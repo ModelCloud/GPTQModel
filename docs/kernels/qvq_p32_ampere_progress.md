@@ -6,8 +6,8 @@ discarded experiments so later tuning does not repeat unsafe variants.
 
 ## Contract and target
 
-- Source base: freshly fetched GitHub `origin/main` at `eb0eefff` (tip after
-  PR #75 merged).
+- Source base: freshly fetched GitHub `origin/main` at `492f1f58` (tip after
+  PR #76 merged).
 - Device: physical GPU 0, `NVIDIA PG506-230`, UUID
   `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`, CC 8.0, 124 SMs, 96 GiB.
 - Software: PyTorch 2.13.0+cu130; CUDA runtime 13.0; NVCC 13.3.
@@ -73,18 +73,21 @@ Hopper-only hardware:
     M8 uses 16-way splits for wide QKV/MLP projections and 32-way splits for
     small-N KV/attention/Z projections; M16 uses 16-way splits for the latter
     group and 32-way splits for full K/V.
+11. M8 uses a compile-time eight-live-row WMMA specialization. It preserves
+    the full `m16n8k16` arithmetic contract while removing runtime row-count
+    masking from activation staging and output stores.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
 as well as carrying forward architecture-independent lessons from the Hopper
 kernel.
 
-There are eight WMMA device specializations: four transition widths times
-full-M16 and partial-row paths. The scalar M1-M4 rows add four exact
-transition-width specializations, while one runtime split reducer is shared
-by all rates. Unknown shapes use a live-SM-derived fallback; the seven
-measured Qwen3.8-27B shapes use recorded split counts without embedding the
-local 124-SM inventory.
+There are twelve WMMA device specializations: four transition widths times
+full-M16, generic partial-row, and compile-time M8 partial-row paths. The
+scalar M1-M4 rows add four exact transition-width specializations, while one
+runtime split reducer is shared by all rates. Unknown shapes use a live-SM-
+derived fallback; the seven measured Qwen3.8-27B shapes use recorded split
+counts without embedding the local 124-SM inventory.
 
 ## Accepted correctness
 
@@ -130,6 +133,8 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/qwen38_origin_main_eb0eefff.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v13.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v14.json`
+- `artifacts/a100_p32_window/qwen38_origin_main_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v15_492f1f58.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -241,6 +246,31 @@ software stage for M4's measured short-K shapes. The proven two-tile WMMA stage
 remains in place for other shapes and M8/M16. The complete matrix is currently
 1.006-1.036x versus the fetched main, so the requested 2x target remains open.
 
+## Current fetched-main checkpoint
+
+The control is `qwen38_origin_main_492f1f58.json`, measured immediately after
+fetching the merged PR #76 tip. The v15 candidate is
+`qwen38_mixed_p32_ampere_v15_492f1f58.json`; both use the same 140-case matrix,
+20 warmups, 100 CUDA-event iterations, and idle/foreign-process gates. Values
+are geometric means of the 28 Ampere event medians for each M; planar timing is
+excluded from this comparison.
+
+| M | Fetched-main geomean ms | v15 geomean ms | Speedup vs fetched main |
+|---:|---:|---:|---:|
+| 1 | 0.064880 | 0.065866 | 0.985x |
+| 2 | 0.070273 | 0.071145 | 0.988x |
+| 4 | 0.081726 | 0.082350 | 0.992x |
+| 8 | 0.092139 | 0.089172 | 1.033x |
+| 16 | 0.095486 | 0.096163 | 0.993x |
+| All 140 cases | 0.080007 | 0.080157 | 0.998x |
+
+The accepted v15 change is the compile-time M8 partial-row specialization.
+Matched W2 probes improved full-Q, attention-out, linear-QKV, and MLP gate/up
+by approximately 5.7%, 3.2%, 4.2%, and 3.3%, respectively, with all 140 cases
+remaining within the exactness gate. The one-pass all-case aggregate is within
+timing noise because M8 is only one of five row counts; the cumulative 3%
+versus-main target remains open and further row-count-specific work continues.
+
 ## Profiler diagnosis
 
 The pre-change M16/W2 full-Q+gate kernel was captured with:
@@ -303,6 +333,9 @@ more decode instructions without expanding the compact state representation.
 | Vectorized four-output split reducer | Correct, but it under-filled the small-output reducer (M1 MLP-down about 0.116 ms versus about 0.100 ms with one output per thread). | Rejected; retain the scalar reducer to preserve enough reduction blocks. |
 | Eight-lane shared-activation broadcast | Correct, but replacing repeated shared loads with a packed-half2 shuffle made the scalar M1/M2 probes 1.5-2x slower (full-Q/MLP-down about 0.089/0.130 ms versus about 0.068/0.10 ms). | Rejected; the extra lane-control and shuffle cost outweighs shared-load reuse on sm_80. |
 | SM80 `m8n8k4` M1-M4 route | Correct, but the smaller tensor-core instruction still required four K4 slices and extra pair shuffles; M1 full-Q was about 0.261 ms versus about 0.067 ms for the scalar route. | Rejected; retain the scalar M1/M2 and WMMA M4+ dispatch. |
+| Adaptive vectorized split reducer | Correct, but large-output rows were neutral at the event-sample resolution and small-output cases lost reducer parallelism; no repeatable full-matrix gain. | Rejected; retain the scalar deterministic reducer. |
+| Ordinary/explicit `.ca` level loads | Correct, but matched probes were neutral-to-slower than the `__ldg` read-only path. | Rejected; retain `__ldg` for the 512-byte codebook. |
+| M8 dead-row staging elision | Correct, but removing the eight inactive activation rows was slower or neutral versus the compile-time-row specialization alone. | Rejected; retain zero-filled inactive rows for stable pipeline scheduling. |
 
 ## Reproduction
 

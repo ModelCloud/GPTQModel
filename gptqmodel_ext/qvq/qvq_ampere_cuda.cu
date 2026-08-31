@@ -171,7 +171,7 @@ __device__ __forceinline__ void copy_async_cg_16(void* destination, const void* 
       : "r"(shared_address), "l"(source));
 }
 
-template <int TransitionBits, bool FullRows>
+template <int TransitionBits, bool FullRows, int ActiveRows = 0>
 __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -211,6 +211,14 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       if constexpr (FullRows) {
         if (source_column < size_k) {
           const half* source = input + static_cast<int64_t>(row) * size_k + source_column;
+          __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
+        } else {
+          input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
+        }
+      } else if constexpr (ActiveRows > 0) {
+        if (row < ActiveRows && source_column < size_k) {
+          const half* source = input + static_cast<int64_t>(row) * size_k +
+              source_column;
           __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
         } else {
           input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
@@ -359,6 +367,19 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       target[static_cast<int64_t>(output_row_0) * size_n + output_column + 9] = accumulator_1.values[1];
       target[static_cast<int64_t>(output_row_1) * size_n + output_column + 8] = accumulator_1.values[2];
       target[static_cast<int64_t>(output_row_1) * size_n + output_column + 9] = accumulator_1.values[3];
+    } else if constexpr (ActiveRows > 0) {
+      if (output_row_0 < ActiveRows) {
+        target[static_cast<int64_t>(output_row_0) * size_n + output_column] = accumulator_0.values[0];
+        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 1] = accumulator_0.values[1];
+        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 8] = accumulator_1.values[0];
+        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 9] = accumulator_1.values[1];
+      }
+      if (output_row_1 < ActiveRows) {
+        target[static_cast<int64_t>(output_row_1) * size_n + output_column] = accumulator_0.values[2];
+        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 1] = accumulator_0.values[3];
+        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 8] = accumulator_1.values[2];
+        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 9] = accumulator_1.values[3];
+      }
     } else {
       if (output_row_0 < size_m) {
         target[static_cast<int64_t>(output_row_0) * size_n + output_column] = accumulator_0.values[0];
@@ -732,6 +753,19 @@ at::Tensor p32_window_ampere_impl(
         bank_ids.data_ptr<uint8_t>(),
         partial_output.data_ptr<float>(),
         output.data_ptr<float>(),
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 8) {
+    p32_window_ampere_kernel<TransitionBits, false, 8><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
         size_k,
         size_n,
         static_cast<int>(split_count),
