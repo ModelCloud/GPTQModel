@@ -70,8 +70,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--rates supports only 2, 2.5, 3, and 3.5")
     if any(m < 1 or m > 16 for m in args.m_values):
         parser.error("--m-values must be in [1, 16]")
-    if args.split_count < 0 or args.split_count > 32:
-        parser.error("--split-count must be in [0, 32]")
+    if args.split_count < 0 or args.split_count > 64:
+        parser.error("--split-count must be in [0, 64]")
     if min(args.warmup, args.iterations, args.idle_samples) <= 0:
         parser.error("warmup, iterations, and idle-samples must be positive")
     return args
