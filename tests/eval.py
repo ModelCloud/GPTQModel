@@ -59,6 +59,7 @@ _ENGINE_OPTION_KEYS = {
     "q_padding_interval_size",
     "kv_padding_interval_size",
     "loglikelihood_prefix_cache",
+    "loglikelihood_prefix_cache_prewarm",
     "loglikelihood_prefix_cache_min_tokens",
     "loglikelihood_prefix_cache_max_entries",
     "vllm_path",
@@ -634,6 +635,7 @@ def _build_evalution_runtime(
             "kv_padding_interval_size",
             "max_cached_graphs",
             "loglikelihood_prefix_cache",
+            "loglikelihood_prefix_cache_prewarm",
             "loglikelihood_prefix_cache_min_tokens",
             "loglikelihood_prefix_cache_max_entries",
         ):

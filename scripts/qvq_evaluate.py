@@ -251,6 +251,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reuse repeated long loglikelihood prefixes through a bounded KV cache.",
     )
     tasks.add_argument(
+        "--loglikelihood-prefix-cache-prewarm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Prefill each shared subject prefix before scoring its question suffixes; "
+            "reports warmup misses separately from steady-state hits."
+        ),
+    )
+    tasks.add_argument(
         "--loglikelihood-prefix-cache-min-tokens",
         type=int,
         default=None,
@@ -1497,6 +1506,7 @@ def _tasks(args: argparse.Namespace) -> int:
         "cuda_graph_mode": graph_mode,
         "cuda_graph_requested": list(graph_request) if graph_request is not None else None,
         "loglikelihood_prefix_cache": args.loglikelihood_prefix_cache,
+        "loglikelihood_prefix_cache_prewarm": args.loglikelihood_prefix_cache_prewarm,
         "loglikelihood_prefix_cache_min_tokens": args.loglikelihood_prefix_cache_min_tokens,
         "loglikelihood_prefix_cache_max_entries": args.loglikelihood_prefix_cache_max_entries,
         "max_rows": args.max_rows,
@@ -1561,6 +1571,7 @@ def _tasks(args: argparse.Namespace) -> int:
                             "kv_padding_interval_size": args.kv_padding_interval_size,
                             "max_cached_graphs": args.max_cached_graphs,
                             "loglikelihood_prefix_cache": args.loglikelihood_prefix_cache,
+                            "loglikelihood_prefix_cache_prewarm": args.loglikelihood_prefix_cache_prewarm,
                             "loglikelihood_prefix_cache_min_tokens": args.loglikelihood_prefix_cache_min_tokens,
                             "loglikelihood_prefix_cache_max_entries": args.loglikelihood_prefix_cache_max_entries,
                         }.items()
