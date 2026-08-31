@@ -42,10 +42,12 @@ fragment ownership cannot yet consume those anchors economically.
 | `942c5ae6` | H200 | W3 | 16 | 5120 | 17408 | window RS-WGMMA | 4 | 0.12288 | 20.318x | 0.337x | 6.20e-5 |
 | `00872584` | H200 | W3 | 16 | 5120 | 17408 | window TMA RS-WGMMA | 4 | 0.07610 | 32.810x | 0.544x | 6.20e-5 |
 | `8dea54a5` | H200 | W3 | 16 | 5120 | 17408 | window TMA RS-WGMMA | 10 | 0.07378 | 33.840x | 0.561x | 3.05e-5 |
+| `035044a3` | H200 | W3 | 16 | 5120 | 17408 | window TMA RS-WGMMA | 10 | 0.07325 | 33.933x | 0.569x | 3.34e-5 |
 | `63daa348` | H200 | W3 | 16 | 17408 | 5120 | planar P32 production | auto | 2.50002 | 1.000x | 0.017x | 3.24e-5 |
 | `942c5ae6` | H200 | W3 | 16 | 17408 | 5120 | window RS-WGMMA | 4 | 0.15272 | 16.370x | 0.278x | 3.09e-4 |
 | `00872584` | H200 | W3 | 16 | 17408 | 5120 | window TMA RS-WGMMA | 4 | 0.09253 | 27.019x | 0.459x | 3.09e-4 |
 | `8dea54a5` | H200 | W3 | 16 | 17408 | 5120 | window TMA RS-WGMMA | 34 | 0.07389 | 33.835x | 0.574x | 6.48e-5 |
+| `035044a3` | H200 | W3 | 16 | 17408 | 5120 | window TMA RS-WGMMA | 34 | 0.07246 | 34.684x | 0.591x | 4.96e-5 |
 
 The direct-window mapping was also checked at M16/K256/N64 and the TMA path at
 M16/K256/N256.  Their maximum errors were 2.38e-6 and 3.34e-6.  The full window
@@ -154,6 +156,21 @@ M16/K5120/N17408, split 5.  Report:
 | No eligible warp | 38.66% |
 | Long-scoreboard samples | 1,868 (744 not issued) |
 | Long-scoreboard cycles per issue | 3.545 (30.8%) |
+
+Commit `035044a3` replaces the two independent bank-bit shift/negate/AND
+chains with one common shift and two 0/1 mask multiplies.  All 25 exact window
+tests pass.  The matched W3 split-4 NCU capture drops executed instructions
+from 36.570M to 35.863M (-1.9%) and duration from 71.65 to 70.14 us while
+retaining 56 registers/thread, 29.31 KiB static shared memory, and a 99.72% L1
+hit rate.  The event-timed Qwen3.8 MLP comparison against the prior all-rate
+checkpoint is:
+
+| Rate | Gate/up before ms | Gate/up `035044a3` ms | Speedup | Down before ms | Down `035044a3` ms | Speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| W2 | 0.07616 | 0.07315 | 1.041x | 0.07482 | 0.07243 | 1.033x |
+| W2.5 | 0.07566 | 0.07376 | 1.026x | 0.07446 | 0.07371 | 1.010x |
+| W3 | 0.07382 | 0.07325 | 1.008x | 0.07290 | 0.07246 | 1.006x |
+| W3.5 | 0.07422 | 0.07374 | 1.007x | 0.07378 | 0.07312 | 1.009x |
 
 W3.5 executes essentially the same instruction count as the earlier W3
 profile.  The remaining front-end cost is therefore common P32 state-address,
