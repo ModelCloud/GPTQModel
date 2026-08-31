@@ -118,6 +118,7 @@ from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hrm_text import HrmTextQModel  # noqa: E402
 from .definitions.hunyuan_v1_dense import HunYuanDenseV1QModel  # noqa: E402
 from .definitions.hunyuan_v1_moe import HunYuanMoEV1QModel  # noqa: E402
+from .definitions.hunyuan_vl import HunYuanVLQModel  # noqa: E402
 from .definitions.hy_v3 import HYV3QModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
@@ -258,6 +259,7 @@ MODEL_MAP = {
     "hrm_text": HrmTextQModel,
     "hunyuan_v1_dense": HunYuanDenseV1QModel,
     "hunyuan_v1_moe": HunYuanMoEV1QModel,
+    "hunyuan_vl": HunYuanVLQModel,
     "hy_v3": HYV3QModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone

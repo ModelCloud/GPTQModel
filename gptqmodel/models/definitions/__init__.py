@@ -50,6 +50,7 @@ from .grinmoe import GrinMoeQModel
 from .hrm_text import HrmTextQModel
 from .hunyuan_v1_dense import HunYuanDenseV1QModel
 from .hunyuan_v1_moe import HunYuanMoEV1QModel
+from .hunyuan_vl import HunYuanVLQModel
 from .hy_v3 import HYV3QModel
 from .hymba import HymbaQModel
 from .instella import InstellaQModel
