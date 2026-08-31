@@ -25,6 +25,7 @@ constexpr int kM1Threads = kThreads;
 constexpr int kM1Warps = kM1Threads / 32;
 constexpr int kM1TilesPerBlock = 4 * kM1Warps;
 constexpr int kStageKTiles = 2;
+constexpr int kScalarLongStageKTiles = 4;
 constexpr int kStageColumns = kStageKTiles * kTileRows;
 constexpr int kPairsPerTile = 128;
 constexpr int kLevels = 256;
@@ -387,7 +388,8 @@ template <
     int TransitionBits,
     int Rows,
     int Threads = kM1Threads,
-    int TilesPerBlock = kM1TilesPerBlock>
+    int TilesPerBlock = kM1TilesPerBlock,
+    int StageKTiles = kStageKTiles>
 __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -402,10 +404,10 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
   constexpr int kWordsPerTile = 4 * TransitionBits;
   static_assert(Rows >= 1 && Rows <= 8);
-  __shared__ __align__(32) half input_tile[2][Rows * kStageKTiles * kTileRows];
+  __shared__ __align__(32) half input_tile[2][Rows * StageKTiles * kTileRows];
   __shared__ __align__(16) uint32_t packed_words[
-      2][kStageKTiles][TilesPerBlock][kWordsPerTile];
-  __shared__ uint8_t packed_bank_ids[2][kStageKTiles][TilesPerBlock];
+      2][StageKTiles][TilesPerBlock][kWordsPerTile];
+  __shared__ uint8_t packed_bank_ids[2][StageKTiles][TilesPerBlock];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
@@ -421,7 +423,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
 
   auto stage = [&](int k_tile_base, int destination) {
     auto* input_vectors = reinterpret_cast<uint4*>(input_tile[destination]);
-    constexpr int kInputVectorsPerRow = kStageKTiles * kTileRows / 8;
+    constexpr int kInputVectorsPerRow = StageKTiles * kTileRows / 8;
     for (int index = thread; index < Rows * kInputVectorsPerRow; index += Threads) {
       const int row = index / kInputVectorsPerRow;
       const int vector = index - row * kInputVectorsPerRow;
@@ -437,7 +439,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
 
     constexpr int kVectorsPerTile = kWordsPerTile / 4;
     constexpr int kVectorsPerKTile = TilesPerBlock * kVectorsPerTile;
-    constexpr int kVectorsPerBlock = kStageKTiles * kVectorsPerKTile;
+    constexpr int kVectorsPerBlock = StageKTiles * kVectorsPerKTile;
     auto* destination_vectors = reinterpret_cast<uint4*>(packed_words[destination]);
     for (int index = thread; index < kVectorsPerBlock; index += Threads) {
       const int stage_k_tile = index / kVectorsPerKTile;
@@ -455,7 +457,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
         destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
       }
     }
-    if (thread < kStageKTiles * TilesPerBlock) {
+    if (thread < StageKTiles * TilesPerBlock) {
       const int stage_k_tile = thread / TilesPerBlock;
       const int tile = thread - stage_k_tile * TilesPerBlock;
       const int n_tile = block_n_tile_base + tile;
@@ -473,10 +475,10 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
 
   stage(k_tile_begin, 0);
   int parity = 0;
-  for (int k_tile = k_tile_begin; k_tile < k_tile_end; k_tile += kStageKTiles) {
-    const bool has_next = k_tile + kStageKTiles < k_tile_end;
+  for (int k_tile = k_tile_begin; k_tile < k_tile_end; k_tile += StageKTiles) {
+    const bool has_next = k_tile + StageKTiles < k_tile_end;
     if (has_next) {
-      stage(k_tile + kStageKTiles, parity ^ 1);
+      stage(k_tile + StageKTiles, parity ^ 1);
     }
     __pipeline_wait_prior(has_next ? 1 : 0);
     __syncthreads();
@@ -487,7 +489,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     const int n_tile = n_tile_base + tile_in_warp;
     if (n_tile < n_tiles) {
 #pragma unroll
-      for (int stage_k_tile = 0; stage_k_tile < kStageKTiles; ++stage_k_tile) {
+      for (int stage_k_tile = 0; stage_k_tile < StageKTiles; ++stage_k_tile) {
         if (k_tile + stage_k_tile >= k_tile_end) {
           continue;
         }
@@ -514,7 +516,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
           const float weight_9 = __half2float(pair_8.values.y);
 #pragma unroll
           for (int output_row = 0; output_row < Rows; ++output_row) {
-            const int row_base = output_row * kStageColumns + stage_k_tile * kTileRows;
+            const int row_base = output_row * (StageKTiles * kTileRows) + stage_k_tile * kTileRows;
             const float input_0 = __half2float(input_tile[parity][row_base + row]);
             const float input_8 = __half2float(input_tile[parity][row_base + row + 8]);
             accumulator_0[tile_in_warp][output_row] =
@@ -630,19 +632,50 @@ at::Tensor p32_window_ampere_impl(
       : at::empty({split_count, size_m, size_n}, input.options().dtype(at::kFloat));
   // The scalar M<=4 route pays one decode loop per K16 row and reuses each
   // decoded pair across the live output rows. It wins for the common 5-6K K
-  // projections; with the wider long-K wave it also wins for M1-M2, while
-  // M4 and larger long-K projections remain on WMMA.
+  // projections; with the wider long-K wave and four-K16 scalar stage it also
+  // wins for M1-M4, while larger long-K projections remain on WMMA.
   const bool use_small_m_scalar =
       (size_m <= 4 && size_k <= 6144) ||
-      (size_m <= 2 && size_k == 17408 && size_n == 5120);
+      (size_m <= 4 && size_k == 17408 && size_n == 5120);
+  const bool use_four_tile_scalar_stage =
+      (size_m == 4 && size_k <= 6144) ||
+      (size_m <= 4 && size_k == 17408 && size_n == 5120);
   const int tiles_per_block = use_small_m_scalar ? kM1TilesPerBlock : kTilesPerBlock;
   const dim3 grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
       1,
       static_cast<unsigned>(split_count));
   const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(input.get_device());
-  if (size_m == 1 && use_small_m_scalar) {
+  if (size_m == 1 && use_small_m_scalar && use_four_tile_scalar_stage) {
+    p32_window_ampere_m1_kernel<
+        TransitionBits, 1, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
+        <<<grid, kM1Threads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 1 && use_small_m_scalar) {
     p32_window_ampere_m1_kernel<TransitionBits, 1><<<grid, kM1Threads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 2 && use_small_m_scalar && use_four_tile_scalar_stage) {
+    p32_window_ampere_m1_kernel<
+        TransitionBits, 2, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
+        <<<grid, kM1Threads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -667,6 +700,20 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(bank_alt_id));
   } else if (size_m == 3 && use_small_m_scalar) {
     p32_window_ampere_m1_kernel<TransitionBits, 3><<<grid, kM1Threads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 4 && use_small_m_scalar && use_four_tile_scalar_stage) {
+    p32_window_ampere_m1_kernel<
+        TransitionBits, 4, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
+        <<<grid, kM1Threads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
