@@ -2138,6 +2138,8 @@ class AWQProcessor(LoopProcessor):
                 "scale_feature": scale_feature,
                 "scale_raw_tokens": int(scale_stat.get("raw_tokens", 0)),
                 "scale_retained_tokens": int(scale_stat.get("retained_tokens", 0)),
+                "scale_batches": int(scale_stat.get("batches", 0)),
+                "scale_aggregation": scale_stat.get("mode", "unknown"),
                 # QUANT_LOG_DAMP: f"{damp_percent:.5f}",
                 PROCESS_LOG_TIME: f"{duration:.3f}",
                 # PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",

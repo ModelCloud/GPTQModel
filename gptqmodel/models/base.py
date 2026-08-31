@@ -202,6 +202,10 @@ class BaseQModel(nn.Module):
     # list modules where they must match the shape of previous module in execution to consider for scaling optimization
     awq_scale_optimize_shape_dependent_modules: List[str] = None
 
+    # Pointwise activations under a model-declared MoE root can be safely packed
+    # across variable-length calibration batches without sequence metadata.
+    awq_moe_feature_max_tokens = 512
+
     # Preserve adapter-supplied position_embeddings during AWQ replay instead of rebuilding them from the root rotary.
     awq_preserve_explicit_position_embeddings = False
 
@@ -2504,6 +2508,28 @@ class BaseQModel(nn.Module):
 
     def awq_skip_modules_for_scaling(self) -> bool:
         pass
+
+    @classmethod
+    def awq_input_feature_aggregation(cls, module_name: str) -> Optional[Dict[str, Any]]:
+        """Declare bounded token-row aggregation for pointwise MoE modules."""
+
+        if not isinstance(module_name, str):
+            return None
+
+        for moe_root in cls.get_moe_module_name() or []:
+            if module_name == moe_root:
+                return {
+                    "mode": "token_rows",
+                    "max_tokens": cls.awq_moe_feature_max_tokens,
+                    "capture_root": True,
+                }
+            if module_name.startswith(f"{moe_root}."):
+                return {
+                    "mode": "token_rows",
+                    "max_tokens": cls.awq_moe_feature_max_tokens,
+                }
+
+        return None
 
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
         nodes = []

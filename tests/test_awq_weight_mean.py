@@ -20,6 +20,11 @@ from gptqmodel.looper.awq_processor import (
     _compute_awq_weight_mean,
 )
 from gptqmodel.models.base import generate_node_for_awq_scaling
+from gptqmodel.models.definitions.minimax_m2 import MiniMaxM2GPTQ
+from gptqmodel.models.definitions.mixtral import MixtralQModel
+from gptqmodel.models.definitions.qwen3 import Qwen3QModel
+from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
+from gptqmodel.models.definitions.qwen3_next import Qwen3NextGPTQ
 from gptqmodel.quantization.config import FORMAT, METHOD, AWQConfig, QuantizeConfig
 
 
@@ -96,6 +101,32 @@ def test_awq_record_input_feature_preserves_sample_axis_for_2d_inputs():
     features = processor._layer_input_features(state)
 
     assert features["self_attn.q_proj"].shape == (2, 16, QWEN3_HIDDEN_SIZE)
+
+
+def test_public_moe_model_policies_enable_pointwise_roots_and_children():
+    cases = [
+        (MixtralQModel, "mlp", "mlp.experts.0.gate_proj"),
+        (Qwen3MoeQModel, "mlp", "mlp.experts.0.gate_proj"),
+        (Qwen3NextGPTQ, "mlp", "mlp.shared_expert.down_proj"),
+        (MiniMaxM2GPTQ, "block_sparse_moe", "block_sparse_moe.experts.0.w1"),
+    ]
+
+    for model_cls, root_name, child_name in cases:
+        root_policy = model_cls.awq_input_feature_aggregation(root_name)
+        child_policy = model_cls.awq_input_feature_aggregation(child_name)
+
+        assert root_policy == {
+            "mode": "token_rows",
+            "max_tokens": 512,
+            "capture_root": True,
+        }
+        assert child_policy == {
+            "mode": "token_rows",
+            "max_tokens": 512,
+        }
+        assert model_cls.awq_input_feature_aggregation("self_attn.q_proj") is None
+
+    assert Qwen3QModel.awq_input_feature_aggregation("mlp.gate_proj") is None
 
 
 def test_awq_capture_applies_padding_mask_to_root_and_flattened_expert_inputs():
