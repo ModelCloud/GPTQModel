@@ -6,7 +6,8 @@ discarded experiments so later tuning does not repeat unsafe variants.
 
 ## Contract and target
 
-- Source base: GitHub `main` at `8ef85802` (tip fetched after PR #69 merged).
+- Source base: fetched GitHub `origin/main` at `2ca65de7` (tip after PR #70
+  merged).
 - Device: physical GPU 0, `NVIDIA PG506-230`, UUID
   `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`, CC 8.0, 124 SMs, 96 GiB.
 - Software: PyTorch 2.13.0+cu130; CUDA runtime 13.0; NVCC 13.3.
@@ -98,7 +99,7 @@ pass.
 
 ## Accepted performance
 
-Artifacts (the `_v2` pair is this post-merge tuning cycle):
+Artifacts from the earlier accepted checkpoints and this tuning cycle:
 
 - `artifacts/a100_p32_window/qwen38_m16_p32_ampere.json`
 - `artifacts/a100_p32_window/qwen38_m1_p32_ampere.json`
@@ -112,9 +113,16 @@ Artifacts (the `_v2` pair is this post-merge tuning cycle):
 - `artifacts/a100_p32_window/qwen38_m8_p32_ampere_v2.json`
 - `artifacts/a100_p32_window/qwen38_m16_p32_ampere_v3.json`
 - `artifacts/a100_p32_window/qwen38_m124_attention_p32_ampere_v2.json`
+- `artifacts/a100_p32_window/qwen38_mixed_longk_attn_p32_ampere_v2.json`
+- `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v5.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
+
+The planar numbers below are oracle context only. The progress target for this
+post-merge cycle is speedup versus the fetched `origin/main` control at
+`2ca65de7`, measured with the same 140-case matrix and the same CUDA-event
+protocol.
 
 | Regime | Cases | Geomean speedup vs planar P32 | Speedup range | Worst max abs |
 |---|---:|---:|---:|---:|
@@ -168,6 +176,31 @@ The attention-out scalar split refresh uses 24 rather than 32 K slices. In the
 formal four-rate artifact it reaches 0.051562 ms (M1), 0.054521 ms (M2), and
 0.057835 ms (M4), with exactness preserved; paired split probes showed 24-way
 waves 5.7-19.4% faster than 32-way waves on this shape.
+
+## Post-merge versus-main progress
+
+The exact control is `/tmp/qvq_origin_main_2ca65de7.json`, produced from
+`origin/main` at `2ca65de7` before the two policy commits in this branch. The
+candidate is `qwen38_mixed_p32_ampere_v5.json` at `72536b4c`. Each row is the
+geometric mean of the 28 cases for that M, using each case's Ampere event
+median; this deliberately excludes planar-oracle timing from the target.
+
+| M | Main geomean ms | Candidate geomean ms | Speedup vs fetched main |
+|---:|---:|---:|---:|
+| 1 | 0.073779 | 0.069525 | 1.061x |
+| 2 | 0.078361 | 0.074900 | 1.046x |
+| 4 | 0.087520 | 0.084787 | 1.032x |
+| 8 | 0.095570 | 0.092163 | 1.037x |
+| 16 | 0.099249 | 0.095798 | 1.036x |
+
+The accepted changes are deliberately narrow: the measured long-K Qwen3.8
+MLP-down shape (K=17408, N=5120) moves from main's eight-way split to a
+32-way split, and M16 attention-out (K=6144, N=5120) moves to a measured
+12-way split. The focused MLP-down rows improve 1.218x, 1.213x, 1.204x,
+1.194x, and 1.170x for M1/M2/M4/M8/M16 respectively; M16 attention-out is
+1.038x. Because MLP-down is only one of seven shapes, the complete matrix is
+currently 1.032-1.061x versus fetched main, so the requested 2x target remains
+open.
 
 ## Profiler diagnosis
 
