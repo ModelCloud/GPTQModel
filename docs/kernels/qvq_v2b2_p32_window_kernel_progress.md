@@ -332,6 +332,26 @@ partial-wave penalty seen in NCU, and are selected automatically for those two
 exact shapes.  The default output is bitwise identical to explicitly requesting
 the selected split.
 
+## Qwen3.8-27B full M1/M2/M4/M8/M16 result
+
+Benchmark harness head: `65379257`; exact-P32 kernel source: `8fbf39d2`.
+Artifact:
+`artifacts/h200_p32_window/qwen38_m1_m2_m4_m8_m16_p32_vs_machete_65379257.json`.
+The sweep covers all seven distinct Qwen3.8-27B projection geometries and all
+four target rates, for 140 exact-P32/Machete comparisons. Every exact-P32 row
+passed its dense P32 reference; worst-case maximum absolute error was
+`7.44e-5`. M1/M2/M4/M8 currently copy their live rows into a persistent,
+zero-padded M16 input inside the timed graph.
+
+| M | Cells | Geomean speedup vs planar P32 | Geomean xMachete W4 |
+|---:|---:|---:|---:|
+| 1 | 28 | 17.026x | 0.713x |
+| 2 | 28 | 18.153x | 0.718x |
+| 4 | 28 | 18.235x | 0.717x |
+| 8 | 28 | 18.279x | 0.716x |
+| 16 | 28 | 27.866x | 0.751x |
+| **All** | **140** | **19.570x** | **0.723x** |
+
 ## Coverage queue
 
 | Priority | Coverage | State |
@@ -339,7 +359,7 @@ the selected split.
 | 1 | Warp-register PGC table versus read-only L1 | rejected; keep read-only L1 |
 | 2 | Rate-specific split/grid policy for all seven Qwen shapes | accepted at `d9464071` |
 | 3 | Generalize direct-window TMA RS-WGMMA to W2, W2.5, and W3.5 | accepted at `874d9632` |
-| 4 | Qwen3.8 M1/M2/M4/M8 specializations | pending |
-| 5 | Full seven-shape W2-W3.5 P32 versus Machete sweep | M16 complete; M1/M2/M4/M8 pending |
+| 4 | Qwen3.8 M1/M2/M4/M8 specializations | pending; zero-padded M16 baseline complete |
+| 5 | Full seven-shape W2-W3.5 P32 versus Machete sweep | complete for M1/M2/M4/M8/M16 |
 | 6 | Producer-contiguous four-state decode and fixed WGMMA register transpose | rejected for the current RS fragment ownership |
 | 7 | Storage-neutral P32 Anchor-4 load-time repack | exact format accepted at `27573a3c`; CUDA mappings rejected |
