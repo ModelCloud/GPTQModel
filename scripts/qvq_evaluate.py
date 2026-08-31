@@ -245,6 +245,48 @@ def build_parser() -> argparse.ArgumentParser:
     tasks.add_argument("--kv-padding-interval-size", type=int, default=None)
     tasks.add_argument("--max-cached-graphs", type=int, default=None)
     tasks.add_argument(
+        "--loglikelihood-prefix-cache",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Reuse repeated long loglikelihood prefixes through a bounded KV cache "
+            "(enabled by default by Evalution)."
+        ),
+    )
+    tasks.add_argument(
+        "--loglikelihood-prefix-cache-prewarm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Prefill each shared subject prefix before scoring its question suffixes; "
+            "reports warmup misses separately from steady-state hits (enabled by default)."
+        ),
+    )
+    tasks.add_argument(
+        "--loglikelihood-prefix-cache-prewarm-batch-size",
+        type=int,
+        default=None,
+        help="Maximum number of distinct prefixes in one prewarm forward (default: 32).",
+    )
+    tasks.add_argument(
+        "--loglikelihood-prefix-cache-release-after-group",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Release scorer prefix KV entries after the MMLU subject group completes.",
+    )
+    tasks.add_argument(
+        "--loglikelihood-prefix-cache-min-tokens",
+        type=int,
+        default=None,
+        help="Minimum shared prefix length eligible for scorer-side KV reuse.",
+    )
+    tasks.add_argument(
+        "--loglikelihood-prefix-cache-max-entries",
+        type=int,
+        default=None,
+        help="Maximum GPU-resident scorer prefix KV entries.",
+    )
+    tasks.add_argument(
         "--max-rows",
         type=int,
         default=None,
@@ -1458,9 +1500,10 @@ def _tasks(args: argparse.Namespace) -> int:
         version_tuple = tuple(int(part) for part in evalution_version.split(".")[:3])
     except ValueError as exc:
         raise RuntimeError(f"Cannot validate Evalution version {evalution_version!r}") from exc
-    if version_tuple < (0, 0, 16):
+    if version_tuple < (0, 0, 17):
         raise RuntimeError(
-            "tasks evaluation requires Evalution>=0.0.16 for Transformers ContinuousBatchingConfig "
+            "tasks evaluation requires Evalution>=0.0.17 for automatic loglikelihood prefix "
+            "caching and Transformers ContinuousBatchingConfig "
             f"graph routing; found Evalution=={evalution_version}"
         )
 
@@ -1478,6 +1521,12 @@ def _tasks(args: argparse.Namespace) -> int:
         "paged_attention_required": True,
         "cuda_graph_mode": graph_mode,
         "cuda_graph_requested": list(graph_request) if graph_request is not None else None,
+        "loglikelihood_prefix_cache": args.loglikelihood_prefix_cache,
+        "loglikelihood_prefix_cache_prewarm": args.loglikelihood_prefix_cache_prewarm,
+        "loglikelihood_prefix_cache_prewarm_batch_size": args.loglikelihood_prefix_cache_prewarm_batch_size,
+        "loglikelihood_prefix_cache_release_after_group": args.loglikelihood_prefix_cache_release_after_group,
+        "loglikelihood_prefix_cache_min_tokens": args.loglikelihood_prefix_cache_min_tokens,
+        "loglikelihood_prefix_cache_max_entries": args.loglikelihood_prefix_cache_max_entries,
         "max_rows": args.max_rows,
         "package_versions": {
             "evalution": package_version("evalution"),
@@ -1539,6 +1588,12 @@ def _tasks(args: argparse.Namespace) -> int:
                             "q_padding_interval_size": args.q_padding_interval_size,
                             "kv_padding_interval_size": args.kv_padding_interval_size,
                             "max_cached_graphs": args.max_cached_graphs,
+                            "loglikelihood_prefix_cache": args.loglikelihood_prefix_cache,
+                            "loglikelihood_prefix_cache_prewarm": args.loglikelihood_prefix_cache_prewarm,
+                            "loglikelihood_prefix_cache_prewarm_batch_size": args.loglikelihood_prefix_cache_prewarm_batch_size,
+                            "loglikelihood_prefix_cache_release_after_group": args.loglikelihood_prefix_cache_release_after_group,
+                            "loglikelihood_prefix_cache_min_tokens": args.loglikelihood_prefix_cache_min_tokens,
+                            "loglikelihood_prefix_cache_max_entries": args.loglikelihood_prefix_cache_max_entries,
                         }.items()
                         if value is not None
                     },
