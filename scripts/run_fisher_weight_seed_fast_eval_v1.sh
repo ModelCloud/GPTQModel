@@ -91,14 +91,15 @@ run_one() {
       python "$ROOT/scripts/run_in_worktree.py" --worktree "$WORKTREE" --script scripts/qvq_evaluate.py -- tasks \
         --checkpoint "$checkpoint" --output "$baseline" --task gsm8k_platinum_cot \
         --batch-size 64 --device cuda:0 --attn-implementation 'paged|flash_attention_2' \
-        --cuda-graph-mode off
+        --cuda-graph-mode off --max-batch-tokens 8192
   fi
   if [ ! -f "$fast" ]; then
     env PYTHONHASHSEED=0 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="$gpu" \
       python "$ROOT/scripts/run_in_worktree.py" --worktree "$WORKTREE" --script scripts/qvq_evaluate.py -- tasks \
         --checkpoint "$checkpoint" --output "$fast" --task gsm8k_platinum_cot \
         --batch-size 64 --device cuda:0 --attn-implementation 'paged|flash_attention_2' \
-        --cuda-graph-mode decode --max-blocks-per-request 4 --kv-padding-interval-size 16
+        --cuda-graph-mode decode --max-blocks-per-request 4 --kv-padding-interval-size 16 \
+        --max-batch-tokens 8192
   fi
   python - "$baseline" "$fast" "$comparison" <<'PY'
 import json

@@ -59,7 +59,7 @@ if [ ! -f "$BASELINE_OUTPUT" ]; then
     python "$ROOT/scripts/run_in_worktree.py" --worktree "$WORKTREE" --script scripts/qvq_evaluate.py -- tasks \
       --checkpoint "$CHECKPOINT" --output "$BASELINE_OUTPUT" --task gsm8k_platinum_cot \
       --batch-size 64 --device cuda:0 --attn-implementation 'paged|flash_attention_2' \
-      --cuda-graph-mode off --max-rows "$MAX_ROWS"
+      --cuda-graph-mode off --max-batch-tokens 2048 --max-rows "$MAX_ROWS"
 fi
 
 if [ ! -f "$CANDIDATE_OUTPUT" ]; then
@@ -68,7 +68,7 @@ if [ ! -f "$CANDIDATE_OUTPUT" ]; then
       --checkpoint "$CHECKPOINT" --output "$CANDIDATE_OUTPUT" --task gsm8k_platinum_cot \
       --batch-size 64 --device cuda:0 --attn-implementation 'paged|flash_attention_2' \
       --cuda-graph-mode decode --max-blocks-per-request 4 --kv-padding-interval-size 16 \
-      --max-rows "$MAX_ROWS"
+      --max-batch-tokens 2048 --max-rows "$MAX_ROWS"
 fi
 
 python - "$BASELINE_OUTPUT" "$CANDIDATE_OUTPUT" "$SUMMARY" "$MAX_ROWS" <<'PY'
