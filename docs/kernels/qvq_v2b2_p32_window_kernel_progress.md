@@ -44,12 +44,14 @@ fragment ownership cannot yet consume those anchors economically.
 | `8dea54a5` | H200 | W3 | 16 | 5120 | 17408 | window TMA RS-WGMMA | 10 | 0.07378 | 33.840x | 0.561x | 3.05e-5 |
 | `035044a3` | H200 | W3 | 16 | 5120 | 17408 | window TMA RS-WGMMA | 10 | 0.07325 | 33.933x | 0.569x | 3.34e-5 |
 | `8a0ab449` | H200 | W3 | 16 | 5120 | 17408 | window TMA RS-WGMMA | 10 | 0.07282 | 34.125x | 0.575x | 3.05e-5 |
+| `8fbf39d2` | H200 | W3 | 16 | 5120 | 17408 | window TMA RS-WGMMA | 10 | 0.07181 | 34.627x | 0.575x | 3.34e-5 |
 | `63daa348` | H200 | W3 | 16 | 17408 | 5120 | planar P32 production | auto | 2.50002 | 1.000x | 0.017x | 3.24e-5 |
 | `942c5ae6` | H200 | W3 | 16 | 17408 | 5120 | window RS-WGMMA | 4 | 0.15272 | 16.370x | 0.278x | 3.09e-4 |
 | `00872584` | H200 | W3 | 16 | 17408 | 5120 | window TMA RS-WGMMA | 4 | 0.09253 | 27.019x | 0.459x | 3.09e-4 |
 | `8dea54a5` | H200 | W3 | 16 | 17408 | 5120 | window TMA RS-WGMMA | 34 | 0.07389 | 33.835x | 0.574x | 6.48e-5 |
 | `035044a3` | H200 | W3 | 16 | 17408 | 5120 | window TMA RS-WGMMA | 34 | 0.07246 | 34.684x | 0.591x | 4.96e-5 |
 | `8a0ab449` | H200 | W3 | 16 | 17408 | 5120 | window TMA RS-WGMMA | 34 | 0.07227 | 34.790x | 0.590x | 4.58e-5 |
+| `8fbf39d2` | H200 | W3 | 16 | 17408 | 5120 | window TMA RS-WGMMA | 34 | 0.07109 | 35.385x | 0.595x | 4.96e-5 |
 
 The direct-window mapping was also checked at M16/K256/N64 and the TMA path at
 M16/K256/N256.  Their maximum errors were 2.38e-6 and 3.34e-6.  The full window
@@ -182,6 +184,15 @@ shared memory remains 29.31 KiB.  Applying the helper to every rate slowed W2
 and W2.5 by roughly 2%, so the accepted code is deliberately W3-only; the
 100-sample all-rate gate and all 25 exact P32 window tests pass.
 
+Commit `8fbf39d2` decodes the `k` and `k+4` P32 states together.  Those states
+share one bit shift and have an exact compile-time `2E`-word separation, so the
+pair helper removes redundant bit-position, wrap, and address work without
+changing the eight shared loads or four exact funnel shifts.  W3 split-4 NCU
+drops from 34.429M to 33.903M instructions, registers fall from 56 to 55, and
+duration falls from 70.18 to 69.89 us.  The 100-sample all-rate MLP gate is
+monotonic: gate/up is 0.07227/0.07173/0.07235/0.07315 ms and down is
+0.07070/0.07070/0.07117/0.07214 ms for W2/W2.5/W3/W3.5 respectively.
+
 W3.5 executes essentially the same instruction count as the earlier W3
 profile.  The remaining front-end cost is therefore common P32 state-address,
 window-extraction, PGC-mix, and level-fetch work rather than a W3.5-only planar
@@ -197,6 +208,7 @@ expansion problem.
 | `27573a3c` + working tree | Anchor-4 decoded independently in consumer ownership | W3 0.13920 ms (0.530x baseline) | W3 0.13818 ms (0.528x baseline) | Rejected; exact, but divergent step reconstruction raises instructions to 74.656M and registers to 72. |
 | `27573a3c` + working tree | Anchor-4 producer decode, four shuffles, two mixed-index `movmatrix` | W3 0.08358 ms (0.883x baseline) | W3 0.08333 ms (0.875x baseline) | Rejected; exact and 55 registers with 96 shared conflicts, but 42.588M instructions remain above the 36.8M window baseline. |
 | `27573a3c` + working tree | Proposed zero-shuffle two-`movmatrix` lower bound | NCU 0.07325 ms | not timed | Rejected; not exact because canonical anchors span two K-row/N-half quadrants. Even before exact routing it executes 40.413M instructions, missing the <32M gate. |
+| `2186324a` + working tree | Stage the level-table pointer through shared memory to force a GPR address base | W3 0.07442 ms | W3 0.07333 ms | Rejected; NCU rises to 34.504M instructions, 29.44 KiB shared, 71.52 us, and 43.11% no-eligible cycles instead of deleting the second address instruction. |
 
 The zero-shuffle mismatch is not an epilogue-only N permutation. PTX assigns
 destination lane `q` source rows `(2q, 2q+1)`; after the proposed row
