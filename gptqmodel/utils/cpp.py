@@ -58,10 +58,6 @@ _cpp_ext_initialized = False
 _SHARED_LIBRARY_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
 _COMPILE_PROGRESS_TOTAL_STEPS = 100
 _COMPILE_PROGRESS_INTERVAL_SECONDS = 1.0
-_LOCAL_INCLUDE_PATTERN = pcre.compile(
-    r'^\s*#\s*include\s+"([^"]+)"',
-    flags=pcre.Flag.MULTILINE,
-)
 _SOURCE_INCLUDE_PATTERN = pcre.compile(
     r'^\s*#\s*include\s+([<"])([^">]+)[">]',
     flags=pcre.Flag.MULTILINE,
