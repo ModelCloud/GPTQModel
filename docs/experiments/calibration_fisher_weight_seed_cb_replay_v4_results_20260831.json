@@ -1,0 +1,95 @@
+{
+  "schema": "qvq.calibration-fisher-weight-seed-cb-replay-results.v1",
+  "status": "complete_with_graph_parity_failures",
+  "completed_at_utc": "2026-08-31T09:00:00Z",
+  "model": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "checkpoint_family": "calibration-fisher-weight-seed-v1",
+  "evaluation_commit": "0bef96f8bcd2cd6822406111324fb8e949d627bc",
+  "package_versions": {
+    "evalution": "0.0.16",
+    "gptqmodel": "7.3.3+ultra+0bef96f8",
+    "torch": "2.13.0+cu130",
+    "transformers": "5.15.1"
+  },
+  "dataset": {
+    "name": "madrylab/gsm8k-platinum",
+    "config": "main",
+    "split": "test",
+    "task": "gsm8k_platinum_cot",
+    "rows": 1209
+  },
+  "runtime": {
+    "backend": "qvq",
+    "attn_implementation": "paged|flash_attention_2",
+    "continuous_batching": true,
+    "paged_attention": true,
+    "batch_size": 64,
+    "use_async_batching": false,
+    "max_batch_tokens": 8192,
+    "max_blocks_per_request": 32,
+    "graph_off_tuple": [false, false],
+    "decode_graph_tuple": [false, true]
+  },
+  "arms": [
+    {
+      "arm_id": "f13_yaqa182_nm4096_yaqa15x",
+      "checkpoint": "/root/qvq-results/calibration-fisher-weight-seed-v1/llama32-1b-f13_yaqa182_nm4096_yaqa15x-anchor-up4-l6-l8",
+      "graph_off": {"correct": 533, "total": 1209, "accuracy": 0.44086021505376344, "seconds": 778.3175731720403},
+      "decode_graph": {"correct": 537, "total": 1209, "accuracy": 0.4441687344913151, "seconds": 421.4842750597745},
+      "speedup": 1.846611176802883,
+      "metric_parity": false,
+      "artifact_sha256": {
+        "graph_off": "8521c1c7b2742eafe6ebf29619f154cb42b816d002d48403a9d8f8bf024faafe",
+        "decode_graph": "02e7a95279d5e7ab3315b3fe6764276827f3ab0e27f228eff0a4495265136c77",
+        "comparison": "1f012c30fb00e5e25517d0f726cc2c744924b80110a397ed6ad1314ab3ce082c"
+      }
+    },
+    {
+      "arm_id": "f14_yaqa182_nm4096_yaqa3x",
+      "checkpoint": "/root/qvq-results/calibration-fisher-weight-seed-v1/llama32-1b-f14_yaqa182_nm4096_yaqa3x-anchor-up4-l6-l8",
+      "graph_off": {"correct": 524, "total": 1209, "accuracy": 0.4334160463192721, "seconds": 848.0456634107977},
+      "decode_graph": {"correct": 530, "total": 1209, "accuracy": 0.43837882547559964, "seconds": 494.07257328461856},
+      "speedup": 1.7164394651031705,
+      "metric_parity": false,
+      "artifact_sha256": {
+        "graph_off": "76cf8de83d1d675d5775da118ba392393e495cfd796cec66dc2d2144bfd72184",
+        "decode_graph": "abcb21f5a4f0f4106a64ab0b752a8cbcd4c6374c47e310fdf4d8b7a915faf5df",
+        "comparison": "1126df9a890e29091cb7d816c6010639c91713bb8b04c1e5483b6e910f6ae311"
+      }
+    },
+    {
+      "arm_id": "f15_yaqa182_nm4096_yaqa2x_seed1",
+      "checkpoint": "/root/qvq-results/calibration-fisher-weight-seed-v1/llama32-1b-f15_yaqa182_nm4096_yaqa2x_seed1-anchor-up4-l6-l8",
+      "graph_off": {"correct": 525, "total": 1209, "accuracy": 0.43424317617866004, "seconds": 779.9077725252137},
+      "decode_graph": {"correct": 525, "total": 1209, "accuracy": 0.43424317617866004, "seconds": 428.9797359191122},
+      "speedup": 1.8180578833043297,
+      "metric_parity": true,
+      "artifact_sha256": {
+        "graph_off": "2e3eb86f26042d65eaeb1accd3f0f4ad0765142ed5eb5d4d3db6d3d0abd57d1d",
+        "decode_graph": "eba9cde12bd4e9330a5eb5fb055e3dc8c539a0646a089db6a0bca8fe5b591ffa",
+        "comparison": "14f0883e165c181573cb19c457dfeab2372ee56519e2d87b052c40c59481cf4a"
+      }
+    },
+    {
+      "arm_id": "f16_yaqa182_nm4096_yaqa2x_seed2",
+      "checkpoint": "/root/qvq-results/calibration-fisher-weight-seed-v1/llama32-1b-f16_yaqa182_nm4096_yaqa2x_seed2-anchor-up4-l6-l8",
+      "graph_off": {"correct": 531, "total": 1209, "accuracy": 0.4392059553349876, "seconds": 781.9580511888489},
+      "decode_graph": {"correct": 533, "total": 1209, "accuracy": 0.44086021505376344, "seconds": 425.1517215576023},
+      "speedup": 1.839244701453959,
+      "metric_parity": false,
+      "artifact_sha256": {
+        "graph_off": "b91fa97608692b78ec65097967e9244ef01ee4996e6ca29186b7fa7c83c69ad7",
+        "decode_graph": "bd59c1a5b8ad2fe5e84f1c4953baa04a303fcf6495e6ca7c59b5d5bd4ddcfd27",
+        "comparison": "677e891ebafc508a6f006e270e882010cf3bf0a9e3a79fdc41806b2a4aa60ddb"
+      }
+    }
+  ],
+  "summary": {
+    "graph_off_correct": [533, 524, 525, 531],
+    "decode_graph_correct": [537, 530, 525, 533],
+    "speedups": [1.846611176802883, 1.7164394651031705, 1.8180578833043297, 1.839244701453959],
+    "metric_parity_passes": 1,
+    "metric_parity_failures": 3,
+    "interpretation": "Decode graphs are materially faster, but full-length generation is not yet score-equivalent for three of four arms. Treat graph-on scores as diagnostic until the parity discrepancy is explained; graph-off scores are the canonical rerun values."
+  }
+}
