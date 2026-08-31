@@ -402,11 +402,6 @@ class AWQProcessor(LoopProcessor):
     ) -> None:
         """Caches one captured input feature tensor for a named module."""
 
-        # Preserve a leading sample axis for flattened [seq, hidden] captures so later
-        # concatenation produces [samples, seq, hidden] instead of collapsing into one giant sequence.
-        if feature.dim() <= 2:
-            feature = feature.unsqueeze(0)
-
         batch_index = self.current_batch_index()
         reserved_batch_index = False
         if dedupe_batch and batch_index is not None:
@@ -426,6 +421,11 @@ class AWQProcessor(LoopProcessor):
                 reserved_batch_index = True
 
         try:
+            feature = self._apply_active_keep_mask_to_feature(feature)
+            # Preserve a leading sample axis for flattened [seq, hidden] captures so later
+            # concatenation produces [samples, seq, hidden] instead of collapsing into one giant sequence.
+            if feature.dim() <= 2:
+                feature = feature.unsqueeze(0)
             if feature.device.type != "cpu":
                 feature = feature.detach().cpu()
             else:
@@ -451,6 +451,30 @@ class AWQProcessor(LoopProcessor):
             inputs_list = entry.setdefault("inputs", [])
             inputs_list.append(feature)
             entry.setdefault("batch_indices", []).append(batch_index)
+
+    def _apply_active_keep_mask_to_feature(self, feature: torch.Tensor) -> torch.Tensor:
+        """Remove padded rows from an activation captured by the current worker.
+
+        Regular module hooks normally receive ``[B, S, H]`` inputs, while the
+        all-expert calibration path flattens the same input to ``[B * S, H]``.
+        Handle both layouts so root and expert statistics exclude the same
+        padding rows. Inputs that cannot be matched unambiguously to the active
+        mask retain their existing behavior.
+        """
+
+        keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+        if not torch.is_tensor(feature) or not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            return feature
+
+        keep_mask = keep_mask.to(device=feature.device, dtype=torch.bool)
+        if feature.dim() >= 3 and tuple(feature.shape[:2]) == tuple(keep_mask.shape):
+            flattened = feature.reshape(-1, *feature.shape[2:])
+            return flattened[keep_mask.reshape(-1)].contiguous()
+
+        if feature.dim() == 2 and feature.shape[0] == keep_mask.numel():
+            return feature[keep_mask.reshape(-1)].contiguous()
+
+        return feature
 
     def record_moe_root_input_feature(self, module_name: str, feature: torch.Tensor) -> None:
         """Capture one pointwise MoE-root input per calibration batch when requested.
@@ -498,10 +522,11 @@ class AWQProcessor(LoopProcessor):
         """Pack ragged pointwise activations into deterministic bounded token rows.
 
         The returned tensor always has shape ``[1, retained_tokens, hidden]``.
-        Whenever ``max_tokens`` is at least the number of cached batches, every
-        calibration batch contributes at least one row; the remaining budget is
-        distributed proportionally to batch length (largest remainder, ties
-        broken by batch order) and rows are sampled evenly inside each batch.
+        Whenever ``max_tokens`` is at least the number of non-empty cached
+        batches, every non-empty calibration batch contributes at least one
+        row; the remaining budget is distributed proportionally to batch length
+        (largest remainder, ties broken by batch order) and rows are sampled
+        evenly inside each batch.
         This avoids the previous latest-batch-only bias without allocating a
         full concatenated activation tensor first. When ``max_tokens`` is
         smaller than the batch count, one row is taken from each of
@@ -523,8 +548,12 @@ class AWQProcessor(LoopProcessor):
                     f"hidden dimension ({hidden}); got shape={tuple(tensor.shape)}."
                 )
             flattened = tensor.reshape(-1, hidden)
-            rows.append(flattened)
             total_tokens += int(flattened.shape[0])
+            if flattened.shape[0] > 0:
+                rows.append(flattened)
+
+        if total_tokens == 0:
+            return tensors[0].new_empty((1, 0, hidden)), 0
 
         retained_tokens = min(total_tokens, max_tokens)
         if retained_tokens == total_tokens:
@@ -950,6 +979,15 @@ class AWQProcessor(LoopProcessor):
         self._awq_feature_kwargs = feature_kwargs
         self._awq_feature_stats = feature_stats
         return features
+
+    def _feature_nsamples_for_log(self, feature_stat: Mapping[str, Any]) -> int:
+        """Return the sample count exposed through the legacy quantization log."""
+
+        if feature_stat.get("mode") == "token_rows":
+            retained_tokens = int(feature_stat.get("retained_tokens", 0))
+            if retained_tokens > 0:
+                return retained_tokens
+        return self._nsamples_total
 
     def _quantize_layer_fallback(
         self,
@@ -2080,7 +2118,7 @@ class AWQProcessor(LoopProcessor):
                 scale_feature,
                 activation_stat,
             )
-            retained_samples = int(scale_stat.get("retained_tokens", 0)) or self._nsamples_total
+            retained_samples = self._feature_nsamples_for_log(scale_stat)
             stat = {
                 PROCESS_LOG_NAME: self.name(),
                 PROCESS_LOG_LAYER: named_module.layer_index,

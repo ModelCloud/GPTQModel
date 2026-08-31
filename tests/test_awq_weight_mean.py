@@ -98,6 +98,40 @@ def test_awq_record_input_feature_preserves_sample_axis_for_2d_inputs():
     assert features["self_attn.q_proj"].shape == (2, 16, QWEN3_HIDDEN_SIZE)
 
 
+def test_awq_capture_applies_padding_mask_to_root_and_flattened_expert_inputs():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 16, "capture_root": True}
+        if name == "mlp"
+        else None
+    )
+    expert_name = "mlp.experts.0.gate_proj"
+    processor.tasks[expert_name] = {"inputs": [], "batch_indices": []}
+    processor._mask_tls = types.SimpleNamespace(
+        value=torch.tensor(
+            [
+                [True, True, False],
+                [True, False, False],
+            ]
+        )
+    )
+    processor._set_current_batch_index(0)
+
+    feature = torch.arange(12, dtype=torch.float32).reshape(2, 3, 2)
+    expected = feature.reshape(-1, 2)[processor._mask_tls.value.reshape(-1)].unsqueeze(0)
+
+    processor.record_moe_root_input_feature("mlp", feature)
+    processor.pre_process_fwd_hook(expert_name)(
+        nn.Identity(),
+        (feature.reshape(-1, 2),),
+        None,
+    )
+    processor._set_current_batch_index(None)
+
+    assert torch.equal(processor.tasks["mlp"]["inputs"][0], expected)
+    assert torch.equal(processor.tasks[expert_name]["inputs"][0], expected)
+
+
 def test_awq_layer_input_features_aligns_variable_length_fallback_with_cached_kwargs():
     processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
     state = _AWQLayerState(modules={"self_attn.q_proj": object()})
@@ -230,6 +264,44 @@ def test_awq_pack_token_rows_never_underfills_budget():
                         lengths,
                         max_tokens,
                     )
+
+
+def test_awq_pack_token_rows_ignores_empty_captures_during_quota_allocation():
+    empty = torch.empty(1, 0, 4)
+    populated = torch.tensor(
+        [[[10.0, 10.0, 10.0, 10.0], [20.0, 20.0, 20.0, 20.0]]]
+    )
+
+    packed, raw = AWQProcessor._pack_token_rows(
+        [empty, populated, empty],
+        max_tokens=1,
+    )
+
+    assert raw == 2
+    assert packed.shape == (1, 1, 4)
+    assert torch.equal(packed[0, 0], populated[0, 0])
+
+    all_empty, all_empty_raw = AWQProcessor._pack_token_rows(
+        [empty, empty],
+        max_tokens=4,
+    )
+    assert all_empty_raw == 0
+    assert all_empty.shape == (1, 0, 4)
+
+
+def test_awq_quant_log_nsamples_changes_only_for_token_row_aggregation():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    processor._nsamples_total = 459
+
+    assert processor._feature_nsamples_for_log(
+        {"mode": "latest_batch", "raw_tokens": 459, "retained_tokens": 36}
+    ) == 459
+    assert processor._feature_nsamples_for_log(
+        {"mode": "batch", "raw_tokens": 459, "retained_tokens": 459}
+    ) == 459
+    assert processor._feature_nsamples_for_log(
+        {"mode": "token_rows", "raw_tokens": 459, "retained_tokens": 128}
+    ) == 128
 
 
 def test_awq_moe_root_capture_deduplicates_subsets_and_is_collapsed():
