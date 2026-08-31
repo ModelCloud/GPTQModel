@@ -109,6 +109,14 @@ def test_torch_ops_jit_extension_python_abi_falls_back_without_soabi(monkeypatch
     assert cpp_module._python_abi_tag() == "cpython-3.13t"
 
 
+def test_torch_ops_jit_extension_python_abi_fallback_handles_missing_abiflags(monkeypatch):
+    monkeypatch.setattr(cpp_module.sysconfig, "get_config_var", lambda name: None)
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=13))
+    monkeypatch.delattr(cpp_module.sys, "abiflags", raising=False)
+
+    assert cpp_module._python_abi_tag() == "cpython-3.13"
+
+
 def test_torch_ops_jit_extension_fingerprint_detects_python_abi_usage(tmp_path):
     source = tmp_path / "unit_test.cpp"
     source.write_text("PYBIND11_MODULE(unit_test, m) {}\n", encoding="utf-8")
@@ -219,12 +227,79 @@ def test_torch_ops_jit_extension_auto_detected_stable_sources_keep_torch_version
     assert first_fingerprint != second_fingerprint
 
 
+def test_torch_ops_jit_extension_stable_target_rejects_older_torch(monkeypatch, tmp_path):
+    loader = _make_loader(tmp_path, torch_stable_abi_target=(2, 10))
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.9.0")
+    prebuilt_calls = []
+
+    def unexpected_prebuilt_load(_build_root):
+        prebuilt_calls.append(True)
+        raise AssertionError("stable ABI floor must prevent cache lookup")
+
+    monkeypatch.setattr(loader, "_try_load_prebuilt_library", unexpected_prebuilt_load)
+
+    assert loader.load() is False
+    assert "requires torch >= 2.10" in loader.last_error_message()
+    assert prebuilt_calls == []
+
+
+def test_torch_ops_jit_extension_stable_target_rejects_unparseable_torch(monkeypatch, tmp_path):
+    loader = _make_loader(tmp_path, torch_stable_abi_target=(2, 10))
+    monkeypatch.setattr(cpp_module.torch, "__version__", "nightly")
+    prebuilt_calls = []
+
+    monkeypatch.setattr(loader, "_try_load_prebuilt_library", lambda _build_root: prebuilt_calls.append(True))
+
+    assert loader.load() is False
+    assert "cannot verify torch stable ABI requirement" in loader.last_error_message()
+    assert prebuilt_calls == []
+
+
+def test_torch_ops_jit_extension_resolves_angle_bracket_local_includes(tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    include_root = tmp_path / "include"
+    include_root.mkdir()
+    wrapper = include_root / "wrapper.h"
+    source.write_text(
+        "#include <wrapper.h>\n#include <nonexistent_sys.h>\nint kernel() { return 1; }\n",
+        encoding="utf-8",
+    )
+    wrapper.write_text("#include <Python.h>\n", encoding="utf-8")
+    loader = _make_loader(tmp_path, sources=[str(source)], extra_include_paths=[str(include_root)])
+
+    assert loader._source_abi_flags([str(source)], [str(include_root)]) == (True, False)
+    first_fingerprint = loader._cache_fingerprint()
+    first_payload = loader._source_cache_fingerprint_payload(str(source), [str(include_root)])
+    assert not any("missing_include" in entry and "nonexistent_sys.h" in entry for entry in first_payload)
+
+    wrapper.write_text("#include <c10/util/SmallVector.h>\n", encoding="utf-8")
+    second_fingerprint = loader._cache_fingerprint()
+
+    assert second_fingerprint != first_fingerprint
+    stable_loader = _make_loader(
+        tmp_path,
+        sources=[str(source)],
+        extra_include_paths=[str(include_root)],
+        torch_stable_abi_target=(2, 10),
+    )
+    with pytest.raises(RuntimeError, match=r"c10/util/SmallVector\.h"):
+        stable_loader._cache_fingerprint()
+
+
 def test_swordfish_static_runtime_error_rejects_older_torch(monkeypatch):
     monkeypatch.setattr(swordfish.torch, "__version__", "2.9.1+cpu")
 
     error = swordfish._swordfish_static_runtime_error()
 
     assert "requires torch >= 2.10" in error
+
+
+def test_swordfish_static_runtime_error_rejects_unparseable_torch(monkeypatch):
+    monkeypatch.setattr(swordfish.torch, "__version__", "nightly")
+
+    error = swordfish._swordfish_static_runtime_error()
+
+    assert "cannot verify torch stable ABI requirement" in error
 
 
 def test_torch_ops_jit_extension_cpu_fingerprint_omits_torch_cuda(monkeypatch, tmp_path):

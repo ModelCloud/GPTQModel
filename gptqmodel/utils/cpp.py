@@ -51,8 +51,8 @@ _cpp_ext_initialized = False
 _SHARED_LIBRARY_SUFFIXES = (".so", ".pyd", ".dylib", ".dll")
 _COMPILE_PROGRESS_TOTAL_STEPS = 100
 _COMPILE_PROGRESS_INTERVAL_SECONDS = 1.0
-_LOCAL_INCLUDE_PATTERN = pcre.compile(
-    r'^\s*#\s*include\s+"([^"]+)"',
+_SOURCE_INCLUDE_PATTERN = pcre.compile(
+    r'^\s*#\s*include\s+([<"])([^">]+)[">]',
     flags=pcre.Flag.MULTILINE,
 )
 _TORCH_INCLUDE_PATTERN = pcre.compile(
@@ -85,7 +85,10 @@ def _python_abi_tag() -> str:
     soabi = sysconfig.get_config_var("SOABI")
     if soabi:
         return str(soabi)
-    return f"cpython-{sys.version_info.major}.{sys.version_info.minor}{sys.abiflags}"
+    # ``sys.abiflags`` is a Unix-only attribute on some supported Python
+    # builds (for example, Windows).  The SOABI fallback must still produce a
+    # stable key there instead of raising while constructing the cache path.
+    return f"cpython-{sys.version_info.major}.{sys.version_info.minor}{getattr(sys, 'abiflags', '')}"
 
 
 def _torch_cpu_cache_version() -> str:
@@ -792,7 +795,7 @@ class TorchOpsJitExtension:
         return self._resolve_path(self.default_build_root)
 
     def _source_cache_fingerprint_payload(self, source: str, include_paths: Sequence[str]) -> list[str]:
-        """Hash one source file plus recursively discovered quoted local includes."""
+        """Hash one source file plus recursively discovered local includes."""
 
         payload: list[str] = []
         visited: set[Path] = set()
@@ -818,14 +821,15 @@ class TorchOpsJitExtension:
             payload.append(hashlib.sha256(source_bytes).hexdigest())
 
             source_text = source_bytes.decode("utf-8", errors="ignore")
-            for include_name in _LOCAL_INCLUDE_PATTERN.findall(source_text):
+            for delimiter, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
                 included_path = _resolve_local_include_path(
                     include_name,
                     including_path=normalized,
                     include_search_roots=include_search_roots,
                 )
                 if included_path is None:
-                    payload.append(f"missing_include={normalized}:{include_name}")
+                    if delimiter == '"':
+                        payload.append(f"missing_include={normalized}:{include_name}")
                     continue
                 visit(included_path)
 
@@ -849,7 +853,7 @@ class TorchOpsJitExtension:
             except OSError:
                 return
             texts.append((normalized, source_text))
-            for include_name in _LOCAL_INCLUDE_PATTERN.findall(source_text):
+            for _, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
                 included_path = _resolve_local_include_path(
                     include_name,
                     including_path=normalized,
@@ -1125,8 +1129,35 @@ class TorchOpsJitExtension:
 
         return self._last_error
 
+    def _stable_abi_runtime_error(self) -> str:
+        if self.torch_stable_abi_target is None:
+            return ""
+        torch_public = torch.__version__.partition("+")[0]
+        try:
+            torch_major_minor = tuple(int(part) for part in torch_public.split(".")[:2])
+        except (TypeError, ValueError):
+            major, minor = self.torch_stable_abi_target
+            return (
+                f"{self.display_name}: cannot verify torch stable ABI requirement >= {major}.{minor}; "
+                f"unrecognized torch version {torch.__version__!r}"
+            )
+        if torch_major_minor < self.torch_stable_abi_target:
+            major, minor = self.torch_stable_abi_target
+            return (
+                f"{self.display_name}: requires torch >= {major}.{minor} "
+                f"(compiled against the torch {major}.{minor} stable ABI); found torch {torch.__version__}"
+            )
+        return ""
+
     def load(self) -> bool:
         """Load the extension from cache or JIT-compile it on first use."""
+
+        stable_abi_error = self._stable_abi_runtime_error()
+        if stable_abi_error:
+            self._load_attempted = True
+            self._load_result = False
+            self._last_error = stable_abi_error
+            return False
 
         if self._load_attempted and self._load_result and not self.force_rebuild_enabled():
             return True
