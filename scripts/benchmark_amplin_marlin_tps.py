@@ -370,6 +370,29 @@ def _generate_batch_sample(
     }
 
 
+def _cuda_graph_policy(mode: str) -> tuple[bool, bool]:
+    """Return the Transformers CB graph policy for ``mode``.
+
+    The tuple is ``(varlen_prefill, decode)``.  Paged FlashAttention-2 is
+    compatible with decode graphs, so the benchmark defaults to ``decode``
+    rather than disabling graph capture for every CB run.  Varlen capture is
+    opt-in because it has stricter shape/padding requirements.
+    """
+    policies = {
+        "off": (False, False),
+        "varlen": (True, False),
+        "decode": (False, True),
+        "both": (True, True),
+    }
+    try:
+        return policies[mode]
+    except KeyError as exc:
+        choices = ", ".join(policies)
+        raise ValueError(
+            f"Unknown CUDA graph mode {mode!r}; choose one of {choices}."
+        ) from exc
+
+
 def _measure_backend(
     path: str,
     backend: str,
@@ -383,6 +406,7 @@ def _measure_backend(
     runs: int,
     batch: int = 1,
     continuous_batching: bool = False,
+    cuda_graph_mode: str = "decode",
 ) -> dict[str, Any]:
     torch.cuda.set_device(torch.device(device))
     _empty_cache(torch.device(device))
@@ -403,9 +427,11 @@ def _measure_backend(
     allocated = 0
 
     if use_cb:
-        # Paged Flash Attention requires CUDA graph capture to be disabled in
-        # the continuous batching config.
-        cb_config = ContinuousBatchingConfig(use_cuda_graph=(False, False))
+        # Paged FlashAttention-2 supports decode graph capture.  Keep this
+        # explicit so callers can opt out (or enable varlen capture) without
+        # silently disabling graphs for every continuous-batching benchmark.
+        graph_policy = _cuda_graph_policy(cuda_graph_mode)
+        cb_config = ContinuousBatchingConfig(use_cuda_graph=graph_policy)
         # The default num_blocks allocates the entire free GPU memory for the
         # paged KV cache, which makes the peak-VRAM metric dominated by the
         # cache rather than the model weights.  Cap it to the blocks needed for
@@ -556,6 +582,15 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--batch", type=int, default=1)
     parser.add_argument("--continuous-batching", action="store_true")
+    parser.add_argument(
+        "--cuda-graph-mode",
+        choices=("off", "varlen", "decode", "both"),
+        default="decode",
+        help=(
+            "Continuous-batching CUDA graph policy: off, varlen prefill, "
+            "decode, or both (default: decode; recommended for paged FA2)."
+        ),
+    )
     parser.add_argument("--prompt", default=None)
     parser.add_argument("--json-output", type=Path)
     args = parser.parse_args()
@@ -579,6 +614,7 @@ def main() -> None:
             args.runs,
             batch=args.batch,
             continuous_batching=args.continuous_batching,
+            cuda_graph_mode=args.cuda_graph_mode,
         )
         results.append(result)
         print(
@@ -595,6 +631,7 @@ def main() -> None:
         "dtype": args.dtype,
         "attn_implementation": args.attn_implementation,
         "continuous_batching": args.continuous_batching,
+        "cuda_graph_mode": args.cuda_graph_mode,
         "batch": args.batch,
         "prompt_tokens": args.prompt_tokens,
         "new_tokens": args.new_tokens,

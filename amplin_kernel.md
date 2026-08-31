@@ -63,9 +63,11 @@ does not trigger a repack and VRAM stays identical to the single-dispatch case.
 
 `scripts/benchmark_amplin_marlin_tps.py` now supports `--continuous-batching`,
 `--batch`, and `attn_implementation=paged|flash_attention_2`.  It uses
-`model.generate_batch` with `ContinuousBatchingConfig(use_cuda_graph=(False, False))`
-and caps `num_blocks` to the blocks needed for the target workload so the paged
-KV cache does not dominate the peak-VRAM measurement.
+`model.generate_batch` with an explicit continuous-batching CUDA-graph policy
+(decode capture is the default; pass `--cuda-graph-mode off`, `varlen`, or
+`both` to select another policy) and caps `num_blocks` to the blocks needed for
+the target workload so the paged KV cache does not dominate the peak-VRAM
+measurement.
 
 For batch=8 the continuous batcher concatenates all input tokens, so the linear
 layers see M=``batch * prompt_tokens`` during prefill (e.g. 256) and M=8 during
