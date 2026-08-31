@@ -66,6 +66,16 @@ def test_p32_ampere_autotune_defaults_on_and_is_bounded(monkeypatch):
     assert max(wide_candidates) == 128
 
 
+def test_p32_ampere_autotune_setting_refreshes_with_cache_clear(monkeypatch):
+    monkeypatch.setenv("QVQ_AMPERE_AUTOTUNE", "0")
+    qvq_ampere_cuda.clear_qvq_ampere_autotune_cache()
+    assert not qvq_ampere_cuda._AUTOTUNE_ENABLED
+
+    monkeypatch.delenv("QVQ_AMPERE_AUTOTUNE", raising=False)
+    qvq_ampere_cuda.clear_qvq_ampere_autotune_cache()
+    assert qvq_ampere_cuda._AUTOTUNE_ENABLED
+
+
 def test_p32_ampere_autotune_skips_cold_cuda_graph_capture(monkeypatch):
     monkeypatch.setattr(qvq_ampere_cuda, "_AUTOTUNE_CACHE", {})
     monkeypatch.setattr(

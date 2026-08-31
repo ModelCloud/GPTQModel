@@ -128,6 +128,9 @@ def _autotune_enabled() -> bool:
     }
 
 
+_AUTOTUNE_ENABLED = _autotune_enabled()
+
+
 def _autotune_cache_key(
     input: torch.Tensor,
     *,
@@ -182,10 +185,12 @@ def _autotune_candidates(
 
 
 def clear_qvq_ampere_autotune_cache() -> None:
-    """Clear the in-process Ampere launch-plan entries."""
+    """Clear in-process plans and refresh the process-local autotune setting."""
 
+    global _AUTOTUNE_ENABLED
     with _AUTOTUNE_CACHE_LOCK:
         _AUTOTUNE_CACHE.clear()
+        _AUTOTUNE_ENABLED = _autotune_enabled()
 
 
 def _autotune_split_count(
@@ -309,7 +314,10 @@ def qvq_p32_window_ampere(
     if split_count == 0:
         if not input.is_cuda:
             raise ValueError("QVQ P32 Ampere input must be CUDA")
-        autotune = _autotune_enabled()
+        # Environment configuration is process-level. Reading ``os.environ``
+        # on every cached launch costs more than the cache lookup itself, so
+        # refresh it only when the process-local plan cache is cleared.
+        autotune = _AUTOTUNE_ENABLED
         autotune_key = None
         if autotune:
             autotune_key = _autotune_cache_key(

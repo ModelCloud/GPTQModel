@@ -503,6 +503,7 @@ more decode instructions without expanding the compact state representation.
 | M8 full-KV compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=1024` tile bound for every staged vector. | Accepted after a 6.62% matched gain; all seven formal M8 shapes now use fixed-N paths. |
 | Scalar M1/M4 fixed-N launcher | Correct, but the scalar stage still checked the fixed output-tile bound at every warp. | Accepted for M1/M4 after 2.16%/2.04% matched gains versus fetched main; M2/M3 use the generic scalar launcher pending a better schedule. |
 | Scalar fixed-N launcher on M2/M3 | Correct, but the larger specialized body regressed M2 by 1.10% versus its cached-dispatch candidate (small-N and linear-Z were the largest losses); M3 was not part of the formal target. | Rejected for M2/M3; keep the compile-time launcher only on M1/M4. |
+| First v13 lock-free full-matrix sample | Five consecutive early-M2 rows jumped by 3.5-7.5x while their planar controls also jumped, then both paths returned to normal. The unaffected 135 rows improved 0.99% versus main. | Discard the aggregate as a transient-contaminated run; retain `qwen38_v13_lockfree_all_29a69382.json` only as a diagnostic and rerun the complete idle-gated matrix. |
 
 ## Post-merge origin/main baseline (v11)
 
@@ -655,6 +656,15 @@ before timing, so concurrent misses tune once. In a matched 20-warmup,
 outputs. The candidate and control are stored in
 `artifacts/a100_p32_window/v13_m1_fullkv_lockfree.json` and
 `artifacts/a100_p32_window/v13_m1_fullkv_locked_control.json`.
+
+The second progression reads the default-on autotune setting once per
+process-local cache lifetime instead of querying `os.environ` on every launch.
+Calling `clear_qvq_ampere_autotune_cache()` refreshes the setting, preserving
+an explicit runtime opt-out without charging cache hits for it. A host-only
+stub launch drops from 2.78 us on merged main to 1.66 us with both v13 dispatch
+changes. The matched M1 full-KV geomean improves again from 0.037096 ms to
+0.036836 ms (`1.007x`), with exact outputs; the result is stored in
+`artifacts/a100_p32_window/v13_m1_fullkv_cached_env.json`.
 
 ## Reproduction
 
