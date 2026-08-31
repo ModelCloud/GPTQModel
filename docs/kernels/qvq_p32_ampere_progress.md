@@ -897,6 +897,30 @@ matched 36-case geomean by 1.136%, with every tested M and shape slower; its
 artifacts are `v15_scalar_bankmask_control.json` and
 `v15_scalar_bankmask_candidate.json`.
 
+The third progression retunes M4 pipeline depth after the lane-local change.
+Transition widths 5-7 use three staged K16 tiles instead of four, reducing
+the new register/shared-memory footprint; W2 retains four stages because it
+was neutral and noisy in the broad candidate. The complete 28-case M4 repeat
+improves the Ampere median geomean by 3.216% and the mean by 2.969%. The first
+selective run measured 3.372%/3.147%, and every shape group improved. The
+matched lane-local control and repeated candidate are
+`artifacts/a100_p32_window/v15_scalar_lane_accumulator_all_candidate_retry.json`
+and
+`artifacts/a100_p32_window/v15_scalar_lane_stage3_m4_selective_repeat.json`.
+The non-selective three-stage diagnostic remains available as
+`v15_scalar_lane_stage3_m4_candidate*.json`.
+
+Four-stage short-K staging for M1/M2 was retested after removing the local
+accumulator arrays, but still regressed their 56-case median geomean by
+0.659%; only W2 was slightly positive. It is rejected and recorded in
+`artifacts/a100_p32_window/v15_scalar_lane_stage4_m1_m2_candidate.json`.
+
+Using the conservative repeated results and exact affected-case weighting,
+the three sequential progressions improve the full 140-case Ampere target by
+`exp((4*ln(1.03078) + 84*ln(1.02269) + 28*ln(1.03216)) / 140) = 1.02087x`,
+or **2.087%** lower latency versus fetched `3de3fb05` main. Planar timings
+are excluded.
+
 Rejected v15 experiments are retained as diagnostics. Explicit
 `cp.async.cg` input staging improved the broad screen by only 0.055%, while
 the scalar-only form regressed 0.204%. WMMA `__launch_bounds__(128, 10)` and
