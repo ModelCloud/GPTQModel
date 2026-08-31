@@ -152,7 +152,7 @@ def _autotune_cache_key(
     )
 
 
-def _autotune_candidates(*, fallback: int, k_tiles: int, max_candidates: int = 6) -> list[int]:
+def _autotune_candidates(*, fallback: int, k_tiles: int, max_candidates: int = 12) -> list[int]:
     """Return a small, bounded split wave around the static policy."""
 
     if k_tiles <= 0:
@@ -166,6 +166,7 @@ def _autotune_candidates(*, fallback: int, k_tiles: int, max_candidates: int = 6
         24,
         32,
         40,
+        48,
         64,
         96,
         128,
@@ -212,7 +213,7 @@ def _autotune_split_count(
             return min(cached, int(input.shape[1]) // 16)
 
         k_tiles = int(input.shape[1]) // 16
-        max_candidates = max(2, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_CANDIDATES", "6")))
+        max_candidates = max(2, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_CANDIDATES", "12")))
         candidates = _autotune_candidates(
             fallback=fallback,
             k_tiles=k_tiles,

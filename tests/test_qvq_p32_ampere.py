@@ -40,6 +40,8 @@ def test_p32_ampere_autotune_defaults_on_and_is_bounded(monkeypatch):
     assert candidates == [32, 16, 64, 8, 24, 40]
     assert len(candidates) == len(set(candidates))
     assert all(1 <= candidate <= 320 for candidate in candidates)
+    full_candidates = _autotune_candidates(fallback=6, k_tiles=512)
+    assert full_candidates == [6, 3, 12, 8, 16, 24, 32, 40, 48, 64, 96, 128]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
