@@ -762,6 +762,7 @@ def _run_single_subset_pass(
 
     # Determine MoE block name for hook selection
     moe_block_name = None
+    moe_block = None
     if looper.gptq_model and hasattr(looper.gptq_model, 'moe_lifecycle_hooks'):
         hooks = looper.gptq_model.moe_lifecycle_hooks
         if hooks is not None:
@@ -772,6 +773,12 @@ def _run_single_subset_pass(
                     if mod is moe_block:
                         moe_block_name = mod_name
                         break
+
+    # Capture a model-declared pointwise MoE root even when routing override
+    # executes every expert through the ordinary model forward (the lifecycle
+    # bypass hook is not active in that mode).
+    if execute_forward and moe_block is not None and moe_block_name is not None:
+        processor.register_moe_root_capture_hook(moe_block, moe_block_name, handle)
 
     if execute_forward:
         for idx, name in enumerate(subset_names):

@@ -377,6 +377,10 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             # this is normal for example glm4_moe has 1-3 :moe layers without experts
             return original_forward(hidden_states, **kwargs)
 
+        root_recorder = getattr(processor, "record_moe_root_input_feature", None)
+        if callable(root_recorder):
+            root_recorder(moe_block_prefix, hidden_states)
+
         expert_count = 0
         stop_forward_raised = False
         proj_names = [self.gate_proj_name, self.up_proj_name, self.down_proj_name]

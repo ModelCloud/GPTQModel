@@ -19,7 +19,13 @@ from gptqmodel.looper.awq_processor import (
     _AWQLayerState,
     _compute_awq_weight_mean,
 )
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.base import generate_node_for_awq_scaling
+from gptqmodel.models.definitions.minimax_m2 import MiniMaxM2GPTQ
+from gptqmodel.models.definitions.mixtral import MixtralQModel
+from gptqmodel.models.definitions.qwen3 import Qwen3QModel
+from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
+from gptqmodel.models.definitions.qwen3_next import Qwen3NextGPTQ
 from gptqmodel.quantization.config import FORMAT, METHOD, AWQConfig, QuantizeConfig
 
 
@@ -62,6 +68,31 @@ class _DummyQwen3SelfAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False, device=device, dtype=dtype)
 
 
+class _DummyQwen3MoeExpert(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate_proj = nn.Linear(4, 2, bias=False)
+        self.up_proj = nn.Linear(4, 2, bias=False)
+        self.down_proj = nn.Linear(2, 4, bias=False)
+
+
+class _DummyQwen3MoeLayer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.input_layernorm = nn.LayerNorm(4)
+        self.self_attn = nn.Module()
+        self.self_attn.q_norm = nn.LayerNorm(4)
+        self.self_attn.k_norm = nn.LayerNorm(4)
+        self.self_attn.q_proj = nn.Linear(4, 4, bias=False)
+        self.self_attn.k_proj = nn.Linear(4, 4, bias=False)
+        self.self_attn.v_proj = nn.Linear(4, 4, bias=False)
+        self.self_attn.o_proj = nn.Linear(4, 4, bias=False)
+        self.post_attention_layernorm = nn.LayerNorm(4)
+        self.mlp = nn.Module()
+        self.mlp.gate = nn.Linear(4, 2, bias=False)
+        self.mlp.experts = nn.ModuleList([_DummyQwen3MoeExpert(), _DummyQwen3MoeExpert()])
+
+
 class _TestAWQProcessor(AWQProcessor):
     def __init__(self, qcfg: QuantizeConfig):
         super().__init__(
@@ -98,6 +129,92 @@ def test_awq_record_input_feature_preserves_sample_axis_for_2d_inputs():
     assert features["self_attn.q_proj"].shape == (2, 16, QWEN3_HIDDEN_SIZE)
 
 
+def test_public_moe_model_policies_enable_pointwise_roots_and_children():
+    cases = [
+        (MixtralQModel, "mlp", "mlp.experts.0.gate_proj"),
+        (Qwen3MoeQModel, "mlp", "mlp.experts.0.gate_proj"),
+        (Qwen3NextGPTQ, "mlp", "mlp.shared_expert.down_proj"),
+        (MiniMaxM2GPTQ, "block_sparse_moe", "block_sparse_moe.experts.0.w1"),
+    ]
+
+    for model_cls, root_name, child_name in cases:
+        root_policy = model_cls.awq_input_feature_aggregation(root_name)
+        child_policy = model_cls.awq_input_feature_aggregation(child_name)
+
+        assert root_policy == {
+            "mode": "token_rows",
+            "capture_root": True,
+        }
+        assert child_policy == {
+            "mode": "token_rows",
+        }
+        assert model_cls.awq_input_feature_aggregation("self_attn.q_proj") is None
+
+    assert Qwen3QModel.awq_input_feature_aggregation("mlp.gate_proj") is None
+
+
+def test_qwen3_moe_awq_scaling_node_preserves_root_feature_name():
+    qmodel = Qwen3MoeQModel.__new__(Qwen3MoeQModel)
+    nn.Module.__init__(qmodel)
+    qmodel.__dict__["model"] = types.SimpleNamespace(
+        config=types.SimpleNamespace(num_experts=2),
+    )
+    layer = _DummyQwen3MoeLayer()
+    root_feature = torch.full((1, 3, 4), -999.0)
+    features = {
+        "self_attn.q_proj": torch.randn(1, 3, 4),
+        "self_attn.k_proj": torch.randn(1, 3, 4),
+        "self_attn.v_proj": torch.randn(1, 3, 4),
+        "self_attn.o_proj": torch.randn(1, 3, 4),
+        "mlp": root_feature,
+    }
+    for expert_index in range(2):
+        prefix = f"mlp.experts.{expert_index}"
+        features[f"{prefix}.gate_proj"] = torch.randn(1, 3, 4)
+        features[f"{prefix}.up_proj"] = torch.randn(1, 3, 4)
+        features[f"{prefix}.down_proj"] = torch.randn(1, 3, 2)
+
+    nodes = qmodel.awq_get_modules_for_scaling(layer, features, {})
+    gate_up_node = next(node for node in nodes if len(node["layers"]) == 4)
+
+    assert gate_up_node["inp"] is root_feature
+    assert gate_up_node["_input_feature_name"] == "mlp"
+
+
+def test_awq_capture_applies_padding_mask_to_root_and_flattened_expert_inputs():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 16, "capture_root": True}
+        if name == "mlp"
+        else None
+    )
+    expert_name = "mlp.experts.0.gate_proj"
+    processor.tasks[expert_name] = {"inputs": [], "batch_indices": []}
+    processor._mask_tls = types.SimpleNamespace(
+        value=torch.tensor(
+            [
+                [True, True, False],
+                [True, False, False],
+            ]
+        )
+    )
+    processor._set_current_batch_index(0)
+
+    feature = torch.arange(12, dtype=torch.float32).reshape(2, 3, 2)
+    expected = feature.reshape(-1, 2)[processor._mask_tls.value.reshape(-1)].unsqueeze(0)
+
+    processor.record_moe_root_input_feature("mlp", feature)
+    processor.pre_process_fwd_hook(expert_name)(
+        nn.Identity(),
+        (feature.reshape(-1, 2),),
+        None,
+    )
+    processor._set_current_batch_index(None)
+
+    assert torch.equal(processor.tasks["mlp"]["inputs"][0], expected)
+    assert torch.equal(processor.tasks[expert_name]["inputs"][0], expected)
+
+
 def test_awq_layer_input_features_aligns_variable_length_fallback_with_cached_kwargs():
     processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
     state = _AWQLayerState(modules={"self_attn.q_proj": object()})
@@ -127,6 +244,329 @@ def test_awq_layer_input_features_aligns_variable_length_fallback_with_cached_kw
     assert features["self_attn.q_proj"].shape == (1, 36, QWEN3_HIDDEN_SIZE)
     assert processor._awq_feature_kwargs["self_attn.q_proj"]["attention_mask"].shape == (1, 1, 36, 36)
     assert processor._awq_feature_kwargs["self_attn.q_proj"]["position_ids"].shape == (1, 36)
+    assert processor._feature_stats["self_attn.q_proj"]["mode"] == "latest_batch"
+    assert processor._feature_stats["self_attn.q_proj"]["raw_tokens"] == 459
+    assert processor._feature_stats["self_attn.q_proj"]["retained_tokens"] == 36
+
+
+def test_awq_layer_input_features_packs_variable_pointwise_token_rows():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    state = _AWQLayerState(modules={"mlp.experts.0.gate_proj": object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 8}
+        if name == "mlp.experts.0.gate_proj"
+        else None
+    )
+    processor.tasks["mlp.experts.0.gate_proj"] = {
+        "inputs": [
+            torch.full((1, 4, 4), 30.0),
+            torch.full((1, 2, 4), 10.0),
+            torch.full((1, 3, 4), 20.0),
+        ],
+        "batch_indices": [2, 0, 1],
+    }
+
+    features = processor._layer_input_features(state)
+    packed = features["mlp.experts.0.gate_proj"]
+
+    assert packed.shape == (1, 8, 4)
+    assert torch.equal(
+        torch.unique(packed[0, :, 0]),
+        torch.tensor([10.0, 20.0, 30.0]),
+    )
+    assert processor._awq_feature_kwargs["mlp.experts.0.gate_proj"] == {}
+    assert processor._feature_stats["mlp.experts.0.gate_proj"] == {
+        "mode": "token_rows",
+        "raw_tokens": 9,
+        "retained_tokens": 8,
+        "batches": 3,
+        "max_tokens": 8,
+    }
+
+
+def test_awq_layer_input_features_derives_token_budget_from_observed_batches():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    module_name = "mlp.experts.0.gate_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows"} if name == module_name else None
+    )
+    processor.tasks[module_name] = {
+        "inputs": [
+            torch.full((1, 3, 4), 10.0),
+            torch.full((1, 9, 4), 20.0),
+            torch.full((1, 5, 4), 30.0),
+        ],
+        "batch_indices": [0, 1, 2],
+    }
+
+    features = processor._layer_input_features(state)
+
+    assert features[module_name].shape == (1, 9, 4)
+    assert torch.equal(
+        torch.unique(features[module_name][0, :, 0]),
+        torch.tensor([10.0, 20.0, 30.0]),
+    )
+    assert processor._feature_stats[module_name] == {
+        "mode": "token_rows",
+        "raw_tokens": 17,
+        "retained_tokens": 9,
+        "batches": 3,
+        "max_tokens": 9,
+    }
+
+
+def test_awq_pack_token_rows_reserves_a_row_from_every_batch():
+    tensors = [
+        torch.full((1, 5, 4), 10.0),
+        torch.full((1, 1, 4), 20.0),
+        torch.full((1, 5, 4), 30.0),
+    ]
+
+    packed, raw_tokens = AWQProcessor._pack_token_rows(tensors, max_tokens=4)
+
+    assert raw_tokens == 11
+    assert packed.shape == (1, 4, 4)
+    # The single-row middle batch must not be skipped by uniform sampling.
+    assert torch.equal(
+        torch.unique(packed[0, :, 0]),
+        torch.tensor([10.0, 20.0, 30.0]),
+    )
+
+    repacked, _ = AWQProcessor._pack_token_rows(tensors, max_tokens=4)
+    assert torch.equal(packed, repacked)
+
+    # Budget smaller than the batch count: one leading row from evenly
+    # spaced batches, deterministically.
+    tiny, tiny_raw = AWQProcessor._pack_token_rows(tensors, max_tokens=2)
+    assert tiny_raw == 11
+    assert tiny.shape == (1, 2, 4)
+    assert torch.equal(tiny[0, :, 0], torch.tensor([10.0, 30.0]))
+
+
+def test_awq_pack_token_rows_never_underfills_budget():
+    """Exhaustive small-scale grid: retained rows must equal min(total, budget).
+
+    Guards the single-pass distribution flaw where saturated short batches
+    stranded leftover budget (e.g. lengths [1, 1, 1, 5] with max_tokens=7
+    previously returned 6 rows).
+    """
+
+    import itertools
+
+    hidden = 2
+    for batch_count in range(1, 5):
+        for lengths in itertools.product(range(1, 5), repeat=batch_count):
+            tensors = [
+                torch.full((1, length, hidden), float(i + 1))
+                for i, length in enumerate(lengths)
+            ]
+            total = sum(lengths)
+            for max_tokens in range(1, total + 2):
+                packed, raw = AWQProcessor._pack_token_rows(
+                    tensors, max_tokens=max_tokens
+                )
+                assert raw == total
+                expected = min(total, max_tokens)
+                assert packed.shape == (1, expected, hidden), (
+                    lengths,
+                    max_tokens,
+                    packed.shape,
+                )
+                if max_tokens >= batch_count:
+                    values = set(packed[0, :, 0].tolist())
+                    assert values == {float(i + 1) for i in range(batch_count)}, (
+                        lengths,
+                        max_tokens,
+                    )
+
+
+def test_awq_pack_token_rows_ignores_empty_captures_during_quota_allocation():
+    empty = torch.empty(1, 0, 4)
+    populated = torch.tensor(
+        [[[10.0, 10.0, 10.0, 10.0], [20.0, 20.0, 20.0, 20.0]]]
+    )
+
+    packed, raw = AWQProcessor._pack_token_rows(
+        [empty, populated, empty],
+        max_tokens=1,
+    )
+
+    assert raw == 2
+    assert packed.shape == (1, 1, 4)
+    assert torch.equal(packed[0, 0], populated[0, 0])
+
+    all_empty, all_empty_raw = AWQProcessor._pack_token_rows(
+        [empty, empty],
+        max_tokens=4,
+    )
+    assert all_empty_raw == 0
+    assert all_empty.shape == (1, 0, 4)
+
+
+def test_awq_token_row_budget_tracks_largest_batch_and_preserves_batch_coverage():
+    largest_batch_bound = [
+        torch.zeros(1, 3, 4),
+        torch.zeros(1, 9, 4),
+        torch.zeros(1, 5, 4),
+    ]
+    batch_coverage_bound = [torch.zeros(1, 1, 4) for _ in range(6)]
+
+    assert AWQProcessor._token_row_budget(largest_batch_bound) == 9
+    assert AWQProcessor._token_row_budget(batch_coverage_bound) == 6
+    assert AWQProcessor._token_row_budget([torch.zeros(1, 0, 4)]) == 0
+
+
+def test_awq_quant_log_nsamples_changes_only_for_token_row_aggregation():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    processor._nsamples_total = 459
+
+    assert processor._feature_nsamples_for_log(
+        {"mode": "latest_batch", "raw_tokens": 459, "retained_tokens": 36}
+    ) == 459
+    assert processor._feature_nsamples_for_log(
+        {"mode": "batch", "raw_tokens": 459, "retained_tokens": 459}
+    ) == 459
+    assert processor._feature_nsamples_for_log(
+        {"mode": "token_rows", "raw_tokens": 459, "retained_tokens": 128}
+    ) == 128
+
+
+def test_awq_fallback_uses_raw_token_row_coverage_but_retained_latest_batch_rows():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    module_name = "mlp.gate_proj"
+    input_feat = {module_name: torch.ones(1, 36, 4)}
+    processor._nsamples_total = 459
+    processor.fallback = {"threshold": 100}
+
+    processor._feature_stats = {
+        module_name: {
+            "mode": "latest_batch",
+            "raw_tokens": 459,
+            "retained_tokens": 36,
+        }
+    }
+    assert processor._should_fallback_group([module_name], input_feat) is True
+
+    processor._feature_stats[module_name]["mode"] = "token_rows"
+    assert processor._should_fallback_group([module_name], input_feat) is False
+
+
+@pytest.mark.parametrize("completion_path", ["no_config", "no_valid_groups"])
+def test_awq_early_layer_completion_releases_all_feature_state(completion_path):
+    processor = _TestAWQProcessor(
+        QuantizeConfig(
+            quant_method=METHOD.AWQ,
+            format=FORMAT.GEMM,
+            group_size=128,
+        )
+    )
+    layer = nn.Module()
+    layer.mlp = nn.Module()
+    layer.mlp.proj = nn.Linear(4, 4, bias=False)
+    named_proj = NamedModule(
+        layer.mlp.proj,
+        name="mlp.proj",
+        full_name="model.layers.0.mlp.proj",
+        layer_index=0,
+    )
+    state = _AWQLayerState(
+        modules={"mlp.proj": named_proj},
+        subset_total=2,
+        processed_subsets={0, 1},
+        layer_module=layer,
+        previous_weight_scale=0.5,
+        pending_modules={"mlp.proj"},
+    )
+    processor.tasks["mlp.proj"] = {
+        "inputs": [torch.ones(1, 2, 4)],
+        "batch_indices": [0],
+    }
+    processor.tasks["mlp"] = {
+        "inputs": [torch.ones(1, 2, 4)],
+        "batch_indices": [0],
+    }
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "capture_root": True}
+        if name == "mlp"
+        else {"mode": "token_rows"}
+        if name == "mlp.proj"
+        else None
+    )
+
+    if completion_path == "no_config":
+        processor.gptq_model.awq_get_modules_for_scaling = (
+            lambda _layer, _features, _kwargs: []
+        )
+    else:
+        mismatched_prev = nn.Linear(3, 5, bias=False)
+        processor.gptq_model.awq_get_modules_for_scaling = (
+            lambda _layer, features, _kwargs: [
+                {
+                    "prev_op": mismatched_prev,
+                    "layers": [layer.mlp.proj],
+                    "inp": features["mlp.proj"],
+                }
+            ]
+        )
+
+    processor._quantize_layer(layer_index=0, state=state)
+
+    assert state.quantized is True
+    assert state.modules == {}
+    assert state.pending_modules == set()
+    assert state.layer_module is None
+    assert state.processed_subsets == set()
+    assert state.subset_total is None
+    assert state.previous_weight_scale is None
+    assert "mlp" not in processor.tasks
+    assert "mlp.proj" not in processor.tasks
+    assert processor._feature_task_names == set()
+    assert processor._feature_stats == {}
+    assert processor._scale_feature_by_module == {}
+    assert processor._awq_feature_kwargs == {}
+    assert not hasattr(processor._scale_context, "layer_index")
+    assert not hasattr(processor._scale_context, "prev_scale")
+
+
+def test_awq_moe_root_capture_deduplicates_subsets_and_is_collapsed():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "max_tokens": 16, "capture_root": True}
+        if name == "mlp"
+        else None
+    )
+    processor.tasks["mlp.experts.0.gate_proj"] = {
+        "inputs": [torch.ones(1, 1, 4)],
+        "batch_indices": [0],
+    }
+    processor._set_current_batch_index(0)
+    processor.record_moe_root_input_feature("mlp", torch.full((1, 2, 4), 10.0))
+    processor.record_moe_root_input_feature("mlp", torch.full((1, 2, 4), 99.0))
+    processor._set_current_batch_index(1)
+    processor.record_moe_root_input_feature("mlp", torch.full((1, 3, 4), 20.0))
+    processor._set_current_batch_index(None)
+
+    state = _AWQLayerState(modules={"mlp.experts.0.gate_proj": object()})
+    features = processor._layer_input_features(state)
+
+    assert features["mlp"].shape == (1, 5, 4)
+    assert torch.equal(features["mlp"][0, :, 0], torch.tensor([10.0, 10.0, 20.0, 20.0, 20.0]))
+    assert processor._feature_stats["mlp"]["batches"] == 2
+
+    processor.tasks.pop("mlp.experts.0.gate_proj")
+    processor._set_current_batch_index(2)
+    processor.record_moe_root_input_feature("mlp", torch.full((1, 7, 4), 30.0))
+    assert processor.tasks["mlp"]["inputs"][0].shape == (1, 5, 4)
+
+    processor.tasks["mlp.experts.0.gate_proj"] = {
+        "inputs": [torch.ones(1, 1, 4)],
+        "batch_indices": [0],
+    }
+    processor.coverage_only = True
+    processor._set_current_batch_index(3)
+    processor.record_moe_root_input_feature("mlp", torch.full((1, 9, 4), 40.0))
+    assert processor.tasks["mlp"]["inputs"][0].shape == (1, 5, 4)
 
 
 def test_awq_can_concat_batch_tensors_requires_matching_trailing_shapes():
@@ -286,6 +726,31 @@ def test_awq_align_module_kwargs_packs_mask_for_packed_feature_tensor():
     assert torch.isfinite(packed_mask[0, 0, 2, 0])
     assert packed_mask[0, 0, 0, 3] == torch.finfo(torch.float32).min
     assert packed_mask[0, 0, 3, 4] == torch.finfo(torch.float32).min
+
+
+def test_awq_align_module_kwargs_crops_single_batch_max_cache_mask():
+    """Replay must crop a max-cache causal mask instead of padding activations."""
+
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    seq_len = 232
+    cache_len = 2048
+    inp = torch.randn(1, seq_len, 16)
+    mask = torch.full((1, 1, cache_len, cache_len), torch.finfo(torch.float32).min)
+    causal = torch.triu(torch.ones((seq_len, seq_len), dtype=torch.bool), diagonal=1)
+    mask[..., :seq_len, :seq_len].masked_fill_(~causal, 0.0)
+    position_ids = torch.arange(cache_len).unsqueeze(0)
+
+    aligned = processor._align_module_kwargs_to_input(
+        inp,
+        {"attention_mask": mask, "position_ids": position_ids},
+    )
+
+    assert aligned["attention_mask"].shape == (1, 1, seq_len, seq_len)
+    assert aligned["position_ids"].shape == (1, seq_len)
+    assert torch.equal(aligned["position_ids"], torch.arange(seq_len).unsqueeze(0))
+    # The first token can attend to itself; the upper triangle remains masked.
+    assert aligned["attention_mask"][0, 0, 0, 0] == 0
+    assert aligned["attention_mask"][0, 0, 0, 1] == torch.finfo(torch.float32).min
 
 
 def test_awq_search_best_scale_keeps_cpu_activations_off_device_until_forward_chunks():

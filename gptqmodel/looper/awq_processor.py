@@ -8,6 +8,7 @@ import inspect
 import math
 import threading
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -210,6 +211,10 @@ class AWQProcessor(LoopProcessor):
         self.duo_scaling = True
 
         self._module_forward_kwargs: Dict[str, torch.Tensor] = {}
+        self._feature_stats: Dict[str, Dict[str, Any]] = {}
+        self._scale_feature_by_module: Dict[str, str] = {}
+        self._feature_task_names: Set[str] = set()
+        self._awq_feature_kwargs: Dict[str, Dict[str, Any]] = {}
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
         self._rotary_source_id: Optional[int] = None
@@ -373,27 +378,156 @@ class AWQProcessor(LoopProcessor):
         self._nsamples_total = total_tokens
         self.nsamples = total_tokens
 
-    def _record_input_feature(self, module_name: str, feature: torch.Tensor) -> None:
+    def _feature_aggregation_policy(self, module_name: str) -> Optional[Dict[str, Any]]:
+        """Return an optional model-specific activation aggregation policy."""
+
+        selector = getattr(self.gptq_model, "awq_input_feature_aggregation", None)
+        if not callable(selector):
+            return None
+        policy = selector(module_name)
+        if policy is None:
+            return None
+        if not isinstance(policy, Mapping):
+            raise TypeError(
+                "awq_input_feature_aggregation must return a mapping or None "
+                f"for {module_name!r}, got {type(policy).__name__}."
+            )
+        return dict(policy)
+
+    def _record_input_feature(
+        self,
+        module_name: str,
+        feature: torch.Tensor,
+        *,
+        dedupe_batch: bool = False,
+    ) -> None:
         """Caches one captured input feature tensor for a named module."""
 
-        # Preserve a leading sample axis for flattened [seq, hidden] captures so later
-        # concatenation produces [samples, seq, hidden] instead of collapsing into one giant sequence.
-        if feature.dim() <= 2:
-            feature = feature.unsqueeze(0)
+        batch_index = self.current_batch_index()
+        reserved_batch_index = False
+        if dedupe_batch and batch_index is not None:
+            # Reserve before the potentially large GPU -> CPU transfer. MoE roots
+            # can replay the same input once per expert subset; checking after the
+            # transfer would discard the duplicate but still copy a full hidden
+            # state tensor for every layer.
+            with self.lock:
+                entry = self.tasks.get(module_name)
+                if entry is None:
+                    entry = {"inputs": [], "batch_indices": []}
+                    self.tasks[module_name] = entry
+                seen_batch_indices = entry.setdefault("seen_batch_indices", set())
+                if batch_index in seen_batch_indices:
+                    return
+                seen_batch_indices.add(batch_index)
+                reserved_batch_index = True
 
-        if feature.device.type != "cpu":
-            feature = feature.detach().cpu()
-        else:
-            feature = feature.detach()
+        try:
+            feature = self._apply_active_keep_mask_to_feature(feature)
+            # Preserve a leading sample axis for flattened [seq, hidden] captures so later
+            # concatenation produces [samples, seq, hidden] instead of collapsing into one giant sequence.
+            if feature.dim() <= 2:
+                feature = feature.unsqueeze(0)
+            if feature.device.type != "cpu":
+                feature = feature.detach().cpu()
+            else:
+                feature = feature.detach()
+        except Exception:
+            if reserved_batch_index:
+                with self.lock:
+                    entry = self.tasks.get(module_name)
+                    if entry is not None:
+                        entry.get("seen_batch_indices", set()).discard(batch_index)
+            raise
 
         with self.lock:
             entry = self.tasks.get(module_name)
             if entry is None:
                 entry = {"inputs": [], "batch_indices": []}
                 self.tasks[module_name] = entry
+            if dedupe_batch and batch_index is not None and not reserved_batch_index:
+                seen_batch_indices = entry.setdefault("seen_batch_indices", set())
+                if batch_index in seen_batch_indices:
+                    return
+                seen_batch_indices.add(batch_index)
             inputs_list = entry.setdefault("inputs", [])
             inputs_list.append(feature)
-            entry.setdefault("batch_indices", []).append(self.current_batch_index())
+            entry.setdefault("batch_indices", []).append(batch_index)
+
+    def _apply_active_keep_mask_to_feature(self, feature: torch.Tensor) -> torch.Tensor:
+        """Remove padded rows from an activation captured by the current worker.
+
+        Regular module hooks normally receive ``[B, S, H]`` inputs, while the
+        all-expert calibration path flattens the same input to ``[B * S, H]``.
+        Handle both layouts so root and expert statistics exclude the same
+        padding rows. Inputs that cannot be matched unambiguously to the active
+        mask retain their existing behavior.
+        """
+
+        keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+        if not torch.is_tensor(feature) or not torch.is_tensor(keep_mask) or keep_mask.ndim != 2:
+            return feature
+
+        keep_mask = keep_mask.to(device=feature.device, dtype=torch.bool)
+        if feature.dim() >= 3 and tuple(feature.shape[:2]) == tuple(keep_mask.shape):
+            flattened = feature.reshape(-1, *feature.shape[2:])
+            return flattened[keep_mask.reshape(-1)].contiguous()
+
+        if feature.dim() == 2 and feature.shape[0] == keep_mask.numel():
+            return feature[keep_mask.reshape(-1)].contiguous()
+
+        return feature
+
+    def record_moe_root_input_feature(self, module_name: str, feature: torch.Tensor) -> None:
+        """Capture one pointwise MoE-root input per calibration batch when requested.
+
+        MoE layers are normally hooked only at expert projections.  Model-specific
+        AWQ scale groups may instead need the shared pre-router input.  The policy
+        gate keeps this opt-in so sequence-sensitive models retain their existing
+        replay contract.
+        """
+
+        if getattr(self, "coverage_only", False):
+            return
+
+        policy = self._feature_aggregation_policy(module_name)
+        if not policy or not policy.get("capture_root", False):
+            return
+        # Capture only while at least one routed projection under this root has
+        # an active AWQ task. Replay-only passes after task cleanup must not
+        # repopulate the root cache.
+        task_prefix = f"{module_name}."
+        with self.lock:
+            if not any(name.startswith(task_prefix) for name in self.tasks):
+                return
+        self._record_input_feature(module_name, feature, dedupe_batch=True)
+
+    def register_moe_root_capture_hook(
+        self,
+        moe_block: Module,
+        moe_block_name: str,
+        handles: List[Any],
+    ) -> bool:
+        """Register AWQ's shared MoE-root capture before the block executes.
+
+        AWQ is the only lifecycle that consumes this shared pointwise feature.
+        Keep the activation-capture and model-policy gates here, alongside the
+        recorder they protect, so the generic subset executor remains unaware
+        of AWQ-specific state and math.
+        """
+
+        if not self.execution_config.enable_activation_capture:
+            return False
+
+        root_policy = self._feature_aggregation_policy(moe_block_name)
+        if not root_policy or not root_policy.get("capture_root", False):
+            return False
+
+        def capture_moe_root_input(_module, inputs):
+            if inputs:
+                self.record_moe_root_input_feature(moe_block_name, inputs[0])
+
+        handles.append(moe_block.register_forward_pre_hook(capture_moe_root_input))
+        return True
 
     @staticmethod
     def _can_concat_batch_tensors(tensors: List[torch.Tensor]) -> bool:
@@ -407,6 +541,148 @@ class AWQProcessor(LoopProcessor):
             tensor.dim() == first.dim() and tensor.shape[1:] == first.shape[1:]
             for tensor in tensors
         )
+
+    @staticmethod
+    def _token_row_budget(tensors: List[torch.Tensor]) -> int:
+        """Derive a pointwise sample budget from observed calibration batches.
+
+        Use one largest-batch equivalent, raised to the number of non-empty
+        batches so every contributing batch can retain at least one row. This
+        adapts to actual batch size, sequence lengths, and expert occupancy
+        while limiting any increase beyond the largest observed activation
+        batch to the minimum needed for one-row-per-batch coverage.
+        """
+
+        row_counts = []
+        for tensor in tensors:
+            if tensor.dim() < 2:
+                continue
+            hidden = int(tensor.shape[-1])
+            if hidden <= 0:
+                continue
+            rows = int(tensor.numel() // hidden)
+            if rows > 0:
+                row_counts.append(rows)
+
+        if not row_counts:
+            return 0
+
+        raw_tokens = sum(row_counts)
+        largest_batch = max(row_counts)
+        contributing_batches = len(row_counts)
+        return min(raw_tokens, max(largest_batch, contributing_batches))
+
+    @staticmethod
+    def _pack_token_rows(
+        tensors: List[torch.Tensor],
+        *,
+        max_tokens: int,
+    ) -> Tuple[torch.Tensor, int]:
+        """Pack ragged pointwise activations into deterministic bounded token rows.
+
+        The returned tensor always has shape ``[1, retained_tokens, hidden]``.
+        Whenever ``max_tokens`` is at least the number of non-empty cached
+        batches, every non-empty calibration batch contributes at least one
+        row; the remaining budget is distributed proportionally to batch length
+        (largest remainder, ties broken by batch order) and rows are sampled
+        evenly inside each batch.
+        This avoids the previous latest-batch-only bias without allocating a
+        full concatenated activation tensor first. When ``max_tokens`` is
+        smaller than the batch count, one row is taken from each of
+        ``max_tokens`` evenly spaced batches instead.
+        """
+
+        if not tensors:
+            return torch.empty(0), 0
+        if max_tokens <= 0:
+            raise ValueError(f"AWQ token-row max_tokens must be positive, got {max_tokens}.")
+
+        hidden = int(tensors[0].shape[-1])
+        rows = []
+        total_tokens = 0
+        for tensor in tensors:
+            if tensor.dim() < 2 or int(tensor.shape[-1]) != hidden:
+                raise ValueError(
+                    "AWQ token-row aggregation requires tensors with one common "
+                    f"hidden dimension ({hidden}); got shape={tuple(tensor.shape)}."
+                )
+            flattened = tensor.reshape(-1, hidden)
+            total_tokens += int(flattened.shape[0])
+            if flattened.shape[0] > 0:
+                rows.append(flattened)
+
+        if total_tokens == 0:
+            return tensors[0].new_empty((1, 0, hidden)), 0
+
+        retained_tokens = min(total_tokens, max_tokens)
+        if retained_tokens == total_tokens:
+            return torch.cat(rows, dim=0).unsqueeze(0), total_tokens
+
+        lengths = [int(tensor_rows.shape[0]) for tensor_rows in rows]
+        batch_count = len(rows)
+
+        if retained_tokens < batch_count:
+            # The budget cannot cover every batch; sample one leading row from
+            # evenly spaced batches so the selection stays deterministic.
+            if retained_tokens == 1:
+                batch_ids = [0]
+            else:
+                batch_ids = [
+                    int(i * (batch_count - 1) // (retained_tokens - 1))
+                    for i in range(retained_tokens)
+                ]
+            selected = [rows[batch_id][:1] for batch_id in dict.fromkeys(batch_ids)]
+            return torch.cat(selected, dim=0).unsqueeze(0), total_tokens
+
+        # Reserve one row per batch, then hand out the remaining budget
+        # proportionally to batch length (largest remainder, ties by order).
+        quotas = [1] * batch_count
+        remaining = retained_tokens - batch_count
+        if remaining > 0:
+            exact = [length * remaining / total_tokens for length in lengths]
+            floors = [int(share) for share in exact]
+            for index, floor_share in enumerate(floors):
+                quotas[index] += floor_share
+            leftover = retained_tokens - sum(quotas)
+            order = sorted(
+                range(batch_count),
+                key=lambda index: (-(exact[index] - floors[index]), index),
+            )
+            # Multiple passes: a single pass can strand budget when the
+            # high-remainder batches saturate (e.g. lengths [1, 1, 1, 5]
+            # with budget 7). retained_tokens <= total_tokens guarantees
+            # enough capacity, so the loop always terminates with zero
+            # leftover.
+            while leftover > 0:
+                distributed = False
+                for index in order:
+                    if leftover <= 0:
+                        break
+                    if quotas[index] < lengths[index]:
+                        quotas[index] += 1
+                        leftover -= 1
+                        distributed = True
+                if not distributed:
+                    break
+
+        selected = []
+        for tensor_rows, quota, length in zip(rows, quotas, lengths):
+            quota = min(quota, length)
+            if quota <= 0:
+                continue
+            if quota == length:
+                selected.append(tensor_rows)
+                continue
+            if quota == 1:
+                local_indices = torch.zeros(1, dtype=torch.int64)
+            else:
+                local_indices = (
+                    torch.arange(quota, dtype=torch.int64)
+                    * (length - 1)
+                    // (quota - 1)
+                )
+            selected.append(tensor_rows.index_select(0, local_indices))
+        return torch.cat(selected, dim=0).unsqueeze(0), total_tokens
 
     @staticmethod
     def _concat_batch_metadata(values: List[Any]) -> Any:
@@ -595,10 +871,16 @@ class AWQProcessor(LoopProcessor):
 
         aligned_kwargs = dict(module_kwargs)
         attention_mask = aligned_kwargs.get("attention_mask")
-        if not torch.is_tensor(inp) or inp.dim() < 3 or not torch.is_tensor(attention_mask):
+        if not torch.is_tensor(inp) or inp.dim() < 2 or not torch.is_tensor(attention_mask):
             return aligned_kwargs
 
-        if inp.shape[0] != 1 or attention_mask.ndim < 2:
+        # `_iter_module_forward_outputs` promotes [tokens, hidden] captures to
+        # [1, tokens, hidden] for attention modules after this helper runs.
+        # Treat that 2-D form as a single batch here so expanded HF masks do
+        # not bypass alignment and fail during replay.
+        input_batch = int(inp.shape[0]) if inp.dim() >= 3 else 1
+        input_seq = int(inp.shape[1]) if inp.dim() >= 3 else int(inp.shape[0])
+        if input_batch != 1 or attention_mask.ndim < 2:
             return aligned_kwargs
 
         try:
@@ -606,13 +888,45 @@ class AWQProcessor(LoopProcessor):
         except Exception:
             return aligned_kwargs
 
-        if keep_mask is None or keep_mask.ndim != 2 or keep_mask.shape[0] <= 1:
+        if keep_mask is None or keep_mask.ndim != 2:
             return aligned_kwargs
 
         total_kept = int(keep_mask.to(dtype=torch.int64).sum().item())
-        if total_kept != int(inp.shape[1]):
-            aligned_kwargs.pop("attention_mask", None)
-            aligned_kwargs.pop("position_ids", None)
+        # Multi-row masks are intentionally packed below. Only a single-row
+        # mask can be an expanded max-cache mask that needs sequence cropping.
+        mask_seq_matches = attention_mask.shape[0] != 1 or (
+            attention_mask.shape[-1] == input_seq
+            and (attention_mask.ndim < 3 or attention_mask.shape[-2] in (1, input_seq))
+        )
+        if total_kept != input_seq or not mask_seq_matches:
+            # Transformers may hand a layer a max-cache causal mask (for
+            # example [1, 1, 2048, 2048]) while the captured replay input is
+            # only 232 tokens. Crop the metadata to the actual sequence so
+            # attention remains causal without padding activations to 2048.
+            # For unsupported/batched layouts retain the defensive drop used
+            # by the original path rather than passing an incompatible mask.
+            cropped_mask = attention_mask
+            if attention_mask.shape[0] == 1:
+                if attention_mask.ndim == 2 and attention_mask.shape[-1] >= input_seq:
+                    cropped_mask = attention_mask[..., :input_seq]
+                elif attention_mask.ndim == 3 and attention_mask.shape[-1] >= input_seq:
+                    if attention_mask.shape[-2] == 1 or attention_mask.shape[-2] >= input_seq:
+                        cropped_mask = attention_mask[..., :input_seq, :input_seq]
+                elif attention_mask.ndim == 4 and attention_mask.shape[-1] >= input_seq:
+                    if attention_mask.shape[-2] == 1:
+                        cropped_mask = attention_mask[..., :1, :input_seq]
+                    elif attention_mask.shape[-2] >= input_seq:
+                        cropped_mask = attention_mask[..., :input_seq, :input_seq]
+
+            if cropped_mask is attention_mask:
+                aligned_kwargs.pop("attention_mask", None)
+                aligned_kwargs.pop("position_ids", None)
+                return aligned_kwargs
+
+            aligned_kwargs["attention_mask"] = cropped_mask
+            position_ids = aligned_kwargs.get("position_ids")
+            if torch.is_tensor(position_ids) and position_ids.ndim >= 2 and position_ids.shape[-1] >= input_seq:
+                aligned_kwargs["position_ids"] = position_ids[..., :input_seq]
             return aligned_kwargs
 
         aligned_kwargs["attention_mask"] = self._pack_attention_mask_for_feature(attention_mask, keep_mask)
@@ -645,30 +959,103 @@ class AWQProcessor(LoopProcessor):
     def _layer_input_features(self, state: _AWQLayerState) -> Dict[str, torch.Tensor]:
         """Collapse cached per-batch inputs into one replay tensor per module.
 
-        Most batches can be concatenated on dim 0. Variable-length calibration
-        batches cannot: for example `[1, 423, H]` and `[1, 36, H]` represent
-        different sequence lengths after masking or packing. In that case we
-        keep the most recent feature tensor and rebuild kwargs from the same
-        batch index so activations, masks, and position ids remain aligned.
+        Model-specific pointwise policies pack variable-length batches into
+        bounded token rows, so every calibration batch contributes to AWQ scale
+        statistics. Generic sequence-sensitive modules retain the legacy
+        behavior: concatenate equal shapes, otherwise keep the latest feature
+        and aligned kwargs.
         """
 
         features: Dict[str, torch.Tensor] = {}
         feature_kwargs: Dict[str, Dict[str, Any]] = {}
-        root_buckets: Dict[str, List[torch.Tensor]] = {}
+        feature_stats: Dict[str, Dict[str, Any]] = {}
+        feature_names = list(state.modules)
+        roots = {name.split(".", 1)[0] for name in feature_names}
+        for root in sorted(roots):
+            if root in self.tasks and root not in feature_names:
+                policy = self._feature_aggregation_policy(root)
+                if policy and policy.get("capture_root", False):
+                    feature_names.append(root)
+
+        self._feature_task_names = set(feature_names)
         # Iterate over a snapshot since quantization may mutate state.modules concurrently
-        for name in list(state.modules):
+        for name in feature_names:
             entry = self.tasks.get(name) or {}
             tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
             batch_indices: List[Optional[int]] = entry.get("batch_indices", [])  # type: ignore[arg-type]
             if not tensors:
                 features[name] = torch.empty(0)
                 feature_kwargs[name] = {}
+                feature_stats[name] = {
+                    "mode": "empty",
+                    "raw_tokens": 0,
+                    "retained_tokens": 0,
+                    "batches": 0,
+                }
                 continue
-            if self._can_concat_batch_tensors(tensors):
+
+            # Capture hooks can complete in device/runtime order, not
+            # necessarily calibration-batch order.  Restore the serial replay
+            # order before concatenation (or before choosing the last
+            # variable-length capture) so activation statistics and their
+            # cached kwargs stay aligned with the calibration corpus.
+            if (
+                len(batch_indices) == len(tensors)
+                and all(index is not None and index >= 0 for index in batch_indices)
+            ):
+                ordered = sorted(
+                    zip(batch_indices, tensors),
+                    key=lambda item: int(item[0]),
+                )
+                batch_indices = [item[0] for item in ordered]
+                tensors = [item[1] for item in ordered]
+
+            policy = self._feature_aggregation_policy(name)
+            aggregation_mode = (policy or {}).get("mode")
+            if aggregation_mode == "token_rows":
+                configured_max_tokens = (policy or {}).get("max_tokens")
+                max_tokens = (
+                    int(configured_max_tokens)
+                    if configured_max_tokens is not None
+                    else self._token_row_budget(tensors)
+                )
+                if max_tokens == 0 and configured_max_tokens is None:
+                    features[name] = tensors[0].new_empty((1, 0, tensors[0].shape[-1]))
+                    raw_tokens = 0
+                else:
+                    features[name], raw_tokens = self._pack_token_rows(
+                        tensors,
+                        max_tokens=max_tokens,
+                    )
+                feature_kwargs[name] = {}
+                retained_tokens = int(features[name].shape[-2])
+                entry["inputs"] = [features[name]]
+                entry["batch_indices"] = [None]
+                feature_stats[name] = {
+                    "mode": "token_rows",
+                    "raw_tokens": raw_tokens,
+                    "retained_tokens": retained_tokens,
+                    "batches": len(tensors),
+                    "max_tokens": max_tokens,
+                }
+            elif aggregation_mode not in (None, "batch"):
+                raise ValueError(
+                    f"Unsupported AWQ feature aggregation mode {aggregation_mode!r} "
+                    f"for {name!r}."
+                )
+            elif self._can_concat_batch_tensors(tensors):
                 features[name] = torch.cat(tensors, dim=0)
                 feature_kwargs[name] = self._feature_kwargs_from_batch_indices(batch_indices)
                 entry["inputs"] = [features[name]]
                 entry["batch_indices"] = [None]
+                hidden = max(int(features[name].shape[-1]), 1)
+                tokens = int(features[name].numel() // hidden)
+                feature_stats[name] = {
+                    "mode": "batch",
+                    "raw_tokens": tokens,
+                    "retained_tokens": tokens,
+                    "batches": len(tensors),
+                }
             else:
                 # Variable-length captures such as `[1, 423, H]` and `[1, 36, H]`
                 # cannot be concatenated on dim 0. Keep the latest capture and
@@ -678,8 +1065,15 @@ class AWQProcessor(LoopProcessor):
                 feature_kwargs[name] = self._feature_kwargs_from_batch_indices([last_batch_index])
                 entry["inputs"] = [features[name]]
                 entry["batch_indices"] = [last_batch_index]
-            root = name.split(".", 1)[0]
-            root_buckets.setdefault(root, []).extend(tensors)
+                hidden = max(int(features[name].shape[-1]), 1)
+                raw_tokens = sum(int(tensor.numel() // hidden) for tensor in tensors)
+                retained_tokens = int(features[name].numel() // hidden)
+                feature_stats[name] = {
+                    "mode": "latest_batch",
+                    "raw_tokens": raw_tokens,
+                    "retained_tokens": retained_tokens,
+                    "batches": len(tensors),
+                }
             if features[name] is not None and features[name].numel() > 0:
                 pass  # previously logged input feature shapes
                 # log.info(
@@ -688,15 +1082,50 @@ class AWQProcessor(LoopProcessor):
                 #     tuple(features[name].shape),
                 # )
 
-        # for root, tensors in root_buckets.items():
-        #     if not tensors or root in features:
-        #         continue
-        #     try:
-        #         features[root] = torch.cat(tensors, dim=0)
-        #     except RuntimeError:
-        #         features[root] = tensors[0]
         self._awq_feature_kwargs = feature_kwargs
+        self._feature_stats = feature_stats
         return features
+
+    def _feature_nsamples_for_log(self, feature_stat: Mapping[str, Any]) -> int:
+        """Return the sample count exposed through the legacy quantization log."""
+
+        if feature_stat.get("mode") == "token_rows":
+            retained_tokens = int(feature_stat.get("retained_tokens", 0))
+            if retained_tokens > 0:
+                return retained_tokens
+        return self._nsamples_total
+
+    def _finalize_quantized_layer(
+        self,
+        state: _AWQLayerState,
+        fallback_task_names: Optional[Set[str]] = None,
+    ) -> None:
+        """Release all per-layer AWQ state after a successful completion."""
+
+        state.quantized = True
+        state.modules.clear()
+        state.pending_modules.clear()
+        state.layer_module = None
+        state.processed_subsets.clear()
+        state.subset_total = None
+        state.previous_weight_scale = None
+
+        task_names = self._feature_task_names or (fallback_task_names or set())
+        with self.lock:
+            for name in task_names:
+                task_entry = self.tasks.pop(name, None)
+                if task_entry and "inputs" in task_entry:
+                    task_entry["inputs"].clear()
+
+        self._feature_task_names = set()
+        self._feature_stats = {}
+        self._scale_feature_by_module = {}
+        self._awq_feature_kwargs = {}
+
+        if hasattr(self._scale_context, "layer_index"):
+            delattr(self._scale_context, "layer_index")
+        if hasattr(self._scale_context, "prev_scale"):
+            delattr(self._scale_context, "prev_scale")
 
     def _quantize_layer_fallback(
         self,
@@ -728,24 +1157,7 @@ class AWQProcessor(LoopProcessor):
         else:
             log.warning("AWQProcessor: layer %s had no supported modules to quantize.", layer_index)
 
-        state.quantized = True
-        state.modules.clear()
-        state.pending_modules.clear()
-        state.layer_module = None
-        state.processed_subsets.clear()
-        state.subset_total = None
-        state.previous_weight_scale = None
-
-        with self.lock:
-            for name in list(named_childs.keys()):
-                task_entry = self.tasks.pop(name, None)
-                if task_entry and "inputs" in task_entry:
-                    task_entry["inputs"].clear()
-
-        if hasattr(self._scale_context, "layer_index"):
-            delattr(self._scale_context, "layer_index")
-        if hasattr(self._scale_context, "prev_scale"):
-            delattr(self._scale_context, "prev_scale")
+        self._finalize_quantized_layer(state, fallback_task_names=set(named_childs))
 
     def _refresh_forward_kwargs_from_cache(self) -> None:
         """Refreshes cached kwargs such as masks and rotary embeddings for AWQ search."""
@@ -827,8 +1239,21 @@ class AWQProcessor(LoopProcessor):
             if feat is None or feat.numel() == 0:
                 return True
 
-            hidden = feat.shape[-1] if feat.dim() >= 1 else 1
-            captured_tokens += feat.numel() // max(hidden, 1)
+            feature_stat = self._feature_stats.get(name, {})
+            if feature_stat.get("mode") == "token_rows" and "raw_tokens" in feature_stat:
+                # Fallback asks "did enough of the calibration corpus route to
+                # this module", so compare the raw routed token count against
+                # the expected corpus total. Token-row retention is a deliberate
+                # sampling bound and must not trigger low-coverage fallback.
+                captured_tokens += int(feature_stat["raw_tokens"])
+            elif "retained_tokens" in feature_stat:
+                # Other modes must measure the rows that scale search actually
+                # receives. In particular, latest-batch aggregation discards
+                # earlier variable-length captures.
+                captured_tokens += int(feature_stat["retained_tokens"])
+            else:
+                hidden = feat.shape[-1] if feat.dim() >= 1 else 1
+                captured_tokens += feat.numel() // max(hidden, 1)
 
         expected_tokens = getattr(self, "total_calibration_tokens", None) or self._nsamples_total
         return should_use_fallback(
@@ -865,6 +1290,7 @@ class AWQProcessor(LoopProcessor):
         )
 
         input_feat = self._layer_input_features(state)
+        self._scale_feature_by_module = {}
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
         if missing and not self.fallback:
             raise RuntimeError(
@@ -903,17 +1329,7 @@ class AWQProcessor(LoopProcessor):
                 "AWQProcessor: no module configuration generated for layer index %s; skipping quantization.",
                 layer_index,
             )
-            state.quantized = True
-            state.modules.clear()
-            state.pending_modules.clear()
-            state.layer_module = None
-            state.processed_subsets.clear()
-            state.subset_total = None
-            state.previous_weight_scale = None
-            if hasattr(self._scale_context, "layer_index"):
-                delattr(self._scale_context, "layer_index")
-            if hasattr(self._scale_context, "prev_scale"):
-                delattr(self._scale_context, "prev_scale")
+            self._finalize_quantized_layer(state, fallback_task_names=set(named_childs))
             return
 
         sanitized_module_config: List[Dict] = []
@@ -981,19 +1397,26 @@ class AWQProcessor(LoopProcessor):
             )
 
         sanitized_module_config = filtered_module_config
+        feature_name_by_id = {id(tensor): name for name, tensor in input_feat.items()}
+        for cfg in sanitized_module_config:
+            feature_name = cfg.pop("_input_feature_name", None)
+            if feature_name not in input_feat:
+                feature_name = feature_name_by_id.get(id(cfg.get("inp")))
+            if feature_name is None:
+                continue
+            for layer in cfg.get("layers") or []:
+                layer_name = (
+                    get_op_name(layer_module_ref, layer)
+                    if isinstance(layer, torch.nn.Module)
+                    else str(layer)
+                )
+                self._scale_feature_by_module[layer_name] = feature_name
         if not sanitized_module_config and not fallback_names:
             log.warning(
                 "AWQProcessor: no valid scaling groups for layer %s after filtering; marking layer as quantized.",
                 layer_index,
             )
-            state.quantized = True
-            state.processed_subsets.clear()
-            state.subset_total = None
-            state.previous_weight_scale = None
-            if hasattr(self._scale_context, "layer_index"):
-                delattr(self._scale_context, "layer_index")
-            if hasattr(self._scale_context, "prev_scale"):
-                delattr(self._scale_context, "prev_scale")
+            self._finalize_quantized_layer(state, fallback_task_names=set(named_childs))
             return
 
         sample_groups = []
@@ -1095,24 +1518,7 @@ class AWQProcessor(LoopProcessor):
             )
             self.apply_quant(fallback_named_childs, scales_list=[])
 
-        state.quantized = True
-        state.modules.clear()
-        state.pending_modules.clear()
-        state.layer_module = None
-        state.processed_subsets.clear()
-        state.subset_total = None
-        state.previous_weight_scale = None
-
-        with self.lock:
-            for name in named_childs:
-                task_entry = self.tasks.pop(name, None)
-                if task_entry and "inputs" in task_entry:
-                    task_entry["inputs"].clear()
-
-        if hasattr(self._scale_context, "layer_index"):
-            delattr(self._scale_context, "layer_index")
-        if hasattr(self._scale_context, "prev_scale"):
-            delattr(self._scale_context, "prev_scale")
+        self._finalize_quantized_layer(state, fallback_task_names=set(named_childs))
 
     @torch.inference_mode()
     def _search_best_scale(
@@ -1790,6 +2196,19 @@ class AWQProcessor(LoopProcessor):
                 loss_summary = f"{avg_loss_value:.10f}"
 
             # TODO "loss" and "nsamples" may not be consistent with the semantics of gptq quantization.
+            activation_stat = self._feature_stats.get(
+                named_module.name,
+                {},
+            )
+            scale_feature = self._scale_feature_by_module.get(
+                named_module.name,
+                named_module.name,
+            )
+            scale_stat = self._feature_stats.get(
+                scale_feature,
+                activation_stat,
+            )
+            retained_samples = self._feature_nsamples_for_log(scale_stat)
             stat = {
                 PROCESS_LOG_NAME: self.name(),
                 PROCESS_LOG_LAYER: named_module.layer_index,
@@ -1797,7 +2216,16 @@ class AWQProcessor(LoopProcessor):
                 MODULE_FEATURE_COLUMN: self.module_feature_summary(named_module),
                 DTYPE_SIZE_COLUMN: self.module_dtype_size_summary(named_module),
                 QUANT_LOG_LOSS: loss_summary,
-                QUANT_LOG_NSAMPLES: f"{self._nsamples_total}",
+                QUANT_LOG_NSAMPLES: f"{retained_samples}",
+                "activation_raw_tokens": int(activation_stat.get("raw_tokens", 0)),
+                "activation_retained_tokens": int(activation_stat.get("retained_tokens", 0)),
+                "activation_batches": int(activation_stat.get("batches", 0)),
+                "activation_aggregation": activation_stat.get("mode", "unknown"),
+                "scale_feature": scale_feature,
+                "scale_raw_tokens": int(scale_stat.get("raw_tokens", 0)),
+                "scale_retained_tokens": int(scale_stat.get("retained_tokens", 0)),
+                "scale_batches": int(scale_stat.get("batches", 0)),
+                "scale_aggregation": scale_stat.get("mode", "unknown"),
                 # QUANT_LOG_DAMP: f"{damp_percent:.5f}",
                 PROCESS_LOG_TIME: f"{duration:.3f}",
                 # PROCESS_LOG_FWD_TIME: f"{self.fwd_time:.3f}",
@@ -1854,6 +2282,13 @@ class AWQProcessor(LoopProcessor):
                 layer_state.pending_modules.update(all_linears.keys())
             layer_state.pending_modules.add(module.name)
         with self.lock:
+            # Seed a policy-requested MoE root before lifecycle forwarding.
+            # This removes dependence on hook/preprocess ordering for the
+            # shared pointwise input used by gate/up scale search.
+            root_name = module.name.split(".", 1)[0]
+            root_policy = self._feature_aggregation_policy(root_name)
+            if root_policy and root_policy.get("capture_root", False):
+                self.tasks.setdefault(root_name, {"inputs": [], "batch_indices": []})
             entry = self.tasks.get(module.name)
             if entry is None:
                 self.tasks[module.name] = {"inputs": []}

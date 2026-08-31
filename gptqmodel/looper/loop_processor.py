@@ -868,6 +868,22 @@ class LoopProcessor:
 
         pass
 
+    def register_moe_root_capture_hook(
+        self,
+        moe_block: Module,
+        moe_block_name: str,
+        handles: List[Any],
+    ) -> bool:
+        """Optionally register a processor-specific MoE-root capture hook.
+
+        The generic subset executor invokes this lifecycle extension without
+        knowing which processor owns the feature. Processors that do not need
+        a shared MoE-root capture leave the default no-op unchanged.
+        """
+
+        del moe_block, moe_block_name, handles
+        return False
+
     # do work and return processor.self state which will updated/merged
     def process(
             self,

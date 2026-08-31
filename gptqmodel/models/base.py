@@ -2546,6 +2546,26 @@ class BaseQModel(nn.Module):
     def awq_skip_modules_for_scaling(self) -> bool:
         pass
 
+    @classmethod
+    def awq_input_feature_aggregation(cls, module_name: str) -> Optional[Dict[str, Any]]:
+        """Declare bounded token-row aggregation for pointwise MoE modules."""
+
+        if not isinstance(module_name, str):
+            return None
+
+        for moe_root in cls.get_moe_module_name() or []:
+            if module_name == moe_root:
+                return {
+                    "mode": "token_rows",
+                    "capture_root": True,
+                }
+            if module_name.startswith(f"{moe_root}."):
+                return {
+                    "mode": "token_rows",
+                }
+
+        return None
+
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
         nodes = []
         last_module = None  # most recent norm obj (from a '!...' block)
@@ -2646,6 +2666,7 @@ class BaseQModel(nn.Module):
                     n, root = generate_node_for_awq_scaling(inp=input_feat[name], prev_op=prev_op,
                                                             module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                             subset=subset, module2inspect=None)
+                    n["_input_feature_name"] = feature_name
                     if root is not None and last_module_root != root:
                         last_module_root = root
 
@@ -2711,6 +2732,7 @@ class BaseQModel(nn.Module):
                 n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
                                                         module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                         subset=subset, module2inspect=module2inspect)
+                n["_input_feature_name"] = feature_name
 
                 nodes.append(n)
 

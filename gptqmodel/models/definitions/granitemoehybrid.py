@@ -15,6 +15,7 @@ class GraniteMoeHybridQModel(BaseQModel):
     require_monkeypatch = True
 
     layer_modules_strict = False
+    dynamic_expert_index = "num_local_experts"
 
     module_tree = [
         "model",
@@ -24,8 +25,18 @@ class GraniteMoeHybridQModel(BaseQModel):
             "input_layernorm": ("input_layernorm:!",),
             "mamba": ("in_proj:0", "out_proj:1"),
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
-            "shared_mlp": ("input_linear:0", "output_linear:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "block_sparse_moe:moe:?": {
+                # Defuser expands each packed parallel projection into
+                # `<projection>.<expert>.linear` pointwise modules.
+                "input_linear": {
+                    "#": ("linear:0",),
+                },
+                "output_linear": {
+                    "#": ("linear:1",),
+                },
+            },
+            "shared_mlp": ("input_linear:0", "output_linear:1"),
         }
     ]
 
