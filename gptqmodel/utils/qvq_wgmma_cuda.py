@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Hopper-only CuTe RS-WGMMA prototype for the QVQ local-ring kernel."""
+"""Hopper-only CuTe RS-WGMMA kernels for exact standard-P32 payloads."""
 
 from __future__ import annotations
 
@@ -71,8 +71,6 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_WGMMA_NAME,
     namespace=_QVQ_WGMMA_NAMESPACE,
     required_ops=(
-        "w3_m16",
-        "w3_m16_tma",
         "p32_window_w3_m16",
         "p32_window_w3_m16_tma",
         "p32_window_m16_tma",
@@ -80,7 +78,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_WGMMA_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qvq_wgmma"),
-    display_name="QVQ Hopper RS-WGMMA prototype",
+    display_name="QVQ exact-P32 Hopper RS-WGMMA kernels",
     extra_cflags=lambda: default_jit_cflags(enable_bf16=True),
     extra_cuda_cflags=_cuda_flags,
     extra_include_paths=_include_paths,
@@ -90,48 +88,6 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
     requires_cuda=True,
     merge_visible_cuda_arch_override=False,
 )
-
-
-def qvq_wgmma_w3_m16(
-    input: torch.Tensor,
-    trellis: torch.Tensor,
-    levels: torch.Tensor,
-    bank_ids: torch.Tensor,
-    *,
-    out_features: int,
-    bank_alt_id: int = 3,
-    split_count: int = 1,
-) -> torch.Tensor:
-    return _QVQ_WGMMA_EXTENSION.op("w3_m16")(
-        input,
-        trellis,
-        levels,
-        bank_ids,
-        out_features,
-        bank_alt_id,
-        split_count,
-    )
-
-
-def qvq_wgmma_w3_m16_tma(
-    input: torch.Tensor,
-    trellis: torch.Tensor,
-    levels: torch.Tensor,
-    bank_ids: torch.Tensor,
-    *,
-    out_features: int,
-    bank_alt_id: int = 3,
-    split_count: int = 1,
-) -> torch.Tensor:
-    return _QVQ_WGMMA_EXTENSION.op("w3_m16_tma")(
-        input,
-        trellis,
-        levels,
-        bank_ids,
-        out_features,
-        bank_alt_id,
-        split_count,
-    )
 
 
 def qvq_p32_window_wgmma_w3_m16(
@@ -264,6 +220,4 @@ __all__ = [
     "qvq_p32_window_wgmma_w3_m16",
     "qvq_p32_window_wgmma_w3_m16_tma",
     "qvq_p32_window_wgmma_m16_tma",
-    "qvq_wgmma_w3_m16",
-    "qvq_wgmma_w3_m16_tma",
 ]

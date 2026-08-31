@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""One-kernel NCU harness for Qwen3.8 W3 LR32 or standard-P32 variants."""
+"""One-kernel NCU harness for exact standard-P32 Qwen3.8 kernels."""
 
 from __future__ import annotations
 
@@ -18,31 +18,24 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from gptqmodel.quantization.qvq import (
-    QVQ_V2B2_P32_LR_RING_STEPS,
-    QVQ_V2B2_P32_LR_RINGS_PER_TILE,
-    local_ring_states_from_edges,
-    pack_local_ring_states,
     pack_qvq_binary_bank_ids,
     repack_p32_planar_to_window,
 )
 from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
 from gptqmodel.quantization.qvq_rates import qvq_transition_bits
-from gptqmodel.utils.qvq_cuda import prewarm_qvq_cuda, qvq_cuda_gemv
 from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_m16_tma,
     qvq_p32_window_wgmma_w3_m16,
-    qvq_wgmma_w3_m16,
-    qvq_wgmma_w3_m16_tma,
 )
-from scripts.benchmark_qvq_lr_vs_gptq_llama32_1b import QWEN38_27B_SHAPES
+from scripts.benchmark_qvq_p32_window_vs_machete import QWEN38_27B_SHAPES
 
 
 def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--kernel",
-        choices=("production", "wgmma", "tma_wgmma", "p32_wgmma", "p32_tma_wgmma"),
+        choices=("p32_wgmma", "p32_tma_wgmma"),
         required=True,
     )
     parser.add_argument(
@@ -59,8 +52,6 @@ def _args() -> argparse.Namespace:
         parser.error("--split must be positive")
     if args.warmup < 0 or args.iterations <= 0:
         parser.error("--warmup must be non-negative and --iterations must be positive")
-    if not args.kernel.startswith("p32_") and args.bits != 3.0:
-        parser.error("non-P32 profiler kernels support only W3")
     if args.kernel == "p32_wgmma" and args.bits != 3.0:
         parser.error("the synchronous P32 prototype supports only W3")
     return args
@@ -82,73 +73,24 @@ def main() -> None:
 
     case = next(case for case in QWEN38_27B_SHAPES if case.name == args.shape)
     generator = torch.Generator().manual_seed(20260830)
-    if args.kernel.startswith("p32_"):
-        transition_bits = qvq_transition_bits(args.bits, vector_size=2)
-        tiles = (case.in_features // 16) * (case.out_features // 16)
-        edges = torch.randint(
-            0,
-            1 << transition_bits,
-            (128, tiles),
-            generator=generator,
-            dtype=torch.int32,
-        )
-        planar = planar_pack_rows(edges, transition_bits).T.contiguous()
-        trellis = repack_p32_planar_to_window(planar, bits=args.bits).cuda()
-        selector_count = tiles * 8
-    else:
-        tiles = (case.in_features // 32) * (case.out_features // 8)
-        edges = torch.randint(
-            0,
-            1 << 6,
-            (tiles, QVQ_V2B2_P32_LR_RINGS_PER_TILE, QVQ_V2B2_P32_LR_RING_STEPS),
-            generator=generator,
-            dtype=torch.int64,
-        )
-        trellis = pack_local_ring_states(local_ring_states_from_edges(edges, bits=3.0), bits=3.0).cuda()
-        selector_count = tiles * QVQ_V2B2_P32_LR_RINGS_PER_TILE
+    transition_bits = qvq_transition_bits(args.bits, vector_size=2)
+    tiles = (case.in_features // 16) * (case.out_features // 16)
+    edges = torch.randint(
+        0,
+        1 << transition_bits,
+        (128, tiles),
+        generator=generator,
+        dtype=torch.int32,
+    )
+    planar = planar_pack_rows(edges, transition_bits).T.contiguous()
+    trellis = repack_p32_planar_to_window(planar, bits=args.bits).cuda()
+    selector_count = tiles * 8
     selectors = torch.randint(0, 2, (selector_count,), generator=generator, dtype=torch.uint8)
     bank_ids = pack_qvq_binary_bank_ids(selectors).cuda()
     levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
     x = (torch.randn((16, case.in_features), generator=generator, dtype=torch.float32) * 0.1).half().cuda()
 
-    if args.kernel == "production":
-        if not prewarm_qvq_cuda():
-            raise RuntimeError("QVQ CUDA extension failed to load")
-
-        def call():
-            return qvq_cuda_gemv(
-                x,
-                trellis,
-                3.0,
-                out_features=case.out_features,
-                output_fp32=True,
-                bank_ids=bank_ids,
-                v2b2_p32_lr=True,
-                bank_alt_id=3,
-            )
-    elif args.kernel == "wgmma":
-        def call():
-            return qvq_wgmma_w3_m16(
-                x,
-                trellis,
-                levels,
-                bank_ids,
-                out_features=case.out_features,
-                bank_alt_id=3,
-                split_count=args.split,
-            )
-    elif args.kernel == "tma_wgmma":
-        def call():
-            return qvq_wgmma_w3_m16_tma(
-                x,
-                trellis,
-                levels,
-                bank_ids,
-                out_features=case.out_features,
-                bank_alt_id=3,
-                split_count=args.split,
-            )
-    elif args.kernel == "p32_wgmma":
+    if args.kernel == "p32_wgmma":
         def call():
             return qvq_p32_window_wgmma_w3_m16(
                 x,

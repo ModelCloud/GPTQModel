@@ -31,6 +31,37 @@ from scripts import benchmark_qvq_lr_vs_gptq_llama32_1b as comparison
 
 RATES = (2.0, 2.5, 3.0, 3.5)
 M_VALUES = (1, 2, 4, 8, 16)
+QWEN38_27B_SHAPES = (
+    comparison.ShapeCase("qwen38_full_q_gate", ("self_attn.q_proj",), 5120, 12288, 1),
+    comparison.ShapeCase(
+        "qwen38_full_kv",
+        ("self_attn.k_proj", "self_attn.v_proj"),
+        5120,
+        1024,
+        2,
+    ),
+    comparison.ShapeCase(
+        "qwen38_attn_out",
+        ("self_attn.o_proj", "linear_attn.out_proj"),
+        6144,
+        5120,
+        2,
+    ),
+    comparison.ShapeCase("qwen38_linear_qkv", ("linear_attn.in_proj_qkv",), 5120, 10240, 1),
+    comparison.ShapeCase("qwen38_linear_z", ("linear_attn.in_proj_z",), 5120, 6144, 1),
+    comparison.ShapeCase(
+        "qwen38_mlp_gate_up",
+        ("mlp.gate_proj", "mlp.up_proj"),
+        5120,
+        17408,
+        2,
+    ),
+    comparison.ShapeCase("qwen38_mlp_down", ("mlp.down_proj",), 17408, 5120, 1),
+)
+
+
+def _shape_by_name(name: str):
+    return next(case for case in QWEN38_27B_SHAPES if case.name == name)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -41,8 +72,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--shapes",
         nargs="+",
-        choices=tuple(case.name for case in comparison.QWEN38_27B_SHAPES),
-        default=tuple(case.name for case in comparison.QWEN38_27B_SHAPES),
+        choices=tuple(case.name for case in QWEN38_27B_SHAPES),
+        default=tuple(case.name for case in QWEN38_27B_SHAPES),
     )
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iterations", type=int, default=40)
@@ -135,9 +166,7 @@ def _run(args: argparse.Namespace) -> dict:
         raise RuntimeError(machete_runtime_error())
 
     levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
-    selected_shapes = [
-        comparison._shape_by_name(name, "qwen38_27b") for name in args.shapes
-    ]
+    selected_shapes = [_shape_by_name(name) for name in args.shapes]
     rows: list[dict] = []
     benchmark_cases = [
         (m, case)

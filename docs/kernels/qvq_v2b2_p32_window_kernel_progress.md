@@ -1,9 +1,12 @@
 # QVQ V2B2-P32 continuous-window Hopper kernel progression
 
-This ledger tracks the accuracy-safe standard-P32 kernel after LR32 development
-was stopped.  The continuous-window representation is a lossless physical
-permutation of canonical planar P32: it has the same word count, adds zero bits,
-and reconstructs the identical K16 x N16 matrix.
+This ledger tracks the accuracy-safe standard-P32 kernel. LR32 was a failed
+experiment: it provided no speed advantage over this P32 path and introduced
+quality regressions relative to P32, so its experimental kernel, dispatch,
+quantization changes, tests, and benchmark records were removed from this PR.
+The continuous-window representation is a lossless physical permutation of
+canonical planar P32: it has the same word count, adds zero bits, and
+reconstructs the identical K16 x N16 matrix.
 
 Anchor-4 is a second lossless physical representation, accepted at `27573a3c`
 as an exact format contract but not as a production kernel. It groups four

@@ -431,9 +431,6 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
     assert args.qvq_telemetry is False
     assert args.output_alignment is False
     assert _parser().parse_args(
-        ("--model", "model", "--dataset", "dataset", "--output", "report.json", "--divergence-rows", "0")
-    ).divergence_rows == 0
-    assert _parser().parse_args(
         ("--model", "model", "--dataset", "dataset", "--output", "report.json", "--output-alignment")
     ).output_alignment is True
     assert _parser().parse_args(
@@ -455,14 +452,6 @@ def test_qvq_v2b2_p32_is_the_default_matched_model_comparison():
         "v2b2_p32": True,
         "bank_count": 2,
     }
-    assert ARM_CONFIG["v2b2-p32-lr"] == {
-        "vector_size": 2,
-        "trellis_window": 16,
-        "dual_v2": False,
-        "v2b2_p32_lr": True,
-        "bank_count": 2,
-    }
-    assert ARM_CONFIG["v2b2-p32-lr-yaqa"]["rounding"] == "yaqa"
     assert ARM_CONFIG["v2b2-p32-yaqa-spectral"]["yaqa_spectral_refinement"] is True
     assert ARM_CONFIG["v2b2-p32-yaqa-sampled-32"]["yaqa_sample_strategy"] == "32_16x16"
     assert ARM_CONFIG["v2b2-p32-yaqa-sampled-64"]["yaqa_sample_strategy"] == "64_16x16"
@@ -1546,24 +1535,6 @@ def test_qvq_target_rate_ladder_uses_canonical_v2_for_unsupported_banked_rates()
         assert "yaqa_v2b2_family_mode" not in geometry
         assert geometry["bank_count"] == 1
     assert banked_yaqa == original
-
-    lr32 = ARM_CONFIG["v2b2-p32-lr"]
-    geometry, codec, effective_bpw = _resolve_mlp_rate_geometry(
-        lr32,
-        rate=2,
-        codec_policy="same",
-    )
-    assert codec == "v2b2-p32-lr"
-    assert effective_bpw == 2.03125
-    assert geometry["v2b2_p32_lr"] is True
-    geometry, codec, effective_bpw = _resolve_mlp_rate_geometry(
-        lr32,
-        rate=4,
-        codec_policy="same",
-    )
-    assert codec == "v2"
-    assert effective_bpw == 4
-    assert "v2b2_p32_lr" not in geometry
 
     with pytest.raises(ValueError, match="unsupported target"):
         _parse_target_rate_ladders([["attention", "4"]])

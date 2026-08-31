@@ -42,58 +42,9 @@ def test_llama32_1b_unique_shape_matrix_preserves_all_seven_roles():
     assert sum(case.modules_per_layer for case in benchmark.LLAMA32_1B_SHAPES) == 7
 
 
-def test_qwen38_27b_projection_inventory_matches_upstream_text_decoder():
-    actual = {
-        projection.name: (projection.in_features, projection.out_features)
-        for projection in benchmark.QWEN38_27B_PROJECTIONS
-    }
-
-    assert actual == {
-        "self_attn.q_proj": (5120, 12288),
-        "self_attn.k_proj": (5120, 1024),
-        "self_attn.v_proj": (5120, 1024),
-        "self_attn.o_proj": (6144, 5120),
-        "linear_attn.in_proj_qkv": (5120, 10240),
-        "linear_attn.in_proj_z": (5120, 6144),
-        "linear_attn.out_proj": (6144, 5120),
-        "mlp.gate_proj": (5120, 17408),
-        "mlp.up_proj": (5120, 17408),
-        "mlp.down_proj": (17408, 5120),
-    }
-
-
-def test_qwen38_27b_unique_shape_matrix_preserves_all_quantized_roles():
-    roles = [role for case in benchmark.QWEN38_27B_SHAPES for role in case.roles]
-    geometries = {(case.in_features, case.out_features) for case in benchmark.QWEN38_27B_SHAPES}
-
-    assert len(roles) == len(set(roles)) == len(benchmark.QWEN38_27B_PROJECTIONS)
-    assert set(roles) == {projection.name for projection in benchmark.QWEN38_27B_PROJECTIONS}
-    assert geometries == {
-        (5120, 12288),
-        (5120, 1024),
-        (6144, 5120),
-        (5120, 10240),
-        (5120, 6144),
-        (5120, 17408),
-        (17408, 5120),
-    }
-    assert len(benchmark.QWEN38_27B_SHAPES) == 7
-
-
-def test_qwen38_full_matrix_has_210_candidate_rows():
-    rows = benchmark._expected_rows(
-        list(benchmark.QWEN38_27B_SHAPES),
-        list(benchmark.DEFAULT_M_VALUES),
-        list(benchmark.DEFAULT_QVQ_BITS),
-        "float16",
-    )
-
-    assert len(rows) == 210
-
-
 def test_default_matrix_has_requested_rates_and_lr_row_specializations():
     assert benchmark.DEFAULT_QVQ_BITS == (2.0, 2.5, 3.0, 3.5)
-    assert benchmark.DEFAULT_M_VALUES == (1, 2, 4, 8, 16)
+    assert benchmark.DEFAULT_M_VALUES == (1, 2, 4, 8, 16, 32)
 
 
 def test_common_gptq_contract_rejects_group32_because_machete_cannot_run_it():
@@ -144,43 +95,8 @@ def test_expected_matrix_contains_every_candidate_for_each_mkn():
         * len(benchmark.DEFAULT_M_VALUES)
         * (len(benchmark.DEFAULT_QVQ_BITS) + 2)
     )
-    assert len(rows) == expected == 120
+    assert len(rows) == expected == 144
     assert {row["kernel"] for row in rows} == {"qvq_lr", "gptq_marlin", "gptq_machete"}
-
-
-def test_pre_timing_gate_waits_for_consecutive_idle_samples(monkeypatch, capsys):
-    readings = iter([2, 0, 0, 0])
-    waits = []
-
-    monkeypatch.setattr(benchmark, "_compute_processes_for_uuid", lambda _uuid: [])
-    monkeypatch.setattr(
-        benchmark.benchmark_utils,
-        "_query_gpu",
-        lambda _gpu: {
-            "index": "1",
-            "pci.bus_id": "0000:44:00.0",
-            "uuid": "GPU-test",
-            "memory.used": "527",
-            "utilization.gpu": str(next(readings)),
-        },
-    )
-
-    class FakeEvent:
-        def wait(self, interval):
-            waits.append(interval)
-
-    monkeypatch.setattr(benchmark.threading, "Event", FakeEvent)
-
-    accepted = benchmark._pre_timing_exclusivity_gate(
-        physical_gpu=1,
-        gpu_uuid="GPU-test",
-        samples=3,
-        interval=0.25,
-    )
-
-    assert accepted["utilization.gpu"] == "0"
-    assert waits == [0.25, 0.25, 0.25]
-    assert "consecutive_idle_samples=3 attempts=4" in capsys.readouterr().out
 
 
 def test_markdown_report_contains_complete_comparison_columns():
@@ -213,7 +129,5 @@ def test_markdown_report_contains_complete_comparison_columns():
     }
 
     report = benchmark._markdown_report(payload)
-    assert "CUDA Graph replay" in report
-    assert "CPU scheduling and host launch gaps are outside each timed interval" in report
     assert "| Shape | Roles | M | K | N | Kernel | W | Group |" in report
     assert "| attn_qo | q_proj/o_proj | 1 | 2048 | 2048 | qvq_lr | 3 | P32 |" in report

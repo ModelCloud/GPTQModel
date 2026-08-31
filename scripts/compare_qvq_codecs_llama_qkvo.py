@@ -90,13 +90,6 @@ ARM_CONFIG = {
         "v2b2_p32": True,
         "bank_count": 2,
     },
-    "v2b2-p32-lr": {
-        "vector_size": 2,
-        "trellis_window": 16,
-        "dual_v2": False,
-        "v2b2_p32_lr": True,
-        "bank_count": 2,
-    },
     "v2b2-p32-hessian-diagonal": {
         "vector_size": 2,
         "trellis_window": 16,
@@ -133,14 +126,6 @@ ARM_CONFIG = {
         "bank_count": 2,
         "rounding": "yaqa",
         "yaqa_v2b2_family_mode": "reselect",
-    },
-    "v2b2-p32-lr-yaqa": {
-        "vector_size": 2,
-        "trellis_window": 16,
-        "dual_v2": False,
-        "v2b2_p32_lr": True,
-        "bank_count": 2,
-        "rounding": "yaqa",
     },
     "v2b2-p32-yaqa-sampled-32": {
         "vector_size": 2,
@@ -423,7 +408,7 @@ def _parser() -> argparse.ArgumentParser:
         "--divergence-rows",
         type=int,
         default=300,
-        help="Maximum evaluation sequences used by the Divergent-300-style metric; zero disables it (default: 300).",
+        help="Maximum evaluation sequences used by the Divergent-300-style metric (default: 300).",
     )
     parser.add_argument(
         "--divergence-tokens",
@@ -466,7 +451,6 @@ def _canonical_v2_geometry(geometry: Mapping[str, object]) -> dict[str, object]:
     fallback.update(vector_size=2, trellis_window=16, dual_v2=False, bank_count=1)
     for flag in (
         "v2b2_p32",
-        "v2b2_p32_lr",
         "v2b4_p64",
         "yaqa_v2b2_family_mode",
         "yaqa_sample_strategy",
@@ -486,15 +470,11 @@ def _resolve_mlp_rate_geometry(
 ) -> tuple[dict[str, object], str, float]:
     """Resolve one target rate to the preferred supported codec and its BPW."""
 
-    segmented_v2 = bool(
-        geometry.get("v2b2_p32") or geometry.get("v2b2_p32_lr") or geometry.get("v2b4_p64")
-    )
+    segmented_v2 = bool(geometry.get("v2b2_p32") or geometry.get("v2b4_p64"))
     if codec_policy == "v2" or (segmented_v2 and rate > 3.5):
         return _canonical_v2_geometry(geometry), "v2", float(rate)
     codec = (
-        "v2b2-p32-lr"
-        if geometry.get("v2b2_p32_lr")
-        else "v2b2-p32"
+        "v2b2-p32"
         if geometry.get("v2b2_p32")
         else "v2b4-p64"
         if geometry.get("v2b4_p64")
@@ -3397,8 +3377,8 @@ def main() -> None:
         )
     if args.layers < 1:
         raise ValueError("layer count must be positive")
-    if args.divergence_rows < 0 or args.divergence_tokens < 1:
-        raise ValueError("divergence rows must be non-negative and token horizon must be positive")
+    if args.divergence_rows < 1 or args.divergence_tokens < 1:
+        raise ValueError("divergence rows and token horizon must be positive")
     if args.prepare_yaqa_only and args.yaqa_factor_cache is None:
         raise ValueError("--prepare-yaqa-only requires --yaqa-factor-cache")
     if args.evaluation_row_offset < args.calibration_rows:
@@ -3726,7 +3706,7 @@ def main() -> None:
         for arm in args.arms:
             started = time.perf_counter()
             geometry = dict(ARM_CONFIG[arm])
-            if (geometry.get("v2b2_p32") or geometry.get("v2b2_p32_lr")) and rate > 3.5:
+            if geometry.get("v2b2_p32") and rate > 3.5:
                 report["results"][str(rate)][arm] = {
                     "status": "unsupported",
                     "reason": "V2B2-P32 supports W1 through W3.5",
@@ -3869,9 +3849,7 @@ def main() -> None:
                             candidate_codec = arm
                             candidate_effective_bpw = float(candidate_rate) + (
                                 2 / 64
-                                if candidate_geometry.get("v2b2_p32")
-                                or candidate_geometry.get("v2b2_p32_lr")
-                                or candidate_geometry.get("v2b4_p64")
+                                if candidate_geometry.get("v2b2_p32") or candidate_geometry.get("v2b4_p64")
                                 else 0
                             )
                         module_batch_size = args.trellis_batch_size or default_qvq_trellis_batch_size(
@@ -3889,9 +3867,7 @@ def main() -> None:
                             ),
                             seed=args.seed,
                             trellis_batch_size=module_batch_size,
-                            input_hessian_preparation=(
-                                None if candidate_geometry.get("v2b2_p32_lr") else input_preparation
-                            ),
+                            input_hessian_preparation=input_preparation,
                             telemetry=module_telemetry,
                             **candidate_geometry,
                         )
@@ -4017,13 +3993,7 @@ def main() -> None:
                 for name, module in modules.items():
                     module.weight.copy_(reconstructions[name].to(device=device, dtype=module.weight.dtype))
             mlp_acceptance_report = {"enabled": False}
-            selector_bpw = (
-                2 / 64
-                if geometry.get("v2b2_p32")
-                or geometry.get("v2b2_p32_lr")
-                or geometry.get("v2b4_p64")
-                else 0
-            )
+            selector_bpw = 2 / 64 if geometry.get("v2b2_p32") or geometry.get("v2b4_p64") else 0
             if mlp_acceptance_enabled:
                 evaluate_mlp_candidate = _build_mlp_acceptance_evaluator(
                     dense_model,
@@ -4184,9 +4154,7 @@ def main() -> None:
                 "selected_storage": storage_metrics,
                 "bank_selectors": _selector_metrics(selector_histogram),
                 "module_alternative_bank_histogram": (
-                    alternative_bank_histogram
-                    if geometry.get("v2b2_p32") or geometry.get("v2b2_p32_lr")
-                    else None
+                    alternative_bank_histogram if geometry.get("v2b2_p32") else None
                 ),
                 "mlp_acceptance": mlp_acceptance_report,
                 "qvq_telemetry": _aggregate_qvq_telemetry(weight_metrics) if args.qvq_telemetry else None,

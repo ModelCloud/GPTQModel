@@ -6,16 +6,13 @@
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.qvq import (
     QVQ_V2B2_P32_LR_RING_STEPS,
     QVQ_V2B2_P32_LR_RINGS_PER_TILE,
     local_ring_states_from_edges,
     pack_local_ring_states,
     pack_qvq_binary_bank_ids,
-    quantize_qvq_linear,
     reconstruct_local_ring_inner_weight,
-    reconstruct_qvq_inner_weight,
 )
 from gptqmodel.quantization.qvq_rates import qvq_transition_bits
 from gptqmodel.utils.qvq_cuda import qvq_cuda_gemv, qvq_cuda_supported
@@ -53,105 +50,6 @@ def _lr_case(bits: float, *, m: int, k: int, n: int, seed: int, dtype=torch.floa
     return x.cuda(), trellis.cuda(), packed_selectors.cuda(), x.float() @ inner.float()
 
 
-@pytest.mark.parametrize("rounding", ("block_ldlq", "yaqa"))
-def test_lr32_cuda_quantizer_payload_runs_production_kernel(rounding):
-    generator = torch.Generator().manual_seed(20260831)
-    weight = (torch.randn((8, 32), generator=generator) * 0.1).cuda()
-    kwargs = {}
-    if rounding == "yaqa":
-        kwargs["output_hessian"] = torch.eye(8, device="cuda")
-    result = quantize_qvq_linear(
-        weight,
-        torch.eye(32, device="cuda"),
-        bits=2,
-        bank_count=2,
-        v2b2_p32_lr=True,
-        rounding=rounding,
-        trellis_batch_size=8,
-        **kwargs,
-    )
-    layer = QVQLinear(
-        bits=2,
-        in_features=32,
-        out_features=8,
-        bank_count=2,
-        v2b2_p32_lr=True,
-        tensors=result.serialized_tensors(),
-    ).cuda().eval()
-    x = torch.randn((4, 32), generator=generator, dtype=torch.float16).cuda()
-    actual = layer(x)
-    expected = (x.float() @ result.weight.float().transpose(0, 1)).to(actual.dtype)
-
-    assert actual.dtype == torch.float16
-    torch.testing.assert_close(actual, expected, rtol=0, atol=2e-2)
-
-
-def test_lr32_cuda_same_payload_has_format_specific_output():
-    bits = 2.0
-    m, k, n = 1, 32, 16
-    generator = torch.Generator().manual_seed(20260830)
-    edges = torch.randint(
-        0,
-        1 << qvq_transition_bits(bits, vector_size=2),
-        (2, QVQ_V2B2_P32_LR_RINGS_PER_TILE, QVQ_V2B2_P32_LR_RING_STEPS),
-        generator=generator,
-        dtype=torch.int64,
-    )
-    trellis = pack_local_ring_states(local_ring_states_from_edges(edges, bits=bits), bits=bits)
-    packed_selectors = pack_qvq_binary_bank_ids(torch.zeros(16, dtype=torch.uint8))
-    bank_alt_id = torch.tensor([1], dtype=torch.uint8)
-    x = torch.randn((m, k), generator=generator, dtype=torch.float16)
-
-    global_inner = reconstruct_qvq_inner_weight(
-        trellis,
-        bits=bits,
-        in_features=k,
-        out_features=n,
-        bank_ids=packed_selectors,
-        v2b2_p32=True,
-        bank_alt_id=bank_alt_id,
-    )
-    local_inner = reconstruct_local_ring_inner_weight(
-        trellis,
-        bits=bits,
-        in_features=k,
-        out_features=n,
-        bank_ids=packed_selectors,
-        bank_alt_id=bank_alt_id,
-    )
-    global_reference = x.float() @ global_inner
-    local_reference = x.float() @ local_inner
-
-    x_cuda = x.cuda()
-    trellis_cuda = trellis.cuda()
-    selectors_cuda = packed_selectors.cuda()
-    global_actual = qvq_cuda_gemv(
-        x_cuda,
-        trellis_cuda,
-        bits,
-        out_features=n,
-        output_fp32=True,
-        bank_ids=selectors_cuda,
-        v2b2_p32=True,
-        bank_alt_id=1,
-    )
-    local_actual = qvq_cuda_gemv(
-        x_cuda,
-        trellis_cuda,
-        bits,
-        out_features=n,
-        output_fp32=True,
-        bank_ids=selectors_cuda,
-        v2b2_p32_lr=True,
-        bank_alt_id=1,
-    )
-
-    torch.testing.assert_close(global_actual.cpu(), global_reference, rtol=0, atol=2e-3)
-    torch.testing.assert_close(local_actual.cpu(), local_reference, rtol=0, atol=2e-3)
-    assert not torch.equal(global_inner, local_inner)
-    assert (global_actual - local_actual).abs().max().item() > 1e-3
-
-
 @pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
 @pytest.mark.parametrize("m,k,n", ((1, 64, 40), (4, 128, 32), (17, 2048, 256)))
 def test_lr32_cuda_matches_local_ring_dense_reference(bits, m, k, n):
@@ -169,66 +67,6 @@ def test_lr32_cuda_matches_local_ring_dense_reference(bits, m, k, n):
     error = (actual - reference.cuda()).abs()
     assert torch.isfinite(actual).all()
     assert error.max().item() <= 2e-3
-
-
-@pytest.mark.parametrize("bits", (2.0, 2.5))
-@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
-@pytest.mark.parametrize("output_fp32", (False, True))
-@pytest.mark.parametrize("split_count", (1, 3))
-def test_lr32_cuda_hopper_cooperative_small_m(bits, m, output_fp32, split_count):
-    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
-    if properties.major != 9:
-        pytest.skip("requires Hopper cooperative WMMA path")
-    x, trellis, bank_ids, reference = _lr_case(
-        bits, m=m, k=256, n=512, seed=20260830 + int(bits * 10) + m + split_count
-    )
-    actual = qvq_cuda_gemv(
-        x,
-        trellis,
-        bits,
-        out_features=512,
-        output_fp32=output_fp32,
-        bank_ids=bank_ids,
-        v2b2_p32_lr=True,
-        bank_alt_id=3,
-        lr_split_count=split_count,
-    )
-    expected = reference.cuda() if output_fp32 else reference.cuda().half().float()
-    error = (actual.float() - expected).abs()
-    assert actual.dtype == (torch.float32 if output_fp32 else torch.float16)
-    assert torch.isfinite(actual).all()
-    assert error.max().item() <= (2e-3 if output_fp32 else 2e-2)
-
-
-@pytest.mark.parametrize("bits", (3.0, 3.5))
-@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
-@pytest.mark.parametrize("output_fp32", (False, True))
-@pytest.mark.parametrize("split_count", (1, 3))
-def test_lr32_cuda_hopper_high_rate_native_n8_small_m(bits, m, output_fp32, split_count):
-    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
-    if properties.major != 9:
-        pytest.skip("requires Hopper native N8 MMA path")
-    x, trellis, bank_ids, reference = _lr_case(
-        bits, m=m, k=256, n=2048, seed=20260863 + int(bits * 10) + m + split_count
-    )
-    actual = qvq_cuda_gemv(
-        x,
-        trellis,
-        bits,
-        out_features=2048,
-        output_fp32=output_fp32,
-        bank_ids=bank_ids,
-        v2b2_p32_lr=True,
-        bank_alt_id=3,
-        lr_split_count=split_count,
-    )
-    expected = reference.cuda() if output_fp32 else reference.cuda().half().float()
-    error = (actual.float() - expected).abs()
-    assert actual.dtype == (torch.float32 if output_fp32 else torch.float16)
-    assert torch.isfinite(actual).all()
-    # Independent FP32 accumulation orders can round to adjacent FP16 values;
-    # 0.03125 is one representable half-precision step at these output scales.
-    assert error.max().item() <= (2e-3 if output_fp32 else 4e-2)
 
 
 def test_lr32_cuda_repeated_launches_are_deterministic():

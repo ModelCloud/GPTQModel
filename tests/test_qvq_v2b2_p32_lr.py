@@ -19,21 +19,16 @@ from gptqmodel.quantization.config import FORMAT, QVQConfig
 from gptqmodel.quantization.qvq import (
     QVQ_V2B2_P32_LR_RING_STEPS,
     QVQ_V2B2_P32_LR_RINGS_PER_TILE,
-    block_ldlq_inner_v2b2_p32_lr,
     decode_local_ring_states,
     decode_local_ring_tiles,
-    decode_trellis_tiles,
     local_ring_states_from_edges,
     pack_local_ring_states,
     pack_qvq_binary_bank_ids,
-    quantize_qvq_linear,
     reconstruct_local_ring_inner_weight,
     unpack_local_ring_edges,
     unpack_local_ring_states,
-    unpack_trellis_states,
 )
 from gptqmodel.quantization.qvq_codecs import (
-    pgc16_codebook_v2_bank,
     pgc16_decode_states_v2_banked,
     pgc16_levels_for_version,
 )
@@ -41,137 +36,6 @@ from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.model import hf_gptqmodel_prepare_model_for_load, make_quant
 
 LR_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
-
-
-@pytest.mark.parametrize("bits", LR_RATES)
-def test_lr32_block_ldlq_quantizer_pack_roundtrip(bits):
-    generator = torch.Generator().manual_seed(20260831 + int(bits * 10))
-    weight = torch.randn((8, 32), generator=generator) * 0.1
-    result = quantize_qvq_linear(
-        weight,
-        torch.eye(32),
-        bits=bits,
-        bank_count=2,
-        v2b2_p32_lr=True,
-        rounding="block_ldlq",
-        trellis_batch_size=8,
-    )
-    tensors = result.serialized_tensors()
-
-    assert result.trellis.shape == (1, int(bits * 8))
-    assert result.bank_ids is not None and result.bank_ids.shape == (8,)
-    assert tensors["bank_ids"].shape == (1,)
-    assert tensors["bank_alt_id"].shape == (1,)
-    assert 1 <= int(tensors["bank_alt_id"].item()) <= 3
-    decoded = reconstruct_local_ring_inner_weight(
-        result.trellis,
-        bits=bits,
-        in_features=32,
-        out_features=8,
-        bank_ids=tensors["bank_ids"],
-        bank_alt_id=tensors["bank_alt_id"],
-    )
-    assert torch.equal(decoded, result.inner_weight)
-    assert torch.isfinite(result.weight).all()
-    assert torch.isfinite(result.proxy_loss)
-
-
-def test_lr32_yaqa_quantizer_pack_roundtrip():
-    generator = torch.Generator().manual_seed(20260832)
-    weight = torch.randn((16, 64), generator=generator) * 0.1
-    result = quantize_qvq_linear(
-        weight,
-        torch.eye(64),
-        bits=2,
-        output_hessian=torch.eye(16),
-        bank_count=2,
-        v2b2_p32_lr=True,
-        rounding="yaqa",
-        trellis_batch_size=16,
-    )
-    tensors = result.serialized_tensors()
-    decoded = reconstruct_local_ring_inner_weight(
-        result.trellis,
-        bits=2,
-        in_features=64,
-        out_features=16,
-        bank_ids=tensors["bank_ids"],
-        bank_alt_id=tensors["bank_alt_id"],
-    )
-
-    assert torch.equal(decoded, result.inner_weight)
-    assert result.kronecker_proxy_loss is not None
-    assert torch.isfinite(result.kronecker_proxy_loss)
-
-
-def test_lr32_quantizer_requires_k32_n8_geometry():
-    with pytest.raises(ValueError, match="divisible by K32 and N8"):
-        quantize_qvq_linear(
-            torch.zeros((16, 16), dtype=torch.float32),
-            torch.eye(16, dtype=torch.float32),
-            bits=2,
-            bank_count=2,
-            v2b2_p32_lr=True,
-            rounding="block_ldlq",
-        )
-
-
-def test_lr32_quantizer_encodes_noncanonical_ring_bank():
-    bits = 2.0
-    edges = torch.arange(16, dtype=torch.int64).remainder(16).reshape(1, 1, 16).expand(1, 8, 16)
-    states = local_ring_states_from_edges(edges, bits=bits)
-    library = tuple(pgc16_codebook_v2_bank(bank, bits=bits) for bank in range(4))
-    source = library[2][states].reshape(1, 8, 32).permute(0, 2, 1).reshape(32, 8)
-
-    quantized, encoded_states, selectors, alt_id = block_ldlq_inner_v2b2_p32_lr(
-        source,
-        torch.eye(32),
-        library,
-        bits=bits,
-        trellis_batch_size=8,
-    )
-
-    assert 1 <= int(alt_id.item()) <= 3
-    assert torch.equal(selectors, torch.ones(8, dtype=torch.uint8))
-    assert torch.equal(quantized, source)
-    assert encoded_states.shape == states.shape
-
-
-def test_lr32_same_payload_changes_only_local_history_boundaries_before_matrix_mapping():
-    bits = 2.0
-    ring = torch.arange(8, dtype=torch.int64)[:, None]
-    step = torch.arange(16, dtype=torch.int64)[None, :]
-    edges = ((step + 3 * ring + (step // 5) * ring) % 16).unsqueeze(0)
-    local_states = local_ring_states_from_edges(edges, bits=bits)
-    trellis = pack_local_ring_states(local_states, bits=bits)
-    global_states = unpack_trellis_states(trellis, bits=bits).reshape(1, 8, 16)
-    packed_selectors = pack_qvq_binary_bank_ids(torch.zeros(8, dtype=torch.uint8))
-    bank_alt_id = torch.tensor([1], dtype=torch.uint8)
-
-    global_values = decode_trellis_tiles(
-        trellis,
-        bits=bits,
-        bank_ids=packed_selectors,
-        v2b2_p32=True,
-        bank_alt_id=bank_alt_id,
-    ).reshape(1, 8, 16, 2)
-    local_values = decode_trellis_tiles(
-        trellis,
-        bits=bits,
-        bank_ids=packed_selectors,
-        v2b2_p32_lr=True,
-        bank_alt_id=bank_alt_id,
-    )
-
-    # At W2, a 16-bit state remembers four 4-bit transitions. The first
-    # three states of every P32 group therefore depend on the preceding
-    # group in the global format but wrap to the same group in LR32.
-    assert torch.count_nonzero(global_states[:, :, :3] != local_states[:, :, :3]).item() == 24
-    assert torch.equal(global_states[:, :, 3:], local_states[:, :, 3:])
-    assert not torch.equal(global_values[:, :, :3], local_values[:, :, :3])
-    assert torch.equal(global_values[:, :, 3:], local_values[:, :, 3:])
-    with pytest.raises(ValueError, match="eight transition-consistent local rings"):
-        pack_local_ring_states(global_states, bits=bits)
 
 
 @pytest.mark.parametrize(
@@ -435,18 +299,6 @@ def test_lr32_config_and_format_metadata():
     assert config.quant_linear_init_kwargs()["v2b2_p32_lr"] is True
     assert config.quant_linear_init_kwargs()["v2b2_p32"] is False
     assert QVQLinear.supported_bits(FORMAT.QVQ_V2B2_P32_LR) == (1, 1.5, 2, 2.5, 3, 3.5)
-
-
-@pytest.mark.parametrize(
-    "yaqa,match",
-    (
-        ({"spectral_refinement": True}, "spectral experiment requires"),
-        ({"sample_strategy": "32_16x16"}, "sampled YAQA family selection requires"),
-    ),
-)
-def test_lr32_config_rejects_p32_specific_yaqa_experiments(yaqa, match):
-    with pytest.raises(ValueError, match=match):
-        QVQConfig(bits=2, format=FORMAT.QVQ_V2B2_P32_LR, bank_count=2, yaqa=yaqa)
 
 
 def test_lr32_make_quant_preserves_layout_format_for_n8_modules():
