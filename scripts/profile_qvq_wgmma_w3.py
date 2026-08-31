@@ -26,11 +26,12 @@ from gptqmodel.quantization.qvq import (
     repack_p32_planar_to_window,
 )
 from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
+from gptqmodel.quantization.qvq_rates import qvq_transition_bits
 from gptqmodel.utils.qvq_cuda import prewarm_qvq_cuda, qvq_cuda_gemv
 from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_wgmma_cuda import (
+    qvq_p32_window_wgmma_m16_tma,
     qvq_p32_window_wgmma_w3_m16,
-    qvq_p32_window_wgmma_w3_m16_tma,
     qvq_wgmma_w3_m16,
     qvq_wgmma_w3_m16_tma,
 )
@@ -50,6 +51,7 @@ def _args() -> argparse.Namespace:
         default="qwen38_mlp_down",
     )
     parser.add_argument("--split", type=int, default=4)
+    parser.add_argument("--bits", type=float, choices=(2.0, 2.5, 3.0, 3.5), default=3.0)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=1)
     args = parser.parse_args()
@@ -57,6 +59,10 @@ def _args() -> argparse.Namespace:
         parser.error("--split must be positive")
     if args.warmup < 0 or args.iterations <= 0:
         parser.error("--warmup must be non-negative and --iterations must be positive")
+    if not args.kernel.startswith("p32_") and args.bits != 3.0:
+        parser.error("non-P32 profiler kernels support only W3")
+    if args.kernel == "p32_wgmma" and args.bits != 3.0:
+        parser.error("the synchronous P32 prototype supports only W3")
     return args
 
 
@@ -77,10 +83,17 @@ def main() -> None:
     case = next(case for case in QWEN38_27B_SHAPES if case.name == args.shape)
     generator = torch.Generator().manual_seed(20260830)
     if args.kernel.startswith("p32_"):
+        transition_bits = qvq_transition_bits(args.bits, vector_size=2)
         tiles = (case.in_features // 16) * (case.out_features // 16)
-        edges = torch.randint(0, 1 << 6, (128, tiles), generator=generator, dtype=torch.int32)
-        planar = planar_pack_rows(edges, 6).T.contiguous()
-        trellis = repack_p32_planar_to_window(planar, bits=3.0).cuda()
+        edges = torch.randint(
+            0,
+            1 << transition_bits,
+            (128, tiles),
+            generator=generator,
+            dtype=torch.int32,
+        )
+        planar = planar_pack_rows(edges, transition_bits).T.contiguous()
+        trellis = repack_p32_planar_to_window(planar, bits=args.bits).cuda()
         selector_count = tiles * 8
     else:
         tiles = (case.in_features // 32) * (case.out_features // 8)
@@ -148,11 +161,12 @@ def main() -> None:
             )
     else:
         def call():
-            return qvq_p32_window_wgmma_w3_m16_tma(
+            return qvq_p32_window_wgmma_m16_tma(
                 x,
                 trellis,
                 levels,
                 bank_ids,
+                args.bits,
                 out_features=case.out_features,
                 bank_alt_id=3,
                 split_count=args.split,
@@ -162,7 +176,7 @@ def main() -> None:
         output = call()
     torch.cuda.synchronize()
     _profiler_call("cudaProfilerStart")
-    torch.cuda.nvtx.range_push(f"qvq_{args.kernel}_w3_{case.name}_split{args.split}")
+    torch.cuda.nvtx.range_push(f"qvq_{args.kernel}_w{args.bits:g}_{case.name}_split{args.split}")
     try:
         for _ in range(args.iterations):
             output = call()
@@ -171,7 +185,8 @@ def main() -> None:
         torch.cuda.nvtx.range_pop()
         _profiler_call("cudaProfilerStop")
     print(
-        f"profile complete: kernel={args.kernel} shape=M16/K{case.in_features}/N{case.out_features} "
+        f"profile complete: kernel={args.kernel} rate=W{args.bits:g} "
+        f"shape=M16/K{case.in_features}/N{case.out_features} "
         f"split={args.split} output={tuple(output.shape)} dtype={output.dtype} "
         f"device={properties.name} sms={properties.multi_processor_count}",
         flush=True,
