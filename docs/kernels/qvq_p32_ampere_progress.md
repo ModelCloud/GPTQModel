@@ -6,8 +6,8 @@ discarded experiments so later tuning does not repeat unsafe variants.
 
 ## Contract and target
 
-- Source base: freshly fetched GitHub `origin/main` at `492f1f58` (tip after
-  PR #76 merged).
+- Source base: freshly fetched GitHub `origin/main` at `1fa22740` (tip after
+  PR #78 merged).
 - Device: physical GPU 0, `NVIDIA PG506-230`, UUID
   `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`, CC 8.0, 124 SMs, 96 GiB.
 - Software: PyTorch 2.13.0+cu130; CUDA runtime 13.0; NVCC 13.3.
@@ -410,6 +410,15 @@ planar oracle kernel.
 
 This exceeds the requested cumulative 3% improvement while preserving the
 22/22 exactness result and the documented M2/M3 scalar rejection.
+
+## Post-merge origin/main baseline
+
+PR #78 is merged at `origin/main` commit `1fa22740`. Fresh isolated controls
+were captured from that exact tip as `qwen38_newmain_m{1,2,4,8,16}_1fa22740.json`
+using the standard 20-warmup/100-iteration CUDA-event protocol and idle gate.
+Their Ampere geomeans are 0.062931, 0.068251, 0.078186, 0.087721, and
+0.092700 ms for M1/M2/M4/M8/M16. New experiments in this cycle must beat these
+controls; planar timing remains oracle context only.
 
 ## Profiler diagnosis
 
