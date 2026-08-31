@@ -21,6 +21,9 @@ constexpr int kRows = 16;
 constexpr int kTileRows = 16;
 constexpr int kTileColumns = 16;
 constexpr int kTilesPerBlock = kWarps;
+constexpr int kM1Threads = kThreads;
+constexpr int kM1Warps = kM1Threads / 32;
+constexpr int kM1TilesPerBlock = 4 * kM1Warps;
 constexpr int kStageKTiles = 2;
 constexpr int kStageColumns = kStageKTiles * kTileRows;
 constexpr int kPairsPerTile = 128;
@@ -68,12 +71,12 @@ __device__ __forceinline__ void window_state_pair64(
   const int shift = bit_position & 31;
   const int first_next = first_word + 1 == kWordsPerTile ? 0 : first_word + 1;
   const int second_word = first_word - kPairWordDistance;
-  const uint64_t first_window = static_cast<uint64_t>(words[first_word]) |
-      (static_cast<uint64_t>(words[first_next]) << 32);
-  const uint64_t second_window = static_cast<uint64_t>(words[second_word]) |
-      (static_cast<uint64_t>(words[second_word + 1]) << 32);
-  first = static_cast<uint32_t>((first_window >> shift) & 0xffffu);
-  second = static_cast<uint32_t>((second_window >> shift) & 0xffffu);
+  // The state windows are at most 27 bits wide on W3.5.  A 32-bit funnel
+  // shift expresses the same circular extraction without promoting each
+  // pair to a 64-bit value (which costs multiple integer instructions on
+  // sm_80).
+  first = __funnelshift_r(words[first_word], words[first_next], shift) & 0xffffu;
+  second = __funnelshift_r(words[second_word], words[second_word + 1], shift) & 0xffffu;
 }
 
 struct MmaFragmentA {
@@ -139,7 +142,11 @@ __device__ __forceinline__ uint32_t decode_pair_bits(
     uint32_t bits;
     half2 values;
   } decoded;
-  decoded.values = __halves2half2(levels[mixed >> 8], levels[mixed & 0xffu]);
+  // The codebook is only 512 bytes and is read randomly by every lane.  On
+  // Ampere, keeping it in the read-only path avoids a per-CTA shared-memory
+  // copy and the bank conflicts that copy creates for the decode gathers.
+  decoded.values = __halves2half2(
+      __ldg(levels + (mixed >> 8)), __ldg(levels + (mixed & 0xffu)));
   return decoded.bits;
 }
 
@@ -149,6 +156,18 @@ __device__ __forceinline__ uint32_t pack_low_halves(uint32_t first, uint32_t sec
 
 __device__ __forceinline__ uint32_t pack_high_halves(uint32_t first, uint32_t second) {
   return (first >> 16) | (second & 0xffff0000u);
+}
+
+// Trellis words are consumed once by the owning CTA.  Bypass L1 for this
+// streaming payload so the read-only codebook path and staged activations do
+// not compete with it for the small Ampere L1/TEX pipe.
+__device__ __forceinline__ void copy_async_cg_16(void* destination, const void* source) {
+  const uint32_t shared_address =
+      static_cast<uint32_t>(__cvta_generic_to_shared(destination));
+  asm volatile(
+      "cp.async.cg.shared.global [%0], [%1], 16;\n"
+      :
+      : "r"(shared_address), "l"(source));
 }
 
 template <int TransitionBits, bool FullRows>
@@ -169,7 +188,6 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   __shared__ __align__(32) half input_tile[2][kRows * kStageColumns];
   __shared__ __align__(16) uint32_t packed_words[2][kStageKTiles][kTilesPerBlock][kWordsPerTile];
   __shared__ uint8_t packed_bank_ids[2][kStageKTiles][kTilesPerBlock];
-  __shared__ half cached_levels[kLevels];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
@@ -182,10 +200,6 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   const int k_tile_begin = (k_tiles * split) / split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(bank_alt_id);
-
-  for (int index = thread; index < kLevels; index += kThreads) {
-    cached_levels[index] = levels[index];
-  }
 
   auto stage = [&](int k_tile_base, int destination) {
     auto* input_vectors = reinterpret_cast<uint4*>(input_tile[destination]);
@@ -224,7 +238,7 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
         const auto* source_vectors = reinterpret_cast<const uint4*>(
             trellis + global_tile * kWordsPerTile);
-        __pipeline_memcpy_async(destination_vectors + index, source_vectors + vector, 16);
+        copy_async_cg_16(destination_vectors + index, source_vectors + vector);
       } else {
         destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
       }
@@ -274,13 +288,13 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         window_state_pair64<TransitionBits>(words, first_pair, state_row_0, state_row_8);
         window_state_pair64<TransitionBits>(words, second_pair, state_row_1, state_row_9);
         const uint32_t decoded_row_0 = decode_pair_bits<TransitionBits>(
-            first_pair, state_row_0, packed_bank_id, alt_mask, cached_levels);
+            first_pair, state_row_0, packed_bank_id, alt_mask, levels);
         const uint32_t decoded_row_8 = decode_pair_bits<TransitionBits>(
-            first_pair + 64, state_row_8, packed_bank_id, alt_mask, cached_levels);
+            first_pair + 64, state_row_8, packed_bank_id, alt_mask, levels);
         const uint32_t decoded_row_1 = decode_pair_bits<TransitionBits>(
-            second_pair, state_row_1, packed_bank_id, alt_mask, cached_levels);
+            second_pair, state_row_1, packed_bank_id, alt_mask, levels);
         const uint32_t decoded_row_9 = decode_pair_bits<TransitionBits>(
-            second_pair + 64, state_row_9, packed_bank_id, alt_mask, cached_levels);
+            second_pair + 64, state_row_9, packed_bank_id, alt_mask, levels);
 
         const uint32_t low_rows_01 = pack_low_halves(decoded_row_0, decoded_row_1);
         const uint32_t high_rows_01 = pack_high_halves(decoded_row_0, decoded_row_1);
@@ -362,6 +376,159 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
 #endif
 }
 
+// M=1 is a distinct workload on Ampere.  The WMMA path above must carry a
+// 16-row A fragment and execute a full m16n8k16 instruction even though only
+// its first row is live.  This Marlin-style route gives each warp four N16
+// tiles and computes only the 16 dot products that are written.  The state
+// windows are still decoded exactly as in the WMMA path; pairs 0..63 are
+// extracted together with their distance-64 partners so the circular payload
+// remains storage-neutral.
+template <int TransitionBits>
+__global__ __launch_bounds__(kM1Threads) void p32_window_ampere_m1_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int size_k,
+    int size_n,
+    int split_count,
+    int bank_alt_id) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
+  constexpr int kWordsPerTile = 4 * TransitionBits;
+  __shared__ __align__(32) half input_tile[2][kStageKTiles * kTileRows];
+  __shared__ __align__(16) uint32_t packed_words[
+      2][kStageKTiles][kM1TilesPerBlock][kWordsPerTile];
+  __shared__ uint8_t packed_bank_ids[2][kStageKTiles][kM1TilesPerBlock];
+
+  const int thread = static_cast<int>(threadIdx.x);
+  const int warp = thread >> 5;
+  const int lane = thread & 31;
+  const int n_tiles = size_n / kTileColumns;
+  const int block_n_tile_base = static_cast<int>(blockIdx.x) * kM1TilesPerBlock;
+  const int n_tile_base = block_n_tile_base + warp * 4;
+  const int split = static_cast<int>(blockIdx.z);
+  const int k_tiles = size_k / kTileRows;
+  const int k_tile_begin = (k_tiles * split) / split_count;
+  const int k_tile_end = (k_tiles * (split + 1)) / split_count;
+  const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(bank_alt_id);
+
+  auto stage = [&](int k_tile_base, int destination) {
+    auto* input_vectors = reinterpret_cast<uint4*>(input_tile[destination]);
+    for (int index = thread; index < kStageKTiles * kTileRows / 8; index += kM1Threads) {
+      const int source_column = k_tile_base * kTileRows + index * 8;
+      if (source_column < size_k) {
+        const half* source = input + source_column;
+        __pipeline_memcpy_async(
+            input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
+      } else {
+        input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
+      }
+    }
+
+    constexpr int kVectorsPerTile = kWordsPerTile / 4;
+    constexpr int kVectorsPerKTile = kM1TilesPerBlock * kVectorsPerTile;
+    constexpr int kVectorsPerBlock = kStageKTiles * kVectorsPerKTile;
+    auto* destination_vectors = reinterpret_cast<uint4*>(packed_words[destination]);
+    for (int index = thread; index < kVectorsPerBlock; index += kM1Threads) {
+      const int stage_k_tile = index / kVectorsPerKTile;
+      const int tile_index = index - stage_k_tile * kVectorsPerKTile;
+      const int tile = tile_index / kVectorsPerTile;
+      const int vector = tile_index - tile * kVectorsPerTile;
+      const int n_tile = block_n_tile_base + tile;
+      const int k_tile = k_tile_base + stage_k_tile;
+      if (n_tile < n_tiles && k_tile < k_tiles) {
+        const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
+        const auto* source_vectors = reinterpret_cast<const uint4*>(
+            trellis + global_tile * kWordsPerTile);
+        copy_async_cg_16(destination_vectors + index, source_vectors + vector);
+      } else {
+        destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
+      }
+    }
+    if (thread < kStageKTiles * kM1TilesPerBlock) {
+      const int stage_k_tile = thread / kM1TilesPerBlock;
+      const int tile = thread - stage_k_tile * kM1TilesPerBlock;
+      const int n_tile = block_n_tile_base + tile;
+      const int k_tile = k_tile_base + stage_k_tile;
+      packed_bank_ids[destination][stage_k_tile][tile] =
+          n_tile < n_tiles && k_tile < k_tiles
+              ? bank_ids[static_cast<int64_t>(k_tile) * n_tiles + n_tile]
+              : 0;
+    }
+    __pipeline_commit();
+  };
+
+  float accumulator_0[4] = {};
+  float accumulator_1[4] = {};
+
+  stage(k_tile_begin, 0);
+  int parity = 0;
+  for (int k_tile = k_tile_begin; k_tile < k_tile_end; k_tile += kStageKTiles) {
+    const bool has_next = k_tile + kStageKTiles < k_tile_end;
+    if (has_next) {
+      stage(k_tile + kStageKTiles, parity ^ 1);
+    }
+    __pipeline_wait_prior(has_next ? 1 : 0);
+    __syncthreads();
+
+    const int tile_in_warp = lane >> 3;
+    const int pair_column = lane & 7;
+    const int shared_tile = warp * 4 + tile_in_warp;
+    const int n_tile = n_tile_base + tile_in_warp;
+    if (n_tile < n_tiles) {
+#pragma unroll
+      for (int stage_k_tile = 0; stage_k_tile < kStageKTiles; ++stage_k_tile) {
+        if (k_tile + stage_k_tile >= k_tile_end) {
+          continue;
+        }
+        const uint32_t* words = packed_words[parity][stage_k_tile][shared_tile];
+        const uint8_t packed_bank_id =
+            packed_bank_ids[parity][stage_k_tile][shared_tile];
+#pragma unroll
+        for (int row = 0; row < 8; ++row) {
+          const int pair = row * 8 + pair_column;
+          uint32_t state_0;
+          uint32_t state_8;
+          window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
+          const uint32_t decoded_0 = decode_pair_bits<TransitionBits>(
+              pair, state_0, packed_bank_id, alt_mask, levels);
+          const uint32_t decoded_8 = decode_pair_bits<TransitionBits>(
+              pair + 64, state_8, packed_bank_id, alt_mask, levels);
+          union {
+            uint32_t bits;
+            half2 values;
+          } pair_0{decoded_0}, pair_8{decoded_8};
+          const float input_0 = __half2float(input_tile[parity][stage_k_tile * kTileRows + row]);
+          const float input_8 = __half2float(input_tile[parity][stage_k_tile * kTileRows + row + 8]);
+          const float weight_0 = __half2float(pair_0.values.x);
+          const float weight_1 = __half2float(pair_0.values.y);
+          const float weight_8 = __half2float(pair_8.values.x);
+          const float weight_9 = __half2float(pair_8.values.y);
+          accumulator_0[tile_in_warp] = fmaf(input_0, weight_0, accumulator_0[tile_in_warp]);
+          accumulator_1[tile_in_warp] = fmaf(input_0, weight_1, accumulator_1[tile_in_warp]);
+          accumulator_0[tile_in_warp] = fmaf(input_8, weight_8, accumulator_0[tile_in_warp]);
+          accumulator_1[tile_in_warp] = fmaf(input_8, weight_9, accumulator_1[tile_in_warp]);
+        }
+      }
+    }
+    __syncthreads();
+    parity ^= 1;
+  }
+
+  float* target = split_count == 1
+      ? output
+      : partial_output + static_cast<int64_t>(split) * size_n;
+  const int n_tile = n_tile_base + (lane >> 3);
+  if (n_tile < n_tiles && (lane & 7) < 8) {
+    const int output_column = n_tile * kTileColumns + (lane & 7) * 2;
+    target[output_column] = accumulator_0[lane >> 3];
+    target[output_column + 1] = accumulator_1[lane >> 3];
+  }
+#endif
+}
+
 __global__ void reduce_split_kernel(
     const float* __restrict__ partial_output,
     float* __restrict__ output,
@@ -411,7 +578,7 @@ at::Tensor p32_window_ampere_impl(
   TORCH_CHECK(
       out_features > 0 && out_features % kTileColumns == 0,
       "QVQ P32 Ampere N must be positive and divisible by 16");
-  TORCH_CHECK(split_count >= 1 && split_count <= 8, "QVQ P32 Ampere split count must be in [1, 8]");
+  TORCH_CHECK(split_count >= 1 && split_count <= 32, "QVQ P32 Ampere split count must be in [1, 32]");
   TORCH_CHECK(bank_alt_id >= 0 && bank_alt_id <= 3, "QVQ P32 Ampere bank ID must be in [0, 3]");
 
   const c10::cuda::CUDAGuard device_guard(input.device());
@@ -441,12 +608,29 @@ at::Tensor p32_window_ampere_impl(
   auto partial_output = split_count == 1
       ? output
       : at::empty({split_count, size_m, size_n}, input.options().dtype(at::kFloat));
+  // The scalar M=1 route pays one decode loop per K16 row.  It wins for the
+  // common 5-6K K projections, while very long-K projections are better left
+  // on the tensor-core path even at M=1.
+  const bool use_m1_scalar = size_m == 1 && size_k <= 6144;
+  const int tiles_per_block = use_m1_scalar ? kM1TilesPerBlock : kTilesPerBlock;
   const dim3 grid(
-      static_cast<unsigned>((n_tiles + kTilesPerBlock - 1) / kTilesPerBlock),
+      static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
       1,
       static_cast<unsigned>(split_count));
   const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(input.get_device());
-  if (size_m == kRows) {
+  if (use_m1_scalar) {
+    p32_window_ampere_m1_kernel<TransitionBits><<<grid, kM1Threads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == kRows) {
     p32_window_ampere_kernel<TransitionBits, true><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),

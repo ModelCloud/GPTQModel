@@ -122,6 +122,12 @@ def qvq_p32_window_ampere(
             k_tiles=int(input.shape[1]) // 16,
             sm_count=properties.multi_processor_count,
         )
+        # The scalar M=1 kernel groups sixteen N16 tiles per CTA.  Wide
+        # projections therefore need a fuller split wave than the WMMA
+        # shape table (which was tuned for four-warp/N64 CTAs) to keep all
+        # 124 Ampere SMs resident during the short decode.
+        if input.shape[0] == 1 and input.shape[1] <= 6144:
+            split_count = min(32, int(input.shape[1]) // 16)
     return _QVQ_AMPERE_EXTENSION.op("p32_window")(
         input,
         trellis,
