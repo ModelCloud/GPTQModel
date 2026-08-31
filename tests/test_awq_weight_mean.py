@@ -304,6 +304,26 @@ def test_awq_quant_log_nsamples_changes_only_for_token_row_aggregation():
     ) == 128
 
 
+def test_awq_fallback_uses_raw_token_row_coverage_but_retained_latest_batch_rows():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    module_name = "mlp.gate_proj"
+    input_feat = {module_name: torch.ones(1, 36, 4)}
+    processor._nsamples_total = 459
+    processor.fallback = {"threshold": 100}
+
+    processor._awq_feature_stats = {
+        module_name: {
+            "mode": "latest_batch",
+            "raw_tokens": 459,
+            "retained_tokens": 36,
+        }
+    }
+    assert processor._should_fallback_group([module_name], input_feat) is True
+
+    processor._awq_feature_stats[module_name]["mode"] = "token_rows"
+    assert processor._should_fallback_group([module_name], input_feat) is False
+
+
 def test_awq_moe_root_capture_deduplicates_subsets_and_is_collapsed():
     processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
     processor.gptq_model.awq_input_feature_aggregation = lambda name: (

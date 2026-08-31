@@ -1119,13 +1119,17 @@ class AWQProcessor(LoopProcessor):
                 return True
 
             feature_stat = getattr(self, "_awq_feature_stats", {}).get(name, {})
-            if "raw_tokens" in feature_stat:
+            if feature_stat.get("mode") == "token_rows" and "raw_tokens" in feature_stat:
                 # Fallback asks "did enough of the calibration corpus route to
                 # this module", so compare the raw routed token count against
-                # the expected corpus total. `retained_tokens` is the policy's
-                # deliberate, uniform sampling bound (e.g. 512 rows) and would
-                # trip absolute or percent thresholds for every policy module.
+                # the expected corpus total. Token-row retention is a deliberate
+                # sampling bound and must not trigger low-coverage fallback.
                 captured_tokens += int(feature_stat["raw_tokens"])
+            elif "retained_tokens" in feature_stat:
+                # Other modes must measure the rows that scale search actually
+                # receives. In particular, latest-batch aggregation discards
+                # earlier variable-length captures.
+                captured_tokens += int(feature_stat["retained_tokens"])
             else:
                 hidden = feat.shape[-1] if feat.dim() >= 1 else 1
                 captured_tokens += feat.numel() // max(hidden, 1)
