@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 
-#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_pipeline.h>
@@ -1828,7 +1828,7 @@ at::Tensor qvq_gemv_cuda_local_ring_impl(
 
   at::Tensor output = at::empty(
       {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(input.get_device());
   const int automatic_split_count = qvq_local_ring_split_count(
       static_cast<int>(size_m),
       static_cast<int>(size_k),
@@ -1956,7 +1956,7 @@ at::Tensor qvq_gemv_cuda_impl(
 
   at::Tensor output = at::empty(
       {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(input.get_device());
   const int64_t n_tiles = out_features / kTileColumns;
   const int64_t m_stripes = (size_m + kRowsPerBlock - 1) / kRowsPerBlock;
   const int64_t base_blocks = n_tiles * m_stripes;
@@ -2107,7 +2107,7 @@ at::Tensor qvq_gemv_cuda_v4(
 
   at::Tensor output = at::empty(
       {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(input.get_device());
   const int64_t base_blocks = (out_features / kTileColumns) * ((size_m + kRowsPerBlock - 1) / kRowsPerBlock);
   const int64_t target_blocks = static_cast<int64_t>(device_config.sm_count) * 6;
   const int64_t k_tiles = size_k / kTileRows;
