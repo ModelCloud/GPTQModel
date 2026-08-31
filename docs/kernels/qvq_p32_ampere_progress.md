@@ -96,17 +96,19 @@ Hopper-only hardware:
 17. For M8 linear-QKV (`N=10240`) and linear-Z (`N=6144`), use compile-time
     N-tile counts with the eight-live-row path after matched screens confirmed
     repeatable gains.
+18. For M8 full-KV (`N=1024`), use the compile-time N-tile count as well. This
+    completes fixed-N dispatch coverage for every formal M8 projection shape.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
 as well as carrying forward architecture-independent lessons from the Hopper
 kernel.
 
-There are forty-eight WMMA device specializations: four transition widths
+There are fifty-two WMMA device specializations: four transition widths
 times full-M16, generic partial-row, compile-time M8 partial-row, and
 compile-time M16 `N=12288`, `N=5120`, `N=10240`, `N=6144`, and `N=1024`
 paths, plus the compile-time M8 `N=12288`, `N=5120`, `N=10240`, and `N=6144`
-paths. The
+paths, plus the compile-time M8 `N=1024` path. The
 scalar M1-M4 rows add four exact transition-width specializations, while one
 runtime split reducer is shared by all rates.
 Unknown shapes use a live-SM-derived fallback; the seven measured Qwen3.8-27B
@@ -171,6 +173,7 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/screen_m8_static_n_fullq.json`
 - `artifacts/a100_p32_window/screen_m8_static_n_5120.json`
 - `artifacts/a100_p32_window/screen_m8_static_n_10240_6144.json`
+- `artifacts/a100_p32_window/screen_m8_static_n_1024.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -365,6 +368,11 @@ The M8 `N=10240`/`N=6144` screen lowers linear-QKV and linear-Z geomeans from
 0.098304/0.065280 ms to 0.094464/0.062720 ms (`1.041x`/`1.041x`) versus
 fetched main, with maximum error `<= 2.9e-5`; exactness remains 22/22.
 
+The final M8 full-KV (`N=1024`) screen lowers its geomean from 0.045312 ms to
+0.042496 ms (`1.066x`) versus fetched main, with maximum error `<= 1.8e-5`.
+This completes the fixed-N M8 shape set with the exactness suite still at
+22/22.
+
 ## Profiler diagnosis
 
 The pre-change M16/W2 full-Q+gate kernel was captured with:
@@ -434,7 +442,8 @@ more decode instructions without expanding the compact state representation.
 | Runtime-N WMMA staging on M16 fixed-N shapes | Correct, but the generic `n_tile < n_tiles` predicate remains on every staged vector even though the measured shapes are fixed at `N=12288`, `N=5120`, `N=10240`, `N=6144`, or `N=1024`. | Replaced by compile-time N specializations, which lower the focused M16 full-Q, attention-out, MLP-down, linear-QKV, linear-Z, and full-KV geomeans by 2.84%, 2.73%, 2.94%, 3.19%, 2.70%, and 4.81%; the remaining N values stay on the generic path pending matched screens. |
 | M8 full-Q compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=12288` tile bound for every staged vector. | Accepted the combined M8 row/N specialization after a 4.63% matched full-Q gain; other M8 N values remain generic pending screens. |
 | M8 attention-out/MLP-down compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=5120` tile bound for every staged vector. | Accepted the combined M8 row/N specialization after 3.87% and 4.18% matched gains; other M8 N values remain generic pending screens. |
-| M8 linear-QKV/linear-Z compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=10240`/`N=6144` tile bounds for every staged vector. | Accepted after 4.07%/4.08% matched gains; only M8 full-KV (`N=1024`) remains generic pending a screen. |
+| M8 linear-QKV/linear-Z compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=10240`/`N=6144` tile bounds for every staged vector. | Accepted after 4.07%/4.08% matched gains; the M8 full-KV (`N=1024`) screen followed separately. |
+| M8 full-KV compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=1024` tile bound for every staged vector. | Accepted after a 6.62% matched gain; all seven formal M8 shapes now use fixed-N paths. |
 
 ## Reproduction
 
