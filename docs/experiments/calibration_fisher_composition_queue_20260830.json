@@ -2,8 +2,8 @@
   "schema": "qvq.calibration-fisher-composition-queue.v1",
   "status": "queued",
   "prepared_at_utc": "2026-08-30T23:57:00Z",
-  "launched_at_utc": "2026-08-31T00:05:22Z",
-  "launch_commit": "c68ee336",
+  "launched_at_utc": "2026-08-31T00:07:15Z",
+  "launch_commit": "b3804693",
   "supervisor": "tmux:qvq-fisher-composition-v1",
   "wait_state": "each arm waits independently for three exclusive-idle samples on its assigned GPU; GPUs 2/3 may launch while the two pinned NM-full endpoints finish on GPUs 0/1",
   "branch": "feat/qvq-frontier-score-updates",
@@ -32,7 +32,7 @@
       "effective_weighted_tokens": 1051958,
       "YAQA_weight": 1.0,
       "NM_weight": 1.0,
-      "state": "queued"
+      "state": "waiting_for_gpu0"
     },
     {
       "arm_id": "f10_yaqa182_nm2048_yaqa2x",
@@ -42,7 +42,7 @@
       "effective_weighted_tokens": 1354151,
       "YAQA_weight": 2.0,
       "NM_weight": 1.0,
-      "state": "queued"
+      "state": "waiting_for_gpu1"
     },
     {
       "arm_id": "f11_yaqa182_nm4096_yaqa1x",
@@ -52,7 +52,7 @@
       "effective_weighted_tokens": 1794387,
       "YAQA_weight": 1.0,
       "NM_weight": 1.0,
-      "state": "queued"
+      "state": "quantizing"
     },
     {
       "arm_id": "f12_yaqa182_nm4096_yaqa2x",
@@ -62,7 +62,7 @@
       "effective_weighted_tokens": 2096580,
       "YAQA_weight": 2.0,
       "NM_weight": 1.0,
-      "state": "queued"
+      "state": "quantizing"
     }
   ],
   "registry": "docs/experiments/calibration_fisher_composition_registry_20260830.json",
