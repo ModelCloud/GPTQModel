@@ -192,9 +192,9 @@ def test_awq_layer_input_features_aligns_variable_length_fallback_with_cached_kw
     assert features["self_attn.q_proj"].shape == (1, 36, QWEN3_HIDDEN_SIZE)
     assert processor._awq_feature_kwargs["self_attn.q_proj"]["attention_mask"].shape == (1, 1, 36, 36)
     assert processor._awq_feature_kwargs["self_attn.q_proj"]["position_ids"].shape == (1, 36)
-    assert processor._awq_feature_stats["self_attn.q_proj"]["mode"] == "latest_batch"
-    assert processor._awq_feature_stats["self_attn.q_proj"]["raw_tokens"] == 459
-    assert processor._awq_feature_stats["self_attn.q_proj"]["retained_tokens"] == 36
+    assert processor._feature_stats["self_attn.q_proj"]["mode"] == "latest_batch"
+    assert processor._feature_stats["self_attn.q_proj"]["raw_tokens"] == 459
+    assert processor._feature_stats["self_attn.q_proj"]["retained_tokens"] == 36
 
 
 def test_awq_layer_input_features_packs_variable_pointwise_token_rows():
@@ -223,7 +223,7 @@ def test_awq_layer_input_features_packs_variable_pointwise_token_rows():
         torch.tensor([10.0, 20.0, 30.0]),
     )
     assert processor._awq_feature_kwargs["mlp.experts.0.gate_proj"] == {}
-    assert processor._awq_feature_stats["mlp.experts.0.gate_proj"] == {
+    assert processor._feature_stats["mlp.experts.0.gate_proj"] == {
         "mode": "token_rows",
         "raw_tokens": 9,
         "retained_tokens": 8,
@@ -342,7 +342,7 @@ def test_awq_fallback_uses_raw_token_row_coverage_but_retained_latest_batch_rows
     processor._nsamples_total = 459
     processor.fallback = {"threshold": 100}
 
-    processor._awq_feature_stats = {
+    processor._feature_stats = {
         module_name: {
             "mode": "latest_batch",
             "raw_tokens": 459,
@@ -351,7 +351,7 @@ def test_awq_fallback_uses_raw_token_row_coverage_but_retained_latest_batch_rows
     }
     assert processor._should_fallback_group([module_name], input_feat) is True
 
-    processor._awq_feature_stats[module_name]["mode"] = "token_rows"
+    processor._feature_stats[module_name]["mode"] = "token_rows"
     assert processor._should_fallback_group([module_name], input_feat) is False
 
 
@@ -378,7 +378,7 @@ def test_awq_moe_root_capture_deduplicates_subsets_and_is_collapsed():
 
     assert features["mlp"].shape == (1, 5, 4)
     assert torch.equal(features["mlp"][0, :, 0], torch.tensor([10.0, 10.0, 20.0, 20.0, 20.0]))
-    assert processor._awq_feature_stats["mlp"]["batches"] == 2
+    assert processor._feature_stats["mlp"]["batches"] == 2
 
     processor.tasks.pop("mlp.experts.0.gate_proj")
     processor._set_current_batch_index(2)

@@ -211,9 +211,9 @@ class AWQProcessor(LoopProcessor):
         self.duo_scaling = True
 
         self._module_forward_kwargs: Dict[str, torch.Tensor] = {}
-        self._awq_feature_stats: Dict[str, Dict[str, Any]] = {}
-        self._awq_scale_feature_by_module: Dict[str, str] = {}
-        self._awq_feature_task_names: Set[str] = set()
+        self._feature_stats: Dict[str, Dict[str, Any]] = {}
+        self._scale_feature_by_module: Dict[str, str] = {}
+        self._feature_task_names: Set[str] = set()
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
         self._rotary_source_id: Optional[int] = None
@@ -880,7 +880,7 @@ class AWQProcessor(LoopProcessor):
                 if policy and policy.get("capture_root", False):
                     feature_names.append(root)
 
-        self._awq_feature_task_names = set(feature_names)
+        self._feature_task_names = set(feature_names)
         # Iterate over a snapshot since quantization may mutate state.modules concurrently
         for name in feature_names:
             entry = self.tasks.get(name) or {}
@@ -977,7 +977,7 @@ class AWQProcessor(LoopProcessor):
                 # )
 
         self._awq_feature_kwargs = feature_kwargs
-        self._awq_feature_stats = feature_stats
+        self._feature_stats = feature_stats
         return features
 
     def _feature_nsamples_for_log(self, feature_stat: Mapping[str, Any]) -> int:
@@ -1118,7 +1118,7 @@ class AWQProcessor(LoopProcessor):
             if feat is None or feat.numel() == 0:
                 return True
 
-            feature_stat = getattr(self, "_awq_feature_stats", {}).get(name, {})
+            feature_stat = self._feature_stats.get(name, {})
             if feature_stat.get("mode") == "token_rows" and "raw_tokens" in feature_stat:
                 # Fallback asks "did enough of the calibration corpus route to
                 # this module", so compare the raw routed token count against
@@ -1169,7 +1169,7 @@ class AWQProcessor(LoopProcessor):
         )
 
         input_feat = self._layer_input_features(state)
-        self._awq_scale_feature_by_module = {}
+        self._scale_feature_by_module = {}
         missing = [name for name, tensor in input_feat.items() if tensor.numel() == 0]
         if missing and not self.fallback:
             raise RuntimeError(
@@ -1297,7 +1297,7 @@ class AWQProcessor(LoopProcessor):
                     if isinstance(layer, torch.nn.Module)
                     else str(layer)
                 )
-                self._awq_scale_feature_by_module[layer_name] = feature_name
+                self._scale_feature_by_module[layer_name] = feature_name
         if not sanitized_module_config and not fallback_names:
             log.warning(
                 "AWQProcessor: no valid scaling groups for layer %s after filtering; marking layer as quantized.",
@@ -1421,13 +1421,13 @@ class AWQProcessor(LoopProcessor):
         state.previous_weight_scale = None
 
         with self.lock:
-            for name in self._awq_feature_task_names or set(named_childs):
+            for name in self._feature_task_names or set(named_childs):
                 task_entry = self.tasks.pop(name, None)
                 if task_entry and "inputs" in task_entry:
                     task_entry["inputs"].clear()
-        self._awq_feature_task_names = set()
-        self._awq_feature_stats = {}
-        self._awq_scale_feature_by_module = {}
+        self._feature_task_names = set()
+        self._feature_stats = {}
+        self._scale_feature_by_module = {}
 
         if hasattr(self._scale_context, "layer_index"):
             delattr(self._scale_context, "layer_index")
@@ -2110,15 +2110,15 @@ class AWQProcessor(LoopProcessor):
                 loss_summary = f"{avg_loss_value:.10f}"
 
             # TODO "loss" and "nsamples" may not be consistent with the semantics of gptq quantization.
-            activation_stat = getattr(self, "_awq_feature_stats", {}).get(
+            activation_stat = self._feature_stats.get(
                 named_module.name,
                 {},
             )
-            scale_feature = getattr(self, "_awq_scale_feature_by_module", {}).get(
+            scale_feature = self._scale_feature_by_module.get(
                 named_module.name,
                 named_module.name,
             )
-            scale_stat = getattr(self, "_awq_feature_stats", {}).get(
+            scale_stat = self._feature_stats.get(
                 scale_feature,
                 activation_stat,
             )
