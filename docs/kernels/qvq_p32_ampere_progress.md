@@ -512,6 +512,7 @@ more decode instructions without expanding the compact state representation.
 | 512-thread reducer for M8/M16 | M16 regressed from 0.089626 ms to 0.096331 ms (7.48%). At the same split 32, full-KV lost 3-12% and three MLP-down rates lost 73-79%. | Rejected and reverted; 256 threads remain the best broad reducer geometry. |
 | Compile-time split-32 reducer | Fully unrolling the common 32-way serial sum preserved exact accumulation order, but M16 full-KV regressed from 0.034293 ms to 0.034816 ms (1.53%); MLP-down was effectively neutral. | Rejected and reverted; runtime loop control is cheaper than the enlarged unrolled reducer on sm_80. |
 | Bank-selector hoist across every scalar and WMMA route | The 60-case full-Q/full-KV/MLP-down screen was neutral overall (-0.09%): M8 improved 2.53%, but M1, M2, M4, and M16 regressed by 1.32%, 0.81%, 0.23%, and 0.68%. | Rejected broadly and narrowed to repeatedly positive M8 fixed-N routes; scalar and full-row kernels retain main's decode path. |
+| Single allocation for partials and output | Placing the output in the final plane of one `(splits+1)` allocation remained exact, but constructing the returned tensor view raised full-KV latency from 0.035362 ms to 0.038750 ms (9.58%). | Rejected and reverted; retain two direct allocator requests for the split workspace and returned output. |
 
 ## Post-merge origin/main baseline (v11)
 
