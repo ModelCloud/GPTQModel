@@ -18,6 +18,8 @@ from gptqmodel.quantization.qvq import (
     unpack_trellis_states,
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
+from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
+from gptqmodel.utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_m16_tma
 
 P32_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
 
@@ -132,3 +134,50 @@ def test_p32_window_cuda_matches_cpu_words_and_states(bits):
     assert torch.equal(actual_window.cpu(), expected_window)
     assert torch.equal(actual_states.cpu(), expected_states)
     assert torch.equal(repack_p32_window_to_planar(actual_window, bits=bits), planar_cuda)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
+def test_p32_window_tma_wgmma_matches_exact_matrix(bits):
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (9, 0):
+        pytest.skip("P32 TMA RS-WGMMA requires SM90")
+
+    in_features = out_features = 256
+    tile_count = (in_features // 16) * (out_features // 16)
+    planar = _random_planar_words(bits, tiles=tile_count, device="cuda")
+    window = repack_p32_planar_to_window(planar, bits=bits)
+    generator = torch.Generator(device="cuda").manual_seed(20260901 + int(bits * 10))
+    selectors = torch.randint(
+        0,
+        2,
+        (tile_count * 8,),
+        generator=generator,
+        device="cuda",
+        dtype=torch.uint8,
+    )
+    bank_ids = pack_qvq_binary_bank_ids(selectors)
+    bank_alt_id = torch.tensor(3, dtype=torch.uint8, device="cuda")
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
+    x = (torch.randn((16, in_features), generator=generator, device="cuda") * 0.1).half()
+
+    dense = reconstruct_p32_window_inner_weight(
+        window,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=bank_ids,
+        bank_alt_id=bank_alt_id,
+    )
+    expected = x.float() @ dense
+    actual = qvq_p32_window_wgmma_m16_tma(
+        x,
+        window,
+        levels,
+        bank_ids,
+        bits,
+        out_features=out_features,
+        bank_alt_id=3,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=0.0)

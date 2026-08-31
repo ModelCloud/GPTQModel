@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 
+from ..quantization.qvq_rates import qvq_transition_bits
 from .cpp import (
     TorchOpsJitExtension,
     default_jit_cflags,
@@ -69,7 +70,13 @@ def _cuda_flags() -> list[str]:
 _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_WGMMA_NAME,
     namespace=_QVQ_WGMMA_NAMESPACE,
-    required_ops=("w3_m16", "w3_m16_tma", "p32_window_w3_m16", "p32_window_w3_m16_tma"),
+    required_ops=(
+        "w3_m16",
+        "w3_m16_tma",
+        "p32_window_w3_m16",
+        "p32_window_w3_m16_tma",
+        "p32_window_m16_tma",
+    ),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_WGMMA_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qvq_wgmma"),
@@ -185,9 +192,38 @@ def qvq_p32_window_wgmma_w3_m16_tma(
     )
 
 
+def qvq_p32_window_wgmma_m16_tma(
+    input: torch.Tensor,
+    trellis: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    bits: float,
+    *,
+    out_features: int,
+    bank_alt_id: int = 3,
+    split_count: int = 1,
+) -> torch.Tensor:
+    """Run the two-stage TMA direct-window P32 RS-WGMMA kernel at W2-W3.5."""
+
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    if transition_bits not in (4, 5, 6, 7):
+        raise ValueError("QVQ P32 TMA WGMMA supports W2 through W3.5")
+    return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma")(
+        input,
+        trellis,
+        levels,
+        bank_ids,
+        transition_bits,
+        out_features,
+        bank_alt_id,
+        split_count,
+    )
+
+
 __all__ = [
     "qvq_p32_window_wgmma_w3_m16",
     "qvq_p32_window_wgmma_w3_m16_tma",
+    "qvq_p32_window_wgmma_m16_tma",
     "qvq_wgmma_w3_m16",
     "qvq_wgmma_w3_m16_tma",
 ]

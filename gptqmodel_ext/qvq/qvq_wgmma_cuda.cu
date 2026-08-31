@@ -82,17 +82,18 @@ using TrellisTmaSmemLayout = decltype(cute::make_layout(
 using BankTmaSmemLayout = decltype(cute::make_layout(
     cute::make_shape(cute::_16{}, cute::_8{}, cute::Int<kTmaStages>{}),
     cute::make_stride(cute::_1{}, cute::_16{}, cute::_128{})));
-using P32TrellisTmaSmemLayout = decltype(cute::make_layout(
+template <int TransitionBits>
+using P32TrellisTmaSmemLayoutFor = decltype(cute::make_layout(
     cute::make_shape(
-        cute::Int<4 * kW3TransitionBits>{},
+        cute::Int<4 * TransitionBits>{},
         cute::Int<kP32N16TilesPerBlock>{},
         cute::Int<kP32K16TilesPerStage>{},
         cute::Int<kTmaStages>{}),
     cute::make_stride(
         cute::_1{},
-        cute::Int<4 * kW3TransitionBits>{},
-        cute::Int<4 * kW3TransitionBits * kP32N16TilesPerBlock>{},
-        cute::Int<4 * kW3TransitionBits * kP32N16TilesPerBlock * kP32K16TilesPerStage>{})));
+        cute::Int<4 * TransitionBits>{},
+        cute::Int<4 * TransitionBits * kP32N16TilesPerBlock>{},
+        cute::Int<4 * TransitionBits * kP32N16TilesPerBlock * kP32K16TilesPerStage>{})));
 using P32BankTmaSmemLayout = decltype(cute::make_layout(
     cute::make_shape(cute::_16{}, cute::_16{}, cute::Int<kTmaStages>{}),
     cute::make_stride(cute::_1{}, cute::_16{}, cute::_256{})));
@@ -106,10 +107,13 @@ struct alignas(128) WgmmaTmaSharedStorage {
   alignas(128) cute::ArrayEngine<uint8_t, cute::cosize_v<BankTmaSmemLayout>> bank_ids;
 };
 
-struct alignas(128) P32WgmmaTmaSharedStorage {
+template <int TransitionBits>
+struct alignas(128) P32WgmmaTmaSharedStorageFor {
   typename WgmmaTmaPipeline::SharedStorage pipeline;
   alignas(128) cute::ArrayEngine<Element, cute::cosize_v<WgmmaTmaSmemLayoutB>> input;
-  alignas(128) cute::ArrayEngine<uint32_t, cute::cosize_v<P32TrellisTmaSmemLayout>> trellis;
+  alignas(128) cute::ArrayEngine<
+      uint32_t,
+      cute::cosize_v<P32TrellisTmaSmemLayoutFor<TransitionBits>>> trellis;
   alignas(128) cute::ArrayEngine<uint8_t, cute::cosize_v<P32BankTmaSmemLayout>> bank_ids;
 };
 
@@ -119,6 +123,23 @@ __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix(uint32_t state) {
   uint32_t mixed = state ^ (state >> 8);
   mixed = (mixed * kPgc16Multiplier + kPgc16Increment) & 0xffffu;
   return mixed ^ (mixed >> 7);
+}
+
+template <int TransitionBits>
+__device__ __forceinline__ uint32_t qvq_wgmma_v2_alternate_bank_mask(int bank_alt_id) {
+  static_assert(TransitionBits >= 4 && TransitionBits <= 7);
+  if (bank_alt_id == 0) {
+    return 0u;
+  }
+  if constexpr (TransitionBits == 4) {
+    return bank_alt_id == 1 ? 0x5a5au : bank_alt_id == 2 ? 0x3c3cu : 0xc3c3u;
+  } else if constexpr (TransitionBits == 5) {
+    return bank_alt_id == 1 ? 0x9696u : bank_alt_id == 2 ? 0x3c3cu : 0xc3c3u;
+  } else if constexpr (TransitionBits == 6) {
+    return bank_alt_id == 1 ? 0x6969u : bank_alt_id == 2 ? 0x5a5au : 0x3c3cu;
+  } else {
+    return bank_alt_id == 1 ? 0xc3c3u : bank_alt_id == 2 ? 0x9696u : 0x5a5au;
+  }
 }
 
 __device__ __forceinline__ uint32_t qvq_wgmma_w3_transition(
@@ -212,11 +233,12 @@ __device__ __forceinline__ void qvq_wgmma_decode_w3_fragment(
   fragment(7) = levels[second_mixed1 & 0xffu];
 }
 
-__device__ __forceinline__ uint32_t qvq_p32_window_w3_state(
+template <int TransitionBits>
+__device__ __forceinline__ uint32_t qvq_p32_window_state(
     const uint32_t* __restrict__ window_words,
     int pair) {
-  constexpr int kWordsPerP32Tile = 4 * kW3TransitionBits;
-  const int bit_position = (kP32PairsPerTile - 1 - pair) * kW3TransitionBits;
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  const int bit_position = (kP32PairsPerTile - 1 - pair) * TransitionBits;
   const int word = bit_position >> 5;
   const int shift = bit_position & 31;
   const int next_word = word + 1 == kWordsPerP32Tile ? 0 : word + 1;
@@ -225,8 +247,8 @@ __device__ __forceinline__ uint32_t qvq_p32_window_w3_state(
   return static_cast<uint32_t>((window >> shift) & 0xffffu);
 }
 
-template <class FragmentA>
-__device__ __forceinline__ void qvq_p32_window_decode_w3_fragment(
+template <int TransitionBits, class FragmentA>
+__device__ __forceinline__ void qvq_p32_window_decode_fragment(
     FragmentA& fragment,
     const uint32_t* __restrict__ window_words,
     uint8_t bank_id,
@@ -246,13 +268,13 @@ __device__ __forceinline__ void qvq_p32_window_decode_w3_fragment(
       (0u - ((static_cast<uint32_t>(bank_id) >> k_pair1) & 1u)) & alternate_bank_mask;
 
   const uint32_t mixed00 = qvq_wgmma_pgc16_mix(
-      qvq_p32_window_w3_state(window_words, pair00) ^ bank_mask0);
+      qvq_p32_window_state<TransitionBits>(window_words, pair00) ^ bank_mask0);
   const uint32_t mixed01 = qvq_wgmma_pgc16_mix(
-      qvq_p32_window_w3_state(window_words, pair01) ^ bank_mask0);
+      qvq_p32_window_state<TransitionBits>(window_words, pair01) ^ bank_mask0);
   const uint32_t mixed10 = qvq_wgmma_pgc16_mix(
-      qvq_p32_window_w3_state(window_words, pair10) ^ bank_mask1);
+      qvq_p32_window_state<TransitionBits>(window_words, pair10) ^ bank_mask1);
   const uint32_t mixed11 = qvq_wgmma_pgc16_mix(
-      qvq_p32_window_w3_state(window_words, pair11) ^ bank_mask1);
+      qvq_p32_window_state<TransitionBits>(window_words, pair11) ^ bank_mask1);
 
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
@@ -487,7 +509,7 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
       if (k_block >= 2) {
         cute::warpgroup_wait<1>();
       }
-      qvq_p32_window_decode_w3_fragment(
+      qvq_p32_window_decode_fragment<kW3TransitionBits>(
           fragment_a,
           &packed_words[k_block][warp][0],
           packed_bank_ids[k_block][warp],
@@ -523,8 +545,8 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
 #endif
 }
 
-template <class InputTma, class TrellisTma, class BankTma>
-__global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_w3_m16_tma_kernel(
+template <int TransitionBits, class InputTma, class TrellisTma, class BankTma>
+__global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kernel(
     CUTE_GRID_CONSTANT InputTma const input_tma,
     CUTE_GRID_CONSTANT TrellisTma const trellis_tma,
     CUTE_GRID_CONSTANT BankTma const bank_tma,
@@ -535,9 +557,11 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_w3_m16_tma_k
     int split_count,
     int bank_alt_id) {
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
-  constexpr int kWordsPerP32Tile = 4 * kW3TransitionBits;
-  __shared__ __align__(128) char shared_buffer[sizeof(P32WgmmaTmaSharedStorage)];
-  auto& shared = *reinterpret_cast<P32WgmmaTmaSharedStorage*>(shared_buffer);
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  using TrellisSmemLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
+  using SharedStorage = P32WgmmaTmaSharedStorageFor<TransitionBits>;
+  __shared__ __align__(128) char shared_buffer[sizeof(SharedStorage)];
+  auto& shared = *reinterpret_cast<SharedStorage*>(shared_buffer);
 
   const int thread = static_cast<int>(threadIdx.x);
   const bool is_consumer = thread < kThreads;
@@ -550,10 +574,8 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_w3_m16_tma_k
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
   const int stage_begin = k_tile_begin / kP32K16TilesPerStage;
   const int stage_count = (k_tile_end - k_tile_begin) / kP32K16TilesPerStage;
-  const uint32_t alternate_bank_mask = bank_alt_id == 0 ? 0u
-      : bank_alt_id == 1 ? 0x6969u
-      : bank_alt_id == 2 ? 0x5a5au
-      : 0x3c3cu;
+  const uint32_t alternate_bank_mask =
+      qvq_wgmma_v2_alternate_bank_mask<TransitionBits>(bank_alt_id);
 
   typename WgmmaTmaPipeline::Params pipeline_params;
   pipeline_params.role = is_producer
@@ -573,7 +595,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_w3_m16_tma_k
   auto s_input = cute::make_tensor(
       cute::make_smem_ptr(shared.input.begin()), WgmmaTmaSmemLayoutB{});
   auto s_trellis = cute::make_tensor(
-      cute::make_smem_ptr(shared.trellis.begin()), P32TrellisTmaSmemLayout{});
+      cute::make_smem_ptr(shared.trellis.begin()), TrellisSmemLayout{});
   auto s_bank_ids = cute::make_tensor(
       cute::make_smem_ptr(shared.bank_ids.begin()), P32BankTmaSmemLayout{});
 
@@ -687,10 +709,10 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_w3_m16_tma_k
       if (k_block >= 2) {
         cute::warpgroup_wait<1>();
       }
-      const auto trellis_layout = P32TrellisTmaSmemLayout{};
+      const auto trellis_layout = TrellisSmemLayout{};
       const uint32_t* window_words = shared.trellis.begin() +
           trellis_layout(0, warp, k_block, read_stage);
-      qvq_p32_window_decode_w3_fragment(
+      qvq_p32_window_decode_fragment<TransitionBits>(
           fragment_a,
           window_words,
           static_cast<uint8_t>(bank_id),
@@ -1135,7 +1157,8 @@ at::Tensor qvq_p32_window_wgmma_w3_m16(
   return output;
 }
 
-at::Tensor qvq_p32_window_wgmma_w3_m16_tma(
+template <int TransitionBits>
+at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
     const at::Tensor& input,
     const at::Tensor& trellis,
     const at::Tensor& levels,
@@ -1179,7 +1202,8 @@ at::Tensor qvq_p32_window_wgmma_w3_m16_tma(
                   (k_tiles / split_count) % kP32K16TilesPerStage == 0,
               "QVQ P32 TMA WGMMA split partitions must contain a multiple of sixteen K16 tiles");
   const int64_t expected_tiles = static_cast<int64_t>(k_tiles) * n_tiles;
-  constexpr int kWordsPerP32Tile = 4 * kW3TransitionBits;
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  using TrellisSmemLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
   TORCH_CHECK(trellis.numel() == expected_tiles * kWordsPerP32Tile,
               "QVQ P32 TMA WGMMA trellis size mismatch");
   TORCH_CHECK(bank_ids.numel() == expected_tiles,
@@ -1211,7 +1235,7 @@ at::Tensor qvq_p32_window_wgmma_w3_m16_tma(
   auto trellis_tma = cute::make_tma_atom(
       cute::SM90_TMA_LOAD{},
       trellis_tensor,
-      P32TrellisTmaSmemLayout{}(cute::_, cute::_, cute::_, cute::_0{}),
+      TrellisSmemLayout{}(cute::_, cute::_, cute::_, cute::_0{}),
       cute::make_shape(
           cute::Int<kWordsPerP32Tile>{},
           cute::Int<kP32N16TilesPerBlock>{},
@@ -1228,7 +1252,7 @@ at::Tensor qvq_p32_window_wgmma_w3_m16_tma(
       : at::empty({split_count, kRows, size_n}, input.options().dtype(at::kFloat));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns), 1, static_cast<unsigned>(split_count));
-  qvq_p32_window_wgmma_w3_m16_tma_kernel<<<grid, kTmaThreads, 0, stream>>>(
+  qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits><<<grid, kTmaThreads, 0, stream>>>(
       input_tma,
       trellis_tma,
       bank_tma,
@@ -1252,6 +1276,45 @@ at::Tensor qvq_p32_window_wgmma_w3_m16_tma(
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return output;
+}
+
+at::Tensor qvq_p32_window_wgmma_w3_m16_tma(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t out_features,
+    int64_t bank_alt_id,
+    int64_t split_count) {
+  return qvq_p32_window_wgmma_m16_tma_impl<kW3TransitionBits>(
+      input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+}
+
+at::Tensor qvq_p32_window_wgmma_m16_tma(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t transition_bits,
+    int64_t out_features,
+    int64_t bank_alt_id,
+    int64_t split_count) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_wgmma_m16_tma_impl<4>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    case 5:
+      return qvq_p32_window_wgmma_m16_tma_impl<5>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    case 6:
+      return qvq_p32_window_wgmma_m16_tma_impl<6>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    case 7:
+      return qvq_p32_window_wgmma_m16_tma_impl<7>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    default:
+      TORCH_CHECK(false, "QVQ P32 TMA WGMMA transition bits must be in [4, 7]");
+  }
 }
 
 at::Tensor qvq_wgmma_w3_m16_tma(
@@ -1378,6 +1441,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("w3_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_w3_m16(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_w3_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
+  m.def("p32_window_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
@@ -1385,4 +1449,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("w3_m16_tma", qvq_wgmma_w3_m16_tma);
   m.impl("p32_window_w3_m16", qvq_p32_window_wgmma_w3_m16);
   m.impl("p32_window_w3_m16_tma", qvq_p32_window_wgmma_w3_m16_tma);
+  m.impl("p32_window_m16_tma", qvq_p32_window_wgmma_m16_tma);
 }
