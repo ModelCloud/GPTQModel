@@ -993,6 +993,7 @@ def test_qvq_two_stream_diagnostics_match_serial_pipeline():
                 diagnostic_detail="primary",
                 diagnostic_streams=diagnostic_streams,
                 collect_telemetry=True,
+                include_topn=True,
                 divergence_rows=0,
             )
         )

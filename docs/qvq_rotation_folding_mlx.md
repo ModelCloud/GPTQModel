@@ -5,7 +5,9 @@ layers, hidden size 2048, MLP size 8192, 32 query heads, 8 KV heads, head
 dimension 64). Quantizer: standard P32 PGC16-v1 with fixed binary bank
 selectors. Runtime measurements use a 48 GB Apple M4 Max in high-power mode.
 The complete 16-layer W2 quality promotion uses an SM80 CUDA host reported as
-`NVIDIA PG506-230` with 96 GB of memory.
+`NVIDIA PG506-230` with 96 GB of memory. That host also runs the complete
+packed-model CUDA quality and decode benchmark through production
+`QVQLinear -> qvq_cuda_gemv` V2B2-P32 planar dispatch.
 
 This report distinguishes exact dense graph rewrites from post-quantization
 accuracy. A transform is called folded only when the unquantized model passes
@@ -17,18 +19,20 @@ imply that the transformed basis quantizes equally well.
 A0 remains the production control. A25 is the only transform-removal arm that
 passed the propagated W2 gate: it folds the head-local V output basis into V
 and the inverse O input basis into O, reducing 14 to 12 online Hadamards per
-block. The complete 16-layer W2 promotion no longer shows a cumulative KL
-regression: A25 ends at `0.88726` KL versus A0's `0.90064` (1.49% lower), and
-its logits relative L2 is 0.48% lower. The discrete accuracy metrics are mixed:
-A25 Top-1 identity is 1.23 percentage points lower, Top-5 is 0.43 points higher,
-and Top-10 is tied. This single held-out stream supports A25 as a quality Pareto
-point but is not enough to claim a general accuracy improvement.
+block. The first 16-row validation stream favors A25 by 1.49% KL, but two
+additional disjoint streams show that this is not a stable win. Across all
+5,630 held-out tokens, packed CUDA KL is `0.91659` for A25 versus `0.91758`
+for A0 (0.108% lower), while logits relative L2 is 0.357% higher and Top-1,
+Top-5, and Top-10 are lower by 0.80, 0.62, and 0.85 percentage points. The
+paired 95% bootstrap intervals for KL and Top-1 both cross zero.
 
-Actual runtime improvement is within repeatability. A25's projected M=1
-QuantLinear sum is `1.64054` ms versus A0's `1.65950` ms (`1.012x`), while its
-p95 is slightly worse. Therefore A25 is the mathematical/quality Pareto point,
-but A0 remains the recommended production architecture until the V/O fold is
-integrated end to end and demonstrates a material full-model tokens/s gain.
+The end-to-end packed CUDA model shows a real median decode signal: A25 is
+1.90% faster at batch 1 and about 4.1--4.4% faster at batches 2--8. Batch-1
+throughput moves from 26.57 to 27.08 token/s. Prefill is flat, and batch-4/8
+p95 decode regresses because of late-cycle outliers. Therefore A25 remains the
+mathematical/runtime Pareto candidate, but A0 stays the recommended production
+architecture until quality is confirmed across fitting seeds/evaluation sets
+and the long-tail latency behavior is resolved.
 
 The zero-Hadamard A6 candidate is not acceptable. At W2 its seven-role mean
 local output relative L2 is `0.30523`, versus `0.23710` for A0, and its summed
@@ -39,21 +43,21 @@ L2 when comparing A22 with A23).
 The cross-arm table retains the common one-layer propagation metric because
 only A0 and A25 were promoted to the complete 16-layer run.
 
-| Arm | Description | Online H/block | Other online | Folded sides/block | W2 EBPW | Layer-0 KL | Top-1 | Top-5 | Top-10 | M1 ms | tok/s | Dense parity | Status |
+| Arm | Description | Online H/block | Other online | Folded sides/block | W2 EBPW | Layer-0 KL | Top-1 | Top-5 | Top-10 | MLX M1 ms | CUDA M1 tok/s | Dense parity | Status |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| A0 | two-sided RHT | 14 | 0 | 0 | `2.05442` | `0.029735` | `.71795` | `1.0` | `1.0` | `1.6595` | — | exact control | production |
+| A0 | two-sided RHT | 14 | 0 | 0 | `2.05442` | `0.029735` | `.71795` | `1.0` | `1.0` | `1.6595` | `26.57` | exact control | production |
 | A1 | residual + V/O folds | 5 | 0 | 9 | `2.05442` | — | — | — | — | `1.3680` | — | rel `1.82e-6` | local reject |
 | A3 | A1 + RoPE Q/K | 3 | 0 | 11 | `2.05442` | — | — | — | — | `1.3722` | — | rel `1.87e-6` | reject |
 | A4 | A3 + SwiGLU fold | 1 | 0 | 13 | `2.05442` | — | — | — | — | `1.3566` | — | rel `1.82e-6` | reject |
 | A6 | zero H | 0 | 0 | 13 | `2.05442` | — | — | — | — | `1.3507` | — | rel `1.82e-6` | reject |
 | A22 | three-H aggressive | 3 | 0 | 11 | `2.05442` | `0.057908` | `.84615` | `1.0` | `1.0` | `1.3524` | — | rel `1.75e-6` | reject |
-| A25 | V/O only | 12 | 0 | 2 | `2.05442` | `0.030801` | `.87179` | `1.0` | `1.0` | `1.6405` | — | rel `1.15e-6` | Pareto/pass |
+| A25 | V/O only | 12 | 0 | 2 | `2.05442` | `0.030801` | `.87179` | `1.0` | `1.0` | `1.6405` | `27.08` | rel `1.15e-6` | Pareto/pass |
 | A27 | permutation SwiGLU | 12 | 0 | 2 | `2.05442` | `0.034170` | `.84615` | `1.0` | `1.0` | `1.6453` | — | rel `1.13e-6` | reject |
 | A29 | identity gate/up output | 12 | 0 | 0 | `2.05442` | `0.034276` | `.94872` | `1.0` | `1.0` | `1.6453` | — | exact zero delta | reject |
 
-`tok/s` is intentionally blank: the repository does not yet have an MLX Llama
-container that persists these graph bases, so only real-shape QuantLinear sums
-can be measured without making a false end-to-end claim.
+CUDA throughput is measured from complete packed models. MLX still lacks a
+Llama container that persists these graph bases, so its entries remain
+real-shape QuantLinear sums rather than an end-to-end claim.
 
 ## Exact folds
 
@@ -222,6 +226,38 @@ lower KL from layer 8 through the final layer.
 | 14 | `.861346` | `.837031` | `-2.82%` | `.55003` | `.55859` |
 | 15 | `.900642` | `.887262` | `-1.49%` | `.55217` | `.53986` |
 
+### Packed CUDA multi-stream promotion
+
+The follow-up keeps each arm's canonical packed tensors in memory and replaces
+all 112 dense projections with production `QVQLinear` modules. It evaluates
+three disjoint 16-row WikiText-2 validation streams (5,630 tokens total) in
+FP16 through the native CUDA P32 path. Stream 0 is intentionally identical to
+the preceding experiment and exactly reproduces its reconstructed-weight
+metrics; streams 1 and 2 test whether that result generalizes. The same dense
+FP32 logits are the oracle for both arms, and the test split remains unread.
+
+| Arm | Reconstructed KL | Packed KL | Packed logits rel-L2 | Packed Top-1 | Top-5 | Top-10 | Packed minus reconstructed KL |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A0 | `.917179` | `.917579` | `.493024` | `.55684` | `.82433` | `.88934` | `+.000400` |
+| A25 | `.916400` | `.916587` | `.494783` | `.54885` | `.81812` | `.88082` | `+.000187` |
+
+The small packed-versus-reconstructed deltas validate the in-memory packed
+installation and quantify the expected FP16/native-kernel rounding. At actual
+packed execution, A25 versus A0 is `-0.108%` KL, `+0.357%` logits relative L2,
+`-0.80` Top-1 points, `-0.62` Top-5 points, and `-0.85` Top-10 points.
+
+| Stream | Tokens | A0 packed KL | A25 packed KL | A25 KL delta | A0 Top-1 | A25 Top-1 |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 1,869 | `.900927` | `.887484` | `-1.49%` | `.55110` | `.54040` |
+| 1 | 1,898 | `.957266` | `.983824` | `+2.77%` | `.55954` | `.54953` |
+| 2 | 1,863 | `.893854` | `.877286` | `-1.85%` | `.55985` | `.55663` |
+
+A 2,000-resample paired bootstrap over held-out texts gives an A25-minus-A0
+KL median of `-0.001236` with 95% interval `[-0.028447, +0.026979]`. The
+Top-1 median delta is `-0.007951` with interval
+`[-0.021095, +0.004783]`. Neither interval excludes zero, so the expanded
+quality evidence supports parity/uncertainty rather than an A25 accuracy win.
+
 ### W2 role diagnostics
 
 Each cell is `validation output relative L2 (runtime axes)`. `HH` means input
@@ -266,6 +302,36 @@ quality. A full transformed-basis MLX Llama container is still required before
 reporting layer time, time/token, or tokens/s; inventing those values from
 independent modules would be misleading.
 
+## Packed CUDA full-model runtime
+
+The CUDA measurement uses the two complete in-memory packed models from the
+multi-stream promotion, not reconstructed dense weights. Every target
+projection dispatches through production `QVQLinear -> qvq_cuda_gemv`
+V2B2-P32 planar code on the exclusive SM80 GPU. This is distinct from the
+separate direct P32 Ampere window microbenchmark and does not attribute that
+kernel's results to `QVQLinear`.
+
+For each arm and batch size, a 128-token prompt is prefetched and then decoded
+one cached token per row at a time. Three timing cycles alternate arm order;
+each cycle uses five decode warmups and 30 synchronized measurements. The
+table reports pooled wall-clock medians and p95s over 90 decode samples.
+CUDA-event medians agree within 0.04 ms.
+
+| Batch | A0 median ms | A25 median ms | A25 median delta | A0 token/s | A25 token/s | A0 p95 ms | A25 p95 ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | `37.640` | `36.927` | `-1.90%` | `26.57` | `27.08` | `38.816` | `37.342` |
+| 2 | `38.366` | `36.755` | `-4.20%` | `52.13` | `54.41` | `39.700` | `39.904` |
+| 4 | `39.398` | `37.671` | `-4.38%` | `101.53` | `106.18` | `40.971` | `45.212` |
+| 8 | `38.429` | `36.839` | `-4.14%` | `208.18` | `217.16` | `40.492` | `46.945` |
+
+Prefill medians are effectively unchanged: A0/A25 are 164.852/164.748 ms at
+batch 1 and 1,194.410/1,193.751 ms at batch 8. The decode median signal is
+consistent with removing 32 full Hadamards across the 16-layer model. It is
+not yet a clean tail-latency win: A25 p95 improves at batch 1, is flat at
+batch 2, and regresses at batches 4 and 8 because the final A25 timing cycle
+contains outliers. Raw event and wall samples for every cycle are retained in
+the artifact.
+
 ## Storage
 
 Standard P32 carries the nominal transition payload, one selector bit per
@@ -302,7 +368,7 @@ integrated into checkpoint save/load.
 | A22 | Generated from evidence: retain Q/K and down H, fold SwiGLU. Promoted. |
 | A23 | Generated from A22: remove down H. Rejected by the down role. |
 | A24 | SwiGLU permutation/scaling only. Rejected because diagonal scaling worsened down quantization. |
-| A25 | V/O-only fold. Passes one-layer and complete 16-layer W2 propagation; full-depth KL/L2 improve slightly while Top-1 regresses. Runtime gain is within noise. |
+| A25 | V/O-only fold. Passes one-layer and complete 16-layer W2 propagation. Packed multi-stream KL is statistically tied; containment metrics trend worse. Full-model CUDA median decode improves 1.9--4.4%, with mixed p95. |
 | A26 | A24 plus V/O. Rejected with A24's down regression. |
 | A27 | Generated from A24 evidence: permutation-only SwiGLU fold. Rejected after propagated layer error rose 3.15x. |
 | A28 | A27 plus V/O fold. Locally dominated by A27 on quality. |
@@ -312,28 +378,36 @@ integrated into checkpoint save/load.
 ## Recommendation and production work
 
 Keep A0 as the production default. The complete 16-layer W2 run strengthens
-A25 as the productionization experiment: it does not accumulate a KL or logits
-relative-L2 regression, although Top-1 identity is 1.23 percentage points lower.
-It is still not a default change because this is one held-out stream and its
-1.14% M1 median improvement is not material relative to p95/run-to-run
-variation. A25's exact remaining
-transforms are both sides of Q and K; V input only; O output only; and both
-sides of gate, up, and down. V output and O input are the two fully folded
-head-local maps. Q/K remain because the legal pair-local RoPE family cannot
-reproduce the recovery of a full output Hadamard. Gate/up remain because every
-identity, permutation, and permutation/scaling replacement increased
-propagated layer error by about 3x. Down remains because removing its input H
-caused a large post-quant regression. The global residual fold also remains
-unpromoted because its A1 family missed the quality gate.
+A25 as the productionization experiment, and the packed full-model CUDA run
+proves that the planned axes execute end to end without a reconstructed dense
+weight cache. The three-stream aggregate does not establish an accuracy win:
+KL is statistically tied, logits relative L2 is slightly worse, and all three
+containment metrics trend lower. Median CUDA decode improves 1.90% at batch 1
+and 4.1--4.4% at batches 2--8, but larger-batch p95 is unstable. A25 is still
+not a default change until independent fit seeds/evaluation sets confirm
+quality and repeated idle-host timings resolve the tail behavior. A25's exact
+remaining transforms are both sides of Q and K; V input only; O output only;
+and both sides of gate, up, and down. V output and O input are the two fully
+folded head-local maps. Q/K remain because the legal pair-local RoPE family
+cannot reproduce the recovery of a full output Hadamard. Gate/up remain
+because every identity, permutation, and permutation/scaling replacement
+increased propagated layer error by about 3x. Down remains because removing
+its input H caused a large post-quant regression. The global residual fold
+also remains unpromoted because its A1 family missed the quality gate.
 
 Productionization requires: a checkpoint format marker; saving the rewritten
 embedding, norm, LM-head and dense graph state; planner descriptors passed to
-each QuantLinear; persisted input/output-H flags; MLX Llama residual-basis
-integration; and end-to-end tokens/s validation. Generic QVQ kernels receive
-only transform descriptors/flags and contain no Q/K/V/O/gate/up/down name
-checks.
+each QuantLinear; persisted input/output-H flags; and repeated full-model
+quality/runtime validation. CUDA execution is validated in memory here; MLX
+still requires Llama graph integration before it can make an equivalent
+end-to-end claim. Generic QVQ kernels receive only transform descriptors/flags
+and contain no Q/K/V/O/gate/up/down name checks.
 
 Raw artifacts:
+
+The packed CUDA experiment is reproduced by
+`scripts/benchmark_qvq_rotation_full_model_cuda.py`; it fails closed unless
+CUDA SM80 is available and no foreign compute process owns the selected GPU.
 
 - `artifacts/qvq_rotation_stage1_m4max.json`
 - `artifacts/qvq_rotation_ax_stage1_m4max.json`
@@ -349,6 +423,7 @@ Raw artifacts:
 - `artifacts/qvq_rotation_layer0_a25_w2_m4max.json`
 - `artifacts/qvq_rotation_full16_a0_a25_w2_m4max.json` (interrupted after A0 layer 4)
 - `artifacts/qvq_rotation_full16_a0_a25_w2_a100_sm80.json` (complete A0/A25)
+- `artifacts/qvq_rotation_full16_a0_a25_w2_packed_cuda_sm80.json` (three-stream packed CUDA quality/runtime)
 - `artifacts/qvq_p32_mlx_m4max_smoke.json`
 - `artifacts/qvq_p32_mlx_m4max.json`
 
@@ -361,6 +436,10 @@ cases previously reported as failures are explicitly skipped because the
 extension's `qvq_cpu_supported()` contract is x86-64-only. Ruff and
 `git diff --check` also pass for the changed surface. On the CUDA host, the P32
 fitting smoke test passes; the selected generic QVQ, P32/LR, planner,
-folded-axis, and exact-P32 Ampere matrix passes 867 tests with 131 platform
-skips. No GitHub Actions result is claimed; hardware results are local to the
-M4 Max and SM80 hosts described above.
+folded-axis, and exact-P32 Ampere matrix passed 867 tests with 131 platform
+skips before the latest-main merge. The expanded post-merge CUDA/P32/Ampere/
+planner/folded-axis matrix passes 1,423 tests with 13 skips and zero failures.
+Its one initially exposed test-contract failure was corrected by explicitly
+requesting the Top-N metrics that the test compares, then the exact full
+selection was rerun. No GitHub Actions result is claimed; hardware results are
+local to the M4 Max and SM80 hosts described above.
