@@ -160,7 +160,7 @@ def qvq_p32_window_ampere(
             # attention projections. Keep the measured split choices local
             # to M8; M5-M7 retain the conservative generic table.
             m8_split = {
-                1024: 32,
+                1024: 24,
                 5120: 32,
                 6144: 32,
                 10240: 16,
@@ -179,6 +179,7 @@ def qvq_p32_window_ampere(
                 5120: 12,
                 6144: 16,
                 10240: 16,
+                17408: 10,
             }.get(int(out_features))
             if m16_split is not None:
                 split_count = min(m16_split, int(input.shape[1]) // 16)

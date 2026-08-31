@@ -553,6 +553,12 @@ again with exact outputs. The 16- and 24-way alternatives reached 0.037868
 and 0.040183 ms; wider waves were not retained after the matched probes. Only
 32 is enabled for this shape.
 
+The fourth progression narrows M8 full-KV to 24 slices. Its clean four-rate
+screen measures 0.034045 ms versus 0.043262 ms at the 32-way control (`1.271x`)
+with exact outputs. Replacing only those four rows lowers the five-M
+140-case median geomean from 0.078688 ms to 0.077580 ms (`1.014x`); the other
+M8 rows retain the post-merge control timings.
+
 ## Reproduction
 
 ```bash
