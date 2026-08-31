@@ -119,11 +119,36 @@ decoded exactly once, so recurrence deduplication is no longer available.  The
 next experiments should target the random read-only PGC level loads and launch
 tail without damaging the already conflict-free shared/TMA layout.
 
+The accepted all-rate head `c07fe9de` was also profiled at W3.5,
+M16/K5120/N17408, split 5.  Report:
+`artifacts/h200_p32_window/profiles/qwen38_gate_w35_p32_tma_rs_wgmma_split5_c07fe9de.ncu-rep`.
+
+| Metric | W3.5 result |
+|---|---:|
+| NCU duration | 69.152 us |
+| Grid / waves per SM | 1,360 CTAs / 1.47 |
+| Executed instructions | 36.786M |
+| Registers / static shared | 56 / 31.36 KiB |
+| L1 / L2 hit rate | 99.65% / 52.72% |
+| L1/TEX / ALU utilization | 80.28% / 60.57% |
+| Shared / tensor / TMA pipe | 4.28% / 4.28% / 0.40% |
+| Shared conflicts / excessive wavefronts | 160 / 0 |
+| Excessive global sectors | 33.520M (85% of all sectors) |
+| No eligible warp | 38.66% |
+| Long-scoreboard samples | 1,868 (744 not issued) |
+| Long-scoreboard cycles per issue | 3.545 (30.8%) |
+
+W3.5 executes essentially the same instruction count as the earlier W3
+profile.  The remaining front-end cost is therefore common P32 state-address,
+window-extraction, PGC-mix, and level-fetch work rather than a W3.5-only planar
+expansion problem.
+
 ## Rejected experiments
 
 | Head | Experiment | Gate M16/K5120/N17408 | Down M16/K17408/N5120 | Decision |
 |---|---|---:|---:|---|
 | `12b3a321` + working tree | Warp-distributed register PGC table | 0.10992 ms (0.687x baseline) | 0.14904 ms (0.620x baseline) | Rejected; exact, but an arbitrary lookup needs four requester-dependent shuffles and is 31-39% slower than the 99.7%-L1-hit read-only table. |
+| `c07fe9de` + working tree | Eight-way lane-interleaved shared PGC table | W2 0.07453 ms (1.022x), W3 0.07594 ms (0.972x), W3.5 0.07707 ms (0.963x) | W2 0.07421 ms (1.008x), W3 0.07546 ms (0.966x), W3.5 0.07571 ms (0.974x) | Rejected; the extra shared footprint/occupancy loss outweighs reduced global lookup pressure at W3/W3.5. |
 
 The Qwen3.8 MLP split sweep at `8dea54a5` accepted split 10 for gate/up and
 split 34 for down.  These policies preserve K256 stage alignment, reduce the
@@ -140,3 +165,5 @@ the selected split.
 | 3 | Generalize direct-window TMA RS-WGMMA to W2, W2.5, and W3.5 | accepted at `874d9632` |
 | 4 | Qwen3.8 M1/M2/M4/M8 specializations | pending |
 | 5 | Full seven-shape W2-W3.5 P32 versus Machete sweep | M16 complete; M1/M2/M4/M8 pending |
+| 6 | Producer-contiguous four-state decode and fixed WGMMA register transpose | next |
+| 7 | Storage-neutral P32 Anchor-4 load-time repack | pending after producer-layout proof |
