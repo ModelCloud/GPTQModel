@@ -1,6 +1,7 @@
 {
   "schema": "qvq.calibration-fisher-composition-queue.v1",
-  "status": "running",
+  "status": "complete",
+  "completed_at_utc": "2026-08-31T02:51:45Z",
   "prepared_at_utc": "2026-08-30T23:57:00Z",
   "launched_at_utc": "2026-08-31T00:09:43Z",
   "launch_commit": "2d13e537",
@@ -40,7 +41,12 @@
       "effective_weighted_tokens": 1051958,
       "YAQA_weight": 1.0,
       "NM_weight": 1.0,
-      "state": "quantizing"
+      "state": "complete",
+      "gsm8k_correct": 543,
+      "gsm8k_accuracy": 0.4491315136476427,
+      "d300_aligned_accuracy": 0.32729166666666665,
+      "d300_exact32": 23,
+      "d300_mean_first_divergence": 9.333333333333334
     },
     {
       "arm_id": "f10_yaqa182_nm2048_yaqa2x",
@@ -50,7 +56,12 @@
       "effective_weighted_tokens": 1354151,
       "YAQA_weight": 2.0,
       "NM_weight": 1.0,
-      "state": "quantizing"
+      "state": "complete",
+      "gsm8k_correct": 531,
+      "gsm8k_accuracy": 0.4392059553349876,
+      "d300_aligned_accuracy": 0.34291666666666665,
+      "d300_exact32": 24,
+      "d300_mean_first_divergence": 10.526666666666667
     },
     {
       "arm_id": "f11_yaqa182_nm4096_yaqa1x",
@@ -60,7 +71,12 @@
       "effective_weighted_tokens": 1794387,
       "YAQA_weight": 1.0,
       "NM_weight": 1.0,
-      "state": "quantizing"
+      "state": "complete",
+      "gsm8k_correct": 525,
+      "gsm8k_accuracy": 0.43424317617866004,
+      "d300_aligned_accuracy": 0.34260416666666665,
+      "d300_exact32": 21,
+      "d300_mean_first_divergence": 9.993333333333334
     },
     {
       "arm_id": "f12_yaqa182_nm4096_yaqa2x",
@@ -70,7 +86,12 @@
       "effective_weighted_tokens": 2096580,
       "YAQA_weight": 2.0,
       "NM_weight": 1.0,
-      "state": "quantizing"
+      "state": "complete",
+      "gsm8k_correct": 535,
+      "gsm8k_accuracy": 0.4425144747725393,
+      "d300_aligned_accuracy": 0.3232291666666667,
+      "d300_exact32": 19,
+      "d300_mean_first_divergence": 9.8
     }
   ],
   "registry": "docs/experiments/calibration_fisher_composition_registry_20260830.json",

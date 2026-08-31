@@ -213,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Append missing tasks to a compatible task report, publishing atomically after every task.",
     )
-    tasks.add_argument("--batch-size", type=int, default=16)
+    tasks.add_argument("--batch-size", type=int, default=64)
     tasks.add_argument("--backend", choices=(BACKEND.QVQ.value, BACKEND.EXL3_EXLLAMA_V3.value), default="qvq")
     tasks.add_argument("--device", default="cuda:0")
     tasks.add_argument(
@@ -221,6 +221,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="paged|flash_attention_2",
         choices=("paged|flash_attention_2", "paged|sdpa"),
         help="Paged attention backend; paged mode also activates native continuous batching.",
+    )
+    tasks.add_argument(
+        "--use-cuda-graph",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Capture continuous-batching prefill/decode graphs (enabled by default).",
     )
     tasks.add_argument("--task", action="append", choices=tuple(TASKS), help="Repeat to select tasks.")
     return parser
@@ -1435,6 +1441,7 @@ def _tasks(args: argparse.Namespace) -> int:
         "attn_implementation": args.attn_implementation,
         "continuous_batching_required": True,
         "paged_attention_required": True,
+        "cuda_graph_requested": args.use_cuda_graph,
         "package_versions": {
             "evalution": package_version("evalution"),
             "gptqmodel": package_version("gptqmodel"),
@@ -1481,6 +1488,7 @@ def _tasks(args: argparse.Namespace) -> int:
                     "dtype": "float16",
                     "device": args.device,
                     "attn_implementation": args.attn_implementation,
+                    "use_cuda_graph": args.use_cuda_graph,
                 },
                 batch_size=args.batch_size,
                 apply_chat_template=apply_chat_template,
@@ -1490,10 +1498,12 @@ def _tasks(args: argparse.Namespace) -> int:
             )
         print(format_eval_result_table(output), flush=True)
         metrics = get_eval_task_results(output)
+        engine = output.get("engine") if isinstance(output, dict) else None
         payload["tasks"][label] = {
             "evalution_task": task,
             "seconds": time.perf_counter() - started,
             "metrics": next(iter(metrics.values())) if metrics else {},
+            "engine": engine if isinstance(engine, dict) else {},
         }
         publish()
         print(f"Published completed task {label} to {args.output}", flush=True)

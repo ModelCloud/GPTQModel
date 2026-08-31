@@ -1,6 +1,6 @@
 {
   "schema": "qvq.calibration-fisher-weight-seed-queue.v1",
-  "status": "waiting_for_current_wave",
+  "status": "running",
   "prepared_at_utc": "2026-08-31T01:41:02Z",
   "launched_at_utc": "2026-08-31T01:51:41Z",
   "launch_commit": "0d9589ba",
@@ -30,10 +30,10 @@
     "launch_condition": "each arm waits for three consecutive exclusive-idle samples on its assigned GPU"
   },
   "arms": [
-    {"arm_id": "f13_yaqa182_nm4096_yaqa15x", "gpu": 0, "YAQA_weight": 1.5, "YAQA_seed": 0, "state": "waiting_for_gpu0"},
-    {"arm_id": "f14_yaqa182_nm4096_yaqa3x", "gpu": 1, "YAQA_weight": 3.0, "YAQA_seed": 0, "state": "waiting_for_gpu1"},
-    {"arm_id": "f15_yaqa182_nm4096_yaqa2x_seed1", "gpu": 2, "YAQA_weight": 2.0, "YAQA_seed": 1, "state": "waiting_for_gpu2"},
-    {"arm_id": "f16_yaqa182_nm4096_yaqa2x_seed2", "gpu": 3, "YAQA_weight": 2.0, "YAQA_seed": 2, "state": "waiting_for_gpu3"}
+    {"arm_id": "f13_yaqa182_nm4096_yaqa15x", "gpu": 0, "YAQA_weight": 1.5, "YAQA_seed": 0, "state": "quantizing"},
+    {"arm_id": "f14_yaqa182_nm4096_yaqa3x", "gpu": 1, "YAQA_weight": 3.0, "YAQA_seed": 0, "state": "quantizing"},
+    {"arm_id": "f15_yaqa182_nm4096_yaqa2x_seed1", "gpu": 2, "YAQA_weight": 2.0, "YAQA_seed": 1, "state": "quantizing"},
+    {"arm_id": "f16_yaqa182_nm4096_yaqa2x_seed2", "gpu": 3, "YAQA_weight": 2.0, "YAQA_seed": 2, "state": "quantizing"}
   ],
   "seed_distance": {
     "reference": "f12_yaqa182_nm4096_yaqa2x (seed 0)",

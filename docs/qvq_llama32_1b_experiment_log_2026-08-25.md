@@ -141,13 +141,23 @@ pinned to `3ebcf9a3`; the interruption is retained in the queue manifest.
 
 ### Fisher composition and seed follow-up (running, 2026-08-31)
 
-The first four composition arms form a 2x2 test at NM prefixes 2,048 and 4,096
-with YAQA Fisher weights 1x and 2x. They reuse immutable deduplicated corpora;
-the weight changes the input/output Sketch-B Gram contribution without
-duplicating rows or inflating the independent-sequence count. All four run one
-process per physical GPU with full GSM8K and D300 evaluation.
+The first four composition arms completed a 2x2 test at NM prefixes 2,048 and
+4,096 with YAQA Fisher weights 1x and 2x. They reuse immutable deduplicated
+corpora; the weight changes the input/output Sketch-B Gram contribution without
+duplicating rows or inflating the independent-sequence count.
 
-Four follow-up NM4096 arms are queued independently behind those GPUs: YAQA
+| NM prefix | YAQA weight | GSM8K | D300 aligned | Exact32 | Mean divergence |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 2,048 | 1x | **543/1209 (44.9132%)** | 32.7292% | 23 | 9.3333 |
+| 2,048 | 2x | 531/1209 (43.9206%) | 34.2917% | 24 | 10.5267 |
+| 4,096 | 1x | 525/1209 (43.4243%) | 34.2604% | 21 | 9.9933 |
+| 4,096 | 2x | **535/1209 (44.2514%)** | 32.3229% | 19 | 9.8000 |
+
+The YAQA-weight effect changes sign with NM coverage: 2x loses 12 GSM questions
+at NM2048 but gains 10 at NM4096. D300 again does not select the GSM winner;
+the best-GSM NM2048/1x arm has the lowest aligned score in its pair.
+
+Four follow-up NM4096 arms are now quantizing independently: YAQA
 weights 1.5x and 3x at seed 0, plus exact 2x replicas at YAQA seeds 1 and 2.
 Together with the running seed-0 2x arm, these provide a 1x/1.5x/2x/3x weight
 curve and three-seed robustness estimate. The launcher also produces pairwise
@@ -157,6 +167,22 @@ by layer. See
 [`calibration_fisher_weight_seed_queue_20260831.json`](experiments/calibration_fisher_weight_seed_queue_20260831.json)
 and
 [`calibration_fisher_weight_seed_registry_20260831.json`](experiments/calibration_fisher_weight_seed_registry_20260831.json).
+
+### Fast held-out evaluator transition (canary queued, 2026-08-31)
+
+The score branch now includes `origin/main` commit `201897eb`, including the
+latest exact-P32 inference kernels. Future task evaluations request paged
+FlashAttention-2, native continuous batching, CUDA graphs, and batch size 64;
+the prior launchers used paged SDPA without graphs at batch size 8. Each result
+now retains Evalution's requested engine configuration and resolved execution
+metadata so a silent fixed-batch fallback is visible.
+
+This is an evaluation-runtime change, not a quantization-protocol change.
+F13--F16 remain quantized from pinned commit `0d9589ba` for exact comparability
+with F12. A separate F9 canary will compare the new runtime against the legacy
+543/1209 result and will only promote it after exact metric parity plus resolved
+paged/continuous execution are verified. See
+[`qvq_fast_eval_protocol_20260831.json`](experiments/qvq_fast_eval_protocol_20260831.json).
 
 ## Frozen data and evaluation protocol
 

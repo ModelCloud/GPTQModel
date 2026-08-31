@@ -225,8 +225,9 @@ def command(job: Job) -> list[str]:
     if job.task == "gsm8k_platinum_cot":
         return [
             "python", "scripts/qvq_evaluate.py", "tasks", "--checkpoint", job.checkpoint,
-            "--output", job.output, "--task", job.task, "--batch-size", "8",
-            "--device", "cuda:0", "--attn-implementation", "paged|sdpa",
+            "--output", job.output, "--task", job.task, "--batch-size", "64",
+            "--device", "cuda:0", "--attn-implementation", "paged|flash_attention_2",
+            "--use-cuda-graph",
         ]
     return [
         "python", "scripts/qvq_evaluate.py", "divergence300", "--dense-model", DENSE_MODEL,
