@@ -1,9 +1,11 @@
-# QVQ offline rotation-folding search on Apple M4 Max
+# QVQ offline rotation-folding search on Apple M4 Max and Ampere
 
 Date: 2026-08-31. Model: `ModelCloud/Llama3.2-1B-Instruct` (16 decoder
 layers, hidden size 2048, MLP size 8192, 32 query heads, 8 KV heads, head
 dimension 64). Quantizer: standard P32 PGC16-v1 with fixed binary bank
-selectors. Hardware: 48 GB Apple M4 Max in high-power mode.
+selectors. Runtime measurements use a 48 GB Apple M4 Max in high-power mode.
+The complete 16-layer W2 quality promotion uses an SM80 CUDA host reported as
+`NVIDIA PG506-230` with 96 GB of memory.
 
 This report distinguishes exact dense graph rewrites from post-quantization
 accuracy. A transform is called folded only when the unquantized model passes
@@ -12,11 +14,15 @@ imply that the transformed basis quantizes equally well.
 
 ## Current conclusion
 
-A0 remains the best-quality and production control. A25 is the only
-transform-removal arm that passed the propagated W2 gate: it folds the
-head-local V output basis into V and the inverse O input basis into O, reducing
-14 to 12 online Hadamards per block. Its final KL is `0.03080` versus A0's
-`0.02973`, its logits relative L2 is lower, and its layer error is 5.4% higher.
+A0 remains the production control. A25 is the only transform-removal arm that
+passed the propagated W2 gate: it folds the head-local V output basis into V
+and the inverse O input basis into O, reducing 14 to 12 online Hadamards per
+block. The complete 16-layer W2 promotion no longer shows a cumulative KL
+regression: A25 ends at `0.88726` KL versus A0's `0.90064` (1.49% lower), and
+its logits relative L2 is 0.48% lower. The discrete accuracy metrics are mixed:
+A25 Top-1 identity is 1.23 percentage points lower, Top-5 is 0.43 points higher,
+and Top-10 is tied. This single held-out stream supports A25 as a quality Pareto
+point but is not enough to claim a general accuracy improvement.
 
 Actual runtime improvement is within repeatability. A25's projected M=1
 QuantLinear sum is `1.64054` ms versus A0's `1.65950` ms (`1.012x`), while its
@@ -30,7 +36,10 @@ local KL is over 12 times A0. Removing the down transform alone also causes a
 large down-projection regression (`0.1371` to `0.4198` local output relative
 L2 when comparing A22 with A23).
 
-| Arm | Description | Online H/block | Other online | Folded sides/block | W2 EBPW | Final KL | Top-1 | Top-5 | Top-10 | M1 ms | tok/s | Dense parity | Status |
+The cross-arm table retains the common one-layer propagation metric because
+only A0 and A25 were promoted to the complete 16-layer run.
+
+| Arm | Description | Online H/block | Other online | Folded sides/block | W2 EBPW | Layer-0 KL | Top-1 | Top-5 | Top-10 | M1 ms | tok/s | Dense parity | Status |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
 | A0 | two-sided RHT | 14 | 0 | 0 | `2.05442` | `0.029735` | `.71795` | `1.0` | `1.0` | `1.6595` | — | exact control | production |
 | A1 | residual + V/O folds | 5 | 0 | 9 | `2.05442` | — | — | — | — | `1.3680` | — | rel `1.82e-6` | local reject |
@@ -148,7 +157,7 @@ its apparently favorable cropped reconstruction does not survive propagation.
 | A29 | 12 | `0.034276` | `0.11357` | `0.12848` | `0.94872` | `1.0` | `1.0` | reject: layer error |
 | A25 | 12 | `0.030801` | `0.09337` | `0.04389` | `0.87179` | `1.0` | `1.0` | pass |
 
-### Interrupted full-model promotion run
+### Full-model W2 promotion run
 
 A progressive full-model W2 A0-versus-A25 runner was added after review of the
 small one-layer validation population. It uses 16 cached WikiText-2 train rows
@@ -157,11 +166,11 @@ with a 128-token cap. The test split remains unread. Within every decoder layer
 it recaptures dependencies in `Q/K/V -> O -> gate/up -> down` order, and every
 later layer sees all previously quantized layers.
 
-The M4 Max run was stopped at the user's request because full P32 quantization
-was too slow on this host. A0 completed five of 16 layers (35 projections,
-2,523.2 seconds of fitting); A25 was not started. These partial values are
-trajectory diagnostics only and must not be treated as an A0/A25 comparison or
-a full-model result:
+The original M4 Max run was stopped at the user's request because full P32
+quantization was too slow on that host. A0 completed five of 16 layers (35
+projections, 2,523.2 seconds of fitting); A25 was not started. These partial
+values are trajectory diagnostics only and must not be treated as an A0/A25
+comparison or a full-model result:
 
 | Quantized through layer | Final KL | Logits relative L2 | Top-1 | Top-5 | Top-10 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -172,8 +181,46 @@ a full-model result:
 | 4 | `0.330728` | `0.31756` | `.72980` | `.95131` | `.97699` |
 
 The interrupted artifact is explicitly marked `interrupted_by_user`; its A0
-payload is marked `interrupted_after_layer_4`. The next valid result must rerun
-both A0 and A25 to all 16 layers under the same protocol on the CUDA host.
+payload is marked `interrupted_after_layer_4`.
+
+The matched experiment was completed from layer 0 on the SM80 CUDA host. Both
+arms quantize all 112 target projections and use identical calibration and
+validation samples. `Fit seconds` is quantizer fitting time, not inference
+latency; evaluation installs reconstructed quantized weights into the dense
+model and does not exercise packed P32 inference kernels.
+
+| Arm | Online H/block | Projections | EBPW | Final KL | Logits rel-L2 | Top-1 | Top-5 | Top-10 | Fit seconds |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| A0 | 14 | 112 | `2.054419` | `0.900642` | `0.491661` | `.55217` | `.81648` | `.88604` | `405.7` |
+| A25 | 12 | 112 | `2.054419` | `0.887262` | `0.489304` | `.53986` | `.82076` | `.88604` | `404.2` |
+
+A25 versus A0 is `-1.49%` final KL, `-0.48%` logits relative L2, `-1.23`
+Top-1 percentage points, `+0.43` Top-5 points, and no Top-10 change. Dense
+parity before quantization passes at `1.12e-6` logits relative L2,
+`9.25e-5` max absolute logits delta, and 100% Top-1/5/10 identity.
+
+The full progressive trajectory shows that the result is depth-dependent: A25
+is worse through most of layers 0--6, becomes competitive at layer 7, and has
+lower KL from layer 8 through the final layer.
+
+| Through layer | A0 KL | A25 KL | A25 KL delta | A0 Top-1 | A25 Top-1 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | `.085411` | `.090876` | `+6.40%` | `.87854` | `.88497` |
+| 1 | `.156804` | `.154114` | `-1.72%` | `.82076` | `.82718` |
+| 2 | `.205767` | `.212951` | `+3.49%` | `.78545` | `.78545` |
+| 3 | `.263433` | `.281484` | `+6.85%` | `.76833` | `.74532` |
+| 4 | `.302290` | `.342736` | `+13.38%` | `.74104` | `.71696` |
+| 5 | `.353558` | `.388892` | `+9.99%` | `.71910` | `.69342` |
+| 6 | `.403128` | `.434637` | `+7.82%` | `.68860` | `.67309` |
+| 7 | `.470211` | `.475894` | `+1.21%` | `.66132` | `.65971` |
+| 8 | `.532519` | `.520953` | `-2.17%` | `.63296` | `.64098` |
+| 9 | `.598485` | `.590595` | `-1.32%` | `.62012` | `.61958` |
+| 10 | `.663142` | `.649837` | `-2.01%` | `.60246` | `.60139` |
+| 11 | `.727606` | `.707891` | `-2.71%` | `.58320` | `.58694` |
+| 12 | `.775093` | `.754261` | `-2.69%` | `.56394` | `.57999` |
+| 13 | `.822580` | `.797732` | `-3.02%` | `.56340` | `.56501` |
+| 14 | `.861346` | `.837031` | `-2.82%` | `.55003` | `.55859` |
+| 15 | `.900642` | `.887262` | `-1.49%` | `.55217` | `.53986` |
 
 ### W2 role diagnostics
 
@@ -235,7 +282,7 @@ integrated into checkpoint save/load.
 
 | Arm | Disposition |
 | --- | --- |
-| A0 | Run at all rates; best-quality control. |
+| A0 | Run at all rates; production quality control. |
 | A1 | Run at all rates; exact and fast, but worse Q/K and aggregate local KL. |
 | A2 | Planned, not mislabeled as implemented: learned folded-basis fitting is absent and fails closed. Pruned after the fixed folded family missed the quality gate. |
 | A3 | Run at all rates; exact RoPE maps, rejected for Q/K post-quant error. |
@@ -255,7 +302,7 @@ integrated into checkpoint save/load.
 | A22 | Generated from evidence: retain Q/K and down H, fold SwiGLU. Promoted. |
 | A23 | Generated from A22: remove down H. Rejected by the down role. |
 | A24 | SwiGLU permutation/scaling only. Rejected because diagonal scaling worsened down quantization. |
-| A25 | V/O-only fold. Passes one-layer propagation and is the sole acceptable quality Pareto point; runtime gain is within noise. |
+| A25 | V/O-only fold. Passes one-layer and complete 16-layer W2 propagation; full-depth KL/L2 improve slightly while Top-1 regresses. Runtime gain is within noise. |
 | A26 | A24 plus V/O. Rejected with A24's down regression. |
 | A27 | Generated from A24 evidence: permutation-only SwiGLU fold. Rejected after propagated layer error rose 3.15x. |
 | A28 | A27 plus V/O fold. Locally dominated by A27 on quality. |
@@ -264,9 +311,12 @@ integrated into checkpoint save/load.
 
 ## Recommendation and production work
 
-Keep A0 as the production default. A25 is the productionization experiment and
-the fastest acceptable quality arm, but its 1.14% M1 median improvement is not
-yet material relative to p95/run-to-run variation. A25's exact remaining
+Keep A0 as the production default. The complete 16-layer W2 run strengthens
+A25 as the productionization experiment: it does not accumulate a KL or logits
+relative-L2 regression, although Top-1 identity is 1.23 percentage points lower.
+It is still not a default change because this is one held-out stream and its
+1.14% M1 median improvement is not material relative to p95/run-to-run
+variation. A25's exact remaining
 transforms are both sides of Q and K; V input only; O output only; and both
 sides of gate, up, and down. V output and O input are the two fully folded
 head-local maps. Q/K remain because the legal pair-local RoPE family cannot
@@ -298,6 +348,7 @@ Raw artifacts:
 - `artifacts/qvq_rotation_layer0_a29_w2_m4max.json`
 - `artifacts/qvq_rotation_layer0_a25_w2_m4max.json`
 - `artifacts/qvq_rotation_full16_a0_a25_w2_m4max.json` (interrupted after A0 layer 4)
+- `artifacts/qvq_rotation_full16_a0_a25_w2_a100_sm80.json` (complete A0/A25)
 - `artifacts/qvq_p32_mlx_m4max_smoke.json`
 - `artifacts/qvq_p32_mlx_m4max.json`
 
@@ -308,5 +359,8 @@ passes `409/409` tests. The broader 1,459-case QVQ/P32 matrix now passes 1,280
 tests with 179 skips and zero failures on this arm64 M4 Max. The 42 native CPU
 cases previously reported as failures are explicitly skipped because the
 extension's `qvq_cpu_supported()` contract is x86-64-only. Ruff and
-`git diff --check` also pass for the changed surface. No GitHub Actions result
-is claimed; these remain local M4 Max results.
+`git diff --check` also pass for the changed surface. On the CUDA host, the P32
+fitting smoke test passes; the selected generic QVQ, P32/LR, planner,
+folded-axis, and exact-P32 Ampere matrix passes 867 tests with 131 platform
+skips. No GitHub Actions result is claimed; hardware results are local to the
+M4 Max and SM80 hosts described above.

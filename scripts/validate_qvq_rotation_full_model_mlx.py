@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-"""Progressive full-model W2 validation for promoted QVQ folding arms on MPS.
+"""Progressive full-model W2 validation for promoted QVQ folding arms.
 
 The runner deliberately recaptures activations after every dependency group:
 Q/K/V, attention O, gate/up, then down.  Earlier quantized layers therefore
@@ -30,18 +30,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from gptqmodel.quantization.qvq import (
+from gptqmodel.quantization.qvq import (  # noqa: E402
     pack_qvq_bank_ids,
     pack_qvq_binary_bank_ids,
     quantize_qvq_linear,
 )
-from gptqmodel.quantization.qvq_transform_llama import LlamaQVQTransformImplementor
-from gptqmodel.quantization.qvq_transform_planner import (
+from gptqmodel.quantization.qvq_transform_llama import LlamaQVQTransformImplementor  # noqa: E402
+from gptqmodel.quantization.qvq_transform_planner import (  # noqa: E402
     ProjectionRole,
     QVQTransformPlanner,
 )
 
 MODEL_ID = "ModelCloud/Llama3.2-1B-Instruct"
+WIKITEXT_ID = "Salesforce/wikitext"
 ROLE_GROUPS = (
     (
         ProjectionRole.ATTENTION_Q,
@@ -68,7 +69,7 @@ def _write(path, payload):
 
 def _select_wikitext(split, count, seed):
     dataset = load_dataset(
-        "wikitext",
+        WIKITEXT_ID,
         "wikitext-2-raw-v1",
         split=split,
         download_mode=DownloadMode.REUSE_DATASET_IF_EXISTS,
@@ -109,11 +110,28 @@ def _encode(tokenizer, samples, max_length):
 
 
 def _sample_metadata(samples):
-    return [{key: value for key, value in sample.items() if key != "text"} for sample in samples]
+    return [
+        {key: value for key, value in sample.items() if key != "text"}
+        for sample in samples
+    ]
 
 
 def _device_inputs(encoded, device):
     return {key: value.to(device) for key, value in encoded.items()}
+
+
+def _synchronize(device):
+    if device.type == "cuda":
+        torch.cuda.synchronize(device)
+    elif device.type == "mps":
+        torch.mps.synchronize()
+
+
+def _empty_cache(device):
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
 
 
 @torch.inference_mode()
@@ -125,13 +143,20 @@ def _dense_reference(model, encoded, layers, device):
 
         def hook(_module, _inputs, output, _index=index):
             hidden = output[0] if isinstance(output, tuple) else output
-            layer_outputs[_index].append(hidden.detach().float().cpu().reshape(-1, hidden.shape[-1]))
+            layer_outputs[_index].append(
+                hidden.detach().float().cpu().reshape(-1, hidden.shape[-1])
+            )
 
         handles.append(layer.register_forward_hook(hook))
     try:
         for item in encoded:
             output = model(**_device_inputs(item, device), use_cache=False)
-            logits.append(output.logits.detach().float().cpu().reshape(-1, output.logits.shape[-1]))
+            logits.append(
+                output.logits.detach()
+                .float()
+                .cpu()
+                .reshape(-1, output.logits.shape[-1])
+            )
     finally:
         for handle in handles:
             handle.remove()
@@ -156,7 +181,9 @@ def _evaluate(model, encoded, dense_logits, dense_layers, device, *, layer_indic
 
         def hook(_module, _inputs, output, _index=layer_index):
             hidden = output[0] if isinstance(output, tuple) else output
-            current_layers[_index] = hidden.detach().float().reshape(-1, hidden.shape[-1])
+            current_layers[_index] = (
+                hidden.detach().float().reshape(-1, hidden.shape[-1])
+            )
 
         handles.append(layer.register_forward_hook(hook))
     try:
@@ -196,7 +223,9 @@ def _evaluate(model, encoded, dense_logits, dense_layers, device, *, layer_indic
             for layer_index in layer_indices:
                 actual_layer = current_layers[layer_index]
                 target_layer = dense_layers[layer_index][sample_index].to(device)
-                layer_delta_sq[layer_index] += float((actual_layer - target_layer).square().sum())
+                layer_delta_sq[layer_index] += float(
+                    (actual_layer - target_layer).square().sum()
+                )
                 layer_reference_sq[layer_index] += float(target_layer.square().sum())
             del output, actual, target_logits, delta
     finally:
@@ -241,8 +270,8 @@ def _capture(model, encoded, names, device):
     return {name: torch.cat(values) for name, values in rows.items()}
 
 
-def _quantize_module(module, descriptor, inputs, bits, seed):
-    inputs = inputs.to("mps")
+def _quantize_module(module, descriptor, inputs, bits, seed, device):
+    inputs = inputs.to(device)
     weight = module.weight.detach().float()
     hessian = inputs.T @ inputs / inputs.shape[0]
     dense_output = inputs @ weight.T
@@ -260,7 +289,7 @@ def _quantize_module(module, descriptor, inputs, bits, seed):
         v2b2_p32=True,
         bank_count=2,
     )
-    torch.mps.synchronize()
+    _synchronize(device)
     fit_seconds = time.perf_counter() - started
     quantized_output = inputs @ result.weight.T
     output_delta = quantized_output - dense_output
@@ -279,9 +308,17 @@ def _quantize_module(module, descriptor, inputs, bits, seed):
             if result.bank_selector_bits == 1
             else pack_qvq_bank_ids(result.bank_ids)
         )
-    tensors = (result.trellis, result.SU, result.SV, packed_bank_ids, result.bank_alt_id)
+    tensors = (
+        result.trellis,
+        result.SU,
+        result.SV,
+        packed_bank_ids,
+        result.bank_alt_id,
+    )
     storage_bits = sum(
-        tensor.numel() * tensor.element_size() * 8 for tensor in tensors if tensor is not None
+        tensor.numel() * tensor.element_size() * 8
+        for tensor in tensors
+        if tensor is not None
     )
     record = {
         "module": descriptor.module_name,
@@ -300,94 +337,181 @@ def _quantize_module(module, descriptor, inputs, bits, seed):
     with torch.inference_mode():
         module.weight.copy_(result.weight)
     del result, hessian, inputs, dense_output, quantized_output, output_delta
-    torch.mps.empty_cache()
+    _empty_cache(device)
     return record
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--arms", type=_csv, default=("A0", "A25"))
-    parser.add_argument("--bits", type=float, default=2.0, choices=(1, 1.5, 2, 2.5, 3, 3.5))
+    parser.add_argument(
+        "--bits", type=float, default=2.0, choices=(1, 1.5, 2, 2.5, 3, 3.5)
+    )
     parser.add_argument("--seed", type=int, default=20260831)
     parser.add_argument("--calibration-samples", type=int, default=16)
     parser.add_argument("--validation-samples", type=int, default=16)
     parser.add_argument("--sequence-length", type=int, default=128)
+    parser.add_argument("--device", choices=("auto", "cuda", "mps"), default="auto")
+    parser.add_argument("--model", default=MODEL_ID)
+    parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="preserve completed arms in an existing compatible JSON artifact",
+    )
     parser.add_argument(
         "--json",
         type=Path,
-        default=REPO_ROOT / "artifacts/qvq_rotation_full16_a0_a25_w2_m4max.json",
+        default=None,
     )
     args = parser.parse_args()
-    if not torch.backends.mps.is_available():
-        parser.error("MPS is required")
+    device_name = args.device
+    if device_name == "auto":
+        device_name = "cuda" if torch.cuda.is_available() else "mps"
+    if device_name == "cuda" and not torch.cuda.is_available():
+        parser.error("CUDA is not available")
+    if device_name == "mps" and not torch.backends.mps.is_available():
+        parser.error("MPS is not available")
+    device = torch.device(device_name)
+    if args.json is None:
+        device_suffix = "cuda" if device.type == "cuda" else "m4max"
+        args.json = (
+            REPO_ROOT / f"artifacts/qvq_rotation_full16_a0_a25_w2_{device_suffix}.json"
+        )
     if args.calibration_samples <= 0 or args.validation_samples <= 0:
         parser.error("sample counts must be positive")
     if args.sequence_length <= 0:
         parser.error("sequence length must be positive")
 
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model,
+        local_files_only=args.local_files_only,
+    )
     calibration_samples = _select_wikitext("train", args.calibration_samples, args.seed)
-    validation_samples = _select_wikitext("validation", args.validation_samples, args.seed + 1)
+    validation_samples = _select_wikitext(
+        "validation", args.validation_samples, args.seed + 1
+    )
     calibration = _encode(tokenizer, calibration_samples, args.sequence_length)
     validation = _encode(tokenizer, validation_samples, args.sequence_length)
 
     reference_started = time.perf_counter()
-    reference_model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
-        local_files_only=True,
-        dtype=torch.float32,
-        low_cpu_mem_usage=True,
-    ).eval().to("mps")
+    reference_model = (
+        AutoModelForCausalLM.from_pretrained(
+            args.model,
+            local_files_only=args.local_files_only,
+            dtype=torch.float32,
+            low_cpu_mem_usage=True,
+        )
+        .eval()
+        .to(device)
+    )
     layer_count = len(reference_model.model.layers)
+    model_revision = getattr(reference_model.config, "_commit_hash", None)
     if layer_count != 16:
-        raise RuntimeError(f"expected Llama 3.2 1B to have 16 layers, found {layer_count}")
+        raise RuntimeError(
+            f"expected Llama 3.2 1B to have 16 layers, found {layer_count}"
+        )
     dense_logits, dense_layers = _dense_reference(
         reference_model,
         validation,
         reference_model.model.layers,
-        "mps",
+        device,
     )
     del reference_model
     gc.collect()
-    torch.mps.empty_cache()
+    _empty_cache(device)
 
-    payload = {
+    new_payload = {
         "schema": "qvq.rotation-folding.full-model-propagation.v1",
         "status": "running",
-        "model": MODEL_ID,
-        "device": "mps",
+        "model": args.model,
+        "model_revision": model_revision,
+        "device": str(device),
+        "device_name": (
+            torch.cuda.get_device_name(device) if device.type == "cuda" else "Apple MPS"
+        ),
         "bits": args.bits,
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda,
+        "device_capability": (
+            list(torch.cuda.get_device_capability(device))
+            if device.type == "cuda"
+            else None
+        ),
         "layer_count": layer_count,
         "seed": args.seed,
         "sequence_length": args.sequence_length,
-        "calibration_source": "wikitext/wikitext-2-raw-v1:train",
-        "validation_source": "wikitext/wikitext-2-raw-v1:validation",
+        "calibration_source": f"{WIKITEXT_ID}/wikitext-2-raw-v1:train",
+        "validation_source": f"{WIKITEXT_ID}/wikitext-2-raw-v1:validation",
         "final_evaluation_source": "reserved wikitext test split (not read)",
         "calibration": _sample_metadata(calibration_samples),
         "validation": _sample_metadata(validation_samples),
         "reference_seconds": time.perf_counter() - reference_started,
         "arms": {},
     }
+    if args.resume and args.json.exists():
+        payload = json.loads(args.json.read_text(encoding="utf-8"))
+        expected = {
+            "schema": new_payload["schema"],
+            "model": new_payload["model"],
+            "device": new_payload["device"],
+            "bits": new_payload["bits"],
+            "layer_count": new_payload["layer_count"],
+            "seed": new_payload["seed"],
+            "sequence_length": new_payload["sequence_length"],
+            "calibration": new_payload["calibration"],
+            "validation": new_payload["validation"],
+        }
+        mismatches = {
+            key: (payload.get(key), value)
+            for key, value in expected.items()
+            if payload.get(key) != value
+        }
+        if mismatches:
+            raise RuntimeError(f"resume artifact is incompatible: {mismatches}")
+        prior_revision = payload.get("model_revision")
+        if prior_revision is not None and prior_revision != model_revision:
+            raise RuntimeError(
+                "resume artifact has a different model revision: "
+                f"{prior_revision!r} != {model_revision!r}"
+            )
+        for key in (
+            "model_revision",
+            "device_name",
+            "torch_version",
+            "cuda_version",
+            "device_capability",
+        ):
+            payload[key] = new_payload[key]
+        payload["status"] = "running"
+        payload["resume_reference_seconds"] = time.perf_counter() - reference_started
+    else:
+        payload = new_payload
     _write(args.json, payload)
 
     for arm in args.arms:
+        if payload["arms"].get(arm, {}).get("status") == "complete":
+            print(
+                f"{arm}: already complete; preserving checkpointed result", flush=True
+            )
+            continue
         arm_started = time.perf_counter()
         model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID,
-            local_files_only=True,
+            args.model,
+            local_files_only=args.local_files_only,
             dtype=torch.float32,
             low_cpu_mem_usage=True,
         ).eval()
         planner = QVQTransformPlanner(model, LlamaQVQTransformImplementor())
         plan = planner.build_transform_plan(arm)
         rewrite = planner.rewrite_dense_weights(plan, seed=args.seed)
-        model.to("mps")
+        model.to(device)
         dense_parity = _evaluate(
             model,
             validation,
             dense_logits,
             dense_layers,
-            "mps",
+            device,
             layer_indices=range(layer_count),
         )
         arm_payload = {
@@ -416,7 +540,7 @@ def main():
                     model,
                     calibration,
                     [item.module_name for item in descriptors],
-                    "mps",
+                    device,
                 )
                 for descriptor in descriptors:
                     record = _quantize_module(
@@ -425,6 +549,7 @@ def main():
                         captured[descriptor.module_name],
                         args.bits,
                         args.seed,
+                        device,
                     )
                     arm_payload["modules"].append(record)
                     print(
@@ -435,13 +560,13 @@ def main():
                     )
                 del captured
                 gc.collect()
-                torch.mps.empty_cache()
+                _empty_cache(device)
             trajectory = _evaluate(
                 model,
                 validation,
                 dense_logits,
                 dense_layers,
-                "mps",
+                device,
                 layer_indices=(layer_index,),
             )
             trajectory["through_layer"] = layer_index
@@ -460,11 +585,13 @@ def main():
             validation,
             dense_logits,
             dense_layers,
-            "mps",
+            device,
             layer_indices=range(layer_count),
         )
         storage_bits = sum(item["storage_bits"] for item in arm_payload["modules"])
-        weight_elements = sum(item["weight_elements"] for item in arm_payload["modules"])
+        weight_elements = sum(
+            item["weight_elements"] for item in arm_payload["modules"]
+        )
         arm_payload.update(
             {
                 "metrics": full_metrics,
@@ -476,7 +603,7 @@ def main():
         _write(args.json, payload)
         del model
         gc.collect()
-        torch.mps.empty_cache()
+        _empty_cache(device)
 
     payload["status"] = "complete"
     _write(args.json, payload)
