@@ -260,6 +260,18 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     tasks.add_argument(
+        "--loglikelihood-prefix-cache-prewarm-batch-size",
+        type=int,
+        default=None,
+        help="Maximum number of distinct prefixes in one prewarm forward (default: 32).",
+    )
+    tasks.add_argument(
+        "--loglikelihood-prefix-cache-release-after-group",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Release scorer prefix KV entries after the MMLU subject group completes.",
+    )
+    tasks.add_argument(
         "--loglikelihood-prefix-cache-min-tokens",
         type=int,
         default=None,
@@ -1507,6 +1519,8 @@ def _tasks(args: argparse.Namespace) -> int:
         "cuda_graph_requested": list(graph_request) if graph_request is not None else None,
         "loglikelihood_prefix_cache": args.loglikelihood_prefix_cache,
         "loglikelihood_prefix_cache_prewarm": args.loglikelihood_prefix_cache_prewarm,
+        "loglikelihood_prefix_cache_prewarm_batch_size": args.loglikelihood_prefix_cache_prewarm_batch_size,
+        "loglikelihood_prefix_cache_release_after_group": args.loglikelihood_prefix_cache_release_after_group,
         "loglikelihood_prefix_cache_min_tokens": args.loglikelihood_prefix_cache_min_tokens,
         "loglikelihood_prefix_cache_max_entries": args.loglikelihood_prefix_cache_max_entries,
         "max_rows": args.max_rows,
@@ -1572,6 +1586,8 @@ def _tasks(args: argparse.Namespace) -> int:
                             "max_cached_graphs": args.max_cached_graphs,
                             "loglikelihood_prefix_cache": args.loglikelihood_prefix_cache,
                             "loglikelihood_prefix_cache_prewarm": args.loglikelihood_prefix_cache_prewarm,
+                            "loglikelihood_prefix_cache_prewarm_batch_size": args.loglikelihood_prefix_cache_prewarm_batch_size,
+                            "loglikelihood_prefix_cache_release_after_group": args.loglikelihood_prefix_cache_release_after_group,
                             "loglikelihood_prefix_cache_min_tokens": args.loglikelihood_prefix_cache_min_tokens,
                             "loglikelihood_prefix_cache_max_entries": args.loglikelihood_prefix_cache_max_entries,
                         }.items()

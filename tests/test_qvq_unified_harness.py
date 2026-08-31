@@ -314,11 +314,16 @@ def test_qvq_evaluate_parser_exposes_prefix_cache_prewarm():
             "result.json",
             "--loglikelihood-prefix-cache",
             "--loglikelihood-prefix-cache-prewarm",
+            "--loglikelihood-prefix-cache-prewarm-batch-size",
+            "32",
+            "--loglikelihood-prefix-cache-release-after-group",
         ]
     )
 
     assert args.loglikelihood_prefix_cache is True
     assert args.loglikelihood_prefix_cache_prewarm is True
+    assert args.loglikelihood_prefix_cache_prewarm_batch_size == 32
+    assert args.loglikelihood_prefix_cache_release_after_group is True
 
 
 def test_qvq_evaluate_exposes_full_mmlu_humanities_category():
