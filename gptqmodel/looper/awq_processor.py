@@ -214,6 +214,7 @@ class AWQProcessor(LoopProcessor):
         self._feature_stats: Dict[str, Dict[str, Any]] = {}
         self._scale_feature_by_module: Dict[str, str] = {}
         self._feature_task_names: Set[str] = set()
+        self._awq_feature_kwargs: Dict[str, Dict[str, Any]] = {}
         self._rotary_lock = threading.Lock()
         self._rotary_cache: Dict[str, nn.Module] = {}
         self._rotary_source_id: Optional[int] = None
@@ -1028,6 +1029,38 @@ class AWQProcessor(LoopProcessor):
                 return retained_tokens
         return self._nsamples_total
 
+    def _finalize_quantized_layer(
+        self,
+        state: _AWQLayerState,
+        fallback_task_names: Optional[Set[str]] = None,
+    ) -> None:
+        """Release all per-layer AWQ state after a successful completion."""
+
+        state.quantized = True
+        state.modules.clear()
+        state.pending_modules.clear()
+        state.layer_module = None
+        state.processed_subsets.clear()
+        state.subset_total = None
+        state.previous_weight_scale = None
+
+        task_names = self._feature_task_names or (fallback_task_names or set())
+        with self.lock:
+            for name in task_names:
+                task_entry = self.tasks.pop(name, None)
+                if task_entry and "inputs" in task_entry:
+                    task_entry["inputs"].clear()
+
+        self._feature_task_names = set()
+        self._feature_stats = {}
+        self._scale_feature_by_module = {}
+        self._awq_feature_kwargs = {}
+
+        if hasattr(self._scale_context, "layer_index"):
+            delattr(self._scale_context, "layer_index")
+        if hasattr(self._scale_context, "prev_scale"):
+            delattr(self._scale_context, "prev_scale")
+
     def _quantize_layer_fallback(
         self,
         layer_index: int,
@@ -1058,24 +1091,7 @@ class AWQProcessor(LoopProcessor):
         else:
             log.warning("AWQProcessor: layer %s had no supported modules to quantize.", layer_index)
 
-        state.quantized = True
-        state.modules.clear()
-        state.pending_modules.clear()
-        state.layer_module = None
-        state.processed_subsets.clear()
-        state.subset_total = None
-        state.previous_weight_scale = None
-
-        with self.lock:
-            for name in list(named_childs.keys()):
-                task_entry = self.tasks.pop(name, None)
-                if task_entry and "inputs" in task_entry:
-                    task_entry["inputs"].clear()
-
-        if hasattr(self._scale_context, "layer_index"):
-            delattr(self._scale_context, "layer_index")
-        if hasattr(self._scale_context, "prev_scale"):
-            delattr(self._scale_context, "prev_scale")
+        self._finalize_quantized_layer(state, fallback_task_names=set(named_childs))
 
     def _refresh_forward_kwargs_from_cache(self) -> None:
         """Refreshes cached kwargs such as masks and rotary embeddings for AWQ search."""
@@ -1247,17 +1263,7 @@ class AWQProcessor(LoopProcessor):
                 "AWQProcessor: no module configuration generated for layer index %s; skipping quantization.",
                 layer_index,
             )
-            state.quantized = True
-            state.modules.clear()
-            state.pending_modules.clear()
-            state.layer_module = None
-            state.processed_subsets.clear()
-            state.subset_total = None
-            state.previous_weight_scale = None
-            if hasattr(self._scale_context, "layer_index"):
-                delattr(self._scale_context, "layer_index")
-            if hasattr(self._scale_context, "prev_scale"):
-                delattr(self._scale_context, "prev_scale")
+            self._finalize_quantized_layer(state, fallback_task_names=set(named_childs))
             return
 
         sanitized_module_config: List[Dict] = []
@@ -1342,14 +1348,7 @@ class AWQProcessor(LoopProcessor):
                 "AWQProcessor: no valid scaling groups for layer %s after filtering; marking layer as quantized.",
                 layer_index,
             )
-            state.quantized = True
-            state.processed_subsets.clear()
-            state.subset_total = None
-            state.previous_weight_scale = None
-            if hasattr(self._scale_context, "layer_index"):
-                delattr(self._scale_context, "layer_index")
-            if hasattr(self._scale_context, "prev_scale"):
-                delattr(self._scale_context, "prev_scale")
+            self._finalize_quantized_layer(state, fallback_task_names=set(named_childs))
             return
 
         sample_groups = []
@@ -1451,27 +1450,7 @@ class AWQProcessor(LoopProcessor):
             )
             self.apply_quant(fallback_named_childs, scales_list=[])
 
-        state.quantized = True
-        state.modules.clear()
-        state.pending_modules.clear()
-        state.layer_module = None
-        state.processed_subsets.clear()
-        state.subset_total = None
-        state.previous_weight_scale = None
-
-        with self.lock:
-            for name in self._feature_task_names or set(named_childs):
-                task_entry = self.tasks.pop(name, None)
-                if task_entry and "inputs" in task_entry:
-                    task_entry["inputs"].clear()
-        self._feature_task_names = set()
-        self._feature_stats = {}
-        self._scale_feature_by_module = {}
-
-        if hasattr(self._scale_context, "layer_index"):
-            delattr(self._scale_context, "layer_index")
-        if hasattr(self._scale_context, "prev_scale"):
-            delattr(self._scale_context, "prev_scale")
+        self._finalize_quantized_layer(state, fallback_task_names=set(named_childs))
 
     @torch.inference_mode()
     def _search_best_scale(

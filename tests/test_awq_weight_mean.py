@@ -19,6 +19,7 @@ from gptqmodel.looper.awq_processor import (
     _AWQLayerState,
     _compute_awq_weight_mean,
 )
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.models.base import generate_node_for_awq_scaling
 from gptqmodel.models.definitions.minimax_m2 import MiniMaxM2GPTQ
 from gptqmodel.models.definitions.mixtral import MixtralQModel
@@ -396,6 +397,83 @@ def test_awq_fallback_uses_raw_token_row_coverage_but_retained_latest_batch_rows
 
     processor._feature_stats[module_name]["mode"] = "token_rows"
     assert processor._should_fallback_group([module_name], input_feat) is False
+
+
+@pytest.mark.parametrize("completion_path", ["no_config", "no_valid_groups"])
+def test_awq_early_layer_completion_releases_all_feature_state(completion_path):
+    processor = _TestAWQProcessor(
+        QuantizeConfig(
+            quant_method=METHOD.AWQ,
+            format=FORMAT.GEMM,
+            group_size=128,
+        )
+    )
+    layer = nn.Module()
+    layer.mlp = nn.Module()
+    layer.mlp.proj = nn.Linear(4, 4, bias=False)
+    named_proj = NamedModule(
+        layer.mlp.proj,
+        name="mlp.proj",
+        full_name="model.layers.0.mlp.proj",
+        layer_index=0,
+    )
+    state = _AWQLayerState(
+        modules={"mlp.proj": named_proj},
+        subset_total=2,
+        processed_subsets={0, 1},
+        layer_module=layer,
+        previous_weight_scale=0.5,
+        pending_modules={"mlp.proj"},
+    )
+    processor.tasks["mlp.proj"] = {
+        "inputs": [torch.ones(1, 2, 4)],
+        "batch_indices": [0],
+    }
+    processor.tasks["mlp"] = {
+        "inputs": [torch.ones(1, 2, 4)],
+        "batch_indices": [0],
+    }
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows", "capture_root": True}
+        if name == "mlp"
+        else {"mode": "token_rows"}
+        if name == "mlp.proj"
+        else None
+    )
+
+    if completion_path == "no_config":
+        processor.gptq_model.awq_get_modules_for_scaling = (
+            lambda _layer, _features, _kwargs: []
+        )
+    else:
+        mismatched_prev = nn.Linear(3, 5, bias=False)
+        processor.gptq_model.awq_get_modules_for_scaling = (
+            lambda _layer, features, _kwargs: [
+                {
+                    "prev_op": mismatched_prev,
+                    "layers": [layer.mlp.proj],
+                    "inp": features["mlp.proj"],
+                }
+            ]
+        )
+
+    processor._quantize_layer(layer_index=0, state=state)
+
+    assert state.quantized is True
+    assert state.modules == {}
+    assert state.pending_modules == set()
+    assert state.layer_module is None
+    assert state.processed_subsets == set()
+    assert state.subset_total is None
+    assert state.previous_weight_scale is None
+    assert "mlp" not in processor.tasks
+    assert "mlp.proj" not in processor.tasks
+    assert processor._feature_task_names == set()
+    assert processor._feature_stats == {}
+    assert processor._scale_feature_by_module == {}
+    assert processor._awq_feature_kwargs == {}
+    assert not hasattr(processor._scale_context, "layer_index")
+    assert not hasattr(processor._scale_context, "prev_scale")
 
 
 def test_awq_moe_root_capture_deduplicates_subsets_and_is_collapsed():
