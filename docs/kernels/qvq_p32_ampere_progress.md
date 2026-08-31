@@ -509,6 +509,7 @@ more decode instructions without expanding the compact state representation.
 | 128-thread split reducer | An isolated full-KV run appeared faster, but the complete M1 subset with recorded tuner plans regressed from 0.058178 ms to 0.058862 ms (1.18%). At the same split 64, all four full-KV rates were 3-9% slower. | Rejected and restored to 256 threads; extra reducer blocks do not offset lower per-block throughput. |
 | Warp-leader split-bound division | Replacing each thread's uniform K-range divisions with lane-zero division and two shuffles was neutral for M1 full-KV and regressed M16 full-KV from 0.034293 ms to 0.035069 ms (2.26%). | Rejected and reverted; retain the compiler's uniform runtime division. |
 | Host-computed alternate-bank mask | Passing the uniform decoded mask instead of deriving it per thread left matched M1 full-KV exactly unchanged at 0.034557 ms; M16 Q/KV results mixed one-tick gains and losses. | Rejected and reverted; retain the simpler bank-ID kernel interface. |
+| 512-thread reducer for M8/M16 | M16 regressed from 0.089626 ms to 0.096331 ms (7.48%). At the same split 32, full-KV lost 3-12% and three MLP-down rates lost 73-79%. | Rejected and reverted; 256 threads remain the best broad reducer geometry. |
 
 ## Post-merge origin/main baseline (v11)
 
