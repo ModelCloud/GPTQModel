@@ -6,8 +6,8 @@ discarded experiments so later tuning does not repeat unsafe variants.
 
 ## Contract and target
 
-- Source base: freshly fetched GitHub `origin/main` at `db785848` (tip after
-  PR #85 merged).
+- Source base: freshly fetched GitHub `origin/main` at `ab277a17` (tip after
+  PR #86 merged).
 - Device: physical GPU 0, `NVIDIA PG506-230`, UUID
   `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`, CC 8.0, 124 SMs, 96 GiB.
 - Software: PyTorch 2.13.0+cu130; CUDA runtime 13.0; NVCC 13.3.
@@ -721,6 +721,19 @@ median latency geomeans fall from 0.061476 ms to 0.059119 ms for M1 (3.83%),
 lower latency. Maximum absolute error remains 0.000080109. Planar timings are
 excluded from every improvement figure. The result is stored in
 `artifacts/a100_p32_window/qwen38_v13_cached_op_all_eee8ad01.json`.
+
+### Post-merge v14 baseline
+
+PR #86 merged as `ab277a17`. This optimization window uses that exact
+`origin/main` tip as its Ampere-kernel control, with default-on in-process
+autotuning for both controls and candidates. Planar timings remain diagnostic
+and are excluded from all improvement calculations.
+
+The clean 20-warmup/100-iteration, 140-case control is stored in
+`artifacts/a100_p32_window/qwen38_newmain_all_ab277a17.json`. Ampere median
+latency geomeans are 0.057948 ms (M1), 0.064170 ms (M2), 0.073818 ms (M4),
+0.086108 ms (M8), and 0.089626 ms (M16), with an all-case geomean of
+0.073316 ms. Maximum absolute error is 0.000080109.
 
 ## Reproduction
 
