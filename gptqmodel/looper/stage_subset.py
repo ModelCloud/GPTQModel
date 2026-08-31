@@ -498,24 +498,41 @@ def build_subset_plan(
                         for module_name in moe_groups[group_key]:
                             forward_device_map[module_name] = target_device
 
-        if forward_device_map:
-            # Once either dense or expert placement is explicit, anchor every
-            # untouched module back to its baseline placement so stale quant
-            # devices never leak into a later subset forward.
-            baseline_devices = _resolve_forward_baseline_devices(
-                subset=subset,
-                full=full,
-            )
-            for module_name, baseline_device in baseline_devices.items():
-                forward_device_map.setdefault(module_name, baseline_device)
+    # A model may keep selected leaf modules on CPU even while replaying their layer on GPU.
+    placement_override = getattr(looper.gptq_model, "forward_device_for_module", None)
+    placement_override_active = getattr(looper.gptq_model, "has_forward_device_overrides", None)
+    placement_override_active = (
+        callable(placement_override)
+        and callable(placement_override_active)
+        and placement_override_active()
+    )
 
-            for module_name, named_module in subset.items():
-                preferred_device = forward_device_map.get(module_name)
-                if preferred_device is not None:
-                    named_module.state["preferred_quant_device"] = preferred_device
+    if forward_device_map or placement_override_active:
+        # Start from each leaf's current device so an excluded tensor is never
+        # moved implicitly with its parent layer.
+        baseline_devices = _resolve_forward_baseline_devices(
+            subset=subset,
+            full=full,
+        )
+        for module_name, baseline_device in baseline_devices.items():
+            forward_device_map.setdefault(module_name, baseline_device)
 
-            restore_forward_device_overrides = False
-            subset_forward_serial = True
+        if placement_override_active:
+            for module_name, planned_device in list(forward_device_map.items()):
+                module_ref = subset.get(module_name)
+                if module_ref is None and full is not None:
+                    module_ref = full.get(module_name)
+                actual_module = module_ref.module if isinstance(module_ref, NamedModule) else module_ref
+                if actual_module is not None:
+                    forward_device_map[module_name] = placement_override(actual_module, planned_device)
+
+        for module_name, named_module in subset.items():
+            preferred_device = forward_device_map.get(module_name)
+            if preferred_device is not None:
+                named_module.state["preferred_quant_device"] = preferred_device
+
+        restore_forward_device_overrides = False
+        subset_forward_serial = True
 
     auto_forward_data_parallel = getattr(
         looper.gptq_model.quantize_config,

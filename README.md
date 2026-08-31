@@ -21,6 +21,7 @@
 
 ## Latest News 🗞️🚀
 
+* 08/31/2026 7.4.0-dev `main`: ✨ Added Qwen3.8-Flash-Next (`qwen4_exp`) quantization.
 * 08/26/2026 7.4.0-dev `main`: ✨ Added NVIDIA `LocateAnything-3B` quantization support.
 * 08/25/2026 7.4.0-dev `main`: ✨ Added Tencent `HunyuanOCR` quantization support.
 * 08/25/2026 7.4.0-dev `main`: ✨ Added `lm_head` and embedding quantization lifecycle.
@@ -255,7 +256,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 
 | Model                         |   |                                 |  |                            |  |                                 |  |                        |   |
 |-------------------------------|---|---------------------------------|--|----------------------------|--|---------------------------------|--|------------------------|---|
-| Apertus                       | ✅ | EXAONE 3/4                      | ✅ | Dots1                      | ✅ | Mistral3 / Ministral3           | ✅ | Qwen 2/3/3.5 (Next/MoE) | ✅ |
+| Apertus                       | ✅ | EXAONE 3/4                      | ✅ | Dots1                      | ✅ | Mistral3 / Ministral3           | ✅ | Qwen 2/3/3.5/3.8 (Next/MoE) | ✅ |
 | Baichuan                      | ✅ | Falcon (H1 / Mamba)             | ✅ | InternLM 1/2/2.5           | ✅ | Mixtral                         | ✅ | Qwen 2/2.5/3 VL        | ✅ |
 | Bloom                         | ✅ | FastVLM                         | ✅ | Kimi K2                    | ✅ | MobileLLM                       | ✅ | Qwen 2.5/3 Omni        | ✅ |
 | ChatGLM                       | ✅ | Gemma 1-4 / 3n                  | ✅ | Klear                      | ✅ | MOSS                            | ✅ | RefinedWeb             | ✅ |

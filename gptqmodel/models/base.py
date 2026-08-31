@@ -291,6 +291,9 @@ class BaseQModel(nn.Module):
     # so `defuser_module_paths` is used to explicitly locate and defuse them.
     defuser_module_paths = None
 
+    # Multimodal wrappers can reuse the checkpoint rules of their text model.
+    hf_conversion_model_type_alias: Optional[str] = None
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -487,6 +490,15 @@ class BaseQModel(nn.Module):
         configured_map = getattr(cls, "HF_CONVERSION_MAP_REVERSED", None)
         if configured_map is not None:
             return copy.deepcopy(configured_map)
+
+        model_type_alias = getattr(cls, "hf_conversion_model_type_alias", None)
+        if model_type_alias:
+            inferred_map = LazyTurtle.infer_hf_conversion_map_reversed(
+                target_model=target_model,
+                model_type=model_type_alias,
+            )
+            if inferred_map is not None:
+                return copy.deepcopy(inferred_map)
 
         inferred_map = LazyTurtle.infer_hf_conversion_map_reversed(target_model=target_model)
         return copy.deepcopy(inferred_map) if inferred_map is not None else None
@@ -1972,6 +1984,35 @@ class BaseQModel(nn.Module):
             return move_to(module, device=self.quantize_config.device)
         else:
             return module
+
+    def forward_device_for_module(self, module: nn.Module, planned_device: torch.device) -> torch.device:
+        """Apply model-declared placement exclusions to subset replay planning."""
+
+        turtle_model = self.turtle_model
+        if not isinstance(turtle_model, LazyTurtle):
+            return planned_device
+
+        # LazyTurtle matches exclusions by dotted parameter path, not module type.
+        module_paths = getattr(self, "_forward_module_paths_by_id", None)
+        if module_paths is None or id(module) not in module_paths:
+            module_paths = {id(candidate): name for name, candidate in self.model.named_modules() if name}
+            self._forward_module_paths_by_id = module_paths
+        module_path = module_paths.get(id(module))
+        if module_path is None:
+            return planned_device
+        # Check only tensors owned by this leaf; descendants receive their own plan entry.
+        for rel_name, _ in module.named_parameters(recurse=False):
+            if turtle_model.is_no_placement_tensor(module_path, rel_name):
+                return torch.device(CPU)
+        return planned_device
+
+    def has_forward_device_overrides(self) -> bool:
+        """Return whether replay must preserve model-declared tensor placement."""
+
+        turtle_model = self.turtle_model
+        return isinstance(turtle_model, LazyTurtle) and bool(
+            getattr(turtle_model, "_no_placement_params", ())
+        )
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         #return self.offload_to_disk(module=module)

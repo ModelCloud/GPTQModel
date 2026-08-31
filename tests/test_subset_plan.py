@@ -368,6 +368,71 @@ def test_build_subset_plan_dense_balanced_keeps_qkv_group_together():
     assert subset["self_attn.v_proj"].state["preferred_quant_device"] == torch.device("cuda:0")
 
 
+def test_build_subset_plan_honors_model_forward_device_override():
+    looper = _make_looper()
+    looper._quant_devices = [torch.device("cuda:0")]
+    looper._dense_quant_devices = [torch.device("cuda:0")]
+    looper._dense_vram_strategy_explicit = True
+
+    processor = _StubProcessor(ExecutionConfig(require_fwd=True))
+    subset = {"ple.key_proj": _make_named_module("ple.key_proj")}
+    ngram_embedding = torch.nn.Embedding(8, 4)
+    full = {
+        "ple.key_proj": subset["ple.key_proj"].module,
+        "ple.ple_embedding.ngram_embedding": ngram_embedding,
+    }
+    looper.gptq_model.forward_device_for_module = (
+        lambda module, planned_device: torch.device("cpu") if module is ngram_embedding else planned_device
+    )
+    looper.gptq_model.has_forward_device_overrides = lambda: True
+
+    plan = build_subset_plan(
+        looper,
+        processor=processor,
+        subset=subset,
+        subset_index=0,
+        subset_total=1,
+        full=full,
+        fallback=True,
+        layer_inputs=[[torch.zeros(1, 4)]],
+        planning_layer_modules=_planning_blocks(("ple.ple_embedding:!", "ple.key_proj")),
+    )
+
+    assert plan.forward_device_map["ple.key_proj"] == torch.device("cuda:0")
+    assert plan.forward_device_map["ple.ple_embedding.ngram_embedding"] == torch.device("cpu")
+
+
+def test_build_subset_plan_activates_model_override_without_explicit_vram_strategy():
+    looper = _make_looper()
+    processor = _StubProcessor(ExecutionConfig(require_fwd=True))
+    subset = {"mlp.experts.0.gate_proj": _make_named_module("mlp.experts.0.gate_proj")}
+    ngram_embedding = torch.nn.Embedding(8, 4)
+    full = {
+        "mlp.experts.0.gate_proj": subset["mlp.experts.0.gate_proj"].module,
+        "ple.ple_embedding.ngram_embedding": ngram_embedding,
+    }
+    looper.gptq_model.forward_device_for_module = (
+        lambda module, planned_device: torch.device("cpu") if module is ngram_embedding else planned_device
+    )
+    looper.gptq_model.has_forward_device_overrides = lambda: True
+
+    plan = build_subset_plan(
+        looper,
+        processor=processor,
+        subset=subset,
+        subset_index=0,
+        subset_total=2,
+        full=full,
+        fallback=True,
+        layer_inputs=[[torch.zeros(1, 4)]],
+        planning_layer_modules=_planning_blocks(("mlp.experts.0.gate_proj",)),
+    )
+
+    assert plan.forward_device_map["ple.ple_embedding.ngram_embedding"] == torch.device("cpu")
+    assert plan.forward_mode == "serial"
+    assert plan.restore_forward_device_overrides is False
+
+
 def test_build_subset_plan_split_pools_pin_dense_subset_and_balance_experts():
     looper = _make_looper()
     looper._quant_devices = [

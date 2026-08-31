@@ -16,7 +16,7 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import torch
@@ -29,7 +29,7 @@ from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
-    _marlin_capability_supported,
+    _marlin_all_visible_devices_supported,
     _transform_param,
     apply_gptq_marlin_linear,
     apply_gptq_marlin_linear_padded,
@@ -49,6 +49,7 @@ from ...utils.marlin import (
     marlin_runtime_available,
     marlin_runtime_error,
     marlin_sort_g_idx,
+    marlin_validate_runtime_device,
     replace_parameter,
 )
 from ...utils.marlin_scalar_type import scalar_types
@@ -56,6 +57,10 @@ from ...utils.rocm import IS_ROCM
 
 
 log = setup_logger()
+
+# SM 7.5 is supported through the FP16-only Turing path.
+_MARLIN_SM75_CAPABILITY = (7, 5)
+_MARLIN_MIN_CAPABILITY = _MARLIN_SM75_CAPABILITY
 
 
 class MarlinLinear(GPTQQuantLinear):
@@ -209,6 +214,16 @@ class MarlinLinear(GPTQQuantLinear):
             )
         )
 
+        # Runtime-only buffers must follow device-map and later module moves.
+        self.register_buffer(
+            "workspace", torch.empty(0, dtype=torch.int32), persistent=False
+        )
+        self.register_buffer(
+            "g_idx_sort_indices",
+            torch.empty(0, dtype=torch.int32),
+            persistent=False,
+        )
+
         if bias:
             self.register_buffer("bias", torch.zeros((self.out_features), dtype=self.compute_dtype))
         else:
@@ -285,10 +300,8 @@ class MarlinLinear(GPTQQuantLinear):
             if IS_ROCM:
                 raise NotImplementedError("Marlin kernel is not supported on ROCm.")
 
-            # Directly check capabilities of all currently visible CUDA devices
-            has_supported_cuda = all(
-                _marlin_capability_supported(*torch.cuda.get_device_capability(i))
-                for i in range(torch.cuda.device_count())
+            has_supported_cuda = _marlin_all_visible_devices_supported(
+                _MARLIN_MIN_CAPABILITY
             )
             if not has_supported_cuda:
                 raise NotImplementedError(
@@ -297,6 +310,15 @@ class MarlinLinear(GPTQQuantLinear):
 
     def post_init(self):
         device = self.qweight.device
+        capability = marlin_validate_runtime_device(
+            device,
+            min_capability=_MARLIN_MIN_CAPABILITY,
+            backend_name="GPTQ Marlin",
+        )
+        if capability == _MARLIN_SM75_CAPABILITY and self.compute_dtype != torch.float16:
+            raise ValueError(
+                "GPTQ Marlin on compute capability 7.5 requires dtype=torch.float16."
+            )
 
         if not marlin_runtime_available(self.compute_dtype):
             raise ModuleNotFoundError(
@@ -371,7 +393,7 @@ class MarlinLinear(GPTQQuantLinear):
             self.g_idx_sort_indices = g_idx_sort_indices
         else:
             setattr(self, "g_idx", marlin_make_empty_g_idx(device))
-            self.g_idx_sort_indices = marlin_make_empty_g_idx(device)
+            self.g_idx_sort_indices = torch.empty(0, dtype=torch.int, device=device)
 
         setattr(self, "qzeros", marlin_make_empty_g_idx(device))
 
@@ -384,16 +406,6 @@ class MarlinLinear(GPTQQuantLinear):
             )
 
         super().post_init()
-
-    def list_buffers(self) -> List:
-        buf = super().list_buffers()
-        if hasattr(self, "workspace") and self.workspace is not None:
-            buf.append(self.workspace)
-        if hasattr(self, "g_idx_sort_indices") and self.g_idx_sort_indices is not None:
-            buf.append(self.g_idx_sort_indices)
-        if hasattr(self, "g_idx") and self.g_idx is not None:
-            buf.append(self.g_idx)
-        return buf
 
     def forward(self, x: torch.Tensor):
         # TODO FIXME: parent should never call us if there is no data to process

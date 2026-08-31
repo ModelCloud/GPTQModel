@@ -1223,6 +1223,90 @@ def pack_model(
     log.info("Model packed.")
     return quant_linear_cls
 
+
+def no_placement_module_names(model: nn.Module) -> set[str]:
+    """Resolve Transformers no-placement parameter patterns to leaf modules."""
+
+    patterns = getattr(model, "_no_placement_params", ()) or ()
+    patterns = tuple(pattern for pattern in patterns if isinstance(pattern, str) and pattern)
+    if not patterns:
+        return set()
+
+    names = set()
+    tensors = (*model.named_parameters(), *model.named_buffers())
+    for tensor_name, _ in tensors:
+        if any(tensor_name == pattern or tensor_name.endswith(f".{pattern}") for pattern in patterns):
+            names.add(tensor_name.rsplit(".", 1)[0])
+    return names
+
+
+def _remove_redundant_device_map_children(device_map: Dict[str, Union[str, int]]) -> None:
+    """Remove child entries already covered by a same-device parent."""
+
+    for name in sorted(device_map, key=lambda item: item.count(".")):
+        if name not in device_map:
+            continue
+        prefix = f"{name}." if name else ""
+        for child_name in list(device_map):
+            if child_name != name and child_name.startswith(prefix) and device_map[child_name] == device_map[name]:
+                device_map.pop(child_name)
+
+
+def _split_device_map_around_module(
+    model: nn.Module,
+    device_map: Dict[str, Union[str, int]],
+    ancestor_name: str,
+    target_name: str,
+    ancestor_device: Union[str, int],
+) -> None:
+    """Replace one parent mapping with non-overlapping branches around a target."""
+
+    current_name = ancestor_name
+    while current_name != target_name:
+        current_module = model if not current_name else model.get_submodule(current_name)
+        relative_target = target_name if not current_name else target_name[len(current_name) + 1:]
+        path_child = relative_target.split(".", 1)[0]
+
+        # Preserve direct tensors and sibling branches on the parent's device;
+        # descend only through the branch containing the excluded module.
+        for param_name, _ in (*current_module.named_parameters(recurse=False), *current_module.named_buffers(recurse=False)):
+            full_name = f"{current_name}.{param_name}" if current_name else param_name
+            device_map.setdefault(full_name, ancestor_device)
+        for child_name, _ in current_module.named_children():
+            full_name = f"{current_name}.{child_name}" if current_name else child_name
+            if child_name != path_child:
+                device_map.setdefault(full_name, ancestor_device)
+
+        current_name = f"{current_name}.{path_child}" if current_name else path_child
+
+
+def apply_no_placement_to_device_map(model: nn.Module, device_map: Dict[str, Union[str, int]]) -> Dict[str, Union[str, int]]:
+    """Build a non-overlapping load map with excluded leaf modules on CPU."""
+
+    result = dict(device_map)
+    _remove_redundant_device_map_children(result)
+    for module_name in no_placement_module_names(model):
+        ancestors = [
+            name
+            for name in result
+            if name != module_name and (not name or module_name.startswith(f"{name}."))
+        ]
+        for ancestor_name in sorted(ancestors, key=lambda item: item.count("."), reverse=True):
+            ancestor_device = result.pop(ancestor_name)
+            _split_device_map_around_module(
+                model,
+                result,
+                ancestor_name,
+                module_name,
+                ancestor_device,
+            )
+        # The checkpoint preloader expands parent and child entries independently;
+        # keep this map non-overlapping so the same tensor is not read on both devices.
+        result[module_name] = "cpu"
+    _remove_redundant_device_map_children(result)
+    return result
+
+
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
@@ -1249,7 +1333,15 @@ def simple_dispatch_model(model, device_map):
     else:
         main_device = [d for d in device_map.values() if d not in ["cpu", "disk"]][0]
 
-    cpu_offload_group = [(n, d) for n, d in device_map.items() if d == "cpu"]
+    # These modules perform their own CPU lookup and must remain resident;
+    # a normal CPU-offload hook would move their full weights back to the GPU.
+    resident_cpu_modules = no_placement_module_names(model)
+    module_names = dict(model.named_modules())
+    cpu_offload_group = [
+        (n, d)
+        for n, d in device_map.items()
+        if d == "cpu" and n not in resident_cpu_modules and n in module_names
+    ]
     prev_hook = None
     for idx, (n, d) in enumerate(cpu_offload_group):
         m = get_module_by_name_suffix(model, n)
@@ -1261,10 +1353,18 @@ def simple_dispatch_model(model, device_map):
     for n, d in device_map.items():
         if n == "":
             continue
-        m = get_module_by_name_suffix(model, n)
+        m = module_names.get(n)
+        if m is None:
+            # Fine-grained maps can contain direct parameter entries.
+            continue
         if d != "cpu":
             d = torch.device(d)
-            hook = AlignDevicesHook(d, io_same_device=True, place_submodules=True)
+            has_other_device_child = any(
+                child_name.startswith(f"{n}.") and child_device != device_map[n]
+                for child_name, child_device in device_map.items()
+            )
+            # A mixed-device child means the parent hook may move inputs, but not descendants.
+            hook = AlignDevicesHook(d, io_same_device=True, place_submodules=not has_other_device_child)
             add_hook_to_module(m, hook)
     accelerate.utils.modeling.retie_parameters(model, tied_params)
 

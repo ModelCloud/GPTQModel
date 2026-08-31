@@ -48,6 +48,45 @@ def _marlin_capability_supported(major: int, minor: int) -> bool:
     return major > 7 or (major == 7 and minor >= 5)
 
 
+def _marlin_all_visible_devices_supported(min_capability: Tuple[int, int]) -> bool:
+    # PyTorch resolves CUDA_VISIBLE_DEVICES, including UUID and MIG entries.
+    device_count = torch.cuda.device_count()
+    return device_count > 0 and all(
+        torch.cuda.get_device_capability(index) >= min_capability
+        for index in range(device_count)
+    )
+
+
+def marlin_validate_runtime_device(
+        device: torch.device,
+        *,
+        min_capability: Tuple[int, int],
+        backend_name: str,
+) -> Tuple[int, int]:
+    """Validate the CUDA device that owns one Marlin module's weights."""
+    device = torch.device(device)
+    if IS_ROCM:
+        raise ValueError(f"{backend_name} is not supported on ROCm.")
+    if device.type != "cuda":
+        raise ValueError(f"{backend_name} requires CUDA tensors, got `{device}`.")
+
+    try:
+        capability = torch.cuda.get_device_capability(device)
+    except Exception as exc:  # pragma: no cover - depends on the CUDA runtime
+        raise ValueError(
+            f"{backend_name} failed to query CUDA device `{device}` capability: {exc}"
+        ) from exc
+
+    if capability < min_capability:
+        minimum = ".".join(str(part) for part in min_capability)
+        detected = ".".join(str(part) for part in capability)
+        raise ValueError(
+            f"{backend_name} requires compute capability >= {minimum}, "
+            f"got {detected} on `{device}`."
+        )
+    return capability
+
+
 def _marlin_environment_error() -> str:
     if IS_ROCM:
         return "Marlin kernel is not supported on ROCm."
