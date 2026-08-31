@@ -50,7 +50,8 @@ Hopper-only hardware:
 5. Accumulate in FP32 and use bounded split-K to expose enough CTA work. The
    generic fallback remains capped at eight slices; measured short-K policies
    use up to thirty-two slices, while the long-K M1/M2 scalar MLP-down route
-   uses a measured 128-way wave to fill more of the A100's 124 SMs.
+   uses measured 128-way (M1) and 96-way (M2) waves to fill more of the
+   A100's 124 SMs.
 6. Use an explicit block barrier after MMA before reusing a stage buffer.
 7. For M=1 and M=2, use a Marlin-style scalar route even on the measured
    long-K MLP-down shape; for M=3-M4, keep that route for K<=6144. One
@@ -62,8 +63,8 @@ Hopper-only hardware:
    state extraction instead of 64-bit window promotion.
 9. For M3-M4 and K<=6144, reuse the Marlin-style scalar tile schedule while
    carrying exactly the live rows in FP32 accumulators. M1-M2 also use this
-   schedule for the long-K MLP-down shape after its 128-way wave was measured
-   to overcome the old WMMA advantage. The short-K dispatch uses up to
+   schedule for the long-K MLP-down shape after wide waves were measured to
+   overcome the old WMMA advantage. The short-K dispatch uses up to
    thirty-two K splits, except attention-out (K=6144, N=5120), where a
    measured 24-way wave reduces split-reduction overhead; M4 long-K and M8+
    remain on the tensor-core path.
@@ -124,6 +125,7 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v10.json`
 - `artifacts/a100_p32_window/qwen38_origin_main_b7d68545.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v11.json`
+- `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v12.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -190,25 +192,25 @@ waves 5.7-19.4% faster than 32-way waves on this shape.
 
 The exact control is `qwen38_origin_main_b7d68545.json`, produced from
 `origin/main` at `b7d68545` before this branch. The candidate is
-`qwen38_mixed_p32_ampere_v11.json` at `e795df74`. Each row is the
+`qwen38_mixed_p32_ampere_v12.json` at `b2b0f8c7`. Each row is the
 geometric mean of the 28 cases for that M, using each case's Ampere event
 median; this deliberately excludes planar-oracle timing from the target.
 
 | M | Main geomean ms | Candidate geomean ms | Speedup vs fetched main |
 |---:|---:|---:|---:|
-| 1 | 0.067228 | 0.065009 | 1.034x |
-| 2 | 0.072805 | 0.070585 | 1.032x |
-| 4 | 0.085102 | 0.084324 | 1.009x |
-| 8 | 0.093966 | 0.092538 | 1.015x |
-| 16 | 0.096349 | 0.095344 | 1.011x |
+| 1 | 0.067228 | 0.066702 | 1.008x |
+| 2 | 0.072805 | 0.071788 | 1.014x |
+| 4 | 0.085102 | 0.084647 | 1.005x |
+| 8 | 0.093966 | 0.092688 | 1.014x |
+| 16 | 0.096349 | 0.096002 | 1.004x |
 
 The accepted changes are deliberately narrow: the measured long-K Qwen3.8
 MLP-down shape (K=17408, N=5120) moves from main's eight-way split to a
-128-way split, M1-M2 use the scalar route on that shape, and M16
+128-way (M1) or 96-way (M2) split, M1-M2 use the scalar route on that shape, and M16
 attention-out (K=6144, N=5120) uses a measured 12-way split. The focused
-MLP-down rows improve 1.010x, 1.013x, 1.003x, 1.000x, and 1.000x for
+MLP-down rows improve 1.008x, 1.022x, 1.002x, 1.000x, and 1.000x for
 M1/M2/M4/M8/M16 respectively; M16 attention-out is 1.000x. Because MLP-down
-is only one of seven shapes, the complete matrix is currently 1.009-1.034x
+is only one of seven shapes, the complete matrix is currently 1.004-1.014x
 versus fetched main in this timing sample, so the requested 2x target remains
 open.
 
@@ -264,8 +266,8 @@ more decode instructions without expanding the compact state representation.
 | Two-warps-per-tile M8 scalar cooperative mapping | Correct after fixing an initial tile-coverage bug, but reducing each CTA to two N16 tiles raised full-Q/attention to about 0.399/0.207 ms versus 0.117/0.073 ms for WMMA. | Rejected; preserve the four-warp WMMA CTA and tune only its split wave. |
 | Four-K16/K64 WMMA stage for short-K M8/M16 | Correct, but the larger stage regressed representative W2 full-Q to about 0.126 ms (M8) and 0.140 ms (M16), versus about 0.117 ms and 0.119 ms for K32 staging. | Rejected; retain K32 staging and shape-specific split tuning. |
 | Conditional final post-MMA barrier elision | Correct, but changing the unconditional handoff to a `has_next` branch regressed representative M16 full-Q to about 0.141 ms versus 0.120 ms; the altered control flow changed compiler scheduling. | Rejected and reverted; retain the unconditional producer/consumer barrier. |
-| Forty-eight-way long-K wave for M4/M8/M16 | Correct, but MLP-down was slower than the accepted 32-way wave (about 0.159/0.163/0.171 ms versus 0.158/0.160/0.165 ms). | Rejected; keep 32-way for M4/M8/M16 and 128-way only for long-K M1/M2. |
-| 256-way long-K wave for M1/M2 | Correct, but the reduction wave turned upward: M1/M2 MLP-down were about 0.105/0.121 ms versus about 0.100/0.114 ms for 128-way splitting. | Rejected; retain the 128-way M1/M2 exception. |
+| Forty-eight-way long-K wave for M4/M8/M16 | Correct, but MLP-down was slower than the accepted 32-way wave (about 0.159/0.163/0.171 ms versus 0.158/0.160/0.165 ms). | Rejected; keep 32-way for M4/M8/M16 and 128-way (M1)/96-way (M2) for long-K scalar work. |
+| 256-way long-K wave for M1/M2 | Correct, but the reduction wave turned upward: M1/M2 MLP-down were about 0.105/0.121 ms versus about 0.100/0.114 ms for 128-way splitting. | Rejected; retain the 128-way M1 and measured 96-way M2 policies. |
 | Vectorized four-output split reducer | Correct, but it under-filled the small-output reducer (M1 MLP-down about 0.116 ms versus about 0.100 ms with one output per thread). | Rejected; retain the scalar reducer to preserve enough reduction blocks. |
 | Eight-lane shared-activation broadcast | Correct, but replacing repeated shared loads with a packed-half2 shuffle made the scalar M1/M2 probes 1.5-2x slower (full-Q/MLP-down about 0.089/0.130 ms versus about 0.068/0.10 ms). | Rejected; the extra lane-control and shuffle cost outweighs shared-load reuse on sm_80. |
 
