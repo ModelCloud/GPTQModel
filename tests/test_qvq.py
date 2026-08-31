@@ -44,8 +44,8 @@ from gptqmodel.quantization.qvq import (
     default_qvq_trellis_batch_size,
     optimize_qvq_module_scale,
     optimize_qvq_output_channel_scales,
-    pack_qvq_bank_ids,
     pack_dual_v2_states,
+    pack_qvq_bank_ids,
     pack_trellis_states,
     quantize_qvq_linear,
     qvq_proxy_loss,
@@ -55,8 +55,8 @@ from gptqmodel.quantization.qvq import (
     rht_reconstruct_weight,
     select_banked_tiles_by_output_error,
     tail_biting_viterbi_quantize,
-    unpack_qvq_bank_ids,
     unpack_dual_v2_states,
+    unpack_qvq_bank_ids,
     unpack_trellis_states,
     viterbi_quantize,
     yaqa_inner,
@@ -99,8 +99,8 @@ from gptqmodel.quantization.qvq_rates import (
     qvq_words_per_tile,
 )
 from gptqmodel.quantization.qvq_yaqa import (
-    YAQA_PAPER_MINIMUM_SEQUENCES,
     YAQA_DEFAULT_REGULARIZATION,
+    YAQA_PAPER_MINIMUM_SEQUENCES,
     YAQA_PAPER_REGULARIZATION,
 )
 from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
@@ -108,6 +108,12 @@ from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import select_quant_linear
 from gptqmodel.utils.model import make_quant
 from gptqmodel.utils.planar_packing import planar_pack_rows, planar_unpack_rows
+from gptqmodel.utils.qvq_cpu import qvq_cpu_supported
+
+requires_qvq_cpu = pytest.mark.skipif(
+    not qvq_cpu_supported(),
+    reason="QVQ native CPU kernels require x86-64 (AMD64)",
+)
 from gptqmodel.utils.qvq_mps import (
     qvq_hyb_reference_mps_gemv,
     qvq_mps_gemv,
@@ -5228,6 +5234,7 @@ def test_native_viterbi_invalid_overlap_is_all_infinity(step_count):
     assert torch.isinf(squared_error[1:]).all()
 
 
+@requires_qvq_cpu
 def test_native_banked_viterbi_adjacent_steps_invalid_sentinels_and_boundary_traceback():
     from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
 
@@ -5264,6 +5271,7 @@ def test_native_banked_viterbi_adjacent_steps_invalid_sentinels_and_boundary_tra
     assert torch.equal(squared_error, torch.zeros_like(squared_error))
 
 
+@requires_qvq_cpu
 def test_native_banked_viterbi_v2_is_thread_count_invariant():
     from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
 
@@ -5296,6 +5304,7 @@ def test_native_banked_viterbi_v2_is_thread_count_invariant():
 
 
 @pytest.mark.parametrize("transition_bits", (7, 16))
+@requires_qvq_cpu
 def test_native_banked_viterbi_suffix_partition_is_thread_count_invariant(transition_bits):
     from gptqmodel.utils.qvq_cpu import qvq_cpu_viterbi_banked
 
@@ -5409,6 +5418,7 @@ def test_native_banked_viterbi_suffix_partition_is_thread_count_invariant(transi
         torch.set_num_threads(original_threads)
 
 
+@requires_qvq_cpu
 def test_native_banked_viterbi_force_overrides_are_parsed_and_scoped(monkeypatch):
     """QVQ_TEST_FORCE_BANKED_* must parse their value and stay in scope."""
 
@@ -5481,6 +5491,7 @@ def test_native_banked_viterbi_force_overrides_are_parsed_and_scoped(monkeypatch
         )
 
 
+@requires_qvq_cpu
 def test_native_banked_viterbi_v4_t16_default_output_is_pinned(monkeypatch):
     """Pin output, not dispatch, with a 99.804688% tie-rich regression net.
 
@@ -6181,6 +6192,7 @@ def test_qvq_cpu_production_forward_never_creates_dense_cache(monkeypatch):
 @pytest.mark.parametrize(("k", "n"), ((2048, 2048), (2048, 8192), (8192, 2048), (2048, 256)))
 @pytest.mark.parametrize("bits", (2, 3.5, 4))
 @pytest.mark.parametrize("m", (1, 8, 32))
+@requires_qvq_cpu
 def test_qvq_cpu_native_packed_gemv_accuracy_matrix(k, n, bits, m):
     from gptqmodel.utils.qvq_cpu import qvq_cpu_gemv
 

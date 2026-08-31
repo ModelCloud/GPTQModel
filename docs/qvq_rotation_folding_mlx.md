@@ -148,6 +148,33 @@ its apparently favorable cropped reconstruction does not survive propagation.
 | A29 | 12 | `0.034276` | `0.11357` | `0.12848` | `0.94872` | `1.0` | `1.0` | reject: layer error |
 | A25 | 12 | `0.030801` | `0.09337` | `0.04389` | `0.87179` | `1.0` | `1.0` | pass |
 
+### Interrupted full-model promotion run
+
+A progressive full-model W2 A0-versus-A25 runner was added after review of the
+small one-layer validation population. It uses 16 cached WikiText-2 train rows
+(1,678 tokens) for calibration and 16 disjoint validation rows (1,869 tokens),
+with a 128-token cap. The test split remains unread. Within every decoder layer
+it recaptures dependencies in `Q/K/V -> O -> gate/up -> down` order, and every
+later layer sees all previously quantized layers.
+
+The M4 Max run was stopped at the user's request because full P32 quantization
+was too slow on this host. A0 completed five of 16 layers (35 projections,
+2,523.2 seconds of fitting); A25 was not started. These partial values are
+trajectory diagnostics only and must not be treated as an A0/A25 comparison or
+a full-model result:
+
+| Quantized through layer | Final KL | Logits relative L2 | Top-1 | Top-5 | Top-10 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | `0.088612` | `0.17908` | `.87212` | `.99037` | `.99304` |
+| 1 | `0.150978` | `0.23146` | `.83093` | `.97967` | `.98876` |
+| 2 | `0.201181` | `0.26658` | `.79882` | `.97164` | `.98823` |
+| 3 | `0.266535` | `0.29328` | `.75281` | `.96148` | `.98020` |
+| 4 | `0.330728` | `0.31756` | `.72980` | `.95131` | `.97699` |
+
+The interrupted artifact is explicitly marked `interrupted_by_user`; its A0
+payload is marked `interrupted_after_layer_4`. The next valid result must rerun
+both A0 and A25 to all 16 layers under the same protocol on the CUDA host.
+
 ### W2 role diagnostics
 
 Each cell is `validation output relative L2 (runtime axes)`. `HH` means input
@@ -270,14 +297,16 @@ Raw artifacts:
 - `artifacts/qvq_rotation_layer0_a27_w2_m4max.json`
 - `artifacts/qvq_rotation_layer0_a29_w2_m4max.json`
 - `artifacts/qvq_rotation_layer0_a25_w2_m4max.json`
+- `artifacts/qvq_rotation_full16_a0_a25_w2_m4max.json` (interrupted after A0 layer 4)
 - `artifacts/qvq_p32_mlx_m4max_smoke.json`
 - `artifacts/qvq_p32_mlx_m4max.json`
 
 ## Verification
 
 The focused MLX, P32, LR-rejection, transform-planner, and folded-axis matrix
-passes `409/409` tests. The broader QVQ/P32 run passes 871 tests with 137
-skips; its 42 failures all invoke x86-64-only native CPU kernels on this arm64
-M4 Max and fail at the existing `qvq_cpu_supported()` architecture guard.
-No MLX, P32, planner, or folded-axis test fails. Ruff and `git diff --check`
-also pass for the changed surface.
+passes `409/409` tests. The broader 1,459-case QVQ/P32 matrix now passes 1,280
+tests with 179 skips and zero failures on this arm64 M4 Max. The 42 native CPU
+cases previously reported as failures are explicitly skipped because the
+extension's `qvq_cpu_supported()` contract is x86-64-only. Ruff and
+`git diff --check` also pass for the changed surface. No GitHub Actions result
+is claimed; these remain local M4 Max results.
