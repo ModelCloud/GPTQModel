@@ -33,6 +33,8 @@ required = (
 )
 if not all(payload.get(key) is True for key in required):
     raise SystemExit(f"fast-eval canary was not accepted: {payload}")
+if float(payload.get("speedup", 0.0)) < 1.0:
+    raise SystemExit(f"fast-eval canary regressed wall time: {payload}")
 PY
 
 cleanup() {

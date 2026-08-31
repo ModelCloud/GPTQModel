@@ -126,6 +126,32 @@ Exact report/checkpoint hashes and per-arm completion data are recorded in the
 with the immutable source union in
 [`calibration_union_v1.json`](experiments/calibration_union_v1.json).
 
+## Fisher weight and seed follow-up (complete, 2026-08-31 UTC)
+
+These arms hold the NM4096+YAQA182 Fisher corpus, the W3.2 `Up4 L6,L8`
+allocation, lifecycle NM128, and 3.178340 effective BPW fixed. F13/F14 finish
+the seed-0 YAQA-weight curve; F15/F16 replicate the 2x recipe at seeds 1 and 2.
+
+| Arm | YAQA weight | Seed | GSM8K Platinum | D300 Top-1 | Exact / 300 | Mean first divergence |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| F13 | **1.5x** | 0 | **44.4996% (538/1209)** | 33.3646% (3203/9600) | **23** | **10.0133** |
+| F14 | 3x | 0 | 43.7552% (529/1209) | 32.5729% (3127/9600) | 18 | 9.8267 |
+| F15 | 2x | 1 | 43.6725% (528/1209) | 34.1042% (3274/9600) | 22 | 9.9300 |
+| F16 | 2x | 2 | 44.0860% (533/1209) | **35.2292% (3382/9600)** | 16 | 9.6633 |
+
+Including F11/F12, the NM4096 seed-0 curve is `525, 538, 535, 529` correct
+for YAQA weights `1x, 1.5x, 2x, 3x`. The best observed weight is **1.5x**;
+3x regresses. The 2x three-seed scores are `535, 528, 533`, for mean
+**532/1209 (44.0033%)** and population standard deviation **2.94 questions**.
+The best ~W3.2 score remains the NM10k seed-0 F6 result at 547/1209.
+
+The proposed paged-FA2/batch-64/CUDA-graph evaluator was rejected by a pinned
+F9 canary: it changed 543 correct to 545 and took 1427.00 seconds versus
+1069.33 seconds (`0.749x`). These F13--F16 rows therefore use the canonical
+paged-SDPA, continuous-batching, batch-8 evaluator. Exact artifact hashes are
+bound in the
+[`Fisher weight/seed result`](experiments/calibration_fisher_weight_seed_results_20260831.json).
+
 ## Current budget anchors (updated 2026-08-28 UTC)
 
 The following anchors are the comparison points for every future allocation
