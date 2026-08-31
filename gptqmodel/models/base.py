@@ -2625,6 +2625,7 @@ class BaseQModel(nn.Module):
                     n, root = generate_node_for_awq_scaling(inp=input_feat[name], prev_op=prev_op,
                                                             module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                             subset=subset, module2inspect=None)
+                    n["_input_feature_name"] = feature_name
                     if root is not None and last_module_root != root:
                         last_module_root = root
 
@@ -2690,6 +2691,7 @@ class BaseQModel(nn.Module):
                 n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
                                                         module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                         subset=subset, module2inspect=module2inspect)
+                n["_input_feature_name"] = feature_name
 
                 nodes.append(n)
 

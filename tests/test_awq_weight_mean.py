@@ -68,6 +68,31 @@ class _DummyQwen3SelfAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_size, hidden_size, bias=False, device=device, dtype=dtype)
 
 
+class _DummyQwen3MoeExpert(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate_proj = nn.Linear(4, 2, bias=False)
+        self.up_proj = nn.Linear(4, 2, bias=False)
+        self.down_proj = nn.Linear(2, 4, bias=False)
+
+
+class _DummyQwen3MoeLayer(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.input_layernorm = nn.LayerNorm(4)
+        self.self_attn = nn.Module()
+        self.self_attn.q_norm = nn.LayerNorm(4)
+        self.self_attn.k_norm = nn.LayerNorm(4)
+        self.self_attn.q_proj = nn.Linear(4, 4, bias=False)
+        self.self_attn.k_proj = nn.Linear(4, 4, bias=False)
+        self.self_attn.v_proj = nn.Linear(4, 4, bias=False)
+        self.self_attn.o_proj = nn.Linear(4, 4, bias=False)
+        self.post_attention_layernorm = nn.LayerNorm(4)
+        self.mlp = nn.Module()
+        self.mlp.gate = nn.Linear(4, 2, bias=False)
+        self.mlp.experts = nn.ModuleList([_DummyQwen3MoeExpert(), _DummyQwen3MoeExpert()])
+
+
 class _TestAWQProcessor(AWQProcessor):
     def __init__(self, qcfg: QuantizeConfig):
         super().__init__(
@@ -126,6 +151,34 @@ def test_public_moe_model_policies_enable_pointwise_roots_and_children():
         assert model_cls.awq_input_feature_aggregation("self_attn.q_proj") is None
 
     assert Qwen3QModel.awq_input_feature_aggregation("mlp.gate_proj") is None
+
+
+def test_qwen3_moe_awq_scaling_node_preserves_root_feature_name():
+    qmodel = Qwen3MoeQModel.__new__(Qwen3MoeQModel)
+    nn.Module.__init__(qmodel)
+    qmodel.__dict__["model"] = types.SimpleNamespace(
+        config=types.SimpleNamespace(num_experts=2),
+    )
+    layer = _DummyQwen3MoeLayer()
+    root_feature = torch.full((1, 3, 4), -999.0)
+    features = {
+        "self_attn.q_proj": torch.randn(1, 3, 4),
+        "self_attn.k_proj": torch.randn(1, 3, 4),
+        "self_attn.v_proj": torch.randn(1, 3, 4),
+        "self_attn.o_proj": torch.randn(1, 3, 4),
+        "mlp": root_feature,
+    }
+    for expert_index in range(2):
+        prefix = f"mlp.experts.{expert_index}"
+        features[f"{prefix}.gate_proj"] = torch.randn(1, 3, 4)
+        features[f"{prefix}.up_proj"] = torch.randn(1, 3, 4)
+        features[f"{prefix}.down_proj"] = torch.randn(1, 3, 2)
+
+    nodes = qmodel.awq_get_modules_for_scaling(layer, features, {})
+    gate_up_node = next(node for node in nodes if len(node["layers"]) == 4)
+
+    assert gate_up_node["inp"] is root_feature
+    assert gate_up_node["_input_feature_name"] == "mlp"
 
 
 def test_awq_capture_applies_padding_mask_to_root_and_flattened_expert_inputs():

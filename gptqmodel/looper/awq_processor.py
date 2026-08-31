@@ -1333,7 +1333,9 @@ class AWQProcessor(LoopProcessor):
         sanitized_module_config = filtered_module_config
         feature_name_by_id = {id(tensor): name for name, tensor in input_feat.items()}
         for cfg in sanitized_module_config:
-            feature_name = feature_name_by_id.get(id(cfg.get("inp")))
+            feature_name = cfg.pop("_input_feature_name", None)
+            if feature_name not in input_feat:
+                feature_name = feature_name_by_id.get(id(cfg.get("inp")))
             if feature_name is None:
                 continue
             for layer in cfg.get("layers") or []:
@@ -2214,6 +2216,13 @@ class AWQProcessor(LoopProcessor):
                 layer_state.pending_modules.update(all_linears.keys())
             layer_state.pending_modules.add(module.name)
         with self.lock:
+            # Seed a policy-requested MoE root before lifecycle forwarding.
+            # This removes dependence on hook/preprocess ordering for the
+            # shared pointwise input used by gate/up scale search.
+            root_name = module.name.split(".", 1)[0]
+            root_policy = self._feature_aggregation_policy(root_name)
+            if root_policy and root_policy.get("capture_root", False):
+                self.tasks.setdefault(root_name, {"inputs": [], "batch_indices": []})
             entry = self.tasks.get(module.name)
             if entry is None:
                 self.tasks[module.name] = {"inputs": []}
