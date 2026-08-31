@@ -6,8 +6,8 @@ discarded experiments so later tuning does not repeat unsafe variants.
 
 ## Contract and target
 
-- Source base: freshly fetched GitHub `origin/main` at `1fa22740` (tip after
-  PR #78 merged).
+- Source base: freshly fetched GitHub `origin/main` at `db785848` (tip after
+  PR #85 merged).
 - Device: physical GPU 0, `NVIDIA PG506-230`, UUID
   `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`, CC 8.0, 124 SMs, 96 GiB.
 - Software: PyTorch 2.13.0+cu130; CUDA runtime 13.0; NVCC 13.3.
@@ -569,7 +569,7 @@ bumped so stale entries cannot mask this update during a long-lived process.
 The Python dispatch now runs a first-use tuner by default for new shapes. It
 benchmarks up to 12 split waves around the measured fallback on the active CUDA
 stream; the selected plan is keyed by
-device UUID/SM80 capability, dtype, M, K, N, transition bits, and bank variant.
+integer CUDA device index, dtype, M, K, N, transition bits, and bank variant.
 Entries are memoized only in the current process; no autotune data is read from
 or written to disk while the kernel is under active development.
 Set `QVQ_AMPERE_AUTOTUNE=0` for the zero-overhead measured/static fallback.
@@ -633,6 +633,19 @@ microbenchmark lowers key construction plus dictionary lookup from 289.9 ns to
 250.8 ns (`1.156x`). The matched M1 full-KV GPU retry remains within timer
 resolution at 0.038912 ms, with the same split-64 plans and exact outputs; it is
 stored in `artifacts/a100_p32_window/v12_m1_fullkv_int_device_key_retry.json`.
+
+### Post-merge v13 baseline
+
+PR #85 merged as `db785848`. This optimization window uses that exact
+`origin/main` tip as its Ampere-kernel control. Planar measurements remain
+diagnostic and are not used in the improvement calculation. Default-on,
+process-memory-only autotuning is enabled for the control and candidates.
+
+The clean 20-warmup/100-iteration, 140-case run is stored in
+`artifacts/a100_p32_window/qwen38_newmain_all_db785848.json`. Ampere median
+latency geomeans are 0.061476 ms (M1), 0.066533 ms (M2), 0.075695 ms (M4),
+0.088012 ms (M8), and 0.091889 ms (M16), with an all-case geomean of
+0.075809 ms. The maximum absolute error across the matrix is 0.000080109.
 
 ## Reproduction
 
