@@ -32,8 +32,8 @@ _TORCH_NVCC_UNDEFINES = (
     "-U__CUDA_NO_HALF_CONVERSIONS__",
 )
 _SM_COUNT_CACHE: dict[tuple[str, int], int] = {}
-_AUTOTUNE_CACHE_VERSION = 2
-_AUTOTUNE_CACHE: dict[str, int] = {}
+_AutotuneCacheKey = tuple[torch.device, torch.dtype, int, int, int, int, int]
+_AUTOTUNE_CACHE: dict[_AutotuneCacheKey, int] = {}
 _AUTOTUNE_CACHE_LOCK = threading.RLock()
 
 
@@ -134,23 +134,19 @@ def _autotune_cache_key(
     transition_bits: int,
     out_features: int,
     bank_alt_id: int,
-) -> str:
-    properties = torch.cuda.get_device_properties(input.device)
-    uuid = str(getattr(properties, "uuid", ""))
-    capability = f"{properties.major}.{properties.minor}"
-    return ":".join(
-        (
-            str(_AUTOTUNE_CACHE_VERSION),
-            uuid,
-            capability,
-            str(properties.multi_processor_count),
-            str(input.dtype),
-            str(input.shape[0]),
-            str(input.shape[1]),
-            str(out_features),
-            str(transition_bits),
-            str(bank_alt_id),
-        )
+) -> _AutotuneCacheKey:
+    # Plans never leave this process, so the tensor's logical device is enough
+    # to distinguish GPUs. Avoid querying CUDA device properties on every hot
+    # cache hit: that host-side driver call delays the kernel after a timing or
+    # dependency event has already been enqueued on the stream.
+    return (
+        input.device,
+        input.dtype,
+        int(input.shape[0]),
+        int(input.shape[1]),
+        int(out_features),
+        int(transition_bits),
+        int(bank_alt_id),
     )
 
 

@@ -601,6 +601,16 @@ latency geomeans are 0.074501 ms (M1), 0.079266 ms (M2), 0.086971 ms (M4),
 0.095925 ms (M8), and 0.099725 ms (M16), with an all-case geomean of
 0.086750 ms. The maximum absolute error across the matrix is 0.000080109.
 
+The first v12 progression removes CUDA device-property queries and string
+construction from every process-local autotune cache hit. Because the plan is
+never persisted, a tuple containing the tensor device, dtype, M, K, N, rate,
+and bank variant is sufficient. On M1 full-KV, the same selected split 64 now
+measures 0.047358 ms by four-rate geomean versus 0.060662 ms in the merged-main
+matrix (`1.281x`). An explicit split-64 control measures 0.032627 ms, showing
+that further Python cache-hit overhead remains available to remove. Exactness
+passes 27/27; the focused result is stored in
+`artifacts/a100_p32_window/v12_m1_fullkv_fastkey.json`.
+
 ## Reproduction
 
 ```bash
