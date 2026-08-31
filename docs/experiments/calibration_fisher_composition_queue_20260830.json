@@ -1,6 +1,6 @@
 {
   "schema": "qvq.calibration-fisher-composition-queue.v1",
-  "status": "queued",
+  "status": "running",
   "prepared_at_utc": "2026-08-30T23:57:00Z",
   "launched_at_utc": "2026-08-31T00:09:43Z",
   "launch_commit": "2d13e537",
@@ -50,7 +50,7 @@
       "effective_weighted_tokens": 1354151,
       "YAQA_weight": 2.0,
       "NM_weight": 1.0,
-      "state": "waiting_for_gpu1"
+      "state": "quantizing"
     },
     {
       "arm_id": "f11_yaqa182_nm4096_yaqa1x",
