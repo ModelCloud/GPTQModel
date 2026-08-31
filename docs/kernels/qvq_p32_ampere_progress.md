@@ -945,6 +945,32 @@ prefix in `artifacts/a100_p32_window/`, including `v15_input_cg_*`,
 `v15_m1_fullq_static_split40.json`, and
 `v15_m1_bankid_u32x4_matched_*`.
 
+### Post-merge v16 baseline
+
+PR #89 merged as `829a8777`. The clean 20-warmup/100-iteration 140-case
+Ampere control is
+`artifacts/a100_p32_window/qwen38_newmain_all_829a8777.json`. Median latency
+geomeans are 0.057675 ms (M1), 0.062415 ms (M2), 0.070734 ms (M4),
+0.084479 ms (M8), and 0.087012 ms (M16), with a 0.071523 ms all-case
+geomean. Maximum absolute error is 0.000080109. Planar timings are diagnostic
+only and excluded from every improvement calculation.
+
+The first v16 progression reduces the scalar M4 stage from three K16 tiles to
+two for transition widths 5 and 7 (W2.5 and W3.5). W2 retains four stages and
+W3 retains three: the broad two-stage screen improved overall but made W3
+slightly slower. The narrowed 21-case M4 W2.5-W3.5 cached-binary repeat lowers
+the Ampere median geomean by 1.782% and the mean by 2.131%; exactness passes
+28/28. The control and repeat are stored in
+`artifacts/a100_p32_window/v16_m4_stage2_control.json` and
+`artifacts/a100_p32_window/v16_m4_stage2_selective_repeat.json`.
+
+Two v16 experiments are rejected so far. Directly reading the already-cached
+Python operator instead of calling the small resolver was mixed and regressed
+the 20-case full-KV median geomean by 1.995%; M4/M8/M16 all slowed. The broad
+M4 two-stage form improved 1.346% overall but regressed W3 by 0.274%, so it
+was narrowed rather than accepted broadly. Diagnostics are retained as
+`v16_cached_op_direct_*.json` and `v16_m4_stage2_candidate.json`.
+
 ## Reproduction
 
 ```bash

@@ -901,7 +901,7 @@ at::Tensor p32_window_ampere_impl(
   const bool use_three_tile_scalar_stage = size_m == 2 && size_k <= 6144;
   constexpr int kM4StageKTiles = TransitionBits == 4
       ? kScalarLongStageKTiles
-      : kScalarTripleStageKTiles;
+      : TransitionBits == 6 ? kScalarTripleStageKTiles : kStageKTiles;
   const int tiles_per_block = use_small_m_scalar ? kM1TilesPerBlock : kTilesPerBlock;
   const dim3 grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
