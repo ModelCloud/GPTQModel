@@ -5,6 +5,23 @@ was stopped.  The continuous-window representation is a lossless physical
 permutation of canonical planar P32: it has the same word count, adds zero bits,
 and reconstructs the identical K16 x N16 matrix.
 
+Anchor-4 is a second lossless physical representation, accepted at `27573a3c`
+as an exact format contract but not as a production kernel. It groups four
+consecutive states into exactly four transition codes of storage:
+
+| Rate | Transition bits | Exact Anchor-4 record | Bits / record | Original bits |
+|---:|---:|---|---:|---:|
+| W2 | 4 | state16 | 16 | 16 |
+| W2.5 | 5 | state16 + lost4 | 20 | 20 |
+| W3 | 6 | state16 + lost2 + next transition6 | 24 | 24 |
+| W3.5 | 7 | state16 + lost5 + next transition7 | 28 | 28 |
+
+The H200/CPU suite passes 17/17 Anchor-4 tests at every target rate: byte size,
+canonical planar round-trip, all 128 states, decoded 256-value tiles, and exact
+K16 x N16 matrix reconstruction. Combined with the existing window suite,
+42/42 tests pass. Kernel experiments below show that the current RS-WGMMA
+fragment ownership cannot yet consume those anchors economically.
+
 ## Measurement contract
 
 - Device: physical GPU 0, NVIDIA H200, UUID
@@ -149,6 +166,18 @@ expansion problem.
 |---|---|---:|---:|---|
 | `12b3a321` + working tree | Warp-distributed register PGC table | 0.10992 ms (0.687x baseline) | 0.14904 ms (0.620x baseline) | Rejected; exact, but an arbitrary lookup needs four requester-dependent shuffles and is 31-39% slower than the 99.7%-L1-hit read-only table. |
 | `c07fe9de` + working tree | Eight-way lane-interleaved shared PGC table | W2 0.07453 ms (1.022x), W3 0.07594 ms (0.972x), W3.5 0.07707 ms (0.963x) | W2 0.07421 ms (1.008x), W3 0.07546 ms (0.966x), W3.5 0.07571 ms (0.974x) | Rejected; the extra shared footprint/occupancy loss outweighs reduced global lookup pressure at W3/W3.5. |
+| `e143f6a1` + working tree | Current-window producer-contiguous decode with 16 gathers | W3 0.09174 ms (0.805x baseline) | W3 0.09141 ms (0.798x baseline) | Rejected; exact, but 44.249M instructions and the gather network exceed the consumer-owned window path. |
+| `27573a3c` + working tree | Anchor-4 decoded independently in consumer ownership | W3 0.13920 ms (0.530x baseline) | W3 0.13818 ms (0.528x baseline) | Rejected; exact, but divergent step reconstruction raises instructions to 74.656M and registers to 72. |
+| `27573a3c` + working tree | Anchor-4 producer decode, four shuffles, two mixed-index `movmatrix` | W3 0.08358 ms (0.883x baseline) | W3 0.08333 ms (0.875x baseline) | Rejected; exact and 55 registers with 96 shared conflicts, but 42.588M instructions remain above the 36.8M window baseline. |
+| `27573a3c` + working tree | Proposed zero-shuffle two-`movmatrix` lower bound | NCU 0.07325 ms | not timed | Rejected; not exact because canonical anchors span two K-row/N-half quadrants. Even before exact routing it executes 40.413M instructions, missing the <32M gate. |
+
+The zero-shuffle mismatch is not an epilogue-only N permutation. PTX assigns
+destination lane `q` source rows `(2q, 2q+1)`; after the proposed row
+permutation those are the desired bank pairs, but a canonical four-state anchor
+also crosses K-row/N-half ownership. This makes the K permutation depend on N,
+after WGMMA has already consumed the activation, so no output-column remap can
+restore the exact matrix. The durable branch therefore retains only the exact
+Anchor-4 conversion/reference contract, not any rejected CUDA path.
 
 The Qwen3.8 MLP split sweep at `8dea54a5` accepted split 10 for gate/up and
 split 34 for down.  These policies preserve K256 stage alignment, reduce the
@@ -165,5 +194,5 @@ the selected split.
 | 3 | Generalize direct-window TMA RS-WGMMA to W2, W2.5, and W3.5 | accepted at `874d9632` |
 | 4 | Qwen3.8 M1/M2/M4/M8 specializations | pending |
 | 5 | Full seven-shape W2-W3.5 P32 versus Machete sweep | M16 complete; M1/M2/M4/M8 pending |
-| 6 | Producer-contiguous four-state decode and fixed WGMMA register transpose | next |
-| 7 | Storage-neutral P32 Anchor-4 load-time repack | pending after producer-layout proof |
+| 6 | Producer-contiguous four-state decode and fixed WGMMA register transpose | rejected for the current RS fragment ownership |
+| 7 | Storage-neutral P32 Anchor-4 load-time repack | exact format accepted at `27573a3c`; CUDA mappings rejected |
