@@ -632,7 +632,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
       ? output
       : partial_output + static_cast<int64_t>(split) * Rows * size_n;
   const int n_tile = n_tile_base + (lane >> 3);
-  if (n_tile < n_tiles && (lane & 7) < 8) {
+  if ((StaticN > 0 || n_tile < n_tiles) && (lane & 7) < 8) {
     const int output_column = n_tile * kTileColumns + (lane & 7) * 2;
 #pragma unroll
     for (int output_row = 0; output_row < Rows; ++output_row) {
@@ -785,21 +785,8 @@ at::Tensor p32_window_ampere_impl(
   const auto* bank_ids_ptr = bank_ids.data_ptr<uint8_t>();
   auto* partial_output_ptr = partial_output.data_ptr<float>();
   auto* output_ptr = output.data_ptr<float>();
-  if (size_m == 1 && use_small_m_scalar && use_four_tile_scalar_stage &&
-      launch_static_n_scalar_kernel<TransitionBits, 1, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>(
-          input_ptr,
-          trellis_ptr,
-          levels_ptr,
-          bank_ids_ptr,
-          partial_output_ptr,
-          output_ptr,
-          size_k,
-          size_n,
-          static_cast<int>(split_count),
-          static_cast<int>(bank_alt_id),
-          grid,
-          stream)) {
-  } else if (size_m == 1 && use_small_m_scalar &&
+  if (size_m == 1 && use_small_m_scalar &&
+      (size_n == 12288 || size_n == 1024 || size_n == 10240 || size_n == 17408) &&
              launch_static_n_scalar_kernel<TransitionBits, 1>(
                  input_ptr,
                  trellis_ptr,

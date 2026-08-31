@@ -98,10 +98,11 @@ Hopper-only hardware:
     repeatable gains.
 18. For M8 full-KV (`N=1024`), use the compile-time N-tile count as well. This
     completes fixed-N dispatch coverage for every formal M8 projection shape.
-19. For scalar M1 and M4, use the fixed-N launcher on the formal shapes while
-    retaining each row count's proven K-stage policy. M1 benefits from fewer
-    N-bound predicates, and M4 keeps its measured four-K16 stage; M2 remains
-    on the cached generic scalar dispatch after a matched regression screen.
+19. For scalar M1 and M4, use the fixed-N launcher on the proven shape subset
+    while retaining each row count's K-stage policy. M1 specializes the
+    N=12288, 1024, 10240, and 17408 short-K projections; M4 specializes all
+    formal shapes with its measured four-K16 stage. M2 remains on the cached
+    generic scalar dispatch after a matched regression screen.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
@@ -179,6 +180,7 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/screen_m8_static_n_10240_6144.json`
 - `artifacts/a100_p32_window/screen_m8_static_n_1024.json`
 - `artifacts/a100_p32_window/screen_m1_m4_static_n_scalar_narrow.json`
+- `artifacts/a100_p32_window/screen_m1_m4_static_n_selective.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -378,10 +380,10 @@ The final M8 full-KV (`N=1024`) screen lowers its geomean from 0.045312 ms to
 This completes the fixed-N M8 shape set with the exactness suite still at
 22/22.
 
-The narrowed scalar fixed-N screen covers all 28 M1 and M4 cases. M1 lowers
-its geomean from 0.064880 ms on fetched main to 0.063490 ms (`1.022x`), and
-M4 lowers 0.081726 ms to 0.080639 ms (`1.013x`). Maximum error is `<= 4.8e-5`;
-M2 and M3 remain on their prior dispatches.
+The final selective scalar fixed-N screen covers all 28 M1 and M4 cases. M1
+lowers its geomean from 0.064880 ms on fetched main to 0.063510 ms (`1.022x`),
+and M4 lowers 0.081726 ms to 0.080089 ms (`1.020x`). Maximum error is
+`<= 4.8e-5`; M2 and M3 remain on their prior dispatches.
 
 ## Profiler diagnosis
 
@@ -454,7 +456,7 @@ more decode instructions without expanding the compact state representation.
 | M8 attention-out/MLP-down compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=5120` tile bound for every staged vector. | Accepted the combined M8 row/N specialization after 3.87% and 4.18% matched gains; other M8 N values remain generic pending screens. |
 | M8 linear-QKV/linear-Z compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=10240`/`N=6144` tile bounds for every staged vector. | Accepted after 4.07%/4.08% matched gains; the M8 full-KV (`N=1024`) screen followed separately. |
 | M8 full-KV compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=1024` tile bound for every staged vector. | Accepted after a 6.62% matched gain; all seven formal M8 shapes now use fixed-N paths. |
-| Scalar M1/M4 fixed-N launcher | Correct, but the scalar stage still checked the fixed output-tile bound at every warp. | Accepted for M1/M4 after 2.19%/1.35% matched gains versus fetched main; M2/M3 use the generic scalar launcher pending a better schedule. |
+| Scalar M1/M4 fixed-N launcher | Correct, but the scalar stage still checked the fixed output-tile bound at every warp. | Accepted for M1/M4 after 2.16%/2.04% matched gains versus fetched main; M2/M3 use the generic scalar launcher pending a better schedule. |
 | Scalar fixed-N launcher on M2/M3 | Correct, but the larger specialized body regressed M2 by 1.10% versus its cached-dispatch candidate (small-N and linear-Z were the largest losses); M3 was not part of the formal target. | Rejected for M2/M3; keep the compile-time launcher only on M1/M4. |
 
 ## Reproduction
