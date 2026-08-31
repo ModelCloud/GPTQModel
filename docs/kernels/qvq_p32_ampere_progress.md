@@ -118,6 +118,9 @@ Hopper-only hardware:
     specialize both N and `K=5120`. The fixed K makes the activation row
     stride and K-tile geometry compile-time values; unknown K values retain
     the runtime fallback.
+23. On M8, retain fixed `K=5120` only for full-KV and linear-QKV, where the
+    matched repeat remains positive. Other M8 shapes keep runtime K after a
+    mixed broad screen.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
@@ -1060,6 +1063,16 @@ and 1.254%. Every newly changed shape improves by median; full-KV gains
 5.206%, full-Q 1.136%, linear-QKV 0.806%, and linear-Z 0.810%. Exactness
 passes 28/28. The artifact is
 `artifacts/a100_p32_window/v16_m16_statick_short_candidate.json`.
+
+The eighth v16 progression selectively adds compile-time `K=5120` to M8
+full-KV and linear-QKV. The narrowed 40-warmup/1000-iteration repeat improves
+the eight-case median geomean by 1.390% and mean by 0.418%; full-KV improves
+2.199% by median and linear-QKV improves 0.587%. Exactness passes 28/28.
+The accepted repeat is
+`artifacts/a100_p32_window/v16_m8_statick_selective_repeat.json`. The broader
+`v16_m8_statick_short_candidate.json` is diagnostic only: MLP-gate regressed
+about 1%, while full-Q and linear-Z did not improve consistently by mean, so
+those routes were restored.
 
 Further v16 experiments rejected after the x2 checkpoint are retained as
 untracked diagnostics. Omitting lower shared rows regressed 0.740%, async
