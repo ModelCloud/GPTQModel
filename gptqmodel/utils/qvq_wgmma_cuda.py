@@ -165,7 +165,12 @@ def qvq_p32_window_wgmma_w3_m16_tma(
     if split_count == 0:
         shape = (int(input.shape[1]), int(out_features))
         split_count = {
+            (5120, 1024): 20,
+            (5120, 6144): 20,
+            (5120, 10240): 4,
+            (5120, 12288): 10,
             (5120, 17408): 10,
+            (6144, 5120): 8,
             (17408, 5120): 34,
         }.get(shape, 1)
 
