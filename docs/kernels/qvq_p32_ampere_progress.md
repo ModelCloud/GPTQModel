@@ -504,6 +504,28 @@ more decode instructions without expanding the compact state representation.
 | Scalar M1/M4 fixed-N launcher | Correct, but the scalar stage still checked the fixed output-tile bound at every warp. | Accepted for M1/M4 after 2.16%/2.04% matched gains versus fetched main; M2/M3 use the generic scalar launcher pending a better schedule. |
 | Scalar fixed-N launcher on M2/M3 | Correct, but the larger specialized body regressed M2 by 1.10% versus its cached-dispatch candidate (small-N and linear-Z were the largest losses); M3 was not part of the formal target. | Rejected for M2/M3; keep the compile-time launcher only on M1/M4. |
 
+## Post-merge origin/main baseline (v11)
+
+This cycle starts from the newly fetched and merged `origin/main` tip
+`8aa265e0fb11edc61e4d4e143bb4cdf2f6aa651c` (the merge of PR #80). The five
+tracked artifacts `qwen38_newmain_m{1,2,4,8,16}_8aa265e0.json` use the same
+20-warmup/100-iteration CUDA-event protocol and idle gate. The target metric
+is Ampere event geomean latency versus this control; planar-oracle timing is
+not included.
+
+| M | Cases | Ampere geomean (ms) | Worst max abs |
+|---:|---:|---:|---:|
+| 1 | 28 | 0.068855 | 3.052e-5 |
+| 2 | 28 | 0.072653 | 3.052e-5 |
+| 4 | 28 | 0.080292 | 3.052e-5 |
+| 8 | 28 | 0.089952 | 3.052e-5 |
+| 16 | 28 | 0.098378 | 3.052e-5 |
+
+The exactness suite passes 22/22 cases on the same checkout. Subsequent
+changes are recorded as separate commits only after a matched benchmark shows
+repeatable forward progress; failed experiments remain untracked artifacts and
+are summarized below rather than being mixed into the control.
+
 ## Reproduction
 
 ```bash
