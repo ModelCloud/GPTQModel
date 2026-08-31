@@ -142,9 +142,12 @@ def qvq_p32_window_ampere(
             # Attention-out has enough N64 CTAs that 24 slices beat the
             # reduction overhead of a 32-way wave for the scalar M1-M4
             # route. Other short-K projections retain the fuller 32-way wave.
+            shape = (int(input.shape[1]), int(out_features))
             small_m_split = (
                 24
-                if (int(input.shape[1]), int(out_features)) == (6144, 5120)
+                if shape == (6144, 5120)
+                else 32
+                if shape == (5120, 1024)
                 else 40
                 if input.shape[0] == 4
                 else 32

@@ -545,6 +545,14 @@ The first M2 screen tried fixed-N dispatch for full-Q with the same stage. It
 was correct but measured 0.080950 ms versus the 0.080699 ms control (`0.997x`),
 so that route was rejected and remains on the generic launcher.
 
+The third progression narrows the M4 full-KV reduction wave to 32 slices on
+the 124-SM A100. The matched `(K,N)=(5120,1024)` screen measured 0.036605 ms
+versus 0.045014 ms at the previous 40-way policy (`1.230x`); the full M4
+refresh improves 0.079040 ms to 0.078673 ms (`1.005x`) by median geomean,
+again with exact outputs. The 16- and 24-way alternatives reached 0.037868
+and 0.040183 ms; wider waves were not retained after the matched probes. Only
+32 is enabled for this shape.
+
 ## Reproduction
 
 ```bash
