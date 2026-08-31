@@ -1,0 +1,58 @@
+{
+  "commit": "833dfa63eb0903fa7c200960551838294ba0b8c7",
+  "device": {
+    "compute_capability": "8.0",
+    "memory_bytes": 102191202304,
+    "name": "NVIDIA PG506-230",
+    "sm_count": 124
+  },
+  "dtype": "float16 inputs/levels, float32 accumulation/output",
+  "hardware": {
+    "index": "0",
+    "memory.total": "98304",
+    "memory.used": "4",
+    "name": "NVIDIA PG506-230",
+    "pci.bus_id": "00000000:A0:00.0",
+    "utilization.gpu": "0",
+    "uuid": "GPU-14ab23f1-a785-e9df-bbb5-215547154e3c"
+  },
+  "iterations": 300,
+  "rows": [
+    {
+      "ampere": {
+        "max_ms": 0.0655359998345375,
+        "mean_ms": 0.03575125380108754,
+        "median_ms": 0.03481600061058998,
+        "min_ms": 0.03276799991726875,
+        "p95_ms": 0.04403200000524521
+      },
+      "ampere_metrics": {
+        "max_abs": 1.33514404296875e-05,
+        "mean_abs": 2.6736679501482286e-06,
+        "relative_l2": 4.859923024014279e-07
+      },
+      "bits": 2.0,
+      "k": 5120,
+      "m": 8,
+      "n": 1024,
+      "planar": {
+        "max_ms": 0.22220799326896667,
+        "mean_ms": 0.0667989332228899,
+        "median_ms": 0.0655359998345375,
+        "min_ms": 0.06451199948787689,
+        "p95_ms": 0.06656000018119812
+      },
+      "planar_metrics": {
+        "max_abs": 7.62939453125e-06,
+        "mean_abs": 1.3851013136445545e-06,
+        "relative_l2": 2.5257918423449155e-07
+      },
+      "shape": "full_kv"
+    }
+  ],
+  "source_fingerprint": "61f3b88f2395dbd883f46d44560ac314e7ec870bc27227c84fe2bdeb41aa0bcc",
+  "split_count": 24,
+  "torch": "2.13.0+cu130",
+  "torch_cuda": "13.0",
+  "warmup": 40
+}
