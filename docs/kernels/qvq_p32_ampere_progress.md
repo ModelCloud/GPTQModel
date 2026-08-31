@@ -526,6 +526,15 @@ changes are recorded as separate commits only after a matched benchmark shows
 repeatable forward progress; failed experiments remain untracked artifacts and
 are summarized below rather than being mixed into the control.
 
+### M1 fixed-N dispatch extension
+
+The first v11 progression extends the existing M1 fixed-N scalar dispatch to
+the remaining formal `linear_z` projection `(K,N)=(5120,6144)`. A matched
+40-warmup/200-iteration screen measured a 0.051132 ms control geomean versus
+0.046074 ms with the compile-time-N body (`1.110x`); the full 28-case M1
+refresh remains exact and measures 0.064973 ms by median geomean. This is a
+dispatch-only change: all other shapes retain their previous route.
+
 ## Reproduction
 
 ```bash

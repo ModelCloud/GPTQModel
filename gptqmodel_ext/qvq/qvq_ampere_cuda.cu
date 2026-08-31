@@ -786,7 +786,8 @@ at::Tensor p32_window_ampere_impl(
   auto* partial_output_ptr = partial_output.data_ptr<float>();
   auto* output_ptr = output.data_ptr<float>();
   if (size_m == 1 && use_small_m_scalar &&
-      (size_n == 12288 || size_n == 1024 || size_n == 10240 || size_n == 17408 ||
+      (size_n == 12288 || size_n == 1024 || size_n == 10240 || size_n == 6144 ||
+       size_n == 17408 ||
        (size_n == 5120 && size_k == 6144)) &&
              launch_static_n_scalar_kernel<TransitionBits, 1>(
                  input_ptr,
