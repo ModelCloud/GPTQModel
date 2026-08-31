@@ -600,6 +600,20 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
       }
     }
     if constexpr (
+        StaticN == 1024 && TilesPerBlock == 16 && Rows == 1) {
+      if (thread < StageKTiles * 4) {
+        const int stage_k_tile = thread >> 2;
+        const int word = thread & 3;
+        const int k_tile = k_tile_base + stage_k_tile;
+        auto* destination_ids = reinterpret_cast<uint32_t*>(
+            packed_bank_ids[destination][stage_k_tile]);
+        destination_ids[word] = k_tile < k_tiles
+            ? __ldg(reinterpret_cast<const uint32_t*>(
+                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles +
+                      block_n_tile_base) + word)
+            : 0u;
+      }
+    } else if constexpr (
         StaticN > 0 && TilesPerBlock == 16 &&
         (Rows == 2 || (Rows == 4 && StaticN != 1024))) {
       if (thread < StageKTiles) {
@@ -629,8 +643,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     __pipeline_commit();
   };
 
-  float accumulator_0[4][Rows] = {};
-  float accumulator_1[4][Rows] = {};
+  float accumulator_0[Rows] = {};
+  float accumulator_1[Rows] = {};
 
   stage(k_tile_begin, 0);
   int parity = 0;
@@ -679,14 +693,14 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
               const int row_base = output_row * (StageKTiles * kTileRows) + stage_k_tile * kTileRows;
               const float input_0 = __half2float(input_tile[parity][row_base + row]);
               const float input_8 = __half2float(input_tile[parity][row_base + row + 8]);
-              accumulator_0[tile_in_warp][output_row] =
-                  fmaf(input_0, weight_0, accumulator_0[tile_in_warp][output_row]);
-              accumulator_1[tile_in_warp][output_row] =
-                  fmaf(input_0, weight_1, accumulator_1[tile_in_warp][output_row]);
-              accumulator_0[tile_in_warp][output_row] =
-                  fmaf(input_8, weight_8, accumulator_0[tile_in_warp][output_row]);
-              accumulator_1[tile_in_warp][output_row] =
-                  fmaf(input_8, weight_9, accumulator_1[tile_in_warp][output_row]);
+              accumulator_0[output_row] =
+                  fmaf(input_0, weight_0, accumulator_0[output_row]);
+              accumulator_1[output_row] =
+                  fmaf(input_0, weight_1, accumulator_1[output_row]);
+              accumulator_0[output_row] =
+                  fmaf(input_8, weight_8, accumulator_0[output_row]);
+              accumulator_1[output_row] =
+                  fmaf(input_8, weight_9, accumulator_1[output_row]);
             }
           }
         }
@@ -723,14 +737,14 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
             const int row_base = output_row * (StageKTiles * kTileRows) + stage_k_tile * kTileRows;
             const float input_0 = __half2float(input_tile[parity][row_base + row]);
             const float input_8 = __half2float(input_tile[parity][row_base + row + 8]);
-            accumulator_0[tile_in_warp][output_row] =
-                fmaf(input_0, weight_0, accumulator_0[tile_in_warp][output_row]);
-            accumulator_1[tile_in_warp][output_row] =
-                fmaf(input_0, weight_1, accumulator_1[tile_in_warp][output_row]);
-            accumulator_0[tile_in_warp][output_row] =
-                fmaf(input_8, weight_8, accumulator_0[tile_in_warp][output_row]);
-            accumulator_1[tile_in_warp][output_row] =
-                fmaf(input_8, weight_9, accumulator_1[tile_in_warp][output_row]);
+            accumulator_0[output_row] =
+                fmaf(input_0, weight_0, accumulator_0[output_row]);
+            accumulator_1[output_row] =
+                fmaf(input_0, weight_1, accumulator_1[output_row]);
+            accumulator_0[output_row] =
+                fmaf(input_8, weight_8, accumulator_0[output_row]);
+            accumulator_1[output_row] =
+                fmaf(input_8, weight_9, accumulator_1[output_row]);
           }
         }
       }
@@ -750,8 +764,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
       float* row_target = target + static_cast<int64_t>(output_row) * size_n;
       store_output_pair<(Rows == 1 && StaticN == 1024)>(
           row_target + output_column,
-          accumulator_0[lane >> 3][output_row],
-          accumulator_1[lane >> 3][output_row]);
+          accumulator_0[output_row],
+          accumulator_1[output_row]);
     }
   }
 #endif
@@ -885,6 +899,9 @@ at::Tensor p32_window_ampere_impl(
       (size_m == 4 && size_k <= 6144) ||
       (size_m <= 4 && size_k == 17408 && size_n == 5120);
   const bool use_three_tile_scalar_stage = size_m == 2 && size_k <= 6144;
+  constexpr int kM4StageKTiles = TransitionBits == 4
+      ? kScalarLongStageKTiles
+      : kScalarTripleStageKTiles;
   const int tiles_per_block = use_small_m_scalar ? kM1TilesPerBlock : kTilesPerBlock;
   const dim3 grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
@@ -1025,7 +1042,7 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 4 && use_small_m_scalar && use_four_tile_scalar_stage &&
-             launch_static_n_scalar_kernel<TransitionBits, 4, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>(
+             launch_static_n_scalar_kernel<TransitionBits, 4, kM1Threads, kM1TilesPerBlock, kM4StageKTiles>(
                  input_ptr,
                  trellis_ptr,
                  levels_ptr,
@@ -1040,7 +1057,7 @@ at::Tensor p32_window_ampere_impl(
                  stream)) {
   } else if (size_m == 4 && use_small_m_scalar && use_four_tile_scalar_stage) {
     p32_window_ampere_m1_kernel<
-        TransitionBits, 4, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
+        TransitionBits, 4, kM1Threads, kM1TilesPerBlock, kM4StageKTiles>
         <<<grid, kM1Threads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
