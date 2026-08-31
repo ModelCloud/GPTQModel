@@ -6,9 +6,9 @@ PINNED_COMMIT="${QVQ_FAST_EVAL_COMMIT:-$(git -C "$ROOT" rev-parse HEAD)}"
 CHECKPOINT="${QVQ_FAST_EVAL_CHECKPOINT:-/root/qvq-results/calibration-fisher-composition-v1/llama32-1b-f9_yaqa182_nm2048_yaqa1x-anchor-up4-l6-l8}"
 GPU="${QVQ_FAST_EVAL_GPU:-0}"
 MAX_ROWS="${QVQ_FAST_EVAL_MAX_ROWS:-128}"
-BASELINE_OUTPUT="$CHECKPOINT/post_quant_eval_gsm8k_platinum_fa2_graph_off_v3.json"
-CANDIDATE_OUTPUT="$CHECKPOINT/post_quant_eval_gsm8k_platinum_fa2_decode_graph_v3.json"
-SUMMARY="$CHECKPOINT/post_quant_eval_gsm8k_platinum_fa2_decode_graph_v3_comparison.json"
+BASELINE_OUTPUT="$CHECKPOINT/post_quant_eval_gsm8k_platinum_fa2_graph_off_v4.json"
+CANDIDATE_OUTPUT="$CHECKPOINT/post_quant_eval_gsm8k_platinum_fa2_decode_graph_v4.json"
+SUMMARY="$CHECKPOINT/post_quant_eval_gsm8k_platinum_fa2_decode_graph_v4_comparison.json"
 WORKBASE=""
 WORKTREE=""
 
@@ -59,7 +59,8 @@ if [ ! -f "$BASELINE_OUTPUT" ]; then
     python "$ROOT/scripts/run_in_worktree.py" --worktree "$WORKTREE" --script scripts/qvq_evaluate.py -- tasks \
       --checkpoint "$CHECKPOINT" --output "$BASELINE_OUTPUT" --task gsm8k_platinum_cot \
       --batch-size 64 --device cuda:0 --attn-implementation 'paged|flash_attention_2' \
-      --cuda-graph-mode off --max-batch-tokens 2048 --max-rows "$MAX_ROWS"
+      --cuda-graph-mode off --no-use-async-batching --max-batch-tokens 2048 \
+      --max-blocks-per-request 32 --max-rows "$MAX_ROWS"
 fi
 
 if [ ! -f "$CANDIDATE_OUTPUT" ]; then
@@ -67,7 +68,7 @@ if [ ! -f "$CANDIDATE_OUTPUT" ]; then
     python "$ROOT/scripts/run_in_worktree.py" --worktree "$WORKTREE" --script scripts/qvq_evaluate.py -- tasks \
       --checkpoint "$CHECKPOINT" --output "$CANDIDATE_OUTPUT" --task gsm8k_platinum_cot \
       --batch-size 64 --device cuda:0 --attn-implementation 'paged|flash_attention_2' \
-      --cuda-graph-mode decode --max-blocks-per-request 4 --kv-padding-interval-size 16 \
+      --cuda-graph-mode decode --no-use-async-batching --max-blocks-per-request 32 \
       --max-batch-tokens 2048 --max-rows "$MAX_ROWS"
 fi
 
@@ -119,6 +120,16 @@ payload = {
     "baseline_graphs": baseline_graphs,
     "candidate_graphs": candidate_graphs,
     "graph_policy_verified": baseline_graphs == [False, False] and candidate_graphs == [False, True],
+    "cache_policy_compatible": (
+        baseline_cb.get("block_size") == candidate_cb.get("block_size")
+        and baseline_cb.get("max_batch_tokens") == candidate_cb.get("max_batch_tokens")
+        and baseline_cb.get("max_blocks_per_request") == candidate_cb.get("max_blocks_per_request")
+        and baseline_cb.get("allow_block_sharing") == candidate_cb.get("allow_block_sharing")
+        and baseline_cb.get("use_async_batching") is False
+        and candidate_cb.get("use_async_batching") is False
+        and int(baseline_cb.get("num_blocks", 0)) >= int(baseline_cb.get("max_blocks_per_request", 0))
+        and int(candidate_cb.get("num_blocks", 0)) >= int(candidate_cb.get("max_blocks_per_request", 0))
+    ),
     "baseline_engine": baseline_engine,
     "candidate_engine": candidate_engine,
 }
@@ -129,6 +140,7 @@ if not all(
         payload["continuous_batching_verified"],
         payload["paged_attention_verified"],
         payload["graph_policy_verified"],
+        payload["cache_policy_compatible"],
     )
 ):
     raise SystemExit(f"fast-eval canary failed: {payload}")
