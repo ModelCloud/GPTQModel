@@ -420,6 +420,16 @@ Their Ampere geomeans are 0.062931, 0.068251, 0.078186, 0.087721, and
 0.092700 ms for M1/M2/M4/M8/M16. New experiments in this cycle must beat these
 controls; planar timing remains oracle context only.
 
+## Dispatch checkpoint: M1 attention-out fixed-N scalar route
+
+Commit `083ec0eb` dispatches the formal M1 attention-out shape
+`(K,N)=(6144,5120)` through the existing compile-time-N scalar launcher. The
+focused four-rate artifact `exp_v10_m1_staticn_attention.json` is exact and
+measures a 0.050733 ms geomean versus 0.051311 ms for the fresh M1 control,
+or `1.011x` versus `origin/main` (planar timing is excluded). The apparent
+`_auto_split_count` early-return issue was separately tested and rejected as a
+red herring; the M-specific caller overrides already execute after the helper.
+
 ## Profiler diagnosis
 
 The pre-change M16/W2 full-Q+gate kernel was captured with:
