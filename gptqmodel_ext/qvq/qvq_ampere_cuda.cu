@@ -25,6 +25,8 @@ constexpr int kM1Threads = kThreads;
 constexpr int kM1Warps = kM1Threads / 32;
 constexpr int kM1TilesPerBlock = 4 * kM1Warps;
 constexpr int kStageKTiles = 2;
+constexpr int kScalarTripleStageKTiles = 3;
+constexpr int kScalarLongStageKTiles = 4;
 constexpr int kStageColumns = kStageKTiles * kTileRows;
 constexpr int kPairsPerTile = 128;
 constexpr int kLevels = 256;
@@ -170,7 +172,7 @@ __device__ __forceinline__ void copy_async_cg_16(void* destination, const void* 
       : "r"(shared_address), "l"(source));
 }
 
-template <int TransitionBits, bool FullRows>
+template <int TransitionBits, bool FullRows, int ActiveRows = 0, int StaticN = 0>
 __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -192,9 +194,10 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
   const int lane = thread & 31;
-  const int n_tiles = size_n / kTileColumns;
+  constexpr int kStaticNTiles = StaticN > 0 ? StaticN / kTileColumns : 0;
+  const int n_tiles = StaticN > 0 ? kStaticNTiles : size_n / kTileColumns;
   const int n_tile_base = static_cast<int>(blockIdx.x) * kTilesPerBlock;
-  const bool active_tile = n_tile_base + warp < n_tiles;
+  const bool active_tile = StaticN > 0 || n_tile_base + warp < n_tiles;
   const int split = static_cast<int>(blockIdx.z);
   const int k_tiles = size_k / kTileRows;
   const int k_tile_begin = (k_tiles * split) / split_count;
@@ -210,6 +213,14 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       if constexpr (FullRows) {
         if (source_column < size_k) {
           const half* source = input + static_cast<int64_t>(row) * size_k + source_column;
+          __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
+        } else {
+          input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
+        }
+      } else if constexpr (ActiveRows > 0) {
+        if (row < ActiveRows && source_column < size_k) {
+          const half* source = input + static_cast<int64_t>(row) * size_k +
+              source_column;
           __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
         } else {
           input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
@@ -234,7 +245,16 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       const int vector = tile_index - tile * kVectorsPerTile;
       const int n_tile = n_tile_base + tile;
       const int k_tile = k_tile_base + stage_k_tile;
-      if (n_tile < n_tiles && k_tile < k_tiles) {
+      if constexpr (StaticN > 0) {
+        if (k_tile < k_tiles) {
+          const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
+          const auto* source_vectors = reinterpret_cast<const uint4*>(
+              trellis + global_tile * kWordsPerTile);
+          copy_async_cg_16(destination_vectors + index, source_vectors + vector);
+        } else {
+          destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
+        }
+      } else if (n_tile < n_tiles && k_tile < k_tiles) {
         const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
         const auto* source_vectors = reinterpret_cast<const uint4*>(
             trellis + global_tile * kWordsPerTile);
@@ -358,6 +378,19 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       target[static_cast<int64_t>(output_row_0) * size_n + output_column + 9] = accumulator_1.values[1];
       target[static_cast<int64_t>(output_row_1) * size_n + output_column + 8] = accumulator_1.values[2];
       target[static_cast<int64_t>(output_row_1) * size_n + output_column + 9] = accumulator_1.values[3];
+    } else if constexpr (ActiveRows > 0) {
+      if (output_row_0 < ActiveRows) {
+        target[static_cast<int64_t>(output_row_0) * size_n + output_column] = accumulator_0.values[0];
+        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 1] = accumulator_0.values[1];
+        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 8] = accumulator_1.values[0];
+        target[static_cast<int64_t>(output_row_0) * size_n + output_column + 9] = accumulator_1.values[1];
+      }
+      if (output_row_1 < ActiveRows) {
+        target[static_cast<int64_t>(output_row_1) * size_n + output_column] = accumulator_0.values[2];
+        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 1] = accumulator_0.values[3];
+        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 8] = accumulator_1.values[2];
+        target[static_cast<int64_t>(output_row_1) * size_n + output_column + 9] = accumulator_1.values[3];
+      }
     } else {
       if (output_row_0 < size_m) {
         target[static_cast<int64_t>(output_row_0) * size_n + output_column] = accumulator_0.values[0];
@@ -387,7 +420,9 @@ template <
     int TransitionBits,
     int Rows,
     int Threads = kM1Threads,
-    int TilesPerBlock = kM1TilesPerBlock>
+    int TilesPerBlock = kM1TilesPerBlock,
+    int StageKTiles = kStageKTiles,
+    int StaticN = 0>
 __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -402,15 +437,16 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
   constexpr int kWordsPerTile = 4 * TransitionBits;
   static_assert(Rows >= 1 && Rows <= 8);
-  __shared__ __align__(32) half input_tile[2][Rows * kStageKTiles * kTileRows];
+  __shared__ __align__(32) half input_tile[2][Rows * StageKTiles * kTileRows];
   __shared__ __align__(16) uint32_t packed_words[
-      2][kStageKTiles][TilesPerBlock][kWordsPerTile];
-  __shared__ uint8_t packed_bank_ids[2][kStageKTiles][TilesPerBlock];
+      2][StageKTiles][TilesPerBlock][kWordsPerTile];
+  __shared__ uint8_t packed_bank_ids[2][StageKTiles][TilesPerBlock];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
   const int lane = thread & 31;
-  const int n_tiles = size_n / kTileColumns;
+  constexpr int kStaticNTiles = StaticN > 0 ? StaticN / kTileColumns : 0;
+  const int n_tiles = StaticN > 0 ? kStaticNTiles : size_n / kTileColumns;
   const int block_n_tile_base = static_cast<int>(blockIdx.x) * TilesPerBlock;
   const int n_tile_base = block_n_tile_base + warp * 4;
   const int split = static_cast<int>(blockIdx.z);
@@ -421,7 +457,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
 
   auto stage = [&](int k_tile_base, int destination) {
     auto* input_vectors = reinterpret_cast<uint4*>(input_tile[destination]);
-    constexpr int kInputVectorsPerRow = kStageKTiles * kTileRows / 8;
+    constexpr int kInputVectorsPerRow = StageKTiles * kTileRows / 8;
     for (int index = thread; index < Rows * kInputVectorsPerRow; index += Threads) {
       const int row = index / kInputVectorsPerRow;
       const int vector = index - row * kInputVectorsPerRow;
@@ -437,7 +473,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
 
     constexpr int kVectorsPerTile = kWordsPerTile / 4;
     constexpr int kVectorsPerKTile = TilesPerBlock * kVectorsPerTile;
-    constexpr int kVectorsPerBlock = kStageKTiles * kVectorsPerKTile;
+    constexpr int kVectorsPerBlock = StageKTiles * kVectorsPerKTile;
     auto* destination_vectors = reinterpret_cast<uint4*>(packed_words[destination]);
     for (int index = thread; index < kVectorsPerBlock; index += Threads) {
       const int stage_k_tile = index / kVectorsPerKTile;
@@ -446,7 +482,16 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
       const int vector = tile_index - tile * kVectorsPerTile;
       const int n_tile = block_n_tile_base + tile;
       const int k_tile = k_tile_base + stage_k_tile;
-      if (n_tile < n_tiles && k_tile < k_tiles) {
+      if constexpr (StaticN > 0) {
+        if (k_tile < k_tiles) {
+          const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
+          const auto* source_vectors = reinterpret_cast<const uint4*>(
+              trellis + global_tile * kWordsPerTile);
+          copy_async_cg_16(destination_vectors + index, source_vectors + vector);
+        } else {
+          destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
+        }
+      } else if (n_tile < n_tiles && k_tile < k_tiles) {
         const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
         const auto* source_vectors = reinterpret_cast<const uint4*>(
             trellis + global_tile * kWordsPerTile);
@@ -455,15 +500,20 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
         destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
       }
     }
-    if (thread < kStageKTiles * TilesPerBlock) {
+    if (thread < StageKTiles * TilesPerBlock) {
       const int stage_k_tile = thread / TilesPerBlock;
       const int tile = thread - stage_k_tile * TilesPerBlock;
       const int n_tile = block_n_tile_base + tile;
       const int k_tile = k_tile_base + stage_k_tile;
-      packed_bank_ids[destination][stage_k_tile][tile] =
-          n_tile < n_tiles && k_tile < k_tiles
-              ? bank_ids[static_cast<int64_t>(k_tile) * n_tiles + n_tile]
-              : 0;
+      if constexpr (StaticN > 0) {
+        packed_bank_ids[destination][stage_k_tile][tile] =
+            k_tile < k_tiles ? bank_ids[static_cast<int64_t>(k_tile) * n_tiles + n_tile] : 0;
+      } else {
+        packed_bank_ids[destination][stage_k_tile][tile] =
+            n_tile < n_tiles && k_tile < k_tiles
+                ? bank_ids[static_cast<int64_t>(k_tile) * n_tiles + n_tile]
+                : 0;
+      }
     }
     __pipeline_commit();
   };
@@ -473,10 +523,10 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
 
   stage(k_tile_begin, 0);
   int parity = 0;
-  for (int k_tile = k_tile_begin; k_tile < k_tile_end; k_tile += kStageKTiles) {
-    const bool has_next = k_tile + kStageKTiles < k_tile_end;
+  for (int k_tile = k_tile_begin; k_tile < k_tile_end; k_tile += StageKTiles) {
+    const bool has_next = k_tile + StageKTiles < k_tile_end;
     if (has_next) {
-      stage(k_tile + kStageKTiles, parity ^ 1);
+      stage(k_tile + StageKTiles, parity ^ 1);
     }
     __pipeline_wait_prior(has_next ? 1 : 0);
     __syncthreads();
@@ -485,9 +535,54 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     const int pair_column = lane & 7;
     const int shared_tile = warp * 4 + tile_in_warp;
     const int n_tile = n_tile_base + tile_in_warp;
-    if (n_tile < n_tiles) {
+    if constexpr (StaticN > 0) {
+      if (true) {
 #pragma unroll
-      for (int stage_k_tile = 0; stage_k_tile < kStageKTiles; ++stage_k_tile) {
+        for (int stage_k_tile = 0; stage_k_tile < StageKTiles; ++stage_k_tile) {
+          if (k_tile + stage_k_tile >= k_tile_end) {
+            continue;
+          }
+          const uint32_t* words = packed_words[parity][stage_k_tile][shared_tile];
+          const uint8_t packed_bank_id =
+              packed_bank_ids[parity][stage_k_tile][shared_tile];
+#pragma unroll
+          for (int row = 0; row < 8; ++row) {
+            const int pair = row * 8 + pair_column;
+            uint32_t state_0;
+            uint32_t state_8;
+            window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
+            const uint32_t decoded_0 = decode_pair_bits<TransitionBits>(
+                pair, state_0, packed_bank_id, alt_mask, levels);
+            const uint32_t decoded_8 = decode_pair_bits<TransitionBits>(
+                pair + 64, state_8, packed_bank_id, alt_mask, levels);
+            union {
+              uint32_t bits;
+              half2 values;
+            } pair_0{decoded_0}, pair_8{decoded_8};
+            const float weight_0 = __half2float(pair_0.values.x);
+            const float weight_1 = __half2float(pair_0.values.y);
+            const float weight_8 = __half2float(pair_8.values.x);
+            const float weight_9 = __half2float(pair_8.values.y);
+#pragma unroll
+            for (int output_row = 0; output_row < Rows; ++output_row) {
+              const int row_base = output_row * (StageKTiles * kTileRows) + stage_k_tile * kTileRows;
+              const float input_0 = __half2float(input_tile[parity][row_base + row]);
+              const float input_8 = __half2float(input_tile[parity][row_base + row + 8]);
+              accumulator_0[tile_in_warp][output_row] =
+                  fmaf(input_0, weight_0, accumulator_0[tile_in_warp][output_row]);
+              accumulator_1[tile_in_warp][output_row] =
+                  fmaf(input_0, weight_1, accumulator_1[tile_in_warp][output_row]);
+              accumulator_0[tile_in_warp][output_row] =
+                  fmaf(input_8, weight_8, accumulator_0[tile_in_warp][output_row]);
+              accumulator_1[tile_in_warp][output_row] =
+                  fmaf(input_8, weight_9, accumulator_1[tile_in_warp][output_row]);
+            }
+          }
+        }
+      }
+    } else if (n_tile < n_tiles) {
+#pragma unroll
+      for (int stage_k_tile = 0; stage_k_tile < StageKTiles; ++stage_k_tile) {
         if (k_tile + stage_k_tile >= k_tile_end) {
           continue;
         }
@@ -514,7 +609,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
           const float weight_9 = __half2float(pair_8.values.y);
 #pragma unroll
           for (int output_row = 0; output_row < Rows; ++output_row) {
-            const int row_base = output_row * kStageColumns + stage_k_tile * kTileRows;
+            const int row_base = output_row * (StageKTiles * kTileRows) + stage_k_tile * kTileRows;
             const float input_0 = __half2float(input_tile[parity][row_base + row]);
             const float input_8 = __half2float(input_tile[parity][row_base + row + 8]);
             accumulator_0[tile_in_warp][output_row] =
@@ -537,7 +632,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
       ? output
       : partial_output + static_cast<int64_t>(split) * Rows * size_n;
   const int n_tile = n_tile_base + (lane >> 3);
-  if (n_tile < n_tiles && (lane & 7) < 8) {
+  if ((StaticN > 0 || n_tile < n_tiles) && (lane & 7) < 8) {
     const int output_column = n_tile * kTileColumns + (lane & 7) * 2;
 #pragma unroll
     for (int output_row = 0; output_row < Rows; ++output_row) {
@@ -547,6 +642,45 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     }
   }
 #endif
+}
+
+template <
+    int TransitionBits,
+    int Rows,
+    int Threads = kM1Threads,
+    int TilesPerBlock = kM1TilesPerBlock,
+    int StageKTiles = kStageKTiles>
+inline bool launch_static_n_scalar_kernel(
+    const half* input,
+    const uint32_t* trellis,
+    const half* levels,
+    const uint8_t* bank_ids,
+    float* partial_output,
+    float* output,
+    int size_k,
+    int size_n,
+    int split_count,
+    int bank_alt_id,
+    const dim3 grid,
+    const cudaStream_t stream) {
+#define QVQ_LAUNCH_STATIC_N(N)                                                        \
+  case N:                                                                             \
+    p32_window_ampere_m1_kernel<TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, N> \
+        <<<grid, Threads, 0, stream>>>(                                               \
+            input, trellis, levels, bank_ids, partial_output, output, size_k, size_n, \
+            split_count, bank_alt_id);                                                \
+    return true
+  switch (size_n) {
+    QVQ_LAUNCH_STATIC_N(1024);
+    QVQ_LAUNCH_STATIC_N(5120);
+    QVQ_LAUNCH_STATIC_N(6144);
+    QVQ_LAUNCH_STATIC_N(10240);
+    QVQ_LAUNCH_STATIC_N(12288);
+    QVQ_LAUNCH_STATIC_N(17408);
+    default:
+      return false;
+  }
+#undef QVQ_LAUNCH_STATIC_N
 }
 
 __global__ void reduce_split_kernel(
@@ -598,7 +732,7 @@ at::Tensor p32_window_ampere_impl(
   TORCH_CHECK(
       out_features > 0 && out_features % kTileColumns == 0,
       "QVQ P32 Ampere N must be positive and divisible by 16");
-  TORCH_CHECK(split_count >= 1 && split_count <= 64, "QVQ P32 Ampere split count must be in [1, 64]");
+  TORCH_CHECK(split_count >= 1 && split_count <= 128, "QVQ P32 Ampere split count must be in [1, 128]");
   TORCH_CHECK(bank_alt_id >= 0 && bank_alt_id <= 3, "QVQ P32 Ampere bank ID must be in [0, 3]");
 
   const c10::cuda::CUDAGuard device_guard(input.device());
@@ -630,19 +764,104 @@ at::Tensor p32_window_ampere_impl(
       : at::empty({split_count, size_m, size_n}, input.options().dtype(at::kFloat));
   // The scalar M<=4 route pays one decode loop per K16 row and reuses each
   // decoded pair across the live output rows. It wins for the common 5-6K K
-  // projections; with the wider long-K wave it also wins for M1-M2, while
-  // M4 and larger long-K projections remain on WMMA.
+  // projections; with the wider long-K wave and four-K16 scalar stage it also
+  // wins for M1-M4, while larger long-K projections remain on WMMA.
   const bool use_small_m_scalar =
       (size_m <= 4 && size_k <= 6144) ||
-      (size_m <= 2 && size_k == 17408 && size_n == 5120);
+      (size_m <= 4 && size_k == 17408 && size_n == 5120);
+  const bool use_four_tile_scalar_stage =
+      (size_m == 4 && size_k <= 6144) ||
+      (size_m <= 4 && size_k == 17408 && size_n == 5120);
+  const bool use_three_tile_scalar_stage = size_m == 2 && size_k <= 6144;
   const int tiles_per_block = use_small_m_scalar ? kM1TilesPerBlock : kTilesPerBlock;
   const dim3 grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
       1,
       static_cast<unsigned>(split_count));
   const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(input.get_device());
-  if (size_m == 1 && use_small_m_scalar) {
+  const auto* input_ptr = reinterpret_cast<const half*>(input.data_ptr<at::Half>());
+  const auto* trellis_ptr = reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>());
+  const auto* levels_ptr = reinterpret_cast<const half*>(levels.data_ptr<at::Half>());
+  const auto* bank_ids_ptr = bank_ids.data_ptr<uint8_t>();
+  auto* partial_output_ptr = partial_output.data_ptr<float>();
+  auto* output_ptr = output.data_ptr<float>();
+  if (size_m == 1 && use_small_m_scalar &&
+      (size_n == 12288 || size_n == 1024 || size_n == 10240 || size_n == 6144 ||
+       size_n == 17408 ||
+       (size_n == 5120 && size_k == 6144)) &&
+             launch_static_n_scalar_kernel<TransitionBits, 1>(
+                 input_ptr,
+                 trellis_ptr,
+                 levels_ptr,
+                 bank_ids_ptr,
+                 partial_output_ptr,
+                 output_ptr,
+                 size_k,
+                 size_n,
+                 static_cast<int>(split_count),
+                 static_cast<int>(bank_alt_id),
+                 grid,
+                 stream)) {
+  } else if (size_m == 1 && use_small_m_scalar && use_four_tile_scalar_stage) {
+    p32_window_ampere_m1_kernel<
+        TransitionBits, 1, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
+        <<<grid, kM1Threads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 1 && use_small_m_scalar) {
     p32_window_ampere_m1_kernel<TransitionBits, 1><<<grid, kM1Threads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 2 && use_small_m_scalar && size_n == 1024 &&
+             launch_static_n_scalar_kernel<
+                 TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
+                 kScalarTripleStageKTiles>(
+                 input_ptr,
+                 trellis_ptr,
+                 levels_ptr,
+                 bank_ids_ptr,
+                 partial_output_ptr,
+                 output_ptr,
+                 size_k,
+                 size_n,
+                 static_cast<int>(split_count),
+                 static_cast<int>(bank_alt_id),
+                 grid,
+                 stream)) {
+  } else if (size_m == 2 && use_small_m_scalar && use_four_tile_scalar_stage) {
+    p32_window_ampere_m1_kernel<
+        TransitionBits, 2, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
+        <<<grid, kM1Threads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 2 && use_small_m_scalar && use_three_tile_scalar_stage) {
+    p32_window_ampere_m1_kernel<
+        TransitionBits, 2, kM1Threads, kM1TilesPerBlock, kScalarTripleStageKTiles>
+        <<<grid, kM1Threads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -677,6 +896,34 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
+  } else if (size_m == 4 && use_small_m_scalar && use_four_tile_scalar_stage &&
+             launch_static_n_scalar_kernel<TransitionBits, 4, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>(
+                 input_ptr,
+                 trellis_ptr,
+                 levels_ptr,
+                 bank_ids_ptr,
+                 partial_output_ptr,
+                 output_ptr,
+                 size_k,
+                 size_n,
+                 static_cast<int>(split_count),
+                 static_cast<int>(bank_alt_id),
+                 grid,
+                 stream)) {
+  } else if (size_m == 4 && use_small_m_scalar && use_four_tile_scalar_stage) {
+    p32_window_ampere_m1_kernel<
+        TransitionBits, 4, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
+        <<<grid, kM1Threads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
   } else if (size_m == 4 && use_small_m_scalar) {
     p32_window_ampere_m1_kernel<TransitionBits, 4><<<grid, kM1Threads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
@@ -685,6 +932,149 @@ at::Tensor p32_window_ampere_impl(
         bank_ids.data_ptr<uint8_t>(),
         partial_output.data_ptr<float>(),
         output.data_ptr<float>(),
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 8 && size_n == 12288) {
+    p32_window_ampere_kernel<TransitionBits, false, 8, 12288><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 8 && size_n == 5120) {
+    p32_window_ampere_kernel<TransitionBits, false, 8, 5120><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 8 && size_n == 10240) {
+    p32_window_ampere_kernel<TransitionBits, false, 8, 10240><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 8 && size_n == 6144) {
+    p32_window_ampere_kernel<TransitionBits, false, 8, 6144><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 8 && size_n == 1024) {
+    p32_window_ampere_kernel<TransitionBits, false, 8, 1024><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 8) {
+    p32_window_ampere_kernel<TransitionBits, false, 8><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == kRows && size_n == 12288) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 12288><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == kRows && size_n == 5120) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 5120><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == kRows && size_n == 10240) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 10240><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == kRows && size_n == 6144) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 6144><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == kRows && size_n == 1024) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 1024><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
         size_k,
         size_n,
         static_cast<int>(split_count),

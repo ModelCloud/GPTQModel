@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import os
+import threading
 from pathlib import Path
+from statistics import median
 
 import torch
 
@@ -28,6 +31,10 @@ _TORCH_NVCC_UNDEFINES = (
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
 )
+_SM_COUNT_CACHE: dict[tuple[str, int], int] = {}
+_AUTOTUNE_CACHE_VERSION = 2
+_AUTOTUNE_CACHE: dict[str, int] = {}
+_AUTOTUNE_CACHE_LOCK = threading.RLock()
 
 
 def _project_root() -> Path:
@@ -76,7 +83,9 @@ _QVQ_AMPERE_EXTENSION = TorchOpsJitExtension(
 )
 
 
-def _auto_split_count(*, in_features: int, out_features: int, k_tiles: int, sm_count: int) -> int:
+def _auto_split_count(
+    *, in_features: int, out_features: int, k_tiles: int, sm_count: int
+) -> int:
     """Use measured Qwen3.8 splits, then a live-SM-derived fallback."""
 
     tuned_split = {
@@ -94,6 +103,193 @@ def _auto_split_count(*, in_features: int, out_features: int, k_tiles: int, sm_c
     target_blocks = max(1, sm_count * 2)
     split_count = max(1, (target_blocks + n64_blocks - 1) // n64_blocks)
     return min(split_count, 8, k_tiles)
+
+
+def _device_sm_count(device: torch.device) -> int:
+    """Cache the immutable SM count used by the live-device fallback."""
+
+    key = (device.type, -1 if device.index is None else int(device.index))
+    sm_count = _SM_COUNT_CACHE.get(key)
+    if sm_count is None:
+        sm_count = int(torch.cuda.get_device_properties(device).multi_processor_count)
+        _SM_COUNT_CACHE[key] = sm_count
+    return sm_count
+
+
+def _autotune_enabled() -> bool:
+    """Return whether first-use launch-plan autotuning is enabled."""
+
+    return os.environ.get("QVQ_AMPERE_AUTOTUNE", "1").lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+        "",
+    }
+
+
+def _autotune_cache_key(
+    input: torch.Tensor,
+    *,
+    transition_bits: int,
+    out_features: int,
+    bank_alt_id: int,
+) -> str:
+    properties = torch.cuda.get_device_properties(input.device)
+    uuid = str(getattr(properties, "uuid", ""))
+    capability = f"{properties.major}.{properties.minor}"
+    return ":".join(
+        (
+            str(_AUTOTUNE_CACHE_VERSION),
+            uuid,
+            capability,
+            str(properties.multi_processor_count),
+            str(input.dtype),
+            str(input.shape[0]),
+            str(input.shape[1]),
+            str(out_features),
+            str(transition_bits),
+            str(bank_alt_id),
+        )
+    )
+
+
+def _autotune_candidates(
+    *, fallback: int, k_tiles: int, max_candidates: int = 12
+) -> list[int]:
+    """Return a small, bounded split wave around the static policy."""
+
+    if k_tiles <= 0:
+        return [1]
+    max_split = min(k_tiles, 128)
+    probes = (
+        fallback,
+        max(1, fallback // 2),
+        fallback * 2,
+        8,
+        16,
+        24,
+        32,
+        40,
+        48,
+        64,
+        96,
+        128,
+    )
+    candidates: list[int] = []
+    for candidate in probes:
+        candidate = min(max(1, int(candidate)), max_split)
+        if candidate not in candidates:
+            candidates.append(candidate)
+        if len(candidates) >= max_candidates:
+            break
+    return candidates
+
+
+def clear_qvq_ampere_autotune_cache() -> None:
+    """Clear the in-process Ampere launch-plan entries."""
+
+    with _AUTOTUNE_CACHE_LOCK:
+        _AUTOTUNE_CACHE.clear()
+
+
+def _autotune_split_count(
+    input: torch.Tensor,
+    trellis: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    *,
+    transition_bits: int,
+    out_features: int,
+    bank_alt_id: int,
+    fallback: int,
+) -> int:
+    """Benchmark a bounded set of split waves once and memoize the winner."""
+
+    key = _autotune_cache_key(
+        input,
+        transition_bits=transition_bits,
+        out_features=out_features,
+        bank_alt_id=bank_alt_id,
+    )
+    with _AUTOTUNE_CACHE_LOCK:
+        cached = _AUTOTUNE_CACHE.get(key)
+        if cached is not None:
+            return min(cached, int(input.shape[1]) // 16)
+
+        # CUDA event timing and host synchronization are illegal during graph
+        # capture. Use the measured fallback for a cold capture without
+        # memoizing it, so a later eager call can still tune this shape. A
+        # shape tuned before capture takes the cached fast path above.
+        if torch.cuda.is_current_stream_capturing():
+            return min(int(fallback), int(input.shape[1]) // 16, 128)
+
+        k_tiles = int(input.shape[1]) // 16
+        max_candidates = max(
+            2, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_CANDIDATES", "12"))
+        )
+        candidates = _autotune_candidates(
+            fallback=fallback,
+            k_tiles=k_tiles,
+            max_candidates=max_candidates,
+        )
+        warmup = max(0, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_WARMUP", "5")))
+        iterations = max(1, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_ITERATIONS", "20")))
+        repeats = max(1, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_REPEATS", "3")))
+        stream = torch.cuda.current_stream(input.device)
+        best_split = fallback
+        best_ms = float("inf")
+        for candidate in candidates:
+            try:
+                for _ in range(warmup):
+                    output = _QVQ_AMPERE_EXTENSION.op("p32_window")(
+                        input,
+                        trellis,
+                        levels,
+                        bank_ids,
+                        transition_bits,
+                        out_features,
+                        bank_alt_id,
+                        candidate,
+                    )
+                    del output
+                samples = []
+                for _ in range(repeats):
+                    starts = [
+                        torch.cuda.Event(enable_timing=True) for _ in range(iterations)
+                    ]
+                    ends = [
+                        torch.cuda.Event(enable_timing=True) for _ in range(iterations)
+                    ]
+                    for iteration in range(iterations):
+                        starts[iteration].record(stream)
+                        output = _QVQ_AMPERE_EXTENSION.op("p32_window")(
+                            input,
+                            trellis,
+                            levels,
+                            bank_ids,
+                            transition_bits,
+                            out_features,
+                            bank_alt_id,
+                            candidate,
+                        )
+                        del output
+                        ends[iteration].record(stream)
+                    ends[-1].synchronize()
+                    samples.extend(
+                        start.elapsed_time(end)
+                        for start, end in zip(starts, ends, strict=True)
+                    )
+                elapsed_ms = median(samples)
+                if elapsed_ms < best_ms:
+                    best_ms = elapsed_ms
+                    best_split = candidate
+            except (RuntimeError, ValueError):
+                # Invalid candidate waves or transient launch failures should
+                # not make a new model unusable; retain the known-good policy.
+                continue
+        _AUTOTUNE_CACHE[key] = int(best_split)
+        return int(best_split)
 
 
 def qvq_p32_window_ampere(
@@ -115,12 +311,11 @@ def qvq_p32_window_ampere(
     if split_count == 0:
         if not input.is_cuda:
             raise ValueError("QVQ P32 Ampere input must be CUDA")
-        properties = torch.cuda.get_device_properties(input.device)
         split_count = _auto_split_count(
             in_features=int(input.shape[1]),
             out_features=int(out_features),
             k_tiles=int(input.shape[1]) // 16,
-            sm_count=properties.multi_processor_count,
+            sm_count=_device_sm_count(input.device),
         )
         # The scalar M<=4 kernel groups sixteen N16 tiles per CTA.  Wide
         # projections therefore need a fuller split wave than the WMMA
@@ -131,9 +326,14 @@ def qvq_p32_window_ampere(
             # Attention-out has enough N64 CTAs that 24 slices beat the
             # reduction overhead of a 32-way wave for the scalar M1-M4
             # route. Other short-K projections retain the fuller 32-way wave.
+            shape = (int(input.shape[1]), int(out_features))
             small_m_split = (
                 24
-                if (int(input.shape[1]), int(out_features)) == (6144, 5120)
+                if shape == (6144, 5120)
+                else 32
+                if shape == (5120, 1024)
+                else 40
+                if input.shape[0] == 4
                 else 32
             )
             split_count = min(small_m_split, int(input.shape[1]) // 16)
@@ -144,7 +344,7 @@ def qvq_p32_window_ampere(
             # attention projections. Keep the measured split choices local
             # to M8; M5-M7 retain the conservative generic table.
             m8_split = {
-                1024: 32,
+                1024: 48,
                 5120: 32,
                 6144: 32,
                 10240: 16,
@@ -163,6 +363,7 @@ def qvq_p32_window_ampere(
                 5120: 12,
                 6144: 16,
                 10240: 16,
+                17408: 10,
             }.get(int(out_features))
             if m16_split is not None:
                 split_count = min(m16_split, int(input.shape[1]) // 16)
@@ -171,10 +372,23 @@ def qvq_p32_window_ampere(
             # eight-way wave leaves too few CTAs per SM on the 124-SM A100;
             # a wider wave reduces the per-CTA K span and the split reducer
             # remains cheaper than the additional idle time. M1-M2 use the
-            # scalar route and continue to benefit at 64 slices; M4+ retain
-            # the measured 32-way WMMA wave.
-            long_k_split = 64 if input.shape[0] <= 2 else 32
+            # scalar route and continue to benefit from a wide wave (128 for
+            # M1, 96 for M2); M4+ retain the measured 32-way WMMA wave.
+            long_k_split = (
+                128 if input.shape[0] == 1 else 96 if input.shape[0] == 2 else 32
+            )
             split_count = min(long_k_split, int(input.shape[1]) // 16)
+        if _autotune_enabled():
+            split_count = _autotune_split_count(
+                input,
+                trellis,
+                levels,
+                bank_ids,
+                transition_bits=transition_bits,
+                out_features=int(out_features),
+                bank_alt_id=int(bank_alt_id),
+                fallback=int(split_count),
+            )
     return _QVQ_AMPERE_EXTENSION.op("p32_window")(
         input,
         trellis,
@@ -187,4 +401,7 @@ def qvq_p32_window_ampere(
     )
 
 
-__all__ = ["qvq_p32_window_ampere"]
+__all__ = [
+    "clear_qvq_ampere_autotune_cache",
+    "qvq_p32_window_ampere",
+]
