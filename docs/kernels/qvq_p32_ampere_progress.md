@@ -971,6 +971,23 @@ M4 two-stage form improved 1.346% overall but regressed W3 by 0.274%, so it
 was narrowed rather than accepted broadly. Diagnostics are retained as
 `v16_cached_op_direct_*.json` and `v16_m4_stage2_candidate.json`.
 
+The second v16 progression removes dead persistent accumulator state from the
+fixed-N M8 WMMA routes. The lower eight activation rows are zero and never
+stored, so their two FP32 accumulator values per fragment are routed to
+temporary MMA outputs instead of being carried through the K loop. Generated
+register use falls from 72 to 56 per thread. Generic MLP-gate retains the old
+path after a broad screen found it negative. The cached 20-warmup/500-iteration
+repeat improves the complete 28-case M8 median geomean by 0.835% and the mean
+by 0.734%; MLP-gate is neutral, full-KV improves 1.459%, and MLP-down improves
+1.713%. Exactness passes 28/28. Artifacts are
+`artifacts/a100_p32_window/v16_m8_live_accumulator_control.json` and
+`artifacts/a100_p32_window/v16_m8_live_accumulator_selective_repeat.json`.
+
+Further scalar depth reductions were rejected. M2 two-stage staging regressed
+its 28-case median and mean geomeans by 1.053% and 1.119%, with W3 about 4%
+slower. One-stage M1 was visibly slower across the short-K shapes. Their
+diagnostics are `v16_m2_stage2_*.json` and `v16_m1_stage1_*.json`.
+
 ## Reproduction
 
 ```bash
