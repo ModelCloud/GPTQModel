@@ -28,7 +28,7 @@ def test_p32_ampere_auto_split_uses_live_resource_inputs():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
-@pytest.mark.parametrize("size_m", (1, 16))
+@pytest.mark.parametrize("size_m", (1, 2, 4, 8, 16))
 def test_p32_window_ampere_matches_exact_matrix(bits, size_m):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (8, 0):

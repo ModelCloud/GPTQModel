@@ -6,13 +6,14 @@ discarded experiments so later tuning does not repeat unsafe variants.
 
 ## Contract and target
 
-- Source base: GitHub `main` at `af1c66cf` (merged Ampere checkpoint).
+- Source base: GitHub `main` at `2cd27973` (tip fetched after PR #67 merged).
 - Device: physical GPU 0, `NVIDIA PG506-230`, UUID
   `GPU-14ab23f1-a785-e9df-bbb5-215547154e3c`, CC 8.0, 124 SMs, 96 GiB.
 - Software: PyTorch 2.13.0+cu130; CUDA runtime 13.0; NVCC 13.3.
 - Input and levels: FP16. Accumulation and output: FP32.
 - Rates: exact standard-P32 W2, W2.5, W3, and W3.5 continuous-window payloads.
-- Rows: M1 through M16; tuned measurements cover M1 and M16.
+- Rows: M1 through M16; the current formal matrix covers M1, M2, M4, M8,
+  and M16.
 - Accuracy gate: identical packed payload and bank metadata, dense exact-P32
   reference, and maximum absolute inference drift `<= 2e-3`.
 - Timing: 10 warmups and 50 per-iteration CUDA-event samples. Every formal run
@@ -56,23 +57,28 @@ Hopper-only hardware:
 8. Keep the 512-byte codebook in Ampere's read-only cache (`__ldg`) and issue
    streaming trellis copies as `cp.async.cg`; use 32-bit funnel shifts for
    state extraction instead of 64-bit window promotion.
+9. For M2-M4 and K<=6144, reuse the Marlin-style scalar tile schedule while
+   carrying exactly the live rows in FP32 accumulators. The short-K dispatch
+   uses up to thirty-two K splits, matching the M1 occupancy policy; M8 and
+   larger rows remain on the tensor-core path.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
 as well as carrying forward architecture-independent lessons from the Hopper
 kernel.
 
-There are eight primary device specializations: four transition widths times
-full-M16 and partial-row paths. One runtime split reducer is shared by all
-rates. Unknown shapes use a live-SM-derived fallback; the seven measured
-Qwen3.8-27B shapes use recorded split counts without embedding the local
-124-SM inventory.
+There are eight WMMA device specializations: four transition widths times
+full-M16 and partial-row paths. The scalar M1-M4 rows add four exact
+transition-width specializations, while one runtime split reducer is shared
+by all rates. Unknown shapes use a live-SM-derived fallback; the seven
+measured Qwen3.8-27B shapes use recorded split counts without embedding the
+local 124-SM inventory.
 
 ## Accepted correctness
 
-`tests/test_qvq_p32_ampere.py` passes 10/10 cases on the target GPU:
+`tests/test_qvq_p32_ampere.py` passes 22/22 cases on the target GPU:
 
-- W2-W3.5 at M1 and M16;
+- W2-W3.5 at M1, M2, M4, M8, and M16;
 - an N80 partial N64 block;
 - split-K reconstruction;
 - long-K accumulation;
@@ -80,8 +86,9 @@ Qwen3.8-27B shapes use recorded split counts without embedding the local
 - output shape, FP32 dtype, finite values, exact repeatability, and the
   `2e-3` maximum-error contract.
 
-The full formal benchmark adds 56 dense-reference cases across seven
-Qwen3.8-27B projection shapes, four rates, and M1/M16. All 56 pass.
+The full formal benchmark adds 140 dense-reference cases across seven
+Qwen3.8-27B projection shapes, four rates, and M1/M2/M4/M8/M16. All 140
+pass.
 
 ## Accepted performance
 
@@ -94,6 +101,8 @@ Artifacts (the `_v2` pair is this post-merge tuning cycle):
 - `artifacts/a100_p32_window/qwen38_m1_p32_ampere_v3.json`
 - `artifacts/a100_p32_window/qwen38_m1_p32_ampere_v4.json`
 - `artifacts/a100_p32_window/qwen38_m1_p32_ampere_v6.json`
+- `artifacts/a100_p32_window/qwen38_m24_p32_ampere_v1.json`
+- `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v1.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -107,6 +116,16 @@ same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
 | M1 (v3, eight-way scalar split) | 28 | 7.918x | 0.952x-29.839x | 2.632e-4 |
 | M1 (v4, sixteen-way scalar split) | 28 | 9.330x | 1.020x-31.519x | 2.632e-4 |
 | M1 (v6, thirty-two-way scalar split) | 28 | 9.620x | 1.041x-35.168x | 2.632e-4 |
+| M2 (small-M scalar, thirty-two-way split) | 28 | 14.179x | 1.340x-31.019x | 2.632e-4 |
+| M4 (small-M scalar, thirty-two-way split) | 28 | 12.578x | 1.340x-25.280x | 2.632e-4 |
+| M8 (WMMA partial rows) | 28 | 11.098x | 1.208x-21.643x | 2.632e-4 |
+| M16 (WMMA full rows, refreshed) | 28 | 15.619x | 4.056x-21.530x | 2.632e-4 |
+
+The fresh five-row-count run has Ampere geometric-mean latencies of 0.073924
+ms (M1), 0.078358 ms (M2), 0.088391 ms (M4), 0.100471 ms (M8), and 0.102477
+ms (M16). Relative to the same-checkout pre-specialization run, M2 improves
+`1.276x` and M4 `1.132x`; M1, M8, and M16 are within normal event-sample noise
+of their baselines. The additional `2x` stretch target remains open.
 
 M16 per-shape speedup ranges across W2-W3.5:
 
@@ -178,6 +197,9 @@ more decode instructions without expanding the compact state representation.
 | Scalar bank-mask hoisting | Exact, but the compiler already hoisted the row-group selector; the 12-case timing matrix was unchanged at the event-sample resolution. | Rejected as a source change; retain the simpler shared decode helper. |
 | Direct global trellis loads for scalar M=1 | Exact in the target-GPU suite, but bypassing the coalesced `cp.async.cg` staging raised the representative full-Q latency to 0.072-0.093 ms and attention to about 0.053-0.057 ms versus the staged route's 0.066-0.074 ms and 0.048-0.055 ms. | Rejected; retain shared trellis staging. |
 | Explicit `ld.global.nc.L1::evict_last` codebook loads | Exact and syntactically valid on sm_80, but the 12-case probe was unchanged or slower than `__ldg` at 0.066-0.093 ms for full-Q and 0.044-0.053 ms for the smaller shapes. | Rejected; retain the simpler `__ldg` read-only path. |
+| 256-thread/32-tile M2 scalar CTA | Correct, but the representative full-Q/full-KV/attention probe rose to about 0.079/0.048/0.056 ms versus 0.073/0.036/0.047 ms for the 128-thread route. | Rejected; retain 128 threads and sixteen N16 tiles per CTA. |
+| Two-tile-per-warp M4 scalar CTA | Correct after fixing the tile-base stride, but leaving half of each warp inactive raised full-Q to about 0.152 ms versus 0.090 ms for four tiles per warp. | Rejected; retain four active N16 tiles per warp. |
+| M8 scalar row accumulator | Correct, but eight live FP32 rows raised full-Q/attention to about 0.151/0.088 ms versus 0.117/0.073 ms for WMMA partial rows. | Rejected; keep M8 on the tensor-core path. |
 
 ## Reproduction
 
