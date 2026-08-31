@@ -90,16 +90,19 @@ Hopper-only hardware:
 15. For M8 full-Q (`N=12288`), combine the compile-time eight-live-row path
     with a compile-time N-tile count. This removes both row and N predicates
     from the measured wide projection while retaining the generic M8 fallback.
+16. For M8 attention-out and MLP-down (`N=5120`), use the same compile-time
+    N-tile count with the eight-live-row path. The two shapes share the N tile
+    geometry despite different K lengths.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
 as well as carrying forward architecture-independent lessons from the Hopper
 kernel.
 
-There are thirty-six WMMA device specializations: four transition widths
+There are forty WMMA device specializations: four transition widths
 times full-M16, generic partial-row, compile-time M8 partial-row, and
 compile-time M16 `N=12288`, `N=5120`, `N=10240`, `N=6144`, and `N=1024`
-paths, plus the compile-time M8 `N=12288` path. The
+paths, plus the compile-time M8 `N=12288` and `N=5120` paths. The
 scalar M1-M4 rows add four exact transition-width specializations, while one
 runtime split reducer is shared by all rates.
 Unknown shapes use a live-SM-derived fallback; the seven measured Qwen3.8-27B
@@ -162,6 +165,7 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/screen_m16_static_n_10240_6144.json`
 - `artifacts/a100_p32_window/screen_m16_static_n_1024.json`
 - `artifacts/a100_p32_window/screen_m8_static_n_fullq.json`
+- `artifacts/a100_p32_window/screen_m8_static_n_5120.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -347,6 +351,11 @@ ms to 0.043008 ms (`1.048x`) versus fetched main, with maximum error
 The M8 full-Q fixed-N screen lowers its four-rate geomean from 0.115712 ms on
 fetched main to 0.110592 ms (`1.046x`), with maximum error `<= 3.5e-5`.
 
+The M8 `N=5120` screen lowers attention-out and MLP-down geomeans from
+0.065280/0.159744 ms to 0.062848/0.153344 ms (`1.039x`/`1.042x`) versus
+fetched main. Maximum error is `<= 7.3e-5`, and the 22-case exactness suite
+passes after the dispatch addition.
+
 ## Profiler diagnosis
 
 The pre-change M16/W2 full-Q+gate kernel was captured with:
@@ -415,6 +424,7 @@ more decode instructions without expanding the compact state representation.
 | Three-K16 scalar stage for M1 | Correct and near-neutral in the full M1 subset (`1.001x`), without a repeatable gain over the two-K16 stage. | Narrowed to M2, where the matched subset measured `1.011x`; M1 retains two-K16 staging. |
 | Runtime-N WMMA staging on M16 fixed-N shapes | Correct, but the generic `n_tile < n_tiles` predicate remains on every staged vector even though the measured shapes are fixed at `N=12288`, `N=5120`, `N=10240`, `N=6144`, or `N=1024`. | Replaced by compile-time N specializations, which lower the focused M16 full-Q, attention-out, MLP-down, linear-QKV, linear-Z, and full-KV geomeans by 2.84%, 2.73%, 2.94%, 3.19%, 2.70%, and 4.81%; the remaining N values stay on the generic path pending matched screens. |
 | M8 full-Q compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=12288` tile bound for every staged vector. | Accepted the combined M8 row/N specialization after a 4.63% matched full-Q gain; other M8 N values remain generic pending screens. |
+| M8 attention-out/MLP-down compile-time N tile count | Correct, but the generic M8 row specialization still checked the fixed `N=5120` tile bound for every staged vector. | Accepted the combined M8 row/N specialization after 3.87% and 4.18% matched gains; other M8 N values remain generic pending screens. |
 
 ## Reproduction
 
