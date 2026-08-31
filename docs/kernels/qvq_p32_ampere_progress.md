@@ -52,18 +52,21 @@ Hopper-only hardware:
    short-K shape policies use up to thirty-two slices to fill more of the
    A100's 124 SMs.
 6. Use an explicit block barrier after MMA before reusing a stage buffer.
-7. For M=1 and K<=6144, use a Marlin-style scalar route: one 128-thread
-   CTA covers sixteen N16 tiles, each warp owns four tiles, and each lane
-   accumulates its two output columns directly. This avoids executing the
-   fifteen inactive rows of every `m16n8k16` instruction.
+7. For M=1 and M=2, use a Marlin-style scalar route even on the measured
+   long-K MLP-down shape; for M=3-M4, keep that route for K<=6144. One
+   128-thread CTA covers sixteen N16 tiles, each warp owns four tiles, and
+   each lane accumulates its output columns directly. This avoids executing
+   inactive rows of every `m16n8k16` instruction where the scalar route wins.
 8. Keep the 512-byte codebook in Ampere's read-only cache (`__ldg`) and issue
    streaming trellis copies as `cp.async.cg`; use 32-bit funnel shifts for
    state extraction instead of 64-bit window promotion.
-9. For M2-M4 and K<=6144, reuse the Marlin-style scalar tile schedule while
-   carrying exactly the live rows in FP32 accumulators. The short-K dispatch
-   uses up to thirty-two K splits, matching the M1 occupancy policy, except
-   attention-out (K=6144, N=5120), where a measured 24-way wave reduces the
-   split-reduction overhead; M8 and larger rows remain on the tensor-core path.
+9. For M3-M4 and K<=6144, reuse the Marlin-style scalar tile schedule while
+   carrying exactly the live rows in FP32 accumulators. M1-M2 also use this
+   schedule for the long-K MLP-down shape after its 32-way wave was measured
+   to overcome the old WMMA advantage. The short-K dispatch uses up to
+   thirty-two K splits, except attention-out (K=6144, N=5120), where a
+   measured 24-way wave reduces split-reduction overhead; M4 long-K and M8+
+   remain on the tensor-core path.
 10. For M8 and M16, retain WMMA arithmetic but choose the K split by M/N shape:
     M8 uses 16-way splits for wide QKV/MLP projections and 32-way splits for
     small-N KV/attention/Z projections; M16 uses 16-way splits for the latter
@@ -115,6 +118,7 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/qwen38_m124_attention_p32_ampere_v2.json`
 - `artifacts/a100_p32_window/qwen38_mixed_longk_attn_p32_ampere_v2.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v5.json`
+- `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v7.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -181,26 +185,26 @@ waves 5.7-19.4% faster than 32-way waves on this shape.
 
 The exact control is `/tmp/qvq_origin_main_2ca65de7.json`, produced from
 `origin/main` at `2ca65de7` before the two policy commits in this branch. The
-candidate is `qwen38_mixed_p32_ampere_v5.json` at `72536b4c`. Each row is the
+candidate is `qwen38_mixed_p32_ampere_v7.json` at `8aa308a3`. Each row is the
 geometric mean of the 28 cases for that M, using each case's Ampere event
 median; this deliberately excludes planar-oracle timing from the target.
 
 | M | Main geomean ms | Candidate geomean ms | Speedup vs fetched main |
 |---:|---:|---:|---:|
-| 1 | 0.073779 | 0.069525 | 1.061x |
-| 2 | 0.078361 | 0.074900 | 1.046x |
-| 4 | 0.087520 | 0.084787 | 1.032x |
-| 8 | 0.095570 | 0.092163 | 1.037x |
-| 16 | 0.099249 | 0.095798 | 1.036x |
+| 1 | 0.073779 | 0.068078 | 1.084x |
+| 2 | 0.078361 | 0.073846 | 1.061x |
+| 4 | 0.087520 | 0.085096 | 1.029x |
+| 8 | 0.095570 | 0.092800 | 1.030x |
+| 16 | 0.099249 | 0.096322 | 1.030x |
 
 The accepted changes are deliberately narrow: the measured long-K Qwen3.8
 MLP-down shape (K=17408, N=5120) moves from main's eight-way split to a
-32-way split, and M16 attention-out (K=6144, N=5120) moves to a measured
-12-way split. The focused MLP-down rows improve 1.218x, 1.213x, 1.204x,
-1.194x, and 1.170x for M1/M2/M4/M8/M16 respectively; M16 attention-out is
-1.038x. Because MLP-down is only one of seven shapes, the complete matrix is
-currently 1.032-1.061x versus fetched main, so the requested 2x target remains
-open.
+32-way split, M1-M2 use the scalar route on that shape, and M16
+attention-out (K=6144, N=5120) uses a measured 12-way split. The focused
+MLP-down rows improve 1.689x, 1.472x, 1.204x, 1.192x, and 1.170x for
+M1/M2/M4/M8/M16 respectively; M16 attention-out is 1.042x. Because MLP-down
+is only one of seven shapes, the complete matrix is currently 1.029-1.084x
+versus fetched main, so the requested 2x target remains open.
 
 ## Profiler diagnosis
 
@@ -241,7 +245,8 @@ more decode instructions without expanding the compact state representation.
 | Full repository QVQ comparator build | Failed because unrelated YAQA translation units require cuBLAS/cuSPARSE developer headers absent from this local toolkit. | Benchmark builds the current `qvq_gemv_cuda.cu` alone. The GEMV file now uses the lightweight current-stream header and remains source-identical to production GEMV. |
 | 256-thread/32-tile M=1 scalar CTA | Correct across the formal M=1 cases, but full-KV latency regressed to 0.058-0.070 ms versus 0.053-0.063 ms for the 128-thread route. | Rejected; retain 128 threads, four warps, and sixteen N16 tiles per CTA. |
 | 64-thread/8-tile M=1 scalar CTA | Correct, but full-Q and attention timings were neutral-to-slower and full-KV W2 rose to about 0.055 ms; it did not offset the reduced per-CTA decode parallelism. | Rejected; retain the 128-thread route. |
-| Scalar M=1 on K=17408 | Correct, but W3.5 MLP-down rose to about 0.229 ms versus 0.196 ms for WMMA. | Rejected by dispatch; scalar M=1 is limited to K<=6144. |
+| Scalar M=1 on K=17408 with the old eight-way wave | Correct, but W3.5 MLP-down rose to about 0.229 ms versus 0.196 ms for WMMA. | Superseded: after widening the long-K wave to 32, scalar M1 is now accepted at about 0.113 ms; do not reuse the old eight-way result. |
+| Scalar M=4 on K=17408 with the 32-way wave | Correct, but the four-row scalar route was neutral-to-slower (about 0.159 ms geomean) than WMMA (about 0.158 ms) in the focused probe. | Rejected; retain WMMA for M4 and larger long-K projections. |
 | Shared codebook copy | Exact, but the `__ldg` read-only path was consistently lower in the representative matrix and removes a 512-byte per-CTA copy. | Replaced by read-only levels; keep the experiment in history as the prior checkpoint. |
 | Direct atomic M=1 split-K accumulation | Correct in the quick matrix and removed the separate reduction launch, but timings were statistically neutral (full-Q about 0.084-0.095 ms, full-KV about 0.053-0.062 ms, attention about 0.070-0.082 ms). Atomic accumulation also sacrifices deterministic summation order. | Rejected; retain deterministic partial-output reduction and do not count this as forward progress. |
 | Scalar bank-mask hoisting | Exact, but the compiler already hoisted the row-group selector; the 12-case timing matrix was unchanged at the event-sample resolution. | Rejected as a source change; retain the simpler shared decode helper. |
