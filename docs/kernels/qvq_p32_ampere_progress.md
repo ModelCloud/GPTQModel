@@ -114,8 +114,9 @@ Hopper-only hardware:
     zeroed to preserve the `m16n8k16` contract, while the matching lower FP32
     outputs remain transient. Full-KV retains `ldmatrix.x4`, which is faster
     once its small launch/reduction overhead dominates.
-22. On the M16 full-Q, full-KV, linear-QKV, linear-Z, and MLP-gate/up routes,
-    specialize both N and `K=5120`. The fixed K makes the activation row
+22. On every formal M16 route, specialize both N and K. Full-Q, full-KV,
+    linear-QKV, linear-Z, and MLP-gate/up use `K=5120`; attention-out uses
+    `K=6144`; MLP-down uses `K=17408`. The fixed K makes the activation row
     stride and K-tile geometry compile-time values; unknown K values retain
     the runtime fallback.
 23. On M8, retain fixed `K=5120` only for full-KV and linear-QKV, where the
@@ -1073,6 +1074,13 @@ The accepted repeat is
 `v16_m8_statick_short_candidate.json` is diagnostic only: MLP-gate regressed
 about 1%, while full-Q and linear-Z did not improve consistently by mean, so
 those routes were restored.
+
+The ninth v16 progression completes formal M16 fixed-K coverage for the two
+`N=5120` shapes: attention-out uses compile-time `K=6144`, and MLP-down uses
+`K=17408`. The matched 40-warmup/1000-iteration eight-case median and mean
+geomeans improve 1.201% and 1.176%; both shapes improve by both metrics.
+Exactness passes 28/28. The artifact is
+`artifacts/a100_p32_window/v16_m16_statick_n5120_candidate.json`.
 
 Further v16 experiments rejected after the x2 checkpoint are retained as
 untracked diagnostics. Omitting lower shared rows regressed 0.740%, async
