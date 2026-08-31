@@ -504,6 +504,90 @@ more decode instructions without expanding the compact state representation.
 | Scalar M1/M4 fixed-N launcher | Correct, but the scalar stage still checked the fixed output-tile bound at every warp. | Accepted for M1/M4 after 2.16%/2.04% matched gains versus fetched main; M2/M3 use the generic scalar launcher pending a better schedule. |
 | Scalar fixed-N launcher on M2/M3 | Correct, but the larger specialized body regressed M2 by 1.10% versus its cached-dispatch candidate (small-N and linear-Z were the largest losses); M3 was not part of the formal target. | Rejected for M2/M3; keep the compile-time launcher only on M1/M4. |
 
+## Post-merge origin/main baseline (v11)
+
+This cycle starts from the newly fetched and merged `origin/main` tip
+`8aa265e0fb11edc61e4d4e143bb4cdf2f6aa651c` (the merge of PR #80). The five
+tracked artifacts `qwen38_newmain_m{1,2,4,8,16}_8aa265e0.json` use the same
+20-warmup/100-iteration CUDA-event protocol and idle gate. The target metric
+is Ampere event geomean latency versus this control; planar-oracle timing is
+not included.
+
+| M | Cases | Ampere geomean (ms) | Worst max abs |
+|---:|---:|---:|---:|
+| 1 | 28 | 0.068855 | 3.052e-5 |
+| 2 | 28 | 0.072653 | 3.052e-5 |
+| 4 | 28 | 0.080292 | 3.052e-5 |
+| 8 | 28 | 0.089952 | 3.052e-5 |
+| 16 | 28 | 0.098378 | 3.052e-5 |
+
+The exactness suite passes 22/22 cases on the same checkout. Subsequent
+changes are recorded as separate commits only after a matched benchmark shows
+repeatable forward progress; failed experiments remain untracked artifacts and
+are summarized below rather than being mixed into the control.
+
+### M1 fixed-N dispatch extension
+
+The first v11 progression extends the existing M1 fixed-N scalar dispatch to
+the remaining formal `linear_z` projection `(K,N)=(5120,6144)`. A matched
+40-warmup/200-iteration screen measured a 0.051132 ms control geomean versus
+0.046074 ms with the compile-time-N body (`1.110x`); the full 28-case M1
+refresh remains exact and measures 0.064973 ms by median geomean. This is a
+dispatch-only change: all other shapes retain their previous route.
+
+The second progression applies the same compile-time-N scalar body to M2
+full-KV `(K,N)=(5120,1024)`, while retaining M2's measured three-tile stage.
+The focused four-rate screen improves 0.044529 ms to 0.043002 ms (`1.036x`),
+and the full M2 refresh improves 0.069963 ms to 0.069192 ms (`1.011x`) by
+median geomean, with exact outputs.
+
+The first M2 screen tried fixed-N dispatch for full-Q with the same stage. It
+was correct but measured 0.080950 ms versus the 0.080699 ms control (`0.997x`),
+so that route was rejected and remains on the generic launcher.
+
+The third progression narrows the M4 full-KV reduction wave to 32 slices on
+the 124-SM A100. The matched `(K,N)=(5120,1024)` screen measured 0.036605 ms
+versus 0.045014 ms at the previous 40-way policy (`1.230x`); the full M4
+refresh improves 0.079040 ms to 0.078673 ms (`1.005x`) by median geomean,
+again with exact outputs. The 16- and 24-way alternatives reached 0.037868
+and 0.040183 ms; wider waves were not retained after the matched probes. Only
+32 is enabled for this shape.
+
+The fourth progression narrows M8 full-KV to 24 slices. Its clean four-rate
+screen measures 0.034045 ms versus 0.043262 ms at the 32-way control (`1.271x`)
+with exact outputs. Replacing only those four rows lowers the five-M
+140-case median geomean from 0.078688 ms to 0.077580 ms (`1.014x`); the other
+M8 rows retain the post-merge control timings.
+
+A follow-up wider-wave screen supersedes that provisional setting: 48 slices
+measure 0.033784 ms across W2-W3.5 versus 0.034045 ms at 24 (`1.008x`). The
+M8 full-KV policy is therefore 48; the in-process launch-plan key version is
+bumped so stale entries cannot mask this update during a long-lived process.
+
+### M/K/N launch-plan autotuning
+
+The Python dispatch now runs a first-use tuner by default for new shapes. It
+benchmarks up to 12 split waves around the measured fallback on the active CUDA
+stream; the selected plan is keyed by
+device UUID/SM80 capability, dtype, M, K, N, transition bits, and bank variant.
+Entries are memoized only in the current process; no autotune data is read from
+or written to disk while the kernel is under active development.
+Set `QVQ_AMPERE_AUTOTUNE=0` for the zero-overhead measured/static fallback.
+Tuning can be made shorter or broader with `QVQ_AMPERE_AUTOTUNE_WARMUP`,
+`QVQ_AMPERE_AUTOTUNE_ITERATIONS`, and `QVQ_AMPERE_AUTOTUNE_CANDIDATES`; clear
+stale plans with `clear_qvq_ampere_autotune_cache()`.
+Cold CUDA-graph capture uses the measured fallback without memoizing it because
+event timing and host synchronization are illegal during capture; shapes tuned
+before capture continue to use their cached in-process plan.
+
+The probe budget was validated against an exhaustive comparison of the full
+bounded family. A six-probe control chose split 16 for an unseen SM80 shape
+K=8192,N=3072,M=1, while explicit timing found split 64 at 0.064512 ms versus
+0.069632 ms (`1.079x`). With the 12-probe default, the tuner selected split 64
+for that same shape. On the known M1 full-KV shape (K=5120,N=1024), the 12-probe
+tuner selected split 96; repeated screens placed splits 64, 96, and 128 within
+0.001024 ms, so no hand-tuned-only candidate is assumed to be optimal.
+
 ## Reproduction
 
 ```bash
