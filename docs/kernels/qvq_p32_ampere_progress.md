@@ -611,6 +611,13 @@ that further Python cache-hit overhead remains available to remove. Exactness
 passes 27/27; the focused result is stored in
 `artifacts/a100_p32_window/v12_m1_fullkv_fastkey.json`.
 
+The second progression makes a hot autotune hit return directly to the CUDA
+operator instead of recomputing the static shape policy and re-entering the
+tuning helper. The same M1 full-KV screen falls again from 0.047358 ms to
+0.038390 ms (`1.234x` over the first progression and `1.580x` over merged
+main), with the selected plans and exact outputs unchanged. The result is in
+`artifacts/a100_p32_window/v12_m1_fullkv_fast_hit.json`.
+
 ## Reproduction
 
 ```bash
