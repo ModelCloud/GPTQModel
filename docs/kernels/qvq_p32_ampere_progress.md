@@ -64,7 +64,8 @@ Hopper-only hardware:
 9. For M3-M4 and K<=6144, reuse the Marlin-style scalar tile schedule while
    carrying exactly the live rows in FP32 accumulators. M1-M4 also use this
    schedule for the long-K MLP-down shape after a scalar four-K16 stage was
-   measured to overcome the old WMMA advantage. The short-K dispatch uses up to
+   measured to overcome the old WMMA advantage. M4 also uses that four-K16
+   stage on the measured short-K shapes; the remaining short-K dispatch uses up to
    thirty-two K splits, except attention-out (K=6144, N=5120), where a
    measured 24-way wave reduces split-reduction overhead; M4 long-K and M8+
    remain on the tensor-core path.
@@ -128,6 +129,7 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v12.json`
 - `artifacts/a100_p32_window/qwen38_origin_main_eb0eefff.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v13.json`
+- `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v14.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -220,26 +222,24 @@ open.
 
 The new control is `qwen38_origin_main_eb0eefff.json`, produced from the
 freshly fetched `origin/main` after PR #75 merged. The candidate is
-`qwen38_mixed_p32_ampere_v13.json`, measured with the same 140 cases, 20
+`qwen38_mixed_p32_ampere_v14.json`, measured with the same 140 cases, 20
 warmups, 100 CUDA-event iterations, and idle/foreign-process gates. Values are
 geometric means of the 28 Ampere event medians for each M; planar timings are
 not part of this target.
 
 | M | New main geomean ms | Candidate geomean ms | Speedup vs fetched main |
 |---:|---:|---:|---:|
-| 1 | 0.066583 | 0.066654 | 0.999x |
-| 2 | 0.072008 | 0.071404 | 1.008x |
-| 4 | 0.084860 | 0.084158 | 1.008x |
-| 8 | 0.092692 | 0.092553 | 1.002x |
-| 16 | 0.096069 | 0.096158 | 0.999x |
+| 1 | 0.066583 | 0.065077 | 1.023x |
+| 2 | 0.072008 | 0.070520 | 1.021x |
+| 4 | 0.084860 | 0.081901 | 1.036x |
+| 8 | 0.092692 | 0.091843 | 1.009x |
+| 16 | 0.096069 | 0.095498 | 1.006x |
 
-The accepted v13 change specializes the Marlin-style scalar path for the
-long-K MLP-down shape (K=17408, N=5120) at M1-M4 and processes four K16 tiles
-per software stage, while keeping the proven two-tile WMMA stage for other
-shapes and M8/M16. Focused long-K geometric-mean improvements versus the new
-main were 1.000x (M1), 1.033x (M2), and 1.066x (M4). The complete matrix is
-currently 0.999-1.008x versus the fetched main, so the requested 2x target
-remains open.
+The accepted v14 change specializes the Marlin-style scalar path for the
+long-K MLP-down shape (K=17408, N=5120) at M1-M4 and uses four K16 tiles per
+software stage for M4's measured short-K shapes. The proven two-tile WMMA stage
+remains in place for other shapes and M8/M16. The complete matrix is currently
+1.006-1.036x versus the fetched main, so the requested 2x target remains open.
 
 ## Profiler diagnosis
 
@@ -296,6 +296,7 @@ more decode instructions without expanding the compact state representation.
 | Forty-eight-way long-K wave for M4/M8/M16 | Correct, but MLP-down was slower than the accepted 32-way wave (about 0.159/0.163/0.171 ms versus 0.158/0.160/0.165 ms). | Rejected; keep 32-way for M4/M8/M16 and 128-way (M1)/96-way (M2) for long-K scalar work. |
 | 256-way long-K wave for M1/M2 | Correct, but the reduction wave turned upward: M1/M2 MLP-down were about 0.105/0.121 ms versus about 0.100/0.114 ms for 128-way splitting. | Rejected; retain the 128-way M1 and measured 96-way M2 policies. |
 | Four-K16 scalar stage for long-K MLP-down | Correct across W2-W3.5 at M1-M4. Focused geometric means improved 1.003x/1.033x/1.068x versus the new M1/M2/M4 controls, while the full 140-case matrix improved 1.012x/1.014x/1.010x/1.003x/1.000x for M1/M2/M4/M8/M16. | Accepted for the measured `(K,N)=(17408,5120)` M1-M4 path; WMMA shapes retain the two-K16 stage. |
+| Four-K16 scalar stage on every short-K M1-M4 shape | Correct, but the six-shape W2-W3.5 probe was neutral-to-slower for M1 (0.998x) and M2 (1.001x), despite a 1.022x M4 gain. | Narrowed to M4 short-K shapes; M1-M2 short-K paths retain two-K16 staging. |
 | Eight-K16 scalar stage for long-K MLP-down | Correct, but W2 latency regressed to about 0.096/0.106/0.151 ms for M1/M2/M4 versus about 0.089/0.095/0.130 ms with four-K16 staging; the larger shared stage and unrolled body outweighed fewer handoffs. | Rejected; retain four-K16 scalar staging. |
 | Four-CTA-per-SM WMMA launch bound | Correct, but representative M8/M16 full-Q W2 latency rose to 0.119/0.131 ms versus 0.114/0.119 ms under the unconstrained launch bound. | Rejected; the apparent occupancy gain did not translate to throughput. |
 | Vectorized four-output split reducer | Correct, but it under-filled the small-output reducer (M1 MLP-down about 0.116 ms versus about 0.100 ms with one output per thread). | Rejected; retain the scalar reducer to preserve enough reduction blocks. |

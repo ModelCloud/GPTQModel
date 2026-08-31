@@ -637,15 +637,16 @@ at::Tensor p32_window_ampere_impl(
   const bool use_small_m_scalar =
       (size_m <= 4 && size_k <= 6144) ||
       (size_m <= 4 && size_k == 17408 && size_n == 5120);
-  const bool use_long_scalar_stage =
-      size_k == 17408 && size_n == 5120 && size_m <= 4;
+  const bool use_four_tile_scalar_stage =
+      (size_m == 4 && size_k <= 6144) ||
+      (size_m <= 4 && size_k == 17408 && size_n == 5120);
   const int tiles_per_block = use_small_m_scalar ? kM1TilesPerBlock : kTilesPerBlock;
   const dim3 grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
       1,
       static_cast<unsigned>(split_count));
   const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(input.get_device());
-  if (size_m == 1 && use_small_m_scalar && use_long_scalar_stage) {
+  if (size_m == 1 && use_small_m_scalar && use_four_tile_scalar_stage) {
     p32_window_ampere_m1_kernel<
         TransitionBits, 1, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
         <<<grid, kM1Threads, 0, stream>>>(
@@ -671,7 +672,7 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
-  } else if (size_m == 2 && use_small_m_scalar && use_long_scalar_stage) {
+  } else if (size_m == 2 && use_small_m_scalar && use_four_tile_scalar_stage) {
     p32_window_ampere_m1_kernel<
         TransitionBits, 2, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
         <<<grid, kM1Threads, 0, stream>>>(
@@ -709,7 +710,7 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
-  } else if (size_m == 4 && use_small_m_scalar && use_long_scalar_stage) {
+  } else if (size_m == 4 && use_small_m_scalar && use_four_tile_scalar_stage) {
     p32_window_ampere_m1_kernel<
         TransitionBits, 4, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
         <<<grid, kM1Threads, 0, stream>>>(
