@@ -175,6 +175,7 @@ more decode instructions without expanding the compact state representation.
 | Scalar M=1 on K=17408 | Correct, but W3.5 MLP-down rose to about 0.229 ms versus 0.196 ms for WMMA. | Rejected by dispatch; scalar M=1 is limited to K<=6144. |
 | Shared codebook copy | Exact, but the `__ldg` read-only path was consistently lower in the representative matrix and removes a 512-byte per-CTA copy. | Replaced by read-only levels; keep the experiment in history as the prior checkpoint. |
 | Direct atomic M=1 split-K accumulation | Correct in the quick matrix and removed the separate reduction launch, but timings were statistically neutral (full-Q about 0.084-0.095 ms, full-KV about 0.053-0.062 ms, attention about 0.070-0.082 ms). Atomic accumulation also sacrifices deterministic summation order. | Rejected; retain deterministic partial-output reduction and do not count this as forward progress. |
+| Scalar bank-mask hoisting | Exact, but the compiler already hoisted the row-group selector; the 12-case timing matrix was unchanged at the event-sample resolution. | Rejected as a source change; retain the simpler shared decode helper. |
 
 ## Reproduction
 
