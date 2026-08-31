@@ -35,6 +35,58 @@ M16/K256/N256.  Their maximum errors were 2.38e-6 and 3.34e-6.  The full window
 format suite at `63daa348` passes 21/21 tests across W1-W3.5, including CPU/CUDA
 word and state identity.
 
+## Qwen3.8-27B all-rate M16 result
+
+Benchmark head: `8e3c9f89`; all-rate kernel source: `874d9632`; rate-specific
+split policy: `d9464071`.  Artifact:
+`artifacts/h200_p32_window/qwen38_m16_p32_vs_machete_8e3c9f89.json`.
+Every row uses the lossless standard-P32 continuous-window payload and passed
+its own dense P32 reference with `max_abs <= 6.49e-5`.  Machete is symmetric W4
+group 128 and is a speed reference rather than a quality-equivalent format.
+
+| Rate | Shape | M | K | N | Window ms | Speedup vs planar P32 | Machete W4 ms | xMachete | Max abs |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| W2 | Full Q+gate | 16 | 5120 | 12288 | 0.05654 | 31.893x | 0.03478 | 0.615x | 2.86e-5 |
+| W2.5 | Full Q+gate | 16 | 5120 | 12288 | 0.05613 | 32.151x | 0.03478 | 0.620x | 3.05e-5 |
+| W3 | Full Q+gate | 16 | 5120 | 12288 | 0.05464 | 32.991x | 0.03478 | 0.637x | 3.24e-5 |
+| W3.5 | Full Q+gate | 16 | 5120 | 12288 | 0.05462 | 32.975x | 0.03478 | 0.637x | 5.72e-5 |
+| W2 | Full K/V | 16 | 5120 | 1024 | 0.01410 | 11.506x | 0.02091 | 1.484x | 1.53e-5 |
+| W2.5 | Full K/V | 16 | 5120 | 1024 | 0.01373 | 11.851x | 0.02091 | 1.523x | 1.72e-5 |
+| W3 | Full K/V | 16 | 5120 | 1024 | 0.01379 | 11.818x | 0.02091 | 1.516x | 1.53e-5 |
+| W3.5 | Full K/V | 16 | 5120 | 1024 | 0.01382 | 11.765x | 0.02091 | 1.513x | 1.53e-5 |
+| W2 | Attention out | 16 | 6144 | 5120 | 0.03422 | 26.336x | 0.02426 | 0.709x | 3.43e-5 |
+| W2.5 | Attention out | 16 | 6144 | 5120 | 0.03360 | 26.944x | 0.02426 | 0.722x | 4.58e-5 |
+| W3 | Attention out | 16 | 6144 | 5120 | 0.03259 | 27.656x | 0.02426 | 0.744x | 3.81e-5 |
+| W3.5 | Attention out | 16 | 6144 | 5120 | 0.03248 | 27.786x | 0.02426 | 0.747x | 3.81e-5 |
+| W2 | Linear QKV | 16 | 5120 | 10240 | 0.05013 | 31.172x | 0.03478 | 0.694x | 3.24e-5 |
+| W2.5 | Linear QKV | 16 | 5120 | 10240 | 0.04995 | 31.231x | 0.03478 | 0.696x | 3.43e-5 |
+| W3 | Linear QKV | 16 | 5120 | 10240 | 0.04741 | 34.229x | 0.03478 | 0.734x | 6.48e-5 |
+| W3.5 | Linear QKV | 16 | 5120 | 10240 | 0.04736 | 32.283x | 0.03478 | 0.734x | 5.91e-5 |
+| W2 | Linear Z | 16 | 5120 | 6144 | 0.03414 | 27.978x | 0.02390 | 0.700x | 1.53e-5 |
+| W2.5 | Linear Z | 16 | 5120 | 6144 | 0.03392 | 27.757x | 0.02390 | 0.705x | 1.53e-5 |
+| W3 | Linear Z | 16 | 5120 | 6144 | 0.03355 | 28.495x | 0.02390 | 0.712x | 1.53e-5 |
+| W3.5 | Linear Z | 16 | 5120 | 6144 | 0.03376 | 27.865x | 0.02390 | 0.708x | 5.15e-5 |
+| W2 | MLP gate/up | 16 | 5120 | 17408 | 0.07616 | 33.637x | 0.04194 | 0.551x | 3.05e-5 |
+| W2.5 | MLP gate/up | 16 | 5120 | 17408 | 0.07566 | 33.574x | 0.04194 | 0.554x | 3.62e-5 |
+| W3 | MLP gate/up | 16 | 5120 | 17408 | 0.07382 | 34.622x | 0.04194 | 0.568x | 3.24e-5 |
+| W3.5 | MLP gate/up | 16 | 5120 | 17408 | 0.07422 | 34.196x | 0.04194 | 0.565x | 5.72e-5 |
+| W2 | MLP down | 16 | 17408 | 5120 | 0.07482 | 33.645x | 0.04262 | 0.570x | 4.58e-5 |
+| W2.5 | MLP down | 16 | 17408 | 5120 | 0.07446 | 33.854x | 0.04262 | 0.572x | 4.58e-5 |
+| W3 | MLP down | 16 | 17408 | 5120 | 0.07290 | 34.443x | 0.04262 | 0.585x | 4.96e-5 |
+| W3.5 | MLP down | 16 | 17408 | 5120 | 0.07378 | 34.112x | 0.04262 | 0.578x | 5.72e-5 |
+
+| Rate | Seven-shape xMachete geomean | Speedup vs planar-P32 geomean |
+|---:|---:|---:|
+| W2 | 0.718x | 26.647x |
+| W2.5 | 0.726x | 26.871x |
+| W3 | 0.743x | 27.709x |
+| W3.5 | 0.741x | 27.304x |
+| Combined | 0.732x | 27.129x |
+
+The isolated CuTe translation unit compiles all four specializations in 44
+seconds on this host.  The complete window suite now passes 25/25 tests on the
+H200, including exact TMA RS-WGMMA reconstruction at W2-W3.5.
+
 ## H200 NCU profile
 
 Profiled head: `f36e1837`; kernel source: `00872584`.  Shape:
@@ -84,7 +136,7 @@ the selected split.
 | Priority | Coverage | State |
 |---:|---|---|
 | 1 | Warp-register PGC table versus read-only L1 | rejected; keep read-only L1 |
-| 2 | W3 split/grid policy to reduce the 164-CTA tail | accepted for gate/down; remaining Qwen shapes pending |
-| 3 | Generalize direct-window TMA RS-WGMMA to W2, W2.5, and W3.5 | pending |
+| 2 | Rate-specific split/grid policy for all seven Qwen shapes | accepted at `d9464071` |
+| 3 | Generalize direct-window TMA RS-WGMMA to W2, W2.5, and W3.5 | accepted at `874d9632` |
 | 4 | Qwen3.8 M1/M2/M4/M8 specializations | pending |
-| 5 | Full seven-shape W2-W3.5 P32 versus Machete sweep | pending |
+| 5 | Full seven-shape W2-W3.5 P32 versus Machete sweep | M16 complete; M1/M2/M4/M8 pending |
