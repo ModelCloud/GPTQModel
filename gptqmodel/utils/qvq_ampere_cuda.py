@@ -28,6 +28,7 @@ _TORCH_NVCC_UNDEFINES = (
     "-U__CUDA_NO_HALF_OPERATORS__",
     "-U__CUDA_NO_HALF_CONVERSIONS__",
 )
+_SM_COUNT_CACHE: dict[tuple[str, int], int] = {}
 
 
 def _project_root() -> Path:
@@ -96,6 +97,17 @@ def _auto_split_count(*, in_features: int, out_features: int, k_tiles: int, sm_c
     return min(split_count, 8, k_tiles)
 
 
+def _device_sm_count(device: torch.device) -> int:
+    """Cache the immutable SM count used by the live-device fallback."""
+
+    key = (device.type, -1 if device.index is None else int(device.index))
+    sm_count = _SM_COUNT_CACHE.get(key)
+    if sm_count is None:
+        sm_count = int(torch.cuda.get_device_properties(device).multi_processor_count)
+        _SM_COUNT_CACHE[key] = sm_count
+    return sm_count
+
+
 def qvq_p32_window_ampere(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -115,12 +127,11 @@ def qvq_p32_window_ampere(
     if split_count == 0:
         if not input.is_cuda:
             raise ValueError("QVQ P32 Ampere input must be CUDA")
-        properties = torch.cuda.get_device_properties(input.device)
         split_count = _auto_split_count(
             in_features=int(input.shape[1]),
             out_features=int(out_features),
             k_tiles=int(input.shape[1]) // 16,
-            sm_count=properties.multi_processor_count,
+            sm_count=_device_sm_count(input.device),
         )
         # The scalar M<=4 kernel groups sixteen N16 tiles per CTA.  Wide
         # projections therefore need a fuller split wave than the WMMA

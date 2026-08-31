@@ -79,6 +79,9 @@ Hopper-only hardware:
 12. M2 short-K scalar projections use a measured three-K16 software stage,
     reducing barrier/commit overhead while retaining the two-K16 stage for M1
     and the four-K16 stage only where it was already proven.
+13. Cache the immutable live SM count per CUDA device in the Python dispatch;
+    this removes repeated driver-property queries from the timed auto-split
+    path, which is material for sub-50-microsecond small-N projections.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
@@ -139,6 +142,11 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/qwen38_origin_main_492f1f58.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v15_492f1f58.json`
 - `artifacts/a100_p32_window/qwen38_m1_m2_stage3_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_m1_cached_sm_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_m2_cached_sm_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_m4_cached_sm_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_m8_cached_sm_492f1f58_retry.json`
+- `artifacts/a100_p32_window/qwen38_m16_cached_sm_492f1f58.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -280,6 +288,25 @@ all 28 cases for M1 and M2. The measured M2 geomean is `0.069539 ms` versus
 `0.070273 ms` for the fetched-main control (`1.011x`); M1 is effectively flat
 at `1.001x`, so the three-stage policy is narrowed to M2 rather than applied
 broadly.
+
+## Isolated row-count checkpoint
+
+The cache checkpoint was validated as separate 28-case runs per row count to
+avoid the clock/scheduling excursions seen in one long 140-case process. The
+comparison remains against `qwen38_origin_main_492f1f58.json` and excludes
+planar timing.
+
+| M | Fetched-main geomean ms | Cached-dispatch geomean ms | Speedup vs fetched main |
+|---:|---:|---:|---:|
+| 1 | 0.064880 | 0.063994 | 1.014x |
+| 2 | 0.070273 | 0.067885 | 1.035x |
+| 4 | 0.081726 | 0.081302 | 1.005x |
+| 8 | 0.092139 | 0.088444 | 1.042x |
+| 16 | 0.095486 | 0.094271 | 1.013x |
+| Equal-weight all M | 0.080007 | 0.078309 | 1.022x |
+
+All isolated runs passed the exactness contract; the M8 retry is the artifact
+used for the table after an earlier contaminated process was discarded.
 
 ## Profiler diagnosis
 
