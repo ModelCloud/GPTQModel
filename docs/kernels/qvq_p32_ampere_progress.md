@@ -82,22 +82,22 @@ Hopper-only hardware:
 13. Cache the immutable live SM count per CUDA device in the Python dispatch;
     this removes repeated driver-property queries from the timed auto-split
     path, which is material for sub-50-microsecond small-N projections.
-14. For the full-row M16 full-Q and `N=5120` projections, use a compile-time
-    N-tile count in the WMMA path. The fixed Qwen3.8 shapes let trellis staging
-    remove the per-vector N-bound predicate while preserving the K-bound check
-    and the exact generic fallback for all other shapes. The `N=5120` case is
-    shared by attention-out and MLP-down.
+14. For the full-row M16 full-Q, `N=5120`, `N=10240`, and `N=6144`
+    projections, use a compile-time N-tile count in the WMMA path. The fixed
+    Qwen3.8 shapes let trellis staging remove the per-vector N-bound predicate
+    while preserving the K-bound check and the exact generic fallback for all
+    other shapes. The `N=5120` case is shared by attention-out and MLP-down.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
 as well as carrying forward architecture-independent lessons from the Hopper
 kernel.
 
-There are twenty WMMA device specializations: four transition widths times
-full-M16, generic partial-row, compile-time M8 partial-row, compile-time M16
-`N=12288`, and compile-time M16 `N=5120` paths. The scalar M1-M4 rows add
-four exact transition-width specializations, while one runtime split reducer
-is shared by all rates.
+There are twenty-eight WMMA device specializations: four transition widths
+times full-M16, generic partial-row, compile-time M8 partial-row, and
+compile-time M16 `N=12288`, `N=5120`, `N=10240`, and `N=6144` paths. The
+scalar M1-M4 rows add four exact transition-width specializations, while one
+runtime split reducer is shared by all rates.
 Unknown shapes use a live-SM-derived fallback; the seven measured Qwen3.8-27B
 shapes use recorded split counts without embedding the local 124-SM inventory.
 
@@ -155,6 +155,7 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/qwen38_m16_cached_sm_492f1f58.json`
 - `artifacts/a100_p32_window/screen_m16_static_n_fullq.json`
 - `artifacts/a100_p32_window/screen_m16_static_n_5120.json`
+- `artifacts/a100_p32_window/screen_m16_static_n_10240_6144.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -328,6 +329,11 @@ their geomeans from 0.067327/0.165489 ms on the fetched-main control to
 0.065536/0.160763 ms (`1.027x`/`1.029x`) with maximum error `<= 9.6e-5`.
 The complete exactness suite is rerun before this checkpoint is retained.
 
+The companion `N=10240`/`N=6144` screen covers M16 linear-QKV and linear-Z.
+Their geomeans fall from 0.103680/0.068096 ms to 0.100480/0.066304 ms
+(`1.032x`/`1.027x`) against the same fetched-main rows. The exactness suite
+passes 22/22 after adding these dispatches.
+
 ## Profiler diagnosis
 
 The pre-change M16/W2 full-Q+gate kernel was captured with:
@@ -394,7 +400,7 @@ more decode instructions without expanding the compact state representation.
 | Ordinary/explicit `.ca` level loads | Correct, but matched probes were neutral-to-slower than the `__ldg` read-only path. | Rejected; retain `__ldg` for the 512-byte codebook. |
 | M8 dead-row staging elision | Correct, but removing the eight inactive activation rows was slower or neutral versus the compile-time-row specialization alone. | Rejected; retain zero-filled inactive rows for stable pipeline scheduling. |
 | Three-K16 scalar stage for M1 | Correct and near-neutral in the full M1 subset (`1.001x`), without a repeatable gain over the two-K16 stage. | Narrowed to M2, where the matched subset measured `1.011x`; M1 retains two-K16 staging. |
-| Runtime-N WMMA staging on M16 full-Q and N=5120 shapes | Correct, but the generic `n_tile < n_tiles` predicate remains on every staged vector even though the measured shapes are fixed at `N=12288` or `N=5120`. | Replaced by compile-time N specializations, which lower the focused M16 full-Q, attention-out, and MLP-down geomeans by 2.84%, 2.73%, and 2.94%; other N values remain on the generic path pending matched screens. |
+| Runtime-N WMMA staging on M16 fixed-N shapes | Correct, but the generic `n_tile < n_tiles` predicate remains on every staged vector even though the measured shapes are fixed at `N=12288`, `N=5120`, `N=10240`, or `N=6144`. | Replaced by compile-time N specializations, which lower the focused M16 full-Q, attention-out, MLP-down, linear-QKV, and linear-Z geomeans by 2.84%, 2.73%, 2.94%, 3.19%, and 2.70%; the remaining N values stay on the generic path pending matched screens. |
 
 ## Reproduction
 
