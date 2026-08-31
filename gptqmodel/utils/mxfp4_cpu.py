@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import torch
-from torch.utils.cpp_extension import load
+
+from .cpp import TorchOpsJitExtension, default_torch_ops_build_root
 
 
 # MXFP4 E2M1 value table (index = 4-bit nibble).
@@ -148,35 +149,52 @@ def _select_compiler() -> None:
 
 
 _EXTENSION: Optional[object] = None
+_TORCH_OPS_EXTENSION: Optional[TorchOpsJitExtension] = None
+
+
+def _mxfp4_cpu_source_path() -> Path:
+    return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "mxfp4_cpu_kernel.cpp"
+
+
+def _mxfp4_cpu_extension() -> TorchOpsJitExtension:
+    """Build the shared MXFP4 CPU torch.ops loader on first use."""
+
+    global _TORCH_OPS_EXTENSION
+    if _TORCH_OPS_EXTENSION is None:
+        _ensure_ninja_on_path()
+        _select_compiler()
+        _TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+            name="gptqmodel_mxfp4_cpu",
+            namespace="gptqmodel_mxfp4",
+            required_ops=("mxfp4_linear_cpu", "mxfp4_prepack_vnni", "mxfp4_linear_cpu_vnni"),
+            sources=lambda: [str(_mxfp4_cpu_source_path())],
+            build_root_env="GPTQMODEL_EXT_BUILD",
+            default_build_root=lambda: default_torch_ops_build_root("mxfp4_cpu"),
+            display_name="mxfp4_cpu",
+            extra_cflags=lambda: [
+                "-O3",
+                "-std=c++17",
+                "-fopenmp",
+                *os.environ.get("GPTQMODEL_MXFP4_EXTRA_CFLAGS", "").split(),
+            ],
+            extra_ldflags=["-fopenmp"],
+            verbose_env="GPTQMODEL_MXFP4_VERBOSE",
+            requires_cuda=False,
+        )
+    return _TORCH_OPS_EXTENSION
 
 
 def load_mxfp4_cpu_kernel() -> object:
-    """Build/load the experimental C++ MXFP4 kernel via torch.utils.cpp_extension (Ninja)."""
+    """Build/load the experimental C++ MXFP4 torch.ops kernel."""
     global _EXTENSION
     if _EXTENSION is not None:
         return _EXTENSION
 
-    _ensure_ninja_on_path()
-    _select_compiler()
-
-    src = Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "mxfp4_cpu_kernel.cpp"
+    src = _mxfp4_cpu_source_path()
     if not src.exists():
         raise FileNotFoundError(src)
 
-    extra_cflags = [
-        "-O3",
-        "-std=c++17",
-        "-fopenmp",
-    ]
-    extra_cflags += os.environ.get("GPTQMODEL_MXFP4_EXTRA_CFLAGS", "").split()
-    extra_ldflags = ["-fopenmp"]
+    from gptqmodel import extension as extension_api
 
-    _EXTENSION = load(
-        name="mxfp4_cpu_kernel",
-        sources=[str(src)],
-        extra_cflags=extra_cflags,
-        extra_ldflags=extra_ldflags,
-        is_python_module=True,
-        verbose=os.environ.get("GPTQMODEL_MXFP4_VERBOSE", "0") == "1",
-    )
+    _EXTENSION = extension_api.namespace("mxfp4_cpu")
     return _EXTENSION

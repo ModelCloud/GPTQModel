@@ -92,6 +92,7 @@ _PANGOLIN_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     force_rebuild_env="GPTQMODEL_PANGOLIN_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
+    python_abi_dependent=False,
 )
 
 def _pangolin_cpu_extra_cflags() -> list[str]:
@@ -123,6 +124,7 @@ _PANGOLIN_CPU_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     force_rebuild_env="GPTQMODEL_PANGOLIN_CPU_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=False,
+    python_abi_dependent=False,
 )
 
 

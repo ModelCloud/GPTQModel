@@ -418,6 +418,7 @@ _MACHETE_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     force_rebuild_env="GPTQMODEL_MACHETE_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
+    python_abi_dependent=False,
     # Machete kernels are Hopper-only, so compile-only workflows may need to
     # force a non-local target such as `TORCH_CUDA_ARCH_LIST=9.0a`.
     merge_visible_cuda_arch_override=False,

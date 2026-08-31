@@ -70,6 +70,11 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_factory("gptqmodel.utils.cpp", "_floatx_cpu_extension"),
     ),
     _ExtensionSpec(
+        name="mxfp4_cpu",
+        aliases=("mxfp4",),
+        resolve=lambda: _resolve_extension_factory("gptqmodel.utils.mxfp4_cpu", "_mxfp4_cpu_extension"),
+    ),
+    _ExtensionSpec(
         name="awq",
         aliases=(),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.awq", "_AWQ_TORCH_OPS_EXTENSION"),

@@ -8,11 +8,12 @@
 // scales is (N, K/32) uint8.  The kernel dequantizes each 32-element block to
 // FP32 on the fly, FMAs against BF16/FP16/FP8 activations, and writes the result.
 
+#include <ATen/ATen.h>
 #include <ATen/Parallel.h>
 #include <c10/util/BFloat16.h>
 #include <c10/util/Float8_e4m3fn.h>
 #include <c10/util/Half.h>
-#include <torch/extension.h>
+#include <torch/library.h>
 
 #include <algorithm>
 #include <array>
@@ -865,7 +866,7 @@ inline int64_t clamped_threads(int64_t requested, int64_t total_macs) {
 
 } // namespace
 
-// variant selects the compute path (see PYBIND11_MODULE doc string):
+// Variant selects the compute path:
 //   0 = auto, 1 = legacy FP32-accumulate / VDPBF16PS paths,
 //   2 = native FP16 compute with unbounded FP16 accumulation,
 //   3 = native FP16 compute with periodic FP32 folding (same as auto),
@@ -1433,16 +1434,18 @@ at::Tensor mxfp4_linear_cpu_vnni(
   return output;
 }
 
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("mxfp4_linear_cpu", &mxfp4_linear_cpu,
-        "MXFP4 linear on CPU (BF16/FP16/FP8_E4M3). variant: 0=auto, 1=legacy FP32/VDPBF16PS, "
-        "2=native FP16 FMA with unbounded FP16 accumulation, 3=native FP16 FMA with periodic "
-        "FP32 folding, 4=native FP16 FMA pinned to the narrow 4x4 tile.  fp16_flush > 0 folds "
-        "the FP16 accumulators into FP32 every fp16_flush K-groups of 32 weights",
-        py::arg("input"), py::arg("qweight"), py::arg("scales"), py::arg("threads") = 0,
-        py::arg("variant") = 0, py::arg("fp16_flush") = 0);
-  m.def("mxfp4_prepack_vnni", &mxfp4_prepack_vnni, "Permute MXFP4 weights for the VNNI int8 path");
-  m.def("mxfp4_linear_cpu_vnni", &mxfp4_linear_cpu_vnni, "MXFP4 linear on CPU via AVX-512 VNNI (FP8_E4M3)");
+} // namespace gptqmodel_mxfp4
+
+TORCH_LIBRARY(gptqmodel_mxfp4, m) {
+  m.def(
+      "mxfp4_linear_cpu(Tensor input, Tensor qweight, Tensor scales, int threads=0, int variant=0, int fp16_flush=0) "
+      "-> Tensor");
+  m.def("mxfp4_prepack_vnni(Tensor qweight, Tensor scales) -> Tensor[]");
+  m.def("mxfp4_linear_cpu_vnni(Tensor input, Tensor qpack, Tensor spack, int N, int threads) -> Tensor");
 }
 
-} // namespace gptqmodel_mxfp4
+TORCH_LIBRARY_IMPL(gptqmodel_mxfp4, CPU, m) {
+  m.impl("mxfp4_linear_cpu", TORCH_FN(gptqmodel_mxfp4::mxfp4_linear_cpu));
+  m.impl("mxfp4_prepack_vnni", TORCH_FN(gptqmodel_mxfp4::mxfp4_prepack_vnni));
+  m.impl("mxfp4_linear_cpu_vnni", TORCH_FN(gptqmodel_mxfp4::mxfp4_linear_cpu_vnni));
+}

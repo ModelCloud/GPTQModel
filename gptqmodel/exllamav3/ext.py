@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 import torch
 
@@ -178,6 +179,7 @@ _EXLLAMAV3_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     force_rebuild_env="GPTQMODEL_EXLLAMAV3_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
+    python_abi_dependent=False,
 )
 
 
