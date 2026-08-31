@@ -514,6 +514,36 @@ class AWQProcessor(LoopProcessor):
         )
 
     @staticmethod
+    def _token_row_budget(tensors: List[torch.Tensor]) -> int:
+        """Derive a pointwise sample budget from observed calibration batches.
+
+        Use one largest-batch equivalent, raised to the number of non-empty
+        batches so every contributing batch can retain at least one row. This
+        adapts to actual batch size, sequence lengths, and expert occupancy
+        while limiting any increase beyond the largest observed activation
+        batch to the minimum needed for one-row-per-batch coverage.
+        """
+
+        row_counts = []
+        for tensor in tensors:
+            if tensor.dim() < 2:
+                continue
+            hidden = int(tensor.shape[-1])
+            if hidden <= 0:
+                continue
+            rows = int(tensor.numel() // hidden)
+            if rows > 0:
+                row_counts.append(rows)
+
+        if not row_counts:
+            return 0
+
+        raw_tokens = sum(row_counts)
+        largest_batch = max(row_counts)
+        contributing_batches = len(row_counts)
+        return min(raw_tokens, max(largest_batch, contributing_batches))
+
+    @staticmethod
     def _pack_token_rows(
         tensors: List[torch.Tensor],
         *,
@@ -916,11 +946,20 @@ class AWQProcessor(LoopProcessor):
             policy = self._feature_aggregation_policy(name)
             aggregation_mode = (policy or {}).get("mode")
             if aggregation_mode == "token_rows":
-                max_tokens = int((policy or {}).get("max_tokens", 512))
-                features[name], raw_tokens = self._pack_token_rows(
-                    tensors,
-                    max_tokens=max_tokens,
+                configured_max_tokens = (policy or {}).get("max_tokens")
+                max_tokens = (
+                    int(configured_max_tokens)
+                    if configured_max_tokens is not None
+                    else self._token_row_budget(tensors)
                 )
+                if max_tokens == 0 and configured_max_tokens is None:
+                    features[name] = tensors[0].new_empty((1, 0, tensors[0].shape[-1]))
+                    raw_tokens = 0
+                else:
+                    features[name], raw_tokens = self._pack_token_rows(
+                        tensors,
+                        max_tokens=max_tokens,
+                    )
                 feature_kwargs[name] = {}
                 retained_tokens = int(features[name].shape[-2])
                 entry["inputs"] = [features[name]]

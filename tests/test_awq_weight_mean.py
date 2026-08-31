@@ -117,12 +117,10 @@ def test_public_moe_model_policies_enable_pointwise_roots_and_children():
 
         assert root_policy == {
             "mode": "token_rows",
-            "max_tokens": 512,
             "capture_root": True,
         }
         assert child_policy == {
             "mode": "token_rows",
-            "max_tokens": 512,
         }
         assert model_cls.awq_input_feature_aggregation("self_attn.q_proj") is None
 
@@ -232,6 +230,38 @@ def test_awq_layer_input_features_packs_variable_pointwise_token_rows():
     }
 
 
+def test_awq_layer_input_features_derives_token_budget_from_observed_batches():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    module_name = "mlp.experts.0.gate_proj"
+    state = _AWQLayerState(modules={module_name: object()})
+    processor.gptq_model.awq_input_feature_aggregation = lambda name: (
+        {"mode": "token_rows"} if name == module_name else None
+    )
+    processor.tasks[module_name] = {
+        "inputs": [
+            torch.full((1, 3, 4), 10.0),
+            torch.full((1, 9, 4), 20.0),
+            torch.full((1, 5, 4), 30.0),
+        ],
+        "batch_indices": [0, 1, 2],
+    }
+
+    features = processor._layer_input_features(state)
+
+    assert features[module_name].shape == (1, 9, 4)
+    assert torch.equal(
+        torch.unique(features[module_name][0, :, 0]),
+        torch.tensor([10.0, 20.0, 30.0]),
+    )
+    assert processor._feature_stats[module_name] == {
+        "mode": "token_rows",
+        "raw_tokens": 17,
+        "retained_tokens": 9,
+        "batches": 3,
+        "max_tokens": 9,
+    }
+
+
 def test_awq_pack_token_rows_reserves_a_row_from_every_batch():
     tensors = [
         torch.full((1, 5, 4), 10.0),
@@ -318,6 +348,19 @@ def test_awq_pack_token_rows_ignores_empty_captures_during_quota_allocation():
     )
     assert all_empty_raw == 0
     assert all_empty.shape == (1, 0, 4)
+
+
+def test_awq_token_row_budget_tracks_largest_batch_and_preserves_batch_coverage():
+    largest_batch_bound = [
+        torch.zeros(1, 3, 4),
+        torch.zeros(1, 9, 4),
+        torch.zeros(1, 5, 4),
+    ]
+    batch_coverage_bound = [torch.zeros(1, 1, 4) for _ in range(6)]
+
+    assert AWQProcessor._token_row_budget(largest_batch_bound) == 9
+    assert AWQProcessor._token_row_budget(batch_coverage_bound) == 6
+    assert AWQProcessor._token_row_budget([torch.zeros(1, 0, 4)]) == 0
 
 
 def test_awq_quant_log_nsamples_changes_only_for_token_row_aggregation():

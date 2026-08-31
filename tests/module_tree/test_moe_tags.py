@@ -115,12 +115,10 @@ def test_registered_moe_model_tree_marks_dynamic_expert_root(model_cls, model_ty
         child_policy = model_cls.awq_input_feature_aggregation(child_modules[-1])
         assert root_policy == {
             "mode": "token_rows",
-            "max_tokens": model_cls.awq_moe_feature_max_tokens,
             "capture_root": True,
         }
         assert child_policy == {
             "mode": "token_rows",
-            "max_tokens": model_cls.awq_moe_feature_max_tokens,
         }
 
 
