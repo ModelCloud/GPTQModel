@@ -46,6 +46,16 @@
       "layer_differing_element_share"
     ]
   },
+  "fast_evaluation": {
+    "state": "queued_after_canary",
+    "runtime_commit": "84018deb",
+    "attn_implementation": "paged|flash_attention_2",
+    "continuous_batching": true,
+    "use_cuda_graph": true,
+    "batch_size": 64,
+    "launcher": "scripts/run_fisher_weight_seed_fast_eval_v1.sh",
+    "policy": "retain pinned legacy reports and publish separate fast-v2 reports; require exact aggregate metric parity"
+  },
   "evaluation": {
     "primary": "gsm8k_platinum_cot: madrylab/gsm8k-platinum main/test, 1209 rows",
     "diagnostic": "canonical D300 development, 300 prompts x 32 tokens"
