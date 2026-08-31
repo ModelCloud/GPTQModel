@@ -36,6 +36,7 @@ _AutotuneCacheKey = tuple[int, torch.dtype, torch.Size, int, int, int]
 _AUTOTUNE_CACHE: dict[_AutotuneCacheKey, int] = {}
 _AUTOTUNE_CACHE_LOCK = threading.RLock()
 _P32_TRANSITION_BITS = {2: 4, 2.5: 5, 3: 6, 3.5: 7}
+_P32_WINDOW_OP: object | None = None
 
 
 def _project_root() -> Path:
@@ -146,10 +147,21 @@ def _autotune_cache_key(
         input.get_device(),
         input.dtype,
         input.shape,
-        int(out_features),
-        int(transition_bits),
-        int(bank_alt_id),
+        out_features,
+        transition_bits,
+        bank_alt_id,
     )
+
+
+def _p32_window_op() -> object:
+    """Resolve the registered operator once for hot cached launches."""
+
+    global _P32_WINDOW_OP
+    op = _P32_WINDOW_OP
+    if op is None:
+        op = _QVQ_AMPERE_EXTENSION.op("p32_window")
+        _P32_WINDOW_OP = op
+    return op
 
 
 def _autotune_candidates(
@@ -240,12 +252,13 @@ def _autotune_split_count(
         iterations = max(1, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_ITERATIONS", "20")))
         repeats = max(1, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_REPEATS", "3")))
         stream = torch.cuda.current_stream(input.device)
+        ampere_op = _p32_window_op()
         best_split = fallback
         best_ms = float("inf")
         for candidate in candidates:
             try:
                 for _ in range(warmup):
-                    output = _QVQ_AMPERE_EXTENSION.op("p32_window")(
+                    output = ampere_op(
                         input,
                         trellis,
                         levels,
@@ -266,7 +279,7 @@ def _autotune_split_count(
                     ]
                     for iteration in range(iterations):
                         starts[iteration].record(stream)
-                        output = _QVQ_AMPERE_EXTENSION.op("p32_window")(
+                        output = ampere_op(
                             input,
                             trellis,
                             levels,
@@ -317,8 +330,6 @@ def qvq_p32_window_ampere(
     if transition_bits not in (4, 5, 6, 7):
         raise ValueError("QVQ P32 Ampere WMMA supports W2 through W3.5")
     if split_count == 0:
-        if not input.is_cuda:
-            raise ValueError("QVQ P32 Ampere input must be CUDA")
         # Environment configuration is process-level. Reading ``os.environ``
         # on every cached launch costs more than the cache lookup itself, so
         # refresh it only when the process-local plan cache is cleared.
@@ -328,8 +339,8 @@ def qvq_p32_window_ampere(
             autotune_key = _autotune_cache_key(
                 input,
                 transition_bits=transition_bits,
-                out_features=int(out_features),
-                bank_alt_id=int(bank_alt_id),
+                out_features=out_features,
+                bank_alt_id=bank_alt_id,
             )
             # A cache hit only reads one process-local dictionary entry. Keep
             # that overwhelmingly common path out of the tuning lock; the
@@ -337,7 +348,7 @@ def qvq_p32_window_ampere(
             # so concurrent misses still tune exactly once.
             cached = _AUTOTUNE_CACHE.get(autotune_key)
             if cached is not None:
-                return _QVQ_AMPERE_EXTENSION.op("p32_window")(
+                return _p32_window_op()(
                     input,
                     trellis,
                     levels,
@@ -347,6 +358,9 @@ def qvq_p32_window_ampere(
                     bank_alt_id,
                     cached,
                 )
+
+        if not input.is_cuda:
+            raise ValueError("QVQ P32 Ampere input must be CUDA")
 
         if split_count == 0:
             split_count = _auto_split_count(
@@ -428,7 +442,7 @@ def qvq_p32_window_ampere(
                 fallback=int(split_count),
                 cache_key=autotune_key,
             )
-    return _QVQ_AMPERE_EXTENSION.op("p32_window")(
+    return _p32_window_op()(
         input,
         trellis,
         levels,

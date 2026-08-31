@@ -704,6 +704,14 @@ slower. The experiment is reverted. Its focused and full diagnostic results
 are stored in `artifacts/a100_p32_window/v13_m1_fullkv_reducer_ilp4.json` and
 `artifacts/a100_p32_window/qwen38_v13_reducer_ilp4_all_09515686.json`.
 
+The fifth accepted progression caches the resolved `torch.ops` callable,
+retains already-typed integers in the M/K/N plan key, and defers the explicit
+CUDA-input check until a real plan-cache miss. Full validation still occurs in
+the CUDA operator on every launch. The Python stub path falls from 1.24 us to
+0.99 us, while the matched M1 full-KV geomean falls from 0.036334 ms to
+0.032760 ms (`1.109x`) with identical numerical error. The result is stored in
+`artifacts/a100_p32_window/v13_m1_fullkv_cached_op.json`.
+
 ## Reproduction
 
 ```bash
