@@ -1,7 +1,11 @@
 {
   "schema": "qvq.calibration-fisher-composition-queue.v1",
-  "status": "prepared",
+  "status": "queued",
   "prepared_at_utc": "2026-08-30T23:57:00Z",
+  "launched_at_utc": "2026-08-31T00:05:22Z",
+  "launch_commit": "c68ee336",
+  "supervisor": "tmux:qvq-fisher-composition-v1",
+  "wait_state": "waiting for the two pinned NM-full Fisher endpoints to release GPUs 0 and 1; all four composition arms launch together after three exclusive-idle samples",
   "branch": "feat/qvq-frontier-score-updates",
   "purpose": "2x2 test of NM Fisher coverage and YAQA source importance without physical row duplication.",
   "fixed_model": "/monster/data/model/Llama-3.2-1B-Instruct",
