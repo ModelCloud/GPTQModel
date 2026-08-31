@@ -266,6 +266,81 @@ def test_build_evalution_runtime_supports_gptqmodel_seed():
     assert captured["engine_kwargs"]["seed"] == 898
 
 
+def test_build_evalution_runtime_routes_transformers_cb_config_to_engine():
+    captured = {}
+
+    class FakeGPTQModel:
+        def __init__(self, **kwargs):
+            captured["engine_kwargs"] = kwargs
+
+        def build(self, model_config):
+            captured["model_config"] = model_config
+            return "session"
+
+    class FakeModel:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def to_dict(self):
+            return dict(self.kwargs)
+
+    fake_evalution = SimpleNamespace(GPTQModel=FakeGPTQModel, Model=FakeModel)
+    _engine, _model_config, session = eval_module._build_evalution_runtime(
+        evalution=fake_evalution,
+        model_or_id_or_path="/tmp/model",
+        llm_backend="gptqmodel",
+        backend=BACKEND.AUTO,
+        batch_size=64,
+        trust_remote_code=False,
+        model_args={
+            "device": "cuda:0",
+            "attn_implementation": "paged|flash_attention_2",
+            "use_cuda_graph": (False, True),
+            "allow_block_sharing": True,
+            "max_batch_tokens": 8192,
+            "max_blocks_per_request": 4,
+            "use_async_batching": True,
+            "q_padding_interval_size": 0,
+            "kv_padding_interval_size": 16,
+            "max_cached_graphs": 4,
+        },
+        tokenizer=None,
+    )
+
+    assert session == "session"
+    engine_kwargs = captured["engine_kwargs"]
+    assert engine_kwargs["use_cuda_graph"] == (False, True)
+    assert engine_kwargs["max_batch_tokens"] == 8192
+    assert engine_kwargs["max_blocks_per_request"] == 4
+    assert engine_kwargs["use_async_batching"] is True
+    assert engine_kwargs["kv_padding_interval_size"] == 16
+    assert engine_kwargs["max_cached_graphs"] == 4
+    assert "use_cuda_graph" not in captured["model_config"].kwargs["model_kwargs"]
+
+
+def test_describe_continuous_batching_config_reports_resolved_graph_paths():
+    class Config:
+        block_size = 256
+        num_blocks = 128
+        max_batch_tokens = 8192
+        max_requests_per_batch = 64
+        max_blocks_per_request = 4
+        allow_block_sharing = True
+        use_async_batching = True
+        use_cuda_graph = (False, True)
+        cuda_graph_booleans = (False, True)
+        q_padding_interval_size = 0
+        kv_padding_interval_size = 16
+        max_cached_graphs = 0
+
+    session = SimpleNamespace(continuous_batching_manager=SimpleNamespace(continuous_batching_config=Config()))
+    payload = eval_module._describe_continuous_batching_config(session)
+    assert payload["use_cuda_graph"] == [False, True]
+    assert payload["cuda_graph_booleans"] == [False, True]
+    assert payload["max_blocks_per_request"] == 4
+    assert payload["kv_padding_interval_size"] == 16
+
+
 def test_build_evalution_runtime_drops_removed_gptqmodel_path_for_strict_engine_signature():
     captured = {}
 

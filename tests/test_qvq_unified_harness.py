@@ -21,6 +21,7 @@ from scripts.qvq_evaluate import (
     _model_logits,
     _publish_snapshot_evaluation,
     _row_text,
+    _resolve_cuda_graph_request,
     _wilson_interval,
     validate_evaluation_is_held_out,
 )
@@ -331,8 +332,66 @@ def test_qvq_evaluate_tasks_require_paged_continuous_batching_defaults():
     assert args.device == "cuda:0"
     assert args.attn_implementation == "paged|flash_attention_2"
     assert args.batch_size == 64
-    assert args.use_cuda_graph is True
+    assert args.use_cuda_graph is None
+    assert args.cuda_graph_mode is None
+    assert _resolve_cuda_graph_request(args) == ((False, True), "decode")
     assert args.resume is False
+
+
+@pytest.mark.parametrize(
+    ("option", "expected"),
+    [
+        ("off", ((False, False), "off")),
+        ("varlen", ((True, False), "varlen")),
+        ("decode", ((False, True), "decode")),
+        ("both", ((True, True), "both")),
+        ("auto", (None, "auto")),
+    ],
+)
+def test_qvq_evaluate_resolves_transformers_cuda_graph_modes(option, expected):
+    args = build_evaluate_parser().parse_args(
+        [
+            "tasks",
+            "--checkpoint",
+            "quantized-model",
+            "--output",
+            "result.json",
+            "--cuda-graph-mode",
+            option,
+        ]
+    )
+    assert _resolve_cuda_graph_request(args) == expected
+
+
+def test_qvq_evaluate_legacy_cuda_graph_flag_maps_to_both_paths():
+    args = build_evaluate_parser().parse_args(
+        [
+            "tasks",
+            "--checkpoint",
+            "quantized-model",
+            "--output",
+            "result.json",
+            "--use-cuda-graph",
+        ]
+    )
+    assert _resolve_cuda_graph_request(args) == ((True, True), "both")
+
+
+def test_qvq_evaluate_rejects_conflicting_cuda_graph_flags():
+    args = build_evaluate_parser().parse_args(
+        [
+            "tasks",
+            "--checkpoint",
+            "quantized-model",
+            "--output",
+            "result.json",
+            "--use-cuda-graph",
+            "--cuda-graph-mode",
+            "decode",
+        ]
+    )
+    with pytest.raises(ValueError, match="only one"):
+        _resolve_cuda_graph_request(args)
 
 
 def test_qvq_evaluate_reports_mmlu_choice_work_as_completed_rows(monkeypatch):
