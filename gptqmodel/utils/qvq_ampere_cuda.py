@@ -5,7 +5,11 @@
 
 from __future__ import annotations
 
+import json
+import os
+import threading
 from pathlib import Path
+from statistics import median
 
 import torch
 
@@ -29,6 +33,10 @@ _TORCH_NVCC_UNDEFINES = (
     "-U__CUDA_NO_HALF_CONVERSIONS__",
 )
 _SM_COUNT_CACHE: dict[tuple[str, int], int] = {}
+_AUTOTUNE_CACHE_VERSION = 2
+_AUTOTUNE_CACHE: dict[str, int] = {}
+_AUTOTUNE_CACHE_LOADED = False
+_AUTOTUNE_CACHE_LOCK = threading.RLock()
 
 
 def _project_root() -> Path:
@@ -108,6 +116,229 @@ def _device_sm_count(device: torch.device) -> int:
     return sm_count
 
 
+def _autotune_enabled() -> bool:
+    """Return whether first-use launch-plan autotuning is enabled."""
+
+    return os.environ.get("QVQ_AMPERE_AUTOTUNE", "1").lower() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+        "",
+    }
+
+
+def _autotune_cache_path() -> Path | None:
+    """Resolve the optional persistent M/K/N launch-plan cache path."""
+
+    value = os.environ.get("QVQ_AMPERE_AUTOTUNE_CACHE")
+    if value is not None:
+        if value.lower() in {"", "0", "none", "off"}:
+            return None
+        return Path(value).expanduser()
+    return Path.home() / ".cache" / "gptqmodel" / "qvq_ampere_launch.json"
+
+
+def _autotune_cache_key(
+    input: torch.Tensor,
+    *,
+    transition_bits: int,
+    out_features: int,
+    bank_alt_id: int,
+) -> str:
+    properties = torch.cuda.get_device_properties(input.device)
+    uuid = str(getattr(properties, "uuid", ""))
+    capability = f"{properties.major}.{properties.minor}"
+    return ":".join(
+        (
+            str(_AUTOTUNE_CACHE_VERSION),
+            uuid,
+            capability,
+            str(properties.multi_processor_count),
+            str(input.dtype),
+            str(input.shape[0]),
+            str(input.shape[1]),
+            str(out_features),
+            str(transition_bits),
+            str(bank_alt_id),
+        )
+    )
+
+
+def _load_autotune_cache_locked() -> None:
+    global _AUTOTUNE_CACHE_LOADED
+    if _AUTOTUNE_CACHE_LOADED:
+        return
+    _AUTOTUNE_CACHE_LOADED = True
+    path = _autotune_cache_path()
+    if path is None or not path.is_file():
+        return
+    try:
+        payload = json.loads(path.read_text())
+        if payload.get("version") != _AUTOTUNE_CACHE_VERSION:
+            return
+        entries = payload.get("entries", {})
+        if isinstance(entries, dict):
+            for key, value in entries.items():
+                if isinstance(key, str) and isinstance(value, int) and value > 0:
+                    _AUTOTUNE_CACHE[key] = value
+    except (OSError, ValueError, TypeError):
+        # A corrupt or concurrently replaced cache must never disable the
+        # kernel; simply fall back to the measured/static policy.
+        return
+
+
+def _save_autotune_cache_locked() -> None:
+    path = _autotune_cache_path()
+    if path is None:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        temporary.write_text(
+            json.dumps(
+                {"version": _AUTOTUNE_CACHE_VERSION, "entries": _AUTOTUNE_CACHE},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        temporary.replace(path)
+    except OSError:
+        # Read-only home directories and ephemeral containers are supported;
+        # the in-process cache remains useful when persistence is unavailable.
+        return
+
+
+def _autotune_candidates(*, fallback: int, k_tiles: int, max_candidates: int = 6) -> list[int]:
+    """Return a small, bounded split wave around the static policy."""
+
+    if k_tiles <= 0:
+        return [1]
+    probes = (
+        fallback,
+        max(1, fallback // 2),
+        fallback * 2,
+        8,
+        16,
+        24,
+        32,
+        40,
+        64,
+        96,
+        128,
+    )
+    candidates: list[int] = []
+    for candidate in probes:
+        candidate = min(max(1, int(candidate)), k_tiles)
+        if candidate not in candidates:
+            candidates.append(candidate)
+        if len(candidates) >= max_candidates:
+            break
+    return candidates
+
+
+def clear_qvq_ampere_autotune_cache() -> None:
+    """Clear in-process and persistent Ampere launch-plan entries."""
+
+    global _AUTOTUNE_CACHE_LOADED
+    with _AUTOTUNE_CACHE_LOCK:
+        _AUTOTUNE_CACHE.clear()
+        _AUTOTUNE_CACHE_LOADED = True
+        path = _autotune_cache_path()
+        if path is not None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
+
+def _autotune_split_count(
+    input: torch.Tensor,
+    trellis: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    *,
+    transition_bits: int,
+    out_features: int,
+    bank_alt_id: int,
+    fallback: int,
+) -> int:
+    """Benchmark a bounded set of split waves once and memoize the winner."""
+
+    key = _autotune_cache_key(
+        input,
+        transition_bits=transition_bits,
+        out_features=out_features,
+        bank_alt_id=bank_alt_id,
+    )
+    with _AUTOTUNE_CACHE_LOCK:
+        _load_autotune_cache_locked()
+        cached = _AUTOTUNE_CACHE.get(key)
+        if cached is not None:
+            return min(cached, int(input.shape[1]) // 16)
+
+        k_tiles = int(input.shape[1]) // 16
+        max_candidates = max(2, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_CANDIDATES", "6")))
+        candidates = _autotune_candidates(
+            fallback=fallback,
+            k_tiles=k_tiles,
+            max_candidates=max_candidates,
+        )
+        warmup = max(0, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_WARMUP", "5")))
+        iterations = max(1, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_ITERATIONS", "20")))
+        repeats = max(1, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_REPEATS", "3")))
+        stream = torch.cuda.current_stream(input.device)
+        best_split = fallback
+        best_ms = float("inf")
+        for candidate in candidates:
+            try:
+                for _ in range(warmup):
+                    output = _QVQ_AMPERE_EXTENSION.op("p32_window")(
+                        input,
+                        trellis,
+                        levels,
+                        bank_ids,
+                        transition_bits,
+                        out_features,
+                        bank_alt_id,
+                        candidate,
+                    )
+                    del output
+                samples = []
+                for _ in range(repeats):
+                    start = torch.cuda.Event(enable_timing=True)
+                    end = torch.cuda.Event(enable_timing=True)
+                    start.record(stream)
+                    for _ in range(iterations):
+                        output = _QVQ_AMPERE_EXTENSION.op("p32_window")(
+                            input,
+                            trellis,
+                            levels,
+                            bank_ids,
+                            transition_bits,
+                            out_features,
+                            bank_alt_id,
+                            candidate,
+                        )
+                        del output
+                    end.record(stream)
+                    end.synchronize()
+                    samples.append(start.elapsed_time(end) / iterations)
+                elapsed_ms = median(samples)
+                if elapsed_ms < best_ms:
+                    best_ms = elapsed_ms
+                    best_split = candidate
+            except (RuntimeError, ValueError):
+                # Invalid candidate waves or transient launch failures should
+                # not make a new model unusable; retain the known-good policy.
+                continue
+        _AUTOTUNE_CACHE[key] = int(best_split)
+        _save_autotune_cache_locked()
+        return int(best_split)
+
+
 def qvq_p32_window_ampere(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -160,7 +391,7 @@ def qvq_p32_window_ampere(
             # attention projections. Keep the measured split choices local
             # to M8; M5-M7 retain the conservative generic table.
             m8_split = {
-                1024: 24,
+                1024: 48,
                 5120: 32,
                 6144: 32,
                 10240: 16,
@@ -192,6 +423,17 @@ def qvq_p32_window_ampere(
             # M1, 96 for M2); M4+ retain the measured 32-way WMMA wave.
             long_k_split = 128 if input.shape[0] == 1 else 96 if input.shape[0] == 2 else 32
             split_count = min(long_k_split, int(input.shape[1]) // 16)
+        if _autotune_enabled():
+            split_count = _autotune_split_count(
+                input,
+                trellis,
+                levels,
+                bank_ids,
+                transition_bits=transition_bits,
+                out_features=int(out_features),
+                bank_alt_id=int(bank_alt_id),
+                fallback=int(split_count),
+            )
     return _QVQ_AMPERE_EXTENSION.op("p32_window")(
         input,
         trellis,
@@ -204,4 +446,7 @@ def qvq_p32_window_ampere(
     )
 
 
-__all__ = ["qvq_p32_window_ampere"]
+__all__ = [
+    "clear_qvq_ampere_autotune_cache",
+    "qvq_p32_window_ampere",
+]

@@ -559,6 +559,25 @@ with exact outputs. Replacing only those four rows lowers the five-M
 140-case median geomean from 0.078688 ms to 0.077580 ms (`1.014x`); the other
 M8 rows retain the post-merge control timings.
 
+A follow-up wider-wave screen supersedes that provisional setting: 48 slices
+measure 0.033784 ms across W2-W3.5 versus 0.034045 ms at 24 (`1.008x`). The
+M8 full-KV policy is therefore 48; the launch-plan cache version is bumped so
+old entries cannot mask this update.
+
+### M/K/N launch-plan autotuning
+
+The Python dispatch now runs a first-use tuner by default for new shapes. It
+benchmarks a bounded set of split waves around the measured fallback on the
+active CUDA stream; the selected plan is keyed by
+device UUID/SM80 capability, dtype, M, K, N, transition bits, and bank variant.
+Entries are memoized in-process and persisted to
+`~/.cache/gptqmodel/qvq_ampere_launch.json` (override with
+`QVQ_AMPERE_AUTOTUNE_CACHE`, or set it to `off` to keep the cache in memory).
+Set `QVQ_AMPERE_AUTOTUNE=0` for the zero-overhead measured/static fallback.
+Tuning can be made shorter or broader with `QVQ_AMPERE_AUTOTUNE_WARMUP`,
+`QVQ_AMPERE_AUTOTUNE_ITERATIONS`, and `QVQ_AMPERE_AUTOTUNE_CANDIDATES`; clear
+stale plans with `clear_qvq_ampere_autotune_cache()`.
+
 ## Reproduction
 
 ```bash

@@ -16,7 +16,12 @@ from gptqmodel.quantization.qvq_codecs import (
     pgc16_levels_for_version,
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
-from gptqmodel.utils.qvq_ampere_cuda import _auto_split_count, qvq_p32_window_ampere
+from gptqmodel.utils.qvq_ampere_cuda import (
+    _auto_split_count,
+    _autotune_candidates,
+    _autotune_enabled,
+    qvq_p32_window_ampere,
+)
 
 
 def test_p32_ampere_auto_split_uses_live_resource_inputs():
@@ -24,6 +29,17 @@ def test_p32_ampere_auto_split_uses_live_resource_inputs():
     assert _auto_split_count(in_features=5120, out_features=12288, k_tiles=320, sm_count=108) == 5
     assert _auto_split_count(in_features=4096, out_features=17408, k_tiles=256, sm_count=108) == 1
     assert _auto_split_count(in_features=4096, out_features=1024, k_tiles=8, sm_count=124) == 8
+
+
+def test_p32_ampere_autotune_defaults_on_and_is_bounded(monkeypatch):
+    monkeypatch.delenv("QVQ_AMPERE_AUTOTUNE", raising=False)
+    assert _autotune_enabled()
+    monkeypatch.setenv("QVQ_AMPERE_AUTOTUNE", "0")
+    assert not _autotune_enabled()
+    candidates = _autotune_candidates(fallback=32, k_tiles=320, max_candidates=6)
+    assert candidates == [32, 16, 64, 8, 24, 40]
+    assert len(candidates) == len(set(candidates))
+    assert all(1 <= candidate <= 320 for candidate in candidates)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
