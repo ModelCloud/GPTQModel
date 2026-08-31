@@ -58,6 +58,9 @@ _ENGINE_OPTION_KEYS = {
     "use_cuda_graph",
     "q_padding_interval_size",
     "kv_padding_interval_size",
+    "loglikelihood_prefix_cache",
+    "loglikelihood_prefix_cache_min_tokens",
+    "loglikelihood_prefix_cache_max_entries",
     "vllm_path",
 }
 _DROPPED_MODEL_ARG_KEYS = {
@@ -290,6 +293,11 @@ def run_evalution(
             pass
         if not isinstance(execution, dict):
             execution = {}
+        prefix_cache_stats = getattr(session, "loglikelihood_prefix_cache_stats", None)
+        if callable(prefix_cache_stats):
+            stats = prefix_cache_stats()
+            if isinstance(stats, dict) and int(stats.get("lookups", 0)) > 0:
+                execution["loglikelihood_prefix_cache"] = stats
         continuous_batching_config = _describe_continuous_batching_config(session)
         if continuous_batching_config is not None:
             execution["continuous_batching_config"] = continuous_batching_config
@@ -625,6 +633,9 @@ def _build_evalution_runtime(
             "q_padding_interval_size",
             "kv_padding_interval_size",
             "max_cached_graphs",
+            "loglikelihood_prefix_cache",
+            "loglikelihood_prefix_cache_min_tokens",
+            "loglikelihood_prefix_cache_max_entries",
         ):
             if key in engine_options:
                 engine_kwargs[key] = engine_options[key]

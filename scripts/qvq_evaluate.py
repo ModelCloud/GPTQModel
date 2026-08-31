@@ -245,6 +245,24 @@ def build_parser() -> argparse.ArgumentParser:
     tasks.add_argument("--kv-padding-interval-size", type=int, default=None)
     tasks.add_argument("--max-cached-graphs", type=int, default=None)
     tasks.add_argument(
+        "--loglikelihood-prefix-cache",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Reuse repeated long loglikelihood prefixes through a bounded KV cache.",
+    )
+    tasks.add_argument(
+        "--loglikelihood-prefix-cache-min-tokens",
+        type=int,
+        default=None,
+        help="Minimum shared prefix length eligible for scorer-side KV reuse.",
+    )
+    tasks.add_argument(
+        "--loglikelihood-prefix-cache-max-entries",
+        type=int,
+        default=None,
+        help="Maximum GPU-resident scorer prefix KV entries.",
+    )
+    tasks.add_argument(
         "--max-rows",
         type=int,
         default=None,
@@ -1478,6 +1496,9 @@ def _tasks(args: argparse.Namespace) -> int:
         "paged_attention_required": True,
         "cuda_graph_mode": graph_mode,
         "cuda_graph_requested": list(graph_request) if graph_request is not None else None,
+        "loglikelihood_prefix_cache": args.loglikelihood_prefix_cache,
+        "loglikelihood_prefix_cache_min_tokens": args.loglikelihood_prefix_cache_min_tokens,
+        "loglikelihood_prefix_cache_max_entries": args.loglikelihood_prefix_cache_max_entries,
         "max_rows": args.max_rows,
         "package_versions": {
             "evalution": package_version("evalution"),
@@ -1539,6 +1560,9 @@ def _tasks(args: argparse.Namespace) -> int:
                             "q_padding_interval_size": args.q_padding_interval_size,
                             "kv_padding_interval_size": args.kv_padding_interval_size,
                             "max_cached_graphs": args.max_cached_graphs,
+                            "loglikelihood_prefix_cache": args.loglikelihood_prefix_cache,
+                            "loglikelihood_prefix_cache_min_tokens": args.loglikelihood_prefix_cache_min_tokens,
+                            "loglikelihood_prefix_cache_max_entries": args.loglikelihood_prefix_cache_max_entries,
                         }.items()
                         if value is not None
                     },
