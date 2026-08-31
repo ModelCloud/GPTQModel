@@ -578,7 +578,7 @@ at::Tensor p32_window_ampere_impl(
   TORCH_CHECK(
       out_features > 0 && out_features % kTileColumns == 0,
       "QVQ P32 Ampere N must be positive and divisible by 16");
-  TORCH_CHECK(split_count >= 1 && split_count <= 8, "QVQ P32 Ampere split count must be in [1, 8]");
+  TORCH_CHECK(split_count >= 1 && split_count <= 16, "QVQ P32 Ampere split count must be in [1, 16]");
   TORCH_CHECK(bank_alt_id >= 0 && bank_alt_id <= 3, "QVQ P32 Ampere bank ID must be in [0, 3]");
 
   const c10::cuda::CUDAGuard device_guard(input.device());
