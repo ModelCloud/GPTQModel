@@ -262,10 +262,9 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   const int pair01 = pair00 + 8;
   const int pair10 = k_pair1 * 16 + n_pair;
   const int pair11 = pair10 + 8;
-  const uint32_t bank_mask0 =
-      (0u - ((static_cast<uint32_t>(bank_id) >> k_pair0) & 1u)) & alternate_bank_mask;
-  const uint32_t bank_mask1 =
-      (0u - ((static_cast<uint32_t>(bank_id) >> k_pair1) & 1u)) & alternate_bank_mask;
+  const uint32_t bank_pair_bits = static_cast<uint32_t>(bank_id) >> k_pair0;
+  const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_bank_mask;
+  const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_bank_mask;
 
   const uint32_t mixed00 = qvq_wgmma_pgc16_mix(
       qvq_p32_window_state<TransitionBits>(window_words, pair00) ^ bank_mask0);
