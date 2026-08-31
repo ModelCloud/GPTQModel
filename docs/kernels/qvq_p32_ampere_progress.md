@@ -114,6 +114,9 @@ Hopper-only hardware:
     zeroed to preserve the `m16n8k16` contract, while the matching lower FP32
     outputs remain transient. Full-KV retains `ldmatrix.x4`, which is faster
     once its small launch/reduction overhead dominates.
+22. On M16 MLP-gate/up, specialize both `N=17408` and `K=5120`. The fixed K
+    makes the activation row stride and K-tile geometry compile-time values;
+    unknown K values retain the runtime fallback.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
@@ -1040,6 +1043,25 @@ rates were neutral-to-slower, with roughly a 2.0% median geomean regression
 against the matched live-accumulator control; retain `ldmatrix.x4` for
 compile-time `N=1024`. The diagnostic is
 `v16_m8_ldmatrix_x2_fullkv_candidate.json`.
+
+The sixth v16 progression adds compile-time `K=5120` to the accepted M16
+MLP-gate/up fixed-N kernel. Against that immediate 40-warmup/1000-iteration
+control, all four rates improve; the median and mean geomean gains are 0.835%
+and 0.726%. Exactness passes 28/28. The candidate is
+`artifacts/a100_p32_window/v16_m16_mlpgate_statick_candidate.json`; its control
+is `v16_m16_mlpgate_static_candidate.json` from the fourth progression.
+
+Further v16 experiments rejected after the x2 checkpoint are retained as
+untracked diagnostics. Omitting lower shared rows regressed 0.740%, async
+zero-fill regressed 0.230%, and MLP-gate bank-mask hoisting regressed 1.964%
+on the relevant M8 screens. M4 W2 three-stage depth, long-K four-stage WMMA,
+M16 `float4` output stores, a two-chain split reducer, and named M4 scalar
+accumulators all regressed or were neutral. Moving packed M16 bank IDs from
+`__ldg` to ordinary global loads was only +0.138% median/+0.026% mean and was
+reverted as below the acceptance threshold. Their artifacts use the
+`v16_m8_x2_`, `v16_m4_w2_stage3_`, `v16_m816_mlpdown_stage4_`,
+`v16_m16_float4_`, `v16_reduce2_`, `v16_m4_named_accumulator_`, and
+`v16_m16_bank_global_` prefixes.
 
 ## Reproduction
 

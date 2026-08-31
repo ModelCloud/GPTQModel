@@ -281,7 +281,8 @@ template <
     int ActiveRows = 0,
     int StaticN = 0,
     bool HoistBankMasks = false,
-    bool UpperRowsOnly = false>
+    bool UpperRowsOnly = false,
+    int StaticK = 0>
 __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -304,11 +305,13 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   const int warp = thread >> 5;
   const int lane = thread & 31;
   constexpr int kStaticNTiles = StaticN > 0 ? StaticN / kTileColumns : 0;
+  constexpr int kStaticKTiles = StaticK > 0 ? StaticK / kTileRows : 0;
   const int n_tiles = StaticN > 0 ? kStaticNTiles : size_n / kTileColumns;
   const int n_tile_base = static_cast<int>(blockIdx.x) * kTilesPerBlock;
   const bool active_tile = StaticN > 0 || n_tile_base + warp < n_tiles;
   const int split = static_cast<int>(blockIdx.z);
-  const int k_tiles = size_k / kTileRows;
+  const int k_tiles = StaticK > 0 ? kStaticKTiles : size_k / kTileRows;
+  const int input_stride = StaticK > 0 ? StaticK : size_k;
   const int k_tile_begin = (k_tiles * split) / split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(bank_alt_id);
@@ -320,22 +323,22 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       const int vector = index - row * (kStageColumns / 8);
       const int source_column = k_tile_base * kTileRows + vector * 8;
       if constexpr (FullRows) {
-        if (source_column < size_k) {
-          const half* source = input + static_cast<int64_t>(row) * size_k + source_column;
+        if (source_column < input_stride) {
+          const half* source = input + static_cast<int64_t>(row) * input_stride + source_column;
           __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
         } else {
           input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
         }
       } else if constexpr (ActiveRows > 0) {
-        if (row < ActiveRows && source_column < size_k) {
-          const half* source = input + static_cast<int64_t>(row) * size_k +
+        if (row < ActiveRows && source_column < input_stride) {
+          const half* source = input + static_cast<int64_t>(row) * input_stride +
               source_column;
           __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
         } else {
           input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
         }
-      } else if (row < size_m && source_column < size_k) {
-        const half* source = input + static_cast<int64_t>(row) * size_k +
+      } else if (row < size_m && source_column < input_stride) {
+        const half* source = input + static_cast<int64_t>(row) * input_stride +
             source_column;
         __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
       } else {
@@ -1300,7 +1303,8 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == kRows && size_n == 17408) {
-    p32_window_ampere_kernel<TransitionBits, true, 0, 17408><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<TransitionBits, true, 0, 17408, false, false, 5120>
+        <<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
