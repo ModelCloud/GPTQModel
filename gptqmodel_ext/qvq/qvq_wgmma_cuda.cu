@@ -125,6 +125,20 @@ __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix(uint32_t state) {
   return mixed ^ (mixed >> 7);
 }
 
+__device__ __forceinline__ Element qvq_wgmma_load_level(
+    const Element* __restrict__ levels,
+    uint32_t index) {
+  uint64_t address;
+  asm("mad.wide.u32 %0, %1, 2, %2;"
+      : "=l"(address)
+      : "r"(index), "l"(levels));
+  uint16_t bits;
+  asm("ld.global.nc.L1::evict_last.u16 %0, [%1];"
+      : "=h"(bits)
+      : "l"(address));
+  return Element::bitcast(bits);
+}
+
 template <int TransitionBits>
 __device__ __forceinline__ uint32_t qvq_wgmma_v2_alternate_bank_mask(int bank_alt_id) {
   static_assert(TransitionBits >= 4 && TransitionBits <= 7);
@@ -279,12 +293,22 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   // adjacent P32 N values so each decoded state feeds both output columns.
   fragment(0) = levels[mixed00 >> 8];
   fragment(1) = levels[mixed01 >> 8];
-  fragment(2) = levels[mixed00 & 0xffu];
-  fragment(3) = levels[mixed01 & 0xffu];
+  if constexpr (TransitionBits == kW3TransitionBits) {
+    fragment(2) = qvq_wgmma_load_level(levels, mixed00 & 0xffu);
+    fragment(3) = qvq_wgmma_load_level(levels, mixed01 & 0xffu);
+  } else {
+    fragment(2) = levels[mixed00 & 0xffu];
+    fragment(3) = levels[mixed01 & 0xffu];
+  }
   fragment(4) = levels[mixed10 >> 8];
   fragment(5) = levels[mixed11 >> 8];
-  fragment(6) = levels[mixed10 & 0xffu];
-  fragment(7) = levels[mixed11 & 0xffu];
+  if constexpr (TransitionBits == kW3TransitionBits) {
+    fragment(6) = qvq_wgmma_load_level(levels, mixed10 & 0xffu);
+    fragment(7) = qvq_wgmma_load_level(levels, mixed11 & 0xffu);
+  } else {
+    fragment(6) = levels[mixed10 & 0xffu];
+    fragment(7) = levels[mixed11 & 0xffu];
+  }
 }
 
 __global__ __launch_bounds__(kThreads) void qvq_wgmma_w3_m16_kernel(
