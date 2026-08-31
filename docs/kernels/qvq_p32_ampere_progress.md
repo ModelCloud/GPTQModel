@@ -921,6 +921,16 @@ the three sequential progressions improve the full 140-case Ampere target by
 or **2.087%** lower latency versus fetched `3de3fb05` main. Planar timings
 are excluded.
 
+The final continuous 20-warmup/300-iteration matrix is stored in
+`artifacts/a100_p32_window/qwen38_v15_final_all_8f04e266.json`. Its mean
+geomean is 2.113% faster than the fetched-main artifact and maximum absolute
+error remains 0.000080109. Its median aggregate is not used: all five
+full-KV M groups shift slower together (8.76% aggregate), including untouched
+M8/M16, while the other shapes and the paired reversals remain positive.
+This repeats the run-level full-KV timing anomaly seen in the first v15 full
+refresh; the stable immediate A/B measurements above remain the acceptance
+evidence.
+
 Rejected v15 experiments are retained as diagnostics. Explicit
 `cp.async.cg` input staging improved the broad screen by only 0.055%, while
 the scalar-only form regressed 0.204%. WMMA `__launch_bounds__(128, 10)` and
