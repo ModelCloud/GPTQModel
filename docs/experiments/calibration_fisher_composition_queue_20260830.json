@@ -2,9 +2,17 @@
   "schema": "qvq.calibration-fisher-composition-queue.v1",
   "status": "queued",
   "prepared_at_utc": "2026-08-30T23:57:00Z",
-  "launched_at_utc": "2026-08-31T00:07:15Z",
-  "launch_commit": "b3804693",
+  "launched_at_utc": "2026-08-31T00:09:43Z",
+  "launch_commit": "2d13e537",
   "supervisor": "tmux:qvq-fisher-composition-v1",
+  "restart_history": [
+    {
+      "failed_at_utc": "2026-08-31T00:08:00Z",
+      "restarted_at_utc": "2026-08-31T00:09:43Z",
+      "affected_arms": ["f11_yaqa182_nm4096_yaqa1x", "f12_yaqa182_nm4096_yaqa2x"],
+      "reason": "The first weighted GPU smoke pass exposed a CPU/CUDA mismatch in effective_weighted_tokens telemetry after the first successful Sketch-B backward. No checkpoint was written. Commit 2d13e537 fixes the counter, adds a weighted-capture regression, and restarts both arms from immutable inputs."
+    }
+  ],
   "wait_state": "each arm waits independently for three exclusive-idle samples on its assigned GPU; GPUs 2/3 may launch while the two pinned NM-full endpoints finish on GPUs 0/1",
   "branch": "feat/qvq-frontier-score-updates",
   "purpose": "2x2 test of NM Fisher coverage and YAQA source importance without physical row duplication.",
