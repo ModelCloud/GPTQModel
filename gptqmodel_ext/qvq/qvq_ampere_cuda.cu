@@ -25,6 +25,7 @@ constexpr int kM1Threads = kThreads;
 constexpr int kM1Warps = kM1Threads / 32;
 constexpr int kM1TilesPerBlock = 4 * kM1Warps;
 constexpr int kStageKTiles = 2;
+constexpr int kScalarTripleStageKTiles = 3;
 constexpr int kScalarLongStageKTiles = 4;
 constexpr int kStageColumns = kStageKTiles * kTileRows;
 constexpr int kPairsPerTile = 128;
@@ -661,6 +662,7 @@ at::Tensor p32_window_ampere_impl(
   const bool use_four_tile_scalar_stage =
       (size_m == 4 && size_k <= 6144) ||
       (size_m <= 4 && size_k == 17408 && size_n == 5120);
+  const bool use_three_tile_scalar_stage = size_m == 2 && size_k <= 6144;
   const int tiles_per_block = use_small_m_scalar ? kM1TilesPerBlock : kTilesPerBlock;
   const dim3 grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
@@ -696,6 +698,20 @@ at::Tensor p32_window_ampere_impl(
   } else if (size_m == 2 && use_small_m_scalar && use_four_tile_scalar_stage) {
     p32_window_ampere_m1_kernel<
         TransitionBits, 2, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
+        <<<grid, kM1Threads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 2 && use_small_m_scalar && use_three_tile_scalar_stage) {
+    p32_window_ampere_m1_kernel<
+        TransitionBits, 2, kM1Threads, kM1TilesPerBlock, kScalarTripleStageKTiles>
         <<<grid, kM1Threads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),

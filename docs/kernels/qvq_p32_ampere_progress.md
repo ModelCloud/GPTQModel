@@ -76,6 +76,9 @@ Hopper-only hardware:
 11. M8 uses a compile-time eight-live-row WMMA specialization. It preserves
     the full `m16n8k16` arithmetic contract while removing runtime row-count
     masking from activation staging and output stores.
+12. M2 short-K scalar projections use a measured three-K16 software stage,
+    reducing barrier/commit overhead while retaining the two-K16 stage for M1
+    and the four-K16 stage only where it was already proven.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
@@ -135,6 +138,7 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v14.json`
 - `artifacts/a100_p32_window/qwen38_origin_main_492f1f58.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v15_492f1f58.json`
+- `artifacts/a100_p32_window/qwen38_m1_m2_stage3_492f1f58.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -271,6 +275,12 @@ remaining within the exactness gate. The one-pass all-case aggregate is within
 timing noise because M8 is only one of five row counts; the cumulative 3%
 versus-main target remains open and further row-count-specific work continues.
 
+The next focused checkpoint is `qwen38_m1_m2_stage3_492f1f58.json`. It covers
+all 28 cases for M1 and M2. The measured M2 geomean is `0.069539 ms` versus
+`0.070273 ms` for the fetched-main control (`1.011x`); M1 is effectively flat
+at `1.001x`, so the three-stage policy is narrowed to M2 rather than applied
+broadly.
+
 ## Profiler diagnosis
 
 The pre-change M16/W2 full-Q+gate kernel was captured with:
@@ -336,6 +346,7 @@ more decode instructions without expanding the compact state representation.
 | Adaptive vectorized split reducer | Correct, but large-output rows were neutral at the event-sample resolution and small-output cases lost reducer parallelism; no repeatable full-matrix gain. | Rejected; retain the scalar deterministic reducer. |
 | Ordinary/explicit `.ca` level loads | Correct, but matched probes were neutral-to-slower than the `__ldg` read-only path. | Rejected; retain `__ldg` for the 512-byte codebook. |
 | M8 dead-row staging elision | Correct, but removing the eight inactive activation rows was slower or neutral versus the compile-time-row specialization alone. | Rejected; retain zero-filled inactive rows for stable pipeline scheduling. |
+| Three-K16 scalar stage for M1 | Correct and near-neutral in the full M1 subset (`1.001x`), without a repeatable gain over the two-K16 stage. | Narrowed to M2, where the matched subset measured `1.011x`; M1 retains two-K16 staging. |
 
 ## Reproduction
 
