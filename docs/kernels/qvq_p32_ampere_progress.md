@@ -60,8 +60,9 @@ Hopper-only hardware:
    state extraction instead of 64-bit window promotion.
 9. For M2-M4 and K<=6144, reuse the Marlin-style scalar tile schedule while
    carrying exactly the live rows in FP32 accumulators. The short-K dispatch
-   uses up to thirty-two K splits, matching the M1 occupancy policy; M8 and
-   larger rows remain on the tensor-core path.
+   uses up to thirty-two K splits, matching the M1 occupancy policy, except
+   attention-out (K=6144, N=5120), where a measured 24-way wave reduces the
+   split-reduction overhead; M8 and larger rows remain on the tensor-core path.
 10. For M8 and M16, retain WMMA arithmetic but choose the K split by M/N shape:
     M8 uses 16-way splits for wide QKV/MLP projections and 32-way splits for
     small-N KV/attention/Z projections; M16 uses 16-way splits for the latter
@@ -110,6 +111,7 @@ Artifacts (the `_v2` pair is this post-merge tuning cycle):
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v1.json`
 - `artifacts/a100_p32_window/qwen38_m8_p32_ampere_v2.json`
 - `artifacts/a100_p32_window/qwen38_m16_p32_ampere_v3.json`
+- `artifacts/a100_p32_window/qwen38_m124_attention_p32_ampere_v2.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -127,6 +129,9 @@ same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
 | M4 (small-M scalar, thirty-two-way split) | 28 | 12.578x | 1.340x-25.280x | 2.632e-4 |
 | M8 (WMMA partial rows, shape splits) | 28 | 11.775x | 1.422x-22.594x | 2.594e-4 |
 | M16 (WMMA full rows, shape splits) | 28 | 16.242x | 4.739x-21.543x | 2.823e-4 |
+| M1 attention-out (24-way scalar split) | 4 | 10.481x | 4.479x-23.683x | 1.645e-5 |
+| M2 attention-out (24-way scalar split) | 4 | 15.517x | 5.130x-22.827x | 1.717e-5 |
+| M4 attention-out (24-way scalar split) | 4 | 14.652x | 5.148x-21.114x | 1.955e-5 |
 
 The previous five-row-count run had Ampere geometric-mean latencies of
 0.073924 ms (M1), 0.078358 ms (M2), 0.088391 ms (M4), 0.100471 ms (M8), and
@@ -158,6 +163,11 @@ The v6 thirty-two-way scalar split lowers the geometric mean again to
 0.074286 ms (`1.031x` over v4), with full-Q W2 at 0.066560 ms. This is
 accepted forward progress, but the additional `2x` Ampere stretch target
 remains open.
+
+The attention-out scalar split refresh uses 24 rather than 32 K slices. In the
+formal four-rate artifact it reaches 0.051562 ms (M1), 0.054521 ms (M2), and
+0.057835 ms (M4), with exactness preserved; paired split probes showed 24-way
+waves 5.7-19.4% faster than 32-way waves on this shape.
 
 ## Profiler diagnosis
 
@@ -208,6 +218,7 @@ more decode instructions without expanding the compact state representation.
 | Two-tile-per-warp M4 scalar CTA | Correct after fixing the tile-base stride, but leaving half of each warp inactive raised full-Q to about 0.152 ms versus 0.090 ms for four tiles per warp. | Rejected; retain four active N16 tiles per warp. |
 | M8 scalar row accumulator | Correct, but eight live FP32 rows raised full-Q/attention to about 0.151/0.088 ms versus 0.117/0.073 ms for WMMA partial rows. | Rejected; keep M8 on the tensor-core path. |
 | Two-warps-per-tile M8 scalar cooperative mapping | Correct after fixing an initial tile-coverage bug, but reducing each CTA to two N16 tiles raised full-Q/attention to about 0.399/0.207 ms versus 0.117/0.073 ms for WMMA. | Rejected; preserve the four-warp WMMA CTA and tune only its split wave. |
+| Four-K16/K64 WMMA stage for short-K M8/M16 | Correct, but the larger stage regressed representative W2 full-Q to about 0.126 ms (M8) and 0.140 ms (M16), versus about 0.117 ms and 0.119 ms for K32 staging. | Rejected; retain K32 staging and shape-specific split tuning. |
 
 ## Reproduction
 
