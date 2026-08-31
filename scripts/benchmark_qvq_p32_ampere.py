@@ -53,8 +53,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--physical-gpu", type=int, default=0)
     parser.add_argument("--rates", nargs="+", type=float, default=RATES)
     parser.add_argument("--m-values", nargs="+", type=int, default=(1, 16))
-    parser.add_argument("--shapes", nargs="+", choices=tuple(SHAPES), default=tuple(SHAPES))
-    parser.add_argument("--split-count", type=int, default=0, help="0 uses the live-device auto policy")
+    parser.add_argument(
+        "--shapes", nargs="+", choices=tuple(SHAPES), default=tuple(SHAPES)
+    )
+    parser.add_argument(
+        "--split-count", type=int, default=0, help="0 uses the live-device auto policy"
+    )
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iterations", type=int, default=100)
     parser.add_argument("--idle-samples", type=int, default=3)
@@ -99,11 +103,18 @@ def _exclusive_recheck(hardware: dict[str, str]) -> None:
     foreign = []
     for line in output.splitlines():
         fields = [field.strip() for field in line.split(",")]
-        if len(fields) >= 2 and fields[0] == hardware["uuid"] and int(fields[1]) != os.getpid():
+        if (
+            len(fields) >= 2
+            and fields[0] == hardware["uuid"]
+            and int(fields[1]) != os.getpid()
+        ):
             foreign.append(line)
     if foreign:
         raise RuntimeError(f"foreign compute process appeared before timing: {foreign}")
-    print(f"pre-timing exclusivity recheck: uuid={hardware['uuid']} pid={os.getpid()} foreign=0", flush=True)
+    print(
+        f"pre-timing exclusivity recheck: uuid={hardware['uuid']} pid={os.getpid()} foreign=0",
+        flush=True,
+    )
 
 
 def _metrics(actual, expected) -> dict[str, float]:
@@ -111,12 +122,16 @@ def _metrics(actual, expected) -> dict[str, float]:
     return {
         "max_abs": difference.abs().max().item(),
         "mean_abs": difference.abs().mean().item(),
-        "relative_l2": difference.norm().div(expected.float().norm().clamp_min(1e-12)).item(),
+        "relative_l2": difference.norm()
+        .div(expected.float().norm().clamp_min(1e-12))
+        .item(),
     }
 
 
 def _print_table(rows: list[dict]) -> None:
-    print("| Rate | Shape | M | K | N | Planar ms | Ampere ms | Speedup | Max abs | Rel L2 |")
+    print(
+        "| Rate | Shape | M | K | N | Planar ms | Ampere ms | Speedup | Max abs | Rel L2 |"
+    )
     print("|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|")
     speedups = []
     for row in rows:
@@ -132,7 +147,9 @@ def _print_table(rows: list[dict]) -> None:
 
 
 def _run(args: argparse.Namespace) -> dict:
-    commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True).strip()
+    commit = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
+    ).strip()
     fingerprint = _source_fingerprint()
     hardware = benchmark_utils._idle_preflight(
         args.physical_gpu,
@@ -161,13 +178,17 @@ def _run(args: argparse.Namespace) -> dict:
         default_torch_ops_build_root,
     )
     from gptqmodel.utils.qvq_ampere_cuda import (
+        _AUTOTUNE_CACHE,
         _QVQ_AMPERE_EXTENSION,
+        _autotune_cache_key,
         qvq_p32_window_ampere,
     )
 
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (8, 0):
-        raise RuntimeError(f"P32 Ampere benchmark requires sm_80, got {properties.name} sm_{properties.major}{properties.minor}")
+        raise RuntimeError(
+            f"P32 Ampere benchmark requires sm_80, got {properties.name} sm_{properties.major}{properties.minor}"
+        )
     planar_extension = TorchOpsJitExtension(
         name="gptqmodel_qvq_gemv_only_ops",
         namespace="gptqmodel_qvq",
@@ -203,9 +224,13 @@ def _run(args: argparse.Namespace) -> dict:
         for shape_name in args.shapes:
             size_k, size_n = SHAPES[shape_name]
             for bits in args.rates:
-                generator = torch.Generator(device="cuda").manual_seed(20261000 + case_index)
+                generator = torch.Generator(device="cuda").manual_seed(
+                    20261000 + case_index
+                )
                 tile_count = (size_k // 16) * (size_n // 16)
-                words_per_tile = qvq_words_per_tile(bits, weight_count=256, vector_size=2)
+                words_per_tile = qvq_words_per_tile(
+                    bits, weight_count=256, vector_size=2
+                )
                 planar = torch.randint(
                     0,
                     1 << 32,
@@ -225,7 +250,9 @@ def _run(args: argparse.Namespace) -> dict:
                         dtype=torch.uint8,
                     )
                 )
-                x = (torch.randn((m, size_k), generator=generator, device="cuda") * 0.1).half()
+                x = (
+                    torch.randn((m, size_k), generator=generator, device="cuda") * 0.1
+                ).half()
                 dense = reconstruct_p32_window_inner_weight(
                     window,
                     bits=bits,
@@ -277,12 +304,22 @@ def _run(args: argparse.Namespace) -> dict:
                 ampere_timing = benchmark_utils._event_timing(
                     torch, ampere_call, warmup=args.warmup, iterations=args.iterations
                 )
+                autotune_split = args.split_count
+                if autotune_split == 0:
+                    autotune_key = _autotune_cache_key(
+                        x,
+                        transition_bits=qvq_transition_bits(bits, vector_size=2),
+                        out_features=size_n,
+                        bank_alt_id=3,
+                    )
+                    autotune_split = _AUTOTUNE_CACHE.get(autotune_key, 0)
                 row = {
                     "bits": bits,
                     "shape": shape_name,
                     "m": m,
                     "k": size_k,
                     "n": size_n,
+                    "autotune_split": autotune_split,
                     "planar": planar_timing,
                     "ampere": ampere_timing,
                     "planar_metrics": planar_metrics,
@@ -291,11 +328,21 @@ def _run(args: argparse.Namespace) -> dict:
                 rows.append(row)
                 print(
                     f"complete M{m} W{bits:g} {shape_name}: planar={planar_timing['median_ms']:.6f} ms "
-                    f"ampere={ampere_timing['median_ms']:.6f} ms max_abs={ampere_metrics['max_abs']:.7g}",
+                    f"ampere={ampere_timing['median_ms']:.6f} ms split={autotune_split} "
+                    f"max_abs={ampere_metrics['max_abs']:.7g}",
                     flush=True,
                 )
                 case_index += 1
-                del planar, window, bank_ids, x, dense, expected, planar_output, ampere_output
+                del (
+                    planar,
+                    window,
+                    bank_ids,
+                    x,
+                    dense,
+                    expected,
+                    planar_output,
+                    ampere_output,
+                )
                 gc.collect()
                 torch.cuda.empty_cache()
 
@@ -320,7 +367,9 @@ def _run(args: argparse.Namespace) -> dict:
         "rows": rows,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    args.output.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     _print_table(rows)
     print(f"result: {args.output}", flush=True)
     return payload
