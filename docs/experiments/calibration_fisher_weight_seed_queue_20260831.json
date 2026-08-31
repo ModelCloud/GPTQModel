@@ -47,8 +47,10 @@
     ]
   },
   "fast_evaluation": {
-    "state": "queued_after_canary",
-    "runtime_commit": "84018deb",
+    "state": "launched_waiting_for_canary",
+    "runtime_commit": "5ffbae36",
+    "launched_at": "2026-08-31T03:07:32Z",
+    "supervisor": "qvq-fisher-weight-seed-fast-eval-v1",
     "attn_implementation": "paged|flash_attention_2",
     "continuous_batching": true,
     "use_cuda_graph": true,
