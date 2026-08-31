@@ -588,6 +588,19 @@ for that same shape. On the known M1 full-KV shape (K=5120,N=1024), the 12-probe
 tuner selected split 96; repeated screens placed splits 64, 96, and 128 within
 0.001024 ms, so no hand-tuned-only candidate is assumed to be optimal.
 
+### Post-merge v12 baseline
+
+PR #82 merged as `3bb797de`. The next optimization window uses that exact
+`origin/main` tip as the Ampere-kernel control; planar timings remain diagnostic
+only and are excluded from improvement calculations. The default-on,
+in-process autotuner was enabled for both the control and all candidates.
+
+The clean 20-warmup/100-iteration, 140-case run is stored in
+`artifacts/a100_p32_window/qwen38_newmain_all_3bb797de.json`. Ampere median
+latency geomeans are 0.074501 ms (M1), 0.079266 ms (M2), 0.086971 ms (M4),
+0.095925 ms (M8), and 0.099725 ms (M16), with an all-case geomean of
+0.086750 ms. The maximum absolute error across the matrix is 0.000080109.
+
 ## Reproduction
 
 ```bash
