@@ -643,8 +643,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     __pipeline_commit();
   };
 
-  float accumulator_0[4][Rows] = {};
-  float accumulator_1[4][Rows] = {};
+  float accumulator_0[Rows] = {};
+  float accumulator_1[Rows] = {};
 
   stage(k_tile_begin, 0);
   int parity = 0;
@@ -693,14 +693,14 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
               const int row_base = output_row * (StageKTiles * kTileRows) + stage_k_tile * kTileRows;
               const float input_0 = __half2float(input_tile[parity][row_base + row]);
               const float input_8 = __half2float(input_tile[parity][row_base + row + 8]);
-              accumulator_0[tile_in_warp][output_row] =
-                  fmaf(input_0, weight_0, accumulator_0[tile_in_warp][output_row]);
-              accumulator_1[tile_in_warp][output_row] =
-                  fmaf(input_0, weight_1, accumulator_1[tile_in_warp][output_row]);
-              accumulator_0[tile_in_warp][output_row] =
-                  fmaf(input_8, weight_8, accumulator_0[tile_in_warp][output_row]);
-              accumulator_1[tile_in_warp][output_row] =
-                  fmaf(input_8, weight_9, accumulator_1[tile_in_warp][output_row]);
+              accumulator_0[output_row] =
+                  fmaf(input_0, weight_0, accumulator_0[output_row]);
+              accumulator_1[output_row] =
+                  fmaf(input_0, weight_1, accumulator_1[output_row]);
+              accumulator_0[output_row] =
+                  fmaf(input_8, weight_8, accumulator_0[output_row]);
+              accumulator_1[output_row] =
+                  fmaf(input_8, weight_9, accumulator_1[output_row]);
             }
           }
         }
@@ -737,14 +737,14 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
             const int row_base = output_row * (StageKTiles * kTileRows) + stage_k_tile * kTileRows;
             const float input_0 = __half2float(input_tile[parity][row_base + row]);
             const float input_8 = __half2float(input_tile[parity][row_base + row + 8]);
-            accumulator_0[tile_in_warp][output_row] =
-                fmaf(input_0, weight_0, accumulator_0[tile_in_warp][output_row]);
-            accumulator_1[tile_in_warp][output_row] =
-                fmaf(input_0, weight_1, accumulator_1[tile_in_warp][output_row]);
-            accumulator_0[tile_in_warp][output_row] =
-                fmaf(input_8, weight_8, accumulator_0[tile_in_warp][output_row]);
-            accumulator_1[tile_in_warp][output_row] =
-                fmaf(input_8, weight_9, accumulator_1[tile_in_warp][output_row]);
+            accumulator_0[output_row] =
+                fmaf(input_0, weight_0, accumulator_0[output_row]);
+            accumulator_1[output_row] =
+                fmaf(input_0, weight_1, accumulator_1[output_row]);
+            accumulator_0[output_row] =
+                fmaf(input_8, weight_8, accumulator_0[output_row]);
+            accumulator_1[output_row] =
+                fmaf(input_8, weight_9, accumulator_1[output_row]);
           }
         }
       }
@@ -764,8 +764,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
       float* row_target = target + static_cast<int64_t>(output_row) * size_n;
       store_output_pair<(Rows == 1 && StaticN == 1024)>(
           row_target + output_column,
-          accumulator_0[lane >> 3][output_row],
-          accumulator_1[lane >> 3][output_row]);
+          accumulator_0[output_row],
+          accumulator_1[output_row]);
     }
   }
 #endif

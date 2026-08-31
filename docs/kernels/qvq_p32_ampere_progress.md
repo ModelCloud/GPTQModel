@@ -874,6 +874,29 @@ candidate and restored-control artifacts are
 `artifacts/a100_p32_window/v15_m1_fullkv_bankid_u32x4_repeat.json` and
 `artifacts/a100_p32_window/v15_m1_fullkv_bankid_clean_repeat.json`.
 
+The second progression removes a per-thread local-memory accumulator array
+from the scalar M1/M2/M4 kernel. Each lane always owns exactly one of the four
+N tiles, but the old implementation allocated accumulators for all four and
+indexed them with `tile_in_warp`. Generated resource usage showed 32, 64, and
+128 bytes of stack per thread for representative M1, M2, and M4 kernels. The
+lane-owned representation stores only `Rows` accumulators and reduces those
+figures to 0, 0, and 8 bytes. In the stable matched 20-warmup/300-iteration
+84-case reversal, the Ampere median geomean falls 2.269% and the mean geomean
+falls 2.168%. M1, M2, and M4 improve 1.145%, 3.189%, and 2.483% by median;
+all seven shapes and all four rates improve. Exactness passes 28/28. The
+control and candidate are stored in
+`artifacts/a100_p32_window/v15_scalar_lane_accumulator_all_control.json` and
+`artifacts/a100_p32_window/v15_scalar_lane_accumulator_all_candidate_retry.json`.
+
+The first expanded candidate refresh for this change is excluded: M1/M2
+latencies jumped by 20-38% partway through while M4 remained normal, then
+recovered on the cached-binary retry. It is retained as
+`artifacts/a100_p32_window/v15_scalar_lane_accumulator_all_candidate.json`.
+An explicit scalar decode-mask rewrite was also rejected after regressing the
+matched 36-case geomean by 1.136%, with every tested M and shape slower; its
+artifacts are `v15_scalar_bankmask_control.json` and
+`v15_scalar_bankmask_candidate.json`.
+
 Rejected v15 experiments are retained as diagnostics. Explicit
 `cp.async.cg` input staging improved the broad screen by only 0.055%, while
 the scalar-only form regressed 0.204%. WMMA `__launch_bounds__(128, 10)` and
