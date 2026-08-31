@@ -32,8 +32,8 @@ _TORCH_NVCC_UNDEFINES = (
     "-U__CUDA_NO_HALF_CONVERSIONS__",
 )
 _SM_COUNT_CACHE: dict[tuple[str, int], int] = {}
-_AUTOTUNE_CACHE_VERSION = 2
-_AUTOTUNE_CACHE: dict[str, int] = {}
+_AutotuneCacheKey = tuple[int, torch.dtype, int, int, int, int, int]
+_AUTOTUNE_CACHE: dict[_AutotuneCacheKey, int] = {}
 _AUTOTUNE_CACHE_LOCK = threading.RLock()
 
 
@@ -134,23 +134,18 @@ def _autotune_cache_key(
     transition_bits: int,
     out_features: int,
     bank_alt_id: int,
-) -> str:
-    properties = torch.cuda.get_device_properties(input.device)
-    uuid = str(getattr(properties, "uuid", ""))
-    capability = f"{properties.major}.{properties.minor}"
-    return ":".join(
-        (
-            str(_AUTOTUNE_CACHE_VERSION),
-            uuid,
-            capability,
-            str(properties.multi_processor_count),
-            str(input.dtype),
-            str(input.shape[0]),
-            str(input.shape[1]),
-            str(out_features),
-            str(transition_bits),
-            str(bank_alt_id),
-        )
+) -> _AutotuneCacheKey:
+    # Plans never leave this process, and CUDA device indices remain stable for
+    # its lifetime. Use the raw integer index rather than hashing a
+    # ``torch.device`` or querying hardware properties on every hot cache hit.
+    return (
+        input.get_device(),
+        input.dtype,
+        int(input.shape[0]),
+        int(input.shape[1]),
+        int(out_features),
+        int(transition_bits),
+        int(bank_alt_id),
     )
 
 
@@ -203,15 +198,18 @@ def _autotune_split_count(
     out_features: int,
     bank_alt_id: int,
     fallback: int,
+    cache_key: _AutotuneCacheKey | None = None,
 ) -> int:
     """Benchmark a bounded set of split waves once and memoize the winner."""
 
-    key = _autotune_cache_key(
-        input,
-        transition_bits=transition_bits,
-        out_features=out_features,
-        bank_alt_id=bank_alt_id,
-    )
+    key = cache_key
+    if key is None:
+        key = _autotune_cache_key(
+            input,
+            transition_bits=transition_bits,
+            out_features=out_features,
+            bank_alt_id=bank_alt_id,
+        )
     with _AUTOTUNE_CACHE_LOCK:
         cached = _AUTOTUNE_CACHE.get(key)
         if cached is not None:
@@ -311,12 +309,36 @@ def qvq_p32_window_ampere(
     if split_count == 0:
         if not input.is_cuda:
             raise ValueError("QVQ P32 Ampere input must be CUDA")
-        split_count = _auto_split_count(
-            in_features=int(input.shape[1]),
-            out_features=int(out_features),
-            k_tiles=int(input.shape[1]) // 16,
-            sm_count=_device_sm_count(input.device),
-        )
+        autotune = _autotune_enabled()
+        autotune_key = None
+        if autotune:
+            autotune_key = _autotune_cache_key(
+                input,
+                transition_bits=transition_bits,
+                out_features=int(out_features),
+                bank_alt_id=int(bank_alt_id),
+            )
+            with _AUTOTUNE_CACHE_LOCK:
+                cached = _AUTOTUNE_CACHE.get(autotune_key)
+            if cached is not None:
+                return _QVQ_AMPERE_EXTENSION.op("p32_window")(
+                    input,
+                    trellis,
+                    levels,
+                    bank_ids,
+                    transition_bits,
+                    out_features,
+                    bank_alt_id,
+                    min(cached, int(input.shape[1]) // 16),
+                )
+
+        if split_count == 0:
+            split_count = _auto_split_count(
+                in_features=int(input.shape[1]),
+                out_features=int(out_features),
+                k_tiles=int(input.shape[1]) // 16,
+                sm_count=_device_sm_count(input.device),
+            )
         # The scalar M<=4 kernel groups sixteen N16 tiles per CTA.  Wide
         # projections therefore need a fuller split wave than the WMMA
         # shape table (which was tuned for four-warp/N64 CTAs) to keep all
@@ -378,7 +400,7 @@ def qvq_p32_window_ampere(
                 128 if input.shape[0] == 1 else 96 if input.shape[0] == 2 else 32
             )
             split_count = min(long_k_split, int(input.shape[1]) // 16)
-        if _autotune_enabled():
+        if autotune and autotune_key is not None:
             split_count = _autotune_split_count(
                 input,
                 trellis,
@@ -388,6 +410,7 @@ def qvq_p32_window_ampere(
                 out_features=int(out_features),
                 bank_alt_id=int(bank_alt_id),
                 fallback=int(split_count),
+                cache_key=autotune_key,
             )
     return _QVQ_AMPERE_EXTENSION.op("p32_window")(
         input,

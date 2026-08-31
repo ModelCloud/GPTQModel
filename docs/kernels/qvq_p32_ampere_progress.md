@@ -588,6 +588,52 @@ for that same shape. On the known M1 full-KV shape (K=5120,N=1024), the 12-probe
 tuner selected split 96; repeated screens placed splits 64, 96, and 128 within
 0.001024 ms, so no hand-tuned-only candidate is assumed to be optimal.
 
+### Post-merge v12 baseline
+
+PR #82 merged as `3bb797de`. The next optimization window uses that exact
+`origin/main` tip as the Ampere-kernel control; planar timings remain diagnostic
+only and are excluded from improvement calculations. The default-on,
+in-process autotuner was enabled for both the control and all candidates.
+
+The clean 20-warmup/100-iteration, 140-case run is stored in
+`artifacts/a100_p32_window/qwen38_newmain_all_3bb797de.json`. Ampere median
+latency geomeans are 0.074501 ms (M1), 0.079266 ms (M2), 0.086971 ms (M4),
+0.095925 ms (M8), and 0.099725 ms (M16), with an all-case geomean of
+0.086750 ms. The maximum absolute error across the matrix is 0.000080109.
+
+The first v12 progression removes CUDA device-property queries and string
+construction from every process-local autotune cache hit. Because the plan is
+never persisted, a tuple containing the tensor device, dtype, M, K, N, rate,
+and bank variant is sufficient. On M1 full-KV, the same selected split 64 now
+measures 0.047358 ms by four-rate geomean versus 0.060662 ms in the merged-main
+matrix (`1.281x`). An explicit split-64 control measures 0.032627 ms, showing
+that further Python cache-hit overhead remains available to remove. Exactness
+passes 27/27; the focused result is stored in
+`artifacts/a100_p32_window/v12_m1_fullkv_fastkey.json`.
+
+The second progression makes a hot autotune hit return directly to the CUDA
+operator instead of recomputing the static shape policy and re-entering the
+tuning helper. The same M1 full-KV screen falls again from 0.047358 ms to
+0.038390 ms (`1.234x` over the first progression and `1.580x` over merged
+main), with the selected plans and exact outputs unchanged. The result is in
+`artifacts/a100_p32_window/v12_m1_fullkv_fast_hit.json`.
+
+The five-M refresh at `09062aa4` confirms that the cache-hit fixes are broad:
+M1 improves from 0.074501 ms to 0.060175 ms (`1.238x`), M2 from 0.079266 ms
+to 0.065976 ms (`1.201x`), M4 from 0.086971 ms to 0.075249 ms (`1.156x`),
+M8 from 0.095925 ms to 0.087640 ms (`1.095x`), and M16 from 0.099725 ms
+to 0.091303 ms (`1.092x`). Across all 140 Ampere cases the geomean falls
+from 0.086750 ms to 0.075110 ms: `1.155x`, or 13.42% lower latency versus
+merged main. The refresh is stored in
+`artifacts/a100_p32_window/qwen38_v12_cached_hit_all_09062aa4.json`.
+
+The third progression keys the process-local cache by the stable integer CUDA
+device index rather than a `torch.device` object. A two-million-lookup host
+microbenchmark lowers key construction plus dictionary lookup from 289.9 ns to
+250.8 ns (`1.156x`). The matched M1 full-KV GPU retry remains within timer
+resolution at 0.038912 ms, with the same split-64 plans and exact outputs; it is
+stored in `artifacts/a100_p32_window/v12_m1_fullkv_int_device_key_retry.json`.
+
 ## Reproduction
 
 ```bash
