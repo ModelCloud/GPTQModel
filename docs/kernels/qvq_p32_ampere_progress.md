@@ -781,6 +781,23 @@ Artifacts are stored in
 `artifacts/a100_p32_window/v14_wmma_float2_selective_all.json`. Planar
 timings remain excluded.
 
+The fourth progression stages fixed-N bank IDs with aligned packed loads on
+the routes where the instruction reduction pays for itself: one `uint4` load
+per K stage on scalar M4 and one `uint32_t` load per K stage on full-row M16.
+M1, M2, M8, dynamic/tail paths, and `N=1024` retain byte loads. The initial
+broad screen found M1 and M8 regressions and a full-KV regression, so those
+variants were rejected rather than averaged into the result. In the immediate
+matched 20-warmup/300-iteration 48-case A/B, all twelve enabled M/shape groups
+improve: M4 falls from 0.084237 ms to 0.083490 ms (0.895%), M16 falls from
+0.103279 ms to 0.101781 ms (1.472%), and their combined geomean falls from
+0.093273 ms to 0.092183 ms (`1.012x`, 1.183% lower latency). Exactness passes
+28/28. The broad diagnostic, narrowed screen, and matched results are stored
+in `artifacts/a100_p32_window/v14_packed_bank_stage_screen.json`,
+`artifacts/a100_p32_window/v14_packed_bank_selective_all.json`,
+`artifacts/a100_p32_window/v14_packed_bank_matched_control.json`, and
+`artifacts/a100_p32_window/v14_packed_bank_matched_candidate.json`. Planar
+timings remain excluded.
+
 ## Reproduction
 
 ```bash

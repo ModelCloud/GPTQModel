@@ -251,7 +251,7 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   constexpr int kWordsPerTile = 4 * TransitionBits;
   __shared__ __align__(32) half input_tile[2][kRows * kStageColumns];
   __shared__ __align__(16) uint32_t packed_words[2][kStageKTiles][kTilesPerBlock][kWordsPerTile];
-  __shared__ uint8_t packed_bank_ids[2][kStageKTiles][kTilesPerBlock];
+  __shared__ __align__(4) uint8_t packed_bank_ids[2][kStageKTiles][kTilesPerBlock];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
@@ -325,7 +325,17 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
       }
     }
-    if (thread < kStageKTiles * kTilesPerBlock) {
+    if constexpr (StaticN > 0 && StaticN != 1024 && FullRows) {
+      if (thread < kStageKTiles) {
+        const int k_tile = k_tile_base + thread;
+        auto* destination_ids = reinterpret_cast<uint32_t*>(
+            packed_bank_ids[destination][thread]);
+        *destination_ids = k_tile < k_tiles
+            ? __ldg(reinterpret_cast<const uint32_t*>(
+                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + n_tile_base))
+            : 0u;
+      }
+    } else if (thread < kStageKTiles * kTilesPerBlock) {
       const int stage_k_tile = thread / kTilesPerBlock;
       const int tile = thread - stage_k_tile * kTilesPerBlock;
       const int n_tile = n_tile_base + tile;
@@ -529,7 +539,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
   __shared__ __align__(32) half input_tile[2][Rows * StageKTiles * kTileRows];
   __shared__ __align__(16) uint32_t packed_words[
       2][StageKTiles][TilesPerBlock][kWordsPerTile];
-  __shared__ uint8_t packed_bank_ids[2][StageKTiles][TilesPerBlock];
+  __shared__ __align__(16) uint8_t packed_bank_ids[2][StageKTiles][TilesPerBlock];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
@@ -589,7 +599,17 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
         destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
       }
     }
-    if (thread < StageKTiles * TilesPerBlock) {
+    if constexpr (StaticN > 0 && StaticN != 1024 && TilesPerBlock == 16 && Rows == 4) {
+      if (thread < StageKTiles) {
+        const int k_tile = k_tile_base + thread;
+        auto* destination_ids = reinterpret_cast<uint4*>(
+            packed_bank_ids[destination][thread]);
+        *destination_ids = k_tile < k_tiles
+            ? __ldg(reinterpret_cast<const uint4*>(
+                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + block_n_tile_base))
+            : make_uint4(0u, 0u, 0u, 0u);
+      }
+    } else if (thread < StageKTiles * TilesPerBlock) {
       const int stage_k_tile = thread / TilesPerBlock;
       const int tile = thread - stage_k_tile * TilesPerBlock;
       const int n_tile = block_n_tile_base + tile;
