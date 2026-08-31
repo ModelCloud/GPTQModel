@@ -54,6 +54,11 @@ def _qvq_mlx_linear_from_torch(module):
 
     if not isinstance(module, QVQLinear):
         raise TypeError("QVQ MLX conversion requires a QVQLinear source module")
+    if module.v2b2_p32_lr:
+        raise ValueError(
+            "QVQ MLX does not support the abandoned LR32 format; "
+            "requantize or convert the checkpoint to standard qvq_v2b2_p32"
+        )
 
     import mlx.core as mx
 
@@ -82,8 +87,9 @@ def _qvq_mlx_linear_from_torch(module):
         bank_ids=copy_array(module.bank_ids),
         v2b4_p64=module.v2b4_p64,
         v2b2_p32=module.v2b2_p32,
-        v2b2_p32_lr=module.v2b2_p32_lr,
         bank_alt_id=copy_array(module.bank_alt_id),
+        input_hadamard=module.input_hadamard,
+        output_hadamard=module.output_hadamard,
     )
 
 

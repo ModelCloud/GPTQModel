@@ -254,6 +254,8 @@ class QVQLinear(BaseQuantLinear):
         v2b4_p64: bool = False,
         v2b2_p32: bool = False,
         v2b2_p32_lr: bool = False,
+        input_hadamard: bool = True,
+        output_hadamard: bool = True,
         **kwargs,
     ):
         del kwargs
@@ -342,6 +344,10 @@ class QVQLinear(BaseQuantLinear):
                 "QVQ V2B2-P32-LR requires vector_size=2, trellis_window=16, bank_count=2, and W1-W3.5"
             )
         self.v2b2_p32_lr = v2b2_p32_lr
+        if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
+            raise TypeError("QVQ transform-axis flags must be bools")
+        self.input_hadamard = input_hadamard
+        self.output_hadamard = output_hadamard
         if isinstance(bank_count, bool) or not isinstance(bank_count, int) or bank_count not in (1, 2, 4):
             raise ValueError("QVQ bank_count must be 1, 2, or 4")
         if bank_count == 4 and vector_size != 4 and not v2b4_p64:
@@ -1075,52 +1081,66 @@ class QVQLinear(BaseQuantLinear):
             # Keep the differentiable Python butterfly path for the reference
             # forward used in training.
             transformed_input = x_2d * self.SU.to(compute_dtype)
-            input_transform = (
-                matmul_hadU_stable
-                if compute_dtype == torch.float16
-                and (
-                    transformed_input.device.type == "mps"
-                    or transformed_input.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+            if self.input_hadamard:
+                input_transform = (
+                    matmul_hadU_stable
+                    if compute_dtype == torch.float16
+                    and (
+                        transformed_input.device.type == "mps"
+                        or transformed_input.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                    )
+                    else matmul_hadU
                 )
-                else matmul_hadU
-            )
-            transformed = input_transform(transformed_input)
+                transformed = input_transform(transformed_input)
+            else:
+                transformed = transformed_input
             output = self._inner_forward(transformed)
-            output_transform = (
-                matmul_hadU_stable
-                if compute_dtype == torch.float16
-                and (
-                    output.device.type == "mps"
-                    or output.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+            if self.output_hadamard:
+                output_transform = (
+                    matmul_hadU_stable
+                    if compute_dtype == torch.float16
+                    and (
+                        output.device.type == "mps"
+                        or output.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                    )
+                    else matmul_hadU
                 )
-                else matmul_hadU
-            )
-            output = output_transform(output) * self.SV.to(compute_dtype)
+                output = output_transform(output)
+            output = output * self.SV.to(compute_dtype)
             if self.bias is not None:
                 output = output + self.bias.to(compute_dtype)
         else:
-            transformed = _qvq_hadamard_fused(
-                x_2d,
-                pre_scale=self._cached_cast("SU", compute_dtype),
-                scale_mode=(
-                    2
-                    if compute_dtype == torch.float16 and self.in_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
-                    else 1
-                ),
-            )
+            if self.input_hadamard:
+                transformed = _qvq_hadamard_fused(
+                    x_2d,
+                    pre_scale=self._cached_cast("SU", compute_dtype),
+                    scale_mode=(
+                        2
+                        if compute_dtype == torch.float16 and self.in_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                        else 1
+                    ),
+                )
+            else:
+                transformed = x_2d * self._cached_cast("SU", compute_dtype)
             output = self._inner_forward(transformed)
             output_dtype = output.dtype
-            output = _qvq_hadamard_fused(
-                output,
-                post_scale=self._cached_cast("SV", compute_dtype, output_dtype),
-                bias=self._cached_cast("bias", compute_dtype, output_dtype),
-                scale_mode=(
-                    3
-                    if output_dtype == torch.float32
-                    and self.out_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
-                    else 4 if output_dtype == torch.float32 else 0
-                ),
-            )
+            if self.output_hadamard:
+                output = _qvq_hadamard_fused(
+                    output,
+                    post_scale=self._cached_cast("SV", compute_dtype, output_dtype),
+                    bias=self._cached_cast("bias", compute_dtype, output_dtype),
+                    scale_mode=(
+                        3
+                        if output_dtype == torch.float32
+                        and self.out_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                        else 4 if output_dtype == torch.float32 else 0
+                    ),
+                )
+            else:
+                output = output * self._cached_cast("SV", compute_dtype, output_dtype)
+                cached_bias = self._cached_cast("bias", compute_dtype, output_dtype)
+                if cached_bias is not None:
+                    output = output + cached_bias
         return output
 
 
@@ -1174,8 +1194,12 @@ def qvq_dense_oracle_forward(
                 ),
             ).to(dtype=torch.float32)
             x_2d = x.to(device=compute_device, dtype=torch.float32).reshape(-1, layer.in_features)
-            transformed = matmul_hadU(x_2d * layer.SU.to(device=compute_device, dtype=torch.float32))
-            output = matmul_hadU(transformed @ inner)
+            transformed = x_2d * layer.SU.to(device=compute_device, dtype=torch.float32)
+            if layer.input_hadamard:
+                transformed = matmul_hadU(transformed)
+            output = transformed @ inner
+            if layer.output_hadamard:
+                output = matmul_hadU(output)
             output = output * layer.SV.to(device=compute_device, dtype=torch.float32)
             if layer.bias is not None:
                 output = output + layer.bias.to(device=compute_device, dtype=torch.float32)

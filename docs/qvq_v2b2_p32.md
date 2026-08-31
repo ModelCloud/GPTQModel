@@ -6278,3 +6278,30 @@ P32 (`1.625x`), while M4/M8/M16 measured `2.081x`, `2.659x`, and `2.280x`.
 The change is therefore promoted only for the short-wide activation-broadcast
 N32 source; long-K and other M1 routes retain their independently validated
 dispatches.
+
+## 189. Remove LR32 from MLX and promote direct standard P32
+
+LR32 was abandoned by the CUDA implementation and is no longer an MLX
+checkpoint or runtime format.  The LR-specific MLX Metal sources, dispatch
+policies, profilers, and benchmarks have been removed.  Loading an old Torch
+`qvq_v2b2_p32_lr` module through the MLX converter now fails closed with an
+instruction to requantize or convert it to standard `qvq_v2b2_p32`.  The
+legacy Torch codec remains only as a checkpoint/reference oracle; it is not
+reachable from MLX execution.
+
+Standard P32 now uses a one-time, storage-neutral repack from canonical planar
+words to continuous circular state windows.  Its Metal GEMV decodes those
+windows directly, accumulates in FP32, supports FP16 or FP32 activations and
+arbitrary positive M, and performs its split reduction in the same kernel.
+The canonical planar tensor remains the serialized checkpoint payload; the
+window tensor is an underscore-prefixed, non-serialized MLX runtime cache.
+
+Bit-exact repack round trips pass at W1, W1.5, W2, W2.5, W3, and W3.5.  Direct
+GEMV dense parity passes for M1, M2, M4, M8, and M17, with the observed worst
+absolute error below `5.8e-6` and relative L2 near `1e-7`.  On the M4 Max,
+the new standard-P32 complete module is also faster than the former LR32 path
+for the tested M16 `(8192,8192)` case (`1.65583` ms versus `2.23208` ms).  M1
+remains dominated by graph/launch boundaries: standard P32 measured
+`0.26575` ms versus LR32's historical `0.23283` ms at `(1,2048,2048)`.
+Consequently the format migration is complete, while further M1 work should
+target dispatch and materialization rather than resurrecting LR32.
