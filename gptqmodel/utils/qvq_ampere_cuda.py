@@ -128,7 +128,15 @@ def qvq_p32_window_ampere(
         # 124 Ampere SMs resident during the short decode.  The same policy
         # applies to M=1, whose scalar route was tuned first.
         if input.shape[0] <= 4 and input.shape[1] <= 6144:
-            split_count = min(32, int(input.shape[1]) // 16)
+            # Attention-out has enough N64 CTAs that 24 slices beat the
+            # reduction overhead of a 32-way wave for the scalar M1-M4
+            # route. Other short-K projections retain the fuller 32-way wave.
+            small_m_split = (
+                24
+                if (int(input.shape[1]), int(out_features)) == (6144, 5120)
+                else 32
+            )
+            split_count = min(small_m_split, int(input.shape[1]) // 16)
         elif input.shape[0] == 8 and input.shape[1] <= 6144:
             # The WMMA partial-row path uses four N16 tiles per CTA.  The
             # original shape table was tuned for M16 and leaves short-M8
