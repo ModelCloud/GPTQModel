@@ -221,6 +221,23 @@ def test_cuda_cache_fingerprint_payload_includes_resolved_arch_flags(monkeypatch
     ]
 
 
+def test_cuda_cache_fingerprint_ignores_compiler_parallelism(tmp_path):
+    """NVCC worker counts must not create duplicate binary caches."""
+
+    loader = _make_loader(tmp_path)
+    loader.extra_cuda_cflags = ["-lineinfo", "--threads", "1", "--split-compile=1"]
+    serial = loader._cache_fingerprint()
+
+    loader.extra_cuda_cflags = ["-lineinfo", "--threads=16", "--split-compile", "8"]
+    parallel = loader._cache_fingerprint()
+
+    loader.extra_cuda_cflags = ["-lineinfo", "-O2", "--threads", "16", "--split-compile=8"]
+    different_codegen = loader._cache_fingerprint()
+
+    assert serial == parallel
+    assert serial != different_codegen
+
+
 def test_default_torch_ops_build_root_ignores_removed_global_override(monkeypatch):
     monkeypatch.setenv("GPTQMODEL_EXT_BUILD_BASE", "/tmp/obsolete-jit-root")
 

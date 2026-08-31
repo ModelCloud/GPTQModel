@@ -70,12 +70,32 @@ _NVCC_VERSION_CACHE: tuple[int, int] | None = None
 _DEFAULT_NVCC_THREADS = "8"
 _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 _TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
+_CUDA_BUILD_SCHEDULING_FLAGS_WITH_VALUE = frozenset(("--threads", "--split-compile"))
+_CUDA_BUILD_SCHEDULING_FLAG_PREFIXES = ("--threads=", "--split-compile=")
 # Cross-process JIT build lock tuning. The lock itself is a kernel-released
 # flock, so a killed holder can never leave the cache permanently locked; the
 # timeout only bounds how long a process waits for another's in-flight build.
 _TORCH_OPS_FILE_LOCK_TIMEOUT_ENV = "GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT"
 _TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS = 600.0
 _TORCH_OPS_FILE_LOCK_POLL_SECONDS = 0.1
+
+
+def _cuda_cache_relevant_flags(flags: Sequence[str]) -> list[str]:
+    """Drop NVCC scheduling knobs that cannot change generated device code."""
+
+    relevant: list[str] = []
+    skip_value = False
+    for flag in flags:
+        if skip_value:
+            skip_value = False
+            continue
+        if flag in _CUDA_BUILD_SCHEDULING_FLAGS_WITH_VALUE:
+            skip_value = True
+            continue
+        if flag.startswith(_CUDA_BUILD_SCHEDULING_FLAG_PREFIXES):
+            continue
+        relevant.append(flag)
+    return relevant
 
 
 def _log_cache_clear_callsite(*, reason: str, target_path: str | Path) -> None:
@@ -868,7 +888,7 @@ class TorchOpsJitExtension:
             payload.extend(self._source_cache_fingerprint_payload(source, include_paths))
 
         payload.extend(self._resolve_sequence(self.extra_cflags))
-        payload.extend(self._resolve_sequence(self.extra_cuda_cflags))
+        payload.extend(_cuda_cache_relevant_flags(self._resolve_sequence(self.extra_cuda_cflags)))
         payload.extend(include_paths)
         payload.extend(self._resolve_sequence(self.extra_ldflags))
         digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
