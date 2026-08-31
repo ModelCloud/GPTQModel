@@ -145,6 +145,8 @@ def qvq_p32_window_ampere(
             small_m_split = (
                 24
                 if (int(input.shape[1]), int(out_features)) == (6144, 5120)
+                else 40
+                if input.shape[0] == 4
                 else 32
             )
             split_count = min(small_m_split, int(input.shape[1]) // 16)

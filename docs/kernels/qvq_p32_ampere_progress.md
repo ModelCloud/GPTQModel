@@ -65,10 +65,10 @@ Hopper-only hardware:
    carrying exactly the live rows in FP32 accumulators. M1-M4 also use this
    schedule for the long-K MLP-down shape after a scalar four-K16 stage was
    measured to overcome the old WMMA advantage. M4 also uses that four-K16
-   stage on the measured short-K shapes; the remaining short-K dispatch uses up to
-   thirty-two K splits, except attention-out (K=6144, N=5120), where a
-   measured 24-way wave reduces split-reduction overhead; M4 long-K and M8+
-   remain on the tensor-core path.
+   stage on the measured short-K shapes; M1-M2 use up to thirty-two K splits,
+   while M4 uses a measured 40-way wave on short-K shapes. Attention-out
+   (K=6144, N=5120) retains a 24-way wave to reduce split-reduction overhead;
+   M4 long-K and M8+ remain on the tensor-core path.
 10. For M8 and M16, retain WMMA arithmetic but choose the K split by M/N shape:
     M8 uses 16-way splits for wide QKV/MLP projections and 32-way splits for
     small-N KV/attention/Z projections; M16 uses 16-way splits for the latter
@@ -103,6 +103,10 @@ Hopper-only hardware:
     N=12288, 1024, 10240, and 17408 short-K projections; M4 specializes all
     formal shapes with its measured four-K16 stage. M2 remains on the cached
     generic scalar dispatch after a matched regression screen.
+20. For M4 short-K projections, use a 40-way split wave except for
+    attention-out, where 24-way remains faster. M1/M2 retain the 32-way
+    short-K wave; this shape-specific policy fills more SMs on the four-row
+    scalar route without changing the other row counts.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
@@ -179,6 +183,7 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/screen_m8_static_n_5120.json`
 - `artifacts/a100_p32_window/screen_m8_static_n_10240_6144.json`
 - `artifacts/a100_p32_window/screen_m8_static_n_1024.json`
+- `artifacts/a100_p32_window/qwen38_m4_final_split40_6bc83e5a.json`
 - `artifacts/a100_p32_window/screen_m1_m4_static_n_scalar_narrow.json`
 - `artifacts/a100_p32_window/screen_m1_m4_static_n_selective.json`
 
@@ -384,6 +389,27 @@ The final selective scalar fixed-N screen covers all 28 M1 and M4 cases. M1
 lowers its geomean from 0.064880 ms on fetched main to 0.063510 ms (`1.022x`),
 and M4 lowers 0.081726 ms to 0.080089 ms (`1.020x`). Maximum error is
 `<= 4.8e-5`; M2 and M3 remain on their prior dispatches.
+
+The final M4 auto-policy artifact applies 40-way splitting to six short-K
+shapes and retains 24-way for attention-out. Its geomean is 0.078690 ms
+(`1.039x` versus fetched main); all 28 cases remain within the exactness
+gate.
+
+Combining the clean isolated row-count artifacts gives the current cumulative
+checkpoint below. The comparator is the fetched `origin/main` control, not the
+planar oracle kernel.
+
+| M | Main geomean ms | Candidate geomean ms | Speedup vs fetched main |
+|---:|---:|---:|---:|
+| 1 | 0.064880 | 0.063510 | 1.022x |
+| 2 | 0.070273 | 0.067885 | 1.035x |
+| 4 | 0.081726 | 0.078690 | 1.039x |
+| 8 | 0.092139 | 0.088308 | 1.043x |
+| 16 | 0.095486 | 0.092902 | 1.028x |
+| All 140 cases | 0.080007 | 0.077431 | 1.033x |
+
+This exceeds the requested cumulative 3% improvement while preserving the
+22/22 exactness result and the documented M2/M3 scalar rejection.
 
 ## Profiler diagnosis
 
