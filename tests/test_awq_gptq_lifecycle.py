@@ -11,9 +11,7 @@ from torch import nn
 
 from gptqmodel.looper.awq_processor import AWQProcessor, _compute_awq_weight_mean
 from gptqmodel.looper.gptq_processor import GPTQProcessor
-from gptqmodel.looper.loop_processor import ExecutionConfig
 from gptqmodel.looper.named_module import NamedModule
-from gptqmodel.looper.stage_subset import _register_awq_moe_root_capture_hook
 from gptqmodel.quantization.config import (
     FORMAT,
     METHOD,
@@ -76,7 +74,7 @@ def test_awq_capture_is_pre_forward_and_gptq_does_not_receive_the_hook():
     probe.record_moe_root_input_feature = lambda name, hidden_states: events.append(
         ("capture", name, hidden_states)
     )
-    assert _register_awq_moe_root_capture_hook(probe, root, "mlp", handles) is True
+    assert probe.register_moe_root_capture_hook(root, "mlp", handles) is True
 
     hidden_states = torch.randn(1, 2, 3)
     root(hidden_states)
@@ -89,15 +87,18 @@ def test_awq_capture_is_pre_forward_and_gptq_does_not_receive_the_hook():
     root(hidden_states)
     assert [event[0] for event in events] == ["forward"]
 
-    # GPTQ's execution contract does not enable activation capture. Even if a
-    # future processor exposes similarly named methods, this AWQ-only hook must
-    # remain disabled for Hessian collection.
-    gptq_probe = SimpleNamespace(
-        execution_config=ExecutionConfig(enable_activation_capture=False),
-        _feature_aggregation_policy=probe._feature_aggregation_policy,
-        record_moe_root_input_feature=probe.record_moe_root_input_feature,
+    # GPTQ inherits the generic no-op lifecycle method; it must not receive an
+    # AWQ root hook even when it processes the same MoE module.
+    gptq_probe = GPTQProcessor(
+        tokenizer=None,
+        qcfg=QuantizeConfig(method=METHOD.GPTQ),
+        calibration=None,
+        prepare_dataset_func=None,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        batch_size=1,
     )
-    assert _register_awq_moe_root_capture_hook(gptq_probe, root, "mlp", []) is False
+    assert gptq_probe.register_moe_root_capture_hook(root, "mlp", []) is False
 
 
 def test_gptq_lifecycle_collects_normalized_hessian_without_awq_feature_state():

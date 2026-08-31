@@ -501,6 +501,34 @@ class AWQProcessor(LoopProcessor):
                 return
         self._record_input_feature(module_name, feature, dedupe_batch=True)
 
+    def register_moe_root_capture_hook(
+        self,
+        moe_block: Module,
+        moe_block_name: str,
+        handles: List[Any],
+    ) -> bool:
+        """Register AWQ's shared MoE-root capture before the block executes.
+
+        AWQ is the only lifecycle that consumes this shared pointwise feature.
+        Keep the activation-capture and model-policy gates here, alongside the
+        recorder they protect, so the generic subset executor remains unaware
+        of AWQ-specific state and math.
+        """
+
+        if not self.execution_config.enable_activation_capture:
+            return False
+
+        root_policy = self._feature_aggregation_policy(moe_block_name)
+        if not root_policy or not root_policy.get("capture_root", False):
+            return False
+
+        def capture_moe_root_input(_module, inputs):
+            if inputs:
+                self.record_moe_root_input_feature(moe_block_name, inputs[0])
+
+        handles.append(moe_block.register_forward_pre_hook(capture_moe_root_input))
+        return True
+
     @staticmethod
     def _can_concat_batch_tensors(tensors: List[torch.Tensor]) -> bool:
         """Return whether cached tensors share the same non-batch shape."""

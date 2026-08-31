@@ -19,7 +19,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
 
 import pcre
 import torch
@@ -702,44 +702,6 @@ def _emit_moe_parallel_quant_subset_telemetry(
     )
 
 
-def _register_awq_moe_root_capture_hook(
-    processor: LoopProcessor,
-    moe_block: torch.nn.Module,
-    moe_block_name: str,
-    handles: List[Any],
-) -> bool:
-    """Register AWQ's shared MoE-root capture before the block executes.
-
-    Root feature capture is an AWQ-only lifecycle extension.  Keep the
-    concrete processor gate in addition to the activation-capture flag so
-    GPTQ, ParoQuant, and future processors cannot accidentally acquire an AWQ
-    feature hook merely by exposing similarly named methods.
-    """
-
-    if not isinstance(processor, AWQProcessor):
-        return False
-
-    execution_config = getattr(processor, "execution_config", None)
-    if not getattr(execution_config, "enable_activation_capture", False):
-        return False
-
-    root_recorder = getattr(processor, "record_moe_root_input_feature", None)
-    feature_policy = getattr(processor, "_feature_aggregation_policy", None)
-    if not callable(root_recorder) or not callable(feature_policy):
-        return False
-
-    root_policy = feature_policy(moe_block_name)
-    if not root_policy or not root_policy.get("capture_root", False):
-        return False
-
-    def capture_moe_root_input(_module, inputs):
-        if inputs:
-            root_recorder(moe_block_name, inputs[0])
-
-    handles.append(moe_block.register_forward_pre_hook(capture_moe_root_input))
-    return True
-
-
 def _run_single_subset_pass(
     looper: 'ModuleLooper',
     processor: LoopProcessor,
@@ -816,7 +778,7 @@ def _run_single_subset_pass(
     # executes every expert through the ordinary model forward (the lifecycle
     # bypass hook is not active in that mode).
     if execute_forward and moe_block is not None and moe_block_name is not None:
-        _register_awq_moe_root_capture_hook(processor, moe_block, moe_block_name, handle)
+        processor.register_moe_root_capture_hook(moe_block, moe_block_name, handle)
 
     if execute_forward:
         for idx, name in enumerate(subset_names):
