@@ -1169,7 +1169,9 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   }
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if (split_count == 1) {
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
 
   if (split_count > 1) {
     constexpr int kReductionThreads = 256;

@@ -754,6 +754,18 @@ The control and candidate are stored in
 `artifacts/a100_p32_window/v14_m8_bank_selector_matched_candidate.json`.
 Planar timings are excluded from these comparisons.
 
+The second progression removes a redundant intermediate CUDA launch-error
+poll from split plans. The main kernel and reducer are submitted to the same
+stream, then the existing post-reducer check validates the two-launch
+sequence; the single-kernel path retains its immediate check. In a matched
+140-case A/B, the Ampere geomean falls from 0.073926 ms to 0.073650 ms
+(`1.004x`, 0.373% lower). M1, M2, M4, M8, and M16 improve by 0.55%, 0.18%,
+0.17%, 0.39%, and 0.58%, respectively. The matched control and candidate are
+stored in
+`artifacts/a100_p32_window/qwen38_v14_launch_poll_matched_control_all.json`
+and `artifacts/a100_p32_window/qwen38_v14_launch_poll_all.json`. Planar
+timings are excluded.
+
 ## Reproduction
 
 ```bash
