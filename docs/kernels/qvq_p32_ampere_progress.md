@@ -567,8 +567,8 @@ bumped so stale entries cannot mask this update during a long-lived process.
 ### M/K/N launch-plan autotuning
 
 The Python dispatch now runs a first-use tuner by default for new shapes. It
-benchmarks a bounded 12-probe set of split waves around the measured fallback
-on the active CUDA stream; the selected plan is keyed by
+benchmarks up to 12 split waves around the measured fallback on the active CUDA
+stream; the selected plan is keyed by
 device UUID/SM80 capability, dtype, M, K, N, transition bits, and bank variant.
 Entries are memoized only in the current process; no autotune data is read from
 or written to disk while the kernel is under active development.
@@ -576,14 +576,17 @@ Set `QVQ_AMPERE_AUTOTUNE=0` for the zero-overhead measured/static fallback.
 Tuning can be made shorter or broader with `QVQ_AMPERE_AUTOTUNE_WARMUP`,
 `QVQ_AMPERE_AUTOTUNE_ITERATIONS`, and `QVQ_AMPERE_AUTOTUNE_CANDIDATES`; clear
 stale plans with `clear_qvq_ampere_autotune_cache()`.
+Cold CUDA-graph capture uses the measured fallback without memoizing it because
+event timing and host synchronization are illegal during capture; shapes tuned
+before capture continue to use their cached in-process plan.
 
 The probe budget was validated against an exhaustive comparison of the full
 bounded family. A six-probe control chose split 16 for an unseen SM80 shape
 K=8192,N=3072,M=1, while explicit timing found split 64 at 0.064512 ms versus
 0.069632 ms (`1.079x`). With the 12-probe default, the tuner selected split 64
 for that same shape. On the known M1 full-KV shape (K=5120,N=1024), the 12-probe
-tuner selected split 96; explicit timing put splits 64/128 within the same
-measurement tie, so no hand-tuned-only candidate is assumed to be optimal.
+tuner selected split 96; repeated screens placed splits 64, 96, and 128 within
+0.001024 ms, so no hand-tuned-only candidate is assumed to be optimal.
 
 ## Reproduction
 

@@ -83,7 +83,9 @@ _QVQ_AMPERE_EXTENSION = TorchOpsJitExtension(
 )
 
 
-def _auto_split_count(*, in_features: int, out_features: int, k_tiles: int, sm_count: int) -> int:
+def _auto_split_count(
+    *, in_features: int, out_features: int, k_tiles: int, sm_count: int
+) -> int:
     """Use measured Qwen3.8 splits, then a live-SM-derived fallback."""
 
     tuned_split = {
@@ -152,11 +154,14 @@ def _autotune_cache_key(
     )
 
 
-def _autotune_candidates(*, fallback: int, k_tiles: int, max_candidates: int = 12) -> list[int]:
+def _autotune_candidates(
+    *, fallback: int, k_tiles: int, max_candidates: int = 12
+) -> list[int]:
     """Return a small, bounded split wave around the static policy."""
 
     if k_tiles <= 0:
         return [1]
+    max_split = min(k_tiles, 128)
     probes = (
         fallback,
         max(1, fallback // 2),
@@ -173,7 +178,7 @@ def _autotune_candidates(*, fallback: int, k_tiles: int, max_candidates: int = 1
     )
     candidates: list[int] = []
     for candidate in probes:
-        candidate = min(max(1, int(candidate)), k_tiles)
+        candidate = min(max(1, int(candidate)), max_split)
         if candidate not in candidates:
             candidates.append(candidate)
         if len(candidates) >= max_candidates:
@@ -212,8 +217,17 @@ def _autotune_split_count(
         if cached is not None:
             return min(cached, int(input.shape[1]) // 16)
 
+        # CUDA event timing and host synchronization are illegal during graph
+        # capture. Use the measured fallback for a cold capture without
+        # memoizing it, so a later eager call can still tune this shape. A
+        # shape tuned before capture takes the cached fast path above.
+        if torch.cuda.is_current_stream_capturing():
+            return min(int(fallback), int(input.shape[1]) // 16, 128)
+
         k_tiles = int(input.shape[1]) // 16
-        max_candidates = max(2, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_CANDIDATES", "12")))
+        max_candidates = max(
+            2, int(os.environ.get("QVQ_AMPERE_AUTOTUNE_CANDIDATES", "12"))
+        )
         candidates = _autotune_candidates(
             fallback=fallback,
             k_tiles=k_tiles,
@@ -241,8 +255,12 @@ def _autotune_split_count(
                     del output
                 samples = []
                 for _ in range(repeats):
-                    starts = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
-                    ends = [torch.cuda.Event(enable_timing=True) for _ in range(iterations)]
+                    starts = [
+                        torch.cuda.Event(enable_timing=True) for _ in range(iterations)
+                    ]
+                    ends = [
+                        torch.cuda.Event(enable_timing=True) for _ in range(iterations)
+                    ]
                     for iteration in range(iterations):
                         starts[iteration].record(stream)
                         output = _QVQ_AMPERE_EXTENSION.op("p32_window")(
@@ -356,7 +374,9 @@ def qvq_p32_window_ampere(
             # remains cheaper than the additional idle time. M1-M2 use the
             # scalar route and continue to benefit from a wide wave (128 for
             # M1, 96 for M2); M4+ retain the measured 32-way WMMA wave.
-            long_k_split = 128 if input.shape[0] == 1 else 96 if input.shape[0] == 2 else 32
+            long_k_split = (
+                128 if input.shape[0] == 1 else 96 if input.shape[0] == 2 else 32
+            )
             split_count = min(long_k_split, int(input.shape[1]) // 16)
         if _autotune_enabled():
             split_count = _autotune_split_count(
