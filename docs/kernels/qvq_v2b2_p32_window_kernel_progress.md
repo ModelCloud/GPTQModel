@@ -106,6 +106,51 @@ group 128 and is a speed reference rather than a quality-equivalent format.
 | W3.5 | 0.741x | 27.304x |
 | Combined | 0.732x | 27.129x |
 
+The exact paired-window head `5dee9ad4` was rerun across the same complete
+Qwen3.8-27B M16 matrix with 10 warmups and 40 measured launches. Artifact:
+`artifacts/h200_p32_window/qwen38_m16_p32_vs_machete_5dee9ad4.json`. All 28
+window rows passed their dense standard-P32 references; the worst maximum
+absolute error was `6.49e-5`.
+
+| Rate | Shape | M | K | N | Window ms | Planar-P32 speedup | Machete W4 ms | xMachete | Max abs |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| W2 | Full Q+gate | 16 | 5120 | 12288 | 0.05338 | 33.635x | 0.03442 | 0.645x | 2.86e-5 |
+| W2.5 | Full Q+gate | 16 | 5120 | 12288 | 0.05296 | 33.997x | 0.03442 | 0.650x | 3.05e-5 |
+| W3 | Full Q+gate | 16 | 5120 | 12288 | 0.05299 | 33.950x | 0.03442 | 0.649x | 3.24e-5 |
+| W3.5 | Full Q+gate | 16 | 5120 | 12288 | 0.05315 | 33.802x | 0.03442 | 0.648x | 5.72e-5 |
+| W2 | Full K/V | 16 | 5120 | 1024 | 0.01338 | 12.094x | 0.02086 | 1.560x | 1.53e-5 |
+| W2.5 | Full K/V | 16 | 5120 | 1024 | 0.01304 | 12.429x | 0.02086 | 1.600x | 1.72e-5 |
+| W3 | Full K/V | 16 | 5120 | 1024 | 0.01326 | 12.265x | 0.02086 | 1.573x | 1.53e-5 |
+| W3.5 | Full K/V | 16 | 5120 | 1024 | 0.01325 | 12.234x | 0.02086 | 1.575x | 1.53e-5 |
+| W2 | Attention out | 16 | 6144 | 5120 | 0.03190 | 28.337x | 0.02384 | 0.747x | 3.43e-5 |
+| W2.5 | Attention out | 16 | 6144 | 5120 | 0.03195 | 28.299x | 0.02384 | 0.746x | 4.58e-5 |
+| W3 | Attention out | 16 | 6144 | 5120 | 0.03134 | 28.704x | 0.02384 | 0.761x | 3.81e-5 |
+| W3.5 | Attention out | 16 | 6144 | 5120 | 0.03152 | 28.662x | 0.02384 | 0.756x | 3.81e-5 |
+| W2 | Linear QKV | 16 | 5120 | 10240 | 0.04728 | 33.021x | 0.03434 | 0.726x | 3.24e-5 |
+| W2.5 | Linear QKV | 16 | 5120 | 10240 | 0.04698 | 33.194x | 0.03434 | 0.731x | 3.43e-5 |
+| W3 | Linear QKV | 16 | 5120 | 10240 | 0.04576 | 35.206x | 0.03434 | 0.750x | 6.48e-5 |
+| W3.5 | Linear QKV | 16 | 5120 | 10240 | 0.04622 | 32.954x | 0.03434 | 0.743x | 5.91e-5 |
+| W2 | Linear Z | 16 | 5120 | 6144 | 0.03232 | 29.519x | 0.02349 | 0.727x | 1.53e-5 |
+| W2.5 | Linear Z | 16 | 5120 | 6144 | 0.03237 | 29.119x | 0.02349 | 0.726x | 1.53e-5 |
+| W3 | Linear Z | 16 | 5120 | 6144 | 0.03246 | 29.432x | 0.02349 | 0.724x | 1.53e-5 |
+| W3.5 | Linear Z | 16 | 5120 | 6144 | 0.03275 | 28.744x | 0.02349 | 0.717x | 5.15e-5 |
+| W2 | MLP gate/up | 16 | 5120 | 17408 | 0.07187 | 35.654x | 0.04184 | 0.582x | 3.05e-5 |
+| W2.5 | MLP gate/up | 16 | 5120 | 17408 | 0.07131 | 35.630x | 0.04184 | 0.587x | 3.62e-5 |
+| W3 | MLP gate/up | 16 | 5120 | 17408 | 0.07173 | 35.632x | 0.04184 | 0.583x | 3.24e-5 |
+| W3.5 | MLP gate/up | 16 | 5120 | 17408 | 0.07259 | 34.847x | 0.04184 | 0.576x | 5.72e-5 |
+| W2 | MLP down | 16 | 17408 | 5120 | 0.07136 | 35.267x | 0.04253 | 0.596x | 4.58e-5 |
+| W2.5 | MLP down | 16 | 17408 | 5120 | 0.07122 | 35.409x | 0.04253 | 0.597x | 4.58e-5 |
+| W3 | MLP down | 16 | 17408 | 5120 | 0.07157 | 35.166x | 0.04253 | 0.594x | 4.96e-5 |
+| W3.5 | MLP down | 16 | 17408 | 5120 | 0.07222 | 34.915x | 0.04253 | 0.589x | 5.72e-5 |
+
+| Rate | Seven-shape xMachete geomean | Speedup vs planar-P32 geomean |
+|---:|---:|---:|
+| W2 | 0.753x | 28.185x |
+| W2.5 | 0.758x | 28.312x |
+| W3 | 0.760x | 28.565x |
+| W3.5 | 0.755x | 28.049x |
+| Combined | 0.757x | 28.277x |
+
 The isolated CuTe translation unit compiles all four specializations in 44
 seconds on this host.  The complete window suite now passes 25/25 tests on the
 H200, including exact TMA RS-WGMMA reconstruction at W2-W3.5.
@@ -209,6 +254,7 @@ expansion problem.
 | `27573a3c` + working tree | Anchor-4 producer decode, four shuffles, two mixed-index `movmatrix` | W3 0.08358 ms (0.883x baseline) | W3 0.08333 ms (0.875x baseline) | Rejected; exact and 55 registers with 96 shared conflicts, but 42.588M instructions remain above the 36.8M window baseline. |
 | `27573a3c` + working tree | Proposed zero-shuffle two-`movmatrix` lower bound | NCU 0.07325 ms | not timed | Rejected; not exact because canonical anchors span two K-row/N-half quadrants. Even before exact routing it executes 40.413M instructions, missing the <32M gate. |
 | `2186324a` + working tree | Stage the level-table pointer through shared memory to force a GPR address base | W3 0.07442 ms | W3 0.07333 ms | Rejected; NCU rises to 34.504M instructions, 29.44 KiB shared, 71.52 us, and 43.11% no-eligible cycles instead of deleting the second address instruction. |
+| `5dee9ad4` + working tree | Pack two W3 PGC mixers into 16-bit lanes | W3 0.07510 ms | W3 0.07450 ms | Rejected; exact, but `PRMT` rises from 1.414M to 2.807M, total instructions rise from 33.903M to 35.307M, and NCU duration rises from 69.89 to 72.70 us with registers/shared unchanged. |
 
 The zero-shuffle mismatch is not an epilogue-only N permutation. PTX assigns
 destination lane `q` source rows `(2q, 2q+1)`; after the proposed row
