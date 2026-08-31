@@ -35,9 +35,14 @@ The kernel carries forward the parts of the Hopper work that do not depend on
 Hopper-only hardware:
 
 1. Consume the storage-neutral continuous-window P32 representation directly.
-2. Assign four WMMA warps to four adjacent N16 tiles so they share one staged
-   M16 x K16 activation tile.
-3. Double-buffer activation and window-word staging with Ampere `cp.async`.
+2. Assign four MMA warps to four adjacent N16 tiles so they share staged
+   activation data. Decode lane-owned FP16 pairs directly into explicit
+   `mma.sync.m16n8k16` B fragments instead of writing and reloading a shared
+   weight tile.
+3. Double-buffer two K16 activation/window tiles per stage with Ampere
+   `cp.async`. Processing the K32 group behind one pair of block barriers halves
+   synchronization and async-pipeline bookkeeping without adding a kernel
+   specialization.
 4. Decode states 64 pairs apart together because they share one funnel-shift
    amount and a compile-time word distance.
 5. Accumulate in FP32 and use bounded split-K to expose enough CTA work.
@@ -81,24 +86,52 @@ same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
 
 | Regime | Cases | Geomean speedup vs planar P32 | Speedup range | Worst max abs |
 |---|---:|---:|---:|---:|
-| M16 | 28 | 15.134x | 4.192x-21.198x | 2.823e-4 |
-| M1 | 28 | 6.933x | 0.981x-21.226x | 2.632e-4 |
+| M16 | 28 | 15.651x | 4.094x-21.478x | 2.823e-4 |
+| M1 | 28 | 7.130x | 1.010x-21.149x | 2.632e-4 |
 
 M16 per-shape speedup ranges across W2-W3.5:
 
 | Shape | K | N | Split | Speedup range |
 |---|---:|---:|---:|---:|
-| Full Q+gate | 5120 | 12288 | 5 | 19.908x-20.821x |
-| Full K/V | 5120 | 1024 | 8 | 4.192x-4.360x |
-| Attention out | 6144 | 5120 | 8 | 15.218x-16.145x |
-| Linear QKV | 5120 | 10240 | 6 | 19.644x-20.155x |
-| Linear Z | 5120 | 6144 | 8 | 19.904x-20.083x |
-| MLP gate/up | 5120 | 17408 | 8 | 20.080x-21.198x |
-| MLP down | 17408 | 5120 | 8 | 15.626x-17.723x |
+| Full Q+gate | 5120 | 12288 | 5 | 20.570x-21.346x |
+| Full K/V | 5120 | 1024 | 8 | 4.094x-4.469x |
+| Attention out | 6144 | 5120 | 8 | 16.041x-16.795x |
+| Linear QKV | 5120 | 10240 | 6 | 20.029x-20.545x |
+| Linear Z | 5120 | 6144 | 8 | 20.352x-20.743x |
+| MLP gate/up | 5120 | 17408 | 8 | 20.452x-21.478x |
+| MLP down | 17408 | 5120 | 8 | 17.503x-18.783x |
 
-The only measured regression is M1/W2 full K/V: 0.053248 ms versus the planar
-kernel's 0.052224 ms (`0.981x`). A future production dispatcher should retain
-the planar path for this narrow low-rate case unless a new result clears it.
+The prior M1/W2 full K/V regression is cleared: the Ampere path now measures
+0.051712 ms versus planar's 0.052224 ms (`1.010x`).
+
+Against the previous Ampere checkpoint, the locked eight-case representative
+matrix improves by `1.047x` geometric mean and reaches `1.119x` on long-K
+M16/W3.5. The full 28-case artifacts improve from 15.134x to 15.651x at M16
+and from 6.933x to 7.130x at M1 versus planar. This is accepted forward
+progress, but it remains below the `2x` additional-Ampere stretch target.
+
+## Profiler diagnosis
+
+The pre-change M16/W2 full-Q+gate kernel was captured with:
+
+```bash
+ncu --section SpeedOfLight --csv --kernel-name regex:p32_window_ampere_kernel \
+  --launch-skip 2 --launch-count 1 -- \
+  python scripts/benchmark_qvq_p32_ampere.py --physical-gpu 0 --m-values 16 \
+  --rates 2 --shapes full_q_gate --warmup 2 --iterations 1
+```
+
+Nsight Compute reported 71.50% memory throughput, 4.76% DRAM throughput,
+75.96% L1/TEX throughput, and 50.54% compute throughput. The detailed capture
+reported 56 registers/thread, 4,128 bytes static shared memory, zero spills,
+56.25% theoretical occupancy, and 43.29% achieved occupancy. This classified
+the path as on-chip-memory/instruction limited rather than HBM limited and
+motivated the Marlin-style register fragments and reduced barrier frequency.
+The matched post-change SpeedOfLight capture reduced profiled duration from
+139,808 ns to 133,856 ns (`1.044x`) and elapsed cycles from 169,515 to 162,346.
+L1/TEX remains the limiting unit at 82.92% while DRAM is only 5.00%, so the
+next 2x-target experiments must reduce random on-chip level gathers or remove
+more decode instructions without expanding the compact state representation.
 
 ## Failed and discarded experiments
 
@@ -108,6 +141,10 @@ the planar path for this narrow low-rate case unless a new result clears it.
 | Double buffering without a post-MMA block barrier | Some low-occupancy cases passed, but denser split grids produced multi-unit output corruption. Fast warps could overwrite a stage still consumed by slower warps under independent thread scheduling. | Rejected and all timings discarded. Added `__syncthreads()` at the producer/consumer handoff. |
 | Split counts above eight during the unsafe-buffer experiment | Long-K splits 9-16 showed increasing corruption. | Not accepted. Public validation remains capped at eight even after the barrier fix; expand only with a new exhaustive correctness gate. |
 | Generic two-wave split heuristic | Correct on the first formal matrix but left substantial performance unused on long-K and wide-N shapes. | Replaced by measured Qwen3.8 splits plus a live-SM fallback for unknown shapes. |
+| Cached 512 KiB state-to-FP16-pair LUT | Exact, but representative latency rose from 0.115-0.221 ms to 0.288-0.451 ms because random cache traffic cost more than compact PGC16 arithmetic. | Rejected and reverted. |
+| Three-stage K16 pipeline without the post-MMA barrier | Exact, but M16 regressed 3-6% and M1 did not improve; the extra footprint/bookkeeping outweighed the removed barrier. | Rejected and reverted. |
+| Eight-warp N128 CTA | Exact, but representative latency regressed 8-12% because the larger block reduced scheduling flexibility. | Rejected and reverted; retain four-warps/N64. |
+| Four-K16/K64 staged group | Exact, but regressed 7-16% versus the accepted K32 group as the larger shared footprint dominated further barrier savings. | Rejected and reverted; retain two-K16/K32. |
 | Full repository QVQ comparator build | Failed because unrelated YAQA translation units require cuBLAS/cuSPARSE developer headers absent from this local toolkit. | Benchmark builds the current `qvq_gemv_cuda.cu` alone. The GEMV file now uses the lightweight current-stream header and remains source-identical to production GEMV. |
 
 ## Reproduction
