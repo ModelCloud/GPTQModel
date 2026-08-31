@@ -238,6 +238,9 @@ Immutable corpus manifest:
 /root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm10000.manifest.json
 SHA-256 90f17c84200edc4cf25bd745729507c6e32b76f34622b3f44b34aabe8e10131e
 
+Repository copy:
+dataset/calibration-fisher-scaling-v2/yaqa182_nm10000.manifest.json
+
 Ordered calibration-manifest SHA-256:
 330c1039a50d8a71b7a64255f4084187594471b25183feadeecfb0a6568e61d7
 ```
@@ -275,6 +278,9 @@ Path: /root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm10000.disjointness.
 SHA-256: f283eca649cbf1d2dcc160c202bc131c2462d4b3485b34c0d4bb5237d85a9d4e
 Status: pass
 Strict required: true
+
+Repository copy:
+dataset/calibration-fisher-scaling-v2/yaqa182_nm10000.disjointness.json
 ```
 
 The manifest binds both calibration sources and the generated Fisher artifact
@@ -435,6 +441,7 @@ Dataset:
 
 ```text
 Path: /root/qvq-data/divergence300-v1/divergence300-development.jsonl
+Repository copy: dataset/divergence300-v1/divergence300-development.jsonl
 SHA-256: 701916fbf75844fd66a6ad294cd49c3e2f8bc909746b60c351edeaeb77ace5b2
 Prompts: 300
 Prompt tokens: 889,765
@@ -476,6 +483,7 @@ used to produce the score above:
 
 ```text
 /root/qvq-data/divergence300-v1/divergence300-locked.jsonl
+Repository copy: dataset/divergence300-v1/divergence300-locked.jsonl
 SHA-256 17151e98b2e34587c9af58a6736c875c82854564f45c763f027090f35b8e8f58
 ```
 
