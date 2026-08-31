@@ -119,6 +119,7 @@ Artifacts from the earlier accepted checkpoints and this tuning cycle:
 - `artifacts/a100_p32_window/qwen38_mixed_longk_attn_p32_ampere_v2.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v5.json`
 - `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v7.json`
+- `artifacts/a100_p32_window/qwen38_mixed_p32_ampere_v8.json`
 
 The comparator is the current canonical planar P32 CUDA GEMV built from the
 same checkout. It is quality-equivalent, unlike a W4 kernel comparison.
@@ -185,25 +186,25 @@ waves 5.7-19.4% faster than 32-way waves on this shape.
 
 The exact control is `/tmp/qvq_origin_main_2ca65de7.json`, produced from
 `origin/main` at `2ca65de7` before the two policy commits in this branch. The
-candidate is `qwen38_mixed_p32_ampere_v7.json` at `8aa308a3`. Each row is the
+candidate is `qwen38_mixed_p32_ampere_v8.json` at `4d95c802`. Each row is the
 geometric mean of the 28 cases for that M, using each case's Ampere event
 median; this deliberately excludes planar-oracle timing from the target.
 
 | M | Main geomean ms | Candidate geomean ms | Speedup vs fetched main |
 |---:|---:|---:|---:|
-| 1 | 0.073779 | 0.068078 | 1.084x |
-| 2 | 0.078361 | 0.073846 | 1.061x |
-| 4 | 0.087520 | 0.085096 | 1.029x |
-| 8 | 0.095570 | 0.092800 | 1.030x |
-| 16 | 0.099249 | 0.096322 | 1.030x |
+| 1 | 0.073779 | 0.066744 | 1.105x |
+| 2 | 0.078361 | 0.072824 | 1.076x |
+| 4 | 0.087520 | 0.084768 | 1.033x |
+| 8 | 0.095570 | 0.092363 | 1.035x |
+| 16 | 0.099249 | 0.095668 | 1.037x |
 
 The accepted changes are deliberately narrow: the measured long-K Qwen3.8
 MLP-down shape (K=17408, N=5120) moves from main's eight-way split to a
 32-way split, M1-M2 use the scalar route on that shape, and M16
 attention-out (K=6144, N=5120) uses a measured 12-way split. The focused
-MLP-down rows improve 1.689x, 1.472x, 1.204x, 1.192x, and 1.170x for
+MLP-down rows improve 1.693x, 1.475x, 1.208x, 1.194x, and 1.172x for
 M1/M2/M4/M8/M16 respectively; M16 attention-out is 1.042x. Because MLP-down
-is only one of seven shapes, the complete matrix is currently 1.029-1.084x
+is only one of seven shapes, the complete matrix is currently 1.033-1.105x
 versus fetched main, so the requested 2x target remains open.
 
 ## Profiler diagnosis
