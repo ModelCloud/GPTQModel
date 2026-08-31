@@ -5,8 +5,7 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
-import os
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -17,13 +16,13 @@ from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
+    _marlin_all_visible_devices_supported,
     apply_awq_marlin_linear,
     apply_awq_marlin_linear_padded,
     awq_marlin_repack,
     awq_to_marlin_zero_points,
     marlin_import_exception,
     marlin_is_tile_aligned,
-    marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_pad_awq_qweight,
     marlin_pad_awq_qzeros,
@@ -34,6 +33,7 @@ from ...utils.marlin import (
     marlin_permute_scales,
     marlin_runtime_available,
     marlin_runtime_error,
+    marlin_validate_runtime_device,
     replace_parameter,
 )
 from ...utils.marlin_scalar_type import scalar_types
@@ -41,6 +41,8 @@ from ...utils.rocm import IS_ROCM
 
 
 log = setup_logger()
+
+_AWQ_MARLIN_MIN_CAPABILITY = (8, 0)
 
 
 class AwqMarlinLinear(AWQuantLinear):
@@ -162,6 +164,19 @@ class AwqMarlinLinear(AWQuantLinear):
             else:
                 self.bias = None
 
+        # Runtime-only buffers must follow device-map and later module moves.
+        self.register_buffer(
+            "workspace", torch.empty(0, dtype=torch.int32), persistent=False
+        )
+        self.register_buffer(
+            "g_idx", torch.empty(0, dtype=torch.int32), persistent=False
+        )
+        self.register_buffer(
+            "g_idx_sort_indices",
+            torch.empty(0, dtype=torch.int32),
+            persistent=False,
+        )
+
         self.is_lm_head = False
         if kwargs.get("name") is not None and kwargs.get("lm_head_name") is not None:
             self.is_lm_head = kwargs["name"] == kwargs["lm_head_name"]
@@ -221,21 +236,22 @@ class AwqMarlinLinear(AWQuantLinear):
     @classmethod
     def validate_device(cls, device: DEVICE):
         super().validate_device(device)
-        CUDA_VISIBLE_DEVICES = os.environ.get("CUDA_VISIBLE_DEVICES")
         if device == DEVICE.CUDA:
             if IS_ROCM:
                 raise NotImplementedError("Marlin kernel is not supported on ROCm.")
 
-            if CUDA_VISIBLE_DEVICES is None:
-                has_cuda_v8 = all(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
-            else:
-                has_cuda_v8 = all(
-                    torch.cuda.get_device_capability(i)[0] >= 8 for i in range(len(CUDA_VISIBLE_DEVICES.split(","))))
-            if not has_cuda_v8:
+            if not _marlin_all_visible_devices_supported(
+                _AWQ_MARLIN_MIN_CAPABILITY
+            ):
                 raise NotImplementedError("Marlin kernel only supports compute capability >= 8.0.")
 
     def post_init(self):
         device = self.qweight.device
+        marlin_validate_runtime_device(
+            device,
+            min_capability=_AWQ_MARLIN_MIN_CAPABILITY,
+            backend_name="AWQ Marlin",
+        )
 
         if not marlin_runtime_available(self.compute_dtype):
             raise ModuleNotFoundError(
@@ -314,9 +330,9 @@ class AwqMarlinLinear(AWQuantLinear):
             num_bits=self.bits)
         replace_parameter(self, "qzeros", marlin_zp)
 
-        # Not-used
-        self.g_idx = marlin_make_empty_g_idx(device)
-        self.g_idx_sort_indices = marlin_make_empty_g_idx(device)
+        # AWQ does not use activation-order indices.
+        self.g_idx = torch.empty(0, dtype=torch.int, device=device)
+        self.g_idx_sort_indices = torch.empty(0, dtype=torch.int, device=device)
 
         if hasattr(self, "bias") and self.bias is not None:
             self.bias.data = marlin_permute_bias(
@@ -325,18 +341,8 @@ class AwqMarlinLinear(AWQuantLinear):
 
         super().post_init()
 
-    def list_buffers(self) -> List:
-        buf = super().list_buffers()
-        if hasattr(self, "workspace") and self.workspace is not None:
-            buf.append(self.workspace)
-        if hasattr(self, "g_idx_sort_indices") and self.g_idx_sort_indices is not None:
-            buf.append(self.g_idx_sort_indices)
-        if hasattr(self, "g_idx") and self.g_idx is not None:
-            buf.append(self.g_idx)
-        return buf
-
     def forward(self, x: torch.Tensor):
-        assert hasattr(self, "workspace"), (
+        assert self.workspace.numel() > 0, (
             "module.post_init() must be called before module.forward(). "
             "Use marlin_post_init() on the whole model."
         )

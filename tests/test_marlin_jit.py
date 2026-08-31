@@ -482,6 +482,79 @@ def test_marlin_quant_linear_validate_device_rejects_pre_turing(monkeypatch):
         marlin_qlinear_module.MarlinLinear.validate_device(marlin_qlinear_module.DEVICE.CUDA)
 
 
+def test_awq_marlin_validate_device_uses_torch_visible_ordinals(monkeypatch):
+    queried_devices = []
+
+    monkeypatch.setattr(marlin_awq_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-first,GPU-second,MIG-third")
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+
+    def get_device_capability(device):
+        queried_devices.append(device)
+        return (8, 0)
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", get_device_capability)
+
+    marlin_awq_qlinear_module.AwqMarlinLinear.validate_device(
+        marlin_awq_qlinear_module.DEVICE.CUDA
+    )
+
+    assert queried_devices == [0, 1]
+
+
+def test_awq_marlin_validate_device_rejects_no_visible_cuda_device(monkeypatch):
+    monkeypatch.setattr(marlin_awq_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+
+    with pytest.raises(NotImplementedError, match="compute capability >= 8.0"):
+        marlin_awq_qlinear_module.AwqMarlinLinear.validate_device(
+            marlin_awq_qlinear_module.DEVICE.CUDA
+        )
+
+
+def test_awq_marlin_validate_device_rejects_pre_ampere(monkeypatch):
+    monkeypatch.setattr(marlin_awq_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (7, 5))
+
+    with pytest.raises(NotImplementedError, match="compute capability >= 8.0"):
+        marlin_awq_qlinear_module.AwqMarlinLinear.validate_device(
+            marlin_awq_qlinear_module.DEVICE.CUDA
+        )
+
+
+def test_marlin_runtime_device_validation_queries_explicit_device(monkeypatch):
+    queried_devices = []
+
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+
+    def get_device_capability(device):
+        queried_devices.append(device)
+        return (8, 0)
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", get_device_capability)
+
+    capability = marlin_utils.marlin_validate_runtime_device(
+        torch.device("cuda:3"),
+        min_capability=(8, 0),
+        backend_name="AWQ Marlin",
+    )
+
+    assert capability == (8, 0)
+    assert queried_devices == [torch.device("cuda:3")]
+
+
+def test_marlin_runtime_device_validation_rejects_cpu(monkeypatch):
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+
+    with pytest.raises(ValueError, match="requires CUDA tensors"):
+        marlin_utils.marlin_validate_runtime_device(
+            torch.device("cpu"),
+            min_capability=(8, 0),
+            backend_name="AWQ Marlin",
+        )
+
+
 def test_sm75_turing_contract_is_present_in_marlin_sources():
     marlin_root = marlin_utils._marlin_root()
     gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
@@ -628,6 +701,11 @@ def test_marlin_quant_linear_post_init_uses_compute_dtype_for_repack(monkeypatch
     captured = {}
 
     monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_validate_runtime_device",
+        lambda *args, **kwargs: (8, 0),
+    )
     monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_available", lambda dtype: True)
     monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_error", lambda dtype: "")
     monkeypatch.setattr(
@@ -663,12 +741,24 @@ def test_marlin_quant_linear_post_init_uses_compute_dtype_for_repack(monkeypatch
 
     assert captured == {"dtype": torch.bfloat16, "shape": tuple(module.qweight.shape)}
     assert module._marlin_tile_padding is None
+    assert module.workspace.numel() == 1
+    assert module.g_idx_sort_indices.numel() == 0
+
+    module.to("meta")
+
+    assert module.workspace.device.type == "meta"
+    assert module.g_idx_sort_indices.device.type == "meta"
 
 
 def test_marlin_quant_linear_post_init_pads_weight_scales_and_bias(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_validate_runtime_device",
+        lambda *args, **kwargs: (8, 0),
+    )
     monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_available", lambda dtype: True)
     monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_error", lambda dtype: "")
     monkeypatch.setattr(
@@ -776,7 +866,16 @@ def test_apply_gptq_marlin_linear_pads_input_and_slices_output(monkeypatch):
 def test_awq_marlin_quant_linear_post_init_pads_packed_tensors(monkeypatch):
     captured = {}
 
+    def validate_runtime_device(device, **kwargs):
+        captured["runtime_device"] = device
+        return (8, 0)
+
     monkeypatch.setattr(marlin_awq_qlinear_module, "marlin_import_exception", None)
+    monkeypatch.setattr(
+        marlin_awq_qlinear_module,
+        "marlin_validate_runtime_device",
+        validate_runtime_device,
+    )
     monkeypatch.setattr(
         marlin_awq_qlinear_module, "marlin_runtime_available", lambda dtype: True
     )
@@ -788,12 +887,6 @@ def test_awq_marlin_quant_linear_post_init_pads_packed_tensors(monkeypatch):
         "marlin_make_workspace_new",
         lambda device: torch.zeros(128, dtype=torch.int32, device=device),
     )
-    monkeypatch.setattr(
-        marlin_awq_qlinear_module,
-        "marlin_make_empty_g_idx",
-        lambda device: torch.empty(0, dtype=torch.int32, device=device),
-    )
-
     def fake_repack(qweight, size_k, size_n, num_bits, dtype=None):
         captured["qweight"] = (
             tuple(qweight.shape),
@@ -866,7 +959,15 @@ def test_awq_marlin_quant_linear_post_init_pads_packed_tensors(monkeypatch):
         "qweight": ((320, 32), 320, 256, 4, torch.float16),
         "scales": ((10, 256), 320, 256, 32),
         "qzeros": ((10, 32), 10, 256, 4),
+        "runtime_device": torch.device("cpu"),
     }
+    assert {"workspace", "g_idx", "g_idx_sort_indices"} <= module._buffers.keys()
+
+    module.to("meta")
+
+    assert module.workspace.device.type == "meta"
+    assert module.g_idx.device.type == "meta"
+    assert module.g_idx_sort_indices.device.type == "meta"
 
 
 def test_apply_awq_marlin_linear_pads_input_and_slices_output(monkeypatch):
@@ -934,10 +1035,56 @@ def test_marlin_quant_linear_registers_runtime_buffers_in_compute_dtype(monkeypa
     assert module.bias.dtype == torch.bfloat16
 
 
+def test_marlin_quant_linear_registers_nonpersistent_runtime_state(monkeypatch):
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+
+    module = marlin_qlinear_module.MarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=64,
+        bias=False,
+        dtype=torch.float16,
+    )
+
+    assert {"workspace", "g_idx_sort_indices"} <= module._buffers.keys()
+    assert {"workspace", "g_idx_sort_indices"} <= module._non_persistent_buffers_set
+    assert "workspace" not in module.state_dict()
+    assert "g_idx_sort_indices" not in module.state_dict()
+
+
+def test_awq_marlin_quant_linear_registers_nonpersistent_runtime_state(monkeypatch):
+    monkeypatch.setattr(marlin_awq_qlinear_module, "marlin_import_exception", None)
+
+    module = marlin_awq_qlinear_module.AwqMarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=64,
+        bias=False,
+        dtype=torch.float16,
+        register_buffers=True,
+    )
+
+    runtime_names = {"workspace", "g_idx", "g_idx_sort_indices"}
+    assert runtime_names <= module._buffers.keys()
+    assert runtime_names <= module._non_persistent_buffers_set
+    assert runtime_names.isdisjoint(module.state_dict())
+
+
 def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_validate_runtime_device",
+        lambda *args, **kwargs: (8, 0),
+    )
     monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_available", lambda dtype: True)
     monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_error", lambda dtype: "")
     monkeypatch.setattr(
