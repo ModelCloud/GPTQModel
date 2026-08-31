@@ -166,6 +166,12 @@ def qvq_p32_window_ampere(
             }.get(int(out_features))
             if m16_split is not None:
                 split_count = min(m16_split, int(input.shape[1]) // 16)
+        elif (int(input.shape[1]), int(out_features)) == (17408, 5120):
+            # MLP-down is the only measured long-K Qwen shape. Its original
+            # eight-way wave leaves too few CTAs per SM on the 124-SM A100;
+            # a 32-way WMMA wave reduces the per-CTA K span and the split
+            # reducer remains cheaper than the additional idle time.
+            split_count = min(32, int(input.shape[1]) // 16)
     return _QVQ_AMPERE_EXTENSION.op("p32_window")(
         input,
         trellis,
