@@ -118,15 +118,17 @@ All eight arms launched at `2026-08-30T09:03:39Z` from pinned commit
 `3ebcf9a3`. The current host exposes four 96 GiB physical GPUs, so two
 small-model pipelines run per GPU with the two NM-full replicas separated.
 
-Six arms have completed full GSM8K and D300 evaluation, and the NM-full seed-0
-arm has completed GSM8K while D300 is still running. The current partial
+Seven arms have completed full GSM8K and D300 evaluation. The current partial
 curve is non-monotonic: YAQA182/NM128/NM256 score 499/494/486, NM512 recovers
 to 520, NM1024 reaches 535, and NM-full seed 0 is the current leader at
 **547/1209 (45.2440%)**. That is +12 questions (+0.9926 pp) over NM1024. The
 token-matched random-NM control scores 513, below the ordered NM512 prefix's
 520 despite essentially identical Fisher-token count (490,481 versus
-490,449). D300 remains pending for NM-full seed 0, and both evaluations remain
-pending for the still-quantizing NM-full seed-1 replica.
+490,449). NM-full seed 0 completes D300 at **3222/9600 (33.5625%)**, 23/300
+exact trajectories, and mean first divergence 9.8067. The seed-1 replica
+scores **533/1209 (44.0860%)**, 14 questions below seed 0; its D300 evaluation
+is still running. The full-corpus seed sensitivity means 547 should remain a
+best observed result rather than a seed-robust frontier claim until replicated.
 
 The original interactive launcher session ended before the two long NM-full
 arms published checkpoints. There was no CUDA/model exception and no partial

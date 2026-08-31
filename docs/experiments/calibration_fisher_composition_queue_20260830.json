@@ -40,7 +40,7 @@
       "effective_weighted_tokens": 1051958,
       "YAQA_weight": 1.0,
       "NM_weight": 1.0,
-      "state": "waiting_for_gpu0"
+      "state": "quantizing"
     },
     {
       "arm_id": "f10_yaqa182_nm2048_yaqa2x",
