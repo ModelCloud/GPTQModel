@@ -160,7 +160,7 @@ def qvq_p32_window_ampere(
             # CTAs at their original measured splits.
             m16_split = {
                 1024: 32,
-                5120: 16,
+                5120: 12,
                 6144: 16,
                 10240: 16,
             }.get(int(out_features))
