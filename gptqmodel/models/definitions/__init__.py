@@ -97,6 +97,7 @@ from .qwen3_vl import Qwen3_VLQModel
 from .rw import RwgQModel
 from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel
+from .unlimited_ocr import UnlimitedOCRQModel
 from .xverse import XverseQModel
 from .falcon_h1 import FalconH1QModel
 from .falcon_mamba import FalconMambaQModel
