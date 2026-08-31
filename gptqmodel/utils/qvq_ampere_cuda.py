@@ -128,7 +128,44 @@ def qvq_p32_window_ampere(
         # 124 Ampere SMs resident during the short decode.  The same policy
         # applies to M=1, whose scalar route was tuned first.
         if input.shape[0] <= 4 and input.shape[1] <= 6144:
-            split_count = min(32, int(input.shape[1]) // 16)
+            # Attention-out has enough N64 CTAs that 24 slices beat the
+            # reduction overhead of a 32-way wave for the scalar M1-M4
+            # route. Other short-K projections retain the fuller 32-way wave.
+            small_m_split = (
+                24
+                if (int(input.shape[1]), int(out_features)) == (6144, 5120)
+                else 32
+            )
+            split_count = min(small_m_split, int(input.shape[1]) // 16)
+        elif input.shape[0] == 8 and input.shape[1] <= 6144:
+            # The WMMA partial-row path uses four N16 tiles per CTA.  The
+            # original shape table was tuned for M16 and leaves short-M8
+            # projections under-filled, especially the small-N KV and
+            # attention projections. Keep the measured split choices local
+            # to M8; M5-M7 retain the conservative generic table.
+            m8_split = {
+                1024: 32,
+                5120: 32,
+                6144: 32,
+                10240: 16,
+                12288: 16,
+                17408: 16,
+            }.get(int(out_features))
+            if m8_split is not None:
+                split_count = min(m8_split, int(input.shape[1]) // 16)
+        elif input.shape[0] == 16 and input.shape[1] <= 6144:
+            # The full-row WMMA path also benefits from a fuller wave on
+            # small-N projections. These choices are deliberately shape
+            # specific: the wide Q and MLP projections already have enough
+            # CTAs at their original measured splits.
+            m16_split = {
+                1024: 32,
+                5120: 16,
+                6144: 16,
+                10240: 16,
+            }.get(int(out_features))
+            if m16_split is not None:
+                split_count = min(m16_split, int(input.shape[1]) // 16)
     return _QVQ_AMPERE_EXTENSION.op("p32_window")(
         input,
         trellis,
