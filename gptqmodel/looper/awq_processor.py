@@ -871,10 +871,16 @@ class AWQProcessor(LoopProcessor):
 
         aligned_kwargs = dict(module_kwargs)
         attention_mask = aligned_kwargs.get("attention_mask")
-        if not torch.is_tensor(inp) or inp.dim() < 3 or not torch.is_tensor(attention_mask):
+        if not torch.is_tensor(inp) or inp.dim() < 2 or not torch.is_tensor(attention_mask):
             return aligned_kwargs
 
-        if inp.shape[0] != 1 or attention_mask.ndim < 2:
+        # `_iter_module_forward_outputs` promotes [tokens, hidden] captures to
+        # [1, tokens, hidden] for attention modules after this helper runs.
+        # Treat that 2-D form as a single batch here so expanded HF masks do
+        # not bypass alignment and fail during replay.
+        input_batch = int(inp.shape[0]) if inp.dim() >= 3 else 1
+        input_seq = int(inp.shape[1]) if inp.dim() >= 3 else int(inp.shape[0])
+        if input_batch != 1 or attention_mask.ndim < 2:
             return aligned_kwargs
 
         try:
@@ -882,13 +888,45 @@ class AWQProcessor(LoopProcessor):
         except Exception:
             return aligned_kwargs
 
-        if keep_mask is None or keep_mask.ndim != 2 or keep_mask.shape[0] <= 1:
+        if keep_mask is None or keep_mask.ndim != 2:
             return aligned_kwargs
 
         total_kept = int(keep_mask.to(dtype=torch.int64).sum().item())
-        if total_kept != int(inp.shape[1]):
-            aligned_kwargs.pop("attention_mask", None)
-            aligned_kwargs.pop("position_ids", None)
+        # Multi-row masks are intentionally packed below. Only a single-row
+        # mask can be an expanded max-cache mask that needs sequence cropping.
+        mask_seq_matches = attention_mask.shape[0] != 1 or (
+            attention_mask.shape[-1] == input_seq
+            and (attention_mask.ndim < 3 or attention_mask.shape[-2] in (1, input_seq))
+        )
+        if total_kept != input_seq or not mask_seq_matches:
+            # Transformers may hand a layer a max-cache causal mask (for
+            # example [1, 1, 2048, 2048]) while the captured replay input is
+            # only 232 tokens. Crop the metadata to the actual sequence so
+            # attention remains causal without padding activations to 2048.
+            # For unsupported/batched layouts retain the defensive drop used
+            # by the original path rather than passing an incompatible mask.
+            cropped_mask = attention_mask
+            if attention_mask.shape[0] == 1:
+                if attention_mask.ndim == 2 and attention_mask.shape[-1] >= input_seq:
+                    cropped_mask = attention_mask[..., :input_seq]
+                elif attention_mask.ndim == 3 and attention_mask.shape[-1] >= input_seq:
+                    if attention_mask.shape[-2] == 1 or attention_mask.shape[-2] >= input_seq:
+                        cropped_mask = attention_mask[..., :input_seq, :input_seq]
+                elif attention_mask.ndim == 4 and attention_mask.shape[-1] >= input_seq:
+                    if attention_mask.shape[-2] == 1:
+                        cropped_mask = attention_mask[..., :1, :input_seq]
+                    elif attention_mask.shape[-2] >= input_seq:
+                        cropped_mask = attention_mask[..., :input_seq, :input_seq]
+
+            if cropped_mask is attention_mask:
+                aligned_kwargs.pop("attention_mask", None)
+                aligned_kwargs.pop("position_ids", None)
+                return aligned_kwargs
+
+            aligned_kwargs["attention_mask"] = cropped_mask
+            position_ids = aligned_kwargs.get("position_ids")
+            if torch.is_tensor(position_ids) and position_ids.ndim >= 2 and position_ids.shape[-1] >= input_seq:
+                aligned_kwargs["position_ids"] = position_ids[..., :input_seq]
             return aligned_kwargs
 
         aligned_kwargs["attention_mask"] = self._pack_attention_mask_for_feature(attention_mask, keep_mask)

@@ -728,6 +728,31 @@ def test_awq_align_module_kwargs_packs_mask_for_packed_feature_tensor():
     assert packed_mask[0, 0, 3, 4] == torch.finfo(torch.float32).min
 
 
+def test_awq_align_module_kwargs_crops_single_batch_max_cache_mask():
+    """Replay must crop a max-cache causal mask instead of padding activations."""
+
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+    seq_len = 232
+    cache_len = 2048
+    inp = torch.randn(1, seq_len, 16)
+    mask = torch.full((1, 1, cache_len, cache_len), torch.finfo(torch.float32).min)
+    causal = torch.triu(torch.ones((seq_len, seq_len), dtype=torch.bool), diagonal=1)
+    mask[..., :seq_len, :seq_len].masked_fill_(~causal, 0.0)
+    position_ids = torch.arange(cache_len).unsqueeze(0)
+
+    aligned = processor._align_module_kwargs_to_input(
+        inp,
+        {"attention_mask": mask, "position_ids": position_ids},
+    )
+
+    assert aligned["attention_mask"].shape == (1, 1, seq_len, seq_len)
+    assert aligned["position_ids"].shape == (1, seq_len)
+    assert torch.equal(aligned["position_ids"], torch.arange(seq_len).unsqueeze(0))
+    # The first token can attend to itself; the upper triangle remains masked.
+    assert aligned["attention_mask"][0, 0, 0, 0] == 0
+    assert aligned["attention_mask"][0, 0, 0, 1] == torch.finfo(torch.float32).min
+
+
 def test_awq_search_best_scale_keeps_cpu_activations_off_device_until_forward_chunks():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available for this test run.")
