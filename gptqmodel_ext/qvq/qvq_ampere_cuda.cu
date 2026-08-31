@@ -632,7 +632,9 @@ at::Tensor p32_window_ampere_impl(
   // decoded pair across the live output rows. It wins for the common 5-6K K
   // projections; with the wider long-K wave it also wins for M1-M2, while
   // M4 and larger long-K projections remain on WMMA.
-  const bool use_small_m_scalar = size_m <= 2 || (size_m <= 4 && size_k <= 6144);
+  const bool use_small_m_scalar =
+      (size_m <= 4 && size_k <= 6144) ||
+      (size_m <= 2 && size_k == 17408 && size_n == 5120);
   const int tiles_per_block = use_small_m_scalar ? kM1TilesPerBlock : kTilesPerBlock;
   const dim3 grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
