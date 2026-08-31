@@ -139,6 +139,25 @@ checkpoint to preserve. Both were restarted from their immutable inputs at
 `2026-08-30T19:56:28Z` under detached `tmux` supervisor `qvq-fisher-v2`, still
 pinned to `3ebcf9a3`; the interruption is retained in the queue manifest.
 
+### Fisher composition and seed follow-up (running, 2026-08-31)
+
+The first four composition arms form a 2x2 test at NM prefixes 2,048 and 4,096
+with YAQA Fisher weights 1x and 2x. They reuse immutable deduplicated corpora;
+the weight changes the input/output Sketch-B Gram contribution without
+duplicating rows or inflating the independent-sequence count. All four run one
+process per physical GPU with full GSM8K and D300 evaluation.
+
+Four follow-up NM4096 arms are queued independently behind those GPUs: YAQA
+weights 1.5x and 3x at seed 0, plus exact 2x replicas at YAQA seeds 1 and 2.
+Together with the running seed-0 2x arm, these provide a 1x/1.5x/2x/3x weight
+curve and three-seed robustness estimate. The launcher also produces pairwise
+seed reports containing logical bank-ID and trellis disagreement, packed-field
+disagreement, reconstructed-weight relative L2, and disagreement concentration
+by layer. See
+[`calibration_fisher_weight_seed_queue_20260831.json`](experiments/calibration_fisher_weight_seed_queue_20260831.json)
+and
+[`calibration_fisher_weight_seed_registry_20260831.json`](experiments/calibration_fisher_weight_seed_registry_20260831.json).
+
 ## Frozen data and evaluation protocol
 
 These values apply to every quantization arm below unless an entry explicitly replaces them.

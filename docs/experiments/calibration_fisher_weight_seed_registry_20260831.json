@@ -1,0 +1,89 @@
+{
+  "schema": "qvq.calibration-fisher-weight-seed-registry.v1",
+  "created_at_utc": "2026-08-31T01:41:02Z",
+  "method": "All arms reuse one immutable deduplicated NM4096+YAQA182 corpus. Source weights multiply each independent sequence's input/output Sketch-B Gram contribution without physical row duplication.",
+  "model": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "sources": {
+    "nm": {
+      "path": "/monster/data/model/dataset/nm-calibration/llm.parquet",
+      "sha256": "26122fd822e64d2fc704b0fe84af7a2df8a24a4455d347e16a6b5a7484f5cbef"
+    },
+    "yaqa": {
+      "path": "/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration.parquet",
+      "sha256": "2140541facb66112428212b3a36d51a7735393b28c79db59c2429f6e51ed57ef"
+    }
+  },
+  "corpus": {
+    "artifact": {
+      "path": "/root/qvq-data/calibration-fisher-composition-v1/yaqa182_nm4096.parquet",
+      "sha256": "98ce63d2eb3eb7542fae55ffc849b29b6fb0a9dd92d4687181e905f73fb26d53",
+      "size_bytes": 2906187
+    },
+    "manifest": {
+      "path": "/root/qvq-data/calibration-fisher-composition-v1/yaqa182_nm4096.manifest.json",
+      "sha256": "6f4a48759f27467e30aee23b82332a5126fae118c2ed5afa66e830ce0371caf1",
+      "size_bytes": 2410682
+    },
+    "disjointness": {
+      "path": "/root/qvq-data/calibration-fisher-composition-v1/yaqa182_nm4096.disjointness.json",
+      "sha256": "51ad573e093620897f275a2be484bdfa1891284f164b8ac31533d4dfe9350d23",
+      "size_bytes": 2533
+    },
+    "unique_sequences": 4277,
+    "raw_valid_tokens": 1794387,
+    "by_source": {
+      "yaqa": {"unique_sequences": 182, "raw_valid_tokens": 302193},
+      "nm": {"unique_sequences": 4095, "raw_valid_tokens": 1492194}
+    }
+  },
+  "arms": [
+    {
+      "arm_id": "f13_yaqa182_nm4096_yaqa15x",
+      "YAQA_weight": 1.5,
+      "NM_weight": 1.0,
+      "YAQA_seed": 0,
+      "effective_weighted_sequences": 4368.0,
+      "effective_weighted_tokens": 1945483.5,
+      "config": {
+        "path": "scripts/configs/llama32_1b_fisher_composition_yaqa182_nm4096_yaqa15x.json",
+        "sha256": "357f6ef2173e7ce2077e7b43e7384929819d671e03529210a8f0fba4f5bb2bff"
+      }
+    },
+    {
+      "arm_id": "f14_yaqa182_nm4096_yaqa3x",
+      "YAQA_weight": 3.0,
+      "NM_weight": 1.0,
+      "YAQA_seed": 0,
+      "effective_weighted_sequences": 4641.0,
+      "effective_weighted_tokens": 2398773.0,
+      "config": {
+        "path": "scripts/configs/llama32_1b_fisher_composition_yaqa182_nm4096_yaqa3x.json",
+        "sha256": "832918a227ccb69c3b7d37ef8db5d298831ee9dde1686b1e2d1f0af449076cb7"
+      }
+    },
+    {
+      "arm_id": "f15_yaqa182_nm4096_yaqa2x_seed1",
+      "YAQA_weight": 2.0,
+      "NM_weight": 1.0,
+      "YAQA_seed": 1,
+      "effective_weighted_sequences": 4459.0,
+      "effective_weighted_tokens": 2096580.0,
+      "config": {
+        "path": "scripts/configs/llama32_1b_fisher_composition_yaqa182_nm4096_yaqa2x_seed1.json",
+        "sha256": "f5799c4fff008991b2ebb9e3d101e8dd44b1b0b9a835ac7f71dbd57abc010db0"
+      }
+    },
+    {
+      "arm_id": "f16_yaqa182_nm4096_yaqa2x_seed2",
+      "YAQA_weight": 2.0,
+      "NM_weight": 1.0,
+      "YAQA_seed": 2,
+      "effective_weighted_sequences": 4459.0,
+      "effective_weighted_tokens": 2096580.0,
+      "config": {
+        "path": "scripts/configs/llama32_1b_fisher_composition_yaqa182_nm4096_yaqa2x_seed2.json",
+        "sha256": "881f100ad9cb45efef5ef3e1518eac5845220bf79ca08062faa5069f5682183d"
+      }
+    }
+  ]
+}

@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Build immutable NM2048/NM4096 corpora and weighted-Fisher configs.
 
-The 1x and 2x YAQA arms at each NM coverage share one unique deduplicated
-Parquet artifact. Importance weighting is config-driven and applied to
-Sketch-B Gram contributions; no row is physically duplicated.
+All YAQA-weight and seed arms at a given NM coverage share one unique
+deduplicated Parquet artifact. Importance weighting is config-driven and
+applied to Sketch-B Gram contributions; no row is physically duplicated.
 """
 
 from __future__ import annotations
@@ -28,6 +28,16 @@ from scripts.check_calibration_disjointness import file_binding
 
 NM_COUNTS = (2048, 4096)
 YAQA_WEIGHTS = (1.0, 2.0)
+NM4096_FOLLOWUPS = (
+    ("f13_yaqa182_nm4096_yaqa15x", 1.5, 0),
+    ("f14_yaqa182_nm4096_yaqa3x", 3.0, 0),
+    ("f15_yaqa182_nm4096_yaqa2x_seed1", 2.0, 1),
+    ("f16_yaqa182_nm4096_yaqa2x_seed2", 2.0, 2),
+)
+
+
+def _weight_label(value: float) -> str:
+    return f"{value:g}".replace(".", "")
 
 
 def _weighted_config(base_config: dict[str, Any], *, yaqa_weight: float) -> dict[str, Any]:
@@ -142,6 +152,36 @@ def main() -> int:
                     "coverage": _weighted_coverage(corpus["coverage"], yaqa_weight=yaqa_weight),
                 }
             )
+
+    nm4096 = next(corpus for corpus in corpora if corpus["key"] == "yaqa182_nm4096")
+    for arm_id, yaqa_weight, seed in NM4096_FOLLOWUPS:
+        label = _weight_label(yaqa_weight)
+        suffix = f"_seed{seed}" if seed else ""
+        config_path = (
+            args.config_dir
+            / f"llama32_1b_fisher_composition_yaqa182_nm4096_yaqa{label}x{suffix}.json"
+        )
+        config = _write_config(
+            base_config=_weighted_config(base_config, yaqa_weight=yaqa_weight),
+            output=config_path,
+            minimum_sequences=nm4096["coverage"]["independent_sequences"],
+            seed=seed,
+        )
+        arms.append(
+            {
+                "arm_id": arm_id,
+                "corpus_key": nm4096["key"],
+                "artifact": nm4096["artifact"],
+                "manifest": nm4096["manifest"],
+                "disjointness": nm4096["disjointness"],
+                "config": config,
+                "source_weights": {"yaqa": yaqa_weight, "nm": 1.0},
+                "seed": seed,
+                "coverage": _weighted_coverage(
+                    nm4096["coverage"], yaqa_weight=yaqa_weight
+                ),
+            }
+        )
 
     registry = {
         "schema": "qvq.calibration_fisher_composition_registry.v1",
