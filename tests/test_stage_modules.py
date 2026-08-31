@@ -828,7 +828,7 @@ def test_run_layer_stage_invokes_subset_stage(monkeypatch):
         layers=layers,
         layer_modules=layer_modules,
         planning_layer_modules=layer_modules,
-        layers_prefix="model.layers",
+        layer_names=["model.layers.0"],
         fallback=True,
         shared_kv_cache_dict={},
         pb=pb,
@@ -1270,7 +1270,7 @@ def test_run_layer_stage_reuses_subset_plan_for_replay(monkeypatch):
         layers=[torch.nn.Linear(1, 1, bias=False) for _ in range(2)],
         layer_modules=[["self_attn.q_proj"]],
         planning_layer_modules=[["self_attn.q_proj"]],
-        layers_prefix="model.layers",
+        layer_names=["model.layers.0", "model.layers.1"],
         fallback=True,
         shared_kv_cache_dict={},
         pb=pb,
@@ -1986,7 +1986,7 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
         ) -> Dict[str, NamedModule]:
             subset = {}
             for name in names:
-                full_name = f"{layers_prefix}.{layer_index}.{name}"
+                full_name = f"{layers_prefix}.{name}"
                 if self.gptq_model.quantize_config.dynamic_get(layer_name=full_name) is False:
                     continue
                 subset[name] = NamedModule(
@@ -2020,7 +2020,7 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
             ["mlp.gate_proj", "mlp.up_proj"],
             ["mlp.down_proj"],
         ],
-        layers_prefix="model.layers",
+        layer_names=["model.layers.0", "model.layers.1"],
         fallback=True,
         shared_kv_cache_dict={},
         pb=pb,
