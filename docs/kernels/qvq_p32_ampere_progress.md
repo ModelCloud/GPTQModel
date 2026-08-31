@@ -675,6 +675,20 @@ falls from 1.66 us to 1.24 us. The matched M1 full-KV screen improves from
 0.036836 ms to 0.036605 ms (`1.006x`) with exact outputs, stored in
 `artifacts/a100_p32_window/v13_m1_fullkv_shape_key.json`.
 
+The clean five-M refresh at `90a686cf` measures 0.060537 ms (M1), 0.065913 ms
+(M2), 0.075263 ms (M4), 0.087170 ms (M8), and 0.091496 ms (M16). Its 140-case
+geomean is 0.075140 ms, `1.009x` or 0.88% lower latency than the `db785848`
+Ampere control. The exact result is stored in
+`artifacts/a100_p32_window/qwen38_v13_shape_key_all_90a686cf.json`.
+
+The fourth progression removes a remaining hot-path device query inside the
+CUDA operator. Compute capability is immutable for the process lifetime, so
+the first launch records it in a lock-free array indexed by integer CUDA device
+index and later launches perform only a relaxed atomic load. The matched M1
+full-KV screen improves from 0.036605 ms to 0.036334 ms (`1.007x`) with exact
+outputs, stored in
+`artifacts/a100_p32_window/v13_m1_fullkv_cached_capability.json`.
+
 ## Reproduction
 
 ```bash
