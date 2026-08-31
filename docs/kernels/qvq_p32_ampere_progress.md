@@ -22,6 +22,13 @@ discarded experiments so later tuning does not repeat unsafe variants.
 The Ampere path explicitly rejects devices other than CC 8.0. It contains no
 TMA, WGMMA, thread-block clusters, or distributed shared memory.
 
+Marlin is another important teacher for this path because it is a very fast
+Ampere-native weight-only kernel. Its warp partitioning, shared-memory layout,
+software pipelining, vectorized movement, occupancy tradeoffs, and shape-aware
+dispatch are relevant to future P32 tuning. Its packed-weight decode and
+quantization contract are different, however, so those parts cannot be copied
+directly into the exact continuous-window P32 representation.
+
 ## Accepted design
 
 The kernel carries forward the parts of the Hopper work that do not depend on
@@ -35,6 +42,11 @@ Hopper-only hardware:
    amount and a compile-time word distance.
 5. Accumulate in FP32 and use bounded split-K to expose enough CTA work.
 6. Use an explicit block barrier after MMA before reusing a stage buffer.
+
+Future Ampere experiments should compare the generated instruction schedule,
+register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
+as well as carrying forward architecture-independent lessons from the Hopper
+kernel.
 
 There are eight primary device specializations: four transition widths times
 full-M16 and partial-row paths. One runtime split reducer is shared by all
