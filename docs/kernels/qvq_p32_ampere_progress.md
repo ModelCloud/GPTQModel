@@ -507,6 +507,7 @@ more decode instructions without expanding the compact state representation.
 | Four-accumulator split reducer | The matched M1 full-KV probe improved 0.68%, but the clean 140-case refresh regressed from 0.074518 ms to 0.074948 ms, with M1-M4 all slower. | Rejected and reverted; retain the single-accumulator deterministic reducer. The false-positive focused and full results remain in the v13 artifacts. |
 | Reusing precomputed tensor data pointers in every CUDA launch branch | Behavior and outputs were unchanged, but the matched 300-iteration M1 full-KV geomean regressed from 0.034557 ms to 0.035309 ms (2.18%). | Rejected and restored to exact `ab277a17` source; repeated `data_ptr()` extraction is not the limiting enqueue cost. |
 | 128-thread split reducer | An isolated full-KV run appeared faster, but the complete M1 subset with recorded tuner plans regressed from 0.058178 ms to 0.058862 ms (1.18%). At the same split 64, all four full-KV rates were 3-9% slower. | Rejected and restored to 256 threads; extra reducer blocks do not offset lower per-block throughput. |
+| Warp-leader split-bound division | Replacing each thread's uniform K-range divisions with lane-zero division and two shuffles was neutral for M1 full-KV and regressed M16 full-KV from 0.034293 ms to 0.035069 ms (2.26%). | Rejected and reverted; retain the compiler's uniform runtime division. |
 
 ## Post-merge origin/main baseline (v11)
 
