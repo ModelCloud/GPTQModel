@@ -42,7 +42,7 @@
     {"arm_id": "f3_yaqa182_nm256", "gpu": 2, "slot": 0, "fisher_rows": 438, "fisher_tokens": 397132, "seed": 0, "state": "complete", "gsm8k_correct": 486, "d300_aligned_accuracy": 0.34760416666666666},
     {"arm_id": "f4_yaqa182_nm512", "gpu": 3, "slot": 0, "fisher_rows": 694, "fisher_tokens": 490449, "seed": 0, "state": "complete", "gsm8k_correct": 520, "d300_aligned_accuracy": 0.3465625},
     {"arm_id": "f5_yaqa182_nm1024", "gpu": 2, "slot": 1, "fisher_rows": 1206, "fisher_tokens": 677908, "seed": 0, "state": "complete", "gsm8k_correct": 535, "d300_aligned_accuracy": 0.3421875},
-    {"arm_id": "f6_yaqa182_nm10000", "gpu": 0, "slot": 1, "fisher_rows": 10178, "fisher_tokens": 3961260, "seed": 0, "state": "restarted"},
+    {"arm_id": "f6_yaqa182_nm10000", "gpu": 0, "slot": 1, "fisher_rows": 10178, "fisher_tokens": 3961260, "seed": 0, "state": "d300_running", "gsm8k_correct": 547, "gsm8k_accuracy": 0.45244003308519437},
     {"arm_id": "f7_yaqa182_nmrandom_token188256_seed20260830", "gpu": 3, "slot": 1, "fisher_rows": 704, "fisher_tokens": 490481, "seed": 0, "state": "complete", "gsm8k_correct": 513, "d300_aligned_accuracy": 0.34489583333333335},
     {"arm_id": "f8_yaqa182_nm10000_seed1", "gpu": 1, "slot": 1, "fisher_rows": 10178, "fisher_tokens": 3961260, "seed": 1, "state": "restarted"}
   ],
