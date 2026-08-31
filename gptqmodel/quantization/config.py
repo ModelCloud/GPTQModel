@@ -160,6 +160,12 @@ class YaqaConfig:
     activation_checkpointing: bool = True
     mps_cleanup_interval: int = 8
     sequence_sort: str = "desc"
+    # Optional per-source Fisher importance weights. The source column is read
+    # from each raw YAQA calibration row and preserved as one scalar per
+    # independent sequence. Sketch-B applies the weight to each sequence Gram;
+    # rows are never physically duplicated.
+    source_weight_column: str | None = None
+    source_weights: tuple[tuple[str, float], ...] = ()
     max_factor_bytes_per_pass: int | None = None
     v2b2_family_mode: str = "reselect"
     sample_strategy: str = "full"
@@ -236,6 +242,43 @@ class YaqaConfig:
         self.sequence_sort = self.sequence_sort.strip().lower()
         if self.sequence_sort not in {"none", "asc", "desc"}:
             raise ValueError("YaqaConfig: `sequence_sort` must be one of `none`, `asc`, or `desc`.")
+        if self.source_weight_column is not None:
+            if not isinstance(self.source_weight_column, str):
+                raise TypeError("YaqaConfig: `source_weight_column` must be a string or None.")
+            self.source_weight_column = self.source_weight_column.strip()
+            if not self.source_weight_column:
+                raise ValueError("YaqaConfig: `source_weight_column` must not be empty.")
+        if isinstance(self.source_weights, dict):
+            source_weight_items = self.source_weights.items()
+        elif isinstance(self.source_weights, (tuple, list)):
+            source_weight_items = self.source_weights
+        else:
+            raise TypeError("YaqaConfig: `source_weights` must be a mapping or sequence of `(source, weight)` pairs.")
+        normalized_source_weights = []
+        seen_sources = set()
+        for item in source_weight_items:
+            if not isinstance(item, (tuple, list)) or len(item) != 2:
+                raise ValueError("YaqaConfig: every source weight must be a `(source, weight)` pair.")
+            source, weight = item
+            if not isinstance(source, str) or not source.strip():
+                raise ValueError("YaqaConfig: source-weight names must be non-empty strings.")
+            source = source.strip()
+            if source in seen_sources:
+                raise ValueError(f"YaqaConfig: duplicate source weight for {source!r}.")
+            if (
+                isinstance(weight, bool)
+                or not isinstance(weight, (int, float))
+                or not math.isfinite(float(weight))
+                or float(weight) <= 0
+            ):
+                raise ValueError("YaqaConfig: source weights must be finite and positive.")
+            seen_sources.add(source)
+            normalized_source_weights.append((source, float(weight)))
+        self.source_weights = tuple(normalized_source_weights)
+        if bool(self.source_weight_column) != bool(self.source_weights):
+            raise ValueError(
+                "YaqaConfig: `source_weight_column` and non-empty `source_weights` must be configured together."
+            )
         if self.max_factor_bytes_per_pass is not None and (
             isinstance(self.max_factor_bytes_per_pass, bool)
             or not isinstance(self.max_factor_bytes_per_pass, int)

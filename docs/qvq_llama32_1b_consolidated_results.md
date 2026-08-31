@@ -27,6 +27,129 @@ The 128-row Mini-GSM train slice is cryptographically bound and disjoint from
 calibration, replay, D300 development/locked, and GSM8K Platinum test rows.
 These are screening proxies; full GSM8K Platinum remains the promotion metric.
 
+## Wave-10 checkpoint provenance audit (2026-08-30)
+
+The historical GSM8K scores for the two nominally identical W3.2
+`Up4 L6,L8` checkpoints are **superseded for current ranking**.  Wave-10
+replayed each checkpoint four times with the pinned evaluator and obtained
+repeat-stable scores of **541/1209** for `8980aa` and **537/1209** for
+`fdbd68`; the archived scores were 551/1209 and 519/1209 respectively.  The
+replay metric digest was identical across all four repeats for each
+checkpoint, ruling out run-to-run evaluator noise.
+
+The checkpoints have the same tracked allocation/config SHA and the same
+calibration/YAQA identities, but carry different recorded quantizer commits
+(`07517d85` versus `a1e0c504`).  A git audit finds no `gptqmodel` implementation
+file changed between those commits, so the SHA mismatch establishes provenance
+mismatch but does **not** yet prove a solver-code change. Tensor comparison finds 268 differing
+serialized keys across all 112 quantized modules; the first logical data
+divergence is `model.layers.0.self_attn.q_proj` (`bank_ids`/`trellis`, with
+`SU`/`SV` equal).  See the machine-readable
+[`Wave-10 checkpoint hash audit`](experiments/frontier_wave10_checkpoint_hash_audit_20260830.json).
+
+Accordingly, the old 551/519 values remain in the append-only history only as
+**historical provenance records**.  They must not be compared with current
+scores or used to select a new arm until replayed under the same pinned
+evaluator and code/runtime provenance. A frozen-input first-module replay is
+still required to identify whether the divergence comes from the discrete
+optimizer, runtime package state, ordering, or another unrecorded input.
+
+## Wave-11 frozen solver causality canary (2026-08-30 UTC)
+
+The first Wave-11 attempt was invalidated before recording scores: historical
+worktree launches resolved the editable package from the current checkout.
+The corrected launcher now explicitly imports each detached worktree package
+(`scripts/run_in_worktree.py`).
+
+The frozen L0 `self_attn.q_proj` canary then fed byte-identical `W`, input and
+output Hessians, RHT sign vectors, transformed tensors, and solver settings to
+both recorded quantizer commits (`07517d85` and `a1e0c504`), with two replicas
+per commit. All four artifacts are byte-identical, including candidate costs,
+bank selectors, trellises, reconstructed weights, and serialized hashes.
+
+| Candidate | Proxy loss | Kronecker loss | Selected family | Trellis prefix |
+| --- | ---: | ---: | ---: | --- |
+| canonical reselect | 1.021233439 | 0.000961478 | 1 | `8ad316dd8538` |
+| fixed family 0 | 1.099056482 | 0.001032234 | 1 | `7762afe4794c` |
+| fixed family 1 | 1.021233439 | 0.000961478 | 1 | `8ad316dd8538` |
+| fixed family 2 | 1.025190473 | 0.000969684 | 2 | `9d1debdcd4de` |
+| fixed family 3 | 1.026627779 | 0.000966786 | 3 | `847e1fb6c50e` |
+
+This rules out an old/new discrete-solver divergence for this frozen input;
+the full end-to-end controls remain necessary to locate the upstream source
+of the historical checkpoint differences. See the machine-readable
+[`Wave-11 frozen solver result`](experiments/frontier_wave11_frozen_solver_results_20260830.json)
+and [`Wave-11 queue`](experiments/frontier_wave11_causality_queue_20260830.json).
+
+### Wave-11 full end-to-end controls (complete, 2026-08-30 UTC)
+
+The corrected detached-worktree launcher completed all four controls under
+the pinned `e45e44f3` evaluator.  Every arm scored **499/1209 (41.2738%)
+GSM8K Platinum**, with zero invalid answers.  The old commit (`07517d85`)
+and new commit (`a1e0c504`) each reproduced exactly across two replicas;
+all four checkpoints have 112 quantized modules, the same model-index SHA-256
+`6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697`, and
+identical per-module packed tensor hashes.  Thus, with explicit worktree
+package binding, this canary shows no old/new solver drift or evaluator
+nondeterminism.  The regenerated checkpoint is nevertheless distinct from
+the historical 551/519 checkpoints, so that cross-wave discrepancy remains
+provenance-sensitive and is not fully localized by this run.  These are
+causality controls, not a new allocation winner; the machine-readable arm
+paths and hash-manifest digests are in the
+[`Wave-11 queue`](experiments/frontier_wave11_causality_queue_20260830.json).
+
+## Calibration union ablation v1 (complete, 2026-08-30 UTC)
+
+Eight pinned end-to-end arms crossed four ordinary lifecycle corpora
+(`NM128`, `NM512`, `YAQA182`, and `union694`) with two YAQA Fisher corpora
+(`YAQA182` and `union694`) while holding the W3.2 `Up4 L6,L8` allocation fixed
+at 3.178340 effective BPW.
+
+| YAQA Fisher corpus | Lifecycle variants | Packed result | GSM8K Platinum | D300 Top-1 | Exact / 300 | Mean first divergence |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| YAQA182 | NM128 / NM512 / YAQA182 / union694 | identical within group | 41.2738% (499/1209) | 34.5521% (3317/9600) | **25** | **9.9933** |
+| union694 | NM128 / NM512 / YAQA182 / union694 | identical within group | **43.0108% (520/1209)** | **34.6563% (3327/9600)** | 15 | 9.8500 |
+
+Within a fixed Fisher corpus, all four lifecycle choices produced byte-identical
+packed module/tensor digests and identical evaluations. In this no-module-replay
+YAQA path, the ordinary lifecycle corpus therefore did not affect the saved
+weights. Expanding the Fisher evidence from 182 YAQA sequences (302,193 valid
+Fisher output-token samples) to the immutable 694-sequence union (490,449
+samples) changed all 112 quantized modules and improved GSM8K by **21 questions
+(+1.7370 pp)**. D300 aligned agreement improved by only 10/9600 positions,
+while exact-32 survival fell by 10 prompts and mean first divergence fell by
+0.1433. This is a protocol result, not a new budget anchor, and should not be
+generalized to module replay or non-YAQA rounding paths.
+
+Exact report/checkpoint hashes and per-arm completion data are recorded in the
+[`calibration ablation result`](experiments/calibration_ablation_v1_results_20260830.json),
+with the immutable source union in
+[`calibration_union_v1.json`](experiments/calibration_union_v1.json).
+
+## Current budget anchors (updated 2026-08-28 UTC)
+
+The following anchors are the comparison points for every future allocation
+wave. They are selected by completed full GSM8K Platinum results, not by
+Mini-GSM or D300. A new arm may replace an anchor only after its checkpoint,
+effective serialized BPW, and full GSM8K report have been verified.
+
+| Budget band | Anchor arm | Allocation | Effective BPW | GSM8K Platinum | Role |
+| --- | --- | --- | ---: | ---: | --- |
+| ~2.02 | `b5283c` | Flat W2, reg 0.15 | 2.0232 | 23.8213% (288/1209) | flat-W2 reference |
+| ~3.02 | `1040a5` | Flat W3 | 3.0232 | 42.9280% (519/1209) | flat-W3 reference |
+| ~3.18 | `8980aa` | W3.2 anchor + Up4 layers 6 and 8 | 3.178340 | **44.7477% (541/1209 current replay)** | historical 551 superseded; provenance canary |
+| ~3.52 | `9769b1` | Flat W3.5, seed 1 | 3.5232 | **46.65% (564/1209)** | current high-rate reference |
+| ~3.56 | `4e7424` | Flat W3.5 + Up4 layers 12–15, seed 1 | 3.5577 | 46.15% (558/1209) | late-Up control |
+| ~3.63 | `049d0c` | Flat W3.5 + V4 all + Up4 layers 9–15 | 3.6266 | 45.9884% (556/1209) | V/Up mixed control |
+
+The historical ~3.2 anchor was the Wave-5 `L6+L8` result; its current pinned
+replay is 541/1209 and is not directly comparable to the archived 551/1209.
+Wave-6's best `L8+L9` arm reached 543/1209 at 3.178340 BPW under its own
+provenance and should likewise be compared only within that protocol. The
+~3.52 seed-1 result remains the highest completed GSM8K count in the current
+ledger, while the ~3.6 rows are useful allocation controls rather than an
+automatic improvement over flat W3.5.
+
 ## Completed arms (ordered by D300 Top-1, descending)
 
 | Arm ID | Family / arm | Rate | Eff. BPW* | Calibration | D300 Top-1 | Exact / 300 | Mean first divergence | GSM8K Platinum | Status |
@@ -411,7 +534,7 @@ whose sequence floor exceeds the supplied YAQA slice.
 | `7cf6ca` | 4 | Flat W3.5 + Up/Gate W4 layers 12–15 | 3.5921 | evaluation complete (Mini-GSM 7.81%) | pending | **43.59% (527/1209)** |
 | `f7f157` | 5 | Flat W3.5 + Up W4 layers 12–15 + O W4 all | 3.6008 | evaluation complete (Mini-GSM 4.69%) | pending | **44.42% (537/1209)** |
 | `049d0c` | 6 | Flat W3.5 + Up W4 layers 9–15 + V W4 all | 3.6266 | evaluation complete (Mini-GSM 4.69%) | pending | **45.99% (556/1209)** |
-| `9769b1` | 7 | Flat W3.5 seed-1 control | 3.5232 | GSM8K running (Mini-GSM 3.13%) | pending | pending |
+| `9769b1` | 7 | Flat W3.5 seed-1 control | 3.5232 | evaluation complete (Mini-GSM 3.13%) | pending | **46.65% (564/1209)** |
 
 Machine-readable status and cross-references: `docs/experiments/frontier_wave2_rerun_20260828.json` and `docs/experiments/arm_id_index.json`.
 
@@ -443,3 +566,250 @@ completed with zero invalid generations. The seed-1 high-frontier control
 (`4e7424`) currently leads this wave at 558/1209 (46.15%).
 
 Machine-readable queue: `docs/experiments/frontier_wave3_queue_20260828.json`.
+
+## Wave-4 W3.2 V/Up sensitivity queue (2026-08-28 UTC)
+
+This wave uses the corrected W3.2 anchor
+`Q2 / K2.5 / V3.5 / O4 / Gate3 / Up3.5 / Down3`. All eight arms completed
+quantization on GPUs 0–7 between 14:16 and 14:21 UTC and are now queued for
+held-out evaluation. Every arm has a distinct
+resolved/effective allocation fingerprint.
+
+The plan's original BPW labels treated V3.5→V4-all as a single-layer-sized
+increment. Existing serialized frontier accounting indicates that V4-all costs
+approximately +0.043103 BPW, so the corrected estimates below are the values
+to use for Pareto comparisons. Final serialized accounting remains authoritative.
+
+| Arm ID | GPU | Allocation | Requested BPW | Corrected est. BPW | State |
+| --- | ---: | --- | ---: | ---: | --- |
+| `c84a1e` | 0 | Anchor, seed 1 | 3.1611 | 3.161099 | GSM8K **43.51% (526/1209)**; Mini-GSM **1.56%** |
+| `f1d903` | 1 | Anchor + V4 all | 3.1697 | **3.204202** | GSM8K **44.09% (533/1209)**; Mini-GSM **4.69%** |
+| `7b6e2a` | 2 | Anchor + Up4 layer 6 | 3.1697 | **3.169720** | GSM8K **44.25% (535/1209)**; Mini-GSM **4.69%** |
+| `a4c918` | 3 | Anchor + Up4 layers 6–7 | 3.1783 | **3.178340** | GSM8K **44.00% (532/1209)**; Mini-GSM **4.69%** |
+| `d2f507` | 4 | Anchor + V4 all + Up4 layer 6 | 3.1783 | **3.212823** | GSM8K **43.59% (527/1209)**; Mini-GSM **4.69%** |
+| `8e3b61` | 5 | Anchor + Up4 layers 6–8 | 3.1870 | **3.186961** | GSM8K **44.09% (533/1209)**; Mini-GSM **3.13%** |
+| `5a0dce` | 6 | Anchor + Up4 layers 6–9 | 3.1956 | **3.195582** | GSM8K **45.00% (544/1209)**; Mini-GSM **3.13%** |
+| `b7f294` | 7 | Anchor + V4 all + Up4 layers 6–8 | 3.1956 | **3.230065** | GSM8K **43.18% (522/1209)**; Mini-GSM **3.13%** |
+
+## Wave-5 sparse Up-layer isolation queue (2026-08-28 UTC)
+
+These eight arms isolate the apparent L6/L9 signal from Wave-4 at the same
+corrected W3.2 anchor. Full GSM8K Platinum and Mini-GSM are required; D300 is
+diagnostic only. Effective BPW values are projection-payload estimates pending
+serialized checkpoint accounting.
+
+| Arm ID | GPU | Allocation | Estimated effective BPW | GSM8K Platinum | Mini exact | Answer-logprob Δ | State |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | --- |
+| `a91f6c` | 0 | Anchor + Up4 layer 9 | 3.169720 | **44.0033% (532/1209)** | 4.6875% | +0.124061 | complete |
+| `3d7e42` | 1 | Anchor + Up4 layers 6 and 9 | 3.178340 | **43.5070% (526/1209)** | 3.1250% | +0.106767 | complete |
+| `e8b5a0` | 2 | Anchor + Up4 layers 7 and 8 (matched negative control) | 3.178340 | **45.1613% (546/1209)** | 6.2500% | −0.036569 | complete |
+| `8980aa` | 3 | Anchor + Up4 layers 6 and 8 | 3.178340 | **45.5749% (551/1209, historical; superseded by current replay 541/1209)** | 4.6875% | −0.019751 | historical provenance; do not rank |
+| `1450c0` | 4 | Anchor + Up4 layers 6 and 10 | 3.178340 | **43.7552% (529/1209)** | 4.6875% | −0.025394 | complete |
+| `a63cf6` | 5 | Anchor + Up4 layers 5 and 9 | 3.178340 | **44.5823% (539/1209)** | 4.6875% | +0.086033 | complete |
+| `aeb16f` | 6 | Anchor + Up4 layers 6, 9, and 12 | 3.186961 | **43.8379% (530/1209)** | 3.1250% | +0.137476 | complete |
+| `a8920f` | 7 | Anchor + Up4 layers 6, 9, 12, and 15 | 3.195582 | **43.1762% (522/1209)** | 3.1250% | +0.129048 | complete |
+
+Machine-readable queue and arm cross-references: `docs/experiments/frontier_wave5_queue_20260828.json` and `docs/experiments/arm_id_index.json`.
+
+## Wave-6 L8 interaction mapping queue (2026-08-28 UTC)
+
+This wave maps standalone and pairwise L8 interactions around the corrected
+W3.2 anchor. Full GSM8K Platinum and Mini-GSM are required; D300 is diagnostic
+only. Effective BPW values are projection-payload estimates pending serialized
+checkpoint accounting.
+
+| Arm ID | GPU | Allocation | Estimated effective BPW | GSM8K Platinum | Mini exact | Answer-logprob Δ | State |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | --- |
+| `35d823` | 0 | Anchor + Up4 layer 8 | 3.169720 | **44.8304% (542/1209)** | 6.25% | −0.007874 | complete |
+| `4b5abc` | 1 | Anchor + Up4 layers 5 and 8 | 3.178340 | **44.5823% (539/1209)** | 6.25% | −0.048598 | complete |
+| `a35e15` | 2 | Anchor + Up4 layers 8 and 9 | 3.178340 | **44.9132% (543/1209)** | 4.69% | +0.067993 | complete |
+| `fd5aff` | 3 | Anchor + Up4 layers 8 and 10 | 3.178340 | **44.4169% (537/1209)** | 4.69% | −0.079265 | complete |
+| `8b2e24` | 4 | Anchor + Up4 layers 8 and 12 | 3.178340 | **43.8379% (530/1209)** | 6.25% | +0.022460 | complete |
+| `7aef62` | 5 | Anchor + Up4 layers 8 and 15 | 3.178340 | **43.9206% (531/1209)** | 6.25% | −0.021847 | complete |
+| `18536a` | 6 | Anchor + Up4 layers 6, 8, and 9 | 3.186961 | **44.3342% (536/1209)** | 3.13% | +0.047220 | complete |
+| `4f89fc` | 7 | Anchor + Up4 layers 6, 8, and 12 | 3.186961 | **44.7477% (541/1209)** | 4.69% | +0.012833 | complete |
+
+Wave-6 held-out evaluations completed on all eight arms. The best GSM8K
+result is `a35e15` (Up4 layers 8 and 9), 543/1209 at 3.178340 BPW; all
+reports and Mini-GSM metrics are recorded in the machine-readable queue.
+
+Machine-readable queue and arm cross-references: `docs/experiments/frontier_wave6_queue_20260828.json` and `docs/experiments/arm_id_index.json`.
+
+## Wave-7 full single-layer Up sensitivity sweep (2026-08-28 UTC)
+
+Sixteen arms are queued from the same corrected W3.2 anchor. Each promotes
+exactly one `mlp.up_proj` (W3.5 → W4), so every arm has the same estimated
+3.169720 BPW and is directly comparable. Two quantizers may run concurrently
+per 96-GB GPU; evaluation is exclusive per GPU and follows quantization
+immediately. Full GSM8K Platinum and Mini-GSM are required.
+
+| Layer | Arm ID | GPU | Allocation | Estimated BPW | State |
+| ---: | --- | ---: | --- | ---: | --- |
+| 0 | `e62172` | 0 | Anchor + Up4 L0 | 3.169720 | evaluation complete |
+| 1 | `4bab0e` | 1 | Anchor + Up4 L1 | 3.169720 | evaluation complete |
+| 2 | `6fba6c` | 2 | Anchor + Up4 L2 | 3.169720 | evaluation complete |
+| 3 | `3ff286` | 3 | Anchor + Up4 L3 | 3.169720 | evaluation complete |
+| 4 | `e1b702` | 4 | Anchor + Up4 L4 | 3.169720 | evaluation complete |
+| 5 | `788234` | 5 | Anchor + Up4 L5 | 3.169720 | evaluation complete |
+| 6 | `5f91ab` | 6 | Anchor + Up4 L6 (repeat) | 3.169720 | evaluation complete |
+| 7 | `5ea33c` | 7 | Anchor + Up4 L7 | 3.169720 | evaluation complete |
+| 8 | `b8fb5c` | 0 | Anchor + Up4 L8 (repeat) | 3.169720 | evaluation complete |
+| 9 | `d693ff` | 1 | Anchor + Up4 L9 (repeat) | 3.169720 | evaluation complete |
+| 10 | `d6fab2` | 2 | Anchor + Up4 L10 | 3.169720 | evaluation complete |
+| 11 | `bd7c59` | 3 | Anchor + Up4 L11 | 3.169720 | evaluation complete |
+| 12 | `bb10df` | 4 | Anchor + Up4 L12 | 3.169720 | evaluation complete |
+| 13 | `adff86` | 5 | Anchor + Up4 L13 | 3.169720 | evaluation complete |
+| 14 | `254d84` | 6 | Anchor + Up4 L14 | 3.169720 | evaluation complete |
+| 15 | `515065` | 7 | Anchor + Up4 L15 | 3.169720 | evaluation complete |
+
+### Wave-7 held-out evaluations (2026-08-29 UTC)
+
+All sixteen checkpoints have completed both full GSM8K Platinum (1,209 rows)
+and Mini-GSM (64 rows). All arms use the same 3.169720 effective payload BPW.
+
+| Layer | Arm ID | GSM8K Platinum | Mini exact | Answer-logprob Δ | Answer-margin Δ | Reports |
+| ---: | --- | ---: | ---: | ---: | ---: | --- |
+| 0 | `e62172` | **44.0033% (532/1209)** | 3.1250% | +0.152838 | +0.745247 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_e62172_llama32_1b_frontier_anchor_up4_l0-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_e62172_llama32_1b_frontier_anchor_up4_l0-micro-math-v1.json) |
+| 1 | `4bab0e` | **43.8379% (530/1209)** | 3.1250% | +0.149789 | +0.558371 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_4bab0e_llama32_1b_frontier_anchor_up4_l1-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_4bab0e_llama32_1b_frontier_anchor_up4_l1-micro-math-v1.json) |
+| 2 | `6fba6c` | **43.9206% (531/1209)** | 4.6875% | +0.092876 | +0.639518 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_6fba6c_llama32_1b_frontier_anchor_up4_l2-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_6fba6c_llama32_1b_frontier_anchor_up4_l2-micro-math-v1.json) |
+| 3 | `3ff286` | **44.2514% (535/1209)** | 4.6875% | +0.178998 | +0.534700 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_3ff286_llama32_1b_frontier_anchor_up4_l3-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_3ff286_llama32_1b_frontier_anchor_up4_l3-micro-math-v1.json) |
+| 4 | `e1b702` | **44.3342% (536/1209)** | 4.6875% | +0.133087 | +0.830440 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_e1b702_llama32_1b_frontier_anchor_up4_l4-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_e1b702_llama32_1b_frontier_anchor_up4_l4-micro-math-v1.json) |
+| 5 | `788234` | **44.7477% (541/1209)** | 4.6875% | +0.102059 | +0.461900 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_788234_llama32_1b_frontier_anchor_up4_l5-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_788234_llama32_1b_frontier_anchor_up4_l5-micro-math-v1.json) |
+| 6 | `5f91ab` | **44.0033% (532/1209)** | 1.5625% | +0.133829 | +0.516292 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_5f91ab_llama32_1b_frontier_anchor_up4_l6-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_5f91ab_llama32_1b_frontier_anchor_up4_l6-micro-math-v1.json) |
+| 7 | `5ea33c` | **43.4243% (525/1209)** | 3.1250% | +0.175927 | +0.609579 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_5ea33c_llama32_1b_frontier_anchor_up4_l7-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_5ea33c_llama32_1b_frontier_anchor_up4_l7-micro-math-v1.json) |
+| 8 | `b8fb5c` | **44.5823% (539/1209)** | 4.6875% | +0.072855 | +0.506915 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_b8fb5c_llama32_1b_frontier_anchor_up4_l8-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_b8fb5c_llama32_1b_frontier_anchor_up4_l8-micro-math-v1.json) |
+| 9 | `d693ff` | **44.4169% (537/1209)** | 3.1250% | +0.216500 | +0.677904 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_d693ff_llama32_1b_frontier_anchor_up4_l9-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_d693ff_llama32_1b_frontier_anchor_up4_l9-micro-math-v1.json) |
+| 10 | `d6fab2` | **43.5897% (527/1209)** | 4.6875% | +0.077571 | +0.534136 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_d6fab2_llama32_1b_frontier_anchor_up4_l10-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_d6fab2_llama32_1b_frontier_anchor_up4_l10-micro-math-v1.json) |
+| 11 | `bd7c59` | **44.2514% (535/1209)** | 4.6875% | +0.203073 | +0.858973 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_bd7c59_llama32_1b_frontier_anchor_up4_l11-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_bd7c59_llama32_1b_frontier_anchor_up4_l11-micro-math-v1.json) |
+| 12 | `bb10df` | **44.6650% (540/1209)** | 3.1250% | +0.168476 | +0.730859 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_bb10df_llama32_1b_frontier_anchor_up4_l12-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_bb10df_llama32_1b_frontier_anchor_up4_l12-micro-math-v1.json) |
+| 13 | `adff86` | **43.9206% (531/1209)** | 4.6875% | +0.256177 | +0.834301 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_adff86_llama32_1b_frontier_anchor_up4_l13-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_adff86_llama32_1b_frontier_anchor_up4_l13-micro-math-v1.json) |
+| 14 | `254d84` | **44.2514% (535/1209)** | 3.1250% | +0.170530 | +0.627562 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_254d84_llama32_1b_frontier_anchor_up4_l14-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_254d84_llama32_1b_frontier_anchor_up4_l14-micro-math-v1.json) |
+| 15 | `515065` | **44.5823% (539/1209)** | 4.6875% | +0.145288 | +0.634211 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w7queued_515065_llama32_1b_frontier_anchor_up4_l15-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w7queued_515065_llama32_1b_frontier_anchor_up4_l15-micro-math-v1.json) |
+
+This is a completed-results snapshot; the queue manifest remains authoritative
+for the live status and remaining evaluations.
+
+Machine-readable queue and arm cross-references: `docs/experiments/frontier_wave7_queue_20260828.json` and `docs/experiments/arm_id_index.json`.
+
+Machine-readable queue and cross-references: `docs/experiments/frontier_wave4_queue_20260828.json` and `docs/experiments/arm_id_index.json`.
+
+## Wave-8 pair-interaction mapping completed (2026-08-29 UTC)
+
+Sixteen matched-budget arms test pairwise Up4 interactions from the corrected
+W3.2 anchor. Each promotes exactly two Up projections from W3.5 to W4, for
+3.178340 effective BPW. Positive (`L6+L8`) and negative (`L8+L12`)
+interaction controls are intentionally repeated. Full GSM8K Platinum and
+Mini-GSM evaluations are required for every checkpoint.
+
+| # | Arm ID | Up4 layers | GPU | Effective BPW | State |
+| ---: | --- | --- | ---: | ---: | --- |
+| 1 | `fb8247` | L5 + L12 | 0 | 3.178340 | evaluation complete |
+| 2 | `735365` | L5 + L15 | 1 | 3.178340 | evaluation complete |
+| 3 | `e5488a` | L12 + L15 | 2 | 3.178340 | evaluation complete |
+| 4 | `6f37dc` | L9 + L12 | 3 | 3.178340 | evaluation complete |
+| 5 | `9cd131` | L9 + L15 | 4 | 3.178340 | evaluation complete |
+| 6 | `fdbd68` | L6 + L8 (positive control) | 5 | 3.178340 | evaluation complete |
+| 7 | `91a008` | L8 + L12 (negative control) | 6 | 3.178340 | evaluation complete |
+| 8 | `4e58f5` | L5 + L6 | 7 | 3.178340 | evaluation complete |
+| 9 | `c4cc84` | L6 + L12 | 0 | 3.178340 | evaluation complete |
+| 10 | `cef938` | L6 + L15 | 1 | 3.178340 | evaluation complete |
+| 11 | `fe2ba7` | L5 + L7 | 2 | 3.178340 | evaluation complete |
+| 12 | `446290` | L7 + L12 | 3 | 3.178340 | evaluation complete |
+| 13 | `719a90` | L7 + L15 | 4 | 3.178340 | evaluation complete |
+| 14 | `cecb41` | L4 + L5 | 5 | 3.178340 | evaluation complete |
+| 15 | `1e3a24` | L4 + L12 | 6 | 3.178340 | evaluation complete |
+| 16 | `864bb1` | L4 + L8 | 7 | 3.178340 | evaluation complete |
+
+Machine-readable queue: `docs/experiments/frontier_wave8_queue_20260829.json`.
+
+### Wave-8 completed evaluations (2026-08-29 UTC)
+
+All sixteen arms completed both full GSM8K Platinum and Mini-GSM evaluations.
+
+| Arm ID | Up4 layers | GSM8K Platinum | Mini exact | Answer-logprob Δ | Answer-margin Δ | Reports |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| `fb8247` | L5 + L12 | **42.3490% (512/1209)** | 3.1250% | +0.409967 | +0.070590 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_fb8247_llama32_1b_frontier_anchor_up4_l5_l12-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_fb8247_llama32_1b_frontier_anchor_up4_l5_l12-micro-math-v1.json) |
+| `6f37dc` | L9 + L12 | **43.3416% (524/1209)** | 1.5625% | +0.475437 | −0.038672 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_6f37dc_llama32_1b_frontier_anchor_up4_l9_l12-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_6f37dc_llama32_1b_frontier_anchor_up4_l9_l12-micro-math-v1.json) |
+| `9cd131` | L9 + L15 | **43.1762% (522/1209)** | 3.1250% | +0.462224 | −0.032238 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_9cd131_llama32_1b_frontier_anchor_up4_l9_l15-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_9cd131_llama32_1b_frontier_anchor_up4_l9_l15-micro-math-v1.json) |
+| `4e58f5` | L5 + L6 | **42.2663% (511/1209)** | 4.6875% | +0.338698 | −0.105156 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_4e58f5_llama32_1b_frontier_anchor_up4_l5_l6-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_4e58f5_llama32_1b_frontier_anchor_up4_l5_l6-micro-math-v1.json) |
+| `735365` | L5 + L15 | **42.8453% (518/1209)** | 6.25% | +0.391713 | +0.076822 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_735365_llama32_1b_frontier_anchor_up4_l5_l15-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_735365_llama32_1b_frontier_anchor_up4_l5_l15-micro-math-v1.json) |
+| `e5488a` | L12 + L15 | **43.4243% (525/1209)** | 4.6875% | +0.456282 | +0.012602 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_e5488a_llama32_1b_frontier_anchor_up4_l12_l15-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_e5488a_llama32_1b_frontier_anchor_up4_l12_l15-micro-math-v1.json) |
+| `fdbd68` | L6 + L8 | **42.9280% (519/1209, historical; superseded by current replay 537/1209)** | 4.6875% | +0.362137 | −0.217387 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8-micro-math-v1.json) |
+| `91a008` | L8 + L12 | **44.8304% (542/1209)** | 1.5625% | +0.430909 | −0.022157 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_91a008_llama32_1b_frontier_anchor_up4_l8_l12-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_91a008_llama32_1b_frontier_anchor_up4_l8_l12-micro-math-v1.json) |
+| `c4cc84` | L6 + L12 | **44.4169% (537/1209)** | 6.25% | +0.407893 | −0.164052 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_c4cc84_llama32_1b_frontier_anchor_up4_l6_l12-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_c4cc84_llama32_1b_frontier_anchor_up4_l6_l12-micro-math-v1.json) |
+| `fe2ba7` | L5 + L7 | **42.8453% (518/1209)** | 4.6875% | +0.257663 | −0.178204 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_fe2ba7_llama32_1b_frontier_anchor_up4_l5_l7-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_fe2ba7_llama32_1b_frontier_anchor_up4_l5_l7-micro-math-v1.json) |
+| `446290` | L7 + L12 | **44.3342% (536/1209)** | 4.6875% | +0.334293 | −0.228091 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_446290_llama32_1b_frontier_anchor_up4_l7_l12-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_446290_llama32_1b_frontier_anchor_up4_l7_l12-micro-math-v1.json) |
+| `719a90` | L7 + L15 | **43.0108% (520/1209)** | 6.25% | +0.318594 | −0.226357 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_719a90_llama32_1b_frontier_anchor_up4_l7_l15-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_719a90_llama32_1b_frontier_anchor_up4_l7_l15-micro-math-v1.json) |
+| `cecb41` | L4 + L5 | **40.8602% (494/1209)** | 3.125% | +0.478479 | +0.217460 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_cecb41_llama32_1b_frontier_anchor_up4_l4_l5-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_cecb41_llama32_1b_frontier_anchor_up4_l4_l5-micro-math-v1.json) |
+| `1e3a24` | L4 + L12 | **43.0108% (520/1209)** | 3.125% | +0.545433 | +0.179761 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_1e3a24_llama32_1b_frontier_anchor_up4_l4_l12-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_1e3a24_llama32_1b_frontier_anchor_up4_l4_l12-micro-math-v1.json) |
+| `864bb1` | L4 + L8 | **43.0108% (520/1209)** | 3.125% | +0.501772 | +0.141465 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_864bb1_llama32_1b_frontier_anchor_up4_l4_l8-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_864bb1_llama32_1b_frontier_anchor_up4_l4_l8-micro-math-v1.json) |
+| `cef938` | L6 + L15 | **42.8453% (518/1209)** | 6.25% | +0.393213 | −0.167946 | [`gsm8k`](/root/qvq-results/llama32-1b-w2-w8queued_cef938_llama32_1b_frontier_anchor_up4_l6_l15-gsm8k-platinum-v1.json), [`micro`](/root/qvq-results/llama32-1b-w2-w8queued_cef938_llama32_1b_frontier_anchor_up4_l6_l15-micro-math-v1.json) |
+
+## Wave-9 local marginal sweep queued (2026-08-29 UTC)
+
+Eight arms ran from the corrected W3.2 anchor. The first six spend one
+additional Up4 or Down3.5 promotion (3.186961 effective BPW); the final two
+spend two targeted Down3.5 promotions (3.195582 effective BPW). All arms use
+the same 182-row YAQA calibration and require full GSM8K Platinum plus
+Mini-GSM evaluation. Queue manifest:
+`docs/experiments/frontier_wave9_queue_20260829.json`.
+
+| # | Arm ID | Allocation | GPU | Effective BPW | State |
+| ---: | --- | --- | ---: | ---: | --- |
+| 1 | `5b847c` | Up4 L7 + L8 + L12 | 0 | 3.186961 | evaluation complete |
+| 2 | `611404` | Up4 L6 + L7 + L8 | 1 | 3.186961 | evaluation complete |
+| 3 | `6fe5ca` | Up4 L8 + L12; Down3.5 L12 | 2 | 3.186961 | evaluation complete |
+| 4 | `228564` | Up4 L6 + L8; Down3.5 L8 | 3 | 3.186961 | evaluation complete |
+| 5 | `370c3a` | Up4 L8 + L11 + L12 | 4 | 3.186961 | evaluation complete |
+| 6 | `0ea650` | Up4 L6 + L8 + L11 | 5 | 3.186961 | evaluation complete |
+| 7 | `186871` | Up4 L8 + L12; Down3.5 L8 + L12 | 6 | 3.195582 | evaluation complete |
+| 8 | `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 7 | 3.195582 | evaluation complete |
+
+### Wave-9 completed evaluations (2026-08-29 UTC)
+
+All eight Wave-9 arms completed both required held-out evaluations. The queue manifest records the full
+micro-math metrics (including answer-logprob and answer-margin deltas):
+`docs/experiments/frontier_wave9_queue_20260829.json`.
+
+| Arm ID | Allocation | Effective BPW | GSM8K Platinum | Mini exact | Answer-logprob Δ | Answer-margin Δ | State |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `5b847c` | Up4 L7 + L8 + L12 | 3.186961 | **529/1209 (43.7552%)** | 6.25% | +0.290639 | −0.265506 | evaluation complete |
+| `0ea650` | Up4 L6 + L8 + L11 | 3.186961 | **525/1209 (43.4243%)** | 6.25% | +0.387690 | −0.225125 | evaluation complete |
+| `611404` | Up4 L6 + L7 + L8 | 3.186961 | **528/1209 (43.6725%)** | 7.8125% | +0.237316 | −0.422956 | evaluation complete |
+| `6fe5ca` | Up4 L8 + L12; Down3.5 L12 | 3.186961 | **529/1209 (43.7552%)** | 4.6875% | +0.436002 | −0.064639 | evaluation complete |
+| `228564` | Up4 L6 + L8; Down3.5 L8 | 3.186961 | **524/1209 (43.3416%)** | 9.375% | +0.204094 | −0.556634 | evaluation complete |
+| `370c3a` | Up4 L8 + L11 + L12 | 3.186961 | **535/1209 (44.2514%)** | 6.25% | +0.458041 | −0.030357 | evaluation complete |
+| `186871` | Up4 L8 + L12; Down3.5 L8 + L12 | 3.195582 | **530/1209 (43.8379%)** | 6.25% | +0.283112 | −0.399024 | evaluation complete |
+| `37eb97` | Up4 L6 + L8; Down3.5 L6 + L8 | 3.195582 | **528/1209 (43.6725%)** | 6.25% | +0.273898 | −0.297230 | evaluation complete |
+
+## Wave-10 determinism canary replays (2026-08-30 UTC)
+
+Eight repeated GSM8K evaluations are running before any new quantization. The
+canary compares the historical `8980aa` checkpoint (551/1209) with the
+Wave-8 `fdbd68` repeat (519/1209), four times each, using the same task,
+batch size, and greedy decoding. Each run writes an immutable aggregate report
+and a normalized metrics digest. Queue manifest and launcher:
+`docs/experiments/frontier_wave10_determinism_queue_20260830.json`,
+`scripts/run_llama32_wave10_canary_replays.sh`.
+
+| Arm IDs | Checkpoint | GPUs | State |
+| --- | --- | --- | --- |
+| `w10-8980aa-r1` … `r4` | `8980aa` (W3.2 Up4 L6,L8) | 0–3 | evaluation complete |
+| `w10-fdbd68-r1` … `r4` | `fdbd68` (W3.2 Up4 L6,L8) | 4–7 | evaluation complete |
+
+### Wave-10 canary replay results (2026-08-30 UTC)
+
+All eight repeated evaluations completed. Each checkpoint produced the same
+normalized metric digest on all four repeats, so evaluator execution is
+deterministic for this protocol. The current evaluator reports differ from
+the historical records (551 for `8980aa`, 519 for `fdbd68`). Those historical
+values are retained for auditability but are **invalid for current arm
+ranking**; the tensor-level comparison is recorded in the
+[`Wave-10 checkpoint hash audit`](experiments/frontier_wave10_checkpoint_hash_audit_20260830.json).
+The remaining discrepancy is checkpoint/code provenance, not run-to-run
+evaluation noise.
+
+| Checkpoint | Repeats | GSM8K each | Digest SHA-256 | Result |
+| --- | ---: | ---: | --- | --- |
+| `8980aa` | 4 | **541/1209 (44.7477%)** | `5b154128…e8529c` | repeat-stable |
+| `fdbd68` | 4 | **537/1209 (44.4169%)** | `ef896c0a…51d202` | repeat-stable |

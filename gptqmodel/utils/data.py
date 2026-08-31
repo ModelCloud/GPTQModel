@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import math
 import random
 from functools import partial
 from typing import Callable, Dict, List, Optional
@@ -162,6 +163,8 @@ def collate_data(
     rows_mask = []
     rows_template_mask = []
     has_template_mask = any("chat_template_mask" in item for item in batch)
+    rows_fisher_weight = []
+    has_fisher_weight = any("fisher_sequence_weight" in item for item in batch)
 
     for item in batch:
         ids_list = item["input_ids"]
@@ -188,6 +191,18 @@ def collate_data(
                 if template_row.numel() != ids.numel():
                     raise ValueError("chat_template_mask must align with input_ids")
                 rows_template_mask.append(template_row)
+            if has_fisher_weight:
+                weights = item.get("fisher_sequence_weight")
+                if weights is None:
+                    raise ValueError(
+                        "every calibration item must provide fisher_sequence_weight when source weighting is enabled"
+                    )
+                if len(weights) != len(ids_list):
+                    raise ValueError("fisher_sequence_weight must provide one scalar per calibration row")
+                weight = float(weights[r])
+                if not math.isfinite(weight) or weight <= 0:
+                    raise ValueError("fisher_sequence_weight must be finite and positive")
+                rows_fisher_weight.append(weight)
 
     # Compute global max length
     max_len = max(t.numel() for t in rows_ids) if rows_ids else 0
@@ -239,6 +254,8 @@ def collate_data(
     }
     if has_template_mask:
         result["chat_template_mask"] = torch.stack(padded_template_mask, dim=0)
+    if has_fisher_weight:
+        result["fisher_sequence_weight"] = torch.tensor(rows_fisher_weight, dtype=torch.float64)
     return result
 
 

@@ -1,0 +1,33 @@
+{
+  "schema": "qvq.frontier-wave10-determinism.v1",
+  "wave": 10,
+  "status": "evaluation_complete",
+  "queued_at_utc": "2026-08-30T00:00:00Z",
+  "started_at_utc": "2026-08-30T00:23:20Z",
+  "completed_at_utc": "2026-08-30T00:46:17Z",
+  "purpose": "Repeated evaluation of the W3.2 Up4 L6,L8 canaries before new quantization runs.",
+  "protocol": {
+    "task": "gsm8k_platinum_cot",
+    "batch_size": 8,
+    "decode": "do_sample=false,temperature=0.0,top_p=1.0,top_k=50",
+    "repeats_per_checkpoint": 4,
+    "checkpoint_comparison": ["8980aa", "fdbd68"],
+    "note": "qvq_evaluate task reports contain aggregate metrics; per-question prediction export remains a follow-up instrumentation item.",
+    "historical_reference": {"8980aa": {"reported_correct": 551}, "fdbd68": {"reported_correct": 519}},
+    "finding": "All four repeats are identical within each checkpoint; the current evaluator reports 541/1209 for 8980aa and 537/1209 for fdbd68."
+  },
+  "arms": [
+    {"arm_id":"w10-8980aa-r1","gpu":0,"checkpoint":"/root/qvq-results/llama32-1b-w2-w5queued_8980aa_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"8980aa","repeat":1,"state":"evaluation_complete","gsm8k":0.44747725392886684,"gsm8k_correct":541,"gsm8k_total":1209,"report":"/root/qvq-results/w10-8980aa-r1-gsm8k-platinum.json","metrics_sha256":"5b1541285fa7882f4bf541af906ff30c24bf99ac26c95689181a4238c8e8529c"},
+    {"arm_id":"w10-8980aa-r2","gpu":1,"checkpoint":"/root/qvq-results/llama32-1b-w2-w5queued_8980aa_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"8980aa","repeat":2,"state":"evaluation_complete","gsm8k":0.44747725392886684,"gsm8k_correct":541,"gsm8k_total":1209,"report":"/root/qvq-results/w10-8980aa-r2-gsm8k-platinum.json","metrics_sha256":"5b1541285fa7882f4bf541af906ff30c24bf99ac26c95689181a4238c8e8529c"},
+    {"arm_id":"w10-8980aa-r3","gpu":2,"checkpoint":"/root/qvq-results/llama32-1b-w2-w5queued_8980aa_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"8980aa","repeat":3,"state":"evaluation_complete","gsm8k":0.44747725392886684,"gsm8k_correct":541,"gsm8k_total":1209,"report":"/root/qvq-results/w10-8980aa-r3-gsm8k-platinum.json","metrics_sha256":"5b1541285fa7882f4bf541af906ff30c24bf99ac26c95689181a4238c8e8529c"},
+    {"arm_id":"w10-8980aa-r4","gpu":3,"checkpoint":"/root/qvq-results/llama32-1b-w2-w5queued_8980aa_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"8980aa","repeat":4,"state":"evaluation_complete","gsm8k":0.44747725392886684,"gsm8k_correct":541,"gsm8k_total":1209,"report":"/root/qvq-results/w10-8980aa-r4-gsm8k-platinum.json","metrics_sha256":"5b1541285fa7882f4bf541af906ff30c24bf99ac26c95689181a4238c8e8529c"},
+    {"arm_id":"w10-fdbd68-r1","gpu":4,"checkpoint":"/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"fdbd68","repeat":1,"state":"evaluation_complete","gsm8k":0.4441687344913151,"gsm8k_correct":537,"gsm8k_total":1209,"report":"/root/qvq-results/w10-fdbd68-r1-gsm8k-platinum.json","metrics_sha256":"ef896c0a107e8622e487b5eee1ef003ed56b7c0ab1b559000787508bc551d202"},
+    {"arm_id":"w10-fdbd68-r2","gpu":5,"checkpoint":"/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"fdbd68","repeat":2,"state":"evaluation_complete","gsm8k":0.4441687344913151,"gsm8k_correct":537,"gsm8k_total":1209,"report":"/root/qvq-results/w10-fdbd68-r2-gsm8k-platinum.json","metrics_sha256":"ef896c0a107e8622e487b5eee1ef003ed56b7c0ab1b559000787508bc551d202"},
+    {"arm_id":"w10-fdbd68-r3","gpu":6,"checkpoint":"/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"fdbd68","repeat":3,"state":"evaluation_complete","gsm8k":0.4441687344913151,"gsm8k_correct":537,"gsm8k_total":1209,"report":"/root/qvq-results/w10-fdbd68-r3-gsm8k-platinum.json","metrics_sha256":"ef896c0a107e8622e487b5eee1ef003ed56b7c0ab1b559000787508bc551d202"},
+    {"arm_id":"w10-fdbd68-r4","gpu":7,"checkpoint":"/root/qvq-results/llama32-1b-w2-w8queued_fdbd68_llama32_1b_frontier_anchor_up4_l6_l8","source_arm":"fdbd68","repeat":4,"state":"evaluation_complete","gsm8k":0.4441687344913151,"gsm8k_correct":537,"gsm8k_total":1209,"report":"/root/qvq-results/w10-fdbd68-r4-gsm8k-platinum.json","metrics_sha256":"ef896c0a107e8622e487b5eee1ef003ed56b7c0ab1b559000787508bc551d202"}
+  ],
+  "results": {
+    "8980aa": {"repeats": ["w10-8980aa-r1", "w10-8980aa-r2", "w10-8980aa-r3", "w10-8980aa-r4"], "gsm8k_platinum": {"accuracy": 0.44747725392886684, "correct": 541, "total": 1209, "repeat_metric_sha256": "5b1541285fa7882f4bf541af906ff30c24bf99ac26c95689181a4238c8e8529c"}},
+    "fdbd68": {"repeats": ["w10-fdbd68-r1", "w10-fdbd68-r2", "w10-fdbd68-r3", "w10-fdbd68-r4"], "gsm8k_platinum": {"accuracy": 0.4441687344913151, "correct": 537, "total": 1209, "repeat_metric_sha256": "ef896c0a107e8622e487b5eee1ef003ed56b7c0ab1b559000787508bc551d202"}}
+  }
+}

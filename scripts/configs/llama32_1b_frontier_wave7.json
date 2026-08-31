@@ -1,0 +1,133 @@
+{
+  "wave": 7,
+  "arms": [
+    {
+      "id": "w7_anchor_up4_l0",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l0.json",
+      "wave": 7,
+      "resolved_fingerprint": "66e20912cca8",
+      "effective_fingerprint": "d879cbc8c01e",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l1",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l1.json",
+      "wave": 7,
+      "resolved_fingerprint": "63055a3a6465",
+      "effective_fingerprint": "8fb7230b4913",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l2",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l2.json",
+      "wave": 7,
+      "resolved_fingerprint": "8c50e36632d1",
+      "effective_fingerprint": "202a5b80b45a",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l3",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l3.json",
+      "wave": 7,
+      "resolved_fingerprint": "bc71744c31fa",
+      "effective_fingerprint": "a08362395ded",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l4",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l4.json",
+      "wave": 7,
+      "resolved_fingerprint": "08fdd3e7fd8c",
+      "effective_fingerprint": "ed21ec8db171",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l5",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l5.json",
+      "wave": 7,
+      "resolved_fingerprint": "6146c1df58aa",
+      "effective_fingerprint": "6a2c4fba2624",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l6",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l6.json",
+      "wave": 7,
+      "resolved_fingerprint": "065e47137c71",
+      "effective_fingerprint": "f26f907531a8",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l7",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l7.json",
+      "wave": 7,
+      "resolved_fingerprint": "5b1351290839",
+      "effective_fingerprint": "cb8a58e0ffec",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l8",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l8.json",
+      "wave": 7,
+      "resolved_fingerprint": "62b565f0352c",
+      "effective_fingerprint": "646ab151be54",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l9",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l9.json",
+      "wave": 7,
+      "resolved_fingerprint": "d2d899910507",
+      "effective_fingerprint": "9579345459b7",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l10",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l10.json",
+      "wave": 7,
+      "resolved_fingerprint": "a578918686b1",
+      "effective_fingerprint": "be1b5e60f400",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l11",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l11.json",
+      "wave": 7,
+      "resolved_fingerprint": "f5d9a6da3d25",
+      "effective_fingerprint": "78fc4dacb3c5",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l12",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l12.json",
+      "wave": 7,
+      "resolved_fingerprint": "57b64430c8c0",
+      "effective_fingerprint": "85513a91e61d",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l13",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l13.json",
+      "wave": 7,
+      "resolved_fingerprint": "02f910c11579",
+      "effective_fingerprint": "035fa4038307",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l14",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l14.json",
+      "wave": 7,
+      "resolved_fingerprint": "acd2e77f1061",
+      "effective_fingerprint": "db4d75a98efb",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w7_anchor_up4_l15",
+      "config": "scripts/configs/llama32_1b_frontier_w7_anchor_up4_l15.json",
+      "wave": 7,
+      "resolved_fingerprint": "11a83031cd5c",
+      "effective_fingerprint": "a654c7c18b40",
+      "yaqa_seed": 0
+    }
+  ]
+}

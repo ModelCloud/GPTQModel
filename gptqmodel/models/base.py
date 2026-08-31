@@ -12,6 +12,7 @@ import re
 import threading
 import time
 from collections import defaultdict
+from collections.abc import Sequence
 from contextlib import nullcontext
 from itertools import count
 from typing import TYPE_CHECKING, Any, ClassVar, Dict, List, Optional, Set, Tuple, Type, Union
@@ -944,6 +945,8 @@ class BaseQModel(nn.Module):
         batch_size: int = 1,
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
+        calibration_source_weight_column: Optional[str] = None,
+        calibration_source_weights: Optional[Sequence[Sequence[Union[str, float]]]] = None,
     ):
         yaqa_config = getattr(getattr(self, "quantize_config", None), "yaqa", None)
         return prepare_calibration_dataset(
@@ -955,6 +958,8 @@ class BaseQModel(nn.Module):
             calibration_data_min_length=calibration_data_min_length,
             calibration_concat_separator=calibration_concat_separator,
             chat_template_config=getattr(yaqa_config, "chat_template", None),
+            source_weight_column=calibration_source_weight_column,
+            source_weights=calibration_source_weights,
             logger=log,
         )
 
@@ -1829,6 +1834,8 @@ class BaseQModel(nn.Module):
                     batch_size=self.quantize_config.yaqa.batch_size,
                     calibration_data_min_length=10,
                     calibration_concat_separator=calibration_concat_separator,
+                    calibration_source_weight_column=self.quantize_config.yaqa.source_weight_column,
+                    calibration_source_weights=self.quantize_config.yaqa.source_weights,
                 )
             if replay_config is not None:
                 qvq_args["module_replay_search_calibration"] = self.prepare_dataset(

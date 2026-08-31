@@ -1,0 +1,184 @@
+{
+  "schema": "qvq.calibration-ablation-results.v1",
+  "status": "complete",
+  "completed_at_utc": "2026-08-30T07:38:53Z",
+  "launch_commit": "487c28c3034fb132ddb511ba6807ed549e1ffddc",
+  "effective_bpw": 3.17834,
+  "fixed_allocation": "Q2 / K2.5 / V3.5 / O4 / Gate3 / Up3.5 / Down3, with Up4 at layers 6 and 8",
+  "common_model_index_sha256": "6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697",
+  "artifact_filenames_relative_to_checkpoint": {
+    "gsm8k_report": "post_quant_eval_gsm8k_platinum.json",
+    "d300_report": "post_quant_eval_divergence300.json",
+    "checkpoint_hash_manifest": "checkpoint_hashes.json"
+  },
+  "calibration_union": {
+    "path": "/root/qvq-data/calibration_union_v1/calibration_union_v1.parquet",
+    "sha256": "05288e83a8ce4cc7a607d7d19bfd48eeb0b45055ca7cc4f4b20d5f037266f2dc",
+    "independent_sequences": 694,
+    "valid_input_tokens": 490449,
+    "valid_fisher_output_token_samples": 490449,
+    "ordered_calibration_manifest_sha256": "143570311180630b6039569992ba0709e8268ef9c73491b2cf8f756b3aca343e"
+  },
+  "equivalence_groups": [
+    {
+      "group_id": "yaqa182_fisher",
+      "arms": [
+        "c1_nm128__yaqa182",
+        "c2_nm512__yaqa182",
+        "c3_yaqa182__yaqa182",
+        "c4_union694__yaqa182"
+      ],
+      "packed_module_digest_sha256": "e98f5ecaa0939cecca618d5ad5368e6e3515fd67dcfd1701c78eb4ce0d580103",
+      "packed_tensor_digest_sha256": "02e1a68796bd88f88974e131285d27346f2575cd501cda5228cf0383d59016f3",
+      "gsm8k": {
+        "correct": 499,
+        "total": 1209,
+        "accuracy": 0.41273779983457404
+      },
+      "d300": {
+        "aligned_correct": 3317,
+        "aligned_total": 9600,
+        "aligned_accuracy": 0.34552083333333333,
+        "exact_32": 25,
+        "prompts": 300,
+        "mean_first_divergence": 9.993333333333334
+      }
+    },
+    {
+      "group_id": "union694_fisher",
+      "arms": [
+        "c5_nm128__union694",
+        "c6_nm512__union694",
+        "c7_yaqa182__union694",
+        "c8_union694__union694"
+      ],
+      "packed_module_digest_sha256": "f74d9d5f4d615d4f8f31b79cd6098ca5cf947d1ca7a379d5706510227369105a",
+      "packed_tensor_digest_sha256": "9330f93aea42e17ea0ceccc4e12f3bf8ebe584785a17437858c60d88d78ccfeb",
+      "gsm8k": {
+        "correct": 520,
+        "total": 1209,
+        "accuracy": 0.43010752688172044
+      },
+      "d300": {
+        "aligned_correct": 3327,
+        "aligned_total": 9600,
+        "aligned_accuracy": 0.3465625,
+        "exact_32": 15,
+        "prompts": 300,
+        "mean_first_divergence": 9.85
+      }
+    }
+  ],
+  "comparison": {
+    "gsm8k_correct_delta_union694_minus_yaqa182": 21,
+    "gsm8k_accuracy_delta": 0.0173697270471464,
+    "d300_aligned_correct_delta": 10,
+    "d300_aligned_accuracy_delta": 0.001041666666666663,
+    "d300_exact_32_delta": -10,
+    "d300_mean_first_divergence_delta": -0.14333333333333442
+  },
+  "arms": [
+    {
+      "arm_id": "c1_nm128__yaqa182",
+      "gpu": 0,
+      "lifecycle": "nm128",
+      "yaqa_fisher": "yaqa182",
+      "completed_at_utc": "2026-08-30T07:29:57Z",
+      "quantization_seconds": 2274.3274362822995,
+      "checkpoint": "/root/qvq-results/calibration-ablation-v1/llama32-1b-c1_nm128__yaqa182-anchor-up4-l6-l8",
+      "gsm8k_report_sha256": "94f8d883d2513076597d55d6edea0a8381099c988b2738f22c3824c4d01f8509",
+      "d300_report_sha256": "d3d02d5ef1a03a29cd002fe0356e49d2fa98af1f4a3f269069aec262b1bd4088",
+      "checkpoint_hash_manifest_sha256": "8853de4941f05d229a80910c50f2c6cfa4973b1485a65913bd0b09b837c74dd9"
+    },
+    {
+      "arm_id": "c2_nm512__yaqa182",
+      "gpu": 1,
+      "lifecycle": "nm512",
+      "yaqa_fisher": "yaqa182",
+      "completed_at_utc": "2026-08-30T07:38:53Z",
+      "quantization_seconds": 2539.21294625476,
+      "checkpoint": "/root/qvq-results/calibration-ablation-v1/llama32-1b-c2_nm512__yaqa182-anchor-up4-l6-l8",
+      "gsm8k_report_sha256": "f5739a9eb5790b076dcafd8919877430dfcadaf10f79f981e2a07194580c12ae",
+      "d300_report_sha256": "b0519b10c2e246251142ce0d0fcf89eb40476bbc50f1565424552dc850268bf9",
+      "checkpoint_hash_manifest_sha256": "d13f9f0b6497e1e8220267eaae720d030f6bad30e8e3c97ed8a48f693e0abb2f"
+    },
+    {
+      "arm_id": "c3_yaqa182__yaqa182",
+      "gpu": 2,
+      "lifecycle": "yaqa182",
+      "yaqa_fisher": "yaqa182",
+      "completed_at_utc": "2026-08-30T07:32:01Z",
+      "quantization_seconds": 2390.5513511896133,
+      "checkpoint": "/root/qvq-results/calibration-ablation-v1/llama32-1b-c3_yaqa182__yaqa182-anchor-up4-l6-l8",
+      "gsm8k_report_sha256": "2d0d81a548bdfe524b42f0e285e19955499ebc53ff9c917f9f3bfb2723be388b",
+      "d300_report_sha256": "e3555504b441a746182dcfd9f3c9f8397f4966425481aa8de0e333527a4685ef",
+      "checkpoint_hash_manifest_sha256": "5c500c794c2c404beaa36073d39ae1f863fa5a754c9b51c7f692662610ed35a4"
+    },
+    {
+      "arm_id": "c4_union694__yaqa182",
+      "gpu": 3,
+      "lifecycle": "union694",
+      "yaqa_fisher": "yaqa182",
+      "completed_at_utc": "2026-08-30T07:33:02Z",
+      "quantization_seconds": 2441.7155304169282,
+      "checkpoint": "/root/qvq-results/calibration-ablation-v1/llama32-1b-c4_union694__yaqa182-anchor-up4-l6-l8",
+      "gsm8k_report_sha256": "308156ad7cfc5b497842436e6b641002640154b320b393c15de5f0668c81ed7e",
+      "d300_report_sha256": "34dcb6fca4f97f66905dfd28dd5db3ea17f48d2555f491827dc216f828c9af1d",
+      "checkpoint_hash_manifest_sha256": "a4d2e4ff4394e6cab0cd5f41b86087c6c0310bc3d13349c93127f7f813550e52"
+    },
+    {
+      "arm_id": "c5_nm128__union694",
+      "gpu": 4,
+      "lifecycle": "nm128",
+      "yaqa_fisher": "union694",
+      "completed_at_utc": "2026-08-30T07:34:44Z",
+      "quantization_seconds": 2498.0513783991337,
+      "checkpoint": "/root/qvq-results/calibration-ablation-v1/llama32-1b-c5_nm128__union694-anchor-up4-l6-l8",
+      "gsm8k_report_sha256": "b606e93afa6314407b04a246876c1956b0f0abad11fc28ac9c9eaaf6f8439a6b",
+      "d300_report_sha256": "8b6426a10406bfc19132304be422bd0bbc46a1d668b18cb8ef47997efb282468",
+      "checkpoint_hash_manifest_sha256": "2561dc3ac8f77048d19fae7144472c80b2dae8cccbcd26fed27cca6479cc9a88"
+    },
+    {
+      "arm_id": "c6_nm512__union694",
+      "gpu": 5,
+      "lifecycle": "nm512",
+      "yaqa_fisher": "union694",
+      "completed_at_utc": "2026-08-30T07:34:23Z",
+      "quantization_seconds": 2564.4515490736812,
+      "checkpoint": "/root/qvq-results/calibration-ablation-v1/llama32-1b-c6_nm512__union694-anchor-up4-l6-l8",
+      "gsm8k_report_sha256": "dbac6db67656a4c631432d0d58febb275f332fd7bc195753f1d7d20bbe7557d4",
+      "d300_report_sha256": "2ad5c0d003fb7328eafaf1df0122613bcc2643b9780b93484afb355eec6a0670",
+      "checkpoint_hash_manifest_sha256": "71e732c67acd70e47192e7171f19f57dbc44989549043a4021ed6fe07d704bf0"
+    },
+    {
+      "arm_id": "c7_yaqa182__union694",
+      "gpu": 6,
+      "lifecycle": "yaqa182",
+      "yaqa_fisher": "union694",
+      "completed_at_utc": "2026-08-30T07:34:42Z",
+      "quantization_seconds": 2568.6117662927136,
+      "checkpoint": "/root/qvq-results/calibration-ablation-v1/llama32-1b-c7_yaqa182__union694-anchor-up4-l6-l8",
+      "gsm8k_report_sha256": "fccee7cd1de7040a28f1ff01845a68d244dd87913f02f34d1f2f7fd4bd73cab0",
+      "d300_report_sha256": "65468d44da96f4fe59a7b92631c154484b6fe645ad0ebb62b3c5b55f27951bbb",
+      "checkpoint_hash_manifest_sha256": "c004fdae6cb442d16efae80e8f0804f93ce431a645edef145348a3d4316f544a"
+    },
+    {
+      "arm_id": "c8_union694__union694",
+      "gpu": 7,
+      "lifecycle": "union694",
+      "yaqa_fisher": "union694",
+      "completed_at_utc": "2026-08-30T07:36:37Z",
+      "quantization_seconds": 2670.9639682862908,
+      "checkpoint": "/root/qvq-results/calibration-ablation-v1/llama32-1b-c8_union694__union694-anchor-up4-l6-l8",
+      "gsm8k_report_sha256": "62a7639425863072abfb736ab46667f2d8cc28dc906f5d7ad40ede226b024cf9",
+      "d300_report_sha256": "4076c48b58d4a24f30e3dbfe62785f4ae56c6f33180e61b3cb8f3c79e8c11c9e",
+      "checkpoint_hash_manifest_sha256": "5a8f52d056f4029563ba39893d6cc785785357be1066d11f40b0d42f7647c250"
+    }
+  ],
+  "interpretation": [
+    "Within either fixed YAQA Fisher corpus, all four lifecycle corpora produced byte-identical packed checkpoints and identical evaluations in this no-module-replay YAQA path.",
+    "Expanding the YAQA Fisher corpus from YAQA182 to union694 changed all 112 quantized modules and improved GSM8K by 21 questions (+1.73697 percentage points).",
+    "D300 aligned agreement improved by 10/9600 positions, while exact-32 trajectories fell from 25 to 15 and mean first divergence fell from 9.9933 to 9.85.",
+    "This result is scoped to the fixed no-module-replay YAQA configuration and must not be generalized to module replay or non-YAQA rounding paths."
+  ]
+}

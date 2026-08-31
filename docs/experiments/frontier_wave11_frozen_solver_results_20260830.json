@@ -1,0 +1,33 @@
+{
+  "schema": "qvq.wave11-frozen-solver-results.v1",
+  "wave": 11,
+  "status": "complete",
+  "module": "model.layers.0.self_attn.q_proj",
+  "snapshot": "/root/qvq-results/w11-frozen-source/l0_q_proj_snapshot.pt",
+  "snapshot_sha256": "ded019fc704f7e009de84b29b9d1d0227002ad1ec652c605faad61ec6cdaecf6",
+  "input_hashes_equal_all_replicates": true,
+  "replicate_artifact_sha256": "a9f121ed14827e53",
+  "replicates_byte_identical": {
+    "old_a_old_b": true,
+    "new_a_new_b": true,
+    "old_new": true
+  },
+  "input_hashes": {
+    "weight": "41438533687b8caf50108a4411a3ef56d851686a3aaa02e5321a3a3c0357b47f",
+    "input_hessian": "e23ca602ea23aa3dfde16eefefa892a66b3640abcc1b0d9fa03032e7b285db07",
+    "output_hessian": "b710bf6bedc5c758302f8ce7e6ecf169f4fb3d751dda728f9ac06ccbf9cd32d8",
+    "SU": "e9e226d8d6c9c07f9c313ef339555cdb117e3493b205f24c46d1e9f1fec0210d",
+    "SV_sign": "a29de71cf8f0b038087db61f12b600c2432b25b74c9b624936da28bf4006904f",
+    "transformed_weight": "00651a416684b0beb1890a88bc9ffaddf47b01201764b13c1c0c92793fcbdae5",
+    "transformed_hessian": "9d0a8df334f7f8c00359e1308272b7cb20663a2a95aee95b72217f3390ca21b2",
+    "transformed_output_hessian": "daa2be471fee62269305899d47daa8864853f18132ce8e814df2cfb5600d5f60"
+  },
+  "candidate_costs": {
+    "canonical_reselect": {"proxy_loss": 1.021233439, "kronecker_proxy_loss": 0.000961478, "family_id": 1, "trellis_sha256": "8ad316dd8538", "bank_ids_sha256": "57fd23e1a043"},
+    "fixed_family_0": {"proxy_loss": 1.099056482, "kronecker_proxy_loss": 0.001032234, "family_id": 1, "trellis_sha256": "7762afe4794c", "bank_ids_sha256": "d5920891fc38"},
+    "fixed_family_1": {"proxy_loss": 1.021233439, "kronecker_proxy_loss": 0.000961478, "family_id": 1, "trellis_sha256": "8ad316dd8538", "bank_ids_sha256": "57fd23e1a043"},
+    "fixed_family_2": {"proxy_loss": 1.025190473, "kronecker_proxy_loss": 0.000969684, "family_id": 2, "trellis_sha256": "9d1debdcd4de", "bank_ids_sha256": "fdd269563200"},
+    "fixed_family_3": {"proxy_loss": 1.026627779, "kronecker_proxy_loss": 0.000966786, "family_id": 3, "trellis_sha256": "847e1fb6c50e", "bank_ids_sha256": "e9d419061203"}
+  },
+  "interpretation": "Byte-identical W/H/SU/SV inputs produced byte-identical candidate costs, bank choices, trellises, reconstructed and serialized hashes across old commit 07517d85 and new commit a1e0c504. The frozen discrete solver is deterministic and shows no old/new divergence for this canary."
+}

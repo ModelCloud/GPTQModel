@@ -1,0 +1,69 @@
+{
+  "wave": 4,
+  "arms": [
+    {
+      "id": "w4_anchor_seed1",
+      "config": "scripts/configs/llama32_1b_frontier_w4_anchor_seed1.json",
+      "wave": 4,
+      "resolved_fingerprint": "9c0d0932b121",
+      "effective_fingerprint": "51215b9d277f",
+      "yaqa_seed": 1
+    },
+    {
+      "id": "w4_anchor_v4_all",
+      "config": "scripts/configs/llama32_1b_frontier_w4_anchor_v4_all.json",
+      "wave": 4,
+      "resolved_fingerprint": "0b5755eaea61",
+      "effective_fingerprint": "2794c5e99bdc",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w4_anchor_up4_l6",
+      "config": "scripts/configs/llama32_1b_frontier_w4_anchor_up4_l6.json",
+      "wave": 4,
+      "resolved_fingerprint": "065e47137c71",
+      "effective_fingerprint": "f26f907531a8",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w4_anchor_up4_l6_7",
+      "config": "scripts/configs/llama32_1b_frontier_w4_anchor_up4_l6_7.json",
+      "wave": 4,
+      "resolved_fingerprint": "c0f52b44fb9d",
+      "effective_fingerprint": "5224b96ffa26",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w4_anchor_v4_up4_l6",
+      "config": "scripts/configs/llama32_1b_frontier_w4_anchor_v4_up4_l6.json",
+      "wave": 4,
+      "resolved_fingerprint": "87affe0521ff",
+      "effective_fingerprint": "51f71eb8c73b",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w4_anchor_up4_l6_8",
+      "config": "scripts/configs/llama32_1b_frontier_w4_anchor_up4_l6_8.json",
+      "wave": 4,
+      "resolved_fingerprint": "42763bfcfbf3",
+      "effective_fingerprint": "08eeb352c83b",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w4_anchor_up4_l6_9",
+      "config": "scripts/configs/llama32_1b_frontier_w4_anchor_up4_l6_9.json",
+      "wave": 4,
+      "resolved_fingerprint": "1fd754205864",
+      "effective_fingerprint": "ff766c300f40",
+      "yaqa_seed": 0
+    },
+    {
+      "id": "w4_anchor_v4_up4_l6_8",
+      "config": "scripts/configs/llama32_1b_frontier_w4_anchor_v4_up4_l6_8.json",
+      "wave": 4,
+      "resolved_fingerprint": "4ead23013e54",
+      "effective_fingerprint": "9b188903d1ea",
+      "yaqa_seed": 0
+    }
+  ]
+}

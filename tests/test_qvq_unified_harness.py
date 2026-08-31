@@ -330,6 +330,8 @@ def test_qvq_evaluate_tasks_require_paged_continuous_batching_defaults():
 
     assert args.device == "cuda:0"
     assert args.attn_implementation == "paged|flash_attention_2"
+    assert args.batch_size == 64
+    assert args.use_cuda_graph is True
     assert args.resume is False
 
 

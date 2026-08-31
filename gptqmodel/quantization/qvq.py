@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Iterator
 
 import torch
@@ -7473,6 +7475,51 @@ def quantize_qvq_linear(
                 torch.tensor(torch.finfo(torch.float32).eps, device=device),
             )
             transformed_output_hessian.diagonal().add_(output_damping)
+
+    # Optional research-only frozen-input capture for cross-commit solver
+    # causality tests.  This is deliberately environment-gated and has no
+    # effect on normal quantization.  The snapshot is written after the RHT
+    # preparation so a replay can feed byte-identical solver inputs (including
+    # the generated sign vectors and damped Hessians) to different commits.
+    frozen_snapshot_path = os.environ.get("GPTQMODEL_QVQ_FROZEN_SNAPSHOT_PATH", "").strip()
+    if frozen_snapshot_path and os.environ.get("GPTQMODEL_QVQ_FROZEN_SNAPSHOT_MODULE", "").strip():
+        snapshot_file = Path(frozen_snapshot_path)
+        if not snapshot_file.exists():
+            snapshot_file.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_payload = {
+                "schema": "qvq.frozen-solver-input.v1",
+                "module": os.environ["GPTQMODEL_QVQ_FROZEN_SNAPSHOT_MODULE"].strip(),
+                "weight": weight.detach().to(device="cpu", dtype=torch.float32).contiguous(),
+                "input_hessian": H.detach().to(device="cpu", dtype=torch.float32).contiguous(),
+                "output_hessian": None
+                if output_hessian is None
+                else output_hessian.detach().to(device="cpu", dtype=torch.float32).contiguous(),
+                "SU": SU.detach().to(device="cpu", dtype=torch.float32).contiguous(),
+                "SV_sign": SV_sign.detach().to(device="cpu", dtype=torch.float32).contiguous(),
+                "transformed_weight": transformed_weight.detach().to(device="cpu", dtype=torch.float32).contiguous(),
+                "transformed_hessian": transformed_H.detach().to(device="cpu", dtype=torch.float32).contiguous(),
+                "transformed_output_hessian": None
+                if transformed_output_hessian is None
+                else transformed_output_hessian.detach().to(device="cpu", dtype=torch.float32).contiguous(),
+                "bits": float(bits),
+                "seed": int(seed),
+                "damp_percent": float(damp_percent),
+                "rounding": rounding,
+                "codebook_version": codebook_version,
+                "vector_size": int(vector_size),
+                "trellis_window": int(trellis_window),
+                "dual_v2": bool(dual_v2),
+                "v2b4_p64": bool(v2b4_p64),
+                "v2b2_p32": bool(v2b2_p32),
+                "v2b2_p32_lr": bool(v2b2_p32_lr),
+                "bank_count": int(bank_count),
+                "yaqa_v2b2_family_mode": yaqa_v2b2_family_mode,
+                "yaqa_v2b2_fixed_family_id": yaqa_v2b2_fixed_family_id,
+                "yaqa_sample_strategy": yaqa_sample_strategy,
+            }
+            temporary_file = snapshot_file.with_suffix(snapshot_file.suffix + ".tmp")
+            torch.save(snapshot_payload, temporary_file)
+            os.replace(temporary_file, snapshot_file)
 
     prepared_yaqa_factorization = None
     if rounding == "yaqa":

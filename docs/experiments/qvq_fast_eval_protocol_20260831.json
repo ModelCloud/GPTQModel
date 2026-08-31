@@ -1,0 +1,38 @@
+{
+  "schema": "qvq.fast-eval-protocol.v1",
+  "status": "canary_queued",
+  "prepared_at_utc": "2026-08-31T02:47:19Z",
+  "launched_at_utc": "2026-08-31T02:59:03Z",
+  "launch_commit": "84018deb",
+  "supervisor": "tmux:qvq-fast-eval-canary-v1",
+  "merged_main_commit": "201897eb",
+  "merge_commit": "b23c9e53496ea0164ef7e23e2f2cb5eb0b4f0e23",
+  "kernel_change": "latest exact-P32 window/GEMV/WGMMA changes from origin/main",
+  "tasks_runtime": {
+    "attn_implementation": "paged|flash_attention_2",
+    "continuous_batching": true,
+    "use_cuda_graph": true,
+    "batch_size": 64,
+    "dtype": "float16"
+  },
+  "legacy_runtime": {
+    "attn_implementation": "paged|sdpa",
+    "continuous_batching": true,
+    "use_cuda_graph": false,
+    "batch_size": 8
+  },
+  "canary": {
+    "checkpoint": "/root/qvq-results/calibration-fisher-composition-v1/llama32-1b-f9_yaqa182_nm2048_yaqa1x-anchor-up4-l6-l8",
+    "legacy_correct": 543,
+    "legacy_accuracy": 0.4491315136476427,
+    "legacy_seconds": 1069.3343269173056,
+    "fast_result": "post_quant_eval_gsm8k_platinum_fast_v2.json",
+    "acceptance": [
+      "GSM8K correct count exactly equals 543",
+      "engine execution reports paged attention and continuous_batching",
+      "engine config reports use_cuda_graph=true",
+      "no fallback to fixed-batch generate"
+    ]
+  },
+  "provenance_note": "F13-F16 quantization remains pinned to 0d9589ba for exact comparison with F12. Their original launcher evaluation is also pinned; fast-runtime reports are separate artifacts until the canary proves metric parity."
+}

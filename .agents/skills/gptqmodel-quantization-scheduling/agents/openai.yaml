@@ -1,0 +1,4 @@
+interface:
+  display_name: "VRAM-Aware Quantization Scheduling"
+  short_description: "Pack safe concurrent quantization jobs per GPU"
+  default_prompt: "Use $gptqmodel-quantization-scheduling to estimate VRAM, place quantizers in per-GPU slots, and keep evaluations exclusive."

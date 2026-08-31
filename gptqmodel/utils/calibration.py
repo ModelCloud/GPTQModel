@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import random
 import re
@@ -221,6 +222,8 @@ def prepare_calibration_dataset(
     calibration_data_min_length: int = 10,
     calibration_concat_separator: Optional[str] = None,
     chat_template_config=None,
+    source_weight_column: Optional[str] = None,
+    source_weights: Optional[Sequence[Sequence[Union[str, float]]]] = None,
     logger=None,
 ):
     """Normalize, validate, and batch calibration samples for quantization.
@@ -231,6 +234,21 @@ def prepare_calibration_dataset(
 
     log = logger or setup_logger()
     chat_template_weighting = bool(getattr(chat_template_config, "enabled", False))
+    source_weight_map = dict(source_weights or ())
+    if bool(source_weight_column) != bool(source_weight_map):
+        raise ValueError(
+            "source_weight_column and non-empty source_weights must be configured together"
+        )
+    for source_name, source_weight in source_weight_map.items():
+        if not isinstance(source_name, str) or not source_name:
+            raise ValueError("source-weight names must be non-empty strings")
+        if (
+            isinstance(source_weight, bool)
+            or not isinstance(source_weight, (int, float))
+            or not math.isfinite(float(source_weight))
+            or float(source_weight) <= 0
+        ):
+            raise ValueError("source weights must be finite and positive")
 
     tokenizer = getattr(qmodel, "tokenizer", None)
     support_batch_quantize = getattr(qmodel, "support_batch_quantize", True)
@@ -490,6 +508,27 @@ def prepare_calibration_dataset(
         )
 
     processed_examples: List[Dict[str, torch.Tensor]] = []
+
+    def _append_processed(packed: Dict[str, torch.Tensor], raw_example: Any, idx: int) -> None:
+        if source_weight_map:
+            if not isinstance(raw_example, dict) or source_weight_column not in raw_example:
+                raise ValueError(
+                    f"Quantize: calibration item {idx} must provide source column {source_weight_column!r}"
+                )
+            source_name = str(raw_example[source_weight_column])
+            if source_name not in source_weight_map:
+                raise ValueError(
+                    f"Quantize: calibration item {idx} has unmapped source {source_name!r}; "
+                    f"configured sources are {sorted(source_weight_map)}"
+                )
+            rows = int(packed["input_ids"].shape[0])
+            packed["fisher_sequence_weight"] = torch.full(
+                (rows,),
+                float(source_weight_map[source_name]),
+                dtype=torch.float64,
+            )
+        processed_examples.append(packed)
+
     for idx, example in enumerate(raw_examples):
         if isinstance(example, dict):
             if "messages" in example:
@@ -497,42 +536,46 @@ def prepare_calibration_dataset(
                 if apply_fn is None:
                     if "text" in example:
                         message_text_fallback_examples += 1
-                        processed_examples.append(_tokenize_text_value(example["text"], idx))
+                        _append_processed(_tokenize_text_value(example["text"], idx), example, idx)
                         continue
                     raise ValueError(
                         "tokenizer must expose `apply_template` or `apply_chat_template`, or calibration data must "
                         "provide `text` when using `messages`."
                     )
-                processed_examples.append(_tokenize_messages_value(example["messages"], idx))
+                _append_processed(_tokenize_messages_value(example["messages"], idx), example, idx)
                 continue
             if "text" in example:
-                processed_examples.append(_tokenize_text_value(example["text"], idx))
+                _append_processed(_tokenize_text_value(example["text"], idx), example, idx)
                 continue
             if "input_ids" in example:
-                processed_examples.append(_pack_ids(example["input_ids"], example.get("attention_mask"), idx))
+                _append_processed(
+                    _pack_ids(example["input_ids"], example.get("attention_mask"), idx),
+                    example,
+                    idx,
+                )
                 continue
             raise ValueError(
                 f"Quantize: unsupported calibration example structure at index {idx}: keys={list(example.keys())}"
             )
 
         if isinstance(example, str):
-            processed_examples.append(_tokenize_text_value(example, idx))
+            _append_processed(_tokenize_text_value(example, idx), example, idx)
             continue
 
         if isinstance(example, (list, tuple)):
             if all(isinstance(x, int) for x in example):
-                processed_examples.append(_pack_ids(list(example), None, idx))
+                _append_processed(_pack_ids(list(example), None, idx), example, idx)
                 continue
             raise ValueError(
                 f"Quantize: list-based calibration example at index {idx} must contain only integers."
             )
 
         if torch.is_tensor(example):
-            processed_examples.append(_pack_ids(example, None, idx))
+            _append_processed(_pack_ids(example, None, idx), example, idx)
             continue
 
         try:
-            processed_examples.append(_pack_ids(example, None, idx))
+            _append_processed(_pack_ids(example, None, idx), example, idx)
         except Exception as exc:  # pragma: no cover - defensive
             raise ValueError(
                 f"Quantize: unsupported calibration example type {type(example)} at index {idx}."
@@ -610,11 +653,16 @@ def prepare_calibration_dataset(
     for example in calibration_dataset:
         input_ids = _convert_tensor_to_list(example["input_ids"])
         attention_mask = _convert_tensor_to_list(example["attention_mask"])
+        fisher_weights = example.get("fisher_sequence_weight")
+        if fisher_weights is not None:
+            fisher_weights = torch.as_tensor(fisher_weights, dtype=torch.float64).reshape(-1).tolist()
+            if len(fisher_weights) != len(input_ids):
+                raise ValueError("fisher_sequence_weight must provide one scalar per calibration row")
 
         # Normalize every logical sequence into its own calibration row. Later
         # sorting, filtering, concatenation, and batching must never use only the
         # first row of a packed tokenizer result or treat masked width as data.
-        for row_ids, row_mask in zip(input_ids, attention_mask):
+        for row_index, (row_ids, row_mask) in enumerate(zip(input_ids, attention_mask)):
             row_len = len(row_ids)
             if max_positions is not None and row_len > max_positions:
                 trimmed_row_count += 1
@@ -635,6 +683,8 @@ def prepare_calibration_dataset(
                 "input_ids": [row_ids],
                 "attention_mask": [row_mask],
             }
+            if fisher_weights is not None:
+                normalized["fisher_sequence_weight"] = [float(fisher_weights[row_index])]
             if "chat_template_mask" in example:
                 template_row = example["chat_template_mask"]
                 if isinstance(template_row, torch.Tensor):
@@ -683,6 +733,8 @@ def prepare_calibration_dataset(
         )
 
     if calibration_dataset_concat_size:
+        if source_weight_map:
+            raise ValueError("source-weighted Fisher calibration requires concat_size=0")
         if chat_template_weighting:
             raise ValueError("chat-template weighting currently requires concat_size=0 to preserve provenance")
         _require_tokenizer("`calibration_dataset_concat_size` is specified")

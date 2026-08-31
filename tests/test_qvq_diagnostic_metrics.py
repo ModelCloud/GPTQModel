@@ -910,6 +910,42 @@ def test_yaqa_projected_sketch_b_gram_matches_explicit_projected_weight_scores()
         assert float(relative_l2) <= 1e-6
 
 
+@pytest.mark.parametrize("strategy", ("batched", "flattened", "projected", "token_space"))
+def test_yaqa_sketch_b_sequence_weights_scale_each_sequence_gram_once(strategy):
+    generator = torch.Generator().manual_seed(20260830)
+    activation = torch.randn((2, 7, 5), generator=generator, dtype=torch.float32)
+    gradient = torch.randn((2, 7, 3), generator=generator, dtype=torch.float32)
+    weights = torch.tensor([1.0, 2.0], dtype=torch.float32)
+    kwargs = {"strategy": strategy, "sequence_weights": weights}
+    if strategy == "projected":
+        kwargs["projections"] = (
+            torch.randn((3, 4), generator=generator, dtype=torch.float32),
+            torch.randn((5, 4), generator=generator, dtype=torch.float32),
+        )
+
+    actual = _sketch_b_gram_updates(activation, gradient, **kwargs)
+    if strategy == "projected":
+        expected_parts = [
+            _sketch_b_gram_updates(
+                activation[index : index + 1],
+                gradient[index : index + 1],
+                strategy=strategy,
+                projections=kwargs["projections"],
+            )
+            for index in range(2)
+        ]
+    else:
+        expected_parts = [
+            _sketch_b_gram_updates(
+                activation[index : index + 1], gradient[index : index + 1], strategy=strategy
+            )
+            for index in range(2)
+        ]
+    expected = tuple(expected_parts[0][axis] + 2.0 * expected_parts[1][axis] for axis in range(2))
+    for actual_factor, expected_factor in zip(actual, expected, strict=True):
+        torch.testing.assert_close(actual_factor, expected_factor, rtol=2e-6, atol=2e-6)
+
+
 def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_oracle():
     model = _TinyCausalModel().eval()
     reference = copy.deepcopy(model)
@@ -992,7 +1028,11 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
         "method": "YAQA-v3 Sketch B real Fisher",
         "full_model_backward": True,
         "independent_sequences": 3,
+        "unique_sequences": 3,
         "valid_output_samples": 5,
+        "raw_valid_tokens": 5,
+        "effective_weighted_sequences": 3.0,
+        "effective_weighted_tokens": 5.0,
         "monte_carlo_samples_per_output": 1,
         "sequence_loss_reduction": "per_sequence_token_sum",
         "activation_checkpointing": False,
@@ -1013,12 +1053,44 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
     assert tuple(parameter.requires_grad for parameter in model.parameters()) == original_requires_grad
     assert all(parameter.grad is None for parameter in model.parameters())
     assert not module._forward_hooks
-    assert not model.model.layers[0]._forward_pre_hooks
 
     invalid_average_input, invalid_average_output = yaqa_sketch_b(torch.stack(gradients).mean(dim=0, keepdim=True))
     assert not torch.allclose(input_hessians["proj"], invalid_average_input.float())
     assert not torch.allclose(output_hessians["proj"], invalid_average_output.float())
 
+
+def test_yaqa_weighted_capture_tracks_effective_coverage_without_duplication():
+    model = _TinyCausalModel().eval()
+    reference = copy.deepcopy(model).eval()
+    batch = {
+        "input_ids": torch.tensor([[1, 2, 3]]),
+        "attention_mask": torch.tensor([[1, 1, 0]]),
+        "fisher_sequence_weight": torch.tensor([2.0], dtype=torch.float64),
+    }
+    unweighted_batch = {name: value for name, value in batch.items() if name != "fisher_sequence_weight"}
+
+    weighted_input, weighted_output, stats = capture_yaqa_sketch_b(
+        model,
+        [batch],
+        {"proj": model.model.layers[0].proj},
+        device=torch.device("cpu"),
+        seed=17,
+    )
+    baseline_input, baseline_output, _ = capture_yaqa_sketch_b(
+        reference,
+        [unweighted_batch],
+        {"proj": reference.model.layers[0].proj},
+        device=torch.device("cpu"),
+        seed=17,
+    )
+
+    torch.testing.assert_close(weighted_input["proj"], baseline_input["proj"])
+    torch.testing.assert_close(weighted_output["proj"], baseline_output["proj"])
+    assert stats["unique_sequences"] == 1
+    assert stats["raw_valid_tokens"] == 2
+    assert stats["effective_weighted_sequences"] == 2.0
+    assert stats["effective_weighted_tokens"] == 4.0
+    assert not model.model.layers[0]._forward_pre_hooks
 
 def test_yaqa_activation_checkpointing_preserves_exact_factors_and_restores_module_forwards():
     baseline_model = _TinyCausalModel().eval()
