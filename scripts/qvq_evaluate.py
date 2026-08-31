@@ -248,7 +248,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--loglikelihood-prefix-cache",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Reuse repeated long loglikelihood prefixes through a bounded KV cache.",
+        help=(
+            "Reuse repeated long loglikelihood prefixes through a bounded KV cache "
+            "(enabled by default by Evalution)."
+        ),
     )
     tasks.add_argument(
         "--loglikelihood-prefix-cache-prewarm",
@@ -256,7 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Prefill each shared subject prefix before scoring its question suffixes; "
-            "reports warmup misses separately from steady-state hits."
+            "reports warmup misses separately from steady-state hits (enabled by default)."
         ),
     )
     tasks.add_argument(
@@ -1497,9 +1500,10 @@ def _tasks(args: argparse.Namespace) -> int:
         version_tuple = tuple(int(part) for part in evalution_version.split(".")[:3])
     except ValueError as exc:
         raise RuntimeError(f"Cannot validate Evalution version {evalution_version!r}") from exc
-    if version_tuple < (0, 0, 16):
+    if version_tuple < (0, 0, 17):
         raise RuntimeError(
-            "tasks evaluation requires Evalution>=0.0.16 for Transformers ContinuousBatchingConfig "
+            "tasks evaluation requires Evalution>=0.0.17 for automatic loglikelihood prefix "
+            "caching and Transformers ContinuousBatchingConfig "
             f"graph routing; found Evalution=={evalution_version}"
         )
 
