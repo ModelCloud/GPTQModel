@@ -561,8 +561,8 @@ M8 rows retain the post-merge control timings.
 
 A follow-up wider-wave screen supersedes that provisional setting: 48 slices
 measure 0.033784 ms across W2-W3.5 versus 0.034045 ms at 24 (`1.008x`). The
-M8 full-KV policy is therefore 48; the launch-plan cache version is bumped so
-old entries cannot mask this update.
+M8 full-KV policy is therefore 48; the in-process launch-plan key version is
+bumped so stale entries cannot mask this update during a long-lived process.
 
 ### M/K/N launch-plan autotuning
 
