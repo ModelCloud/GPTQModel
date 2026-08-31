@@ -172,7 +172,7 @@ __device__ __forceinline__ void copy_async_cg_16(void* destination, const void* 
       : "r"(shared_address), "l"(source));
 }
 
-template <int TransitionBits, bool FullRows, int ActiveRows = 0>
+template <int TransitionBits, bool FullRows, int ActiveRows = 0, int StaticN = 0>
 __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -194,9 +194,10 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
   const int lane = thread & 31;
-  const int n_tiles = size_n / kTileColumns;
+  constexpr int kStaticNTiles = StaticN > 0 ? StaticN / kTileColumns : 0;
+  const int n_tiles = StaticN > 0 ? kStaticNTiles : size_n / kTileColumns;
   const int n_tile_base = static_cast<int>(blockIdx.x) * kTilesPerBlock;
-  const bool active_tile = n_tile_base + warp < n_tiles;
+  const bool active_tile = StaticN > 0 || n_tile_base + warp < n_tiles;
   const int split = static_cast<int>(blockIdx.z);
   const int k_tiles = size_k / kTileRows;
   const int k_tile_begin = (k_tiles * split) / split_count;
@@ -244,7 +245,16 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       const int vector = tile_index - tile * kVectorsPerTile;
       const int n_tile = n_tile_base + tile;
       const int k_tile = k_tile_base + stage_k_tile;
-      if (n_tile < n_tiles && k_tile < k_tiles) {
+      if constexpr (StaticN > 0) {
+        if (k_tile < k_tiles) {
+          const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
+          const auto* source_vectors = reinterpret_cast<const uint4*>(
+              trellis + global_tile * kWordsPerTile);
+          copy_async_cg_16(destination_vectors + index, source_vectors + vector);
+        } else {
+          destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
+        }
+      } else if (n_tile < n_tiles && k_tile < k_tiles) {
         const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
         const auto* source_vectors = reinterpret_cast<const uint4*>(
             trellis + global_tile * kWordsPerTile);
@@ -775,6 +785,19 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8) {
     p32_window_ampere_kernel<TransitionBits, false, 8><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == kRows && size_n == 12288) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 12288><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
