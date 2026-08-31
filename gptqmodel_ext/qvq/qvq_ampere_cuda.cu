@@ -152,6 +152,14 @@ __device__ __forceinline__ void mma_m16n8k16(
         "f"(accumulator.values[3]));
 }
 
+__device__ __forceinline__ uint32_t selected_bank_mask(
+    uint8_t packed_bank_id,
+    int bank_bit,
+    uint32_t alt_mask) {
+  return (0u - ((static_cast<uint32_t>(packed_bank_id) >> bank_bit) & 1u)) &
+      alt_mask;
+}
+
 template <int TransitionBits>
 __device__ __forceinline__ uint32_t decode_pair_bits(
     int pair,
@@ -161,6 +169,20 @@ __device__ __forceinline__ uint32_t decode_pair_bits(
     const half* __restrict__ levels) {
   const uint32_t bank_mask =
       ((static_cast<uint32_t>(packed_bank_id) >> (pair >> 4)) & 1u) * alt_mask;
+  const uint32_t mixed = pgc16_mix(state ^ bank_mask);
+  union {
+    uint32_t bits;
+    half2 values;
+  } decoded;
+  decoded.values = __halves2half2(
+      __ldg(levels + (mixed >> 8)), __ldg(levels + (mixed & 0xffu)));
+  return decoded.bits;
+}
+
+__device__ __forceinline__ uint32_t decode_state_bits(
+    uint32_t state,
+    uint32_t bank_mask,
+    const half* __restrict__ levels) {
   const uint32_t mixed = pgc16_mix(state ^ bank_mask);
   union {
     uint32_t bits;
@@ -194,7 +216,12 @@ __device__ __forceinline__ void copy_async_cg_16(void* destination, const void* 
       : "r"(shared_address), "l"(source));
 }
 
-template <int TransitionBits, bool FullRows, int ActiveRows = 0, int StaticN = 0>
+template <
+    int TransitionBits,
+    bool FullRows,
+    int ActiveRows = 0,
+    int StaticN = 0,
+    bool HoistBankMasks = false>
 __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -329,14 +356,29 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         uint32_t state_row_9;
         window_state_pair64<TransitionBits>(words, first_pair, state_row_0, state_row_8);
         window_state_pair64<TransitionBits>(words, second_pair, state_row_1, state_row_9);
-        const uint32_t decoded_row_0 = decode_pair_bits<TransitionBits>(
-            first_pair, state_row_0, packed_bank_id, alt_mask, levels);
-        const uint32_t decoded_row_8 = decode_pair_bits<TransitionBits>(
-            first_pair + 64, state_row_8, packed_bank_id, alt_mask, levels);
-        const uint32_t decoded_row_1 = decode_pair_bits<TransitionBits>(
-            second_pair, state_row_1, packed_bank_id, alt_mask, levels);
-        const uint32_t decoded_row_9 = decode_pair_bits<TransitionBits>(
-            second_pair + 64, state_row_9, packed_bank_id, alt_mask, levels);
+        uint32_t decoded_row_0;
+        uint32_t decoded_row_8;
+        uint32_t decoded_row_1;
+        uint32_t decoded_row_9;
+        if constexpr (HoistBankMasks) {
+          const uint32_t bank_mask_0 =
+              selected_bank_mask(packed_bank_id, producer_row_pair, alt_mask);
+          const uint32_t bank_mask_8 =
+              selected_bank_mask(packed_bank_id, producer_row_pair + 4, alt_mask);
+          decoded_row_0 = decode_state_bits(state_row_0, bank_mask_0, levels);
+          decoded_row_8 = decode_state_bits(state_row_8, bank_mask_8, levels);
+          decoded_row_1 = decode_state_bits(state_row_1, bank_mask_0, levels);
+          decoded_row_9 = decode_state_bits(state_row_9, bank_mask_8, levels);
+        } else {
+          decoded_row_0 = decode_pair_bits<TransitionBits>(
+              first_pair, state_row_0, packed_bank_id, alt_mask, levels);
+          decoded_row_8 = decode_pair_bits<TransitionBits>(
+              first_pair + 64, state_row_8, packed_bank_id, alt_mask, levels);
+          decoded_row_1 = decode_pair_bits<TransitionBits>(
+              second_pair, state_row_1, packed_bank_id, alt_mask, levels);
+          decoded_row_9 = decode_pair_bits<TransitionBits>(
+              second_pair + 64, state_row_9, packed_bank_id, alt_mask, levels);
+        }
 
         const uint32_t low_rows_01 = pack_low_halves(decoded_row_0, decoded_row_1);
         const uint32_t high_rows_01 = pack_high_halves(decoded_row_0, decoded_row_1);
@@ -958,7 +1000,7 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 12288) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 12288><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<TransitionBits, false, 8, 12288, true><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -971,7 +1013,7 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 5120) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 5120><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<TransitionBits, false, 8, 5120, true><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -984,7 +1026,7 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 10240) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 10240><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<TransitionBits, false, 8, 10240, true><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -997,7 +1039,7 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 6144) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 6144><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<TransitionBits, false, 8, 6144, true><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),

@@ -511,6 +511,7 @@ more decode instructions without expanding the compact state representation.
 | Host-computed alternate-bank mask | Passing the uniform decoded mask instead of deriving it per thread left matched M1 full-KV exactly unchanged at 0.034557 ms; M16 Q/KV results mixed one-tick gains and losses. | Rejected and reverted; retain the simpler bank-ID kernel interface. |
 | 512-thread reducer for M8/M16 | M16 regressed from 0.089626 ms to 0.096331 ms (7.48%). At the same split 32, full-KV lost 3-12% and three MLP-down rates lost 73-79%. | Rejected and reverted; 256 threads remain the best broad reducer geometry. |
 | Compile-time split-32 reducer | Fully unrolling the common 32-way serial sum preserved exact accumulation order, but M16 full-KV regressed from 0.034293 ms to 0.034816 ms (1.53%); MLP-down was effectively neutral. | Rejected and reverted; runtime loop control is cheaper than the enlarged unrolled reducer on sm_80. |
+| Bank-selector hoist across every scalar and WMMA route | The 60-case full-Q/full-KV/MLP-down screen was neutral overall (-0.09%): M8 improved 2.53%, but M1, M2, M4, and M16 regressed by 1.32%, 0.81%, 0.23%, and 0.68%. | Rejected broadly and narrowed to repeatedly positive M8 fixed-N routes; scalar and full-row kernels retain main's decode path. |
 
 ## Post-merge origin/main baseline (v11)
 
@@ -740,6 +741,18 @@ The clean 20-warmup/100-iteration, 140-case control is stored in
 latency geomeans are 0.057948 ms (M1), 0.064170 ms (M2), 0.073818 ms (M4),
 0.086108 ms (M8), and 0.089626 ms (M16), with an all-case geomean of
 0.073316 ms. Maximum absolute error is 0.000080109.
+
+The first v14 progression hoists the two bank-selector masks shared by each
+M8 WMMA lane's four decoded pairs. It is enabled only for the five fixed-N
+routes that improved in repeated screens: full-Q, attention-out, linear-QKV,
+linear-Z, and MLP-down. Full-KV, MLP-gate, scalar M1-M4, and full-row M16 keep
+the original decode path. An immediate matched 20-warmup/300-iteration A/B
+reduces the enabled 20-case Ampere geomean from 0.091589 ms to 0.090367 ms
+(`1.014x`, 1.335% lower latency); every enabled shape improves by 0.93-1.62%.
+The control and candidate are stored in
+`artifacts/a100_p32_window/v14_m8_bank_selector_matched_control.json` and
+`artifacts/a100_p32_window/v14_m8_bank_selector_matched_candidate.json`.
+Planar timings are excluded from these comparisons.
 
 ## Reproduction
 
