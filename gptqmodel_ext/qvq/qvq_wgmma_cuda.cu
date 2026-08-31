@@ -261,6 +261,27 @@ __device__ __forceinline__ uint32_t qvq_p32_window_state(
   return static_cast<uint32_t>((window >> shift) & 0xffffu);
 }
 
+template <int TransitionBits>
+__device__ __forceinline__ void qvq_p32_window_state_pair(
+    const uint32_t* __restrict__ window_words,
+    int pair,
+    uint32_t& first,
+    uint32_t& second) {
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  constexpr int kKPairWordDistance = 2 * TransitionBits;
+  const int bit_position = (kP32PairsPerTile - 1 - pair) * TransitionBits;
+  const int first_word = bit_position >> 5;
+  const int shift = bit_position & 31;
+  const int first_next_word = first_word + 1 == kWordsPerP32Tile ? 0 : first_word + 1;
+  const int second_word = first_word - kKPairWordDistance;
+  const uint64_t first_window = static_cast<uint64_t>(window_words[first_word]) |
+      (static_cast<uint64_t>(window_words[first_next_word]) << 32);
+  const uint64_t second_window = static_cast<uint64_t>(window_words[second_word]) |
+      (static_cast<uint64_t>(window_words[second_word + 1]) << 32);
+  first = static_cast<uint32_t>((first_window >> shift) & 0xffffu);
+  second = static_cast<uint32_t>((second_window >> shift) & 0xffffu);
+}
+
 template <int TransitionBits, class FragmentA>
 __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     FragmentA& fragment,
@@ -274,20 +295,20 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   const int k_pair1 = k_pair0 + 4;
   const int pair00 = k_pair0 * 16 + n_pair;
   const int pair01 = pair00 + 8;
-  const int pair10 = k_pair1 * 16 + n_pair;
-  const int pair11 = pair10 + 8;
   const uint32_t bank_pair_bits = static_cast<uint32_t>(bank_id) >> k_pair0;
   const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_bank_mask;
   const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_bank_mask;
 
-  const uint32_t mixed00 = qvq_wgmma_pgc16_mix(
-      qvq_p32_window_state<TransitionBits>(window_words, pair00) ^ bank_mask0);
-  const uint32_t mixed01 = qvq_wgmma_pgc16_mix(
-      qvq_p32_window_state<TransitionBits>(window_words, pair01) ^ bank_mask0);
-  const uint32_t mixed10 = qvq_wgmma_pgc16_mix(
-      qvq_p32_window_state<TransitionBits>(window_words, pair10) ^ bank_mask1);
-  const uint32_t mixed11 = qvq_wgmma_pgc16_mix(
-      qvq_p32_window_state<TransitionBits>(window_words, pair11) ^ bank_mask1);
+  uint32_t state00;
+  uint32_t state01;
+  uint32_t state10;
+  uint32_t state11;
+  qvq_p32_window_state_pair<TransitionBits>(window_words, pair00, state00, state10);
+  qvq_p32_window_state_pair<TransitionBits>(window_words, pair01, state01, state11);
+  const uint32_t mixed00 = qvq_wgmma_pgc16_mix(state00 ^ bank_mask0);
+  const uint32_t mixed01 = qvq_wgmma_pgc16_mix(state01 ^ bank_mask0);
+  const uint32_t mixed10 = qvq_wgmma_pgc16_mix(state10 ^ bank_mask1);
+  const uint32_t mixed11 = qvq_wgmma_pgc16_mix(state11 ^ bank_mask1);
 
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
