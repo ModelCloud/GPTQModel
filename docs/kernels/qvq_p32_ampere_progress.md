@@ -820,6 +820,37 @@ failed refresh is retained in
 `artifacts/a100_p32_window/qwen38_v14_packed_bank_all_ec5b2e3e.json` so the
 anomaly is visible rather than silently discarded.
 
+Two final broad host/store experiments were rejected. Pairing every M2 scalar
+output store regressed the 28-case geomean by 0.356%, and narrowing it to the
+initially promising linear-QKV/MLP-gate routes still regressed the immediate
+500-iteration A/B by 0.093%. Removing the release-build launch-status poll
+also failed to generalize: the matched 20-case full-KV geomean regressed
+0.333%, with M1, M4, and M16 non-positive. The source is restored after both
+experiments. Diagnostics are retained in
+`artifacts/a100_p32_window/v14_m2_float2_candidate.json`,
+`artifacts/a100_p32_window/v14_m2_selective_float2_control.json`,
+`artifacts/a100_p32_window/v14_m2_selective_float2_candidate.json`,
+`artifacts/a100_p32_window/v14_release_launch_check_control.json`, and
+`artifacts/a100_p32_window/v14_release_launch_check_candidate.json`.
+
+The sixth progression narrows paired scalar output stores to M1 full-KV only.
+The naturally aligned adjacent outputs are written with one `float2` store;
+all other scalar routes retain the proven scalar stores. In the matched
+40-warmup/1000-iteration A/B, the four-rate Ampere geomean falls from
+0.035062 ms to 0.032996 ms (`1.063x`, 6.259% lower latency), and an immediate
+repeat measures 0.033022 ms. Exactness passes 28/28. Artifacts are stored in
+`artifacts/a100_p32_window/v14_m1_fullkv_float2_control.json`,
+`artifacts/a100_p32_window/v14_m1_fullkv_float2_candidate.json`, and
+`artifacts/a100_p32_window/v14_m1_fullkv_float2_candidate_repeat.json`.
+
+Using exact artifact medians—not rounded ledger percentages—and weighting
+each sequential matched progression by its affected share of the 140-case
+matrix, cumulative Ampere latency improves `1.02155x`, or **2.155%**, versus
+the fetched `ab277a17` main baseline. Planar measurements are excluded. This
+clears the requested cumulative 2% threshold despite the unusable full-refresh
+run above; a future quiet-window refresh should confirm the same result in one
+continuous matrix.
+
 ## Reproduction
 
 ```bash

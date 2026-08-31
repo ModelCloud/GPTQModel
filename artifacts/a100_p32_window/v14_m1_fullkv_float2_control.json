@@ -1,0 +1,155 @@
+{
+  "commit": "52dfdf46dcb882f2fd567c11f9546f2f60bb1fdc",
+  "device": {
+    "compute_capability": "8.0",
+    "memory_bytes": 102191202304,
+    "name": "NVIDIA PG506-230",
+    "sm_count": 124
+  },
+  "dtype": "float16 inputs/levels, float32 accumulation/output",
+  "hardware": {
+    "index": "0",
+    "memory.total": "98304",
+    "memory.used": "0",
+    "name": "NVIDIA PG506-230",
+    "pci.bus_id": "00000000:A0:00.0",
+    "utilization.gpu": "0",
+    "uuid": "GPU-14ab23f1-a785-e9df-bbb5-215547154e3c"
+  },
+  "iterations": 1000,
+  "rows": [
+    {
+      "ampere": {
+        "max_ms": 0.05939200147986412,
+        "mean_ms": 0.035121216546744105,
+        "median_ms": 0.03481600061058998,
+        "min_ms": 0.023552000522613525,
+        "p95_ms": 0.03788800165057182
+      },
+      "ampere_metrics": {
+        "max_abs": 6.67572021484375e-06,
+        "mean_abs": 1.6447811503894627e-06,
+        "relative_l2": 3.118782672117959e-07
+      },
+      "autotune_split": 64,
+      "bits": 2.0,
+      "k": 5120,
+      "m": 1,
+      "n": 1024,
+      "planar": {
+        "max_ms": 0.2396160066127777,
+        "mean_ms": 0.0526489591114223,
+        "median_ms": 0.05222399905323982,
+        "min_ms": 0.05119999870657921,
+        "p95_ms": 0.053247999399900436
+      },
+      "planar_metrics": {
+        "max_abs": 7.62939453125e-06,
+        "mean_abs": 1.425913069397211e-06,
+        "relative_l2": 2.729591983552382e-07
+      },
+      "shape": "full_kv"
+    },
+    {
+      "ampere": {
+        "max_ms": 0.2027519941329956,
+        "mean_ms": 0.036007936775684354,
+        "median_ms": 0.035840000957250595,
+        "min_ms": 0.03276799991726875,
+        "p95_ms": 0.03788800165057182
+      },
+      "ampere_metrics": {
+        "max_abs": 9.5367431640625e-06,
+        "mean_abs": 1.7216807464137673e-06,
+        "relative_l2": 3.077089729686122e-07
+      },
+      "autotune_split": 64,
+      "bits": 2.5,
+      "k": 5120,
+      "m": 1,
+      "n": 1024,
+      "planar": {
+        "max_ms": 0.1157120019197464,
+        "mean_ms": 0.05998182561248541,
+        "median_ms": 0.05939200147986412,
+        "min_ms": 0.05939200147986412,
+        "p95_ms": 0.060416001826524734
+      },
+      "planar_metrics": {
+        "max_abs": 6.9141387939453125e-06,
+        "mean_abs": 1.480730134062469e-06,
+        "relative_l2": 2.5785840307435137e-07
+      },
+      "shape": "full_kv"
+    },
+    {
+      "ampere": {
+        "max_ms": 0.6932479739189148,
+        "mean_ms": 0.04072652814351022,
+        "median_ms": 0.03379200026392937,
+        "min_ms": 0.027648000046610832,
+        "p95_ms": 0.03788800165057182
+      },
+      "ampere_metrics": {
+        "max_abs": 7.62939453125e-06,
+        "mean_abs": 1.7023703549057245e-06,
+        "relative_l2": 3.146347182791942e-07
+      },
+      "autotune_split": 96,
+      "bits": 3.0,
+      "k": 5120,
+      "m": 1,
+      "n": 1024,
+      "planar": {
+        "max_ms": 0.40140798687934875,
+        "mean_ms": 0.22452121402323247,
+        "median_ms": 0.2242559939622879,
+        "min_ms": 0.22118400037288666,
+        "p95_ms": 0.22630399465560913
+      },
+      "planar_metrics": {
+        "max_abs": 6.4373016357421875e-06,
+        "mean_abs": 1.4303368516266346e-06,
+        "relative_l2": 2.629643063301046e-07
+      },
+      "shape": "full_kv"
+    },
+    {
+      "ampere": {
+        "max_ms": 0.0655359998345375,
+        "mean_ms": 0.03587584074959159,
+        "median_ms": 0.035840000957250595,
+        "min_ms": 0.020479999482631683,
+        "p95_ms": 0.03891199827194214
+      },
+      "ampere_metrics": {
+        "max_abs": 8.58306884765625e-06,
+        "mean_abs": 1.7223646864295006e-06,
+        "relative_l2": 3.036857378901914e-07
+      },
+      "autotune_split": 64,
+      "bits": 3.5,
+      "k": 5120,
+      "m": 1,
+      "n": 1024,
+      "planar": {
+        "max_ms": 0.24883200228214264,
+        "mean_ms": 0.22332006150484085,
+        "median_ms": 0.22323200106620789,
+        "min_ms": 0.21606400609016418,
+        "p95_ms": 0.2252800017595291
+      },
+      "planar_metrics": {
+        "max_abs": 8.58306884765625e-06,
+        "mean_abs": 1.5159021131694317e-06,
+        "relative_l2": 2.7108714562018577e-07
+      },
+      "shape": "full_kv"
+    }
+  ],
+  "source_fingerprint": "5cd454cf3a1044fa7076cc8f817ac0dba4bff0ef0d0aa33877ad74640076fab7",
+  "split_count": 0,
+  "torch": "2.13.0+cu130",
+  "torch_cuda": "13.0",
+  "warmup": 40
+}

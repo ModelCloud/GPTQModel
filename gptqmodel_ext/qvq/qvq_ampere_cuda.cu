@@ -748,8 +748,10 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
 #pragma unroll
     for (int output_row = 0; output_row < Rows; ++output_row) {
       float* row_target = target + static_cast<int64_t>(output_row) * size_n;
-      row_target[output_column] = accumulator_0[lane >> 3][output_row];
-      row_target[output_column + 1] = accumulator_1[lane >> 3][output_row];
+      store_output_pair<(Rows == 1 && StaticN == 1024)>(
+          row_target + output_column,
+          accumulator_0[lane >> 3][output_row],
+          accumulator_1[lane >> 3][output_row]);
     }
   }
 #endif
