@@ -798,6 +798,28 @@ in `artifacts/a100_p32_window/v14_packed_bank_stage_screen.json`,
 `artifacts/a100_p32_window/v14_packed_bank_matched_candidate.json`. Planar
 timings remain excluded.
 
+The fifth progression revisits M2 fixed-N specialization together with packed
+bank-ID staging. Fixed N alone had previously regressed M2 by 1.10%; combining
+it with one aligned `uint4` bank-ID load per K stage reverses that result.
+Across the matched 24 non-KV cases the Ampere geomean falls from 0.071618 ms
+to 0.070870 ms (1.055%), with all six shape groups non-regressing. A separate
+500-iteration full-KV A/B falls from 0.035574 ms to 0.034808 ms (2.199%).
+Together the complete 28-case M2 geomean falls from 0.064805 ms to 0.064026 ms
+(`1.012x`, 1.218% lower latency), and exactness passes 28/28. The four matched
+artifacts are
+`artifacts/a100_p32_window/v14_m2_static_packed_control.json`,
+`artifacts/a100_p32_window/v14_m2_static_packed_candidate.json`,
+`artifacts/a100_p32_window/v14_m2_fullkv_packed_control.json`, and
+`artifacts/a100_p32_window/v14_m2_fullkv_packed_candidate.json`.
+
+The first post-progression 140-case refresh is diagnostic only: six M1/M2
+samples suffered isolated 2.6-4.0x timing spikes despite the exclusivity gate,
+so its aggregate is invalid and is not used for the cumulative comparison.
+The unaffected M16 slice was 2.20% faster than fetched main. The complete
+failed refresh is retained in
+`artifacts/a100_p32_window/qwen38_v14_packed_bank_all_ec5b2e3e.json` so the
+anomaly is visible rather than silently discarded.
+
 ## Reproduction
 
 ```bash

@@ -599,7 +599,9 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
         destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
       }
     }
-    if constexpr (StaticN > 0 && StaticN != 1024 && TilesPerBlock == 16 && Rows == 4) {
+    if constexpr (
+        StaticN > 0 && TilesPerBlock == 16 &&
+        (Rows == 2 || (Rows == 4 && StaticN != 1024))) {
       if (thread < StageKTiles) {
         const int k_tile = k_tile_base + thread;
         auto* destination_ids = reinterpret_cast<uint4*>(
@@ -936,10 +938,10 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
-  } else if (size_m == 2 && use_small_m_scalar && size_n == 1024 &&
+  } else if (size_m == 2 && use_small_m_scalar && use_four_tile_scalar_stage &&
              launch_static_n_scalar_kernel<
                  TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
-                 kScalarTripleStageKTiles>(
+                 kScalarLongStageKTiles>(
                  input_ptr,
                  trellis_ptr,
                  levels_ptr,
@@ -956,30 +958,46 @@ at::Tensor p32_window_ampere_impl(
     p32_window_ampere_m1_kernel<
         TransitionBits, 2, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
         <<<grid, kM1Threads, 0, stream>>>(
-        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
-        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
-        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
-        bank_ids.data_ptr<uint8_t>(),
-        partial_output.data_ptr<float>(),
-        output.data_ptr<float>(),
+        input_ptr,
+        trellis_ptr,
+        levels_ptr,
+        bank_ids_ptr,
+        partial_output_ptr,
+        output_ptr,
         size_k,
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 2 && use_small_m_scalar && use_three_tile_scalar_stage) {
-    p32_window_ampere_m1_kernel<
-        TransitionBits, 2, kM1Threads, kM1TilesPerBlock, kScalarTripleStageKTiles>
-        <<<grid, kM1Threads, 0, stream>>>(
-        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
-        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
-        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
-        bank_ids.data_ptr<uint8_t>(),
-        partial_output.data_ptr<float>(),
-        output.data_ptr<float>(),
-        size_k,
-        size_n,
-        static_cast<int>(split_count),
-        static_cast<int>(bank_alt_id));
+    if (!launch_static_n_scalar_kernel<
+            TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
+            kScalarTripleStageKTiles>(
+            input_ptr,
+            trellis_ptr,
+            levels_ptr,
+            bank_ids_ptr,
+            partial_output_ptr,
+            output_ptr,
+            size_k,
+            size_n,
+            static_cast<int>(split_count),
+            static_cast<int>(bank_alt_id),
+            grid,
+            stream)) {
+      p32_window_ampere_m1_kernel<
+          TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
+          kScalarTripleStageKTiles><<<grid, kM1Threads, 0, stream>>>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id));
+    }
   } else if (size_m == 2 && use_small_m_scalar) {
     p32_window_ampere_m1_kernel<TransitionBits, 2><<<grid, kM1Threads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
