@@ -628,7 +628,11 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
     const int p32_column = (wgmma_column & ~15) + ((tile_column & 7) << 1) + (tile_column >> 3);
     const int64_t output_index =
         static_cast<int64_t>(output_row) * size_n + n64_block * kOutputColumns + p32_column;
-    partial_output[static_cast<int64_t>(split) * kRows * size_n + output_index] = accumulator(index);
+    if (split_count > 1) {
+      atomicAdd(partial_output + output_index, accumulator(index));
+    } else {
+      partial_output[output_index] = accumulator(index);
+    }
   }
 #endif
 }
@@ -825,7 +829,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
   auto output = at::empty({kRows, size_n}, input.options().dtype(at::kFloat));
   auto partial_output = split_count == 1
       ? output
-      : at::empty({split_count, kRows, size_n}, input.options().dtype(at::kFloat));
+      : at::zeros({kRows, size_n}, input.options().dtype(at::kFloat));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns), 1, static_cast<unsigned>(split_count));
   qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits><<<grid, kTmaThreads, 0, stream>>>(
@@ -841,15 +845,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   if (split_count > 1) {
-    constexpr int kReductionThreads = 256;
-    const int output_values = kRows * size_n;
-    const int reduction_blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
-    qvq_wgmma_reduce_split_kernel<<<reduction_blocks, kReductionThreads, 0, stream>>>(
-        partial_output.data_ptr<float>(),
-        output.data_ptr<float>(),
-        output_values,
-        static_cast<int>(split_count));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    output = partial_output;
   }
   return output;
 }
