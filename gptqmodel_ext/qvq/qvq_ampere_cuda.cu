@@ -1780,6 +1780,29 @@ at::Tensor p32_window_ampere_impl(
         return output;
       }
     }
+    if (size_m == 2 && size_k == 17408 && size_n == 5120 &&
+        (split_count == 96 || split_count == 128)) {
+      constexpr int kReductionWarps = kReductionThreads / 32;
+      constexpr int kOutputsPerWarp = 16;
+      const int warp_blocks =
+          (output_values + kReductionWarps * kOutputsPerWarp - 1) /
+          (kReductionWarps * kOutputsPerWarp);
+      if (split_count == 96) {
+        reduce_split_warp_kernel<96, kOutputsPerWarp>
+            <<<warp_blocks, kReductionThreads, 0, stream>>>(
+                partial_output.data_ptr<float>(),
+                output.data_ptr<float>(),
+                output_values);
+      } else {
+        reduce_split_warp_kernel<128, kOutputsPerWarp>
+            <<<warp_blocks, kReductionThreads, 0, stream>>>(
+                partial_output.data_ptr<float>(),
+                output.data_ptr<float>(),
+                output_values);
+      }
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      return output;
+    }
     const bool use_m2_warp_reducer =
         size_m == 2 &&
         ((size_k == 6144 && size_n == 5120) ||

@@ -1704,6 +1704,16 @@ control is the M1 MLP-down subset of `qwen38_v19_current_all_0904e361.json`.
 Affected-case log weighting now reaches **0.876% cumulative improvement**
 versus fetched main.
 
+The seventh v19 progression applies a 16-output warp reducer to M2 long-K
+MLP-down. W2 improves from `0.089088` to `0.088064 ms` and W3 from
+`0.103424` to `0.102400 ms`; W2.5 and W3.5 tie. The four-case affected
+geomean improves **1.0054x** (0.536% lower latency), with maximum absolute
+error below `3.47e-05`. The candidate is
+`artifacts/a100_p32_window/v19_m2_mlpdown_warpreduce16_candidate.json`; its
+control is the M2 MLP-down subset of `qwen38_v19_current_all_0904e361.json`.
+Affected-case log weighting now reaches **0.892% cumulative improvement**
+versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
