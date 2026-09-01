@@ -111,8 +111,17 @@ struct MmaFragmentB {
   uint32_t values[2];
 };
 
-struct MmaFragmentC {
+template <bool UpperRowsOnly>
+struct MmaAccumulator;
+
+template <>
+struct MmaAccumulator<false> {
   float values[4];
+};
+
+template <>
+struct MmaAccumulator<true> {
+  float values[2];
 };
 
 __device__ __forceinline__ void load_mma_fragment_a(
@@ -129,27 +138,64 @@ __device__ __forceinline__ void load_mma_fragment_a(
       : "r"(shared_address));
 }
 
+__device__ __forceinline__ void load_mma_fragment_a_upper(
+    MmaFragmentA& fragment,
+    const void* shared_source) {
+  const uint32_t shared_address =
+      static_cast<uint32_t>(__cvta_generic_to_shared(shared_source));
+  asm volatile(
+      "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0,%1}, [%2];\n"
+      : "=r"(fragment.values[0]), "=r"(fragment.values[2])
+      : "r"(shared_address));
+  fragment.values[1] = 0;
+  fragment.values[3] = 0;
+}
+
+template <bool UpperRowsOnly>
 __device__ __forceinline__ void mma_m16n8k16(
     const MmaFragmentA& input,
     const MmaFragmentB& weight,
-    MmaFragmentC& accumulator) {
-  asm volatile(
-      "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
-      "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
-      : "=f"(accumulator.values[0]),
-        "=f"(accumulator.values[1]),
-        "=f"(accumulator.values[2]),
-        "=f"(accumulator.values[3])
-      : "r"(input.values[0]),
-        "r"(input.values[1]),
-        "r"(input.values[2]),
-        "r"(input.values[3]),
-        "r"(weight.values[0]),
-        "r"(weight.values[1]),
-        "f"(accumulator.values[0]),
-        "f"(accumulator.values[1]),
-        "f"(accumulator.values[2]),
-        "f"(accumulator.values[3]));
+    MmaAccumulator<UpperRowsOnly>& accumulator) {
+  if constexpr (UpperRowsOnly) {
+    float discarded_0;
+    float discarded_1;
+    const float zero = 0.0f;
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+        : "=f"(accumulator.values[0]),
+          "=f"(accumulator.values[1]),
+          "=f"(discarded_0),
+          "=f"(discarded_1)
+        : "r"(input.values[0]),
+          "r"(input.values[1]),
+          "r"(input.values[2]),
+          "r"(input.values[3]),
+          "r"(weight.values[0]),
+          "r"(weight.values[1]),
+          "f"(accumulator.values[0]),
+          "f"(accumulator.values[1]),
+          "f"(zero),
+          "f"(zero));
+  } else {
+    asm volatile(
+        "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+        "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+        : "=f"(accumulator.values[0]),
+          "=f"(accumulator.values[1]),
+          "=f"(accumulator.values[2]),
+          "=f"(accumulator.values[3])
+        : "r"(input.values[0]),
+          "r"(input.values[1]),
+          "r"(input.values[2]),
+          "r"(input.values[3]),
+          "r"(weight.values[0]),
+          "r"(weight.values[1]),
+          "f"(accumulator.values[0]),
+          "f"(accumulator.values[1]),
+          "f"(accumulator.values[2]),
+          "f"(accumulator.values[3]));
+  }
 }
 
 __device__ __forceinline__ uint32_t selected_bank_mask(
@@ -229,12 +275,23 @@ __device__ __forceinline__ void copy_async_cg_16(void* destination, const void* 
       : "r"(shared_address), "l"(source));
 }
 
+__device__ __forceinline__ void copy_async_ca_4(void* destination, const void* source) {
+  const uint32_t shared_address =
+      static_cast<uint32_t>(__cvta_generic_to_shared(destination));
+  asm volatile(
+      "cp.async.ca.shared.global [%0], [%1], 4;\n"
+      :
+      : "r"(shared_address), "l"(source));
+}
+
 template <
     int TransitionBits,
     bool FullRows,
     int ActiveRows = 0,
     int StaticN = 0,
-    bool HoistBankMasks = false>
+    bool HoistBankMasks = false,
+    bool UpperRowsOnly = false,
+    int StaticK = 0>
 __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -257,11 +314,13 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   const int warp = thread >> 5;
   const int lane = thread & 31;
   constexpr int kStaticNTiles = StaticN > 0 ? StaticN / kTileColumns : 0;
+  constexpr int kStaticKTiles = StaticK > 0 ? StaticK / kTileRows : 0;
   const int n_tiles = StaticN > 0 ? kStaticNTiles : size_n / kTileColumns;
   const int n_tile_base = static_cast<int>(blockIdx.x) * kTilesPerBlock;
   const bool active_tile = StaticN > 0 || n_tile_base + warp < n_tiles;
   const int split = static_cast<int>(blockIdx.z);
-  const int k_tiles = size_k / kTileRows;
+  const int k_tiles = StaticK > 0 ? kStaticKTiles : size_k / kTileRows;
+  const int input_stride = StaticK > 0 ? StaticK : size_k;
   const int k_tile_begin = (k_tiles * split) / split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(bank_alt_id);
@@ -273,22 +332,22 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       const int vector = index - row * (kStageColumns / 8);
       const int source_column = k_tile_base * kTileRows + vector * 8;
       if constexpr (FullRows) {
-        if (source_column < size_k) {
-          const half* source = input + static_cast<int64_t>(row) * size_k + source_column;
+        if (source_column < input_stride) {
+          const half* source = input + static_cast<int64_t>(row) * input_stride + source_column;
           __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
         } else {
           input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
         }
       } else if constexpr (ActiveRows > 0) {
-        if (row < ActiveRows && source_column < size_k) {
-          const half* source = input + static_cast<int64_t>(row) * size_k +
+        if (row < ActiveRows && source_column < input_stride) {
+          const half* source = input + static_cast<int64_t>(row) * input_stride +
               source_column;
           __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
         } else {
           input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
         }
-      } else if (row < size_m && source_column < size_k) {
-        const half* source = input + static_cast<int64_t>(row) * size_k +
+      } else if (row < size_m && source_column < input_stride) {
+        const half* source = input + static_cast<int64_t>(row) * input_stride +
             source_column;
         __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
       } else {
@@ -330,10 +389,14 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         const int k_tile = k_tile_base + thread;
         auto* destination_ids = reinterpret_cast<uint32_t*>(
             packed_bank_ids[destination][thread]);
-        *destination_ids = k_tile < k_tiles
-            ? __ldg(reinterpret_cast<const uint32_t*>(
-                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + n_tile_base))
-            : 0u;
+        if (k_tile < k_tiles) {
+          copy_async_ca_4(
+              destination_ids,
+              reinterpret_cast<const uint32_t*>(
+                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + n_tile_base));
+        } else {
+          *destination_ids = 0u;
+        }
       }
     } else if (thread < kStageKTiles * kTilesPerBlock) {
       const int stage_k_tile = thread / kTilesPerBlock;
@@ -347,8 +410,10 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     __pipeline_commit();
   };
 
-  MmaFragmentC accumulator_0 = {};
-  MmaFragmentC accumulator_1 = {};
+  static_assert(!UpperRowsOnly || (!FullRows && ActiveRows == 8));
+  constexpr bool kUpperRowsOnly = UpperRowsOnly;
+  MmaAccumulator<kUpperRowsOnly> accumulator_0 = {};
+  MmaAccumulator<kUpperRowsOnly> accumulator_1 = {};
 
   stage(k_tile_begin, 0);
   int parity = 0;
@@ -427,15 +492,26 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         weight_fragment_1.values[0] = select_high ? high_01_1 : low_01_1;
         weight_fragment_1.values[1] = select_high ? high_89_1 : low_89_1;
 
-        const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
-        const int address_column = (lane >> 4) * 8;
         MmaFragmentA input_fragment;
-        load_mma_fragment_a(
-            input_fragment,
-            input_tile[parity] +
-                address_row * kStageColumns +
-                stage_k_tile * kTileRows +
-                address_column);
+        if constexpr (kUpperRowsOnly && StaticN != 1024) {
+          const int address_row = lane & 7;
+          const int address_column = ((lane >> 3) & 1) * 8;
+          load_mma_fragment_a_upper(
+              input_fragment,
+              input_tile[parity] +
+                  address_row * kStageColumns +
+                  stage_k_tile * kTileRows +
+                  address_column);
+        } else {
+          const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
+          const int address_column = (lane >> 4) * 8;
+          load_mma_fragment_a(
+              input_fragment,
+              input_tile[parity] +
+                  address_row * kStageColumns +
+                  stage_k_tile * kTileRows +
+                  address_column);
+        }
         mma_m16n8k16(input_fragment, weight_fragment_0, accumulator_0);
         mma_m16n8k16(input_fragment, weight_fragment_1, accumulator_1);
       }
@@ -478,13 +554,15 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
             target + static_cast<int64_t>(output_row_0) * size_n + output_column + 8,
             accumulator_1.values[0], accumulator_1.values[1]);
       }
-      if (output_row_1 < ActiveRows) {
-        store_output_pair<StaticN != 1024>(
-            target + static_cast<int64_t>(output_row_1) * size_n + output_column,
-            accumulator_0.values[2], accumulator_0.values[3]);
-        store_output_pair<StaticN != 1024>(
-            target + static_cast<int64_t>(output_row_1) * size_n + output_column + 8,
-            accumulator_1.values[2], accumulator_1.values[3]);
+      if constexpr (!kUpperRowsOnly) {
+        if (output_row_1 < ActiveRows) {
+          store_output_pair<StaticN != 1024>(
+              target + static_cast<int64_t>(output_row_1) * size_n + output_column,
+              accumulator_0.values[2], accumulator_0.values[3]);
+          store_output_pair<StaticN != 1024>(
+              target + static_cast<int64_t>(output_row_1) * size_n + output_column + 8,
+              accumulator_1.values[2], accumulator_1.values[3]);
+        }
       }
     } else {
       if (output_row_0 < size_m) {
@@ -901,7 +979,7 @@ at::Tensor p32_window_ampere_impl(
   const bool use_three_tile_scalar_stage = size_m == 2 && size_k <= 6144;
   constexpr int kM4StageKTiles = TransitionBits == 4
       ? kScalarLongStageKTiles
-      : kScalarTripleStageKTiles;
+      : TransitionBits == 6 ? kScalarTripleStageKTiles : kStageKTiles;
   const int tiles_per_block = use_small_m_scalar ? kM1TilesPerBlock : kTilesPerBlock;
   const dim3 grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
@@ -1082,7 +1160,7 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 12288) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 12288, true><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<TransitionBits, false, 8, 12288, true, true><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -1095,7 +1173,7 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 5120) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 5120, true><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<TransitionBits, false, 8, 5120, true, true><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -1107,8 +1185,8 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
-  } else if (size_m == 8 && size_n == 10240) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 10240, true><<<grid, kThreads, 0, stream>>>(
+  } else if (size_m == 8 && size_k == 5120 && size_n == 10240) {
+    p32_window_ampere_kernel<TransitionBits, false, 8, 10240, true, true, 5120><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -1121,7 +1199,7 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 6144) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 6144, true><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<TransitionBits, false, 8, 6144, true, true><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -1133,8 +1211,21 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
-  } else if (size_m == 8 && size_n == 1024) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 1024><<<grid, kThreads, 0, stream>>>(
+  } else if (size_m == 8 && size_k == 5120 && size_n == 1024) {
+    p32_window_ampere_kernel<TransitionBits, false, 8, 1024, false, true, 5120><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 8 && size_n == 17408) {
+    p32_window_ampere_kernel<TransitionBits, false, 8, 17408, false, true><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -1159,8 +1250,36 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
-  } else if (size_m == kRows && size_n == 12288) {
-    p32_window_ampere_kernel<TransitionBits, true, 0, 12288><<<grid, kThreads, 0, stream>>>(
+  } else if (size_m == kRows && size_k == 5120 && size_n == 12288) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 12288, false, false, 5120><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == kRows && size_k == 6144 && size_n == 5120) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 5120, false, false, 6144>
+        <<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == kRows && size_k == 17408 && size_n == 5120) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 5120, false, false, 17408>
+        <<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -1185,8 +1304,8 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
-  } else if (size_m == kRows && size_n == 10240) {
-    p32_window_ampere_kernel<TransitionBits, true, 0, 10240><<<grid, kThreads, 0, stream>>>(
+  } else if (size_m == kRows && size_k == 5120 && size_n == 10240) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 10240, false, false, 5120><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -1198,8 +1317,8 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
-  } else if (size_m == kRows && size_n == 6144) {
-    p32_window_ampere_kernel<TransitionBits, true, 0, 6144><<<grid, kThreads, 0, stream>>>(
+  } else if (size_m == kRows && size_k == 5120 && size_n == 6144) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 6144, false, false, 5120><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -1211,8 +1330,22 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
-  } else if (size_m == kRows && size_n == 1024) {
-    p32_window_ampere_kernel<TransitionBits, true, 0, 1024><<<grid, kThreads, 0, stream>>>(
+  } else if (size_m == kRows && size_k == 5120 && size_n == 1024) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 1024, false, false, 5120><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == kRows && size_n == 17408) {
+    p32_window_ampere_kernel<TransitionBits, true, 0, 17408, false, false, 5120>
+        <<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
