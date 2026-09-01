@@ -1347,6 +1347,42 @@ the full-KV screen. Finally, wave-adjacent M8 splits 21 (full-Q), 19
 autotuned choices, so the profiler's theoretical tail-wave estimate does not
 translate into a useful tuning candidate for these imbalanced K slices.
 
+### Post-merge v18 baseline
+
+PR #91 merged as `90c4fa5f`. The clean 20-warmup/100-iteration 140-case
+Ampere control is
+`artifacts/a100_p32_window/qwen38_newmain_all_90c4fa5f.json`. Median latency
+geomeans are 0.057364 ms (M1), 0.060760 ms (M2), 0.068937 ms (M4),
+0.078366 ms (M8), and 0.084038 ms (M16), with a 0.069161 ms all-case
+geomean. Maximum absolute error is 0.000080109. Planar timings remain
+diagnostic only and are excluded from improvement calculations.
+
+The first v18 progression applies the Hopper paired-decode lesson at the
+16-bit arithmetic level. On M8 fixed-N routes, adjacent decoded states share
+one bank mask. Their two PGC16 transforms now execute as packed 16-bit lanes,
+amortizing the fold shifts/XORs while retaining the same four read-only-cache
+codebook fetches and exact FP32 accumulation. The matched
+40-warmup/1000-iteration 24-case non-full-KV pair improves the median geomean
+by **2.319%**, with 21 wins, three event-quantized ties, and no losses.
+Full-Q, attention-out, linear-Z, and MLP-down improve 3.167%, 2.740%, 3.653%,
+and 3.095%; linear-QKV improves 0.917% and MLP-gate/up 0.384%.
+Artifacts are
+`artifacts/a100_p32_window/v18_m8_packed_pgc_control.json` and
+`artifacts/a100_p32_window/v18_m8_packed_pgc_candidate_repeat.json`.
+Affected-case log weighting gives
+`exp(24/140 * ln(1.023186)) = 1.003937x`, or **0.394%** cumulative median
+improvement versus fetched `90c4fa5f` main. Planar timings are excluded.
+
+Two structural experiments were rejected before this progression. Direct
+FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
+reducer launch, but atomic contention plus output zero-fill raised latency
+from roughly 0.032-0.034 ms to 0.037-0.039 ms. Warp-private staging on M16
+full-Q replaced CTA barriers with duplicated activation/window stages, but
+the extra traffic raised latency from 0.106-0.110 ms to 0.116-0.119 ms.
+Their diagnostics are `v18_m1_fullkv_atomic_candidate.json` and
+`v18_m16_fullq_warp_private_candidate.json`; both source changes were fully
+restored.
+
 ## Reproduction
 
 ```bash

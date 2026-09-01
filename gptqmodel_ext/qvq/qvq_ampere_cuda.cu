@@ -242,6 +242,36 @@ __device__ __forceinline__ uint32_t decode_state_bits(
   return decoded.bits;
 }
 
+__device__ __forceinline__ void decode_state_pair_bits(
+    uint32_t first_state,
+    uint32_t second_state,
+    uint32_t bank_mask,
+    const half* __restrict__ levels,
+    uint32_t& first_decoded,
+    uint32_t& second_decoded) {
+  uint32_t states = (first_state ^ bank_mask) |
+      ((second_state ^ bank_mask) << 16);
+  uint32_t mixed = states ^ ((states >> 8) & 0x00ff00ffu);
+  const uint32_t mixed_low =
+      (mixed & 0xffffu) * kPgc16Multiplier + kPgc16Increment;
+  const uint32_t mixed_high =
+      (mixed >> 16) * kPgc16Multiplier + kPgc16Increment;
+  mixed = (mixed_low & 0xffffu) | (mixed_high << 16);
+  mixed ^= (mixed >> 7) & 0x01ff01ffu;
+  union {
+    uint32_t bits;
+    half2 values;
+  } first, second;
+  first.values = __halves2half2(
+      __ldg(levels + ((mixed >> 8) & 0xffu)),
+      __ldg(levels + (mixed & 0xffu)));
+  second.values = __halves2half2(
+      __ldg(levels + (mixed >> 24)),
+      __ldg(levels + ((mixed >> 16) & 0xffu)));
+  first_decoded = first.bits;
+  second_decoded = second.bits;
+}
+
 __device__ __forceinline__ uint32_t pack_low_halves(uint32_t first, uint32_t second) {
   return (first & 0xffffu) | (second << 16);
 }
@@ -476,10 +506,12 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
               selected_bank_mask(packed_bank_id, producer_row_pair, alt_mask);
           const uint32_t bank_mask_8 =
               selected_bank_mask(packed_bank_id, producer_row_pair + 4, alt_mask);
-          decoded_row_0 = decode_state_bits(state_row_0, bank_mask_0, levels);
-          decoded_row_8 = decode_state_bits(state_row_8, bank_mask_8, levels);
-          decoded_row_1 = decode_state_bits(state_row_1, bank_mask_0, levels);
-          decoded_row_9 = decode_state_bits(state_row_9, bank_mask_8, levels);
+          decode_state_pair_bits(
+              state_row_0, state_row_1, bank_mask_0, levels,
+              decoded_row_0, decoded_row_1);
+          decode_state_pair_bits(
+              state_row_8, state_row_9, bank_mask_8, levels,
+              decoded_row_8, decoded_row_9);
         } else {
           decoded_row_0 = decode_pair_bits<TransitionBits>(
               first_pair, state_row_0, packed_bank_id, alt_mask, levels);
