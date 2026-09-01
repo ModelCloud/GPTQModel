@@ -1451,6 +1451,18 @@ Artifacts are
 Affected-case log weighting now reaches **1.365%** cumulative median
 improvement versus fetched main; planar timings remain excluded.
 
+The ninth v18 progression restores the two M1 MLP-gate/up rates whose first
+screen was hidden by a queue stall. In the focused matched split-40
+60-warmup/2000-iteration pair, W3/W3.5 fall from 0.094208/0.092160 ms to
+0.091136/0.090112 ms. The affected geomean speedup is **1.0282x** (2.743%
+lower latency), and exactness remains below `1.34e-05`. The control and
+candidate are
+`artifacts/a100_p32_window/v18_m1_mlpgate_w33_packed_pgc_control_s40.json`
+and
+`artifacts/a100_p32_window/v18_m1_mlpgate_packed_pgc_all_candidate_s40.json`.
+Affected-case log weighting now reaches **1.405%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
@@ -1486,6 +1498,11 @@ The initially promising candidate measured 0.0317-0.0328 ms, but the restored
 control measured 0.0307-0.0328 ms and won three rates. Diagnostics are
 `artifacts/a100_p32_window/v18_m1_fullkv_packed_pgc_candidate.json` and
 `artifacts/a100_p32_window/v18_m1_fullkv_packed_pgc_control.json`.
+
+M4 full-KV paired decode was rejected after its matched split-64 control:
+W2/W2.5 were slower and W3 tied, while W3.5 never entered the candidate path.
+Diagnostics are `v18_m4_fullkv_packed_pgc_candidate.json` and
+`v18_m4_fullkv_packed_pgc_control.json`.
 
 The direct 140-case post-progression refresh is diagnostic only. Isolated
 0.22-0.29 ms charges appeared in otherwise stable M2, M16, and full-KV
