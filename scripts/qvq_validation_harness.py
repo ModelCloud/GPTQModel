@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -415,6 +416,14 @@ def _engine_command(
     return command
 
 
+def _engine_environment(*, local_files_only: bool) -> dict[str, str]:
+    environment = os.environ.copy()
+    if local_files_only:
+        environment["HF_HUB_OFFLINE"] = "1"
+        environment["HF_DATASETS_OFFLINE"] = "1"
+    return environment
+
+
 def _parse_seeds(value: str) -> tuple[int, ...]:
     try:
         seeds = tuple(int(item.strip()) for item in value.split(",") if item.strip())
@@ -459,7 +468,12 @@ def main() -> None:
             suite_iterations=args.suite_iterations,
         )
         if not args.validate_only:
-            subprocess.run(command, cwd=REPO_ROOT, check=True)
+            subprocess.run(
+                command,
+                cwd=REPO_ROOT,
+                check=True,
+                env=_engine_environment(local_files_only=args.local_files_only),
+            )
         _require(artifact.is_file(), f"benchmark artifact does not exist: {artifact}")
         run = validate_artifact(
             artifact,

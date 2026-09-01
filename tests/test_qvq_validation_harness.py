@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from scripts.qvq_validation_harness import PROFILES, validate_artifact
+from scripts.qvq_validation_harness import (
+    PROFILES,
+    _engine_environment,
+    validate_artifact,
+)
 
 
 def _quality_block():
@@ -240,3 +244,13 @@ def test_harness_rejects_revision_mismatch(tmp_path):
     payload = _artifact("a0-a41-production", revision="old")
     with pytest.raises(RuntimeError, match="git revision"):
         _validate(_write(tmp_path, payload), "a0-a41-production", revision="new")
+
+
+def test_local_files_only_applies_to_entire_engine_process(monkeypatch):
+    monkeypatch.setenv("HF_HUB_OFFLINE", "0")
+    monkeypatch.setenv("HF_DATASETS_OFFLINE", "0")
+
+    environment = _engine_environment(local_files_only=True)
+
+    assert environment["HF_HUB_OFFLINE"] == "1"
+    assert environment["HF_DATASETS_OFFLINE"] == "1"
