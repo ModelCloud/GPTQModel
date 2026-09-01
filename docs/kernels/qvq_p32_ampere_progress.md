@@ -1791,6 +1791,15 @@ error for the accepted W2 path is `2.68e-05`. Artifacts are
 `artifacts/a100_p32_window/`. Affected-case log weighting now reaches
 **1.188% cumulative improvement** versus fetched main.
 
+The fifteenth v19 progression enables packed two-state PGC16 decode for M16
+W3 linear-QKV only. In a matched 100-warmup/4000-iteration pair, latency
+falls from `0.094208` to `0.093184 ms` (**1.0110x**, 1.087% lower latency),
+with maximum absolute error `2.87e-05`. Other rates retain the existing
+decoder. Artifacts are `v19_m16_w3_linearq_packed_control.json` and
+`v19_m16_w3_linearq_packed_candidate.json` under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**1.196% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
