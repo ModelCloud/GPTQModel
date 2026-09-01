@@ -1176,7 +1176,7 @@ __global__ void reduce_split_kernel(
   output[index] = accumulator;
 }
 
-template <int StaticSplitCount>
+template <int StaticSplitCount, int OutputsPerWarp = 4>
 __global__ void reduce_split_warp_kernel(
     const float* __restrict__ partial_output,
     float* __restrict__ output,
@@ -1184,7 +1184,9 @@ __global__ void reduce_split_warp_kernel(
   const int warp = static_cast<int>(threadIdx.x) >> 5;
   const int lane = static_cast<int>(threadIdx.x) & 31;
   const int warps_per_block = static_cast<int>(blockDim.x) >> 5;
-  constexpr int kOutputsPerWarp = 4;
+  constexpr int kOutputsPerWarp = OutputsPerWarp;
+  static_assert(kOutputsPerWarp > 0 && kOutputsPerWarp <= 16);
+  static_assert((kOutputsPerWarp & (kOutputsPerWarp - 1)) == 0);
   constexpr int kSplitLanes = 32 / kOutputsPerWarp;
   const int index =
       (static_cast<int>(blockIdx.x) * warps_per_block + warp) *
@@ -1714,6 +1716,20 @@ at::Tensor p32_window_ampere_impl(
       const int warp_blocks =
           (output_values + kReductionWarps * 4 - 1) / (kReductionWarps * 4);
       reduce_split_warp_kernel<48>
+          <<<warp_blocks, kReductionThreads, 0, stream>>>(
+              partial_output.data_ptr<float>(),
+              output.data_ptr<float>(),
+              output_values);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      return output;
+    }
+    if (size_m == 16 && size_n == 1024 && split_count == 32) {
+      constexpr int kReductionWarps = kReductionThreads / 32;
+      constexpr int kOutputsPerWarp = 16;
+      const int warp_blocks =
+          (output_values + kReductionWarps * kOutputsPerWarp - 1) /
+          (kReductionWarps * kOutputsPerWarp);
+      reduce_split_warp_kernel<32, kOutputsPerWarp>
           <<<warp_blocks, kReductionThreads, 0, stream>>>(
               partial_output.data_ptr<float>(),
               output.data_ptr<float>(),

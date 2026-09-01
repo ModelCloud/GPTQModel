@@ -1647,12 +1647,36 @@ error remains below `1.58e-05`. Artifacts are
 Affected-case log weighting gives **0.444% cumulative improvement** versus
 fetched main.
 
+The second v19 progression specializes the warp reducer geometry for M16
+full-KV at split 32. Sixteen adjacent outputs share a warp while two lanes
+parallelize each output's split sum, retaining 128 reducer blocks and wider
+coalesced loads than the four-output layout. In the
+100-warmup/4000-iteration fixed-split screen all four rates win, improving
+from `0.033792/0.033792/0.033792/0.034816 ms` to
+`0.031744/0.031744/0.032768/0.032768 ms`. The affected geomean speedup is
+**1.0556x** (5.267% lower latency), with maximum absolute error below
+`1.53e-05`. The control and candidate are
+`artifacts/a100_p32_window/v18_m16_fullkv_packed_pgc_control.json` and
+`artifacts/a100_p32_window/v19_m16_fullkv_warpreduce16_candidate.json`.
+Affected-case log weighting now reaches **0.599% cumulative improvement**
+versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
 neutral. The retained dispatch therefore covers only the two clean winning
 shapes. The broad diagnostic is
 `artifacts/a100_p32_window/v19_m1_warpreduce4_candidate.json`.
+
+Extending the four-output layout to M2 attention-out, linear-Z, and MLP-down
+was rejected: attention-out had one win, two ties, and one loss, while the
+other shapes were neutral-to-slower. An eight-output M16 full-KV layout was
+also narrowed out despite a 1.62% geomean gain because W3.5 lost one event
+tick; the retained 16-output layout wins every rate. Diagnostics are
+`v19_m2_selective_warpreduce_screen.json`,
+`v19_m16_fullkv_warpreduce8_fixed_candidate.json`, and
+`v19_m16_fullkv_warpreduce16_candidate.json` under
+`artifacts/a100_p32_window/`.
 
 ## Reproduction
 
