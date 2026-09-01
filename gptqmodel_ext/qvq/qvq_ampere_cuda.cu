@@ -896,7 +896,10 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
               }
             }
           } else if constexpr (
-              Rows == 4 && StaticN != 1024 && TransitionBits != 7) {
+              StaticN != 1024 &&
+              ((Rows == 4 && TransitionBits != 7) ||
+               (Rows == 1 &&
+                !(StaticN == 17408 && TransitionBits >= 6)))) {
 #pragma unroll
             for (int bank_group = 0; bank_group < 4; ++bank_group) {
               const uint32_t bank_mask_0 =

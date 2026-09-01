@@ -1388,6 +1388,17 @@ gives
 `exp(24/140 * ln(1.023186) + 18/140 * ln(1.010027)) = 1.005226x`, or
 **0.523%** cumulative median improvement versus fetched main.
 
+The third v18 progression selectively enables packed scalar groups for 18 M1
+cases. Full-Q, attention-out, linear-QKV, and linear-Z use the path at all
+four rates; MLP-gate/up uses it only for W2/W2.5. W3/W3.5 MLP-gate/up remains
+on the prior scalar decoder because the multi-case diagnostic encountered
+the queue-stall failure described below. Across the retained cases, 11
+medians improve and seven tie with no losses; the affected geomean improves
+**1.154%**. The diagnostic artifact is
+`artifacts/a100_p32_window/v18_m1_packed_pgc_candidate.json`. Including this
+progression, affected-case log weighting reaches **0.671%** cumulative median
+improvement versus fetched `90c4fa5f` main.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
