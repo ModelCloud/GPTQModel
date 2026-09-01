@@ -501,6 +501,77 @@ Python compilation, artifact JSON validation, and `git diff --check` also
 pass. After merging `origin/main` at `6b3cea54`, the freshly rebuilt
 latest-main Ampere extension also passes its 28 exactness and dispatch tests.
 
+### Deterministic harness reproduction on latest main
+
+The deterministic validation wrapper was then executed on the SM80 host after
+merging `origin/main` at `90c4fa5f`. It enforces the 16-layer/112-projection W2
+contract, exact source revision, clean tree, fixed model/data identities,
+dense parity, reconstructed and packed quality, exclusive GPU startup, five
+alternating timing cycles, 150 raw decode samples per batch/arm, and paired
+bootstrap output.
+
+The same-payload `a31-a41-runtime` profile at `2711059c` fit A31 once and reused
+all 112 payloads as A41. The complete per-module hash dictionaries and EBPW
+were identical. It produced a more mixed incremental runtime result than the
+earlier compact run:
+
+| Batch | A31 decode median (p95) ms | A41 decode median (p95) ms | Median delta | p95 delta |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | `35.5327 (42.6884)` | `32.0832 (37.7244)` | **-9.71%** | **-11.63%** |
+| 2 | `35.8228 (83.2631)` | `32.9124 (39.2551)` | **-8.12%** | **-52.85%** |
+| 4 | `35.2472 (38.6627)` | `33.3702 (38.2424)` | **-5.33%** | **-1.09%** |
+| 8 | `35.0527 (38.6027)` | `35.2336 (40.9179)` | **+0.52%** | **+6.00%** |
+
+The B2 A31 p95 contains a large outlier and is not evidence for a 52.85% tail
+gain. The isolated suite improves `12.63%` at M1 and `5.61--7.68%` at M2--M8,
+but the B8 full-model result shows that grouped execution is not uniformly
+faster under every latest-main run. The profile still passes its correctness
+purpose: A31/A41 payload identity is exact; reconstructed quality is reused;
+packed KL and Top-1 bootstrap intervals cross zero; both arms have
+`2.054419024` EBPW; and dense rel-L2 is `1.1171e-6` with 100% Top-1 identity.
+
+The independently fitted `a0-a41-production` profile at `1b368547` gives a
+stronger same-run production-control result:
+
+| Batch | A0 decode median (p95) ms | A41 decode median (p95) ms | Median delta | p95 delta |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | `39.2876 (40.8555)` | `31.3608 (31.9233)` | **-20.18%** | **-21.86%** |
+| 2 | `39.5296 (41.1352)` | `32.8206 (34.1593)` | **-16.97%** | **-16.96%** |
+| 4 | `39.5008 (41.4623)` | `32.9159 (34.7605)` | **-16.67%** | **-16.16%** |
+| 8 | `39.4781 (41.4087)` | `33.1755 (34.9786)` | **-15.96%** | **-15.53%** |
+
+The isolated 112-projection suite improves `26.48%` at M1 and
+`20.47--21.29%` at M2--M8. Prefill improves only `0.43--1.43%`, consistent
+with transform and launch removal primarily benefiting decode. Packed A0/A41
+KL is `0.917579/0.916420`, logits rel-L2 is `0.493024/0.494857`, and Top-1 is
+`0.556838/0.548313`. The A41-minus-A0 KL interval
+`[-0.028652, +0.026789]` and Top-1 interval
+`[-0.021935, +0.004124]` both cross zero; this remains compatibility evidence,
+not an accuracy-win claim.
+
+The first harness execution also exposed that `--local-files-only` previously
+covered model/tokenizer loading but not dataset metadata lookup. The wrapper
+now launches the complete engine with Hugging Face Hub and datasets offline
+mode enabled. The production profile confirms that both train and validation
+data resolve from the cached `b08601e0` dataset revision without network
+requests. Both profiles use model revision `bb3d2111`, identical calibration
+rows, and identical validation row/hash sets.
+
+The post-harness latest-main SM80 matrix is green:
+`2,172 passed, 136 skipped, 0 failed` across QVQ, CUDA, P32, folded axes,
+planner, shared/grouped runtime, and the harness contracts. The seven harness
+tests include the positive same-payload case plus rejection of payload drift,
+dense-parity regression, validation overlap, missing timing samples,
+source-revision mismatch, and failure to propagate offline mode to the
+complete engine process.
+
+Harness artifacts:
+
+- `artifacts/qvq_validation/a31-a41-runtime_seed20260831_2711059c.json`;
+- `artifacts/qvq_validation/summary_a31-a41-runtime_2711059c.json`;
+- `artifacts/qvq_validation/a0-a41-production_seed20260831_1b368547.json`;
+- `artifacts/qvq_validation/summary_a0-a41-production_1b368547.json`.
+
 Further fusion opportunities remain even when a transform must remain:
 
 - batch/fuse Q and K output transforms when their chosen basis permits it;
@@ -591,7 +662,11 @@ The most promising near-term points are therefore:
 | A36+A38 | 1 | combine successful Q/K and SwiGLU folds | very high |
 | A39 | variable | cheaper unavoidable down transform | implementation risk |
 
-The <=9-H, >=10% M1 milestone is now met by A41. The next milestone is to
-retain that runtime win across an independent fitting seed, stabilize B2/B4
-tail latency, productionize grouped checkpoint loading, and then push toward
-the learned 5-H A33/A34 topology.
+The <=9-H, >=10% M1 milestone is met by A41 against the independently fitted
+A0 production control. The latest same-payload A31/A41 profile measures a
+9.71% B1 gain and a 0.52% B8 regression, so the incremental grouped-runtime
+claim remains workload- and run-sensitive. The next milestone is to repeat the
+production profile with an independent fitting seed, stabilize tail latency,
+productionize grouped checkpoint loading, add the plain-P32/refactored-P32
+same-payload oracle, and only then push toward the learned 5-H A33/A34
+topology.
