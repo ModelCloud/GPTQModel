@@ -1766,6 +1766,20 @@ Artifacts are `v19_m2_attention_fastplan48_final.json` and
 `v19_m2_w35_attention_fastplan64_final.json`. Affected-case log weighting
 now reaches **1.156% cumulative improvement** versus fetched main.
 
+The thirteenth v19 progression applies the packed two-state PGC16 transform
+to M16 long-K MLP-down. Adjacent decoded states share one bank selector, so
+the path amortizes the fold and permutation arithmetic while retaining FP32
+accumulation and the existing split-32 launch. Against the matched
+60-warmup/2000-iteration control, all four rates improve one event tick:
+`0.146432/0.148480/0.148480/0.149504 ms` becomes
+`0.145408/0.147456/0.147456/0.147456 ms`. The affected geomean speedup is
+**1.0087x** (0.863% lower latency), with maximum absolute error below
+`9.54e-05`. Artifacts are
+`v19_m16_packed_mlpdown_control.json` and
+`v19_m16_packed_fullq_mlpdown_candidate.json` under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**1.181% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1859,6 +1873,23 @@ The apparent M4 W3 full-KV 16-output reduction win did not reproduce at
 4000 iterations: it measured `0.033792 ms`, slower than the four-output
 control. The retry is `v19_m4_w3_fullkv_warpreduce16_final.json`, and the
 source change was restored.
+
+Four later plan/cache probes were also rejected. Pinning M8 W2.5
+MLP-gate/up to split 8 was neutral. Explicit M2 linear-Z plans regressed the
+otherwise correct-looking screen, and an explicit split-16 M16 full-Q plan
+was exactly neutral. A selective Marlin-style `L2::128B` trellis prefetch on
+M4 W3.5 attention-out/MLP-down also tied its matched control at both medians.
+Diagnostics are `v19_m8_w25_gate_fixed8.json`,
+`v19_m2_linearz_fastplans_final.json`,
+`v19_m16_fullq_fastplan16_candidate.json`, and
+`v19_m4_w35_l2_128b_{candidate,control}.json` under
+`artifacts/a100_p32_window/`.
+
+The packed M16 follow-up initially included full-Q. It improved W2 one event
+tick, regressed W3 one tick, and tied W2.5/W3.5, so full-Q was restored to
+the existing decoder. Only the all-rate-positive MLP-down specialization is
+retained; the combined diagnostic is
+`v19_m16_packed_fullq_mlpdown_candidate.json`.
 
 ## Reproduction
 
