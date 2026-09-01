@@ -1248,6 +1248,18 @@ Including the sixth progression, affected-case log weighting raises the
 cumulative median improvement to **1.170%** versus fetched `6b3cea54` main.
 Planar timings remain excluded.
 
+The seventh v17 progression extends M2 packed async selector staging to the
+W3 `N=17408` and `N=5120` routes. In the clean matched
+60-warmup/2000-iteration six-shape screen, MLP-gate/up improves 1.020% and
+MLP-down 1.887%; attention-out (which shares `N=5120`) and the other three
+shapes are neutral. The six-case median and mean geomeans improve 0.482% and
+0.983%. The control preloads exact accepted `433f778e` from JIT fingerprint
+`02ac30b097c0cef4`. Artifacts are
+`artifacts/a100_p32_window/v17_m2_w3_async_selector_control.json` and
+`artifacts/a100_p32_window/v17_m2_w3_async_selector_candidate.json`.
+Affected-case log weighting now gives **1.191%** cumulative median improvement
+versus fetched `6b3cea54` main; planar timings remain excluded.
+
 ## Reproduction
 
 ```bash

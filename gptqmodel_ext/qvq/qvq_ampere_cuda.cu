@@ -737,7 +737,10 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
         const int k_tile = k_tile_base + thread;
         auto* destination_ids = reinterpret_cast<uint4*>(
             packed_bank_ids[destination][thread]);
-        if constexpr (StaticN != 1024 && (TransitionBits == 5 || TransitionBits == 7)) {
+        if constexpr (
+            StaticN != 1024 &&
+            (TransitionBits == 5 || TransitionBits == 7 ||
+             (TransitionBits == 6 && (StaticN == 5120 || StaticN == 17408)))) {
           if (k_tile < k_tiles) {
             copy_async_ca_16(
                 destination_ids,
