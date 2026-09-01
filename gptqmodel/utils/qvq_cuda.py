@@ -33,6 +33,7 @@ QVQ_CUDA_BITS = QVQ_BITS
 _QVQ_CUDA_OPS_NAME = "gptqmodel_qvq_cuda_ops"
 _QVQ_CUDA_NAMESPACE = "gptqmodel_qvq"
 _QVQ_CUDA_OP: Callable | None = None
+_QVQ_CUDA_GROUPED_P32_OP: Callable | None = None
 _QVQ_CUDA_LR_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_TRUSTED_OP: Callable | None = None
@@ -96,6 +97,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     namespace=_QVQ_CUDA_NAMESPACE,
     required_ops=(
         "gemv",
+        "gemv_grouped_p32",
         "gemv_lr",
         "gemv_v4",
         "viterbi",
@@ -179,6 +181,19 @@ def _qvq_cuda_op() -> Callable:
             if _QVQ_CUDA_OP is None:
                 _QVQ_CUDA_OP = _extension_api().op("qvq_cuda", "gemv")
     return _QVQ_CUDA_OP
+
+
+def _qvq_cuda_grouped_p32_op() -> Callable:
+    """Resolve the P32 GEMV variant with per-N16 alternative-bank IDs."""
+
+    global _QVQ_CUDA_GROUPED_P32_OP
+    if _QVQ_CUDA_GROUPED_P32_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_GROUPED_P32_OP is None:
+                _QVQ_CUDA_GROUPED_P32_OP = _extension_api().op(
+                    "qvq_cuda", "gemv_grouped_p32"
+                )
+    return _QVQ_CUDA_GROUPED_P32_OP
 
 
 def _qvq_cuda_lr_op() -> Callable:
@@ -739,7 +754,9 @@ def qvq_cuda_gemv(
     v2b2_p32: bool = False,
     v2b2_p32_lr: bool = False,
     bank_alt_id: int = 0,
+    bank_alt_ids: torch.Tensor | None = None,
     lr_split_count: int = 0,
+    _bank_alt_ids_validated: bool = False,
 ) -> torch.Tensor:
     """Multiply transformed activations by planar QVQ tiles on the current CUDA stream.
 
@@ -761,14 +778,18 @@ def qvq_cuda_gemv(
         raise ValueError("QVQ CUDA segmented-bank formats require exactly one packed selector byte per tile")
     bank_alt_id = _integer_argument("bank_alt_id", bank_alt_id)
     lr_split_count = _integer_argument("lr_split_count", lr_split_count)
+    if not isinstance(_bank_alt_ids_validated, bool):
+        raise TypeError("_bank_alt_ids_validated must be boolean")
     if lr_split_count < 0:
         raise ValueError("QVQ CUDA lr_split_count must be non-negative")
     if lr_split_count > 64:
         raise ValueError("QVQ CUDA lr_split_count must be in [1, 64] or 0 for automatic selection")
     if lr_split_count and not v2b2_p32_lr:
         raise ValueError("QVQ CUDA lr_split_count is valid only for V2B2-P32-LR")
+    if bank_alt_ids is not None and not v2b2_p32:
+        raise ValueError("QVQ CUDA per-output alternative-bank IDs require V2B2-P32")
     if v2b2_p32 or v2b2_p32_lr:
-        if not 1 <= bank_alt_id <= 3:
+        if bank_alt_ids is None and not 1 <= bank_alt_id <= 3:
             raise ValueError("QVQ CUDA V2B2-P32 bank_alt_id must be in [1, 3]")
     elif bank_alt_id != 0:
         raise ValueError("QVQ CUDA bank_alt_id is valid only for V2B2-P32")
@@ -813,6 +834,23 @@ def qvq_cuda_gemv(
             raise ValueError(f"QVQ CUDA bank selectors must have shape {(tile_count,)}")
         if vector_size == 4 and torch.any(bank_ids > 3):
             raise ValueError("QVQ V4 bank selectors must be in [0, 3]")
+    if bank_alt_ids is not None:
+        if bank_alt_ids.device != x.device or bank_alt_ids.dtype != torch.uint8:
+            raise TypeError(
+                "QVQ CUDA per-output alternative-bank IDs must be uint8 on the input CUDA device"
+            )
+        if not bank_alt_ids.is_contiguous():
+            raise ValueError("QVQ CUDA per-output alternative-bank IDs must be contiguous")
+        expected_alt_shape = (n // 16,)
+        if tuple(bank_alt_ids.shape) != expected_alt_shape:
+            raise ValueError(
+                "QVQ CUDA per-output alternative-bank IDs must have shape "
+                f"{expected_alt_shape}, got {tuple(bank_alt_ids.shape)}"
+            )
+        if not _bank_alt_ids_validated and torch.any(
+            (bank_alt_ids < 1) | (bank_alt_ids > 3)
+        ):
+            raise ValueError("QVQ CUDA per-output alternative-bank IDs must be in [1, 3]")
     levels = _pgc16_levels(x.device, codebook_version)
     if m == 0:
         return torch.empty((0, n), dtype=torch.float32 if output_fp32 else x.dtype, device=x.device)
@@ -823,6 +861,17 @@ def qvq_cuda_gemv(
     if v2b2_p32_lr:
         return _qvq_cuda_lr_op()(
             x, trellis, levels, transition_bits, n, output_fp32, bank_ids, bank_alt_id, lr_split_count
+        )
+    if bank_alt_ids is not None:
+        return _qvq_cuda_grouped_p32_op()(
+            x,
+            trellis,
+            levels,
+            transition_bits,
+            n,
+            output_fp32,
+            bank_ids,
+            bank_alt_ids,
         )
     op = _qvq_cuda_op()
     if vector_size == 4:

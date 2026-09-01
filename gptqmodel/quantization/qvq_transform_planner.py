@@ -186,7 +186,7 @@ class QVQTransformPlanner:
             "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A8", "A9",
             "A12", "A13", "A14", "A15", "A16", "A17", "A18",
             "A20", "A21", "A22", "A23", "A24", "A25", "A26", "A27", "A28", "A29", "A30",
-            "A31",
+            "A31", "A41",
         }:
             raise ValueError(f"unsupported QVQ transform-search arm: {arm}")
 
@@ -223,10 +223,11 @@ class QVQTransformPlanner:
             "A29": "remove gate/up output Hadamards without SwiGLU reparameterization",
             "A30": "A29 plus head-local V/O folding",
             "A31": "sibling-shared QKV and gate/up input RHTs plus head-local V/O folding",
+            "A41": "A31 topology with grouped sibling CUDA P32 decode fusion",
         }
         descriptors = []
         for semantic in semantics:
-            if arm in {"A0", "A24", "A25", "A26", "A27", "A28", "A29", "A30", "A31"}:
+            if arm in {"A0", "A24", "A25", "A26", "A27", "A28", "A29", "A30", "A31", "A41"}:
                 input_transform = output_transform = ONLINE_HADAMARD
             else:
                 residual_in = TransformSpec(
@@ -252,7 +253,7 @@ class QVQTransformPlanner:
                         TransformPlacement.FOLDED,
                         f"rope_qk.l{semantic.layer_index}",
                     )
-            if arm in {"A25", "A26", "A28", "A30", "A31"}:
+            if arm in {"A25", "A26", "A28", "A30", "A31", "A41"}:
                 vo_folded = TransformSpec(
                     TransformKind.HADAMARD,
                     TransformPlacement.FOLDED,
@@ -262,7 +263,7 @@ class QVQTransformPlanner:
                     output_transform = vo_folded
                 elif semantic.role == ProjectionRole.ATTENTION_O:
                     input_transform = vo_folded
-            if arm == "A31":
+            if arm in {"A31", "A41"}:
                 if semantic.role in {
                     ProjectionRole.ATTENTION_Q,
                     ProjectionRole.ATTENTION_K,
@@ -324,7 +325,7 @@ class QVQTransformPlanner:
                 in {
                     "A0", "A1", "A3", "A4", "A6", "A18", "A20", "A21", "A22", "A23", "A24",
                     "A25", "A26", "A27", "A28", "A29", "A30",
-                    "A31",
+                    "A31", "A41",
                 },
                 "checkpoint_serialization_implemented": arm == "A0",
             },

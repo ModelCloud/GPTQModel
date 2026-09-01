@@ -40,8 +40,10 @@ local KL is over 12 times A0. Removing the down transform alone also causes a
 large down-projection regression (`0.1371` to `0.4198` local output relative
 L2 when comparing A22 with A23).
 
-The cross-arm table retains the common one-layer propagation metric because
-only A0 and A25 were promoted to the complete 16-layer run.
+The cross-arm table retains the original common one-layer propagation metric.
+A31 reuses A25's fitted coordinate system with shared sibling inputs, and A41
+adds a runtime-only grouped CUDA decoder; their complete 16-layer evidence is
+reported in `docs/qvq_rotation_folding_phase2.md`.
 
 | Arm | Description | Online H/block | Other online | Folded sides/block | W2 EBPW | Layer-0 KL | Top-1 | Top-5 | Top-10 | MLX M1 ms | CUDA M1 tok/s | Dense parity | Status |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
@@ -52,12 +54,15 @@ only A0 and A25 were promoted to the complete 16-layer run.
 | A6 | zero H | 0 | 0 | 13 | `2.05442` | — | — | — | — | `1.3507` | — | rel `1.82e-6` | reject |
 | A22 | three-H aggressive | 3 | 0 | 11 | `2.05442` | `0.057908` | `.84615` | `1.0` | `1.0` | `1.3524` | — | rel `1.75e-6` | reject |
 | A25 | V/O only | 12 | 0 | 2 | `2.05442` | `0.030801` | `.87179` | `1.0` | `1.0` | `1.6405` | `27.08` | rel `1.15e-6` | Pareto/pass |
+| A31 | A25 + sibling-shared inputs | 9 | 0 | 2 | `2.05442` | `0.030801` | `.87179` | `1.0` | `1.0` | — | `28.13` | rel `1.12e-6` | Pareto/pass |
+| A41 | A31 + grouped P32 decode | 9 | 0 | 2 | `2.05458` | `0.030801` | `.87179` | `1.0` | `1.0` | — | **`31.63`** | rel `1.12e-6` | fastest Pareto |
 | A27 | permutation SwiGLU | 12 | 0 | 2 | `2.05442` | `0.034170` | `.84615` | `1.0` | `1.0` | `1.6453` | — | rel `1.13e-6` | reject |
 | A29 | identity gate/up output | 12 | 0 | 0 | `2.05442` | `0.034276` | `.94872` | `1.0` | `1.0` | `1.6453` | — | exact zero delta | reject |
 
 CUDA throughput is measured from complete packed models. MLX still lacks a
 Llama container that persists these graph bases, so its entries remain
 real-shape QuantLinear sums rather than an end-to-end claim.
+A41's EBPW includes its 19,376-byte per-N16 alternative-bank metadata.
 
 ## Exact folds
 
@@ -240,11 +245,15 @@ FP32 logits are the oracle for both arms, and the test split remains unread.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | A0 | `.917179` | `.917579` | `.493024` | `.55684` | `.82433` | `.88934` | `+.000400` |
 | A25 | `.916400` | `.916587` | `.494783` | `.54885` | `.81812` | `.88082` | `+.000187` |
+| A31 | `.916400` | `.916587` | `.494783` | `.54885` | `.81812` | `.88082` | `+.000187` |
+| A41 | `.916400` | `.916420` | `.494857` | `.54831` | `.81812` | `.88064` | `+.000020` |
 
 The small packed-versus-reconstructed deltas validate the in-memory packed
 installation and quantify the expected FP16/native-kernel rounding. At actual
-packed execution, A25 versus A0 is `-0.108%` KL, `+0.357%` logits relative L2,
+packed execution, A25/A31 versus A0 is `-0.108%` KL, `+0.357%` logits relative L2,
 `-0.80` Top-1 points, `-0.62` Top-5 points, and `-0.85` Top-10 points.
+A41 changes those values only through grouped-kernel accumulation order; its
+paired A41-minus-A31 KL and Top-1 bootstrap intervals both include zero.
 
 | Stream | Tokens | A0 packed KL | A25 packed KL | A25 KL delta | A0 Top-1 | A25 Top-1 |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |

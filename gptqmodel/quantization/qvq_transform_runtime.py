@@ -182,6 +182,293 @@ class QVQSharedInputLinear(torch.nn.Module):
         return self.linear.forward_pretransformed(transformed, output_dtype=x.dtype)
 
 
+class QVQGroupedP32InputTransformState:
+    """One shared input transform and one grouped CUDA P32 decode."""
+
+    def __init__(
+        self, group: QVQSharedInputTransformGroup, modules: dict[str, QVQLinear]
+    ):
+        # Reuse the established shared-transform validation before imposing
+        # the narrower grouped P32 contract.
+        QVQSharedInputTransformState(group, modules)
+        reference = modules[group.module_names[0]]
+        if reference.in_features % 16:
+            raise ValueError(
+                f"grouped QVQ P32 basis {group.basis_id!r} requires K divisible by 16"
+            )
+        if reference.trellis.device.type != "cuda":
+            raise ValueError("grouped QVQ P32 execution requires CUDA-resident payloads")
+
+        invariant_names = (
+            "bits",
+            "codebook_version",
+            "vector_size",
+            "trellis_window",
+            "v2b2_p32",
+            "v2b2_p32_lr",
+            "dual_v2",
+        )
+        k_tiles = reference.in_features // 16
+        trellis_parts = []
+        selector_parts = []
+        alternative_parts = []
+        output_widths = []
+        original_storage_bytes = 0
+        for module_name in group.module_names:
+            module = modules[module_name]
+            differing = [
+                name
+                for name in invariant_names
+                if getattr(module, name) != getattr(reference, name)
+            ]
+            if differing:
+                raise ValueError(
+                    f"grouped QVQ P32 basis {group.basis_id!r} has incompatible "
+                    f"{module_name}: {differing}"
+                )
+            if (
+                not module.v2b2_p32
+                or module.v2b2_p32_lr
+                or module.dual_v2
+                or module.vector_size != 2
+                or module.trellis_window != 16
+            ):
+                raise ValueError(
+                    f"grouped QVQ P32 basis {group.basis_id!r} requires direct V2B2-P32 modules"
+                )
+            if module.out_features % 16:
+                raise ValueError(
+                    f"grouped QVQ P32 consumer {module_name!r} requires N divisible by 16"
+                )
+            if module.trellis.device != reference.trellis.device:
+                raise ValueError(
+                    f"grouped QVQ P32 basis {group.basis_id!r} spans CUDA devices"
+                )
+            n_tiles = module.out_features // 16
+            tile_count = k_tiles * n_tiles
+            if module.trellis.ndim != 2 or module.trellis.shape[0] != tile_count:
+                raise ValueError(
+                    f"grouped QVQ P32 consumer {module_name!r} has incompatible trellis shape"
+                )
+            if module.trellis.dtype != torch.int32:
+                raise TypeError("grouped QVQ P32 trellises must use int32")
+            if (
+                module.bank_ids is None
+                or module.bank_ids.dtype != torch.uint8
+                or module.bank_ids.numel() != tile_count
+            ):
+                raise ValueError(
+                    f"grouped QVQ P32 consumer {module_name!r} needs one packed selector byte per tile"
+                )
+            if (
+                module.bank_alt_id is None
+                or module.bank_alt_id.dtype != torch.uint8
+                or module.bank_alt_id.numel() != 1
+            ):
+                raise ValueError(
+                    f"grouped QVQ P32 consumer {module_name!r} needs one uint8 alternative-bank ID"
+                )
+            alternative = int(module.bank_alt_id.item())
+            if not 1 <= alternative <= 3:
+                raise ValueError(
+                    f"grouped QVQ P32 consumer {module_name!r} has invalid alternative-bank ID"
+                )
+            words_per_tile = module.trellis.shape[1]
+            trellis_parts.append(
+                module.trellis.contiguous().view(k_tiles, n_tiles, words_per_tile)
+            )
+            selector_parts.append(
+                module.bank_ids.contiguous().view(k_tiles, n_tiles)
+            )
+            alternative_parts.append(
+                torch.full(
+                    (n_tiles,),
+                    alternative,
+                    dtype=torch.uint8,
+                    device=module.trellis.device,
+                )
+            )
+            output_widths.append(module.out_features)
+            original_storage_bytes += (
+                module.trellis.numel() * module.trellis.element_size()
+                + module.bank_ids.numel() * module.bank_ids.element_size()
+                + module.bank_alt_id.numel() * module.bank_alt_id.element_size()
+            )
+
+        words_per_tile = reference.trellis.shape[1]
+        if any(part.shape[-1] != words_per_tile for part in trellis_parts):
+            raise ValueError(
+                f"grouped QVQ P32 basis {group.basis_id!r} has incompatible rates"
+            )
+        self.group = group
+        self.modules = tuple(modules[name] for name in group.module_names)
+        self.trellis = torch.cat(trellis_parts, dim=1).reshape(-1, words_per_tile)
+        self.bank_ids = torch.cat(selector_parts, dim=1).reshape(-1)
+        self.bank_alt_ids = torch.cat(alternative_parts)
+        self.output_widths = tuple(output_widths)
+        self.out_features = sum(output_widths)
+        self.original_storage_bytes = original_storage_bytes
+        self.grouped_storage_bytes = sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (self.trellis, self.bank_ids, self.bank_alt_ids)
+        )
+        self.metadata_overhead_bytes = self.grouped_storage_bytes - original_storage_bytes
+        self._source: torch.Tensor | None = None
+        self._source_version: int | None = None
+        self._outputs: tuple[torch.Tensor, ...] | None = None
+        self._next_consumer_index = 0
+        self.transform_invocations = 0
+        self.grouped_gemv_invocations = 0
+        self.completed_cycles = 0
+        self.payloads_released = False
+
+    @property
+    def pending_consumers(self) -> tuple[str, ...]:
+        return self.group.module_names[self._next_consumer_index :]
+
+    def release_individual_payloads(self) -> None:
+        """Drop child payload copies after the interleaved group is complete."""
+
+        if self.payloads_released:
+            return
+        words_per_tile = self.trellis.shape[1]
+        for module in self.modules:
+            module.trellis = module.trellis.new_empty((0, words_per_tile))
+            module.bank_ids = module.bank_ids.new_empty((0,))
+            module.bank_alt_id = module.bank_alt_id.new_empty((0,))
+            module._qvq_cuda_bank_cache = None
+        self.payloads_released = True
+
+    def reset(self) -> None:
+        self._source = None
+        self._source_version = None
+        self._outputs = None
+        self._next_consumer_index = 0
+
+    @staticmethod
+    def _tensor_version(x: torch.Tensor) -> int | None:
+        return None if torch.is_inference(x) else x._version
+
+    def _grouped_outputs(
+        self, transformed: torch.Tensor, output_dtype: torch.dtype
+    ) -> tuple[torch.Tensor, ...]:
+        from gptqmodel.utils.qvq_cuda import qvq_cuda_gemv
+
+        if transformed.dtype not in (torch.float16, torch.bfloat16):
+            raise TypeError(
+                "grouped QVQ P32 execution requires FP16 or BF16 transformed activations"
+            )
+        flat = transformed.reshape(-1, transformed.shape[-1]).contiguous()
+        reference = self.modules[0]
+        grouped_inner = qvq_cuda_gemv(
+            flat,
+            self.trellis,
+            reference.bits,
+            out_features=self.out_features,
+            codebook_version=reference.codebook_version,
+            output_fp32=True,
+            vector_size=reference.vector_size,
+            bank_ids=self.bank_ids,
+            v2b2_p32=True,
+            bank_alt_ids=self.bank_alt_ids,
+            _bank_alt_ids_validated=True,
+        )
+        self.grouped_gemv_invocations += 1
+        leading_shape = transformed.shape[:-1]
+        pieces = grouped_inner.split(self.output_widths, dim=-1)
+        return tuple(
+            module.recover_output(
+                piece.contiguous().reshape(*leading_shape, module.out_features),
+                output_dtype=output_dtype,
+            )
+            for module, piece in zip(self.modules, pieces, strict=True)
+        )
+
+    def consume(
+        self,
+        consumer_index: int,
+        module_name: str,
+        module: QVQLinear,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        if consumer_index != self._next_consumer_index:
+            reason = (
+                "duplicate consumer"
+                if consumer_index < self._next_consumer_index
+                else "out-of-order consumer"
+            )
+            raise RuntimeError(
+                f"grouped QVQ P32 basis {self.group.basis_id!r} received {reason} "
+                f"{module_name!r}; pending={self.pending_consumers}"
+            )
+        if self.group.module_names[consumer_index] != module_name:
+            raise RuntimeError("grouped QVQ P32 wrapper order is inconsistent")
+
+        if consumer_index == 0:
+            self._source = x
+            self._source_version = self._tensor_version(x)
+            transformed = module.transform_input(x)
+            self.transform_invocations += 1
+            self._outputs = self._grouped_outputs(transformed, x.dtype)
+        elif self._source is not x or (
+            self._source_version is not None and self._source_version != x._version
+        ):
+            raise RuntimeError(
+                f"grouped QVQ P32 basis {self.group.basis_id!r} received a new or "
+                f"mutated activation; pending={self.pending_consumers}"
+            )
+
+        outputs = self._outputs
+        if outputs is None:
+            raise RuntimeError("grouped QVQ P32 output cache is unexpectedly empty")
+        output = outputs[consumer_index]
+        self._next_consumer_index += 1
+        if self._next_consumer_index == len(self.group.module_names):
+            self.completed_cycles += 1
+            self.reset()
+        return output
+
+
+class QVQGroupedP32Linear(torch.nn.Module):
+    """A child projection served by one eager grouped P32 sibling decode."""
+
+    def __init__(
+        self,
+        linear: QVQLinear,
+        state: QVQGroupedP32InputTransformState,
+        module_name: str,
+        consumer_index: int,
+    ):
+        super().__init__()
+        self.linear = linear
+        object.__setattr__(self, "_grouped_p32_state", state)
+        self.module_name = module_name
+        self.consumer_index = consumer_index
+
+    @property
+    def in_features(self) -> int:
+        return self.linear.in_features
+
+    @property
+    def out_features(self) -> int:
+        return self.linear.out_features
+
+    @property
+    def bias(self) -> torch.Tensor | None:
+        return self.linear.bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self._grouped_p32_state.consume(
+            self.consumer_index, self.module_name, self.linear, x
+        )
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        del destination, prefix, keep_vars
+        raise RuntimeError(
+            "grouped QVQ P32 runtime payloads are not checkpoint-serializable"
+        )
+
+
 def shared_input_groups(
     plan: QVQTransformPlan,
 ) -> tuple[QVQSharedInputTransformGroup, ...]:
@@ -236,10 +523,60 @@ def install_qvq_shared_input_transforms(
     return states
 
 
+def install_qvq_grouped_p32_input_transforms(
+    model: torch.nn.Module,
+    plan: QVQTransformPlan,
+) -> dict[str, QVQGroupedP32InputTransformState]:
+    """Install CUDA P32 sibling fusion and release superseded child payloads.
+
+    The grouped buffers contain exactly the same trellis words and packed bank
+    selectors as their children, interleaved in the K-major/N-major layout the
+    CUDA decoder expects.  Serialization is intentionally unsupported because
+    child payload buffers are emptied after installation.
+    """
+
+    prepared: list[
+        tuple[
+            QVQSharedInputTransformGroup,
+            dict[str, QVQLinear],
+            QVQGroupedP32InputTransformState,
+        ]
+    ] = []
+    for group in shared_input_groups(plan):
+        modules = {}
+        for module_name in group.module_names:
+            module = model.get_submodule(module_name)
+            if not isinstance(module, QVQLinear):
+                raise TypeError(
+                    f"grouped QVQ P32 consumer {module_name!r} must be a packed "
+                    f"QVQLinear, got {type(module).__name__}"
+                )
+            modules[module_name] = module
+        prepared.append(
+            (group, modules, QVQGroupedP32InputTransformState(group, modules))
+        )
+
+    states = {}
+    for group, modules, state in prepared:
+        state.release_individual_payloads()
+        for consumer_index, module_name in enumerate(group.module_names):
+            parent_name, _, child_name = module_name.rpartition(".")
+            wrapper = QVQGroupedP32Linear(
+                modules[module_name], state, module_name, consumer_index
+            )
+            wrapper.train(modules[module_name].training)
+            setattr(model.get_submodule(parent_name), child_name, wrapper)
+        states[group.basis_id] = state
+    return states
+
+
 __all__ = [
+    "QVQGroupedP32InputTransformState",
+    "QVQGroupedP32Linear",
     "QVQSharedInputLinear",
     "QVQSharedInputTransformGroup",
     "QVQSharedInputTransformState",
     "install_qvq_shared_input_transforms",
+    "install_qvq_grouped_p32_input_transforms",
     "shared_input_groups",
 ]

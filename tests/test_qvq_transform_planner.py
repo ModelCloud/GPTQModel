@@ -56,6 +56,7 @@ def test_qvq_transform_plan_counts_and_role_descriptors():
     assert planner.build_transform_plan("A29").online_hadamards_per_block == 12
     assert planner.build_transform_plan("A30").online_hadamards_per_block == 10
     assert planner.build_transform_plan("A31").online_hadamards_per_block == 9
+    assert planner.build_transform_plan("A41").online_hadamards_per_block == 9
 
     a31 = planner.build_transform_plan("A31")
     layer_zero = [item for item in a31.modules if ".layers.0." in item.module_name]
@@ -98,7 +99,7 @@ def test_qvq_transform_plan_counts_and_role_descriptors():
     "arm",
     (
         "A1", "A3", "A4", "A6", "A20", "A21", "A22", "A23", "A24", "A25", "A26",
-        "A27", "A28", "A29", "A30", "A31",
+        "A27", "A28", "A29", "A30", "A31", "A41",
     ),
 )
 def test_qvq_llama_dense_rewrite_preserves_final_logits(arm):

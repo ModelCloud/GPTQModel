@@ -1146,6 +1146,39 @@ class QVQLinear(BaseQuantLinear):
         )
         return output.reshape(*transformed.shape[:-1], self.out_features).to(target_dtype)
 
+    def recover_output(
+        self,
+        inner_output: torch.Tensor,
+        *,
+        output_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        """Apply this module's output-side QVQ recovery to decoded inner output.
+
+        Grouped packed decoders use this boundary to decode several sibling
+        projections in one kernel while retaining each module's independent
+        output Hadamard, ``SV``, and bias.  No input transform or trellis decode
+        runs here.
+        """
+
+        if inner_output.shape[-1] != self.out_features:
+            raise ValueError(
+                f"QVQ expected inner output width {self.out_features}, "
+                f"got {inner_output.shape[-1]}"
+            )
+        if self.training:
+            raise RuntimeError("separate QVQ output recovery is inference-only")
+        target_dtype = inner_output.dtype if output_dtype is None else output_dtype
+        if inner_output.numel() == 0:
+            return inner_output.to(target_dtype)
+        compute_dtype = _qvq_compute_dtype(target_dtype, inner_output.device.type)
+        recovered = self._recover_output_compute_dtype(
+            inner_output.reshape(-1, self.out_features),
+            compute_dtype,
+        )
+        return recovered.reshape(*inner_output.shape[:-1], self.out_features).to(
+            target_dtype
+        )
+
     def _forward_compute_dtype(self, x_2d: torch.Tensor, compute_dtype: torch.dtype) -> torch.Tensor:
         if self.training:
             # Keep the differentiable Python butterfly path for the reference
@@ -1201,6 +1234,13 @@ class QVQLinear(BaseQuantLinear):
         compute_dtype: torch.dtype,
     ) -> torch.Tensor:
         output = self._inner_forward(transformed)
+        return self._recover_output_compute_dtype(output, compute_dtype)
+
+    def _recover_output_compute_dtype(
+        self,
+        output: torch.Tensor,
+        compute_dtype: torch.dtype,
+    ) -> torch.Tensor:
         output_dtype = output.dtype
         if self.output_hadamard:
             return _qvq_hadamard_fused(

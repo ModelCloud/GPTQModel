@@ -168,7 +168,7 @@ Artifacts:
 - `artifacts/qvq_rotation_a25_a31_w2_packed_cuda_sm80_stage1.json`
 - `artifacts/qvq_rotation_a25_a31_w2_packed_cuda_sm80_full16.json`
 
-Validation on the SM80 host is green: `2,157 passed, 136 skipped` across the
+Validation at the A31 checkpoint was green: `2,157 passed, 136 skipped` across the
 broad QVQ, CUDA, P32, folded-axis, planner, and shared-runtime matrix. The
 skips are unavailable MPS/MLX, multi-GPU, and free-threaded cases. Ruff and
 `git diff --check` also pass.
@@ -381,7 +381,91 @@ what matters for decode latency.
 ## A41: sibling/boundary transform fusion
 
 Track kernel-launch savings separately from mathematical transform savings.
-Even when a transform must remain:
+A41 keeps A31's quality-valid nine-Hadamard topology but fuses the sibling
+inner decodes that consume each shared activation. The first Q/K/V consumer
+runs one combined P32 GEMV and caches all three recovered outputs; the first
+gate/up consumer does the same for those two outputs. Each projection retains
+its own output Hadamard, `SV`, and bias.
+
+P32 fitting chooses `bank_alt_id` independently per projection, so forcing a
+common alternative bank would alter the quantizer. The new gated CUDA entry
+point instead accepts one uint8 alternative-bank ID per N16 output tile. It
+interleaves the original trellis words and packed selector bytes in the
+decoder's K-major/N-major layout. Child payload copies are then released, so
+the trellis and selector payload remains storage-neutral. The expanded
+per-N16 bank metadata costs 19,376 bytes for all 32 groups, moving W2 EBPW only
+from `2.054419024` to `2.054578321` (`+0.000159297` BPW).
+
+The initial implementation exposed an important rejected variant. Splitting a
+row-major grouped output produced non-contiguous module slices for M > 1,
+which made the output-recovery path about 188% slower in the seven-projection
+suite. Materializing each small slice contiguously removed that regression:
+the corrected stage-1 suite is 10.7--14.4% faster at M=1/2/4/8 and prefill is
+0.2--0.7% faster. The failed and corrected raw artifacts are both retained.
+
+### A41 full-depth SM80 result
+
+A31 was fit progressively across all 112 projections. A41 then reused those
+exact fitted tensors rather than refitting a runtime-only arm. All module
+payload-hash dictionaries are identical, reconstructed quality is identical,
+and both dense rewrites have `1.1171e-6` logits relative L2, `9.2506e-5` max
+absolute logit delta, and 100% Top-1/5/10 identity.
+
+| Metric | A31 | A41 grouped P32 | A41 delta |
+| --- | ---: | ---: | ---: |
+| Online full H/block | 9 | 9 | 0 |
+| P32 inner launches/block | 7 | **4** | **-3** |
+| Effective BPW | `2.054419024` | `2.054578321` | `+0.000159297` |
+| Packed final KL | `.916587496` | **`.916420329`** | `-0.0182%` |
+| Packed logits rel-L2 | `.494783025` | `.494856902` | `+0.0149%` |
+| Packed Top-1 | `.548845` | `.548313` | `-0.0533` point |
+| Packed Top-5 | `.818117` | `.818117` | tie |
+| Packed Top-10 | `.880817` | `.880639` | `-0.0178` point |
+
+The 2,000-resample paired held-out-text bootstrap gives A41-minus-A31 KL
+median `-0.000160`, 95% CI `[-0.000403, +0.000062]`, and Top-1 median
+`-0.000533`, CI `[-0.002116, +0.001255]`. Both intervals cross zero. Against
+the separately measured but sample-aligned A0 model, A41 KL is `.916420`
+versus `.917579`; the paired KL CI is `[-0.028652, +0.026789]` and the Top-1
+CI is `[-0.021935, +0.004124]`. A41 therefore remains statistically
+compatible with A0 under the present evidence.
+
+Five alternating idle-host cycles give the fresh paired runtime result:
+
+| Batch | A31 decode median (p95) ms | A41 decode median (p95) ms | Median delta | p95 delta |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | `35.5497 (38.3549)` | **`31.6160 (32.7834)`** | **-11.07%** | **-14.53%** |
+| 2 | `35.5845 (36.3940)` | `34.1366 (38.8844)` | **-4.07%** | `+6.84%` |
+| 4 | `35.7550 (36.4831)` | `33.5754 (37.0770)` | **-6.10%** | `+1.63%` |
+| 8 | `35.7289 (38.7215)` | `33.3527 (34.2620)` | **-6.65%** | **-11.52%** |
+
+The isolated 112-projection suite improves `16.68%` at M1 and
+`8.71--8.76%` at M2--M8 median; p95 improves `9.43--16.25%`. Prefill medians
+improve `0.19--1.21%`. Relative to the historical A0 medians, A41 is
+`15.95%/10.96%/14.72%/13.13%` faster at B1/B2/B4/B8, but that A0 comparison
+is contextual rather than a fresh paired timing run.
+
+A41 is now the fastest quality-compatible Pareto arm and clears the primary
+M=1 >=10% phase-2 runtime gate while retaining the <=9-H topology. It does not
+clear a 10% full-model B2 gate, and B2/B4 p95 need another repeat before a
+tail-latency claim. Productionization also needs a checkpoint/load-time grouped
+payload format; the experimental runtime deliberately fails closed on
+serialization after releasing child payload copies.
+
+Artifacts:
+
+- `artifacts/qvq_rotation_a31_a41_w2_packed_cuda_sm80_stage1.json` (rejected
+  strided-output implementation);
+- `artifacts/qvq_rotation_a31_a41_w2_packed_cuda_sm80_stage1_contiguous.json`;
+- `artifacts/qvq_rotation_a31_a41_w2_packed_cuda_sm80_full16.json`.
+
+Post-A41 validation on the SM80 host is green: `2,162 passed, 136 skipped`
+across the broad QVQ, CUDA, P32, folded-axis, planner, shared-runtime, and
+grouped-runtime matrix. The CUDA extension was rebuilt from source before the
+new grouped parity test; Ruff, Python compilation, and `git diff --check` also
+pass.
+
+Further fusion opportunities remain even when a transform must remain:
 
 - batch/fuse Q and K output transforms when their chosen basis permits it;
 - batch gate and up output transforms in one dispatch;
@@ -398,7 +482,7 @@ full packed decode time is materially better.
 Use the following promotion sequence rather than a Cartesian sweep:
 
 1. A31 fixed sibling-shared basis. **Complete: quality-exact to A25 and Pareto.**
-2. Apply A41 grouped-kernel fusion to A31 to target the remaining B1/B2 gap.
+2. A41 grouped-kernel fusion. **Complete: M1 gate passed and new Pareto point.**
 3. Reserve A32 for a future fitter whose module-local input recovery breaks
    exact sibling sharing.
 4. In parallel, pursue A33 learned global residual basis.
@@ -461,15 +545,17 @@ The most promising near-term points are therefore:
 
 | Candidate | Full-H/block target | Main idea | Risk |
 | --- | ---: | --- | --- |
-| A31 | 9 | share QKV and gate/up input RHTs + A25 | low/medium |
+| A31 | 9 | share QKV and gate/up input RHTs + A25 | validated Pareto |
+| A41 | 9 | A31 plus grouped QKV and gate/up P32 decode | **validated winner** |
 | A32 | 9 | learn those shared bases for QVQ | medium |
 | A33 | 5 | learned persistent residual basis + A25 | medium/high |
 | A34 | 5 + cheap bridges | common H core, layer-adapted sparse basis | medium/high |
 | A36 | 3 | learned exact RoPE-compatible Q/K fold | high |
 | A38 | 3 | learned exact SwiGLU symmetry | high |
 | A36+A38 | 1 | combine successful Q/K and SwiGLU folds | very high |
-| A39/A41 | variable | cheaper/fused unavoidable transforms | implementation risk |
+| A39 | variable | cheaper unavoidable down transform | implementation risk |
 
-The next milestone should not be another two-transform reduction. It should be
-a **quality-valid <=9-H architecture with a reproducible >=10% packed decode
-speedup**, followed by a push toward the 5-H topology.
+The <=9-H, >=10% M1 milestone is now met by A41. The next milestone is to
+retain that runtime win across an independent fitting seed, stabilize B2/B4
+tail latency, productionize grouped checkpoint loading, and then push toward
+the learned 5-H A33/A34 topology.

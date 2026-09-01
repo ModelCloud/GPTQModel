@@ -190,6 +190,7 @@ class LlamaQVQTransformImplementor:
             "A29",
             "A30",
             "A31",
+            "A41",
         }
         if residual_folded:
             residual_basis = _random_hadamard_basis(hidden_size, seed=seed)

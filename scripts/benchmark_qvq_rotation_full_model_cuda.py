@@ -13,6 +13,7 @@ serialized.
 from __future__ import annotations
 
 import argparse
+import copy
 import gc
 import hashlib
 import os
@@ -45,6 +46,7 @@ from gptqmodel.quantization.qvq_transform_planner import (  # noqa: E402
     QVQTransformPlanner,
 )
 from gptqmodel.quantization.qvq_transform_runtime import (  # noqa: E402
+    install_qvq_grouped_p32_input_transforms,
     install_qvq_shared_input_transforms,
 )
 from gptqmodel.utils.qvq_cuda import prewarm_qvq_cuda  # noqa: E402
@@ -633,6 +635,11 @@ def main():
     parser.add_argument("--module-suite-warmup", type=int, default=10)
     parser.add_argument("--module-suite-iterations", type=int, default=30)
     parser.add_argument("--timing-cycles", type=int, default=3)
+    parser.add_argument(
+        "--reuse-identical-a31-payloads",
+        action="store_true",
+        help="reuse A31's fitted P32 payloads for a later A41 runtime-only arm",
+    )
     parser.add_argument("--model", default=MODEL_ID)
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument(
@@ -742,6 +749,7 @@ def main():
     packed_models = {}
     shared_states_by_arm = {}
     descriptors_by_arm = {}
+    reusable_a31 = None
     for arm in args.arms:
         arm_started = time.perf_counter()
         model = (
@@ -776,42 +784,88 @@ def main():
         }
         payload["arms"][arm] = arm_payload
         _write(args.json, payload)
-        runtime_payloads = {}
-
-        for layer_index in range(args.layers):
-            layer_descriptors = descriptors_by_layer[layer_index]
-            for roles in ROLE_GROUPS:
-                grouped = [item for item in layer_descriptors if item.role in roles]
-                names = [item.module_name for item in grouped]
-                captured = _capture(model, calibration, names, device)
-                for descriptor in grouped:
-                    current = model.get_submodule(descriptor.module_name)
-                    record, tensors = _quantize_module(
-                        current,
-                        descriptor,
-                        captured[descriptor.module_name],
-                        args.bits,
-                        args.seed,
-                        device,
-                    )
-                    arm_payload["modules"].append(record)
-                    runtime_payloads[descriptor.module_name] = tensors
-                    print(
-                        f"{arm} L{layer_index:02d} {descriptor.role.value}: "
-                        f"{record['fit_seconds']:.1f}s, "
-                        f"wrel={record['weight_relative_l2']:.4f}, "
-                        f"orel={record['output_relative_l2']:.4f}",
-                        flush=True,
-                    )
-                del captured
-                gc.collect()
-                _empty_cache(device)
-            arm_payload["completed_layers"] = layer_index + 1
-            _write(args.json, payload)
-
-        arm_payload["reconstructed_quality"] = _aggregate_evaluation(
-            model, validation_streams, dense_logits_streams, device
+        reuse_a31 = (
+            args.reuse_identical_a31_payloads
+            and arm == "A41"
+            and reusable_a31 is not None
         )
+        if reuse_a31:
+            source_descriptors = reusable_a31["descriptors"]
+            candidate_signature = tuple(
+                (
+                    item.module_name,
+                    item.input_transform,
+                    item.output_transform,
+                    item.local_input_scale,
+                    item.local_output_scale,
+                )
+                for item in descriptors.values()
+            )
+            source_signature = tuple(
+                (
+                    item.module_name,
+                    item.input_transform,
+                    item.output_transform,
+                    item.local_input_scale,
+                    item.local_output_scale,
+                )
+                for item in source_descriptors.values()
+            )
+            if candidate_signature != source_signature:
+                raise RuntimeError("A41 cannot reuse A31 payloads with a different transform plan")
+            runtime_payloads = reusable_a31["runtime_payloads"]
+            arm_payload["modules"] = copy.deepcopy(reusable_a31["modules"])
+            arm_payload["completed_layers"] = args.layers
+            arm_payload["fit_reused_from"] = "A31"
+            arm_payload["reconstructed_quality"] = copy.deepcopy(
+                reusable_a31["reconstructed_quality"]
+            )
+            print("A41: reusing byte-identical fitted A31 P32 payloads", flush=True)
+        else:
+            runtime_payloads = {}
+            for layer_index in range(args.layers):
+                layer_descriptors = descriptors_by_layer[layer_index]
+                for roles in ROLE_GROUPS:
+                    grouped = [item for item in layer_descriptors if item.role in roles]
+                    names = [item.module_name for item in grouped]
+                    captured = _capture(model, calibration, names, device)
+                    for descriptor in grouped:
+                        current = model.get_submodule(descriptor.module_name)
+                        record, tensors = _quantize_module(
+                            current,
+                            descriptor,
+                            captured[descriptor.module_name],
+                            args.bits,
+                            args.seed,
+                            device,
+                        )
+                        arm_payload["modules"].append(record)
+                        runtime_payloads[descriptor.module_name] = tensors
+                        print(
+                            f"{arm} L{layer_index:02d} {descriptor.role.value}: "
+                            f"{record['fit_seconds']:.1f}s, "
+                            f"wrel={record['weight_relative_l2']:.4f}, "
+                            f"orel={record['output_relative_l2']:.4f}",
+                            flush=True,
+                        )
+                    del captured
+                    gc.collect()
+                    _empty_cache(device)
+                arm_payload["completed_layers"] = layer_index + 1
+                _write(args.json, payload)
+
+            arm_payload["reconstructed_quality"] = _aggregate_evaluation(
+                model, validation_streams, dense_logits_streams, device
+            )
+            if arm == "A31" and args.reuse_identical_a31_payloads:
+                reusable_a31 = {
+                    "runtime_payloads": runtime_payloads,
+                    "modules": copy.deepcopy(arm_payload["modules"]),
+                    "descriptors": descriptors,
+                    "reconstructed_quality": copy.deepcopy(
+                        arm_payload["reconstructed_quality"]
+                    ),
+                }
         installed = _install_packed_modules(
             model, runtime_payloads, descriptors, device
         )
@@ -829,14 +883,29 @@ def main():
             ),
             metadata=plan.metadata,
         )
-        shared_states = install_qvq_shared_input_transforms(model, runtime_plan)
+        if arm == "A41":
+            shared_states = install_qvq_grouped_p32_input_transforms(
+                model, runtime_plan
+            )
+        else:
+            shared_states = install_qvq_shared_input_transforms(model, runtime_plan)
+        grouped_metadata_bytes = sum(
+            getattr(state, "metadata_overhead_bytes", 0)
+            for state in shared_states.values()
+        )
         arm_payload["shared_input_runtime"] = {
+            "mode": "grouped_p32" if arm == "A41" else "shared_transform",
             "group_count": len(shared_states),
+            "grouped_metadata_bytes": grouped_metadata_bytes,
             "groups": {
                 basis_id: {
                     "module_names": list(state.group.module_names),
                     "su_sha256": _tensor_sha256(
                         installed[state.group.module_names[0]].SU
+                    ),
+                    "grouped_gemv": hasattr(state, "grouped_gemv_invocations"),
+                    "metadata_overhead_bytes": getattr(
+                        state, "metadata_overhead_bytes", 0
                     ),
                 }
                 for basis_id, state in shared_states.items()
@@ -845,13 +914,18 @@ def main():
         arm_payload["packed_quality"] = _aggregate_evaluation(
             model, validation_streams, dense_logits_streams, device
         )
-        storage_bits = sum(item["storage_bits"] for item in arm_payload["modules"])
+        qvq_storage_bits = sum(
+            item["storage_bits"] for item in arm_payload["modules"]
+        )
+        storage_bits = qvq_storage_bits + grouped_metadata_bytes * 8
         weight_elements = sum(
             item["weight_elements"] for item in arm_payload["modules"]
         )
         arm_payload.update(
             {
                 "packed_modules": len(installed),
+                "qvq_payload_bpw": qvq_storage_bits / weight_elements,
+                "transform_metadata_bits": grouped_metadata_bytes * 8,
                 "effective_bpw": storage_bits / weight_elements,
                 "elapsed_seconds": time.perf_counter() - arm_started,
                 "status": "complete",
@@ -891,6 +965,9 @@ def main():
                 basis_id: {
                     "transform_invocations": state.transform_invocations,
                     "completed_cycles": state.completed_cycles,
+                    "grouped_gemv_invocations": getattr(
+                        state, "grouped_gemv_invocations", 0
+                    ),
                     "pending_consumers": list(state.pending_consumers),
                 }
                 for basis_id, state in shared_states_by_arm[arm].items()
