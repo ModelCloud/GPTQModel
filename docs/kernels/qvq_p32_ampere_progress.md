@@ -1484,6 +1484,18 @@ the x4 control's 0.033792/0.033792/0.033792/0.032768 ms falls to
 Affected-case log weighting now reaches **1.562%** cumulative median
 improvement versus fetched main; planar timings remain excluded.
 
+The twelfth v18 progression bypasses the Python autotune-key lookup for the
+measured M8 `(K,N)=(5120,1024)` hot shape and directly launches its stable
+48-way plan. Unknown MKNs still use the default-on process-local tuner, and
+no plan is written to disk. In the matched 100-warmup/4000-iteration screen,
+latency falls from a 0.033533 ms affected geomean to 0.033276 ms, a
+**1.0077x** speedup, with maximum absolute error below `1.53e-05`. Artifacts
+are `artifacts/a100_p32_window/v18_m8_fullkv_x2_scalar_guard_control.json`
+and
+`artifacts/a100_p32_window/v18_m8_fullkv_minimal_fastreturn_candidate.json`.
+Affected-case log weighting now reaches **1.584%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
@@ -1543,6 +1555,18 @@ across M1/M2/M4 because its larger scheduled body outweighed eliminating the
 uniform divisions. Diagnostics use the `v18_m4_w35_vertical_packed_`,
 `v18_m16_vertical_packed_`, `v18_m8_fullq_statick_packed_`, and
 `v18_scalar_fullkv_static_ksplit_` prefixes; all source changes were restored.
+
+Four later host/epilogue experiments were rejected. Skipping dead-row shared
+staging after the accepted M8 `ldmatrix.x2` load and replacing scalar output
+stores with `float2` both regressed their matched full-KV controls. A final
+head-to-head autotune pass and a 2% selection hysteresis still mis-ranked the
+short split-48 launch because CUDA-event quantization dominated first-use
+samples. Finally, generalizing direct measured dispatch across all 28 M8
+cases was event-quantized neutral (three wins, 22 ties, two losses after
+excluding one queue-stall sample), so only the focused full-KV path remains.
+Diagnostics use the `v18_m8_fullkv_x2_deadrows_`,
+`v18_m8_fullkv_x2_float2_`, `v18_m8_fullkv_x2_autotune_`, and
+`v18_m8_fastplans_` prefixes; rejected source changes were restored.
 
 The direct 140-case post-progression refresh is diagnostic only. Isolated
 0.22-0.29 ms charges appeared in otherwise stable M2, M16, and full-KV
