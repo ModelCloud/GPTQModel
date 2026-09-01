@@ -1409,6 +1409,14 @@ MLP-gate/up improves 3.191%. The diagnostic candidate is
 selective progression, affected-case log weighting reaches **0.816%**
 cumulative median improvement versus fetched main.
 
+The fifth v18 progression extends packed M2 groups to ten selective W2/W3
+cases. Every retained median improves and their geomean gain is **2.354%**.
+W2 attention-out and linear-Z regress and therefore keep the prior decoder;
+the distinct four-stage W2 MLP-down path remains enabled. The candidate is
+`artifacts/a100_p32_window/v18_m2_packed_pgc_w23_candidate.json`.
+Affected-case log weighting now reaches **0.984%** cumulative median
+improvement versus fetched main.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
