@@ -35,6 +35,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear  # noqa: E402
 from gptqmodel.quantization.qvq import (  # noqa: E402
+    optimize_qvq_output_channel_scales,
     pack_qvq_binary_bank_ids,
     quantize_qvq_linear,
 )
@@ -47,6 +48,7 @@ from gptqmodel.quantization.qvq_transform_planner import (  # noqa: E402
 )
 from gptqmodel.quantization.qvq_transform_runtime import (  # noqa: E402
     install_qvq_grouped_p32_input_transforms,
+    install_qvq_refactored_p32_runtime,
     install_qvq_shared_input_transforms,
 )
 from gptqmodel.utils.qvq_cuda import prewarm_qvq_cuda  # noqa: E402
@@ -128,12 +130,12 @@ def _dense_logits(model, encoded, device):
     return rows
 
 
-def _runtime_tensors(result):
+def _runtime_tensors(result, *, SV=None):
     packed_bank_ids = pack_qvq_binary_bank_ids(result.bank_ids)
     tensors = {
         "trellis": result.trellis.detach().cpu().contiguous(),
         "SU": result.SU.detach().cpu().contiguous(),
-        "SV": result.SV.detach().cpu().contiguous(),
+        "SV": (result.SV if SV is None else SV).detach().cpu().contiguous(),
         "bank_ids": packed_bank_ids.detach().cpu().contiguous(),
         "bank_alt_id": result.bank_alt_id.detach().cpu().contiguous(),
     }
@@ -142,7 +144,16 @@ def _runtime_tensors(result):
     return tensors
 
 
-def _quantize_module(module, descriptor, inputs, bits, seed, device):
+def _quantize_module(
+    module,
+    descriptor,
+    inputs,
+    bits,
+    seed,
+    device,
+    *,
+    fixed_trellis_correction=False,
+):
     inputs = inputs.to(device)
     weight = module.weight.detach().float()
     hessian = inputs.T @ inputs / inputs.shape[0]
@@ -161,10 +172,59 @@ def _quantize_module(module, descriptor, inputs, bits, seed, device):
         v2b2_p32=True,
         bank_count=2,
     )
+    baseline_runtime_tensors = _runtime_tensors(result)
+    reconstructed_weight = result.weight
+    selected_SV = result.SV
+    correction = None
+    if fixed_trellis_correction:
+        correction_started = time.perf_counter()
+        selected_SV, reconstructed_weight, corrected_proxy_loss, accepted_channels = (
+            optimize_qvq_output_channel_scales(
+                weight,
+                result.inner_weight,
+                hessian,
+                result.SU,
+                result.SV,
+                input_hadamard=result.input_hadamard,
+                output_hadamard=result.output_hadamard,
+            )
+        )
+        corrected_runtime_tensors = _runtime_tensors(result, SV=selected_SV)
+        baseline_hashes = {
+            name: _tensor_sha256(tensor)
+            for name, tensor in baseline_runtime_tensors.items()
+        }
+        corrected_hashes = {
+            name: _tensor_sha256(tensor)
+            for name, tensor in corrected_runtime_tensors.items()
+        }
+        changed_tensors = sorted(
+            name
+            for name in baseline_hashes
+            if baseline_hashes[name] != corrected_hashes[name]
+        )
+        if set(changed_tensors) - {"SV"}:
+            raise RuntimeError(
+                "fixed-trellis correction changed tensors outside the serialized SV recovery vector"
+            )
+        if float(corrected_proxy_loss) > float(result.proxy_loss):
+            raise RuntimeError("fixed-trellis correction regressed its calibration proxy")
+        correction = {
+            "kind": "fixed_trellis_output_channel_sv",
+            "SU_trainable": False,
+            "accepted_channels": accepted_channels,
+            "proxy_loss_before": float(result.proxy_loss),
+            "proxy_loss_after": float(corrected_proxy_loss),
+            "seconds": time.perf_counter() - correction_started,
+            "changed_tensors": changed_tensors,
+            "tensor_sha256_before": baseline_hashes,
+        }
+        runtime_tensors = corrected_runtime_tensors
+    else:
+        runtime_tensors = baseline_runtime_tensors
     _synchronize(device)
     fit_seconds = time.perf_counter() - started
-    quantized_output = inputs @ result.weight.T
-    runtime_tensors = _runtime_tensors(result)
+    quantized_output = inputs @ reconstructed_weight.T
     storage_bits = sum(
         tensor.numel() * tensor.element_size() * 8
         for tensor in runtime_tensors.values()
@@ -175,7 +235,9 @@ def _quantize_module(module, descriptor, inputs, bits, seed, device):
         "shape": list(weight.shape),
         "input_hadamard": result.input_hadamard,
         "output_hadamard": result.output_hadamard,
-        "weight_relative_l2": float((result.weight - weight).norm() / weight.norm()),
+        "weight_relative_l2": float(
+            (reconstructed_weight - weight).norm() / weight.norm()
+        ),
         "output_relative_l2": float(
             (quantized_output - dense_output).norm() / dense_output.norm()
         ),
@@ -187,8 +249,10 @@ def _quantize_module(module, descriptor, inputs, bits, seed, device):
             name: _tensor_sha256(tensor) for name, tensor in runtime_tensors.items()
         },
     }
+    if correction is not None:
+        record["fixed_trellis_correction"] = correction
     with torch.inference_mode():
-        module.weight.copy_(result.weight)
+        module.weight.copy_(reconstructed_weight)
     del result, hessian, inputs, dense_output, quantized_output
     _empty_cache(device)
     return record, runtime_tensors
@@ -640,6 +704,14 @@ def main():
         action="store_true",
         help="reuse A31's fitted P32 payloads for a later A41 runtime-only arm",
     )
+    parser.add_argument(
+        "--runtime-oracle",
+        choices=("plain-refactored", "plain-refactored-corrected"),
+        help=(
+            "fit one canonical A31-basis P32 payload and execute it as ordinary "
+            "per-module P32 versus the fail-closed refactored grouped runtime"
+        ),
+    )
     parser.add_argument("--model", default=MODEL_ID)
     parser.add_argument("--local-files-only", action="store_true")
     parser.add_argument(
@@ -649,6 +721,20 @@ def main():
         / "artifacts/qvq_rotation_full16_a0_a25_w2_packed_cuda_sm80.json",
     )
     args = parser.parse_args()
+    oracle_arms = {
+        "plain-refactored": ("P0", "R0"),
+        "plain-refactored-corrected": ("P0+C", "R0+C"),
+    }
+    if args.runtime_oracle and tuple(args.arms) != oracle_arms[args.runtime_oracle]:
+        parser.error(
+            f"--runtime-oracle {args.runtime_oracle} requires "
+            f"--arms {','.join(oracle_arms[args.runtime_oracle])}"
+        )
+    if args.runtime_oracle and args.reuse_identical_a31_payloads:
+        parser.error(
+            "--runtime-oracle already enforces canonical payload reuse and cannot "
+            "be combined with --reuse-identical-a31-payloads"
+        )
     if not torch.cuda.is_available():
         parser.error("CUDA is required")
     device = torch.device("cuda")
@@ -744,13 +830,37 @@ def main():
         ],
         "arms": {},
     }
+    if args.runtime_oracle:
+        payload["runtime_oracle"] = {
+            "mode": args.runtime_oracle,
+            "reference_arm": args.arms[0],
+            "candidate_arm": args.arms[1],
+            "canonical_transform_plan": "A31",
+            "canonical_payload_materializations": 1,
+            "fixed_trellis_correction": (
+                {
+                    "kind": "fixed_trellis_output_channel_sv",
+                    "mutable_tensors": ["SV"],
+                    "immutable_tensors": [
+                        "trellis",
+                        "SU",
+                        "bank_ids",
+                        "bank_alt_id",
+                        "bias",
+                    ],
+                    "SU_trainable": False,
+                }
+                if args.runtime_oracle == "plain-refactored-corrected"
+                else None
+            ),
+        }
     _write(args.json, payload)
 
     packed_models = {}
     shared_states_by_arm = {}
     descriptors_by_arm = {}
-    reusable_a31 = None
-    for arm in args.arms:
+    reusable_payload = None
+    for arm_index, arm in enumerate(args.arms):
         arm_started = time.perf_counter()
         model = (
             AutoModelForCausalLM.from_pretrained(
@@ -763,7 +873,8 @@ def main():
             .to(device)
         )
         planner = QVQTransformPlanner(model, LlamaQVQTransformImplementor())
-        plan = planner.build_transform_plan(arm)
+        planning_arm = "A31" if args.runtime_oracle else arm
+        plan = planner.build_transform_plan(planning_arm)
         rewrite = planner.rewrite_dense_weights(plan, seed=args.seed)
         dense_parity = _evaluate(model, validation_all, dense_logits_all, {}, device)
         descriptors_by_layer = defaultdict(list)
@@ -775,7 +886,12 @@ def main():
                 descriptors[descriptor.module_name] = descriptor
         arm_payload = {
             "description": plan.description,
-            "online_hadamards_per_block": plan.online_hadamards_per_block,
+            "online_hadamards_per_block": (
+                12
+                if args.runtime_oracle and arm_index == 0
+                else plan.online_hadamards_per_block
+            ),
+            "transform_plan_arm": planning_arm,
             "rewrite": rewrite,
             "dense_parity": dense_parity,
             "modules": [],
@@ -784,13 +900,16 @@ def main():
         }
         payload["arms"][arm] = arm_payload
         _write(args.json, payload)
-        reuse_a31 = (
-            args.reuse_identical_a31_payloads
-            and arm == "A41"
-            and reusable_a31 is not None
+        reuse_payload = (
+            (args.runtime_oracle and arm_index == 1 and reusable_payload is not None)
+            or (
+                args.reuse_identical_a31_payloads
+                and arm == "A41"
+                and reusable_payload is not None
+            )
         )
-        if reuse_a31:
-            source_descriptors = reusable_a31["descriptors"]
+        if reuse_payload:
+            source_descriptors = reusable_payload["descriptors"]
             candidate_signature = tuple(
                 (
                     item.module_name,
@@ -812,15 +931,21 @@ def main():
                 for item in source_descriptors.values()
             )
             if candidate_signature != source_signature:
-                raise RuntimeError("A41 cannot reuse A31 payloads with a different transform plan")
-            runtime_payloads = reusable_a31["runtime_payloads"]
-            arm_payload["modules"] = copy.deepcopy(reusable_a31["modules"])
+                raise RuntimeError(
+                    f"{arm} cannot reuse canonical payloads with a different transform plan"
+                )
+            runtime_payloads = reusable_payload["runtime_payloads"]
+            arm_payload["modules"] = copy.deepcopy(reusable_payload["modules"])
             arm_payload["completed_layers"] = args.layers
-            arm_payload["fit_reused_from"] = "A31"
+            arm_payload["fit_reused_from"] = args.arms[0] if args.runtime_oracle else "A31"
             arm_payload["reconstructed_quality"] = copy.deepcopy(
-                reusable_a31["reconstructed_quality"]
+                reusable_payload["reconstructed_quality"]
             )
-            print("A41: reusing byte-identical fitted A31 P32 payloads", flush=True)
+            print(
+                f"{arm}: reusing byte-identical fitted {arm_payload['fit_reused_from']} "
+                "P32 payloads",
+                flush=True,
+            )
         else:
             runtime_payloads = {}
             for layer_index in range(args.layers):
@@ -838,6 +963,9 @@ def main():
                             args.bits,
                             args.seed,
                             device,
+                            fixed_trellis_correction=(
+                                args.runtime_oracle == "plain-refactored-corrected"
+                            ),
                         )
                         arm_payload["modules"].append(record)
                         runtime_payloads[descriptor.module_name] = tensors
@@ -857,8 +985,11 @@ def main():
             arm_payload["reconstructed_quality"] = _aggregate_evaluation(
                 model, validation_streams, dense_logits_streams, device
             )
-            if arm == "A31" and args.reuse_identical_a31_payloads:
-                reusable_a31 = {
+            if (
+                (args.runtime_oracle and arm_index == 0)
+                or (arm == "A31" and args.reuse_identical_a31_payloads)
+            ):
+                reusable_payload = {
                     "runtime_payloads": runtime_payloads,
                     "modules": copy.deepcopy(arm_payload["modules"]),
                     "descriptors": descriptors,
@@ -883,19 +1014,32 @@ def main():
             ),
             metadata=plan.metadata,
         )
-        if arm == "A41":
+        plain_fallbacks = {}
+        if args.runtime_oracle and arm_index == 0:
+            shared_states = {}
+            runtime_mode = "plain_per_module_p32"
+        elif args.runtime_oracle:
+            compiled_runtime = install_qvq_refactored_p32_runtime(model, runtime_plan)
+            shared_states = compiled_runtime.grouped_states
+            plain_fallbacks = compiled_runtime.plain_fallbacks
+            runtime_mode = "refactored_grouped_or_plain_p32"
+        elif arm == "A41":
             shared_states = install_qvq_grouped_p32_input_transforms(
                 model, runtime_plan
             )
+            runtime_mode = "grouped_p32"
         else:
             shared_states = install_qvq_shared_input_transforms(model, runtime_plan)
+            runtime_mode = "shared_transform"
         grouped_metadata_bytes = sum(
             getattr(state, "metadata_overhead_bytes", 0)
             for state in shared_states.values()
         )
         arm_payload["shared_input_runtime"] = {
-            "mode": "grouped_p32" if arm == "A41" else "shared_transform",
+            "mode": runtime_mode,
             "group_count": len(shared_states),
+            "plain_fallback_count": len(plain_fallbacks),
+            "plain_fallbacks": plain_fallbacks,
             "grouped_metadata_bytes": grouped_metadata_bytes,
             "groups": {
                 basis_id: {
@@ -946,6 +1090,28 @@ def main():
         del installed, runtime_payloads
         gc.collect()
         _empty_cache(device)
+
+    if args.runtime_oracle:
+        reference_logits_all = _dense_logits(
+            packed_models[args.arms[0]], validation_all, device
+        )
+        reference_logits_streams = []
+        offset = 0
+        for stream in validation_streams:
+            reference_logits_streams.append(
+                reference_logits_all[offset : offset + len(stream)]
+            )
+            offset += len(stream)
+        payload["runtime_oracle"]["packed_runtime_equivalence"] = (
+            _aggregate_evaluation(
+                packed_models[args.arms[1]],
+                validation_streams,
+                reference_logits_streams,
+                device,
+            )
+        )
+        del reference_logits_all, reference_logits_streams
+        _write(args.json, payload)
 
     payload["timing_compute_processes"] = _assert_exclusive_cuda_process()
     timing_cycles = {arm: [] for arm in args.arms}

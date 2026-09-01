@@ -19,6 +19,7 @@ from gptqmodel.quantization.qvq_transform_runtime import (
     QVQGroupedP32Linear,
     QVQSharedInputLinear,
     install_qvq_grouped_p32_input_transforms,
+    install_qvq_refactored_p32_runtime,
     install_qvq_shared_input_transforms,
 )
 
@@ -144,6 +145,31 @@ def test_qvq_shared_input_runtime_rejects_different_stored_su():
         install_qvq_shared_input_transforms(root, _shared_plan("first", "second"))
 
 
+def test_qvq_refactored_runtime_preserves_module_local_su_with_plain_fallback():
+    generator = torch.Generator().manual_seed(350)
+    su = torch.ones(32)
+    root = torch.nn.Module()
+    root.first = _packed_layer(seed=351, su=su)
+    root.second = _packed_layer(seed=352, su=-su)
+    baseline_first = copy.deepcopy(root.first)
+    baseline_second = copy.deepcopy(root.second)
+    x = torch.randn((4, 32), generator=generator)
+    expected = (baseline_first(x), baseline_second(x))
+
+    compiled = install_qvq_refactored_p32_runtime(
+        root, _shared_plan("first", "second")
+    )
+    actual = (root.first(x), root.second(x))
+
+    assert compiled.grouped_states == {}
+    assert set(compiled.plain_fallbacks) == {"test.shared.input"}
+    assert "bit-identical stored SU" in compiled.plain_fallbacks["test.shared.input"]
+    assert isinstance(root.first, QVQLinear)
+    assert isinstance(root.second, QVQLinear)
+    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+
+
 def test_qvq_shared_input_runtime_rejects_incomplete_or_duplicate_cycles():
     su = torch.ones(32)
     root = torch.nn.Module()
@@ -228,3 +254,31 @@ def test_qvq_grouped_p32_runtime_runs_one_decode_and_releases_child_payloads():
     assert root.second.linear.trellis.numel() == 0
     with pytest.raises(RuntimeError, match="not checkpoint-serializable"):
         root.state_dict()
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 0),
+    reason="requires NVIDIA CUDA compute capability >= 8.0",
+)
+def test_qvq_refactored_runtime_groups_compatible_payloads():
+    generator = torch.Generator().manual_seed(650)
+    su = torch.randint(0, 2, (32,), generator=generator).mul_(2).sub_(1).float()
+    root = torch.nn.Module()
+    root.first = _packed_layer(seed=651, su=su).half().cuda()
+    root.second = _packed_layer(seed=652, su=su).half().cuda()
+    baseline_first = copy.deepcopy(root.first)
+    baseline_second = copy.deepcopy(root.second)
+
+    with torch.inference_mode():
+        x = torch.randn((8, 32), generator=generator, dtype=torch.float16).cuda()
+        expected = (baseline_first(x), baseline_second(x))
+        compiled = install_qvq_refactored_p32_runtime(
+            root, _shared_plan("first", "second")
+        )
+        actual = (root.first(x), root.second(x))
+
+    assert compiled.plain_fallbacks == {}
+    assert set(compiled.grouped_states) == {"test.shared.input"}
+    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=2e-3)
+    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=2e-3)

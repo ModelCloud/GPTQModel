@@ -139,6 +139,31 @@ def _artifact(profile_name: str, revision="deadbeef"):
     candidate = _arm(profile.candidate_arm, profile.expected_hadamards[profile.candidate_arm])
     if profile.reuse_identical_payloads:
         candidate["fit_reused_from"] = profile.reference_arm
+    if profile.runtime_oracle:
+        reference["shared_input_runtime"] = {
+            "mode": "plain_per_module_p32",
+            "group_count": 0,
+            "plain_fallback_count": 0,
+        }
+        candidate["shared_input_runtime"] = {
+            "mode": "refactored_grouped_or_plain_p32",
+            "group_count": 32,
+            "plain_fallback_count": 0,
+        }
+    if profile.correction_required:
+        for module in reference["modules"]:
+            before = dict(module["tensor_sha256"])
+            before["SV"] = f"before-{before['SV']}"
+            module["fixed_trellis_correction"] = {
+                "kind": "fixed_trellis_output_channel_sv",
+                "SU_trainable": False,
+                "accepted_channels": 1,
+                "proxy_loss_before": 2.0,
+                "proxy_loss_after": 1.0,
+                "changed_tensors": ["SV"],
+                "tensor_sha256_before": before,
+            }
+        candidate["modules"] = copy.deepcopy(reference["modules"])
     calibration = [
         {"row": index, "sha256": f"cal-{index}", "tokens": 100}
         for index in range(16)
@@ -155,7 +180,7 @@ def _artifact(profile_name: str, revision="deadbeef"):
         for stream in range(3)
     ]
     comparison_key = f"{profile.candidate_arm}_minus_{profile.reference_arm}"
-    return {
+    payload = {
         "schema": "qvq.rotation-folding.packed-cuda-full-model.v1",
         "status": "complete",
         "repository_revision": revision,
@@ -185,6 +210,45 @@ def _artifact(profile_name: str, revision="deadbeef"):
             }
         },
     }
+    if profile.runtime_oracle:
+        payload["runtime_oracle"] = {
+            "mode": profile.runtime_oracle,
+            "reference_arm": profile.reference_arm,
+            "candidate_arm": profile.candidate_arm,
+            "canonical_transform_plan": "A31",
+            "canonical_payload_materializations": 1,
+            "packed_runtime_equivalence": _quality_block(),
+            "fixed_trellis_correction": (
+                {
+                    "kind": "fixed_trellis_output_channel_sv",
+                    "mutable_tensors": ["SV"],
+                    "immutable_tensors": [
+                        "trellis",
+                        "SU",
+                        "bank_ids",
+                        "bank_alt_id",
+                        "bias",
+                    ],
+                    "SU_trainable": False,
+                }
+                if profile.correction_required
+                else None
+            ),
+        }
+        equivalence = payload["runtime_oracle"]["packed_runtime_equivalence"][
+            "aggregate"
+        ]
+        equivalence.update(
+            {
+                "final_kl": 1e-7,
+                "logits_relative_l2": 1e-4,
+                "max_abs_logits_delta": 0.01,
+                "top1": 1.0,
+                "top5": 1.0,
+                "top10": 1.0,
+            }
+        )
+    return payload
 
 
 def _write(tmp_path: Path, payload):
@@ -217,6 +281,55 @@ def test_runtime_profile_rejects_payload_drift(tmp_path):
     payload["arms"]["A41"]["modules"][0]["tensor_sha256"]["SU"] = "changed"
     with pytest.raises(RuntimeError, match="byte-identical"):
         _validate(_write(tmp_path, payload), "a31-a41-runtime")
+
+
+def test_plain_refactored_oracle_accepts_one_canonical_payload(tmp_path):
+    result = _validate(_write(tmp_path, _artifact("p0-r0-runtime")), "p0-r0-runtime")
+
+    assert result["payload_identity"] is True
+    assert result["runtime_oracle"]["candidate_group_count"] == 32
+    assert result["runtime_oracle"]["packed_runtime_equivalence"]["top1"] == 1.0
+
+
+def test_plain_refactored_oracle_rejects_packed_output_drift(tmp_path):
+    payload = _artifact("p0-r0-runtime")
+    payload["runtime_oracle"]["packed_runtime_equivalence"]["aggregate"][
+        "logits_relative_l2"
+    ] = 0.011
+
+    with pytest.raises(RuntimeError, match="packed logits relative L2"):
+        _validate(_write(tmp_path, payload), "p0-r0-runtime")
+
+
+def test_corrected_oracle_accepts_sv_only_fixed_trellis_recovery(tmp_path):
+    result = _validate(
+        _write(tmp_path, _artifact("p0c-r0c-correction")),
+        "p0c-r0c-correction",
+    )
+
+    correction = result["fixed_trellis_correction"]
+    assert correction["corrected_module_records"] == 224
+    assert correction["accepted_channels_across_both_identical_arms"] == 224
+    assert correction["mutable_tensors"] == ["SV"]
+
+
+def test_corrected_oracle_rejects_immutable_payload_drift(tmp_path):
+    payload = _artifact("p0c-r0c-correction")
+    payload["arms"]["P0+C"]["modules"][0]["tensor_sha256"]["SU"] = "changed"
+    payload["arms"]["R0+C"]["modules"][0]["tensor_sha256"]["SU"] = "changed"
+
+    with pytest.raises(RuntimeError, match="immutable SU"):
+        _validate(_write(tmp_path, payload), "p0c-r0c-correction")
+
+
+def test_corrected_oracle_rejects_no_accepted_recovery(tmp_path):
+    payload = _artifact("p0c-r0c-correction")
+    for arm in payload["arms"].values():
+        for module in arm["modules"]:
+            module["fixed_trellis_correction"]["accepted_channels"] = 0
+
+    with pytest.raises(RuntimeError, match="accepted no output channels"):
+        _validate(_write(tmp_path, payload), "p0c-r0c-correction")
 
 
 def test_harness_rejects_dense_parity_regression(tmp_path):

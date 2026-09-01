@@ -7,13 +7,17 @@ This is intentionally a thin orchestration and verification layer around the
 full-model packed CUDA runner.  It freezes the experiment contract before the
 runtime/checkpoint refactor begins.
 
-Two initial profiles are supported:
+Four profiles are supported:
 
 * ``a31-a41-runtime`` fits A31 once and requires A41 to reuse byte-identical
   payloads.  This isolates runtime compilation/grouping from quantization.
 * ``a0-a41-production`` independently fits A0 and A41 with the same data/seed.
   This measures the current production-control versus optimized-candidate
   tradeoff.
+* ``p0-r0-runtime`` materializes one canonical P32 payload and executes it as
+  ordinary per-module P32 versus the refactored grouped/fallback compiler.
+* ``p0c-r0c-correction`` repeats that oracle after fixed-trellis, SV-only
+  post-quant correction.
 
 The harness never accepts a benchmark artifact merely because the subprocess
 returned zero.  It validates provenance, dataset identity, dense parity,
@@ -46,6 +50,9 @@ class HarnessProfile:
     reuse_identical_payloads: bool
     expected_hadamards: dict[str, int]
     require_equal_ebpw: bool = True
+    runtime_oracle: str | None = None
+    require_runtime_equivalence: bool = False
+    correction_required: bool = False
 
 
 PROFILES = {
@@ -62,6 +69,25 @@ PROFILES = {
         candidate_arm="A41",
         reuse_identical_payloads=False,
         expected_hadamards={"A0": 14, "A41": 9},
+    ),
+    "p0-r0-runtime": HarnessProfile(
+        name="p0-r0-runtime",
+        reference_arm="P0",
+        candidate_arm="R0",
+        reuse_identical_payloads=True,
+        expected_hadamards={"P0": 12, "R0": 9},
+        runtime_oracle="plain-refactored",
+        require_runtime_equivalence=True,
+    ),
+    "p0c-r0c-correction": HarnessProfile(
+        name="p0c-r0c-correction",
+        reference_arm="P0+C",
+        candidate_arm="R0+C",
+        reuse_identical_payloads=True,
+        expected_hadamards={"P0+C": 12, "R0+C": 9},
+        runtime_oracle="plain-refactored-corrected",
+        require_runtime_equivalence=True,
+        correction_required=True,
     ),
 }
 
@@ -256,6 +282,101 @@ def _validate_bootstrap(payload: dict[str, Any], profile: HarnessProfile) -> dic
     }
 
 
+def _validate_runtime_oracle(
+    payload: dict[str, Any], profile: HarnessProfile
+) -> dict[str, Any]:
+    oracle = payload.get("runtime_oracle")
+    _require(isinstance(oracle, dict), "runtime-oracle profile is missing its contract")
+    _require(oracle.get("mode") == profile.runtime_oracle, "runtime-oracle mode mismatch")
+    _require(oracle.get("reference_arm") == profile.reference_arm, "runtime-oracle reference mismatch")
+    _require(oracle.get("candidate_arm") == profile.candidate_arm, "runtime-oracle candidate mismatch")
+    _require(oracle.get("canonical_transform_plan") == "A31", "runtime oracle must use the canonical A31 basis plan")
+    _require(int(oracle.get("canonical_payload_materializations", 0)) == 1, "runtime oracle must materialize one canonical payload")
+
+    arms = payload["arms"]
+    reference_runtime = arms[profile.reference_arm].get("shared_input_runtime", {})
+    candidate_runtime = arms[profile.candidate_arm].get("shared_input_runtime", {})
+    _require(reference_runtime.get("mode") == "plain_per_module_p32", "P0 must use ordinary per-module P32")
+    _require(int(reference_runtime.get("group_count", -1)) == 0, "P0 must not install shared/grouped runtime hooks")
+    _require(candidate_runtime.get("mode") == "refactored_grouped_or_plain_p32", "R0 must use the refactored runtime compiler")
+    _require(int(candidate_runtime.get("group_count", -1)) == 32, "R0 must compile all 32 sibling groups")
+    _require(int(candidate_runtime.get("plain_fallback_count", -1)) == 0, "canonical R0 unexpectedly fell back to plain P32")
+
+    result = {
+        "reference_runtime_mode": reference_runtime["mode"],
+        "candidate_runtime_mode": candidate_runtime["mode"],
+        "candidate_group_count": int(candidate_runtime["group_count"]),
+        "candidate_plain_fallback_count": int(candidate_runtime["plain_fallback_count"]),
+    }
+    if profile.require_runtime_equivalence:
+        quality = _validate_quality_block(
+            "runtime_oracle.packed_runtime_equivalence",
+            oracle.get("packed_runtime_equivalence", {}),
+        )
+        _require(
+            float(quality["final_kl"]) <= 1e-3,
+            "plain/refactored packed KL gate failed",
+        )
+        _require(
+            float(quality["logits_relative_l2"]) <= 1e-2,
+            "plain/refactored packed logits relative L2 gate failed",
+        )
+        _require(
+            float(quality["max_abs_logits_delta"]) <= 0.5,
+            "plain/refactored packed maximum logit delta gate failed",
+        )
+        _require(
+            float(quality["top1"]) >= 0.99,
+            "plain/refactored packed Top-1 identity gate failed",
+        )
+        _require(
+            float(quality["top5"]) >= 0.999,
+            "plain/refactored packed Top-5 identity gate failed",
+        )
+        result["packed_runtime_equivalence"] = quality
+    return result
+
+
+def _validate_fixed_trellis_correction(
+    payload: dict[str, Any], profile: HarnessProfile
+) -> dict[str, Any]:
+    contract = payload["runtime_oracle"].get("fixed_trellis_correction")
+    _require(isinstance(contract, dict), "corrected oracle is missing its correction contract")
+    _require(contract.get("kind") == "fixed_trellis_output_channel_sv", "unexpected fixed-trellis correction kind")
+    _require(contract.get("mutable_tensors") == ["SV"], "fixed-trellis correction may mutate only SV")
+    _require(contract.get("SU_trainable") is False, "fixed-trellis correction must keep SU frozen")
+
+    accepted_channels = 0
+    corrected_modules = 0
+    for arm_name in (profile.reference_arm, profile.candidate_arm):
+        for module in payload["arms"][arm_name]["modules"]:
+            name = str(module["module"])
+            correction = module.get("fixed_trellis_correction")
+            _require(isinstance(correction, dict), f"{name}: missing fixed-trellis correction record")
+            _require(correction.get("kind") == contract["kind"], f"{name}: correction kind mismatch")
+            _require(correction.get("SU_trainable") is False, f"{name}: SU must remain frozen")
+            changed = set(correction.get("changed_tensors", []))
+            _require(changed <= {"SV"}, f"{name}: correction changed tensors outside SV")
+            _require(
+                float(correction["proxy_loss_after"]) <= float(correction["proxy_loss_before"]),
+                f"{name}: correction proxy regressed",
+            )
+            before = correction.get("tensor_sha256_before", {})
+            after = module.get("tensor_sha256", {})
+            for tensor_name, digest in before.items():
+                if tensor_name != "SV":
+                    _require(after.get(tensor_name) == digest, f"{name}: correction mutated immutable {tensor_name}")
+            accepted_channels += int(correction["accepted_channels"])
+            corrected_modules += 1
+    _require(accepted_channels > 0, "fixed-trellis correction accepted no output channels")
+    return {
+        "corrected_module_records": corrected_modules,
+        "accepted_channels_across_both_identical_arms": accepted_channels,
+        "mutable_tensors": contract["mutable_tensors"],
+        "SU_trainable": contract["SU_trainable"],
+    }
+
+
 def validate_artifact(
     path: Path,
     profile: HarnessProfile,
@@ -315,6 +436,13 @@ def validate_artifact(
             "profile requires identical effective BPW",
         )
 
+    runtime_oracle = None
+    correction = None
+    if profile.runtime_oracle:
+        runtime_oracle = _validate_runtime_oracle(payload, profile)
+    if profile.correction_required:
+        correction = _validate_fixed_trellis_correction(payload, profile)
+
     reference_timing = _validate_timing_arm(
         profile.reference_arm,
         reference,
@@ -354,6 +482,8 @@ def validate_artifact(
         "candidate_effective_bpw": float(candidate["effective_bpw"]),
         "bootstrap": _validate_bootstrap(payload, profile),
         "decode": timing_delta,
+        "runtime_oracle": runtime_oracle,
+        "fixed_trellis_correction": correction,
     }
 
 
@@ -409,7 +539,9 @@ def _engine_command(
         "--json",
         str(output),
     ]
-    if profile.reuse_identical_payloads:
+    if profile.runtime_oracle:
+        command.extend(("--runtime-oracle", profile.runtime_oracle))
+    elif profile.reuse_identical_payloads:
         command.append("--reuse-identical-a31-payloads")
     if local_files_only:
         command.append("--local-files-only")

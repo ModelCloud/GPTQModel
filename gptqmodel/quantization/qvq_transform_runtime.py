@@ -476,6 +476,14 @@ class QVQGroupedP32Linear(torch.nn.Module):
         )
 
 
+@dataclass(frozen=True)
+class QVQRefactoredP32Runtime:
+    """Result of compiling compatible groups with semantic plain fallbacks."""
+
+    grouped_states: dict[str, QVQGroupedP32InputTransformState]
+    plain_fallbacks: dict[str, str]
+
+
 def shared_input_groups(
     plan: QVQTransformPlan,
 ) -> tuple[QVQSharedInputTransformGroup, ...]:
@@ -577,13 +585,68 @@ def install_qvq_grouped_p32_input_transforms(
     return states
 
 
+def install_qvq_refactored_p32_runtime(
+    model: torch.nn.Module,
+    plan: QVQTransformPlan,
+) -> QVQRefactoredP32Runtime:
+    """Compile compatible sibling groups and retain plain P32 otherwise.
+
+    A grouped input transform is legal only while every consumer has the same
+    stored ``SU`` and compatible packed geometry.  Post-quant recovery may
+    intentionally make those tensors module-local.  This compiler preserves
+    the canonical per-module execution as an explicit fallback instead of
+    rejecting the model or sharing an invalid transform.  The strict A41
+    installer above remains fail-closed and unchanged.
+    """
+
+    prepared: list[
+        tuple[
+            QVQSharedInputTransformGroup,
+            dict[str, QVQLinear],
+            QVQGroupedP32InputTransformState,
+        ]
+    ] = []
+    plain_fallbacks: dict[str, str] = {}
+    for group in shared_input_groups(plan):
+        modules = {}
+        for module_name in group.module_names:
+            module = model.get_submodule(module_name)
+            if not isinstance(module, QVQLinear):
+                raise TypeError(
+                    f"refactored QVQ P32 consumer {module_name!r} must be a packed "
+                    f"QVQLinear, got {type(module).__name__}"
+                )
+            modules[module_name] = module
+        try:
+            state = QVQGroupedP32InputTransformState(group, modules)
+        except (TypeError, ValueError) as exc:
+            plain_fallbacks[group.basis_id] = str(exc)
+            continue
+        prepared.append((group, modules, state))
+
+    states = {}
+    for group, modules, state in prepared:
+        state.release_individual_payloads()
+        for consumer_index, module_name in enumerate(group.module_names):
+            parent_name, _, child_name = module_name.rpartition(".")
+            wrapper = QVQGroupedP32Linear(
+                modules[module_name], state, module_name, consumer_index
+            )
+            wrapper.train(modules[module_name].training)
+            setattr(model.get_submodule(parent_name), child_name, wrapper)
+        states[group.basis_id] = state
+    return QVQRefactoredP32Runtime(states, plain_fallbacks)
+
+
 __all__ = [
     "QVQGroupedP32InputTransformState",
     "QVQGroupedP32Linear",
+    "QVQRefactoredP32Runtime",
     "QVQSharedInputLinear",
     "QVQSharedInputTransformGroup",
     "QVQSharedInputTransformState",
     "install_qvq_shared_input_transforms",
     "install_qvq_grouped_p32_input_transforms",
+    "install_qvq_refactored_p32_runtime",
     "shared_input_groups",
 ]
