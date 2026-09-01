@@ -1745,6 +1745,16 @@ lower latency), with identical split-40 kernel math. Artifacts are
 `artifacts/a100_p32_window/`. Affected-case log weighting now reaches
 **1.086% cumulative improvement** versus fetched main.
 
+The eleventh v19 progression specializes M2 W3 attention-out at split 48
+with 16 outputs per reduction warp; all other M2 projection rates retain the
+accepted eight-output geometry. The matched 60-warmup/2000-iteration screen
+improves from `0.044032` to `0.043008 ms` (**1.0238x**, 2.326% lower
+latency), and a 100-warmup/4000-iteration confirmation reproduces
+`0.043008 ms` with maximum absolute error below `1.63e-05`. Artifacts are
+`v19_m2_warpreduce8_candidate.json`, `v19_m2_warpreduce16_candidate.json`,
+and `v19_m2_w3_attention_warpreduce16_final.json`. Affected-case log
+weighting now reaches **1.103% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1813,6 +1823,16 @@ The M4 attention-out half of the direct-plan screen was neutral and was
 omitted. Its W2.5/W3.5 autotune result also varied between split 24 and 48
 without changing median latency, so retaining autotuning avoids hard-coding
 an equivalent summation order.
+
+Later host experiments were rejected. Direct dispatch was neutral for M8
+attention-out/linear-Z, M2 and M4 full-Q/linear-QKV, and M2 MLP-down; M1
+MLP-down regressed W3.5. Packing the complete autotune identity into one
+large Python integer made cache hits 3-6 microseconds slower than the tuple
+key, so the cache retains its device-index-first tuple. Computing the bank
+mask on the host and passing it into CUDA regressed almost every tested
+M1-M8 attention rate by one event tick. Diagnostics use the
+`v19_*_fastplan`, `v19_*_fastplans`, `v19_m2_projection_packed_int_cache_`,
+and `v19_host_altmask_` prefixes.
 
 ## Reproduction
 

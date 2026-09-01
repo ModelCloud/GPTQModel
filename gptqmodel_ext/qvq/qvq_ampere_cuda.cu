@@ -1803,6 +1803,23 @@ at::Tensor p32_window_ampere_impl(
       C10_CUDA_KERNEL_LAUNCH_CHECK();
       return output;
     }
+    if constexpr (TransitionBits == 6) {
+      if (size_m == 2 && size_k == 6144 && size_n == 5120 &&
+          split_count == 48) {
+        constexpr int kReductionWarps = kReductionThreads / 32;
+        constexpr int kOutputsPerWarp = 16;
+        const int warp_blocks =
+            (output_values + kReductionWarps * kOutputsPerWarp - 1) /
+            (kReductionWarps * kOutputsPerWarp);
+        reduce_split_warp_kernel<48, kOutputsPerWarp>
+            <<<warp_blocks, kReductionThreads, 0, stream>>>(
+                partial_output.data_ptr<float>(),
+                output.data_ptr<float>(),
+                output_values);
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        return output;
+      }
+    }
     const bool use_m2_warp_reducer =
         size_m == 2 &&
         ((size_k == 6144 && size_n == 5120) ||
