@@ -1625,6 +1625,35 @@ queued CUDA-event stall signature. It is retained as
 `artifacts/a100_p32_window/qwen38_v18_current_all_55b5c849.json` and is not
 used in the cumulative comparison.
 
+## v19: post-PR-92 continuation
+
+PR 92 was merged and `origin/main` was fetched at merge commit `03144a22`.
+The fresh 140-case main baseline is
+`artifacts/a100_p32_window/qwen38_newmain_all_03144a22.json`. Its Ampere-only
+geomean is `0.068735 ms`; per-M geomeans are `0.057361`, `0.060111`,
+`0.068089`, `0.076959`, and `0.084912 ms` for M1/M2/M4/M8/M16. Planar
+timings are excluded from every v19 comparison.
+
+The first v19 progression extends the four-output warp split reducer to M1
+attention-out `(K,N)=(6144,5120)` and linear-Z `(5120,6144)`. These shapes
+launch only 20-24 blocks with the serial reducer; the interleaved warp layout
+raises reducer parallelism while retaining four adjacent output loads. In a
+matched 60-warmup/2000-iteration pair, all eight medians win: attention-out
+improves **1.0931x** and linear-Z improves **1.0682x**, for a combined
+**1.0806x** affected geomean speedup (7.457% lower latency). Maximum absolute
+error remains below `1.58e-05`. Artifacts are
+`artifacts/a100_p32_window/v19_m1_selective_warpreduce_control.json` and
+`artifacts/a100_p32_window/v19_m1_selective_warpreduce_candidate.json`.
+Affected-case log weighting gives **0.444% cumulative improvement** versus
+fetched main.
+
+The initial broad M1 reducer experiment was narrowed before acceptance. It
+improved attention-out and linear-Z, was neutral on long-K MLP-down, and
+regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
+neutral. The retained dispatch therefore covers only the two clean winning
+shapes. The broad diagnostic is
+`artifacts/a100_p32_window/v19_m1_warpreduce4_candidate.json`.
+
 ## Reproduction
 
 ```bash
