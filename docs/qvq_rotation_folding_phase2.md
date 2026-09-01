@@ -463,7 +463,9 @@ Post-A41 validation on the SM80 host is green: `2,162 passed, 136 skipped`
 across the broad QVQ, CUDA, P32, folded-axis, planner, shared-runtime, and
 grouped-runtime matrix. The CUDA extension was rebuilt from source before the
 new grouped parity test; Ruff, Python compilation, and `git diff --check` also
-pass.
+pass. After merging `origin/main` at `6b3cea54`, the 36 focused A41
+planner/runtime/grouped-kernel tests still pass, and the freshly rebuilt
+latest-main Ampere extension passes its 28 exactness and dispatch tests.
 
 Further fusion opportunities remain even when a transform must remain:
 
