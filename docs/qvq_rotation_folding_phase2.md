@@ -655,6 +655,11 @@ Oracle artifacts:
 - `artifacts/qvq_validation/p0c-r0c-correction_seed20260831_f495e745.json`;
 - `artifacts/qvq_validation/summary_p0c-r0c-correction_f495e745.json`.
 
+Post-oracle validation on the merged latest-main SM80 head is green:
+`2,179 passed, 136 skipped, 0 failed`. This is the previous 2,308-test matrix
+plus the seven new runtime-oracle and semantic-fallback cases. Ruff, Python
+compilation, artifact JSON parsing, and `git diff --check` also pass.
+
 Further fusion opportunities remain even when a transform must remain:
 
 - batch/fuse Q and K output transforms when their chosen basis permits it;
