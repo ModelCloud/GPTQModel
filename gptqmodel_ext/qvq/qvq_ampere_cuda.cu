@@ -716,7 +716,9 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
       }
     } else if constexpr (
         StaticN > 0 && StaticN != 1024 && TilesPerBlock == 16 && Rows == 1 &&
-        (TransitionBits == 5 || TransitionBits == 7)) {
+        (TransitionBits == 5 || TransitionBits == 7 ||
+         (TransitionBits == 4 &&
+          (StaticN == 12288 || StaticN == 10240 || StaticN == 17408)))) {
       if (thread < StageKTiles) {
         const int k_tile = k_tile_base + thread;
         auto* destination_ids = reinterpret_cast<uint4*>(

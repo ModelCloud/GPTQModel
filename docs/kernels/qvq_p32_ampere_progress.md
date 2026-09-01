@@ -1232,6 +1232,22 @@ ln(1.03524076) + 12/140 * ln(1.01210067) + 12/140 * ln(1.01625809)) =
 1.011356x`, or **1.136%** cumulative median improvement versus fetched
 `6b3cea54` main. Planar timings remain excluded.
 
+The sixth v17 progression extends packed async M1 selector staging to the
+three W2 fixed-N routes that remained positive in the broad diagnostic:
+full-Q, linear-QKV, and MLP-gate/up. The clean matched
+60-warmup/2000-iteration three-case pair improves the median and mean
+geomeans by 1.604% and 1.189%, and every case improves. The attempted W3
+MLP-gate extension was exactly neutral and was removed. The control preloads
+the exact accepted `c023f477` binary from JIT fingerprint
+`cdffda1bd75374aa`. Artifacts are
+`artifacts/a100_p32_window/v17_m1_w2_async_selector_selective_control.json`
+and
+`artifacts/a100_p32_window/v17_m1_w2_async_selector_selective_candidate.json`.
+
+Including the sixth progression, affected-case log weighting raises the
+cumulative median improvement to **1.170%** versus fetched `6b3cea54` main.
+Planar timings remain excluded.
+
 ## Reproduction
 
 ```bash
