@@ -137,16 +137,17 @@ def test_p32_ampere_dispatches_measured_wmma_kv_plan_directly(
 
 
 @pytest.mark.parametrize(
-    ("out_features", "expected_split"), ((1024, 64), (12288, 40))
+    ("in_features", "out_features", "expected_split"),
+    ((5120, 1024, 64), (5120, 12288, 40), (6144, 5120, 48)),
 )
 def test_p32_ampere_dispatches_measured_m1_plans_directly(
-    monkeypatch, out_features, expected_split
+    monkeypatch, in_features, out_features, expected_split
 ):
     calls = []
     monkeypatch.setattr(
         qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
     )
-    input = torch.empty((1, 5120))
+    input = torch.empty((1, in_features))
 
     qvq_ampere_cuda.qvq_p32_window_ampere(
         input,

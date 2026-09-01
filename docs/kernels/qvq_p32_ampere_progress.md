@@ -1726,6 +1726,15 @@ Artifacts are `v19_m16_fastplans_control.json` and
 Affected-case log weighting now reaches **1.036% cumulative improvement**
 versus fetched main.
 
+The ninth v19 progression adds a direct measured split-48 dispatch for M1
+attention-out. Against the accepted 16-output reducer control, W2 improves
+from `0.039936` to `0.038912 ms` and the other three rates tie. The
+four-case affected geomean speedup is **1.0065x** (0.647% lower latency),
+with identical kernel math and accuracy. The candidate is
+`artifacts/a100_p32_window/v19_m1_projection_fastplans_candidate.json`; its
+control is `v19_m1_warpreduce16_candidate.json`. Affected-case log weighting
+now reaches **1.054% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1783,6 +1792,12 @@ A broad direct-plan table for every M16 Qwen shape was narrowed to the
 retained full-KV entry. Full-Q W2.5/W3.5, attention-out W3.5, and linear-Z
 W2 lost one event tick in the matched pair, while most other cases tied.
 Those shapes continue to use the default in-memory autotuner.
+
+Direct measured dispatch was also rejected for M2 attention-out/linear-Z:
+the attention cases tied and linear-Z W2 lost one event tick. The M1
+linear-Z half of the subsequent direct-dispatch screen was narrowed out for
+the same reason, while the retained M1 attention-out half had one clean win.
+The M2 diagnostic is `v19_m2_projection_fastplans_candidate.json`.
 
 ## Reproduction
 

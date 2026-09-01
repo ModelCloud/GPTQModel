@@ -383,6 +383,22 @@ def qvq_p32_window_ampere(
             bank_alt_id,
             32,
         )
+    if split_count == 0 and input.shape[0] == 1:
+        shape = (int(input.shape[1]), int(out_features))
+        measured_m1_projection_split = None
+        if shape == (6144, 5120):
+            measured_m1_projection_split = 48
+        if measured_m1_projection_split is not None:
+            return _p32_window_op()(
+                input,
+                trellis,
+                levels,
+                bank_ids,
+                transition_bits,
+                out_features,
+                bank_alt_id,
+                measured_m1_projection_split,
+            )
     if split_count == 0:
         # Environment configuration is process-level. Reading ``os.environ``
         # on every cached launch costs more than the cache lookup itself, so
