@@ -1755,6 +1755,17 @@ latency), and a 100-warmup/4000-iteration confirmation reproduces
 and `v19_m2_w3_attention_warpreduce16_final.json`. Affected-case log
 weighting now reaches **1.103% cumulative improvement** versus fetched main.
 
+The twelfth v19 progression pins the measured M2 attention-out plans to
+split 48 for W2/W2.5/W3 and split 64 for W3.5. This prevents the bounded
+first-use tuner from occasionally selecting the event-quantized split-24 W2
+plan. Against the final pre-change refresh, W2 improves from `0.043008` to
+`0.039936 ms`; W2.5 and W3 tie their accepted values, and a separate
+4000-iteration split-64 W3.5 confirmation ties at `0.044032 ms`. The
+affected four-case geomean speedup is **1.0187x** (1.836% lower latency).
+Artifacts are `v19_m2_attention_fastplan48_final.json` and
+`v19_m2_w35_attention_fastplan64_final.json`. Affected-case log weighting
+now reaches **1.156% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1833,6 +1844,21 @@ mask on the host and passing it into CUDA regressed almost every tested
 M1-M8 attention rate by one event tick. Diagnostics use the
 `v19_*_fastplan`, `v19_*_fastplans`, `v19_m2_projection_packed_int_cache_`,
 and `v19_host_altmask_` prefixes.
+
+Three CUDA cache/specialization experiments were also rejected. A
+`__grid_constant__` bank-ID parameter was mixed and regressed M1; compiling
+bank-alt 3 as a true template constant regressed the tested M8 N5120 routes.
+Adding Marlin's 128-byte L2 prefetch hint to every streaming trellis
+`cp.async.cg` load was neutral on M8/M16 but regressed three M1 rates, so it
+was not retained globally. Diagnostics are
+`v19_gridconstant_bankid_candidate.json`,
+`v19_m8_n5120_static_bank3_candidate.json`, and
+`v19_trellis_l2_128b_attention_candidate.json`.
+
+The apparent M4 W3 full-KV 16-output reduction win did not reproduce at
+4000 iterations: it measured `0.033792 ms`, slower than the four-output
+control. The retry is `v19_m4_w3_fullkv_warpreduce16_final.json`, and the
+source change was restored.
 
 ## Reproduction
 
