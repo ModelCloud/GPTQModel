@@ -850,28 +850,38 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
               packed_bank_ids[parity][stage_k_tile][shared_tile];
           if constexpr (
               Rows == 2 && StaticN != 1024 &&
-              (TransitionBits == 5 || TransitionBits == 7)) {
+              (TransitionBits == 5 || TransitionBits == 7) &&
+              !(StaticN == 17408 && TransitionBits == 7)) {
 #pragma unroll
             for (int bank_group = 0; bank_group < 4; ++bank_group) {
               const uint32_t bank_mask_0 =
                   selected_bank_mask(packed_bank_id, bank_group, alt_mask);
               const uint32_t bank_mask_8 =
                   selected_bank_mask(packed_bank_id, bank_group + 4, alt_mask);
+              uint32_t state_0[2];
+              uint32_t state_8[2];
 #pragma unroll
               for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
                 const int row = bank_group * 2 + row_in_group;
                 const int pair = row * 8 + pair_column;
-                uint32_t state_0;
-                uint32_t state_8;
-                window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
-                const uint32_t decoded_0 =
-                    decode_state_bits(state_0, bank_mask_0, levels);
-                const uint32_t decoded_8 =
-                    decode_state_bits(state_8, bank_mask_8, levels);
+                window_state_pair64<TransitionBits>(
+                    words, pair, state_0[row_in_group], state_8[row_in_group]);
+              }
+              uint32_t decoded_0[2];
+              uint32_t decoded_8[2];
+              decode_state_pair_bits(
+                  state_0[0], state_0[1], bank_mask_0, levels,
+                  decoded_0[0], decoded_0[1]);
+              decode_state_pair_bits(
+                  state_8[0], state_8[1], bank_mask_8, levels,
+                  decoded_8[0], decoded_8[1]);
+#pragma unroll
+              for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
+                const int row = bank_group * 2 + row_in_group;
                 union {
                   uint32_t bits;
                   half2 values;
-                } pair_0{decoded_0}, pair_8{decoded_8};
+                } pair_0{decoded_0[row_in_group]}, pair_8{decoded_8[row_in_group]};
                 const float weight_0 = __half2float(pair_0.values.x);
                 const float weight_1 = __half2float(pair_0.values.y);
                 const float weight_8 = __half2float(pair_8.values.x);

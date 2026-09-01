@@ -1399,6 +1399,16 @@ medians improve and seven tie with no losses; the affected geomean improves
 progression, affected-case log weighting reaches **0.671%** cumulative median
 improvement versus fetched `90c4fa5f` main.
 
+The fourth v18 progression packs the existing two-row M2 bank groups for
+W2.5/W3.5 on every non-full-KV route except W3.5 MLP-gate/up. The retained
+11-case screen has eight wins and three ties with no losses; its affected
+geomean improves **1.852%**. Full-Q improves 2.083%, attention-out 1.156%,
+linear-QKV 2.456%, MLP-down 2.920%, and linear-Z is neutral; W2.5
+MLP-gate/up improves 3.191%. The diagnostic candidate is
+`artifacts/a100_p32_window/v18_m2_packed_pgc_candidate.json`. Including this
+selective progression, affected-case log weighting reaches **0.816%**
+cumulative median improvement versus fetched main.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
