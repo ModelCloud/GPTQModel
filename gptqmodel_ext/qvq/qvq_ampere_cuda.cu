@@ -1060,6 +1060,7 @@ inline bool launch_static_n_scalar_kernel(
 #undef QVQ_LAUNCH_STATIC_N
 }
 
+template <int StaticSplitCount = 0>
 __global__ void reduce_split_kernel(
     const float* __restrict__ partial_output,
     float* __restrict__ output,
@@ -1070,7 +1071,10 @@ __global__ void reduce_split_kernel(
     return;
   }
   float accumulator = 0.0f;
-  for (int split = 0; split < split_count; ++split) {
+#pragma unroll
+  for (int split = 0;
+       split < (StaticSplitCount > 0 ? StaticSplitCount : split_count);
+       ++split) {
     accumulator += partial_output[static_cast<int64_t>(split) * output_values + index];
   }
   output[index] = accumulator;
@@ -1564,11 +1568,65 @@ at::Tensor p32_window_ampere_impl(
     constexpr int kReductionThreads = 256;
     const int output_values = size_m * size_n;
     const int blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
-    reduce_split_kernel<<<blocks, kReductionThreads, 0, stream>>>(
-        partial_output.data_ptr<float>(),
-        output.data_ptr<float>(),
-        output_values,
-        static_cast<int>(split_count));
+#define QVQ_LAUNCH_STATIC_REDUCER(SPLITS)                                    \
+  reduce_split_kernel<SPLITS><<<blocks, kReductionThreads, 0, stream>>>(     \
+      partial_output.data_ptr<float>(),                                      \
+      output.data_ptr<float>(),                                              \
+      output_values,                                                         \
+      SPLITS)
+    const bool use_static_reducer =
+        size_n != 1024 && (size_m == 2 || size_m == 4 || size_m == 16);
+    if (use_static_reducer) {
+      switch (split_count) {
+        case 10:
+          QVQ_LAUNCH_STATIC_REDUCER(10);
+          break;
+        case 12:
+          QVQ_LAUNCH_STATIC_REDUCER(12);
+          break;
+        case 16:
+          QVQ_LAUNCH_STATIC_REDUCER(16);
+          break;
+        case 20:
+          QVQ_LAUNCH_STATIC_REDUCER(20);
+          break;
+        case 24:
+          QVQ_LAUNCH_STATIC_REDUCER(24);
+          break;
+        case 32:
+          QVQ_LAUNCH_STATIC_REDUCER(32);
+          break;
+        case 40:
+          QVQ_LAUNCH_STATIC_REDUCER(40);
+          break;
+        case 48:
+          QVQ_LAUNCH_STATIC_REDUCER(48);
+          break;
+        case 64:
+          QVQ_LAUNCH_STATIC_REDUCER(64);
+          break;
+        case 96:
+          QVQ_LAUNCH_STATIC_REDUCER(96);
+          break;
+        case 128:
+          QVQ_LAUNCH_STATIC_REDUCER(128);
+          break;
+        default:
+          reduce_split_kernel<<<blocks, kReductionThreads, 0, stream>>>(
+              partial_output.data_ptr<float>(),
+              output.data_ptr<float>(),
+              output_values,
+              static_cast<int>(split_count));
+          break;
+      }
+    } else {
+      reduce_split_kernel<<<blocks, kReductionThreads, 0, stream>>>(
+          partial_output.data_ptr<float>(),
+          output.data_ptr<float>(),
+          output_values,
+          static_cast<int>(split_count));
+    }
+#undef QVQ_LAUNCH_STATIC_REDUCER
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return output;

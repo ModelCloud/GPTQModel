@@ -1260,6 +1260,34 @@ shapes are neutral. The six-case median and mean geomeans improve 0.482% and
 Affected-case log weighting now gives **1.191%** cumulative median improvement
 versus fetched `6b3cea54` main; planar timings remain excluded.
 
+The eighth v17 progression statically unrolls the scalar split reducer for
+the split counts selected by the live autotuner, but only on non-full-KV M2,
+M4, and M16 routes. The broad 140-case experiment exposed why this must be
+selective: static reducers improved the 120 non-full-KV cases by 0.375%
+median geomean, while full-KV regressed 1.888%. M1 and M8 were also mixed.
+Restricting the identical specialized code paths to the 72 robust cases gives
+0.446% median, 0.397% mean, and 0.484% p95 geomean gains, with 27 wins, 43
+quantized ties, and two losses by median. M2, M4, and M16 improve 0.187%,
+0.469%, and 0.282% respectively across their non-KV cases. The exact accepted
+`cf96b17c` JIT binary at fingerprint `cd31af2dd6479ddc` was preloaded for the
+control. The broad diagnostic artifacts are
+`artifacts/a100_p32_window/v17_static_reducers_candidate.json` and
+`artifacts/a100_p32_window/v17_static_reducers_control.json`; the committed
+dispatch preserves the runtime reducer on every route rejected by that pair.
+Exactness passes 28/28.
+
+Including this progression, affected-case log weighting raises the cumulative
+median improvement to **1.423%** versus fetched `6b3cea54` main. Planar timings
+remain excluded.
+
+Two more reducer/load experiments were rejected. Packing four output elements
+per split-reduction thread reduced the reducer grid fourfold and was
+decisively slower because it sacrificed the parallelism that hides strided
+partial-output loads. Separately, staging each M8 selector as one aligned
+16-byte shared-memory sector with `cp.async.cg` regressed the full screen by
+0.312% median geomean and linear-QKV by 1.49%; the accepted distributed
+selector layout remains faster.
+
 ## Reproduction
 
 ```bash
