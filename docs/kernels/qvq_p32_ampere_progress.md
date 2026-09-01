@@ -1714,6 +1714,18 @@ control is the M2 MLP-down subset of `qwen38_v19_current_all_0904e361.json`.
 Affected-case log weighting now reaches **0.892% cumulative improvement**
 versus fetched main.
 
+The eighth v19 progression bypasses the Python autotune-key lookup for the
+measured M16 full-KV split-32 plan, matching the existing direct dispatches
+for M1/M2/M4/M8 KV. In the matched 60-warmup/2000-iteration pair, W2,
+W2.5, and W3.5 improve from `0.036864/0.037888/0.036864 ms` to
+`0.033792/0.034816/0.035840 ms`, while W3 ties at `0.034816 ms`. The
+affected geomean speedup is **1.0512x** (4.871% lower latency), and output
+accuracy is unchanged because both paths launch the same split-32 kernel.
+Artifacts are `v19_m16_fastplans_control.json` and
+`v19_m16_fastplans_candidate.json` under `artifacts/a100_p32_window/`.
+Affected-case log weighting now reaches **1.036% cumulative improvement**
+versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1758,6 +1770,19 @@ tick. Widening the accepted M2 projection reducer from eight to 16 outputs
 was also rejected because both attention-out W2 and linear-Z W2 regressed.
 Diagnostics are `v19_m1_warpreduce16_wide_candidate.json` and
 `v19_m2_warpreduce16_candidate.json` under `artifacts/a100_p32_window/`.
+
+The later reduction sweep rejected eight- and 16-output layouts for
+M1/M2/M4 full-KV, M4/M8/M16 MLP-down, and M8/M16 attention-out/linear-Z;
+each was neutral or had at least one rate regression. Vectorizing M2/M4
+scalar full-KV output stores likewise regressed the matched control. The
+diagnostics use the `v19_m124_fullkv_`, `v19_m4_mlpdown_`,
+`v19_m8_mlpdown_`, `v19_m16_mlpdown_`, `v19_m8_projection_`,
+`v19_m16_projection_`, and `v19_m24_fullkv_float2_` prefixes.
+
+A broad direct-plan table for every M16 Qwen shape was narrowed to the
+retained full-KV entry. Full-Q W2.5/W3.5, attention-out W3.5, and linear-Z
+W2 lost one event tick in the matched pair, while most other cases tied.
+Those shapes continue to use the default in-memory autotuner.
 
 ## Reproduction
 

@@ -113,12 +113,15 @@ def test_p32_ampere_autotune_skips_cold_cuda_graph_capture(monkeypatch):
     )
 
 
-def test_p32_ampere_dispatches_measured_m8_kv_plan_directly(monkeypatch):
+@pytest.mark.parametrize(("size_m", "expected_split"), ((8, 48), (16, 32)))
+def test_p32_ampere_dispatches_measured_wmma_kv_plan_directly(
+    monkeypatch, size_m, expected_split
+):
     calls = []
     monkeypatch.setattr(
         qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
     )
-    input = torch.empty((8, 5120))
+    input = torch.empty((size_m, 5120))
 
     qvq_ampere_cuda.qvq_p32_window_ampere(
         input,
@@ -130,7 +133,7 @@ def test_p32_ampere_dispatches_measured_m8_kv_plan_directly(monkeypatch):
         bank_alt_id=3,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == 48
+    assert calls[0][-1] == expected_split
 
 
 @pytest.mark.parametrize(
