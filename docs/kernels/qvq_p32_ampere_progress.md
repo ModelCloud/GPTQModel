@@ -1507,6 +1507,30 @@ are `artifacts/a100_p32_window/v18_m1_fastplans_control.json` and
 Affected-case log weighting now reaches **1.650%** cumulative median
 improvement versus fetched main; planar timings remain excluded.
 
+The fourteenth v18 progression replaces the serial small-N split reducer
+with a four-output-per-warp Ampere reducer for the measured full-KV waves:
+split 64 for M1/M2/M4 and split 48 for M8. Four interleaved lane groups load
+adjacent outputs while eight lanes parallelize each output's split sum. This
+preserves useful coalescing and expands the reducer from 4-16 blocks to
+32-256 blocks on the 124-SM A100. M2/M4 now directly dispatch their measured
+split-64 plan so normal `split_count=0` calls reach the new reducer; unknown
+MKNs remain on the default-on in-memory tuner.
+
+Against the pre-change fixed-split controls, the affected geomean speedups
+are **1.0331x** for M1, **1.0588x** for M2, **1.0903x** for M4, and
+**1.0580x** for M8. All 16 medians win or tie, for a combined **1.0598x**
+speedup (5.645% lower latency); maximum absolute error stays below
+`1.15e-05`. Candidate artifacts are
+`v18_m124_fullkv_warpreduce4_candidate.json` and
+`v18_m8_fullkv_warpreduce4_candidate.json`; controls are
+`v18_m1_fullkv_packed_pgc_control.json`,
+`v18_m2_fullkv_packed_pgc_candidate.json`,
+`v18_m4_fullkv_packed_pgc_control.json`, and
+`v18_m8_fullkv_x2_scalar_store_control.json` under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**2.327%** cumulative median improvement versus fetched main; planar timings
+remain excluded.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
@@ -1585,6 +1609,14 @@ ties, but M1 linear-Z W2 and MLP-down W2 each lost one event tick. Those
 shapes retain normal in-memory autotuning. Diagnostics are
 `artifacts/a100_p32_window/v18_m1_fastplans_control.json` and
 `artifacts/a100_p32_window/v18_m1_fastplans_candidate.json`.
+
+Two reducer variants were rejected while finding the retained layout. The
+first assigned one complete warp to each output, improving M1/M2 and slightly
+improving M4 but issuing split-strided loads; it regressed M8 by 3.03% and
+M16 by 6.99%. The retained four-output layout recovered coalescing and won
+through M8, but remained 0.70% slower at M16 split 32, so M16 keeps the
+serial reducer. Diagnostics use the `v18_m*_fullkv_warpreduce_` and
+`v18_m*_fullkv_warpreduce4_` prefixes.
 
 The direct 140-case post-progression refresh is diagnostic only. Isolated
 0.22-0.29 ms charges appeared in otherwise stable M2, M16, and full-KV
