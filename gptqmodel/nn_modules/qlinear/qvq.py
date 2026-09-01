@@ -20,11 +20,12 @@ from ...quantization.qvq import (
     pack_qvq_bank_ids,
     pack_qvq_binary_bank_ids,
     reconstruct_qvq_inner_weight,
+    repack_p32_planar_to_window,
     unpack_qvq_bank_ids,
     unpack_qvq_binary_bank_ids,
 )
 from ...quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
-from ...quantization.qvq_rates import qvq_words_per_tile
+from ...quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
 from ...quantization.rotation.hadamard_utils import matmul_hadU, matmul_hadU_stable
 from ...utils.backend import BACKEND
 from ...utils.qvq_cuda import (
@@ -383,6 +384,7 @@ class QVQLinear(BaseQuantLinear):
             tuple[torch.Tensor, int, torch.device, torch.Tensor | None, int, torch.Tensor, int] | None
         ) = None
         self._qvq_cuda_bank_cache_lock = threading.Lock()
+        self._qvq_cuda_window_cache: tuple[torch.Tensor, int, torch.device, torch.Tensor] | None = None
         pgc16_levels_for_version(self.codebook_version)
 
         missing = {"trellis", "SU", "SV"} - set(tensors) if tensors else set()
@@ -452,12 +454,14 @@ class QVQLinear(BaseQuantLinear):
         state = super().__getstate__()
         state.pop("_qvq_cuda_bank_cache_lock", None)
         state["_qvq_cuda_bank_cache"] = None
+        state["_qvq_cuda_window_cache"] = None
         return state
 
     def __setstate__(self, state):
         super().__setstate__(state)
         self._qvq_cuda_bank_cache_lock = threading.Lock()
         self._qvq_cuda_bank_cache = None
+        self._qvq_cuda_window_cache = None
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
@@ -474,6 +478,33 @@ class QVQLinear(BaseQuantLinear):
     def _dtype_cache_clear(self) -> None:
         """Drop cached dtype conversions (call if SU/SV/bias are replaced)."""
         self._dtype_cache = {}
+
+    def _prepare_hopper_p32_window(
+        self,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Build and retain the storage-neutral P32 window payload for Hopper WGMMA.
+
+        Serialized checkpoints remain canonical planar P32.  The direct-window
+        Hopper kernel uses an equivalent bit layout, so convert once per module
+        after the weights reach CUDA and reuse the result for subsequent calls.
+        """
+
+        source = self.trellis
+        source_version = source._version
+        cached = self._qvq_cuda_window_cache
+        if (
+            cached is not None
+            and cached[0] is source
+            and cached[1] == source_version
+            and cached[2] == device
+        ):
+            return cached[3]
+        window = repack_p32_planar_to_window(source.contiguous(), bits=self.bits).to(device=device)
+        if self.trellis is not source or source._version != source_version:
+            raise RuntimeError("QVQ P32 trellis changed while preparing the Hopper window payload")
+        self._qvq_cuda_window_cache = (source, source_version, device, window)
+        return window
 
     def _cached_cast(self, name: str, *dtypes: torch.dtype) -> torch.Tensor | None:
         """Convert a constant auxiliary tensor (SU/SV/bias) to the requested
@@ -688,6 +719,7 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_mps_bank_ids_cache = None
         with self._qvq_cuda_bank_cache_lock:
             self._qvq_cuda_bank_cache = None
+            self._qvq_cuda_window_cache = None
         if self.trellis.device.type == "mps":
             from ...utils.qvq_mps import _prepare_qvq_mps_compander
 
@@ -704,6 +736,7 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_mps_bank_ids_cache = None
         with self._qvq_cuda_bank_cache_lock:
             self._qvq_cuda_bank_cache = None
+            self._qvq_cuda_window_cache = None
         # ModuleLooper performs device handoffs from inference-mode workers.
         # Letting Module._apply inherit that mode would recreate all cache-keyed
         # buffers without mutation counters immediately after post_init made
@@ -976,6 +1009,48 @@ class QVQLinear(BaseQuantLinear):
                 not qvq_cuda_device_supported(x.device)
             ):
                 return self._reference_inner_forward(x)
+
+            # Hopper's RS-WGMMA path consumes the storage-neutral continuous
+            # P32 window layout.  Keep checkpoints in canonical planar form,
+            # lazily repack once per module, and use the two-stage TMA kernel
+            # for the high-value M<=16 FP16 inference case.  The padded rows
+            # are zero, so this is exact for every real row while retaining
+            # the existing planar path for unsupported rates/shapes/dtypes.
+            if (
+                self.v2b2_p32
+                and self.vector_size == 2
+                and x.dtype == torch.float16
+                and 0 < x.shape[0] <= 16
+                and self.in_features % 256 == 0
+                and self.out_features % 256 == 0
+                and qvq_transition_bits(self.bits, vector_size=2) in (4, 5, 6, 7)
+            ):
+                properties = torch.cuda.get_device_properties(x.device)
+                if properties.major == 9 and properties.minor == 0 and "H200" in properties.name:
+                    from ...utils.qvq_cuda import _pgc16_levels
+                    from ...utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_m16_tma
+
+                    with self._qvq_cuda_bank_cache_lock:
+                        window = self._prepare_hopper_p32_window(x.device)
+                    wgmma_input = x.contiguous()
+                    if wgmma_input.shape[0] != 16:
+                        padded = torch.zeros(
+                            (16, self.in_features),
+                            dtype=wgmma_input.dtype,
+                            device=wgmma_input.device,
+                        )
+                        padded[: wgmma_input.shape[0]].copy_(wgmma_input)
+                        wgmma_input = padded
+                    output = qvq_p32_window_wgmma_m16_tma(
+                        wgmma_input,
+                        window,
+                        _pgc16_levels(x.device, self.codebook_version),
+                        cuda_bank_ids,
+                        self.bits,
+                        out_features=self.out_features,
+                        bank_alt_id=cuda_bank_alt_id,
+                    )
+                    return output[: x.shape[0]]
 
             return qvq_cuda_gemv(
                 x.contiguous(),

@@ -218,7 +218,7 @@ def _run(args: argparse.Namespace) -> dict:
             atol=2e-2,
             rtol=2e-2,
         )
-        machete_timing = comparison._cuda_graph_event_timing(
+        machete_timing = benchmark_utils._event_timing(
             torch, machete_call, warmup=args.warmup, iterations=args.iterations
         )
         del dense_gptq, gptq_reference, machete_output
@@ -313,7 +313,7 @@ def _run(args: argparse.Namespace) -> dict:
             rows.append(
                 _timed_row(
                     kernel="planar_p32",
-                    timing=comparison._cuda_graph_event_timing(
+                    timing=benchmark_utils._event_timing(
                         torch, planar_call, warmup=args.warmup, iterations=args.iterations
                     ),
                     max_abs=planar_metrics["max_abs"],
@@ -323,7 +323,7 @@ def _run(args: argparse.Namespace) -> dict:
             rows.append(
                 _timed_row(
                     kernel="p32_window_tma_rs_wgmma",
-                    timing=comparison._cuda_graph_event_timing(
+                    timing=benchmark_utils._event_timing(
                         torch, window_call, warmup=args.warmup, iterations=args.iterations
                     ),
                     max_abs=window_metrics["max_abs"],

@@ -89,6 +89,9 @@ struct alignas(128) P32WgmmaTmaSharedStorageFor {
       uint32_t,
       cute::cosize_v<P32TrellisTmaSmemLayoutFor<TransitionBits>>> trellis;
   alignas(128) cute::ArrayEngine<uint8_t, cute::cosize_v<P32BankTmaSmemLayout>> bank_ids;
+  // Reused by every decode lane and K16 tile; avoid dependent L1/global
+  // lookups for the small, read-only PGC level table.
+  alignas(128) cute::ArrayEngine<Element, 256> levels;
 };
 
 static_assert(cute::size(WgmmaTiledMma{}) == kThreads);
@@ -111,6 +114,29 @@ __device__ __forceinline__ Element qvq_wgmma_load_level(
       : "=h"(bits)
       : "l"(address));
   return Element::bitcast(bits);
+}
+
+__device__ __forceinline__ Element qvq_wgmma_load_level_shared(
+    uint32_t levels_base,
+    uint32_t index) {
+  const uint32_t address = levels_base + index * sizeof(Element);
+  uint16_t bits;
+  asm("ld.shared.u16 %0, [%1];" : "=h"(bits) : "r"(address));
+  return Element::bitcast(bits);
+}
+
+template <int TransitionBits, bool LevelsInShared>
+__device__ __forceinline__ Element qvq_wgmma_decode_level(
+    const Element* __restrict__ levels,
+    uint32_t levels_shared_base,
+    uint32_t index) {
+  if constexpr (LevelsInShared) {
+    return qvq_wgmma_load_level_shared(levels_shared_base, index);
+  } else if constexpr (TransitionBits == kW3TransitionBits) {
+    return qvq_wgmma_load_level(levels, index);
+  } else {
+    return levels[index];
+  }
 }
 
 template <int TransitionBits>
@@ -165,29 +191,91 @@ __device__ __forceinline__ void qvq_p32_window_state_pair(
   second = static_cast<uint32_t>((second_window >> shift) & 0xffffu);
 }
 
-template <int TransitionBits, class FragmentA>
+// W3.5 is the only rate whose seven-bit windows cross enough word boundaries
+// to make the lane geometry arithmetic visible in the hot loop.  Hoist the
+// two word pairs and shifts once per lane; lower rates retain the compact
+// generic path that ptxas already optimizes well.
+struct QvqP32WindowLanePlan {
+  int first_word0;
+  int first_next_word0;
+  int shift0;
+  int first_word1;
+  int first_next_word1;
+  int shift1;
+  int bank_shift;
+};
+
+template <int TransitionBits>
+__device__ __forceinline__ QvqP32WindowLanePlan qvq_p32_window_lane_plan(int lane) {
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  const int n_pair = lane >> 2;
+  const int k_pair = lane & 3;
+  const int pair0 = k_pair * 16 + n_pair;
+  const int bit_position0 = (kP32PairsPerTile - 1 - pair0) * TransitionBits;
+  const int bit_position1 = bit_position0 - 8 * TransitionBits;
+  const int first_word0 = bit_position0 >> 5;
+  const int first_word1 = bit_position1 >> 5;
+  return {
+      first_word0,
+      first_word0 + 1 == kWordsPerP32Tile ? 0 : first_word0 + 1,
+      bit_position0 & 31,
+      first_word1,
+      first_word1 + 1,
+      bit_position1 & 31,
+      k_pair,
+  };
+}
+
+template <int TransitionBits>
+__device__ __forceinline__ void qvq_p32_window_state_pair_planned(
+    const uint32_t* __restrict__ window_words,
+    int first_word,
+    int first_next_word,
+    int shift,
+    uint32_t& first,
+    uint32_t& second) {
+  constexpr int kKPairWordDistance = 2 * TransitionBits;
+  const int second_word = first_word - kKPairWordDistance;
+  const uint64_t first_window = static_cast<uint64_t>(window_words[first_word]) |
+      (static_cast<uint64_t>(window_words[first_next_word]) << 32);
+  const uint64_t second_window = static_cast<uint64_t>(window_words[second_word]) |
+      (static_cast<uint64_t>(window_words[second_word + 1]) << 32);
+  first = static_cast<uint32_t>((first_window >> shift) & 0xffffu);
+  second = static_cast<uint32_t>((second_window >> shift) & 0xffffu);
+}
+
+template <int TransitionBits, bool LevelsInShared, class FragmentA>
 __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     FragmentA& fragment,
     const uint32_t* __restrict__ window_words,
+    const QvqP32WindowLanePlan& plan,
     uint8_t bank_id,
     const Element* __restrict__ levels,
+    uint32_t levels_shared_base,
     uint32_t alternate_bank_mask) {
-  const int lane = static_cast<int>(threadIdx.x) & 31;
-  const int n_pair = lane >> 2;
-  const int k_pair0 = lane & 3;
-  const int k_pair1 = k_pair0 + 4;
-  const int pair00 = k_pair0 * 16 + n_pair;
-  const int pair01 = pair00 + 8;
-  const uint32_t bank_pair_bits = static_cast<uint32_t>(bank_id) >> k_pair0;
-  const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_bank_mask;
-  const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_bank_mask;
-
   uint32_t state00;
   uint32_t state01;
   uint32_t state10;
   uint32_t state11;
-  qvq_p32_window_state_pair<TransitionBits>(window_words, pair00, state00, state10);
-  qvq_p32_window_state_pair<TransitionBits>(window_words, pair01, state01, state11);
+  uint32_t bank_pair_bits;
+  if constexpr (TransitionBits == 7) {
+    bank_pair_bits = static_cast<uint32_t>(bank_id) >> plan.bank_shift;
+    qvq_p32_window_state_pair_planned<TransitionBits>(
+        window_words, plan.first_word0, plan.first_next_word0, plan.shift0, state00, state10);
+    qvq_p32_window_state_pair_planned<TransitionBits>(
+        window_words, plan.first_word1, plan.first_next_word1, plan.shift1, state01, state11);
+  } else {
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const int n_pair = lane >> 2;
+    const int k_pair0 = lane & 3;
+    const int pair00 = k_pair0 * 16 + n_pair;
+    const int pair01 = pair00 + 8;
+    bank_pair_bits = static_cast<uint32_t>(bank_id) >> k_pair0;
+    qvq_p32_window_state_pair<TransitionBits>(window_words, pair00, state00, state10);
+    qvq_p32_window_state_pair<TransitionBits>(window_words, pair01, state01, state11);
+  }
+  const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_bank_mask;
+  const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_bank_mask;
   const uint32_t mixed00 = qvq_wgmma_pgc16_mix(state00 ^ bank_mask0);
   const uint32_t mixed01 = qvq_wgmma_pgc16_mix(state01 ^ bank_mask0);
   const uint32_t mixed10 = qvq_wgmma_pgc16_mix(state10 ^ bank_mask1);
@@ -195,24 +283,14 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
 
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
-  fragment(0) = levels[mixed00 >> 8];
-  fragment(1) = levels[mixed01 >> 8];
-  if constexpr (TransitionBits == kW3TransitionBits) {
-    fragment(2) = qvq_wgmma_load_level(levels, mixed00 & 0xffu);
-    fragment(3) = qvq_wgmma_load_level(levels, mixed01 & 0xffu);
-  } else {
-    fragment(2) = levels[mixed00 & 0xffu];
-    fragment(3) = levels[mixed01 & 0xffu];
-  }
-  fragment(4) = levels[mixed10 >> 8];
-  fragment(5) = levels[mixed11 >> 8];
-  if constexpr (TransitionBits == kW3TransitionBits) {
-    fragment(6) = qvq_wgmma_load_level(levels, mixed10 & 0xffu);
-    fragment(7) = qvq_wgmma_load_level(levels, mixed11 & 0xffu);
-  } else {
-    fragment(6) = levels[mixed10 & 0xffu];
-    fragment(7) = levels[mixed11 & 0xffu];
-  }
+  fragment(0) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed00 >> 8);
+  fragment(1) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed01 >> 8);
+  fragment(2) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed00 & 0xffu);
+  fragment(3) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed01 & 0xffu);
+  fragment(4) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed10 >> 8);
+  fragment(5) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed11 >> 8);
+  fragment(6) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed10 & 0xffu);
+  fragment(7) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed11 & 0xffu);
 }
 
 __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
@@ -264,6 +342,7 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
   auto accumulator = cute::make_tensor<float>(thread_coordinate_c.shape());
   cute::clear(accumulator);
   tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
+  const auto decode_plan = qvq_p32_window_lane_plan<kW3TransitionBits>(thread & 31);
 
   for (int kb = k_tile_begin; kb < k_tile_end; kb += kP32K16TilesPerStage) {
     auto* packed_vectors = reinterpret_cast<uint4*>(&packed_words[0][0][0]);
@@ -303,11 +382,13 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
       if (k_block >= 2) {
         cute::warpgroup_wait<1>();
       }
-      qvq_p32_window_decode_fragment<kW3TransitionBits>(
+      qvq_p32_window_decode_fragment<kW3TransitionBits, false>(
           fragment_a,
           &packed_words[k_block][warp][0],
+          decode_plan,
           packed_bank_ids[k_block][warp],
           levels,
+          0,
           alternate_bank_mask);
       cute::warpgroup_fence_operand(fragment_a);
       cute::warpgroup_arrive();
@@ -433,6 +514,10 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       cute::group_modes<0, 2>(s_bank_ids),
       cute::group_modes<0, 2>(tiled_bank_ids));
 
+  for (int index = thread; index < 256; index += kTmaThreads) {
+    shared.levels.begin()[index] = levels[index];
+  }
+
   __syncthreads();
 
   if (is_producer) {
@@ -484,6 +569,8 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   const int warp = thread >> 5;
   const int lane = thread & 31;
   const int bank_n16_offset = (n64_block & 3) * kP32N16TilesPerBlock;
+  const auto decode_plan = qvq_p32_window_lane_plan<TransitionBits>(lane);
+  const uint32_t shared_levels_base = __cvta_generic_to_shared(shared.levels.begin());
   WgmmaTmaPipelineState read_state;
   WgmmaTmaPipelineState release_state;
 
@@ -506,11 +593,13 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       const auto trellis_layout = TrellisSmemLayout{};
       const uint32_t* window_words = shared.trellis.begin() +
           trellis_layout(0, warp, k_block, read_stage);
-      qvq_p32_window_decode_fragment<TransitionBits>(
+      qvq_p32_window_decode_fragment<TransitionBits, true>(
           fragment_a,
           window_words,
+          decode_plan,
           static_cast<uint8_t>(bank_id),
-          levels,
+          shared.levels.begin(),
+          shared_levels_base,
           alternate_bank_mask);
       cute::warpgroup_fence_operand(fragment_a);
       cute::warpgroup_arrive();
@@ -539,7 +628,11 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
     const int p32_column = (wgmma_column & ~15) + ((tile_column & 7) << 1) + (tile_column >> 3);
     const int64_t output_index =
         static_cast<int64_t>(output_row) * size_n + n64_block * kOutputColumns + p32_column;
-    partial_output[static_cast<int64_t>(split) * kRows * size_n + output_index] = accumulator(index);
+    if (split_count > 1) {
+      atomicAdd(partial_output + output_index, accumulator(index));
+    } else {
+      partial_output[output_index] = accumulator(index);
+    }
   }
 #endif
 }
@@ -726,7 +819,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
       cute::make_shape(
           cute::Int<kWordsPerP32Tile>{},
           cute::Int<kP32N16TilesPerBlock>{},
-          cute::Int<kP32K16TilesPerStage>{}));
+      cute::Int<kP32K16TilesPerStage>{}));
   auto bank_tma = cute::make_tma_atom(
       cute::SM90_TMA_LOAD{},
       bank_tensor,
@@ -736,7 +829,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
   auto output = at::empty({kRows, size_n}, input.options().dtype(at::kFloat));
   auto partial_output = split_count == 1
       ? output
-      : at::empty({split_count, kRows, size_n}, input.options().dtype(at::kFloat));
+      : at::zeros({kRows, size_n}, input.options().dtype(at::kFloat));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns), 1, static_cast<unsigned>(split_count));
   qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits><<<grid, kTmaThreads, 0, stream>>>(
@@ -752,15 +845,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   if (split_count > 1) {
-    constexpr int kReductionThreads = 256;
-    const int output_values = kRows * size_n;
-    const int reduction_blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
-    qvq_wgmma_reduce_split_kernel<<<reduction_blocks, kReductionThreads, 0, stream>>>(
-        partial_output.data_ptr<float>(),
-        output.data_ptr<float>(),
-        output_values,
-        static_cast<int>(split_count));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    output = partial_output;
   }
   return output;
 }
