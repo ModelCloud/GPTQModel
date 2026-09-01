@@ -784,6 +784,150 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
           const uint32_t* words = packed_words[parity][stage_k_tile][shared_tile];
           const uint8_t packed_bank_id =
               packed_bank_ids[parity][stage_k_tile][shared_tile];
+          if constexpr (
+              Rows == 2 && StaticN != 1024 &&
+              (TransitionBits == 5 || TransitionBits == 7)) {
+#pragma unroll
+            for (int bank_group = 0; bank_group < 4; ++bank_group) {
+              const uint32_t bank_mask_0 =
+                  selected_bank_mask(packed_bank_id, bank_group, alt_mask);
+              const uint32_t bank_mask_8 =
+                  selected_bank_mask(packed_bank_id, bank_group + 4, alt_mask);
+#pragma unroll
+              for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
+                const int row = bank_group * 2 + row_in_group;
+                const int pair = row * 8 + pair_column;
+                uint32_t state_0;
+                uint32_t state_8;
+                window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
+                const uint32_t decoded_0 =
+                    decode_state_bits(state_0, bank_mask_0, levels);
+                const uint32_t decoded_8 =
+                    decode_state_bits(state_8, bank_mask_8, levels);
+                union {
+                  uint32_t bits;
+                  half2 values;
+                } pair_0{decoded_0}, pair_8{decoded_8};
+                const float weight_0 = __half2float(pair_0.values.x);
+                const float weight_1 = __half2float(pair_0.values.y);
+                const float weight_8 = __half2float(pair_8.values.x);
+                const float weight_9 = __half2float(pair_8.values.y);
+#pragma unroll
+                for (int output_row = 0; output_row < Rows; ++output_row) {
+                  const int row_base = output_row * (StageKTiles * kTileRows) +
+                      stage_k_tile * kTileRows;
+                  const float input_0 =
+                      __half2float(input_tile[parity][row_base + row]);
+                  const float input_8 =
+                      __half2float(input_tile[parity][row_base + row + 8]);
+                  accumulator_0[output_row] =
+                      fmaf(input_0, weight_0, accumulator_0[output_row]);
+                  accumulator_1[output_row] =
+                      fmaf(input_0, weight_1, accumulator_1[output_row]);
+                  accumulator_0[output_row] =
+                      fmaf(input_8, weight_8, accumulator_0[output_row]);
+                  accumulator_1[output_row] =
+                      fmaf(input_8, weight_9, accumulator_1[output_row]);
+                }
+              }
+            }
+          } else {
+#pragma unroll
+            for (int row = 0; row < 8; ++row) {
+              const int pair = row * 8 + pair_column;
+              uint32_t state_0;
+              uint32_t state_8;
+              window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
+              const uint32_t decoded_0 = decode_pair_bits<TransitionBits>(
+                  pair, state_0, packed_bank_id, alt_mask, levels);
+              const uint32_t decoded_8 = decode_pair_bits<TransitionBits>(
+                  pair + 64, state_8, packed_bank_id, alt_mask, levels);
+              union {
+                uint32_t bits;
+                half2 values;
+              } pair_0{decoded_0}, pair_8{decoded_8};
+              const float weight_0 = __half2float(pair_0.values.x);
+              const float weight_1 = __half2float(pair_0.values.y);
+              const float weight_8 = __half2float(pair_8.values.x);
+              const float weight_9 = __half2float(pair_8.values.y);
+#pragma unroll
+              for (int output_row = 0; output_row < Rows; ++output_row) {
+                const int row_base = output_row * (StageKTiles * kTileRows) +
+                    stage_k_tile * kTileRows;
+                const float input_0 =
+                    __half2float(input_tile[parity][row_base + row]);
+                const float input_8 =
+                    __half2float(input_tile[parity][row_base + row + 8]);
+                accumulator_0[output_row] =
+                    fmaf(input_0, weight_0, accumulator_0[output_row]);
+                accumulator_1[output_row] =
+                    fmaf(input_0, weight_1, accumulator_1[output_row]);
+                accumulator_0[output_row] =
+                    fmaf(input_8, weight_8, accumulator_0[output_row]);
+                accumulator_1[output_row] =
+                    fmaf(input_8, weight_9, accumulator_1[output_row]);
+              }
+            }
+          }
+        }
+      }
+    } else if (n_tile < n_tiles) {
+#pragma unroll
+      for (int stage_k_tile = 0; stage_k_tile < StageKTiles; ++stage_k_tile) {
+        if (k_tile + stage_k_tile >= k_tile_end) {
+          continue;
+        }
+        const uint32_t* words = packed_words[parity][stage_k_tile][shared_tile];
+        const uint8_t packed_bank_id =
+            packed_bank_ids[parity][stage_k_tile][shared_tile];
+        if constexpr (
+            Rows == 2 && StaticN != 1024 &&
+            (TransitionBits == 5 || TransitionBits == 7)) {
+#pragma unroll
+          for (int bank_group = 0; bank_group < 4; ++bank_group) {
+            const uint32_t bank_mask_0 =
+                selected_bank_mask(packed_bank_id, bank_group, alt_mask);
+            const uint32_t bank_mask_8 =
+                selected_bank_mask(packed_bank_id, bank_group + 4, alt_mask);
+#pragma unroll
+            for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
+              const int row = bank_group * 2 + row_in_group;
+              const int pair = row * 8 + pair_column;
+              uint32_t state_0;
+              uint32_t state_8;
+              window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
+              const uint32_t decoded_0 =
+                  decode_state_bits(state_0, bank_mask_0, levels);
+              const uint32_t decoded_8 =
+                  decode_state_bits(state_8, bank_mask_8, levels);
+              union {
+                uint32_t bits;
+                half2 values;
+              } pair_0{decoded_0}, pair_8{decoded_8};
+              const float weight_0 = __half2float(pair_0.values.x);
+              const float weight_1 = __half2float(pair_0.values.y);
+              const float weight_8 = __half2float(pair_8.values.x);
+              const float weight_9 = __half2float(pair_8.values.y);
+#pragma unroll
+              for (int output_row = 0; output_row < Rows; ++output_row) {
+                const int row_base = output_row * (StageKTiles * kTileRows) +
+                    stage_k_tile * kTileRows;
+                const float input_0 =
+                    __half2float(input_tile[parity][row_base + row]);
+                const float input_8 =
+                    __half2float(input_tile[parity][row_base + row + 8]);
+                accumulator_0[output_row] =
+                    fmaf(input_0, weight_0, accumulator_0[output_row]);
+                accumulator_1[output_row] =
+                    fmaf(input_0, weight_1, accumulator_1[output_row]);
+                accumulator_0[output_row] =
+                    fmaf(input_8, weight_8, accumulator_0[output_row]);
+                accumulator_1[output_row] =
+                    fmaf(input_8, weight_9, accumulator_1[output_row]);
+              }
+            }
+          }
+        } else {
 #pragma unroll
           for (int row = 0; row < 8; ++row) {
             const int pair = row * 8 + pair_column;
@@ -804,9 +948,12 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
             const float weight_9 = __half2float(pair_8.values.y);
 #pragma unroll
             for (int output_row = 0; output_row < Rows; ++output_row) {
-              const int row_base = output_row * (StageKTiles * kTileRows) + stage_k_tile * kTileRows;
-              const float input_0 = __half2float(input_tile[parity][row_base + row]);
-              const float input_8 = __half2float(input_tile[parity][row_base + row + 8]);
+              const int row_base = output_row * (StageKTiles * kTileRows) +
+                  stage_k_tile * kTileRows;
+              const float input_0 =
+                  __half2float(input_tile[parity][row_base + row]);
+              const float input_8 =
+                  __half2float(input_tile[parity][row_base + row + 8]);
               accumulator_0[output_row] =
                   fmaf(input_0, weight_0, accumulator_0[output_row]);
               accumulator_1[output_row] =
@@ -816,49 +963,6 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
               accumulator_1[output_row] =
                   fmaf(input_8, weight_9, accumulator_1[output_row]);
             }
-          }
-        }
-      }
-    } else if (n_tile < n_tiles) {
-#pragma unroll
-      for (int stage_k_tile = 0; stage_k_tile < StageKTiles; ++stage_k_tile) {
-        if (k_tile + stage_k_tile >= k_tile_end) {
-          continue;
-        }
-        const uint32_t* words = packed_words[parity][stage_k_tile][shared_tile];
-        const uint8_t packed_bank_id =
-            packed_bank_ids[parity][stage_k_tile][shared_tile];
-#pragma unroll
-        for (int row = 0; row < 8; ++row) {
-          const int pair = row * 8 + pair_column;
-          uint32_t state_0;
-          uint32_t state_8;
-          window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
-          const uint32_t decoded_0 = decode_pair_bits<TransitionBits>(
-              pair, state_0, packed_bank_id, alt_mask, levels);
-          const uint32_t decoded_8 = decode_pair_bits<TransitionBits>(
-              pair + 64, state_8, packed_bank_id, alt_mask, levels);
-          union {
-            uint32_t bits;
-            half2 values;
-          } pair_0{decoded_0}, pair_8{decoded_8};
-          const float weight_0 = __half2float(pair_0.values.x);
-          const float weight_1 = __half2float(pair_0.values.y);
-          const float weight_8 = __half2float(pair_8.values.x);
-          const float weight_9 = __half2float(pair_8.values.y);
-#pragma unroll
-          for (int output_row = 0; output_row < Rows; ++output_row) {
-            const int row_base = output_row * (StageKTiles * kTileRows) + stage_k_tile * kTileRows;
-            const float input_0 = __half2float(input_tile[parity][row_base + row]);
-            const float input_8 = __half2float(input_tile[parity][row_base + row + 8]);
-            accumulator_0[output_row] =
-                fmaf(input_0, weight_0, accumulator_0[output_row]);
-            accumulator_1[output_row] =
-                fmaf(input_0, weight_1, accumulator_1[output_row]);
-            accumulator_0[output_row] =
-                fmaf(input_8, weight_8, accumulator_0[output_row]);
-            accumulator_1[output_row] =
-                fmaf(input_8, weight_9, accumulator_1[output_row]);
           }
         }
       }

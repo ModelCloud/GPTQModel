@@ -1154,6 +1154,42 @@ and 16-byte async copies regressed the complete M2 set by 0.142%. Their source
 paths were restored; the broad diagnostic is
 `v17_scalar_bank_cpasync_candidate.json`.
 
+The third v17 progression applies the Hopper bank-mask-hoisting lesson only
+where it survives Ampere resource and schedule constraints. For M2 W2.5 and
+W3.5 outside full-KV, two adjacent scalar decode rows share each lower/upper
+bank-mask pair instead of recomputing the selectors for every decoded state.
+Other rates, rows, and M2 full-KV retain their bit-identical accepted paths.
+On the clean matched 40-warmup/1000-iteration 12-case run, every case improves;
+the median geomean gain is 3.524%, while the aggregate mean-latency gain is
+3.306%. Per-shape median gains are 3.349% for full-Q, 4.545% for
+attention-out, 3.150% for linear-QKV, 5.676% for linear-Z, 3.545% for
+MLP-gate/up, and 0.939% for MLP-down. Exactness passes 28/28. The control and
+candidate are `artifacts/a100_p32_window/v17_m2_bank_mask_group_control.json`
+and
+`artifacts/a100_p32_window/v17_m2_bank_mask_group_selective_candidate.json`.
+The control process preloaded the exact accepted `499e6810` JIT binary at
+cache fingerprint `657b7db6c159a655` before running the same benchmark.
+
+Using affected-case log weighting, the three accepted v17 progressions are
+`exp(28/140 * ln(1.02161) + 24/140 * ln(1.00958) + 12/140 *
+ln(1.03524076)) = 1.008919x`, or **0.892%** cumulative median improvement
+versus fetched `6b3cea54` main. Planar timings remain excluded.
+
+Additional v17 failures are recorded to prevent retesting dead ends. A packed
+M1 selector was only +0.215% overall and regressed attention-out and linear-Z;
+an async M16 full-KV selector was roughly 7-9% slower. Hoisting the WMMA lane
+mapping grew live ranges and regressed M16 uniformly. Four skewed shared
+codebook replicas were 1-2% slower than the read-only-cache path. Forcing
+ordinary L1 `.ca` codebook loads in place of the generated read-only load mode
+was neutral-to-mixed in a contention-only screen. A 16-bit inline-PTX PGC mix
+lengthened the hot SASS region and was rejected before timing. Finally,
+grouping scalar bank masks broadly regressed M1 by 1.968% and M4 by 1.453% in
+the diagnostic screen; only the cleanly validated M2 W2.5/W3.5 subset above
+is retained. Diagnostics use the `v17_m1_bank_cpasync_`,
+`v17_m16_fullkv_bank_cpasync_`, `v17_wmma_lane_hoist_`,
+`v17_m8_shared_levels4_`, and `v17_scalar_bank_group_` labels; contention-only
+files remain untracked.
+
 ## Reproduction
 
 ```bash
