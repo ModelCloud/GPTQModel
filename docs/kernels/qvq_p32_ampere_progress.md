@@ -1308,6 +1308,19 @@ identical to the runtime-split control, so the compiler is already reducing
 the uniform split arithmetic effectively. Diagnostics use the
 `v17_m16_static_split10_` prefix.
 
+The tenth v17 progression extends the static reducer to the three M1 shape
+families that were positive by median, mean, and p95 in the broad experiment:
+full-Q, linear-QKV, and long-K MLP-down. The clean matched
+60-warmup/2000-iteration 12-case pair improves every case. Median, mean, and
+p95 geomeans improve 3.684%, 3.931%, and 3.001%; per-shape median gains are
+3.026% for full-Q, 3.548% for linear-QKV, and 4.485% for MLP-down. Other M1
+shapes and full-KV keep the runtime reducer. The control preloads exact
+accepted `31caa82d` from JIT fingerprint `a73a469768c9542b`. Artifacts are
+`artifacts/a100_p32_window/v17_m1_static_reducer_control.json` and
+`artifacts/a100_p32_window/v17_m1_static_reducer_candidate.json`. Affected-case
+log weighting now gives **1.951%** cumulative median improvement versus
+fetched `6b3cea54` main; planar timings remain excluded.
+
 ## Reproduction
 
 ```bash
