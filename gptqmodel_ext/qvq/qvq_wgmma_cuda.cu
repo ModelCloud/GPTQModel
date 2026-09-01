@@ -89,6 +89,9 @@ struct alignas(128) P32WgmmaTmaSharedStorageFor {
       uint32_t,
       cute::cosize_v<P32TrellisTmaSmemLayoutFor<TransitionBits>>> trellis;
   alignas(128) cute::ArrayEngine<uint8_t, cute::cosize_v<P32BankTmaSmemLayout>> bank_ids;
+  // Reused by every decode lane and K16 tile; avoid dependent L1/global
+  // lookups for the small, read-only PGC level table.
+  alignas(128) cute::ArrayEngine<Element, 256> levels;
 };
 
 static_assert(cute::size(WgmmaTiledMma{}) == kThreads);
@@ -111,6 +114,29 @@ __device__ __forceinline__ Element qvq_wgmma_load_level(
       : "=h"(bits)
       : "l"(address));
   return Element::bitcast(bits);
+}
+
+__device__ __forceinline__ Element qvq_wgmma_load_level_shared(
+    uint32_t levels_base,
+    uint32_t index) {
+  const uint32_t address = levels_base + index * sizeof(Element);
+  uint16_t bits;
+  asm("ld.shared.u16 %0, [%1];" : "=h"(bits) : "r"(address));
+  return Element::bitcast(bits);
+}
+
+template <int TransitionBits, bool LevelsInShared>
+__device__ __forceinline__ Element qvq_wgmma_decode_level(
+    const Element* __restrict__ levels,
+    uint32_t levels_shared_base,
+    uint32_t index) {
+  if constexpr (LevelsInShared) {
+    return qvq_wgmma_load_level_shared(levels_shared_base, index);
+  } else if constexpr (TransitionBits == kW3TransitionBits) {
+    return qvq_wgmma_load_level(levels, index);
+  } else {
+    return levels[index];
+  }
 }
 
 template <int TransitionBits>
@@ -218,13 +244,14 @@ __device__ __forceinline__ void qvq_p32_window_state_pair_planned(
   second = static_cast<uint32_t>((second_window >> shift) & 0xffffu);
 }
 
-template <int TransitionBits, class FragmentA>
+template <int TransitionBits, bool LevelsInShared, class FragmentA>
 __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     FragmentA& fragment,
     const uint32_t* __restrict__ window_words,
     const QvqP32WindowLanePlan& plan,
     uint8_t bank_id,
     const Element* __restrict__ levels,
+    uint32_t levels_shared_base,
     uint32_t alternate_bank_mask) {
   uint32_t state00;
   uint32_t state01;
@@ -256,24 +283,14 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
 
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
-  fragment(0) = levels[mixed00 >> 8];
-  fragment(1) = levels[mixed01 >> 8];
-  if constexpr (TransitionBits == kW3TransitionBits) {
-    fragment(2) = qvq_wgmma_load_level(levels, mixed00 & 0xffu);
-    fragment(3) = qvq_wgmma_load_level(levels, mixed01 & 0xffu);
-  } else {
-    fragment(2) = levels[mixed00 & 0xffu];
-    fragment(3) = levels[mixed01 & 0xffu];
-  }
-  fragment(4) = levels[mixed10 >> 8];
-  fragment(5) = levels[mixed11 >> 8];
-  if constexpr (TransitionBits == kW3TransitionBits) {
-    fragment(6) = qvq_wgmma_load_level(levels, mixed10 & 0xffu);
-    fragment(7) = qvq_wgmma_load_level(levels, mixed11 & 0xffu);
-  } else {
-    fragment(6) = levels[mixed10 & 0xffu];
-    fragment(7) = levels[mixed11 & 0xffu];
-  }
+  fragment(0) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed00 >> 8);
+  fragment(1) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed01 >> 8);
+  fragment(2) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed00 & 0xffu);
+  fragment(3) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed01 & 0xffu);
+  fragment(4) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed10 >> 8);
+  fragment(5) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed11 >> 8);
+  fragment(6) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed10 & 0xffu);
+  fragment(7) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed11 & 0xffu);
 }
 
 __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
@@ -365,12 +382,13 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
       if (k_block >= 2) {
         cute::warpgroup_wait<1>();
       }
-      qvq_p32_window_decode_fragment<kW3TransitionBits>(
+      qvq_p32_window_decode_fragment<kW3TransitionBits, false>(
           fragment_a,
           &packed_words[k_block][warp][0],
           decode_plan,
           packed_bank_ids[k_block][warp],
           levels,
+          0,
           alternate_bank_mask);
       cute::warpgroup_fence_operand(fragment_a);
       cute::warpgroup_arrive();
@@ -496,6 +514,10 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       cute::group_modes<0, 2>(s_bank_ids),
       cute::group_modes<0, 2>(tiled_bank_ids));
 
+  for (int index = thread; index < 256; index += kTmaThreads) {
+    shared.levels.begin()[index] = levels[index];
+  }
+
   __syncthreads();
 
   if (is_producer) {
@@ -548,6 +570,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   const int lane = thread & 31;
   const int bank_n16_offset = (n64_block & 3) * kP32N16TilesPerBlock;
   const auto decode_plan = qvq_p32_window_lane_plan<TransitionBits>(lane);
+  const uint32_t shared_levels_base = __cvta_generic_to_shared(shared.levels.begin());
   WgmmaTmaPipelineState read_state;
   WgmmaTmaPipelineState release_state;
 
@@ -570,12 +593,13 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       const auto trellis_layout = TrellisSmemLayout{};
       const uint32_t* window_words = shared.trellis.begin() +
           trellis_layout(0, warp, k_block, read_stage);
-      qvq_p32_window_decode_fragment<TransitionBits>(
+      qvq_p32_window_decode_fragment<TransitionBits, true>(
           fragment_a,
           window_words,
           decode_plan,
           static_cast<uint8_t>(bank_id),
-          levels,
+          shared.levels.begin(),
+          shared_levels_base,
           alternate_bank_mask);
       cute::warpgroup_fence_operand(fragment_a);
       cute::warpgroup_arrive();
