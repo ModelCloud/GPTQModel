@@ -572,6 +572,89 @@ Harness artifacts:
 - `artifacts/qvq_validation/a0-a41-production_seed20260831_1b368547.json`;
 - `artifacts/qvq_validation/summary_a0-a41-production_1b368547.json`.
 
+### Canonical P32 runtime and recovery oracles
+
+Two stricter no-requantization profiles were added after merging
+`origin/main` at `03144a22`. These are runtime oracles, not additional
+quantization arms. Both use the A31/A25-compatible transformed-weight plan and
+materialize one canonical per-module P32 payload:
+
+- `P0` executes those bytes through seven ordinary per-module `QVQLinear`
+  calls. No shared-transform or grouped-runtime hook is installed, so the
+  A25 axes execute 12 full Hadamards/block.
+- `R0` loads the exact same bytes and compiles compatible Q/K/V and gate/up
+  sibling groups. It executes nine Hadamards and four P32 inner launches/block.
+- `P0+C` and `R0+C` repeat the same control after the repository's production
+  fixed-trellis output-channel correction. That correction freezes trellis,
+  selectors, alternative-bank choice, bias, and `SU`; only serialized `SV`
+  may change. Inference uses no random seed.
+
+The refactored compiler is recovery-safe rather than optimistically strict.
+It groups a sibling set only when its packed geometry and stored `SU` are
+compatible. An incompatible set remains as ordinary per-module P32. A unit
+test with unequal module-local `SU` proves that fallback is exact. This matters
+for any future recovery algorithm that learns input scales independently;
+the current production alignment explicitly freezes `SU` and is SV-only.
+
+The clean-tree `p0-r0-runtime` profile at `02b20151` passed all harness gates:
+
+- 112/112 complete projection records and byte-identical payload hashes;
+- one canonical payload materialization and no candidate fit;
+- 32/32 grouped sibling sets, zero fallback;
+- identical `2.054419024` effective BPW;
+- direct R0-versus-P0 packed logits KL `7.4977e-5`, relative L2 `0.004626`,
+  maximum absolute delta `0.232422`, Top-1 identity `99.183%`, and Top-5/10
+  identity `100%` across 5,630 held-out tokens.
+
+Five alternating timing cycles give a material runtime win against plain P32:
+
+| Batch | P0 decode median (p95) ms | R0 decode median (p95) ms | Median delta | p95 delta |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | `37.1427 (39.9424)` | **`30.8287 (32.2134)`** | **-17.00%** | **-19.35%** |
+| 2 | `37.1377 (41.5199)` | **`32.6202 (35.4383)`** | **-12.16%** | **-14.65%** |
+| 4 | `36.9230 (40.2394)` | **`32.0682 (34.2309)`** | **-13.15%** | **-14.93%** |
+| 8 | `36.8466 (40.2223)` | **`31.8748 (33.2723)`** | **-13.49%** | **-17.28%** |
+
+B1 throughput rises from `26.92` to `32.44` token/s (`+20.48%`). The isolated
+112-projection suite improves `21.61%` at M1 and `15.67--17.56%` at M2--M8;
+all suite p95 deltas are favorable.
+
+The `p0c-r0c-correction` profile at `f495e745` also passed. Correction accepted
+374,732 output-channel updates across all 112 modules; every module changed
+only `SV`. The summed local Hessian proxy fell from `474.7300` to `468.7766`
+(`-1.25%`). R0+C still compiled 32/32 groups with zero fallback and retained
+identical EBPW and payload hashes. Direct R0+C-versus-P0+C packed equivalence
+is KL `6.8878e-5`, relative L2 `0.004352`, maximum delta `0.210938`, Top-1
+identity `99.325%`, and Top-5/10 identity `100%`.
+
+| Batch | P0+C decode median (p95) ms | R0+C decode median (p95) ms | Median delta | p95 delta |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | `38.5307 (45.8208)` | **`32.6092 (38.6828)`** | **-15.37%** | **-15.58%** |
+| 2 | `37.8954 (43.6457)` | **`34.4376 (41.0248)`** | **-9.12%** | **-6.00%** |
+| 4 | `38.3092 (44.9101)` | **`33.9781 (40.6990)`** | **-11.31%** | **-9.38%** |
+| 8 | `39.8481 (45.3532)` | **`33.5493 (275.4560)`** | **-15.81%** | `+507.36%` outlier |
+
+The corrected B8 p95 contains one extreme R0+C sample and is explicitly not
+tail-latency evidence. Its median and the independent isolated suite remain
+favorable; the corrected suite improves `19.16--25.98%` at M1--M8 median.
+
+The correction itself is a negative propagated-quality result. P0+C versus
+uncorrected P0 moves full-model packed KL from `0.916587` to `0.958022`
+(`+4.52%`) and logits relative L2 from `0.494783` to `0.504663` (`+2.00%`),
+although Top-1/5/10 each improve by `0.18--0.30` percentage point. Improving
+every local fixed-trellis Hessian proxy therefore does not establish a
+full-model quality improvement. The oracle proves that the refactored runtime
+preserves the repository's existing post-quant recovery representation; it
+does not promote this particular local SV correction as the production
+quality default.
+
+Oracle artifacts:
+
+- `artifacts/qvq_validation/p0-r0-runtime_seed20260831_02b20151.json`;
+- `artifacts/qvq_validation/summary_p0-r0-runtime_02b20151.json`;
+- `artifacts/qvq_validation/p0c-r0c-correction_seed20260831_f495e745.json`;
+- `artifacts/qvq_validation/summary_p0c-r0c-correction_f495e745.json`.
+
 Further fusion opportunities remain even when a transform must remain:
 
 - batch/fuse Q and K output transforms when their chosen basis permits it;
