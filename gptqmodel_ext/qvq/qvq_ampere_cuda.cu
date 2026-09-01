@@ -1743,10 +1743,12 @@ at::Tensor p32_window_ampere_impl(
          (size_k == 5120 && size_n == 6144));
     if (use_m1_warp_reducer) {
       constexpr int kReductionWarps = kReductionThreads / 32;
+      constexpr int kOutputsPerWarp = 16;
       const int warp_blocks =
-          (output_values + kReductionWarps * 4 - 1) / (kReductionWarps * 4);
+          (output_values + kReductionWarps * kOutputsPerWarp - 1) /
+          (kReductionWarps * kOutputsPerWarp);
 #define QVQ_LAUNCH_WARP_REDUCER(SPLITS)                                      \
-  reduce_split_warp_kernel<SPLITS>                                           \
+  reduce_split_warp_kernel<SPLITS, kOutputsPerWarp>                          \
       <<<warp_blocks, kReductionThreads, 0, stream>>>(                        \
           partial_output.data_ptr<float>(),                                  \
           output.data_ptr<float>(),                                           \

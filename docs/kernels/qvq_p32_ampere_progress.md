@@ -1682,6 +1682,17 @@ Maximum absolute error remains below `1.53e-05`. Artifacts are
 `artifacts/a100_p32_window/`. Affected-case log weighting now reaches
 **0.750% cumulative improvement** versus fetched main.
 
+The fifth v19 progression widens the retained M1 projection reducer from
+four to 16 adjacent outputs per warp. Against the matched four-output
+artifact, attention-out W2 improves from `0.040960` to `0.039936 ms` and
+linear-Z W2 improves from `0.040960` to `0.036864 ms`; the other six rates
+tie. The affected eight-case geomean speedup is **1.0165x** (1.620% lower
+latency), with maximum absolute error below `1.63e-05`. The candidate is
+`artifacts/a100_p32_window/v19_m1_warpreduce16_candidate.json` and the
+four-output control is `v19_m1_selective_warpreduce_candidate.json` in the
+same directory. Affected-case log weighting now reaches **0.844% cumulative
+improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1709,6 +1720,16 @@ eight-output layout to full-Q, linear-QKV, and MLP-gate/up produced several
 one-tick regressions and no wins. Their source changes were restored;
 diagnostics are `v19_m4_warpreduce16_candidate.json` and
 `v19_m2_warpreduce8_wide_screen.json`.
+
+Three additional reducer/epilogue variants were rejected after the fourth
+progression. Reducing warp-reducer launches from 256 to 128 threads regressed
+M16 full-KV at every rate and did not provide a clean M1/M2 gain. Loading the
+four M16 full-KV bank IDs with one `cp.async.ca` transaction regressed three
+rates. An intermediate eight-output M1 reducer was superseded by the retained
+16-output layout, which produced the larger clean gain. Diagnostics are
+`v19_warpreduce128_screen.json`,
+`v19_m16_fullkv_bankid_cpasync4_candidate.json`, and
+`v19_m1_warpreduce8_candidate.json` under `artifacts/a100_p32_window/`.
 
 ## Reproduction
 
