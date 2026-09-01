@@ -165,29 +165,90 @@ __device__ __forceinline__ void qvq_p32_window_state_pair(
   second = static_cast<uint32_t>((second_window >> shift) & 0xffffu);
 }
 
+// W3.5 is the only rate whose seven-bit windows cross enough word boundaries
+// to make the lane geometry arithmetic visible in the hot loop.  Hoist the
+// two word pairs and shifts once per lane; lower rates retain the compact
+// generic path that ptxas already optimizes well.
+struct QvqP32WindowLanePlan {
+  int first_word0;
+  int first_next_word0;
+  int shift0;
+  int first_word1;
+  int first_next_word1;
+  int shift1;
+  int bank_shift;
+};
+
+template <int TransitionBits>
+__device__ __forceinline__ QvqP32WindowLanePlan qvq_p32_window_lane_plan(int lane) {
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  const int n_pair = lane >> 2;
+  const int k_pair = lane & 3;
+  const int pair0 = k_pair * 16 + n_pair;
+  const int bit_position0 = (kP32PairsPerTile - 1 - pair0) * TransitionBits;
+  const int bit_position1 = bit_position0 - 8 * TransitionBits;
+  const int first_word0 = bit_position0 >> 5;
+  const int first_word1 = bit_position1 >> 5;
+  return {
+      first_word0,
+      first_word0 + 1 == kWordsPerP32Tile ? 0 : first_word0 + 1,
+      bit_position0 & 31,
+      first_word1,
+      first_word1 + 1,
+      bit_position1 & 31,
+      k_pair,
+  };
+}
+
+template <int TransitionBits>
+__device__ __forceinline__ void qvq_p32_window_state_pair_planned(
+    const uint32_t* __restrict__ window_words,
+    int first_word,
+    int first_next_word,
+    int shift,
+    uint32_t& first,
+    uint32_t& second) {
+  constexpr int kKPairWordDistance = 2 * TransitionBits;
+  const int second_word = first_word - kKPairWordDistance;
+  const uint64_t first_window = static_cast<uint64_t>(window_words[first_word]) |
+      (static_cast<uint64_t>(window_words[first_next_word]) << 32);
+  const uint64_t second_window = static_cast<uint64_t>(window_words[second_word]) |
+      (static_cast<uint64_t>(window_words[second_word + 1]) << 32);
+  first = static_cast<uint32_t>((first_window >> shift) & 0xffffu);
+  second = static_cast<uint32_t>((second_window >> shift) & 0xffffu);
+}
+
 template <int TransitionBits, class FragmentA>
 __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     FragmentA& fragment,
     const uint32_t* __restrict__ window_words,
+    const QvqP32WindowLanePlan& plan,
     uint8_t bank_id,
     const Element* __restrict__ levels,
     uint32_t alternate_bank_mask) {
-  const int lane = static_cast<int>(threadIdx.x) & 31;
-  const int n_pair = lane >> 2;
-  const int k_pair0 = lane & 3;
-  const int k_pair1 = k_pair0 + 4;
-  const int pair00 = k_pair0 * 16 + n_pair;
-  const int pair01 = pair00 + 8;
-  const uint32_t bank_pair_bits = static_cast<uint32_t>(bank_id) >> k_pair0;
-  const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_bank_mask;
-  const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_bank_mask;
-
   uint32_t state00;
   uint32_t state01;
   uint32_t state10;
   uint32_t state11;
-  qvq_p32_window_state_pair<TransitionBits>(window_words, pair00, state00, state10);
-  qvq_p32_window_state_pair<TransitionBits>(window_words, pair01, state01, state11);
+  uint32_t bank_pair_bits;
+  if constexpr (TransitionBits == 7) {
+    bank_pair_bits = static_cast<uint32_t>(bank_id) >> plan.bank_shift;
+    qvq_p32_window_state_pair_planned<TransitionBits>(
+        window_words, plan.first_word0, plan.first_next_word0, plan.shift0, state00, state10);
+    qvq_p32_window_state_pair_planned<TransitionBits>(
+        window_words, plan.first_word1, plan.first_next_word1, plan.shift1, state01, state11);
+  } else {
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const int n_pair = lane >> 2;
+    const int k_pair0 = lane & 3;
+    const int pair00 = k_pair0 * 16 + n_pair;
+    const int pair01 = pair00 + 8;
+    bank_pair_bits = static_cast<uint32_t>(bank_id) >> k_pair0;
+    qvq_p32_window_state_pair<TransitionBits>(window_words, pair00, state00, state10);
+    qvq_p32_window_state_pair<TransitionBits>(window_words, pair01, state01, state11);
+  }
+  const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_bank_mask;
+  const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_bank_mask;
   const uint32_t mixed00 = qvq_wgmma_pgc16_mix(state00 ^ bank_mask0);
   const uint32_t mixed01 = qvq_wgmma_pgc16_mix(state01 ^ bank_mask0);
   const uint32_t mixed10 = qvq_wgmma_pgc16_mix(state10 ^ bank_mask1);
@@ -264,6 +325,7 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
   auto accumulator = cute::make_tensor<float>(thread_coordinate_c.shape());
   cute::clear(accumulator);
   tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
+  const auto decode_plan = qvq_p32_window_lane_plan<kW3TransitionBits>(thread & 31);
 
   for (int kb = k_tile_begin; kb < k_tile_end; kb += kP32K16TilesPerStage) {
     auto* packed_vectors = reinterpret_cast<uint4*>(&packed_words[0][0][0]);
@@ -306,6 +368,7 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
       qvq_p32_window_decode_fragment<kW3TransitionBits>(
           fragment_a,
           &packed_words[k_block][warp][0],
+          decode_plan,
           packed_bank_ids[k_block][warp],
           levels,
           alternate_bank_mask);
@@ -484,6 +547,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   const int warp = thread >> 5;
   const int lane = thread & 31;
   const int bank_n16_offset = (n64_block & 3) * kP32N16TilesPerBlock;
+  const auto decode_plan = qvq_p32_window_lane_plan<TransitionBits>(lane);
   WgmmaTmaPipelineState read_state;
   WgmmaTmaPipelineState release_state;
 
@@ -509,6 +573,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       qvq_p32_window_decode_fragment<TransitionBits>(
           fragment_a,
           window_words,
+          decode_plan,
           static_cast<uint8_t>(bank_id),
           levels,
           alternate_bank_mask);
@@ -726,7 +791,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
       cute::make_shape(
           cute::Int<kWordsPerP32Tile>{},
           cute::Int<kP32N16TilesPerBlock>{},
-          cute::Int<kP32K16TilesPerStage>{}));
+      cute::Int<kP32K16TilesPerStage>{}));
   auto bank_tma = cute::make_tma_atom(
       cute::SM90_TMA_LOAD{},
       bank_tensor,
