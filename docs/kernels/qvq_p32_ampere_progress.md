@@ -1427,6 +1427,19 @@ control and candidate are
 Affected-case log weighting now reaches **1.071%** cumulative median
 improvement versus fetched main. Planar timings remain excluded.
 
+The seventh v18 progression combines the M1 long-K MLP-down fixed-N route
+with paired PGC16 decode. That route previously stayed runtime-N because the
+fixed specialization alone was neutral; paired decode changes the balance.
+In the matched split-128 40-warmup/1000-iteration pair all four rates win,
+falling from 0.0870/0.1004/0.1004/0.1055 ms to
+0.0840/0.0942/0.0973/0.0963 ms. The affected geomean speedup is **1.0570x**
+(5.390% lower latency), and maximum absolute error remains below `2.68e-05`.
+Artifacts are
+`artifacts/a100_p32_window/v18_m1_mlpdown_static_packed_control.json` and
+`artifacts/a100_p32_window/v18_m1_mlpdown_static_packed_candidate_repeat.json`.
+Affected-case log weighting now reaches **1.231%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
