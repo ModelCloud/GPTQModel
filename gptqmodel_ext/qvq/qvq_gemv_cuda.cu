@@ -562,7 +562,9 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
     int size_n,
     int transition_bits,
     int bank_mode,
-    int bank_alt_id) {
+    int bank_alt_id,
+    int bank_alt_boundary0,
+    int bank_alt_boundary1) {
   __shared__ half cached_levels[kPgc16LevelCount];
   __shared__ float reduced[kThreads / 32][ROWS * kTileColumns];  // [warp][row*16+col]
 
@@ -574,8 +576,12 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_kernel(
   const int n0 = n_tile * kTileColumns;
   const int n_tiles = size_n / kTileColumns;
   const int k_tiles = size_k / kTileRows;
-  const int output_bank_alt_id =
-      bank_alt_ids == nullptr ? bank_alt_id : static_cast<int>(bank_alt_ids[n_tile]);
+  const int bank_alt_segment =
+      static_cast<int>(n_tile >= bank_alt_boundary0) +
+      static_cast<int>(n_tile >= bank_alt_boundary1);
+  const int output_bank_alt_id = bank_alt_ids == nullptr
+      ? bank_alt_id
+      : static_cast<int>(bank_alt_ids[bank_alt_segment]);
 
   const int col = thread & 15;
   const int k_slot = thread >> 4;
@@ -771,7 +777,9 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
     int split_count,
     int transition_bits,
     int bank_mode,
-    int bank_alt_id) {
+    int bank_alt_id,
+    int bank_alt_boundary0,
+    int bank_alt_boundary1) {
   __shared__ half cached_levels[kPgc16LevelCount];
   __shared__ float reduced[kThreads / 32][ROWS * kTileColumns];
 
@@ -784,8 +792,12 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
   const int n0 = n_tile * kTileColumns;
   const int n_tiles = size_n / kTileColumns;
   const int k_tiles = size_k / kTileRows;
-  const int output_bank_alt_id =
-      bank_alt_ids == nullptr ? bank_alt_id : static_cast<int>(bank_alt_ids[n_tile]);
+  const int bank_alt_segment =
+      static_cast<int>(n_tile >= bank_alt_boundary0) +
+      static_cast<int>(n_tile >= bank_alt_boundary1);
+  const int output_bank_alt_id = bank_alt_ids == nullptr
+      ? bank_alt_id
+      : static_cast<int>(bank_alt_ids[bank_alt_segment]);
   const int k_tile_begin = (k_tiles * split) / split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
 
@@ -1358,6 +1370,8 @@ void launch_qvq_gemv(
     int transition_bits,
     int bank_mode,
     int bank_alt_id,
+    int bank_alt_boundary0,
+    int bank_alt_boundary1,
     cudaStream_t stream) {
   const int rows = qvq_rows_for_m(static_cast<int>(input.size(0)));
   const dim3 grid(
@@ -1379,7 +1393,7 @@ void launch_qvq_gemv(
             input_ptr, trellis_ptr, bank_ids_ptr, bank_alt_ids_ptr, levels_ptr, output_ptr,                      \
             static_cast<int>(input.size(0)),                                                                      \
             static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), transition_bits, bank_mode,        \
-            bank_alt_id)
+            bank_alt_id, bank_alt_boundary0, bank_alt_boundary1)
 #define QVQ_LAUNCH_ROWS(ROWS)                                                                                      \
     switch (transition_bits) {                                                                                     \
       case 2: QVQ_LAUNCH_TB(ROWS, 2); break;                                                                       \
@@ -1416,7 +1430,8 @@ void launch_qvq_gemv(
   qvq_gemv_kernel<Scalar, OutputScalar, ROWS, VectorSize, 0><<<grid, kThreads, 0, stream>>>(                       \
       input_ptr, trellis_ptr, bank_ids_ptr, bank_alt_ids_ptr, levels_ptr, output_ptr,                              \
       static_cast<int>(input.size(0)),                                                                              \
-      static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), transition_bits, bank_mode, bank_alt_id)
+      static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), transition_bits, bank_mode, bank_alt_id,  \
+      bank_alt_boundary0, bank_alt_boundary1)
   if (rows == 1) {
     QVQ_LAUNCH(1);
   } else if (rows == 8) {
@@ -1442,6 +1457,8 @@ void launch_qvq_gemv_splitk(
     int split_count,
     int bank_mode,
     int bank_alt_id,
+    int bank_alt_boundary0,
+    int bank_alt_boundary1,
     cudaStream_t stream) {
   float* partial_ptr = partial_output.mutable_data_ptr<float>();
   const int rows = qvq_rows_for_m(static_cast<int>(input.size(0)));
@@ -1465,7 +1482,7 @@ void launch_qvq_gemv_splitk(
             input_ptr, trellis_ptr, bank_ids_ptr, bank_alt_ids_ptr, levels_ptr, partial_ptr,                     \
             static_cast<int>(input.size(0)),                                                                      \
             static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), split_count, transition_bits,      \
-            bank_mode, bank_alt_id)
+            bank_mode, bank_alt_id, bank_alt_boundary0, bank_alt_boundary1)
 #define QVQ_SPLITK_LAUNCH_ROWS(ROWS)                                                                              \
     switch (transition_bits) {                                                                                    \
       case 2: QVQ_SPLITK_LAUNCH_TB(ROWS, 2); break;                                                               \
@@ -1507,7 +1524,7 @@ void launch_qvq_gemv_splitk(
       input_ptr, trellis_ptr, bank_ids_ptr, bank_alt_ids_ptr, levels_ptr, partial_ptr,                            \
       static_cast<int>(input.size(0)),                                                                             \
       static_cast<int>(input.size(1)), static_cast<int>(output.size(1)), split_count, transition_bits,            \
-      bank_mode, bank_alt_id)
+      bank_mode, bank_alt_id, bank_alt_boundary0, bank_alt_boundary1)
   if (rows == 1) {
     QVQ_SPLITK_LAUNCH(1);
   } else if (rows == 8) {
@@ -1909,7 +1926,9 @@ at::Tensor qvq_gemv_cuda_impl(
     const c10::optional<at::Tensor>& bank_ids,
     int64_t bank_mode,
     int64_t bank_alt_id,
-    const c10::optional<at::Tensor>& bank_alt_ids) {
+    const c10::optional<at::Tensor>& bank_alt_ids,
+    int64_t bank_alt_boundary0,
+    int64_t bank_alt_boundary1) {
   TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor");
   TORCH_CHECK(trellis.is_cuda(), "trellis must be a CUDA tensor");
   TORCH_CHECK(levels.is_cuda(), "PGC16 levels must be a CUDA tensor");
@@ -1929,7 +1948,7 @@ at::Tensor qvq_gemv_cuda_impl(
   TORCH_CHECK(bank_mode != 3 || (bank_alt_id >= 1 && bank_alt_id <= 3),
               "V2B2-P32 alternative-bank ID must be in [1, 3]");
   TORCH_CHECK(!bank_alt_ids.has_value() || bank_mode == 3,
-              "per-output alternative-bank IDs are valid only for V2B2-P32");
+              "grouped alternative-bank IDs are valid only for V2B2-P32");
   TORCH_CHECK(input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
               "input must have dtype float16 or bfloat16");
   TORCH_CHECK(levels.scalar_type() == at::kHalf, "PGC16 levels must preserve the canonical float16 bit patterns");
@@ -1966,11 +1985,24 @@ at::Tensor qvq_gemv_cuda_impl(
   if (bank_alt_ids.has_value()) {
     const at::Tensor& alternatives = *bank_alt_ids;
     TORCH_CHECK(alternatives.is_cuda() && alternatives.device() == input.device(),
-                "V2B2-P32 per-output alternative-bank IDs must share the input CUDA device");
+                "grouped V2B2-P32 alternative-bank IDs must share the input CUDA device");
     TORCH_CHECK(alternatives.scalar_type() == at::kByte && alternatives.is_contiguous(),
-                "V2B2-P32 per-output alternative-bank IDs must be contiguous uint8");
-    TORCH_CHECK(alternatives.dim() == 1 && alternatives.numel() == out_features / kTileColumns,
-                "V2B2-P32 per-output alternative-bank IDs must contain one byte per N16 tile");
+                "grouped V2B2-P32 alternative-bank IDs must be contiguous uint8");
+    TORCH_CHECK(alternatives.dim() == 1 && (alternatives.numel() == 2 || alternatives.numel() == 3),
+                "grouped V2B2-P32 alternative-bank IDs must contain two or three bytes");
+    const int64_t output_tiles = out_features / kTileColumns;
+    TORCH_CHECK(bank_alt_boundary0 > 0 && bank_alt_boundary0 < output_tiles,
+                "grouped V2B2-P32 first output-tile boundary is out of range");
+    if (alternatives.numel() == 2) {
+      TORCH_CHECK(bank_alt_boundary1 == output_tiles,
+                  "two-way grouped V2B2-P32 must end its second segment at N/16");
+    } else {
+      TORCH_CHECK(bank_alt_boundary1 > bank_alt_boundary0 && bank_alt_boundary1 < output_tiles,
+                  "three-way grouped V2B2-P32 output-tile boundaries must be strictly increasing");
+    }
+  } else {
+    TORCH_CHECK(bank_alt_boundary0 == 0 && bank_alt_boundary1 == 0,
+                "grouped V2B2-P32 boundaries require compact alternative-bank IDs");
   }
 
   if (size_m == 0) {
@@ -2031,46 +2063,54 @@ at::Tensor qvq_gemv_cuda_impl(
       launch_qvq_gemv_splitk<half, float>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr,
           bank_alt_ids.has_value() ? &*bank_alt_ids : nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id), stream);
+          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id),
+          static_cast<int>(bank_alt_boundary0), static_cast<int>(bank_alt_boundary1), stream);
     } else if (input.scalar_type() == at::kHalf) {
       launch_qvq_gemv_splitk<half, half>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr,
           bank_alt_ids.has_value() ? &*bank_alt_ids : nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id), stream);
+          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id),
+          static_cast<int>(bank_alt_boundary0), static_cast<int>(bank_alt_boundary1), stream);
     } else if (output_fp32) {
       launch_qvq_gemv_splitk<nv_bfloat16, float>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr,
           bank_alt_ids.has_value() ? &*bank_alt_ids : nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id), stream);
+          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id),
+          static_cast<int>(bank_alt_boundary0), static_cast<int>(bank_alt_boundary1), stream);
     } else {
       launch_qvq_gemv_splitk<nv_bfloat16, nv_bfloat16>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr,
           bank_alt_ids.has_value() ? &*bank_alt_ids : nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id), stream);
+          static_cast<int>(transition_bits), split_count, static_cast<int>(bank_mode), static_cast<int>(bank_alt_id),
+          static_cast<int>(bank_alt_boundary0), static_cast<int>(bank_alt_boundary1), stream);
     }
   } else if (input.scalar_type() == at::kHalf) {
     if (output_fp32) {
       launch_qvq_gemv<half, float>(input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr,
                                    bank_alt_ids.has_value() ? &*bank_alt_ids : nullptr, levels, output,
                                    static_cast<int>(transition_bits), static_cast<int>(bank_mode),
-                                   static_cast<int>(bank_alt_id), stream);
+                                   static_cast<int>(bank_alt_id), static_cast<int>(bank_alt_boundary0),
+                                   static_cast<int>(bank_alt_boundary1), stream);
     } else {
       launch_qvq_gemv<half, half>(input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr,
                                   bank_alt_ids.has_value() ? &*bank_alt_ids : nullptr, levels, output,
                                   static_cast<int>(transition_bits), static_cast<int>(bank_mode),
-                                  static_cast<int>(bank_alt_id), stream);
+                                  static_cast<int>(bank_alt_id), static_cast<int>(bank_alt_boundary0),
+                                  static_cast<int>(bank_alt_boundary1), stream);
     }
   } else {
     if (output_fp32) {
       launch_qvq_gemv<nv_bfloat16, float>(input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr,
                                           bank_alt_ids.has_value() ? &*bank_alt_ids : nullptr, levels, output,
                                           static_cast<int>(transition_bits), static_cast<int>(bank_mode),
-                                          static_cast<int>(bank_alt_id), stream);
+                                          static_cast<int>(bank_alt_id), static_cast<int>(bank_alt_boundary0),
+                                          static_cast<int>(bank_alt_boundary1), stream);
     } else {
       launch_qvq_gemv<nv_bfloat16, nv_bfloat16>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr,
           bank_alt_ids.has_value() ? &*bank_alt_ids : nullptr, levels, output,
-          static_cast<int>(transition_bits), static_cast<int>(bank_mode), static_cast<int>(bank_alt_id), stream);
+          static_cast<int>(transition_bits), static_cast<int>(bank_mode), static_cast<int>(bank_alt_id),
+          static_cast<int>(bank_alt_boundary0), static_cast<int>(bank_alt_boundary1), stream);
     }
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -2155,39 +2195,39 @@ at::Tensor qvq_gemv_cuda_v4(
     if (input.scalar_type() == at::kHalf && output_fp32) {
       launch_qvq_gemv_splitk<half, float, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, stream);
+          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, 0, 0, stream);
     } else if (input.scalar_type() == at::kHalf) {
       launch_qvq_gemv_splitk<half, half, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, stream);
+          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, 0, 0, stream);
     } else if (output_fp32) {
       launch_qvq_gemv_splitk<nv_bfloat16, float, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, stream);
+          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, 0, 0, stream);
     } else {
       launch_qvq_gemv_splitk<nv_bfloat16, nv_bfloat16, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, nullptr, levels, partial_output, output,
-          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, stream);
+          static_cast<int>(transition_bits), split_count, bank_ids.has_value() ? 1 : 0, 0, 0, 0, stream);
     }
   } else if (input.scalar_type() == at::kHalf) {
     if (output_fp32) {
       launch_qvq_gemv<half, float, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, nullptr, levels, output,
-          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, stream);
+          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, 0, 0, stream);
     } else {
       launch_qvq_gemv<half, half, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, nullptr, levels, output,
-          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, stream);
+          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, 0, 0, stream);
     }
   } else {
     if (output_fp32) {
       launch_qvq_gemv<nv_bfloat16, float, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, nullptr, levels, output,
-          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, stream);
+          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, 0, 0, stream);
     } else {
       launch_qvq_gemv<nv_bfloat16, nv_bfloat16, 4>(
           input, trellis, bank_ids.has_value() ? &*bank_ids : nullptr, nullptr, levels, output,
-          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, stream);
+          static_cast<int>(transition_bits), bank_ids.has_value() ? 1 : 0, 0, 0, 0, stream);
     }
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -2198,14 +2238,14 @@ at::Tensor qvq_gemv_cuda_v4(
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("gemv(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor? bank_ids=None, int bank_mode=0, int bank_alt_id=0) -> Tensor");
-  m.def("gemv_grouped_p32(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor bank_ids, Tensor bank_alt_ids) -> Tensor");
+  m.def("gemv_grouped_p32(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor bank_ids, Tensor bank_alt_ids, int bank_alt_boundary0, int bank_alt_boundary1) -> Tensor");
   m.def("gemv_lr(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor bank_ids, int bank_alt_id, int split_count=0) -> Tensor");
   m.def("gemv_v4(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor? bank_ids=None) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
-  m.impl("gemv", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids, int64_t bank_mode, int64_t bank_alt_id) { return qvq_gemv_cuda_impl(input, trellis, levels, transition_bits, out_features, output_fp32, 2, bank_ids, bank_mode, bank_alt_id, c10::nullopt); });
-  m.impl("gemv_grouped_p32", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const at::Tensor& bank_ids, const at::Tensor& bank_alt_ids) { return qvq_gemv_cuda_impl(input, trellis, levels, transition_bits, out_features, output_fp32, 2, bank_ids, 3, 1, bank_alt_ids); });
+  m.impl("gemv", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids, int64_t bank_mode, int64_t bank_alt_id) { return qvq_gemv_cuda_impl(input, trellis, levels, transition_bits, out_features, output_fp32, 2, bank_ids, bank_mode, bank_alt_id, c10::nullopt, 0, 0); });
+  m.impl("gemv_grouped_p32", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const at::Tensor& bank_ids, const at::Tensor& bank_alt_ids, int64_t bank_alt_boundary0, int64_t bank_alt_boundary1) { return qvq_gemv_cuda_impl(input, trellis, levels, transition_bits, out_features, output_fp32, 2, bank_ids, 3, 1, bank_alt_ids, bank_alt_boundary0, bank_alt_boundary1); });
   m.impl("gemv_lr", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const at::Tensor& bank_ids, int64_t bank_alt_id, int64_t split_count) { return qvq_gemv_cuda_local_ring_impl(input, trellis, levels, transition_bits, out_features, output_fp32, bank_ids, bank_alt_id, split_count); });
   m.impl("gemv_v4", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids) { return qvq_gemv_cuda_v4(input, trellis, levels, transition_bits, out_features, output_fp32, 4, bank_ids); });
 }

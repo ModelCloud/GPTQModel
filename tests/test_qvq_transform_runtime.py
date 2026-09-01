@@ -221,7 +221,9 @@ def test_qvq_grouped_p32_runtime_runs_one_decode_and_releases_child_payloads():
     assert state.transform_invocations == 1
     assert state.grouped_gemv_invocations == 1
     assert state.completed_cycles == 1
-    assert state.metadata_overhead_bytes == 2
+    assert state.bank_alt_ids.tolist() == [1, 3]
+    assert state.bank_alt_boundaries == (2,)
+    assert state.metadata_overhead_bytes == 0
     assert root.first.linear.trellis.numel() == 0
     assert root.second.linear.trellis.numel() == 0
     with pytest.raises(RuntimeError, match="not checkpoint-serializable"):

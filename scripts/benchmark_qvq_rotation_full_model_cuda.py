@@ -907,6 +907,14 @@ def main():
                     "metadata_overhead_bytes": getattr(
                         state, "metadata_overhead_bytes", 0
                     ),
+                    "bank_alt_ids": (
+                        state.bank_alt_ids.tolist()
+                        if hasattr(state, "bank_alt_ids")
+                        else None
+                    ),
+                    "bank_alt_boundaries": list(
+                        getattr(state, "bank_alt_boundaries", ())
+                    ),
                 }
                 for basis_id, state in shared_states.items()
             },

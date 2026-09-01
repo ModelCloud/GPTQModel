@@ -47,22 +47,24 @@ reported in `docs/qvq_rotation_folding_phase2.md`.
 
 | Arm | Description | Online H/block | Other online | Folded sides/block | W2 EBPW | Layer-0 KL | Top-1 | Top-5 | Top-10 | MLX M1 ms | CUDA M1 tok/s | Dense parity | Status |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |
-| A0 | two-sided RHT | 14 | 0 | 0 | `2.05442` | `0.029735` | `.71795` | `1.0` | `1.0` | `1.6595` | `26.57` | exact control | production |
+| A0 | two-sided RHT | 14 | 0 | 0 | `2.05442` | `0.029735` | `.71795` | `1.0` | `1.0` | `1.6595` | `25.95` | exact control | production |
 | A1 | residual + V/O folds | 5 | 0 | 9 | `2.05442` | — | — | — | — | `1.3680` | — | rel `1.82e-6` | local reject |
 | A3 | A1 + RoPE Q/K | 3 | 0 | 11 | `2.05442` | — | — | — | — | `1.3722` | — | rel `1.87e-6` | reject |
 | A4 | A3 + SwiGLU fold | 1 | 0 | 13 | `2.05442` | — | — | — | — | `1.3566` | — | rel `1.82e-6` | reject |
 | A6 | zero H | 0 | 0 | 13 | `2.05442` | — | — | — | — | `1.3507` | — | rel `1.82e-6` | reject |
 | A22 | three-H aggressive | 3 | 0 | 11 | `2.05442` | `0.057908` | `.84615` | `1.0` | `1.0` | `1.3524` | — | rel `1.75e-6` | reject |
 | A25 | V/O only | 12 | 0 | 2 | `2.05442` | `0.030801` | `.87179` | `1.0` | `1.0` | `1.6405` | `27.08` | rel `1.15e-6` | Pareto/pass |
-| A31 | A25 + sibling-shared inputs | 9 | 0 | 2 | `2.05442` | `0.030801` | `.87179` | `1.0` | `1.0` | — | `28.13` | rel `1.12e-6` | Pareto/pass |
-| A41 | A31 + grouped P32 decode | 9 | 0 | 2 | `2.05458` | `0.030801` | `.87179` | `1.0` | `1.0` | — | **`31.63`** | rel `1.12e-6` | fastest Pareto |
+| A31 | A25 + sibling-shared inputs | 9 | 0 | 2 | `2.05442` | `0.030801` | `.87179` | `1.0` | `1.0` | — | `29.00` | rel `1.12e-6` | Pareto/pass |
+| A41 | A31 + grouped P32 decode | 9 | 0 | 2 | `2.05442` | `0.030801` | `.87179` | `1.0` | `1.0` | — | **`33.10`** | rel `1.12e-6` | fastest Pareto |
 | A27 | permutation SwiGLU | 12 | 0 | 2 | `2.05442` | `0.034170` | `.84615` | `1.0` | `1.0` | `1.6453` | — | rel `1.13e-6` | reject |
 | A29 | identity gate/up output | 12 | 0 | 0 | `2.05442` | `0.034276` | `.94872` | `1.0` | `1.0` | `1.6453` | — | exact zero delta | reject |
 
 CUDA throughput is measured from complete packed models. MLX still lacks a
 Llama container that persists these graph bases, so its entries remain
 real-shape QuantLinear sums rather than an end-to-end claim.
-A41's EBPW includes its 19,376-byte per-N16 alternative-bank metadata.
+A41 now stores only the original 2--3 alternative-bank bytes per group and
+derives group boundaries from child output widths, so its grouped runtime adds
+zero effective BPW.
 
 ## Exact folds
 

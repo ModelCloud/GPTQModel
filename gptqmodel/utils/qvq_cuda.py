@@ -184,7 +184,7 @@ def _qvq_cuda_op() -> Callable:
 
 
 def _qvq_cuda_grouped_p32_op() -> Callable:
-    """Resolve the P32 GEMV variant with per-N16 alternative-bank IDs."""
+    """Resolve the grouped P32 GEMV with compact alternative-bank segments."""
 
     global _QVQ_CUDA_GROUPED_P32_OP
     if _QVQ_CUDA_GROUPED_P32_OP is None:
@@ -755,6 +755,7 @@ def qvq_cuda_gemv(
     v2b2_p32_lr: bool = False,
     bank_alt_id: int = 0,
     bank_alt_ids: torch.Tensor | None = None,
+    bank_alt_boundaries: tuple[int, ...] | None = None,
     lr_split_count: int = 0,
     _bank_alt_ids_validated: bool = False,
 ) -> torch.Tensor:
@@ -786,8 +787,12 @@ def qvq_cuda_gemv(
         raise ValueError("QVQ CUDA lr_split_count must be in [1, 64] or 0 for automatic selection")
     if lr_split_count and not v2b2_p32_lr:
         raise ValueError("QVQ CUDA lr_split_count is valid only for V2B2-P32-LR")
-    if bank_alt_ids is not None and not v2b2_p32:
-        raise ValueError("QVQ CUDA per-output alternative-bank IDs require V2B2-P32")
+    if (bank_alt_ids is not None or bank_alt_boundaries is not None) and not v2b2_p32:
+        raise ValueError("QVQ CUDA grouped alternative-bank metadata requires V2B2-P32")
+    if (bank_alt_ids is None) != (bank_alt_boundaries is None):
+        raise ValueError(
+            "QVQ CUDA grouped alternative-bank IDs and boundaries must be provided together"
+        )
     if v2b2_p32 or v2b2_p32_lr:
         if bank_alt_ids is None and not 1 <= bank_alt_id <= 3:
             raise ValueError("QVQ CUDA V2B2-P32 bank_alt_id must be in [1, 3]")
@@ -837,20 +842,39 @@ def qvq_cuda_gemv(
     if bank_alt_ids is not None:
         if bank_alt_ids.device != x.device or bank_alt_ids.dtype != torch.uint8:
             raise TypeError(
-                "QVQ CUDA per-output alternative-bank IDs must be uint8 on the input CUDA device"
+                "QVQ CUDA grouped alternative-bank IDs must be uint8 on the input CUDA device"
             )
         if not bank_alt_ids.is_contiguous():
-            raise ValueError("QVQ CUDA per-output alternative-bank IDs must be contiguous")
-        expected_alt_shape = (n // 16,)
-        if tuple(bank_alt_ids.shape) != expected_alt_shape:
+            raise ValueError("QVQ CUDA grouped alternative-bank IDs must be contiguous")
+        group_count = bank_alt_ids.numel()
+        if bank_alt_ids.ndim != 1 or group_count not in (2, 3):
             raise ValueError(
-                "QVQ CUDA per-output alternative-bank IDs must have shape "
-                f"{expected_alt_shape}, got {tuple(bank_alt_ids.shape)}"
+                "QVQ CUDA grouped alternative-bank IDs must have shape (2,) or (3,)"
             )
         if not _bank_alt_ids_validated and torch.any(
             (bank_alt_ids < 1) | (bank_alt_ids > 3)
         ):
-            raise ValueError("QVQ CUDA per-output alternative-bank IDs must be in [1, 3]")
+            raise ValueError("QVQ CUDA grouped alternative-bank IDs must be in [1, 3]")
+        if not isinstance(bank_alt_boundaries, tuple):
+            raise TypeError("QVQ CUDA grouped alternative-bank boundaries must be a tuple")
+        if len(bank_alt_boundaries) != group_count - 1:
+            raise ValueError(
+                "QVQ CUDA grouped alternative-bank boundaries must separate every output group"
+            )
+        boundaries = tuple(
+            _integer_argument("bank_alt_boundary", value)
+            for value in bank_alt_boundaries
+        )
+        output_tiles = n // 16
+        if (
+            any(value <= 0 or value >= output_tiles for value in boundaries)
+            or any(left >= right for left, right in zip(boundaries, boundaries[1:]))
+        ):
+            raise ValueError(
+                "QVQ CUDA grouped alternative-bank boundaries must be strictly increasing N16 indices"
+            )
+    else:
+        boundaries = ()
     levels = _pgc16_levels(x.device, codebook_version)
     if m == 0:
         return torch.empty((0, n), dtype=torch.float32 if output_fp32 else x.dtype, device=x.device)
@@ -872,6 +896,8 @@ def qvq_cuda_gemv(
             output_fp32,
             bank_ids,
             bank_alt_ids,
+            boundaries[0],
+            boundaries[1] if len(boundaries) == 2 else n // 16,
         )
     op = _qvq_cuda_op()
     if vector_size == 4:

@@ -191,6 +191,10 @@ class QVQGroupedP32InputTransformState:
         # Reuse the established shared-transform validation before imposing
         # the narrower grouped P32 contract.
         QVQSharedInputTransformState(group, modules)
+        if len(group.module_names) not in (2, 3):
+            raise ValueError(
+                f"grouped QVQ P32 basis {group.basis_id!r} requires two or three consumers"
+            )
         reference = modules[group.module_names[0]]
         if reference.in_features % 16:
             raise ValueError(
@@ -211,7 +215,8 @@ class QVQGroupedP32InputTransformState:
         k_tiles = reference.in_features // 16
         trellis_parts = []
         selector_parts = []
-        alternative_parts = []
+        alternative_ids = []
+        output_tile_ends = []
         output_widths = []
         original_storage_bytes = 0
         for module_name in group.module_names:
@@ -280,13 +285,9 @@ class QVQGroupedP32InputTransformState:
             selector_parts.append(
                 module.bank_ids.contiguous().view(k_tiles, n_tiles)
             )
-            alternative_parts.append(
-                torch.full(
-                    (n_tiles,),
-                    alternative,
-                    dtype=torch.uint8,
-                    device=module.trellis.device,
-                )
+            alternative_ids.append(alternative)
+            output_tile_ends.append(
+                n_tiles + (output_tile_ends[-1] if output_tile_ends else 0)
             )
             output_widths.append(module.out_features)
             original_storage_bytes += (
@@ -304,7 +305,12 @@ class QVQGroupedP32InputTransformState:
         self.modules = tuple(modules[name] for name in group.module_names)
         self.trellis = torch.cat(trellis_parts, dim=1).reshape(-1, words_per_tile)
         self.bank_ids = torch.cat(selector_parts, dim=1).reshape(-1)
-        self.bank_alt_ids = torch.cat(alternative_parts)
+        self.bank_alt_ids = torch.tensor(
+            alternative_ids,
+            dtype=torch.uint8,
+            device=reference.trellis.device,
+        )
+        self.bank_alt_boundaries = tuple(output_tile_ends[:-1])
         self.output_widths = tuple(output_widths)
         self.out_features = sum(output_widths)
         self.original_storage_bytes = original_storage_bytes
@@ -371,6 +377,7 @@ class QVQGroupedP32InputTransformState:
             bank_ids=self.bank_ids,
             v2b2_p32=True,
             bank_alt_ids=self.bank_alt_ids,
+            bank_alt_boundaries=self.bank_alt_boundaries,
             _bank_alt_ids_validated=True,
         )
         self.grouped_gemv_invocations += 1

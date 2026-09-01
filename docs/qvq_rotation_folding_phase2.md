@@ -381,6 +381,13 @@ what matters for decode latency.
 ## A41: sibling/boundary transform fusion
 
 Track kernel-launch savings separately from mathematical transform savings.
+A25 is the only new offline fold in this phase: it removes two Hadamards.
+A31 removes three further executions by sharing two sibling transforms, not by
+folding them offline. A41 leaves the nine-Hadamard mathematical topology
+unchanged and removes three P32 launches by grouping execution. Thus the exact
+accounting is `14 -> 12` by offline folding, `12 -> 9` by sharing, and
+independently `7 -> 4` P32 inner launches.
+
 A41 keeps A31's quality-valid nine-Hadamard topology but fuses the sibling
 inner decodes that consume each shared activation. The first Q/K/V consumer
 runs one combined P32 GEMV and caches all three recovered outputs; the first
@@ -389,12 +396,17 @@ its own output Hadamard, `SV`, and bias.
 
 P32 fitting chooses `bank_alt_id` independently per projection, so forcing a
 common alternative bank would alter the quantizer. The new gated CUDA entry
-point instead accepts one uint8 alternative-bank ID per N16 output tile. It
-interleaves the original trellis words and packed selector bytes in the
+point interleaves the original trellis words and packed selector bytes in the
 decoder's K-major/N-major layout. Child payload copies are then released, so
-the trellis and selector payload remains storage-neutral. The expanded
-per-N16 bank metadata costs 19,376 bytes for all 32 groups, moving W2 EBPW only
-from `2.054419024` to `2.054578321` (`+0.000159297` BPW).
+the trellis and selector payload remains storage-neutral.
+
+The first implementation expanded each projection's scalar `bank_alt_id` to
+one uint8 per N16 output tile. That was correct but redundant: it cost 19,376
+bytes across 32 groups, or `+0.000159297` BPW. The promoted compact revision
+retains only the original two or three alternative-bank bytes per group and
+passes cumulative N16 output boundaries as launch scalars. Those boundaries
+are derivable from the existing child output widths, so A41 now has exactly
+zero incremental stored metadata and the same `2.054419024` EBPW as A31.
 
 The initial implementation exposed an important rejected variant. Splitting a
 row-major grouped output produced non-contiguous module slices for M > 1,
@@ -415,7 +427,7 @@ absolute logit delta, and 100% Top-1/5/10 identity.
 | --- | ---: | ---: | ---: |
 | Online full H/block | 9 | 9 | 0 |
 | P32 inner launches/block | 7 | **4** | **-3** |
-| Effective BPW | `2.054419024` | `2.054578321` | `+0.000159297` |
+| Effective BPW | `2.054419024` | `2.054419024` | **0** |
 | Packed final KL | `.916587496` | **`.916420329`** | `-0.0182%` |
 | Packed logits rel-L2 | `.494783025` | `.494856902` | `+0.0149%` |
 | Packed Top-1 | `.548845` | `.548313` | `-0.0533` point |
@@ -430,25 +442,41 @@ versus `.917579`; the paired KL CI is `[-0.028652, +0.026789]` and the Top-1
 CI is `[-0.021935, +0.004124]`. A41 therefore remains statistically
 compatible with A0 under the present evidence.
 
-Five alternating idle-host cycles give the fresh paired runtime result:
+Five alternating idle-host cycles with the compact metadata give the promoted
+paired A31/A41 runtime result:
 
 | Batch | A31 decode median (p95) ms | A41 decode median (p95) ms | Median delta | p95 delta |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | `35.5497 (38.3549)` | **`31.6160 (32.7834)`** | **-11.07%** | **-14.53%** |
-| 2 | `35.5845 (36.3940)` | `34.1366 (38.8844)` | **-4.07%** | `+6.84%` |
-| 4 | `35.7550 (36.4831)` | `33.5754 (37.0770)` | **-6.10%** | `+1.63%` |
-| 8 | `35.7289 (38.7215)` | `33.3527 (34.2620)` | **-6.65%** | **-11.52%** |
+| 1 | `34.4877 (36.4676)` | **`30.2130 (31.6513)`** | **-12.40%** | **-13.21%** |
+| 2 | `34.3100 (36.2937)` | **`31.5958 (32.5810)`** | **-7.91%** | **-10.23%** |
+| 4 | `34.1264 (35.3610)` | **`31.6802 (32.4189)`** | **-7.17%** | **-8.32%** |
+| 8 | `34.2510 (35.8650)` | **`32.1640 (33.6889)`** | **-6.09%** | **-6.07%** |
 
-The isolated 112-projection suite improves `16.68%` at M1 and
-`8.71--8.76%` at M2--M8 median; p95 improves `9.43--16.25%`. Prefill medians
-improve `0.19--1.21%`. Relative to the historical A0 medians, A41 is
-`15.95%/10.96%/14.72%/13.13%` faster at B1/B2/B4/B8, but that A0 comparison
-is contextual rather than a fresh paired timing run.
+The compact isolated 112-projection suite improves `14.61%` at M1 and
+`8.29--8.58%` at M2--M8 median; p95 improves `5.21--11.86%`. Prefill medians
+improve `0.19--1.28%`.
+
+The requested fresh five-cycle A0/A41 control was also run, with both arms
+independently fitted from the same calibration and fitting seed:
+
+| Batch | A0 decode median (p95) ms | A41 decode median (p95) ms | Median delta | p95 delta |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | `38.5312 (42.1340)` | **`30.0659 (30.9259)`** | **-21.97%** | **-26.60%** |
+| 2 | `38.6982 (43.9698)` | **`31.6813 (32.5845)`** | **-18.13%** | **-25.89%** |
+| 4 | `39.0107 (42.4347)` | **`31.8814 (33.5868)`** | **-18.28%** | **-20.85%** |
+| 8 | `38.4161 (40.2852)` | **`31.7058 (34.9701)`** | **-17.47%** | **-13.19%** |
+
+B1 throughput moves from `25.95` to `33.26` token/s. This direct control used
+the correct but expanded alternative-bank vector immediately before the
+compact revision. Compact A41 then measured `30.2130` ms B1, within `0.49%`
+of that A41 result across runs, while its paired A31 comparison strengthened
+and all p95 deltas became favorable. The compact representation therefore
+removes storage without giving back the runtime gain.
 
 A41 is now the fastest quality-compatible Pareto arm and clears the primary
-M=1 >=10% phase-2 runtime gate while retaining the <=9-H topology. It does not
-clear a 10% full-model B2 gate, and B2/B4 p95 need another repeat before a
-tail-latency claim. Productionization also needs a checkpoint/load-time grouped
+M=1 >=10% phase-2 runtime gate while retaining the <=9-H topology. The fresh
+A0 control also clears 10% at B2/B4/B8; the incremental compact A31-to-A41 B2
+gain is 7.91%. Productionization still needs a checkpoint/load-time grouped
 payload format; the experimental runtime deliberately fails closed on
 serialization after releasing child payload copies.
 
@@ -457,15 +485,21 @@ Artifacts:
 - `artifacts/qvq_rotation_a31_a41_w2_packed_cuda_sm80_stage1.json` (rejected
   strided-output implementation);
 - `artifacts/qvq_rotation_a31_a41_w2_packed_cuda_sm80_stage1_contiguous.json`;
-- `artifacts/qvq_rotation_a31_a41_w2_packed_cuda_sm80_full16.json`.
+- `artifacts/qvq_rotation_a31_a41_w2_packed_cuda_sm80_full16.json` (expanded
+  alternative-bank metadata);
+- `artifacts/qvq_rotation_a0_a41_w2_packed_cuda_sm80_full16.json` (fresh direct
+  A0/A41 control);
+- `artifacts/qvq_rotation_a31_a41_w2_packed_cuda_sm80_full16_compact_alt.json`
+  (promoted storage-neutral compact metadata).
 
-Post-A41 validation on the SM80 host is green: `2,162 passed, 136 skipped`
+Post-compact-A41 validation on the SM80 host is green: `2,165 passed, 136 skipped`
 across the broad QVQ, CUDA, P32, folded-axis, planner, shared-runtime, and
-grouped-runtime matrix. The CUDA extension was rebuilt from source before the
-new grouped parity test; Ruff, Python compilation, and `git diff --check` also
-pass. After merging `origin/main` at `6b3cea54`, the 36 focused A41
-planner/runtime/grouped-kernel tests still pass, and the freshly rebuilt
-latest-main Ampere extension passes its 28 exactness and dispatch tests.
+grouped-runtime matrix. Both generic CUDA JIT variants were rebuilt from
+source. The focused compact grouped test covers two- and three-consumer layouts
+at M=1/8/17 plus invalid IDs/boundaries and end-to-end runtime parity. Ruff,
+Python compilation, artifact JSON validation, and `git diff --check` also
+pass. After merging `origin/main` at `6b3cea54`, the freshly rebuilt
+latest-main Ampere extension also passes its 28 exactness and dispatch tests.
 
 Further fusion opportunities remain even when a transform must remain:
 

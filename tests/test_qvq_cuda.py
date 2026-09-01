@@ -3254,11 +3254,18 @@ def test_qvq_segmented_v2_cuda_gemv_matches_dense_reference(bits, format_name, m
 
 
 @pytest.mark.parametrize("m", (1, 8, 17))
-def test_qvq_grouped_p32_cuda_gemv_preserves_independent_alternative_banks(m):
+@pytest.mark.parametrize(
+    ("output_widths", "alternative_banks"),
+    (
+        ((32, 64), (1, 3)),
+        ((32, 64, 48), (1, 3, 2)),
+    ),
+)
+def test_qvq_grouped_p32_cuda_gemv_preserves_independent_alternative_banks(
+    m, output_widths, alternative_banks
+):
     bits = 2.0
     k = 64
-    output_widths = (32, 64)
-    alternative_banks = (1, 3)
     transition_bits = qvq_transition_bits(bits)
     words_per_tile = qvq_words_per_tile(bits)
     generator = torch.Generator(device="cpu").manual_seed(5371 + m)
@@ -3306,18 +3313,12 @@ def test_qvq_grouped_p32_cuda_gemv_preserves_independent_alternative_banks(m):
 
     grouped_trellis = torch.cat(trellises, dim=1).reshape(-1, words_per_tile)
     grouped_bank_ids = torch.cat(bank_selectors, dim=1).reshape(-1)
-    grouped_bank_alt_ids = torch.cat(
-        [
-            torch.full(
-                (out_features // 16,),
-                bank_alt_id,
-                dtype=torch.uint8,
-                device="cuda",
-            )
-            for out_features, bank_alt_id in zip(
-                output_widths, alternative_banks, strict=True
-            )
-        ]
+    grouped_bank_alt_ids = torch.tensor(
+        alternative_banks, dtype=torch.uint8, device="cuda"
+    )
+    grouped_bank_alt_boundaries = tuple(
+        sum(output_widths[:index]) // 16
+        for index in range(1, len(output_widths))
     )
     actual = qvq_cuda_gemv(
         x,
@@ -3328,6 +3329,7 @@ def test_qvq_grouped_p32_cuda_gemv_preserves_independent_alternative_banks(m):
         bank_ids=grouped_bank_ids,
         v2b2_p32=True,
         bank_alt_ids=grouped_bank_alt_ids,
+        bank_alt_boundaries=grouped_bank_alt_boundaries,
     )
     reference = torch.cat(references, dim=-1)
 
@@ -3362,15 +3364,29 @@ def test_qvq_segmented_v2_cuda_gemv_rejects_invalid_contracts():
             v2b2_p32=True,
             bank_alt_id=4,
         )
-    with pytest.raises(ValueError, match="per-output alternative-bank IDs must be in"):
+    grouped_trellis_w3 = torch.zeros((2, 24), dtype=torch.int32, device="cuda")
+    grouped_selectors = torch.zeros((2,), dtype=torch.uint8, device="cuda")
+    with pytest.raises(ValueError, match="grouped alternative-bank IDs must be in"):
         qvq_cuda_gemv(
             x,
-            trellis_w3,
+            grouped_trellis_w3,
             3.0,
-            out_features=16,
-            bank_ids=selectors,
+            out_features=32,
+            bank_ids=grouped_selectors,
             v2b2_p32=True,
-            bank_alt_ids=torch.zeros((1,), dtype=torch.uint8, device="cuda"),
+            bank_alt_ids=torch.zeros((2,), dtype=torch.uint8, device="cuda"),
+            bank_alt_boundaries=(1,),
+        )
+    with pytest.raises(ValueError, match="strictly increasing N16 indices"):
+        qvq_cuda_gemv(
+            x,
+            grouped_trellis_w3,
+            3.0,
+            out_features=32,
+            bank_ids=grouped_selectors,
+            v2b2_p32=True,
+            bank_alt_ids=torch.ones((2,), dtype=torch.uint8, device="cuda"),
+            bank_alt_boundaries=(2,),
         )
 
 
