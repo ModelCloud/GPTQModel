@@ -1140,6 +1140,20 @@ The control and candidate are
 `artifacts/a100_p32_window/v17_m8_bank_cpasync_control.json` and
 `artifacts/a100_p32_window/v17_m8_bank_cpasync_candidate.json`.
 
+The second v17 progression applies a 16-byte `cp.async.ca` selector copy to
+the six fixed-N M4 routes other than full-KV. The narrowed
+40-warmup/1000-iteration repeat improves the 24-case median and mean geomeans
+by 0.958% and 1.475%; every shape improves by median, from 0.382% on
+linear-QKV to 1.511% on MLP-down. The matched scalar control and accepted
+repeat are `artifacts/a100_p32_window/v17_scalar_bank_cpasync_control.json`
+and `artifacts/a100_p32_window/v17_m4_bank_cpasync_selective_repeat.json`.
+
+The broader scalar selector experiment was narrowed rather than accepted.
+Distributed four-byte async copies regressed M1 full-KV by 4.629% median,
+and 16-byte async copies regressed the complete M2 set by 0.142%. Their source
+paths were restored; the broad diagnostic is
+`v17_scalar_bank_cpasync_candidate.json`.
+
 ## Reproduction
 
 ```bash

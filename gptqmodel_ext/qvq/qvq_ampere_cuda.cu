@@ -284,6 +284,15 @@ __device__ __forceinline__ void copy_async_ca_4(void* destination, const void* s
       : "r"(shared_address), "l"(source));
 }
 
+__device__ __forceinline__ void copy_async_ca_16(void* destination, const void* source) {
+  const uint32_t shared_address =
+      static_cast<uint32_t>(__cvta_generic_to_shared(destination));
+  asm volatile(
+      "cp.async.ca.shared.global [%0], [%1], 16;\n"
+      :
+      : "r"(shared_address), "l"(source));
+}
+
 template <
     int TransitionBits,
     bool FullRows,
@@ -705,9 +714,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
                       block_n_tile_base) + word)
             : 0u;
       }
-    } else if constexpr (
-        StaticN > 0 && TilesPerBlock == 16 &&
-        (Rows == 2 || (Rows == 4 && StaticN != 1024))) {
+    } else if constexpr (StaticN > 0 && TilesPerBlock == 16 && Rows == 2) {
       if (thread < StageKTiles) {
         const int k_tile = k_tile_base + thread;
         auto* destination_ids = reinterpret_cast<uint4*>(
@@ -716,6 +723,21 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
             ? __ldg(reinterpret_cast<const uint4*>(
                   bank_ids + static_cast<int64_t>(k_tile) * n_tiles + block_n_tile_base))
             : make_uint4(0u, 0u, 0u, 0u);
+      }
+    } else if constexpr (
+        StaticN > 0 && TilesPerBlock == 16 && Rows == 4 && StaticN != 1024) {
+      if (thread < StageKTiles) {
+        const int k_tile = k_tile_base + thread;
+        auto* destination_ids = reinterpret_cast<uint4*>(
+            packed_bank_ids[destination][thread]);
+        if (k_tile < k_tiles) {
+          copy_async_ca_16(
+              destination_ids,
+              reinterpret_cast<const uint4*>(
+                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + block_n_tile_base));
+        } else {
+          *destination_ids = make_uint4(0u, 0u, 0u, 0u);
+        }
       }
     } else if (thread < StageKTiles * TilesPerBlock) {
       const int stage_k_tile = thread / TilesPerBlock;
