@@ -329,6 +329,22 @@ def qvq_p32_window_ampere(
         transition_bits = qvq_transition_bits(bits, vector_size=2)
     if transition_bits not in (4, 5, 6, 7):
         raise ValueError("QVQ P32 Ampere WMMA supports W2 through W3.5")
+    if (
+        split_count == 0
+        and input.shape[0] == 1
+        and input.shape[1] == 5120
+        and out_features in (1024, 12288)
+    ):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            64 if out_features == 1024 else 40,
+        )
     if split_count == 0 and out_features == 1024 and input.shape == (8, 5120):
         return _p32_window_op()(
             input,

@@ -133,6 +133,31 @@ def test_p32_ampere_dispatches_measured_m8_kv_plan_directly(monkeypatch):
     assert calls[0][-1] == 48
 
 
+@pytest.mark.parametrize(
+    ("out_features", "expected_split"), ((1024, 64), (12288, 40))
+)
+def test_p32_ampere_dispatches_measured_m1_plans_directly(
+    monkeypatch, out_features, expected_split
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((1, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=out_features,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == expected_split
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
 @pytest.mark.parametrize("size_m", (1, 2, 4, 8, 16))

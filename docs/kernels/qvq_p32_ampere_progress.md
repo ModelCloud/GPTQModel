@@ -1496,6 +1496,17 @@ and
 Affected-case log weighting now reaches **1.584%** cumulative median
 improvement versus fetched main; planar timings remain excluded.
 
+The thirteenth v18 progression directly dispatches the stable M1 full-Q and
+full-KV plans, avoiding the hot Python cache key for these eight cases while
+leaving unknown shapes on the live tuner. In the focused screen, the
+affected geomean falls by **1.124%** (a **1.0114x** speedup): full-Q has two
+wins and two ties, while full-KV has two wins, one tie, and one event-tick
+loss. Exactness remains below `1.34e-05`. The matched control and candidate
+are `artifacts/a100_p32_window/v18_m1_fastplans_control.json` and
+`artifacts/a100_p32_window/v18_m1_fastplans_narrow_candidate.json`.
+Affected-case log weighting now reaches **1.650%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
@@ -1567,6 +1578,13 @@ excluding one queue-stall sample), so only the focused full-KV path remains.
 Diagnostics use the `v18_m8_fullkv_x2_deadrows_`,
 `v18_m8_fullkv_x2_float2_`, `v18_m8_fullkv_x2_autotune_`, and
 `v18_m8_fastplans_` prefixes; rejected source changes were restored.
+
+Generalizing the same direct-plan path across all 28 M1 cases was narrowed
+to the retained full-Q/full-KV subset. The broad screen had five wins and 20
+ties, but M1 linear-Z W2 and MLP-down W2 each lost one event tick. Those
+shapes retain normal in-memory autotuning. Diagnostics are
+`artifacts/a100_p32_window/v18_m1_fastplans_control.json` and
+`artifacts/a100_p32_window/v18_m1_fastplans_candidate.json`.
 
 The direct 140-case post-progression refresh is diagnostic only. Isolated
 0.22-0.29 ms charges appeared in otherwise stable M2, M16, and full-KV
