@@ -1119,6 +1119,234 @@ scalar M1/M2/M4 kernels regressed their matched 84-case median and mean
 geomeans by 1.902% and 2.355%; every shape bucket was slower. Diagnostics are
 `v16_m8_statick_n5120_candidate.json` and `v16_scalar_statickn_*.json`.
 
+### Post-merge v17 baseline
+
+PR #90 merged as `6b3cea54`. The clean 20-warmup/100-iteration 140-case
+Ampere control is
+`artifacts/a100_p32_window/qwen38_newmain_all_6b3cea54.json`. Median latency
+geomeans are 0.057193 ms (M1), 0.061991 ms (M2), 0.068832 ms (M4),
+0.079767 ms (M8), and 0.083897 ms (M16), with a 0.069599 ms all-case
+geomean. Maximum absolute error is 0.000080109. Planar timings are diagnostic
+only and excluded from every improvement calculation.
+
+The first v17 progression extends asynchronous packed bank-selector staging
+from full-row M16 to every fixed-N M8 route. Each K16 stage replaces four
+synchronous byte loads with one four-byte `cp.async.ca`, overlapping the
+selector with the existing input and trellis pipeline. In the matched
+30-warmup/500-iteration 28-case pair, the median and mean geomeans improve
+2.161% and 2.364%. All shape buckets are non-negative by median; full-KV
+improves 2.224%, linear-QKV 2.717%, MLP-gate/up 3.224%, and MLP-down 4.107%.
+The control and candidate are
+`artifacts/a100_p32_window/v17_m8_bank_cpasync_control.json` and
+`artifacts/a100_p32_window/v17_m8_bank_cpasync_candidate.json`.
+
+The second v17 progression applies a 16-byte `cp.async.ca` selector copy to
+the six fixed-N M4 routes other than full-KV. The narrowed
+40-warmup/1000-iteration repeat improves the 24-case median and mean geomeans
+by 0.958% and 1.475%; every shape improves by median, from 0.382% on
+linear-QKV to 1.511% on MLP-down. The matched scalar control and accepted
+repeat are `artifacts/a100_p32_window/v17_scalar_bank_cpasync_control.json`
+and `artifacts/a100_p32_window/v17_m4_bank_cpasync_selective_repeat.json`.
+
+The broader scalar selector experiment was narrowed rather than accepted.
+Distributed four-byte async copies regressed M1 full-KV by 4.629% median,
+and 16-byte async copies regressed the complete M2 set by 0.142%. Their source
+paths were restored; the broad diagnostic is
+`v17_scalar_bank_cpasync_candidate.json`.
+
+The third v17 progression applies the Hopper bank-mask-hoisting lesson only
+where it survives Ampere resource and schedule constraints. For M2 W2.5 and
+W3.5 outside full-KV, two adjacent scalar decode rows share each lower/upper
+bank-mask pair instead of recomputing the selectors for every decoded state.
+Other rates, rows, and M2 full-KV retain their bit-identical accepted paths.
+On the clean matched 40-warmup/1000-iteration 12-case run, every case improves;
+the median geomean gain is 3.524%, while the aggregate mean-latency gain is
+3.306%. Per-shape median gains are 3.349% for full-Q, 4.545% for
+attention-out, 3.150% for linear-QKV, 5.676% for linear-Z, 3.545% for
+MLP-gate/up, and 0.939% for MLP-down. Exactness passes 28/28. The control and
+candidate are `artifacts/a100_p32_window/v17_m2_bank_mask_group_control.json`
+and
+`artifacts/a100_p32_window/v17_m2_bank_mask_group_selective_candidate.json`.
+The control process preloaded the exact accepted `499e6810` JIT binary at
+cache fingerprint `657b7db6c159a655` before running the same benchmark.
+
+Using affected-case log weighting, the three accepted v17 progressions are
+`exp(28/140 * ln(1.02161) + 24/140 * ln(1.00958) + 12/140 *
+ln(1.03524076)) = 1.008919x`, or **0.892%** cumulative median improvement
+versus fetched `6b3cea54` main. Planar timings remain excluded.
+
+Additional v17 failures are recorded to prevent retesting dead ends. A packed
+M1 selector was only +0.215% overall and regressed attention-out and linear-Z;
+an async M16 full-KV selector was roughly 7-9% slower. Hoisting the WMMA lane
+mapping grew live ranges and regressed M16 uniformly. Four skewed shared
+codebook replicas were 1-2% slower than the read-only-cache path. Forcing
+ordinary L1 `.ca` codebook loads in place of the generated read-only load mode
+was neutral-to-mixed in a contention-only screen. A 16-bit inline-PTX PGC mix
+lengthened the hot SASS region and was rejected before timing. Finally,
+grouping scalar bank masks broadly regressed M1 by 1.968% and M4 by 1.453% in
+the diagnostic screen; only the cleanly validated M2 W2.5/W3.5 subset above
+is retained. Diagnostics use the `v17_m1_bank_cpasync_`,
+`v17_m16_fullkv_bank_cpasync_`, `v17_wmma_lane_hoist_`,
+`v17_m8_shared_levels4_`, and `v17_scalar_bank_group_` labels; contention-only
+files remain untracked.
+
+The fourth v17 progression pipelines the packed 16-byte M2 bank-selector copy
+only on the same validated non-full-KV W2.5/W3.5 routes. The earlier broad M2
+async experiment predated bank-mask grouping and was slightly negative; after
+grouping shortens the selector's decode use, `cp.async.ca` overlaps its global
+load with the scalar input and trellis stage. The clean 60-warmup/2000-iteration
+repeat improves the 12-case median and mean geomeans by 1.210% and 0.993%.
+Every shape is non-negative by median; gains range from 0.462% on MLP-down to
+1.600% on linear-QKV. The accepted repeat is
+`artifacts/a100_p32_window/v17_m2_group_async_selector_repeat.json`; its
+immediate control is
+`artifacts/a100_p32_window/v17_m2_bank_mask_group_selective_candidate.json`.
+
+Including this fourth progression, affected-case log weighting gives
+`exp(28/140 * ln(1.02161) + 24/140 * ln(1.00958) + 12/140 *
+ln(1.03524076) + 12/140 * ln(1.01210067)) = 1.009959x`, or **0.996%**
+cumulative median improvement versus fetched `6b3cea54` main. Planar timings
+remain excluded.
+
+An isolated M4 selector cache-policy follow-up was also rejected. Changing
+only the selector from `cp.async.ca` to `cp.async.cg` improved the clean
+24-case median geomean by just 0.036%, with 22 cases bit-for-bit identical in
+the event median. The earlier combined cache-policy diagnostic was therefore
+not hiding a material selector-only gain; retain `.ca`.
+
+The fifth v17 progression narrows the earlier broad M1 selector experiment to
+the W2.5/W3.5 non-full-KV routes that were consistently positive. One
+16-byte `cp.async.ca` now replaces 16 distributed selector-byte loads per
+scalar K stage; W2/W3 and full-KV keep their accepted synchronous paths. In
+the clean matched 60-warmup/2000-iteration 12-case pair, the median and mean
+geomeans improve 1.626% and 0.976%. Every shape improves by median, from
+1.021% on MLP-down to 2.613% on linear-QKV. The exact accepted `088f0dbe`
+binary was preloaded from JIT fingerprint `9f664b2065b9d1fb` for the control.
+Artifacts are
+`artifacts/a100_p32_window/v17_m1_async_selector_selective_control.json` and
+`artifacts/a100_p32_window/v17_m1_async_selector_selective_repeat.json`.
+
+Including the fifth progression, affected-case log weighting gives
+`exp(28/140 * ln(1.02161) + 24/140 * ln(1.00958) + 12/140 *
+ln(1.03524076) + 12/140 * ln(1.01210067) + 12/140 * ln(1.01625809)) =
+1.011356x`, or **1.136%** cumulative median improvement versus fetched
+`6b3cea54` main. Planar timings remain excluded.
+
+The sixth v17 progression extends packed async M1 selector staging to the
+three W2 fixed-N routes that remained positive in the broad diagnostic:
+full-Q, linear-QKV, and MLP-gate/up. The clean matched
+60-warmup/2000-iteration three-case pair improves the median and mean
+geomeans by 1.604% and 1.189%, and every case improves. The attempted W3
+MLP-gate extension was exactly neutral and was removed. The control preloads
+the exact accepted `c023f477` binary from JIT fingerprint
+`cdffda1bd75374aa`. Artifacts are
+`artifacts/a100_p32_window/v17_m1_w2_async_selector_selective_control.json`
+and
+`artifacts/a100_p32_window/v17_m1_w2_async_selector_selective_candidate.json`.
+
+Including the sixth progression, affected-case log weighting raises the
+cumulative median improvement to **1.170%** versus fetched `6b3cea54` main.
+Planar timings remain excluded.
+
+The seventh v17 progression extends M2 packed async selector staging to the
+W3 `N=17408` and `N=5120` routes. In the clean matched
+60-warmup/2000-iteration six-shape screen, MLP-gate/up improves 1.020% and
+MLP-down 1.887%; attention-out (which shares `N=5120`) and the other three
+shapes are neutral. The six-case median and mean geomeans improve 0.482% and
+0.983%. The control preloads exact accepted `433f778e` from JIT fingerprint
+`02ac30b097c0cef4`. Artifacts are
+`artifacts/a100_p32_window/v17_m2_w3_async_selector_control.json` and
+`artifacts/a100_p32_window/v17_m2_w3_async_selector_candidate.json`.
+Affected-case log weighting now gives **1.191%** cumulative median improvement
+versus fetched `6b3cea54` main; planar timings remain excluded.
+
+The eighth v17 progression statically unrolls the scalar split reducer for
+the split counts selected by the live autotuner, but only on non-full-KV M2,
+M4, and M16 routes. The broad 140-case experiment exposed why this must be
+selective: static reducers improved the 120 non-full-KV cases by 0.375%
+median geomean, while full-KV regressed 1.888%. M1 and M8 were also mixed.
+Restricting the identical specialized code paths to the 72 robust cases gives
+0.446% median, 0.397% mean, and 0.484% p95 geomean gains, with 27 wins, 43
+quantized ties, and two losses by median. M2, M4, and M16 improve 0.187%,
+0.469%, and 0.282% respectively across their non-KV cases. The exact accepted
+`cf96b17c` JIT binary at fingerprint `cd31af2dd6479ddc` was preloaded for the
+control. The broad diagnostic artifacts are
+`artifacts/a100_p32_window/v17_static_reducers_candidate.json` and
+`artifacts/a100_p32_window/v17_static_reducers_control.json`; the committed
+dispatch preserves the runtime reducer on every route rejected by that pair.
+Exactness passes 28/28.
+
+Including this progression, affected-case log weighting raises the cumulative
+median improvement to **1.423%** versus fetched `6b3cea54` main. Planar timings
+remain excluded.
+
+Two more reducer/load experiments were rejected. Packing four output elements
+per split-reduction thread reduced the reducer grid fourfold and was
+decisively slower because it sacrificed the parallelism that hides strided
+partial-output loads. Separately, staging each M8 selector as one aligned
+16-byte shared-memory sector with `cp.async.cg` regressed the full screen by
+0.312% median geomean and linear-QKV by 1.49%; the accepted distributed
+selector layout remains faster.
+
+The ninth v17 progression extends the static split reducer to the 24 M8
+non-full-KV cases after the broad screen's aggregate M8 result was obscured by
+the losing full-KV cases. In the clean matched 40-warmup/1000-iteration pair,
+all 24 medians are non-regressing: the median, mean, and p95 geomeans improve
+1.231%, 1.028%, and 0.997%. Attention-out and linear-Z improve 2.691% and
+2.667% by median, MLP-down improves 1.507%, and the remaining shapes are
+non-negative. Full-KV deliberately retains the runtime reducer. The control
+preloads exact accepted `c928aec5` from JIT fingerprint `593b839d5a285eec`.
+Artifacts are
+`artifacts/a100_p32_window/v17_m8_static_reducer_control.json` and
+`artifacts/a100_p32_window/v17_m8_static_reducer_candidate.json`.
+Affected-case log weighting now gives **1.636%** cumulative median improvement
+versus fetched `6b3cea54` main; planar timings remain excluded.
+
+Compile-time split specialization of the main M16 MLP-gate kernel was also
+rejected. At fixed split 10, all four 2000-iteration medians were exactly
+identical to the runtime-split control, so the compiler is already reducing
+the uniform split arithmetic effectively. Diagnostics use the
+`v17_m16_static_split10_` prefix.
+
+The tenth v17 progression extends the static reducer to the three M1 shape
+families that were positive by median, mean, and p95 in the broad experiment:
+full-Q, linear-QKV, and long-K MLP-down. The clean matched
+60-warmup/2000-iteration 12-case pair improves every case. Median, mean, and
+p95 geomeans improve 3.684%, 3.931%, and 3.001%; per-shape median gains are
+3.026% for full-Q, 3.548% for linear-QKV, and 4.485% for MLP-down. Other M1
+shapes and full-KV keep the runtime reducer. The control preloads exact
+accepted `31caa82d` from JIT fingerprint `a73a469768c9542b`. Artifacts are
+`artifacts/a100_p32_window/v17_m1_static_reducer_control.json` and
+`artifacts/a100_p32_window/v17_m1_static_reducer_candidate.json`. Affected-case
+log weighting now gives **1.951%** cumulative median improvement versus
+fetched `6b3cea54` main; planar timings remain excluded.
+
+The eleventh v17 progression adds M1 MLP-gate/up to the static-reducer set.
+The final-source matched 60-warmup/2000-iteration pair improves every rate:
+the median, mean, and p95 geomeans improve 2.300%, 2.350%, and 2.280%.
+The control again preloads exact accepted `c3c21fbb` from fingerprint
+`847808c5f0c8f7c3`. Artifacts are
+`artifacts/a100_p32_window/v17_m1_mlpgate_static_reducer_control.json` and
+`artifacts/a100_p32_window/v17_m1_mlpgate_static_reducer_candidate.json`.
+Attention-out and linear-Z were screened at the same time but remain on the
+runtime reducer: attention W2 regressed 4.88%, while linear-Z had a slightly
+negative p95 aggregate. With only the robust MLP-gate subset retained,
+affected-case log weighting reaches **2.018%** cumulative median improvement
+versus fetched `6b3cea54` main. Planar timings remain excluded.
+
+Nsight profiling and follow-up experiments close several additional dead
+ends. The M8 full-Q kernel is limited by random codebook traffic through the
+unified L1/TEX path and integer ALU work, but its read-only-cache hit rate is
+96.2%. Distributing the 256-entry codebook across warp registers required
+four shuffles per random half lookup and slowed W2 full-Q from about 0.098 ms
+to 0.140 ms. Fetching aligned 32-bit codebook words instead of 16-bit values
+slowed it to 0.108 ms. Replacing shared trellis-word loads with warp shuffles
+was also 2.08% slower. Marking the split-reducer input loads `__ldg` regressed
+the full-KV screen. Finally, wave-adjacent M8 splits 21 (full-Q), 19
+(linear-QKV), 31 (linear-Z), and 25 (attention-out) all lost to the existing
+autotuned choices, so the profiler's theoretical tail-wave estimate does not
+translate into a useful tuning candidate for these imbalanced K slices.
+
 ## Reproduction
 
 ```bash
