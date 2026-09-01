@@ -55,6 +55,32 @@ def test_qvq_transform_plan_counts_and_role_descriptors():
     assert planner.build_transform_plan("A28").online_hadamards_per_block == 10
     assert planner.build_transform_plan("A29").online_hadamards_per_block == 12
     assert planner.build_transform_plan("A30").online_hadamards_per_block == 10
+    assert planner.build_transform_plan("A31").online_hadamards_per_block == 9
+
+    a31 = planner.build_transform_plan("A31")
+    layer_zero = [item for item in a31.modules if ".layers.0." in item.module_name]
+    attention_inputs = {
+        item.input_transform.basis_id
+        for item in layer_zero
+        if item.role
+        in {
+            ProjectionRole.ATTENTION_Q,
+            ProjectionRole.ATTENTION_K,
+            ProjectionRole.ATTENTION_V,
+        }
+    }
+    mlp_inputs = {
+        item.input_transform.basis_id
+        for item in layer_zero
+        if item.role in {ProjectionRole.MLP_GATE, ProjectionRole.MLP_UP}
+    }
+    assert attention_inputs == {"sibling.attn.l0"}
+    assert mlp_inputs == {"sibling.mlp.l0"}
+    assert all(
+        item.input_transform.placement == TransformPlacement.SHARED
+        for item in layer_zero
+        if item.input_transform.basis_id in attention_inputs | mlp_inputs
+    )
 
     a4 = planner.build_transform_plan("A4")
     gate = next(item for item in a4.modules if item.role == ProjectionRole.MLP_GATE)
@@ -72,7 +98,7 @@ def test_qvq_transform_plan_counts_and_role_descriptors():
     "arm",
     (
         "A1", "A3", "A4", "A6", "A20", "A21", "A22", "A23", "A24", "A25", "A26",
-        "A27", "A28", "A29", "A30",
+        "A27", "A28", "A29", "A30", "A31",
     ),
 )
 def test_qvq_llama_dense_rewrite_preserves_final_logits(arm):

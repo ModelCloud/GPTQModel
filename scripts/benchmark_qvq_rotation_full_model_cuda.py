@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 
-"""Run packed full-model CUDA A0/A25 quality and decode benchmarks.
+"""Run packed full-model CUDA rotation-arm quality and decode benchmarks.
 
 Quantization follows the progressive dense-reconstruction protocol used by
 ``validate_qvq_rotation_full_model_mlx.py``.  Pack-ready P32 tensors are kept
@@ -41,7 +41,11 @@ from gptqmodel.quantization.qvq_transform_llama import (  # noqa: E402
     LlamaQVQTransformImplementor,
 )
 from gptqmodel.quantization.qvq_transform_planner import (  # noqa: E402
+    QVQTransformPlan,
     QVQTransformPlanner,
+)
+from gptqmodel.quantization.qvq_transform_runtime import (  # noqa: E402
+    install_qvq_shared_input_transforms,
 )
 from gptqmodel.utils.qvq_cuda import prewarm_qvq_cuda  # noqa: E402
 from scripts.validate_qvq_rotation_full_model_mlx import (  # noqa: E402
@@ -410,51 +414,147 @@ def _combine_benchmark_cycles(cycles):
     ]
 
 
-def _paired_bootstrap(a0_metrics, a25_metrics, *, samples=2000, seed=20260901):
-    a0_rows = a0_metrics["aggregate"]["per_text"]
-    a25_rows = a25_metrics["aggregate"]["per_text"]
-    if len(a0_rows) != len(a25_rows) or not a0_rows:
+@torch.inference_mode()
+def _benchmark_quant_linear_suite(
+    model,
+    descriptors_by_layer,
+    device,
+    *,
+    batch_sizes,
+    warmup,
+    iterations,
+):
+    """Time the seven packed projections with graph-valid shared inputs."""
+
+    rows = []
+    grouped_calls = []
+    for layer_index in sorted(descriptors_by_layer):
+        layer_descriptors = descriptors_by_layer[layer_index]
+        for roles in ROLE_GROUPS:
+            descriptors = [item for item in layer_descriptors if item.role in roles]
+            if not descriptors:
+                continue
+            grouped_calls.append(
+                tuple(model.get_submodule(item.module_name) for item in descriptors)
+            )
+
+    for batch_size in batch_sizes:
+        inputs = []
+        for modules in grouped_calls:
+            inputs.append(
+                torch.randn(
+                    (batch_size, modules[0].in_features),
+                    device=device,
+                    dtype=torch.float16,
+                )
+            )
+
+        def invoke_suite():
+            outputs = []
+            for modules, x in zip(grouped_calls, inputs, strict=True):
+                outputs.extend(module(x) for module in modules)
+            return outputs
+
+        for _ in range(warmup):
+            outputs = invoke_suite()
+            del outputs
+        _synchronize(device)
+        event_ms = []
+        wall_ms = []
+        for _ in range(iterations):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            _synchronize(device)
+            wall_started = time.perf_counter()
+            start.record()
+            outputs = invoke_suite()
+            end.record()
+            _synchronize(device)
+            wall_ms.append((time.perf_counter() - wall_started) * 1000)
+            event_ms.append(start.elapsed_time(end))
+            del outputs
+        rows.append(
+            {
+                "batch_size": batch_size,
+                "quantized_layers": len(descriptors_by_layer),
+                "packed_projections": sum(len(group) for group in grouped_calls),
+                "timing": _timing_summary(event_ms, wall_ms, batch_size),
+            }
+        )
+    return rows
+
+
+def _combine_suite_cycles(cycles):
+    by_batch = defaultdict(lambda: {"event": [], "wall": []})
+    metadata = {}
+    for cycle in cycles:
+        for row in cycle:
+            batch_size = row["batch_size"]
+            metadata[batch_size] = {
+                "quantized_layers": row["quantized_layers"],
+                "packed_projections": row["packed_projections"],
+            }
+            by_batch[batch_size]["event"].extend(row["timing"]["event_samples_ms"])
+            by_batch[batch_size]["wall"].extend(row["timing"]["wall_samples_ms"])
+    return [
+        {
+            "batch_size": batch_size,
+            **metadata[batch_size],
+            "timing": _timing_summary(values["event"], values["wall"], batch_size),
+        }
+        for batch_size, values in sorted(by_batch.items())
+    ]
+
+
+def _paired_bootstrap(reference_metrics, candidate_metrics, *, samples=2000, seed=20260901):
+    reference_rows = reference_metrics["aggregate"]["per_text"]
+    candidate_rows = candidate_metrics["aggregate"]["per_text"]
+    if len(reference_rows) != len(candidate_rows) or not reference_rows:
         raise ValueError("paired bootstrap requires aligned non-empty per-text metrics")
     generator = random.Random(seed)
     kl_deltas = []
     top1_deltas = []
     for _ in range(samples):
-        indices = [generator.randrange(len(a0_rows)) for _ in a0_rows]
-        tokens = sum(a0_rows[index]["tokens"] for index in indices)
-        a0_kl = (
+        indices = [generator.randrange(len(reference_rows)) for _ in reference_rows]
+        tokens = sum(reference_rows[index]["tokens"] for index in indices)
+        reference_kl = (
             sum(
-                a0_rows[index]["final_kl"] * a0_rows[index]["tokens"]
+                reference_rows[index]["final_kl"] * reference_rows[index]["tokens"]
                 for index in indices
             )
             / tokens
         )
-        a25_kl = (
+        candidate_kl = (
             sum(
-                a25_rows[index]["final_kl"] * a25_rows[index]["tokens"]
+                candidate_rows[index]["final_kl"] * candidate_rows[index]["tokens"]
                 for index in indices
             )
             / tokens
         )
-        a0_top1 = (
-            sum(a0_rows[index]["top1"] * a0_rows[index]["tokens"] for index in indices)
-            / tokens
-        )
-        a25_top1 = (
+        reference_top1 = (
             sum(
-                a25_rows[index]["top1"] * a25_rows[index]["tokens"] for index in indices
+                reference_rows[index]["top1"] * reference_rows[index]["tokens"]
+                for index in indices
             )
             / tokens
         )
-        kl_deltas.append(a25_kl - a0_kl)
-        top1_deltas.append(a25_top1 - a0_top1)
+        candidate_top1 = (
+            sum(
+                candidate_rows[index]["top1"] * candidate_rows[index]["tokens"]
+                for index in indices
+            )
+            / tokens
+        )
+        kl_deltas.append(candidate_kl - reference_kl)
+        top1_deltas.append(candidate_top1 - reference_top1)
     return {
         "resamples": samples,
         "unit": "held-out text",
-        "final_kl_delta_a25_minus_a0": {
+        "final_kl_delta_candidate_minus_reference": {
             "median": statistics.median(kl_deltas),
             "ci95": [_percentile(kl_deltas, 0.025), _percentile(kl_deltas, 0.975)],
         },
-        "top1_delta_a25_minus_a0": {
+        "top1_delta_candidate_minus_reference": {
             "median": statistics.median(top1_deltas),
             "ci95": [
                 _percentile(top1_deltas, 0.025),
@@ -530,6 +630,8 @@ def main():
     parser.add_argument("--prefill-iterations", type=int, default=5)
     parser.add_argument("--decode-warmup", type=int, default=5)
     parser.add_argument("--decode-iterations", type=int, default=30)
+    parser.add_argument("--module-suite-warmup", type=int, default=10)
+    parser.add_argument("--module-suite-iterations", type=int, default=30)
     parser.add_argument("--timing-cycles", type=int, default=3)
     parser.add_argument("--model", default=MODEL_ID)
     parser.add_argument("--local-files-only", action="store_true")
@@ -559,6 +661,8 @@ def main():
         args.prefill_iterations,
         args.decode_warmup,
         args.decode_iterations,
+        args.module_suite_warmup,
+        args.module_suite_iterations,
         args.timing_cycles,
         *args.decode_batches,
     )
@@ -618,7 +722,7 @@ def main():
         "cuda_version": torch.version.cuda,
         "repository_revision": _git_revision("HEAD"),
         "origin_main_revision": _git_revision("origin/main"),
-        "runtime_path": "QVQLinear CUDA qvq_cuda_gemv V2B2-P32 planar",
+        "runtime_path": "QVQLinear CUDA qvq_cuda_gemv V2B2-P32 planar with planned shared inputs",
         "startup_compute_processes": startup_compute_processes,
         "bits": args.bits,
         "quantized_layers": args.layers,
@@ -636,6 +740,8 @@ def main():
     _write(args.json, payload)
 
     packed_models = {}
+    shared_states_by_arm = {}
+    descriptors_by_arm = {}
     for arm in args.arms:
         arm_started = time.perf_counter()
         model = (
@@ -713,6 +819,29 @@ def main():
             raise RuntimeError(
                 f"expected {args.layers * 7} packed modules, installed {len(installed)}"
             )
+        runtime_plan = QVQTransformPlan(
+            arm=plan.arm,
+            description=plan.description,
+            modules=tuple(
+                descriptor
+                for descriptor in plan.modules
+                if descriptor.module_name in descriptors
+            ),
+            metadata=plan.metadata,
+        )
+        shared_states = install_qvq_shared_input_transforms(model, runtime_plan)
+        arm_payload["shared_input_runtime"] = {
+            "group_count": len(shared_states),
+            "groups": {
+                basis_id: {
+                    "module_names": list(state.group.module_names),
+                    "su_sha256": _tensor_sha256(
+                        installed[state.group.module_names[0]].SU
+                    ),
+                }
+                for basis_id, state in shared_states.items()
+            },
+        }
         arm_payload["packed_quality"] = _aggregate_evaluation(
             model, validation_streams, dense_logits_streams, device
         )
@@ -730,6 +859,8 @@ def main():
         )
         _write(args.json, payload)
         packed_models[arm] = model
+        shared_states_by_arm[arm] = shared_states
+        descriptors_by_arm[arm] = descriptors_by_layer
         del installed, runtime_payloads
         gc.collect()
         _empty_cache(device)
@@ -756,17 +887,52 @@ def main():
                 "cycles": timing_cycles[arm],
                 "aggregate": _combine_benchmark_cycles(timing_cycles[arm]),
             }
+            payload["arms"][arm]["shared_input_runtime"]["counters"] = {
+                basis_id: {
+                    "transform_invocations": state.transform_invocations,
+                    "completed_cycles": state.completed_cycles,
+                    "pending_consumers": list(state.pending_consumers),
+                }
+                for basis_id, state in shared_states_by_arm[arm].items()
+            }
             _write(args.json, payload)
 
-    if {"A0", "A25"}.issubset(payload["arms"]):
-        payload["comparison"] = {
+    suite_cycles = {arm: [] for arm in args.arms}
+    for cycle_index in range(args.timing_cycles):
+        cycle_order = args.arms if cycle_index % 2 == 0 else tuple(reversed(args.arms))
+        for arm in cycle_order:
+            print(f"CUDA QuantLinear suite cycle {cycle_index + 1}: {arm}", flush=True)
+            suite_cycles[arm].append(
+                _benchmark_quant_linear_suite(
+                    packed_models[arm],
+                    descriptors_by_arm[arm],
+                    device,
+                    batch_sizes=args.decode_batches,
+                    warmup=args.module_suite_warmup,
+                    iterations=args.module_suite_iterations,
+                )
+            )
+            payload["arms"][arm]["quant_linear_suite_benchmark"] = {
+                "cycles": suite_cycles[arm],
+                "aggregate": _combine_suite_cycles(suite_cycles[arm]),
+            }
+            _write(args.json, payload)
+
+    reference_arm = "A0" if "A0" in payload["arms"] else args.arms[0]
+    payload["comparisons"] = {}
+    for candidate_arm in args.arms:
+        if candidate_arm == reference_arm:
+            continue
+        payload["comparisons"][f"{candidate_arm}_minus_{reference_arm}"] = {
+            "reference_arm": reference_arm,
+            "candidate_arm": candidate_arm,
             "reconstructed": _paired_bootstrap(
-                payload["arms"]["A0"]["reconstructed_quality"],
-                payload["arms"]["A25"]["reconstructed_quality"],
+                payload["arms"][reference_arm]["reconstructed_quality"],
+                payload["arms"][candidate_arm]["reconstructed_quality"],
             ),
             "packed": _paired_bootstrap(
-                payload["arms"]["A0"]["packed_quality"],
-                payload["arms"]["A25"]["packed_quality"],
+                payload["arms"][reference_arm]["packed_quality"],
+                payload["arms"][candidate_arm]["packed_quality"],
             ),
         }
     payload["status"] = "complete"

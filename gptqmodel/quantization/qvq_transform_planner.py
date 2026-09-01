@@ -33,6 +33,7 @@ class TransformKind(str, Enum):
 
 class TransformPlacement(str, Enum):
     ONLINE = "online"
+    SHARED = "shared"
     FUSED = "fused"
     FOLDED = "folded"
     NONE = "none"
@@ -46,11 +47,22 @@ class TransformSpec:
 
     @property
     def is_online_full_hadamard(self) -> bool:
-        return self.kind == TransformKind.HADAMARD and self.placement == TransformPlacement.ONLINE
+        return self.kind == TransformKind.HADAMARD and self.placement in {
+            TransformPlacement.ONLINE,
+            TransformPlacement.SHARED,
+        }
 
     @property
     def is_online(self) -> bool:
-        return self.placement in {TransformPlacement.ONLINE, TransformPlacement.FUSED}
+        return self.placement in {
+            TransformPlacement.ONLINE,
+            TransformPlacement.SHARED,
+            TransformPlacement.FUSED,
+        }
+
+    @property
+    def is_shared(self) -> bool:
+        return self.placement == TransformPlacement.SHARED
 
 
 ONLINE_HADAMARD = TransformSpec(TransformKind.HADAMARD, TransformPlacement.ONLINE)
@@ -86,21 +98,33 @@ class QVQTransformPlan:
 
     @property
     def online_hadamards_per_block(self) -> int:
-        return sum(
-            descriptor.input_transform.is_online_full_hadamard
-            + descriptor.output_transform.is_online_full_hadamard
-            for descriptor in self.modules
-        ) // max(1, self.layer_count)
+        return self._online_transform_count(full_hadamard=True) // max(1, self.layer_count)
 
     @property
     def other_online_transforms_per_block(self) -> int:
-        return sum(
-            descriptor.input_transform.is_online
-            + descriptor.output_transform.is_online
-            - descriptor.input_transform.is_online_full_hadamard
-            - descriptor.output_transform.is_online_full_hadamard
-            for descriptor in self.modules
-        ) // max(1, self.layer_count)
+        return self._online_transform_count(full_hadamard=False) // max(1, self.layer_count)
+
+    def _online_transform_count(self, *, full_hadamard: bool) -> int:
+        unique = set()
+        for descriptor in self.modules:
+            for side, transform in (
+                ("input", descriptor.input_transform),
+                ("output", descriptor.output_transform),
+            ):
+                selected = (
+                    transform.is_online_full_hadamard
+                    if full_hadamard
+                    else transform.is_online and not transform.is_online_full_hadamard
+                )
+                if not selected:
+                    continue
+                if transform.is_shared:
+                    if not transform.basis_id:
+                        raise ValueError("shared QVQ transforms require a basis_id")
+                    unique.add((transform.kind, transform.placement, transform.basis_id))
+                else:
+                    unique.add((descriptor.module_name, side))
+        return len(unique)
 
     @property
     def folded_transforms_per_block(self) -> int:
@@ -162,6 +186,7 @@ class QVQTransformPlanner:
             "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A8", "A9",
             "A12", "A13", "A14", "A15", "A16", "A17", "A18",
             "A20", "A21", "A22", "A23", "A24", "A25", "A26", "A27", "A28", "A29", "A30",
+            "A31",
         }:
             raise ValueError(f"unsupported QVQ transform-search arm: {arm}")
 
@@ -197,10 +222,11 @@ class QVQTransformPlanner:
             "A28": "head-local V/O plus permutation-only SwiGLU folding",
             "A29": "remove gate/up output Hadamards without SwiGLU reparameterization",
             "A30": "A29 plus head-local V/O folding",
+            "A31": "sibling-shared QKV and gate/up input RHTs plus head-local V/O folding",
         }
         descriptors = []
         for semantic in semantics:
-            if arm in {"A0", "A24", "A25", "A26", "A27", "A28", "A29", "A30"}:
+            if arm in {"A0", "A24", "A25", "A26", "A27", "A28", "A29", "A30", "A31"}:
                 input_transform = output_transform = ONLINE_HADAMARD
             else:
                 residual_in = TransformSpec(
@@ -226,7 +252,7 @@ class QVQTransformPlanner:
                         TransformPlacement.FOLDED,
                         f"rope_qk.l{semantic.layer_index}",
                     )
-            if arm in {"A25", "A26", "A28", "A30"}:
+            if arm in {"A25", "A26", "A28", "A30", "A31"}:
                 vo_folded = TransformSpec(
                     TransformKind.HADAMARD,
                     TransformPlacement.FOLDED,
@@ -236,6 +262,26 @@ class QVQTransformPlanner:
                     output_transform = vo_folded
                 elif semantic.role == ProjectionRole.ATTENTION_O:
                     input_transform = vo_folded
+            if arm == "A31":
+                if semantic.role in {
+                    ProjectionRole.ATTENTION_Q,
+                    ProjectionRole.ATTENTION_K,
+                    ProjectionRole.ATTENTION_V,
+                }:
+                    input_transform = TransformSpec(
+                        TransformKind.HADAMARD,
+                        TransformPlacement.SHARED,
+                        f"sibling.attn.l{semantic.layer_index}",
+                    )
+                elif semantic.role in {
+                    ProjectionRole.MLP_GATE,
+                    ProjectionRole.MLP_UP,
+                }:
+                    input_transform = TransformSpec(
+                        TransformKind.HADAMARD,
+                        TransformPlacement.SHARED,
+                        f"sibling.mlp.l{semantic.layer_index}",
+                    )
             if arm in {"A29", "A30"} and semantic.role in {
                 ProjectionRole.MLP_GATE,
                 ProjectionRole.MLP_UP,
@@ -278,6 +324,7 @@ class QVQTransformPlanner:
                 in {
                     "A0", "A1", "A3", "A4", "A6", "A18", "A20", "A21", "A22", "A23", "A24",
                     "A25", "A26", "A27", "A28", "A29", "A30",
+                    "A31",
                 },
                 "checkpoint_serialization_implemented": arm == "A0",
             },

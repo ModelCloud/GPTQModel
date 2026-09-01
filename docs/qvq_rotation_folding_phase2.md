@@ -93,10 +93,15 @@ side buffer is transformed. The same idea applies to the MLP input shared by
 z_mlp = x_mlp U_mlp
 ```
 
-Module-local diagonal/sign recovery remains inside each QVQ projection and can
-be fused into GEMV loads/epilogues. The shared transform does not require the
-three Q/K/V modules, or gate/up, to share their trellis path, SU/SV recovery,
-or output transform.
+The existing input recovery is ordered as `(x * SU) H`, so a single shared
+input transform requires bit-identical stored `SU` within each sibling group.
+The current fixed-seed fitter already produces that state because `SU` is a
+deterministic random sign vector of the input width; inference itself uses no
+RNG. The runtime must verify equality and fail closed rather than assuming it.
+Trellis paths, `SV`, and output transforms remain module-local. Future learned
+module-local input recovery would require an explicitly supported post-shared-H
+diagonal (`z_shared * D_alpha_i`); an arbitrary pre-H `SU_i` cannot commute
+through the shared Hadamard.
 
 Transform count with the already-validated A25 V/O fold:
 
@@ -109,8 +114,64 @@ This is less restrictive than A1 because the basis is layer-local and
 branch-local rather than one fixed residual basis for the entire model. It is
 also exact before quantization.
 
-First test a fixed randomized shared RHT per sibling group. If that misses the
-quality gate, do not discard the topology; continue to A32.
+### A31 SM80 result
+
+A31 is implemented and validated on the full 16-layer Llama 3.2 1B W2 P32
+model. The runtime uses plan-declared, role-agnostic sibling groups and keeps
+the original packed `QVQLinear` payloads unchanged. Installation validates
+width, input-Hadamard state, and bit-identical stored `SU`; execution fails
+closed on duplicate, out-of-order, or interleaved consumers.
+
+The result is exact relative to A25 at quantization and packed inference:
+
+| Metric | A25 | A31 |
+| --- | ---: | ---: |
+| Online full H/block | 12 | **9** |
+| Shared groups/model | 0 | **32** |
+| Effective BPW | `2.054419` | `2.054419` |
+| Dense logits rel-L2 | `1.1171e-6` | `1.1171e-6` |
+| Packed final KL | `0.916587` | `0.916587` |
+| Packed logits rel-L2 | `0.494783` | `0.494783` |
+| Packed Top-1/5/10 | `.54885/.81812/.88082` | `.54885/.81812/.88082` |
+
+All 112 module payload-hash dictionaries are identical, and the 2,000-sample
+paired bootstrap gives exactly zero A31-minus-A25 KL and Top-1 deltas. A31
+therefore inherits A25's A0 comparison: packed KL is statistically tied to A0
+(`-0.001236`, 95% CI `[-0.028447, +0.026979]`), while containment metrics
+continue to trend toward A0.
+
+Five alternating idle-host timing cycles give:
+
+| Batch | A25 decode median (p95) ms | A31 decode median (p95) ms | Median delta | p95 delta |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | `36.9556 (40.5217)` | `34.3101 (37.2716)` | **-7.16%** | **-8.02%** |
+| 2 | `36.8906 (40.9569)` | `34.7965 (38.1399)` | **-5.68%** | **-6.88%** |
+| 4 | `36.9229 (40.9856)` | `34.3107 (36.1984)` | **-7.07%** | **-11.68%** |
+| 8 | `37.7492 (40.8422)` | `34.5523 (36.9797)` | **-8.47%** | **-9.46%** |
+
+The isolated 112-projection packed suite improves `8.51--9.34%` at median
+and `6.43--8.99%` at p95. Prefill changes by less than `0.32%`, as expected
+because GEMM work dominates there. The full-model A31 result is also
+`8.78%/9.24%/12.85%/10.01%` faster than the separately measured A0 medians at
+B1/B2/B4/B8, but that cross-artifact comparison is contextual rather than a
+fresh paired timing run.
+
+A31 is a new Pareto point: it preserves A25 quality and storage while producing
+a reproducible decode win. It does **not** fully clear the phase-2 runtime gate,
+because paired B1/B2 gains versus A25 remain below 10%. The next runtime step
+should be A41-style grouped-kernel fusion for the already-valid A31 topology;
+A32 learned bases are unnecessary unless future fitting makes sibling `SU`
+module-local and breaks exact sharing.
+
+Artifacts:
+
+- `artifacts/qvq_rotation_a25_a31_w2_packed_cuda_sm80_stage1.json`
+- `artifacts/qvq_rotation_a25_a31_w2_packed_cuda_sm80_full16.json`
+
+Validation on the SM80 host is green: `2,157 passed, 136 skipped` across the
+broad QVQ, CUDA, P32, folded-axis, planner, and shared-runtime matrix. The
+skips are unavailable MPS/MLX, multi-GPU, and free-threaded cases. Ruff and
+`git diff --check` also pass.
 
 ## A32: QVQ-trained sibling-shared basis
 
@@ -336,16 +397,18 @@ full packed decode time is materially better.
 
 Use the following promotion sequence rather than a Cartesian sweep:
 
-1. A31 fixed sibling-shared basis.
-2. If quality is close but misses, A32 learned sibling basis.
-3. In parallel, A33 learned global residual basis.
-4. If A33 is too constrained, A34 common-core layer-adapted basis, then A35
+1. A31 fixed sibling-shared basis. **Complete: quality-exact to A25 and Pareto.**
+2. Apply A41 grouped-kernel fusion to A31 to target the remaining B1/B2 gap.
+3. Reserve A32 for a future fitter whose module-local input recovery breaks
+   exact sibling sharing.
+4. In parallel, pursue A33 learned global residual basis.
+5. If A33 is too constrained, A34 common-core layer-adapted basis, then A35
    stage-shared basis.
-5. Only after a <=9-H parent passes propagation, try A36 Q/K and A38 SwiGLU.
-6. Independently characterize A39 as a cheaper replacement for the one
+6. Only after a <=9-H parent passes propagation, try A36 Q/K and A38 SwiGLU.
+7. Independently characterize A39 as a cheaper replacement for the one
    demonstrably important down transform.
-7. Apply A41 fusion to every promoted topology.
-8. Treat A40 as the deeper codec/kernel co-design track.
+8. Apply A41 fusion to every promoted topology.
+9. Treat A40 as the deeper codec/kernel co-design track.
 
 ## Screening and promotion gates
 

@@ -181,7 +181,16 @@ class LlamaQVQTransformImplementor:
         }
         del descriptor_by_role
 
-        residual_folded = plan.arm not in {"A24", "A25", "A26", "A27", "A28", "A29", "A30"}
+        residual_folded = plan.arm not in {
+            "A24",
+            "A25",
+            "A26",
+            "A27",
+            "A28",
+            "A29",
+            "A30",
+            "A31",
+        }
         if residual_folded:
             residual_basis = _random_hadamard_basis(hidden_size, seed=seed)
             self._rewrite_residual_basis(model, root, layers, residual_basis)
