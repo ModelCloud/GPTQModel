@@ -1575,7 +1575,8 @@ at::Tensor p32_window_ampere_impl(
       output_values,                                                         \
       SPLITS)
     const bool use_static_reducer =
-        size_n != 1024 && (size_m == 2 || size_m == 4 || size_m == 16);
+        size_n != 1024 &&
+        (size_m == 2 || size_m == 4 || size_m == 8 || size_m == 16);
     if (use_static_reducer) {
       switch (split_count) {
         case 10:

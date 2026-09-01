@@ -1288,6 +1288,26 @@ partial-output loads. Separately, staging each M8 selector as one aligned
 0.312% median geomean and linear-QKV by 1.49%; the accepted distributed
 selector layout remains faster.
 
+The ninth v17 progression extends the static split reducer to the 24 M8
+non-full-KV cases after the broad screen's aggregate M8 result was obscured by
+the losing full-KV cases. In the clean matched 40-warmup/1000-iteration pair,
+all 24 medians are non-regressing: the median, mean, and p95 geomeans improve
+1.231%, 1.028%, and 0.997%. Attention-out and linear-Z improve 2.691% and
+2.667% by median, MLP-down improves 1.507%, and the remaining shapes are
+non-negative. Full-KV deliberately retains the runtime reducer. The control
+preloads exact accepted `c928aec5` from JIT fingerprint `593b839d5a285eec`.
+Artifacts are
+`artifacts/a100_p32_window/v17_m8_static_reducer_control.json` and
+`artifacts/a100_p32_window/v17_m8_static_reducer_candidate.json`.
+Affected-case log weighting now gives **1.636%** cumulative median improvement
+versus fetched `6b3cea54` main; planar timings remain excluded.
+
+Compile-time split specialization of the main M16 MLP-gate kernel was also
+rejected. At fixed split 10, all four 2000-iteration medians were exactly
+identical to the runtime-split control, so the compiler is already reducing
+the uniform split arithmetic effectively. Diagnostics use the
+`v17_m16_static_split10_` prefix.
+
 ## Reproduction
 
 ```bash
