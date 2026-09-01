@@ -1735,6 +1735,16 @@ with identical kernel math and accuracy. The candidate is
 control is `v19_m1_warpreduce16_candidate.json`. Affected-case log weighting
 now reaches **1.054% cumulative improvement** versus fetched main.
 
+The tenth v19 progression adds a direct measured split-40 dispatch for M4
+linear-Z. In the immediate matched pair, W2 improves from `0.045056` to
+`0.044032 ms`, W3.5 improves from `0.051200` to `0.050176 ms`, and the
+other two rates tie. The affected geomean speedup is **1.0109x** (1.074%
+lower latency), with identical split-40 kernel math. Artifacts are
+`v19_m4_projection_fastplans_control.json` and
+`v19_m4_projection_fastplans_candidate.json` under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**1.086% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1798,6 +1808,11 @@ the attention cases tied and linear-Z W2 lost one event tick. The M1
 linear-Z half of the subsequent direct-dispatch screen was narrowed out for
 the same reason, while the retained M1 attention-out half had one clean win.
 The M2 diagnostic is `v19_m2_projection_fastplans_candidate.json`.
+
+The M4 attention-out half of the direct-plan screen was neutral and was
+omitted. Its W2.5/W3.5 autotune result also varied between split 24 and 48
+without changing median latency, so retaining autotuning avoids hard-coding
+an equivalent summation order.
 
 ## Reproduction
 

@@ -185,6 +185,26 @@ def test_p32_ampere_dispatches_measured_small_m_kv_plans_directly(
     assert calls[0][-1] == 64
 
 
+def test_p32_ampere_dispatches_measured_m4_linear_z_plan_directly(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((4, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=6144,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 40
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
 @pytest.mark.parametrize("size_m", (1, 2, 4, 8, 16))
