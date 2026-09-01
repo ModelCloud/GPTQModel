@@ -548,7 +548,7 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         weight_fragment_1.values[1] = select_high ? high_89_1 : low_89_1;
 
         MmaFragmentA input_fragment;
-        if constexpr (kUpperRowsOnly && StaticN != 1024) {
+        if constexpr (kUpperRowsOnly) {
           const int address_row = lane & 7;
           const int address_column = ((lane >> 3) & 1) * 8;
           load_mma_fragment_a_upper(

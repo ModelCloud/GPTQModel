@@ -1472,6 +1472,18 @@ latency), with maximum absolute error `9.54e-06`. Artifacts are
 Affected-case log weighting now reaches **1.449%** cumulative median
 improvement versus fetched main; planar timings remain excluded.
 
+The eleventh v18 progression revisits the Marlin-style `ldmatrix.x2` M8
+full-KV load after paired decode changed that kernel's instruction balance.
+In the matched split-48 60-warmup/2000-iteration pair, all four rates win:
+the x4 control's 0.033792/0.033792/0.033792/0.032768 ms falls to
+0.032768/0.031744/0.032768/0.031744 ms. The affected geomean speedup is
+**1.0397x** (3.820% lower latency), with maximum absolute error below
+`1.53e-05`. Artifacts are
+`artifacts/a100_p32_window/v18_m8_fullkv_packed_ldmatrix_x4_control.json` and
+`artifacts/a100_p32_window/v18_m8_fullkv_packed_ldmatrix_x2_candidate.json`.
+Affected-case log weighting now reaches **1.562%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
@@ -1522,6 +1534,15 @@ geomean by only +0.061% versus main, below the acceptance threshold. These
 diagnostics use the `v18_m16_fullkv_packed_pgc_`, `v18_m8_packed_vadd2_`,
 `v18_m8_mask_replicate_`, and `v18_m1_batch_autotune_` prefixes; all source
 changes were restored.
+
+Packing distance-64 states with independent bank masks was exact but
+regressed every M4 W3.5 shape by a 4.03% geomean; the same layout was neutral
+to slower on M16. Compile-time K on packed M8 full-Q raised every rate by one
+event tick. A scalar `(K,N,split)=(5120,1024,64)` specialization also lost
+across M1/M2/M4 because its larger scheduled body outweighed eliminating the
+uniform divisions. Diagnostics use the `v18_m4_w35_vertical_packed_`,
+`v18_m16_vertical_packed_`, `v18_m8_fullq_statick_packed_`, and
+`v18_scalar_fullkv_static_ksplit_` prefixes; all source changes were restored.
 
 The direct 140-case post-progression refresh is diagnostic only. Isolated
 0.22-0.29 ms charges appeared in otherwise stable M2, M16, and full-KV
