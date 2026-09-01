@@ -398,6 +398,20 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
           *destination_ids = 0u;
         }
       }
+    } else if constexpr (StaticN > 0 && ActiveRows == 8) {
+      if (thread < kStageKTiles) {
+        const int k_tile = k_tile_base + thread;
+        auto* destination_ids = reinterpret_cast<uint32_t*>(
+            packed_bank_ids[destination][thread]);
+        if (k_tile < k_tiles) {
+          copy_async_ca_4(
+              destination_ids,
+              reinterpret_cast<const uint32_t*>(
+                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + n_tile_base));
+        } else {
+          *destination_ids = 0u;
+        }
+      }
     } else if (thread < kStageKTiles * kTilesPerBlock) {
       const int stage_k_tile = thread / kTilesPerBlock;
       const int tile = thread - stage_k_tile * kTilesPerBlock;

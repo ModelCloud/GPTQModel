@@ -1119,6 +1119,27 @@ scalar M1/M2/M4 kernels regressed their matched 84-case median and mean
 geomeans by 1.902% and 2.355%; every shape bucket was slower. Diagnostics are
 `v16_m8_statick_n5120_candidate.json` and `v16_scalar_statickn_*.json`.
 
+### Post-merge v17 baseline
+
+PR #90 merged as `6b3cea54`. The clean 20-warmup/100-iteration 140-case
+Ampere control is
+`artifacts/a100_p32_window/qwen38_newmain_all_6b3cea54.json`. Median latency
+geomeans are 0.057193 ms (M1), 0.061991 ms (M2), 0.068832 ms (M4),
+0.079767 ms (M8), and 0.083897 ms (M16), with a 0.069599 ms all-case
+geomean. Maximum absolute error is 0.000080109. Planar timings are diagnostic
+only and excluded from every improvement calculation.
+
+The first v17 progression extends asynchronous packed bank-selector staging
+from full-row M16 to every fixed-N M8 route. Each K16 stage replaces four
+synchronous byte loads with one four-byte `cp.async.ca`, overlapping the
+selector with the existing input and trellis pipeline. In the matched
+30-warmup/500-iteration 28-case pair, the median and mean geomeans improve
+2.161% and 2.364%. All shape buckets are non-negative by median; full-KV
+improves 2.224%, linear-QKV 2.717%, MLP-gate/up 3.224%, and MLP-down 4.107%.
+The control and candidate are
+`artifacts/a100_p32_window/v17_m8_bank_cpasync_control.json` and
+`artifacts/a100_p32_window/v17_m8_bank_cpasync_candidate.json`.
+
 ## Reproduction
 
 ```bash
