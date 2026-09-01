@@ -1661,6 +1661,16 @@ from `0.033792/0.033792/0.033792/0.034816 ms` to
 Affected-case log weighting now reaches **0.599% cumulative improvement**
 versus fetched main.
 
+The third v19 progression adds an eight-output warp reducer for M2
+attention-out and linear-Z. This geometry provides 160-192 blocks while
+loading eight adjacent outputs per warp. Against the fetched-main baseline,
+the eight retained cases have three wins and five event-quantized ties with
+no losses: their affected geomean improves **1.0184x** (1.807% lower
+latency), and maximum absolute error stays below `1.91e-05`. The candidate
+is `artifacts/a100_p32_window/v19_m2_warpreduce8_candidate.json`; the control
+is the M2 subset of `qwen38_newmain_all_03144a22.json`. Affected-case log
+weighting now reaches **0.704% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1677,6 +1687,10 @@ tick; the retained 16-output layout wins every rate. Diagnostics are
 `v19_m16_fullkv_warpreduce8_fixed_candidate.json`, and
 `v19_m16_fullkv_warpreduce16_candidate.json` under
 `artifacts/a100_p32_window/`.
+
+M2 MLP-down remained exactly median-neutral under the later eight-output
+layout, so it was omitted from the retained dispatch to avoid changing
+summation order without a performance benefit.
 
 ## Reproduction
 
