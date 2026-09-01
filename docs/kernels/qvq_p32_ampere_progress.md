@@ -1800,6 +1800,22 @@ decoder. Artifacts are `v19_m16_w3_linearq_packed_control.json` and
 `artifacts/a100_p32_window/`. Affected-case log weighting now reaches
 **1.196% cumulative improvement** versus fetched main.
 
+The sixteenth v19 progression simplifies circular-window wrap selection for
+eight attention-out specializations. A wrap can only occur in the first
+`floor(32 / transition_bits)` pair positions, so these kernels compare the
+pair directly instead of reconstructing and comparing the next word index.
+The retained set is all four M1 rates, M2 W2, M4 W3, and M8 W3/W3.5. Against
+the matched 40-warmup/1000-iteration control, every retained case wins; the
+affected geomean speedup is **1.0423x** (4.060% lower latency). Separate
+100-warmup/4000-iteration confirmations measure
+`0.036864/0.040960/0.040960/0.040960 ms` for M1, `0.039936 ms` for M2 W2,
+`0.050176 ms` for M4 W3, and `0.055296 ms` for both M8 rates. Maximum
+absolute error stays below `2.29e-05`, and the complete 38-case Ampere suite
+passes. Artifacts are `v19_wrap_pair_predicate_attention_{control,candidate}.json`
+and the `v19_selective_wrap_attention_*_deep.json` confirmations under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**1.436% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1910,6 +1926,14 @@ tick, regressed W3 one tick, and tied W2.5/W3.5, so full-Q was restored to
 the existing decoder. Only the all-rate-positive MLP-down specialization is
 retained; the combined diagnostic is
 `v19_m16_packed_fullq_mlpdown_candidate.json`.
+
+Applying the direct pair-wrap predicate to every specialization was also
+rejected. The matched attention screen exposed losses on M2 W3/W3.5, M4
+W2.5, and M16 W2.5-W3.5, while a broader M1 screen was mixed outside
+attention-out. The final template flag is therefore enabled only for the
+eight deeply confirmed attention cases. The broad diagnostics are
+`v19_wrap_pair_predicate_attention_{control,candidate}.json` and
+`v19_selective_wrap_predicate_m1_candidate.json`.
 
 ## Reproduction
 

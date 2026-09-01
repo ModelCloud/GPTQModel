@@ -82,7 +82,7 @@ __device__ __forceinline__ uint32_t alternate_bank_mask(int bank_alt_id) {
 // funnel-shift amount and their first words are exactly 2 * TransitionBits
 // words apart. This is the storage-neutral paired extraction used by the
 // Hopper kernel, expressed here with ordinary Ampere integer instructions.
-template <int TransitionBits>
+template <int TransitionBits, bool UsePairWrapPredicate = false>
 __device__ __forceinline__ void window_state_pair64(
     const uint32_t* __restrict__ words,
     int pair,
@@ -93,7 +93,10 @@ __device__ __forceinline__ void window_state_pair64(
   const int bit_position = (kPairsPerTile - 1 - pair) * TransitionBits;
   const int first_word = bit_position >> 5;
   const int shift = bit_position & 31;
-  const int first_next = first_word + 1 == kWordsPerTile ? 0 : first_word + 1;
+  constexpr int kWrappingPairs = 32 / TransitionBits;
+  const int first_next = UsePairWrapPredicate
+      ? (pair < kWrappingPairs ? 0 : first_word + 1)
+      : (first_word + 1 == kWordsPerTile ? 0 : first_word + 1);
   const int second_word = first_word - kPairWordDistance;
   // The state windows are at most 27 bits wide on W3.5.  A 32-bit funnel
   // shift expresses the same circular extraction without promoting each
@@ -330,7 +333,8 @@ template <
     int StaticN = 0,
     bool HoistBankMasks = false,
     bool UpperRowsOnly = false,
-    int StaticK = 0>
+    int StaticK = 0,
+    bool UsePairWrapPredicate = false>
 __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -495,8 +499,10 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         uint32_t state_row_8;
         uint32_t state_row_1;
         uint32_t state_row_9;
-        window_state_pair64<TransitionBits>(words, first_pair, state_row_0, state_row_8);
-        window_state_pair64<TransitionBits>(words, second_pair, state_row_1, state_row_9);
+        window_state_pair64<TransitionBits, UsePairWrapPredicate>(
+            words, first_pair, state_row_0, state_row_8);
+        window_state_pair64<TransitionBits, UsePairWrapPredicate>(
+            words, second_pair, state_row_1, state_row_9);
         uint32_t decoded_row_0;
         uint32_t decoded_row_8;
         uint32_t decoded_row_1;
@@ -686,6 +692,11 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
   const int k_tile_begin = (k_tiles * split) / split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(bank_alt_id);
+  constexpr bool kUsePairWrapPredicate =
+      StaticN == 5120 && StageKTiles != kScalarLongStageKTiles &&
+      (Rows == 1 ||
+       (Rows == 2 && TransitionBits == 4) ||
+       (Rows == 4 && TransitionBits == 6));
 
   auto stage = [&](int k_tile_base, int destination) {
     auto* input_vectors = reinterpret_cast<uint4*>(input_tile[destination]);
@@ -865,7 +876,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
               for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
                 const int row = bank_group * 2 + row_in_group;
                 const int pair = row * 8 + pair_column;
-                window_state_pair64<TransitionBits>(
+                window_state_pair64<TransitionBits, kUsePairWrapPredicate>(
                     words, pair, state_0[row_in_group], state_8[row_in_group]);
               }
               uint32_t decoded_0[2];
@@ -922,7 +933,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
               for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
                 const int row = bank_group * 2 + row_in_group;
                 const int pair = row * 8 + pair_column;
-                window_state_pair64<TransitionBits>(
+                window_state_pair64<TransitionBits, kUsePairWrapPredicate>(
                     words, pair, state_0[row_in_group], state_8[row_in_group]);
               }
               uint32_t decoded_0[2];
@@ -965,7 +976,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
               const int pair = row * 8 + pair_column;
               uint32_t state_0;
               uint32_t state_8;
-              window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
+              window_state_pair64<TransitionBits, kUsePairWrapPredicate>(
+                  words, pair, state_0, state_8);
               const uint32_t decoded_0 = decode_pair_bits<TransitionBits>(
                   pair, state_0, packed_bank_id, alt_mask, levels);
               const uint32_t decoded_8 = decode_pair_bits<TransitionBits>(
@@ -1023,7 +1035,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
               const int pair = row * 8 + pair_column;
               uint32_t state_0;
               uint32_t state_8;
-              window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
+              window_state_pair64<TransitionBits, kUsePairWrapPredicate>(
+                  words, pair, state_0, state_8);
               const uint32_t decoded_0 =
                   decode_state_bits(state_0, bank_mask_0, levels);
               const uint32_t decoded_8 =
@@ -1061,7 +1074,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
             const int pair = row * 8 + pair_column;
             uint32_t state_0;
             uint32_t state_8;
-            window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
+            window_state_pair64<TransitionBits, kUsePairWrapPredicate>(
+                words, pair, state_0, state_8);
             const uint32_t decoded_0 = decode_pair_bits<TransitionBits>(
                 pair, state_0, packed_bank_id, alt_mask, levels);
             const uint32_t decoded_8 = decode_pair_bits<TransitionBits>(
@@ -1468,6 +1482,23 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 12288) {
     p32_window_ampere_kernel<TransitionBits, false, 8, 12288, true, true><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (
+      size_m == 8 && size_k == 6144 && size_n == 5120 &&
+      (TransitionBits == 6 || TransitionBits == 7)) {
+    p32_window_ampere_kernel<
+        TransitionBits, false, 8, 5120, true, true, 0, true>
+        <<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
