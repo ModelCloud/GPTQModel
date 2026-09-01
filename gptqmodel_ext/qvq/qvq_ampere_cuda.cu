@@ -588,16 +588,16 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     const int output_column =
         (n_tile_base + warp) * kTileColumns + (lane & 3) * 2;
     if constexpr (FullRows) {
-      store_output_pair<StaticN != 1024>(
+      store_output_pair<true>(
           target + static_cast<int64_t>(output_row_0) * size_n + output_column,
           accumulator_0.values[0], accumulator_0.values[1]);
-      store_output_pair<StaticN != 1024>(
+      store_output_pair<true>(
           target + static_cast<int64_t>(output_row_1) * size_n + output_column,
           accumulator_0.values[2], accumulator_0.values[3]);
-      store_output_pair<StaticN != 1024>(
+      store_output_pair<true>(
           target + static_cast<int64_t>(output_row_0) * size_n + output_column + 8,
           accumulator_1.values[0], accumulator_1.values[1]);
-      store_output_pair<StaticN != 1024>(
+      store_output_pair<true>(
           target + static_cast<int64_t>(output_row_1) * size_n + output_column + 8,
           accumulator_1.values[2], accumulator_1.values[3]);
     } else if constexpr (ActiveRows > 0) {

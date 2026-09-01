@@ -1671,6 +1671,17 @@ is `artifacts/a100_p32_window/v19_m2_warpreduce8_candidate.json`; the control
 is the M2 subset of `qwen38_newmain_all_03144a22.json`. Affected-case log
 weighting now reaches **0.704% cumulative improvement** versus fetched main.
 
+The fourth v19 progression changes M16 full-KV partial-output stores from
+two scalar FP32 writes to one aligned `float2` write per pair. With the
+16-output warp reducer already shortening the epilogue, W2/W2.5 tie and
+W3/W3.5 each improve one event tick, taking the four-rate geomean from
+`0.032251 ms` to `0.031744 ms`: a **1.0160x** speedup (1.575% lower latency).
+Maximum absolute error remains below `1.53e-05`. Artifacts are
+`v19_m16_fullkv_warpreduce16_candidate.json` and
+`v19_m16_fullkv_float2_warpreduce16_candidate.json` under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**0.750% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1691,6 +1702,13 @@ tick; the retained 16-output layout wins every rate. Diagnostics are
 M2 MLP-down remained exactly median-neutral under the later eight-output
 layout, so it was omitted from the retained dispatch to avoid changing
 summation order without a performance benefit.
+
+Two wider reducer expansions were rejected. The M4 16-output layout was
+neutral-to-slower on attention-out and linear-Z. Extending M2's retained
+eight-output layout to full-Q, linear-QKV, and MLP-gate/up produced several
+one-tick regressions and no wins. Their source changes were restored;
+diagnostics are `v19_m4_warpreduce16_candidate.json` and
+`v19_m2_warpreduce8_wide_screen.json`.
 
 ## Reproduction
 
