@@ -1082,6 +1082,24 @@ geomeans improve 1.201% and 1.176%; both shapes improve by both metrics.
 Exactness passes 28/28. The artifact is
 `artifacts/a100_p32_window/v16_m16_statick_n5120_candidate.json`.
 
+The tenth v16 progression moves each fixed-N/full-row M16 stage's packed
+four-byte bank-selector load into the existing Ampere `cp.async.ca` pipeline.
+The selector now overlaps the input and trellis transfers instead of issuing
+as a synchronous `__ldg` before the pipeline commit. Full-KV (`N=1024`) keeps
+its separate byte-load route. In the matched 30-warmup/500-iteration pair,
+all six affected shape buckets improve by both metrics. The 24-case median
+and mean geomeans improve 2.333% and 2.498%, with median gains of 0.823% for
+attention-out, 1.227% for linear-Z, 2.183% for linear-QKV, 3.035% for full-Q,
+3.285% for MLP-down, and 3.475% for MLP-gate/up. The control and candidate are
+`artifacts/a100_p32_window/v16_m16_bank_cpasync_control.json` and
+`artifacts/a100_p32_window/v16_m16_bank_cpasync_candidate.json`.
+
+Using sequential affected-case log weighting, the first nine progressions
+were 1.8859% faster than fetched `829a8777` main. The tenth progression raises
+that estimate to
+`exp(ln(1.0188591) + 24/140 * ln(1.02333)) = 1.022895x`, or **2.290%**
+cumulative median improvement versus main. Planar timings remain excluded.
+
 Further v16 experiments rejected after the x2 checkpoint are retained as
 untracked diagnostics. Omitting lower shared rows regressed 0.740%, async
 zero-fill regressed 0.230%, and MLP-gate bank-mask hoisting regressed 1.964%
@@ -1093,6 +1111,13 @@ reverted as below the acceptance threshold. Their artifacts use the
 `v16_m8_x2_`, `v16_m4_w2_stage3_`, `v16_m816_mlpdown_stage4_`,
 `v16_m16_float4_`, `v16_reduce2_`, `v16_m4_named_accumulator_`, and
 `v16_m16_bank_global_` prefixes.
+
+Two final fixed-K experiments were also rejected. Specializing the two M8
+`N=5120` routes produced only +0.090% median across their eight cases
+(attention-out was neutral), too small to accept. Extending fixed K to the
+scalar M1/M2/M4 kernels regressed their matched 84-case median and mean
+geomeans by 1.902% and 2.355%; every shape bucket was slower. Diagnostics are
+`v16_m8_statick_n5120_candidate.json` and `v16_scalar_statickn_*.json`.
 
 ## Reproduction
 

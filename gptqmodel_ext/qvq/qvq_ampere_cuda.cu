@@ -275,6 +275,15 @@ __device__ __forceinline__ void copy_async_cg_16(void* destination, const void* 
       : "r"(shared_address), "l"(source));
 }
 
+__device__ __forceinline__ void copy_async_ca_4(void* destination, const void* source) {
+  const uint32_t shared_address =
+      static_cast<uint32_t>(__cvta_generic_to_shared(destination));
+  asm volatile(
+      "cp.async.ca.shared.global [%0], [%1], 4;\n"
+      :
+      : "r"(shared_address), "l"(source));
+}
+
 template <
     int TransitionBits,
     bool FullRows,
@@ -380,10 +389,14 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         const int k_tile = k_tile_base + thread;
         auto* destination_ids = reinterpret_cast<uint32_t*>(
             packed_bank_ids[destination][thread]);
-        *destination_ids = k_tile < k_tiles
-            ? __ldg(reinterpret_cast<const uint32_t*>(
-                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + n_tile_base))
-            : 0u;
+        if (k_tile < k_tiles) {
+          copy_async_ca_4(
+              destination_ids,
+              reinterpret_cast<const uint32_t*>(
+                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + n_tile_base));
+        } else {
+          *destination_ids = 0u;
+        }
       }
     } else if (thread < kStageKTiles * kTilesPerBlock) {
       const int stage_k_tile = thread / kTilesPerBlock;
