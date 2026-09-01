@@ -82,11 +82,12 @@ Hopper-only hardware:
 13. Cache the immutable live SM count per CUDA device in the Python dispatch;
     this removes repeated driver-property queries from the timed auto-split
     path, which is material for sub-50-microsecond small-N projections.
-14. For the full-row M16 full-Q, `N=5120`, `N=10240`, `N=6144`, and `N=1024`
-    projections, use a compile-time N-tile count in the WMMA path. The fixed
-    Qwen3.8 shapes let trellis staging remove the per-vector N-bound predicate
-    while preserving the K-bound check and the exact generic fallback for all
-    other shapes. The `N=5120` case is shared by attention-out and MLP-down.
+14. For the full-row M16 full-Q, `N=5120`, `N=10240`, `N=6144`, `N=1024`,
+    and `N=17408` projections, use a compile-time N-tile count in the WMMA
+    path. The fixed Qwen3.8 shapes let trellis staging remove the per-vector
+    N-bound predicate while preserving the K-bound check and the exact generic
+    fallback for all other shapes. The `N=5120` case is shared by attention-out
+    and MLP-down, while `N=17408` covers MLP-gate/up.
 15. For M8 full-Q (`N=12288`), combine the compile-time eight-live-row path
     with a compile-time N-tile count. This removes both row and N predicates
     from the measured wide projection while retaining the generic M8 fallback.
@@ -96,8 +97,9 @@ Hopper-only hardware:
 17. For M8 linear-QKV (`N=10240`) and linear-Z (`N=6144`), use compile-time
     N-tile counts with the eight-live-row path after matched screens confirmed
     repeatable gains.
-18. For M8 full-KV (`N=1024`), use the compile-time N-tile count as well. This
-    completes fixed-N dispatch coverage for every formal M8 projection shape.
+18. For M8 full-KV (`N=1024`) and MLP-gate/up (`N=17408`), use compile-time
+    N-tile counts as well. This completes fixed-N dispatch coverage for every
+    formal M8 projection shape.
 19. For scalar M1 and M4, use the fixed-N launcher on the proven shape subset
     while retaining each row count's K-stage policy. M1 specializes the
     N=12288, 1024, 10240, and 17408 short-K projections; M4 specializes all
@@ -107,17 +109,31 @@ Hopper-only hardware:
     attention-out, where 24-way remains faster. M1/M2 retain the 32-way
     short-K wave; this shape-specific policy fills more SMs on the four-row
     scalar route without changing the other row counts.
+21. On fixed-N M8 shapes other than full-KV, load only the two live upper-row
+    A submatrices with `ldmatrix.x2`. The lower A registers are explicitly
+    zeroed to preserve the `m16n8k16` contract, while the matching lower FP32
+    outputs remain transient. Full-KV retains `ldmatrix.x4`, which is faster
+    once its small launch/reduction overhead dominates.
+22. On every formal M16 route, specialize both N and K. Full-Q, full-KV,
+    linear-QKV, linear-Z, and MLP-gate/up use `K=5120`; attention-out uses
+    `K=6144`; MLP-down uses `K=17408`. The fixed K makes the activation row
+    stride and K-tile geometry compile-time values; unknown K values retain
+    the runtime fallback.
+23. On M8, retain fixed `K=5120` only for full-KV and linear-QKV, where the
+    matched repeat remains positive. Other M8 shapes keep runtime K after a
+    mixed broad screen.
 
 Future Ampere experiments should compare the generated instruction schedule,
 register pressure, shared-memory bank behavior, and CTA swizzle against Marlin
 as well as carrying forward architecture-independent lessons from the Hopper
 kernel.
 
-There are fifty-two WMMA device specializations: four transition widths
+There are sixty WMMA device specializations: four transition widths
 times full-M16, generic partial-row, compile-time M8 partial-row, and
-compile-time M16 `N=12288`, `N=5120`, `N=10240`, `N=6144`, and `N=1024`
+compile-time M16 `N=12288`, `N=5120`, `N=10240`, `N=6144`, `N=1024`, and
+`N=17408`
 paths, plus the compile-time M8 `N=12288`, `N=5120`, `N=10240`, and `N=6144`
-paths, plus the compile-time M8 `N=1024` path. The
+paths, plus the compile-time M8 `N=1024` and `N=17408` paths. The
 scalar M1-M4 rows add four exact transition-width specializations, while one
 runtime split reducer is shared by all rates.
 Unknown shapes use a live-SM-derived fallback; the seven measured Qwen3.8-27B
@@ -944,6 +960,164 @@ prefix in `artifacts/a100_p32_window/`, including `v15_input_cg_*`,
 `v15_wmma_minblocks*`, `v15_wave_m16_*`,
 `v15_m1_fullq_static_split40.json`, and
 `v15_m1_bankid_u32x4_matched_*`.
+
+### Post-merge v16 baseline
+
+PR #89 merged as `829a8777`. The clean 20-warmup/100-iteration 140-case
+Ampere control is
+`artifacts/a100_p32_window/qwen38_newmain_all_829a8777.json`. Median latency
+geomeans are 0.057675 ms (M1), 0.062415 ms (M2), 0.070734 ms (M4),
+0.084479 ms (M8), and 0.087012 ms (M16), with a 0.071523 ms all-case
+geomean. Maximum absolute error is 0.000080109. Planar timings are diagnostic
+only and excluded from every improvement calculation.
+
+The first v16 progression reduces the scalar M4 stage from three K16 tiles to
+two for transition widths 5 and 7 (W2.5 and W3.5). W2 retains four stages and
+W3 retains three: the broad two-stage screen improved overall but made W3
+slightly slower. The narrowed 21-case M4 W2.5-W3.5 cached-binary repeat lowers
+the Ampere median geomean by 1.782% and the mean by 2.131%; exactness passes
+28/28. The control and repeat are stored in
+`artifacts/a100_p32_window/v16_m4_stage2_control.json` and
+`artifacts/a100_p32_window/v16_m4_stage2_selective_repeat.json`.
+
+Two v16 experiments are rejected so far. Directly reading the already-cached
+Python operator instead of calling the small resolver was mixed and regressed
+the 20-case full-KV median geomean by 1.995%; M4/M8/M16 all slowed. The broad
+M4 two-stage form improved 1.346% overall but regressed W3 by 0.274%, so it
+was narrowed rather than accepted broadly. Diagnostics are retained as
+`v16_cached_op_direct_*.json` and `v16_m4_stage2_candidate.json`.
+
+The second v16 progression removes dead persistent accumulator state from the
+fixed-N M8 WMMA routes. The lower eight activation rows are zero and never
+stored, so their two FP32 accumulator values per fragment are routed to
+temporary MMA outputs instead of being carried through the K loop. Generated
+register use falls from 72 to 56 per thread. Generic MLP-gate retains the old
+path after a broad screen found it negative. The cached 20-warmup/500-iteration
+repeat improves the complete 28-case M8 median geomean by 0.835% and the mean
+by 0.734%; MLP-gate is neutral, full-KV improves 1.459%, and MLP-down improves
+1.713%. Exactness passes 28/28. Artifacts are
+`artifacts/a100_p32_window/v16_m8_live_accumulator_control.json` and
+`artifacts/a100_p32_window/v16_m8_live_accumulator_selective_repeat.json`.
+
+Further scalar depth reductions were rejected. M2 two-stage staging regressed
+its 28-case median and mean geomeans by 1.053% and 1.119%, with W3 about 4%
+slower. One-stage M1 was visibly slower across the short-K shapes. Their
+diagnostics are `v16_m2_stage2_*.json` and `v16_m1_stage1_*.json`.
+
+The third v16 progression completes the M8 fixed-N/live-row coverage for
+MLP-gate/up (`N=17408`). The prior generic route could not combine its static
+N geometry with the newly reduced 56-register accumulator state. In a matched
+40-warmup/1000-iteration reversal, every rate improves: 1.399%, 2.721%,
+4.110%, and 4.762% for W2 through W3.5. The median geomean gain is 3.240%
+and the mean geomean gain is 3.360%. Artifacts are
+`artifacts/a100_p32_window/v16_m8_mlpgate_static_live_control.json` and
+`artifacts/a100_p32_window/v16_m8_mlpgate_static_live_candidate.json`.
+
+Two additional M8 variants were rejected after the live-accumulator change.
+A 256-thread/N128 CTA regressed representative cases by roughly 6-12%, and
+eliding inactive lower-row activation staging was broadly slower. Retain the
+128-thread/N64 CTA and zero-filled inactive rows. Diagnostics are
+`v16_m8_wide_cta_candidate.json` and
+`v16_m8_live_rows_stage_candidate.json`.
+
+The fourth v16 progression adds the missing full-row M16 fixed-N route for
+MLP-gate/up (`N=17408`). In the matched 40-warmup/1000-iteration pair, all
+four rates improve by 5.263-5.960%; the median geomean gain is 5.473% and the
+mean geomean gain is 5.348%. Exactness passes 28/28. Artifacts are
+`artifacts/a100_p32_window/v16_m16_mlpgate_static_control.json` and
+`artifacts/a100_p32_window/v16_m16_mlpgate_static_candidate.json`.
+
+Packing each fixed-N M8 stage's four bank IDs into one cached 32-bit load was
+also rejected. It regressed the 24-case median and mean geomeans by 0.506%
+and 0.490%, with five of six shape buckets slower; retain distributed byte
+loads on partial-row kernels. Diagnostics are `v16_m8_bankid_u32_*.json`.
+
+The fifth v16 progression applies the Marlin-style fragment lesson directly
+to M8: because only rows 0-7 are live, `ldmatrix.x2` loads the two required
+8x8 A submatrices into operand registers 0 and 2, while registers 1 and 3 are
+zeroed. This removes half of the shared-matrix load work without changing the
+`m16n8k16` arithmetic or output. Across the matched 30-warmup/500-iteration
+24-case non-KV screen, every shape improves; the median and mean geomean gains
+are 4.775% and 4.836%, with per-shape median gains from 3.060% to 6.594%.
+Exactness passes 28/28. The control and candidate are
+`artifacts/a100_p32_window/v16_m8_bankid_u32_control.json` and
+`artifacts/a100_p32_window/v16_m8_ldmatrix_x2_candidate.json`.
+
+Applying `ldmatrix.x2` to M8 full-KV was rejected and narrowed out. Its four
+rates were neutral-to-slower, with roughly a 2.0% median geomean regression
+against the matched live-accumulator control; retain `ldmatrix.x4` for
+compile-time `N=1024`. The diagnostic is
+`v16_m8_ldmatrix_x2_fullkv_candidate.json`.
+
+The sixth v16 progression adds compile-time `K=5120` to the accepted M16
+MLP-gate/up fixed-N kernel. Against that immediate 40-warmup/1000-iteration
+control, all four rates improve; the median and mean geomean gains are 0.835%
+and 0.726%. Exactness passes 28/28. The candidate is
+`artifacts/a100_p32_window/v16_m16_mlpgate_statick_candidate.json`; its control
+is `v16_m16_mlpgate_static_candidate.json` from the fourth progression.
+
+The seventh v16 progression expands compile-time `K=5120` to the other four
+unambiguous M16 N routes: full-Q, full-KV, linear-QKV, and linear-Z. In the
+matched 30-warmup/500-iteration five-shape screen (including the already
+specialized MLP-gate control), the median and mean geomeans improve 1.575%
+and 1.254%. Every newly changed shape improves by median; full-KV gains
+5.206%, full-Q 1.136%, linear-QKV 0.806%, and linear-Z 0.810%. Exactness
+passes 28/28. The artifact is
+`artifacts/a100_p32_window/v16_m16_statick_short_candidate.json`.
+
+The eighth v16 progression selectively adds compile-time `K=5120` to M8
+full-KV and linear-QKV. The narrowed 40-warmup/1000-iteration repeat improves
+the eight-case median geomean by 1.390% and mean by 0.418%; full-KV improves
+2.199% by median and linear-QKV improves 0.587%. Exactness passes 28/28.
+The accepted repeat is
+`artifacts/a100_p32_window/v16_m8_statick_selective_repeat.json`. The broader
+`v16_m8_statick_short_candidate.json` is diagnostic only: MLP-gate regressed
+about 1%, while full-Q and linear-Z did not improve consistently by mean, so
+those routes were restored.
+
+The ninth v16 progression completes formal M16 fixed-K coverage for the two
+`N=5120` shapes: attention-out uses compile-time `K=6144`, and MLP-down uses
+`K=17408`. The matched 40-warmup/1000-iteration eight-case median and mean
+geomeans improve 1.201% and 1.176%; both shapes improve by both metrics.
+Exactness passes 28/28. The artifact is
+`artifacts/a100_p32_window/v16_m16_statick_n5120_candidate.json`.
+
+The tenth v16 progression moves each fixed-N/full-row M16 stage's packed
+four-byte bank-selector load into the existing Ampere `cp.async.ca` pipeline.
+The selector now overlaps the input and trellis transfers instead of issuing
+as a synchronous `__ldg` before the pipeline commit. Full-KV (`N=1024`) keeps
+its separate byte-load route. In the matched 30-warmup/500-iteration pair,
+all six affected shape buckets improve by both metrics. The 24-case median
+and mean geomeans improve 2.333% and 2.498%, with median gains of 0.823% for
+attention-out, 1.227% for linear-Z, 2.183% for linear-QKV, 3.035% for full-Q,
+3.285% for MLP-down, and 3.475% for MLP-gate/up. The control and candidate are
+`artifacts/a100_p32_window/v16_m16_bank_cpasync_control.json` and
+`artifacts/a100_p32_window/v16_m16_bank_cpasync_candidate.json`.
+
+Using sequential affected-case log weighting, the first nine progressions
+were 1.8859% faster than fetched `829a8777` main. The tenth progression raises
+that estimate to
+`exp(ln(1.0188591) + 24/140 * ln(1.02333)) = 1.022895x`, or **2.290%**
+cumulative median improvement versus main. Planar timings remain excluded.
+
+Further v16 experiments rejected after the x2 checkpoint are retained as
+untracked diagnostics. Omitting lower shared rows regressed 0.740%, async
+zero-fill regressed 0.230%, and MLP-gate bank-mask hoisting regressed 1.964%
+on the relevant M8 screens. M4 W2 three-stage depth, long-K four-stage WMMA,
+M16 `float4` output stores, a two-chain split reducer, and named M4 scalar
+accumulators all regressed or were neutral. Moving packed M16 bank IDs from
+`__ldg` to ordinary global loads was only +0.138% median/+0.026% mean and was
+reverted as below the acceptance threshold. Their artifacts use the
+`v16_m8_x2_`, `v16_m4_w2_stage3_`, `v16_m816_mlpdown_stage4_`,
+`v16_m16_float4_`, `v16_reduce2_`, `v16_m4_named_accumulator_`, and
+`v16_m16_bank_global_` prefixes.
+
+Two final fixed-K experiments were also rejected. Specializing the two M8
+`N=5120` routes produced only +0.090% median across their eight cases
+(attention-out was neutral), too small to accept. Extending fixed K to the
+scalar M1/M2/M4 kernels regressed their matched 84-case median and mean
+geomeans by 1.902% and 2.355%; every shape bucket was slower. Diagnostics are
+`v16_m8_statick_n5120_candidate.json` and `v16_scalar_statickn_*.json`.
 
 ## Reproduction
 
