@@ -242,6 +242,36 @@ __device__ __forceinline__ uint32_t decode_state_bits(
   return decoded.bits;
 }
 
+__device__ __forceinline__ void decode_state_pair_bits(
+    uint32_t first_state,
+    uint32_t second_state,
+    uint32_t bank_mask,
+    const half* __restrict__ levels,
+    uint32_t& first_decoded,
+    uint32_t& second_decoded) {
+  uint32_t states = (first_state ^ bank_mask) |
+      ((second_state ^ bank_mask) << 16);
+  uint32_t mixed = states ^ ((states >> 8) & 0x00ff00ffu);
+  const uint32_t mixed_low =
+      (mixed & 0xffffu) * kPgc16Multiplier + kPgc16Increment;
+  const uint32_t mixed_high =
+      (mixed >> 16) * kPgc16Multiplier + kPgc16Increment;
+  mixed = (mixed_low & 0xffffu) | (mixed_high << 16);
+  mixed ^= (mixed >> 7) & 0x01ff01ffu;
+  union {
+    uint32_t bits;
+    half2 values;
+  } first, second;
+  first.values = __halves2half2(
+      __ldg(levels + ((mixed >> 8) & 0xffu)),
+      __ldg(levels + (mixed & 0xffu)));
+  second.values = __halves2half2(
+      __ldg(levels + (mixed >> 24)),
+      __ldg(levels + ((mixed >> 16) & 0xffu)));
+  first_decoded = first.bits;
+  second_decoded = second.bits;
+}
+
 __device__ __forceinline__ uint32_t pack_low_halves(uint32_t first, uint32_t second) {
   return (first & 0xffffu) | (second << 16);
 }
@@ -476,10 +506,12 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
               selected_bank_mask(packed_bank_id, producer_row_pair, alt_mask);
           const uint32_t bank_mask_8 =
               selected_bank_mask(packed_bank_id, producer_row_pair + 4, alt_mask);
-          decoded_row_0 = decode_state_bits(state_row_0, bank_mask_0, levels);
-          decoded_row_8 = decode_state_bits(state_row_8, bank_mask_8, levels);
-          decoded_row_1 = decode_state_bits(state_row_1, bank_mask_0, levels);
-          decoded_row_9 = decode_state_bits(state_row_9, bank_mask_8, levels);
+          decode_state_pair_bits(
+              state_row_0, state_row_1, bank_mask_0, levels,
+              decoded_row_0, decoded_row_1);
+          decode_state_pair_bits(
+              state_row_8, state_row_9, bank_mask_8, levels,
+              decoded_row_8, decoded_row_9);
         } else {
           decoded_row_0 = decode_pair_bits<TransitionBits>(
               first_pair, state_row_0, packed_bank_id, alt_mask, levels);
@@ -516,7 +548,7 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         weight_fragment_1.values[1] = select_high ? high_89_1 : low_89_1;
 
         MmaFragmentA input_fragment;
-        if constexpr (kUpperRowsOnly && StaticN != 1024) {
+        if constexpr (kUpperRowsOnly) {
           const int address_row = lane & 7;
           const int address_column = ((lane >> 3) & 1) * 8;
           load_mma_fragment_a_upper(
@@ -817,29 +849,40 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
           const uint8_t packed_bank_id =
               packed_bank_ids[parity][stage_k_tile][shared_tile];
           if constexpr (
-              Rows == 2 && StaticN != 1024 &&
-              (TransitionBits == 5 || TransitionBits == 7)) {
+              Rows == 2 &&
+              !(TransitionBits == 4 &&
+                (StaticN == 6144 ||
+                 (StaticN == 5120 && StageKTiles != kScalarLongStageKTiles)))) {
 #pragma unroll
             for (int bank_group = 0; bank_group < 4; ++bank_group) {
               const uint32_t bank_mask_0 =
                   selected_bank_mask(packed_bank_id, bank_group, alt_mask);
               const uint32_t bank_mask_8 =
                   selected_bank_mask(packed_bank_id, bank_group + 4, alt_mask);
+              uint32_t state_0[2];
+              uint32_t state_8[2];
 #pragma unroll
               for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
                 const int row = bank_group * 2 + row_in_group;
                 const int pair = row * 8 + pair_column;
-                uint32_t state_0;
-                uint32_t state_8;
-                window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
-                const uint32_t decoded_0 =
-                    decode_state_bits(state_0, bank_mask_0, levels);
-                const uint32_t decoded_8 =
-                    decode_state_bits(state_8, bank_mask_8, levels);
+                window_state_pair64<TransitionBits>(
+                    words, pair, state_0[row_in_group], state_8[row_in_group]);
+              }
+              uint32_t decoded_0[2];
+              uint32_t decoded_8[2];
+              decode_state_pair_bits(
+                  state_0[0], state_0[1], bank_mask_0, levels,
+                  decoded_0[0], decoded_0[1]);
+              decode_state_pair_bits(
+                  state_8[0], state_8[1], bank_mask_8, levels,
+                  decoded_8[0], decoded_8[1]);
+#pragma unroll
+              for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
+                const int row = bank_group * 2 + row_in_group;
                 union {
                   uint32_t bits;
                   half2 values;
-                } pair_0{decoded_0}, pair_8{decoded_8};
+                } pair_0{decoded_0[row_in_group]}, pair_8{decoded_8[row_in_group]};
                 const float weight_0 = __half2float(pair_0.values.x);
                 const float weight_1 = __half2float(pair_0.values.y);
                 const float weight_8 = __half2float(pair_8.values.x);
@@ -860,6 +903,59 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
                       fmaf(input_8, weight_8, accumulator_0[output_row]);
                   accumulator_1[output_row] =
                       fmaf(input_8, weight_9, accumulator_1[output_row]);
+                }
+              }
+            }
+          } else if constexpr (
+              StaticN != 1024 &&
+              ((Rows == 4 && TransitionBits != 7) ||
+               Rows == 1)) {
+#pragma unroll
+            for (int bank_group = 0; bank_group < 4; ++bank_group) {
+              const uint32_t bank_mask_0 =
+                  selected_bank_mask(packed_bank_id, bank_group, alt_mask);
+              const uint32_t bank_mask_8 =
+                  selected_bank_mask(packed_bank_id, bank_group + 4, alt_mask);
+              uint32_t state_0[2];
+              uint32_t state_8[2];
+#pragma unroll
+              for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
+                const int row = bank_group * 2 + row_in_group;
+                const int pair = row * 8 + pair_column;
+                window_state_pair64<TransitionBits>(
+                    words, pair, state_0[row_in_group], state_8[row_in_group]);
+              }
+              uint32_t decoded_0[2];
+              uint32_t decoded_8[2];
+              decode_state_pair_bits(
+                  state_0[0], state_0[1], bank_mask_0, levels,
+                  decoded_0[0], decoded_0[1]);
+              decode_state_pair_bits(
+                  state_8[0], state_8[1], bank_mask_8, levels,
+                  decoded_8[0], decoded_8[1]);
+#pragma unroll
+              for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
+                const int row = bank_group * 2 + row_in_group;
+                union {
+                  uint32_t bits;
+                  half2 values;
+                } pair_0{decoded_0[row_in_group]}, pair_8{decoded_8[row_in_group]};
+#pragma unroll
+                for (int output_row = 0; output_row < Rows; ++output_row) {
+                  const int row_base = output_row * (StageKTiles * kTileRows) +
+                      stage_k_tile * kTileRows;
+                  const float input_0 =
+                      __half2float(input_tile[parity][row_base + row]);
+                  const float input_8 =
+                      __half2float(input_tile[parity][row_base + row + 8]);
+                  accumulator_0[output_row] = fmaf(
+                      input_0, __half2float(pair_0.values.x), accumulator_0[output_row]);
+                  accumulator_1[output_row] = fmaf(
+                      input_0, __half2float(pair_0.values.y), accumulator_1[output_row]);
+                  accumulator_0[output_row] = fmaf(
+                      input_8, __half2float(pair_8.values.x), accumulator_0[output_row]);
+                  accumulator_1[output_row] = fmaf(
+                      input_8, __half2float(pair_8.values.y), accumulator_1[output_row]);
                 }
               }
             }
@@ -1080,6 +1176,40 @@ __global__ void reduce_split_kernel(
   output[index] = accumulator;
 }
 
+template <int StaticSplitCount>
+__global__ void reduce_split_warp_kernel(
+    const float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int output_values) {
+  const int warp = static_cast<int>(threadIdx.x) >> 5;
+  const int lane = static_cast<int>(threadIdx.x) & 31;
+  const int warps_per_block = static_cast<int>(blockDim.x) >> 5;
+  constexpr int kOutputsPerWarp = 4;
+  constexpr int kSplitLanes = 32 / kOutputsPerWarp;
+  const int index =
+      (static_cast<int>(blockIdx.x) * warps_per_block + warp) *
+          kOutputsPerWarp +
+      (lane & (kOutputsPerWarp - 1));
+  if (index >= output_values) {
+    return;
+  }
+  float accumulator = 0.0f;
+#pragma unroll
+  for (int split = lane / kOutputsPerWarp;
+       split < StaticSplitCount;
+       split += kSplitLanes) {
+    accumulator +=
+        partial_output[static_cast<int64_t>(split) * output_values + index];
+  }
+#pragma unroll
+  for (int offset = 16; offset >= kOutputsPerWarp; offset >>= 1) {
+    accumulator += __shfl_down_sync(0xffffffffu, accumulator, offset);
+  }
+  if (lane < kOutputsPerWarp) {
+    output[index] = accumulator;
+  }
+}
+
 template <int TransitionBits>
 at::Tensor p32_window_ampere_impl(
     const at::Tensor& input,
@@ -1170,8 +1300,7 @@ at::Tensor p32_window_ampere_impl(
   auto* output_ptr = output.data_ptr<float>();
   if (size_m == 1 && use_small_m_scalar &&
       (size_n == 12288 || size_n == 1024 || size_n == 10240 || size_n == 6144 ||
-       size_n == 17408 ||
-       (size_n == 5120 && size_k == 6144)) &&
+       size_n == 17408 || size_n == 5120) &&
              launch_static_n_scalar_kernel<TransitionBits, 1>(
                  input_ptr,
                  trellis_ptr,
@@ -1388,7 +1517,7 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_k == 5120 && size_n == 1024) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 1024, false, true, 5120><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<TransitionBits, false, 8, 1024, true, true, 5120><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -1568,6 +1697,30 @@ at::Tensor p32_window_ampere_impl(
     constexpr int kReductionThreads = 256;
     const int output_values = size_m * size_n;
     const int blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
+    if (size_m <= 4 && size_n == 1024 && split_count == 64) {
+      constexpr int kReductionWarps = kReductionThreads / 32;
+      const int warp_blocks =
+          (output_values + kReductionWarps * 4 - 1) / (kReductionWarps * 4);
+      reduce_split_warp_kernel<64>
+          <<<warp_blocks, kReductionThreads, 0, stream>>>(
+              partial_output.data_ptr<float>(),
+              output.data_ptr<float>(),
+              output_values);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      return output;
+    }
+    if (size_m == 8 && size_n == 1024 && split_count == 48) {
+      constexpr int kReductionWarps = kReductionThreads / 32;
+      const int warp_blocks =
+          (output_values + kReductionWarps * 4 - 1) / (kReductionWarps * 4);
+      reduce_split_warp_kernel<48>
+          <<<warp_blocks, kReductionThreads, 0, stream>>>(
+              partial_output.data_ptr<float>(),
+              output.data_ptr<float>(),
+              output_values);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      return output;
+    }
 #define QVQ_LAUNCH_STATIC_REDUCER(SPLITS)                                    \
   reduce_split_kernel<SPLITS><<<blocks, kReductionThreads, 0, stream>>>(     \
       partial_output.data_ptr<float>(),                                      \

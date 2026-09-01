@@ -1347,6 +1347,284 @@ the full-KV screen. Finally, wave-adjacent M8 splits 21 (full-Q), 19
 autotuned choices, so the profiler's theoretical tail-wave estimate does not
 translate into a useful tuning candidate for these imbalanced K slices.
 
+### Post-merge v18 baseline
+
+PR #91 merged as `90c4fa5f`. The clean 20-warmup/100-iteration 140-case
+Ampere control is
+`artifacts/a100_p32_window/qwen38_newmain_all_90c4fa5f.json`. Median latency
+geomeans are 0.057364 ms (M1), 0.060760 ms (M2), 0.068937 ms (M4),
+0.078366 ms (M8), and 0.084038 ms (M16), with a 0.069161 ms all-case
+geomean. Maximum absolute error is 0.000080109. Planar timings remain
+diagnostic only and are excluded from improvement calculations.
+
+The first v18 progression applies the Hopper paired-decode lesson at the
+16-bit arithmetic level. On M8 fixed-N routes, adjacent decoded states share
+one bank mask. Their two PGC16 transforms now execute as packed 16-bit lanes,
+amortizing the fold shifts/XORs while retaining the same four read-only-cache
+codebook fetches and exact FP32 accumulation. The matched
+40-warmup/1000-iteration 24-case non-full-KV pair improves the median geomean
+by **2.319%**, with 21 wins, three event-quantized ties, and no losses.
+Full-Q, attention-out, linear-Z, and MLP-down improve 3.167%, 2.740%, 3.653%,
+and 3.095%; linear-QKV improves 0.917% and MLP-gate/up 0.384%.
+Artifacts are
+`artifacts/a100_p32_window/v18_m8_packed_pgc_control.json` and
+`artifacts/a100_p32_window/v18_m8_packed_pgc_candidate_repeat.json`.
+Affected-case log weighting gives
+`exp(24/140 * ln(1.023186)) = 1.003937x`, or **0.394%** cumulative median
+improvement versus fetched `90c4fa5f` main. Planar timings are excluded.
+
+The second v18 progression applies the packed transform to M4 scalar decode
+groups for W2, W2.5, and W3. Two adjacent K rows share each lower/upper bank
+selector, so the PGC transform is packed while each decoded weight pair is
+still reused across all four output rows. In the 20-warmup/100-iteration
+18-case screen all cases are non-regressing: 12 improve and six tie at CUDA
+event resolution. The median geomean improves **1.003%**; per-shape geomean
+gains are 1.220% full-Q, 1.042% attention-out, 0.917% linear-QKV, 1.437%
+linear-Z, 0.287% MLP-gate/up, and 1.117% MLP-down. W3.5 is deliberately
+excluded because all six shapes regressed. The candidate artifact is
+`artifacts/a100_p32_window/v18_m14_packed_pgc_candidate.json`; its control is
+the fetched-main 140-case artifact above. Affected-case log weighting now
+gives
+`exp(24/140 * ln(1.023186) + 18/140 * ln(1.010027)) = 1.005226x`, or
+**0.523%** cumulative median improvement versus fetched main.
+
+The third v18 progression selectively enables packed scalar groups for 18 M1
+cases. Full-Q, attention-out, linear-QKV, and linear-Z use the path at all
+four rates; MLP-gate/up uses it only for W2/W2.5. W3/W3.5 MLP-gate/up remains
+on the prior scalar decoder because the multi-case diagnostic encountered
+the queue-stall failure described below. Across the retained cases, 11
+medians improve and seven tie with no losses; the affected geomean improves
+**1.154%**. The diagnostic artifact is
+`artifacts/a100_p32_window/v18_m1_packed_pgc_candidate.json`. Including this
+progression, affected-case log weighting reaches **0.671%** cumulative median
+improvement versus fetched `90c4fa5f` main.
+
+The fourth v18 progression packs the existing two-row M2 bank groups for
+W2.5/W3.5 on every non-full-KV route except W3.5 MLP-gate/up. The retained
+11-case screen has eight wins and three ties with no losses; its affected
+geomean improves **1.852%**. Full-Q improves 2.083%, attention-out 1.156%,
+linear-QKV 2.456%, MLP-down 2.920%, and linear-Z is neutral; W2.5
+MLP-gate/up improves 3.191%. The diagnostic candidate is
+`artifacts/a100_p32_window/v18_m2_packed_pgc_candidate.json`. Including this
+selective progression, affected-case log weighting reaches **0.816%**
+cumulative median improvement versus fetched main.
+
+The fifth v18 progression extends packed M2 groups to ten selective W2/W3
+cases. Every retained median improves and their geomean gain is **2.354%**.
+W2 attention-out and linear-Z regress and therefore keep the prior decoder;
+the distinct four-stage W2 MLP-down path remains enabled. The candidate is
+`artifacts/a100_p32_window/v18_m2_packed_pgc_w23_candidate.json`.
+Affected-case log weighting now reaches **0.984%** cumulative median
+improvement versus fetched main.
+
+The sixth v18 progression extends the paired PGC16 transform to M8 full-KV.
+At the same 48-way split, the clean 40-warmup/1000-iteration four-rate screen
+has three wins and one event-quantized tie; its median geomean improves
+**3.078%**. Maximum absolute error remains below `1.53e-05`. The matched
+control and candidate are
+`artifacts/a100_p32_window/v18_fullkv_s48_current.json` and
+`artifacts/a100_p32_window/v18_m8_fullkv_packed_pgc_candidate.json`.
+Affected-case log weighting now reaches **1.071%** cumulative median
+improvement versus fetched main. Planar timings remain excluded.
+
+The seventh v18 progression combines the M1 long-K MLP-down fixed-N route
+with paired PGC16 decode. That route previously stayed runtime-N because the
+fixed specialization alone was neutral; paired decode changes the balance.
+In the matched split-128 40-warmup/1000-iteration pair all four rates win,
+falling from 0.0870/0.1004/0.1004/0.1055 ms to
+0.0840/0.0942/0.0973/0.0963 ms. The affected geomean speedup is **1.0570x**
+(5.390% lower latency), and maximum absolute error remains below `2.68e-05`.
+Artifacts are
+`artifacts/a100_p32_window/v18_m1_mlpdown_static_packed_control.json` and
+`artifacts/a100_p32_window/v18_m1_mlpdown_static_packed_candidate_repeat.json`.
+Affected-case log weighting now reaches **1.231%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
+The eighth v18 progression enables paired PGC16 decode for M2 full-KV. In
+the matched split-64 40-warmup/1000-iteration pair, three rates win and W3
+ties: latency falls from 0.0328/0.0348/0.0328/0.0348 ms to
+0.0307/0.0328/0.0328/0.0328 ms. The affected geomean speedup is **1.0475x**
+(4.538% lower latency), with maximum absolute error below `1.15e-05`.
+Artifacts are
+`artifacts/a100_p32_window/v18_m2_fullkv_packed_pgc_control.json` and
+`artifacts/a100_p32_window/v18_m2_fullkv_packed_pgc_candidate.json`.
+Affected-case log weighting now reaches **1.365%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
+The ninth v18 progression restores the two M1 MLP-gate/up rates whose first
+screen was hidden by a queue stall. In the focused matched split-40
+60-warmup/2000-iteration pair, W3/W3.5 fall from 0.094208/0.092160 ms to
+0.091136/0.090112 ms. The affected geomean speedup is **1.0282x** (2.743%
+lower latency), and exactness remains below `1.34e-05`. The control and
+candidate are
+`artifacts/a100_p32_window/v18_m1_mlpgate_w33_packed_pgc_control_s40.json`
+and
+`artifacts/a100_p32_window/v18_m1_mlpgate_packed_pgc_all_candidate_s40.json`.
+Affected-case log weighting now reaches **1.405%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
+The tenth v18 progression resolves the final contaminated scalar case. In a
+focused matched split-32 60-warmup/2000-iteration pair, M2 MLP-gate/up W3.5
+falls from 0.106496 ms to 0.100352 ms, a **1.0612x** speedup (5.769% lower
+latency), with maximum absolute error `9.54e-06`. Artifacts are
+`artifacts/a100_p32_window/v18_m2_mlpgate_w35_packed_control.json` and
+`artifacts/a100_p32_window/v18_m2_mlpgate_w35_packed_candidate.json`.
+Affected-case log weighting now reaches **1.449%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
+The eleventh v18 progression revisits the Marlin-style `ldmatrix.x2` M8
+full-KV load after paired decode changed that kernel's instruction balance.
+In the matched split-48 60-warmup/2000-iteration pair, all four rates win:
+the x4 control's 0.033792/0.033792/0.033792/0.032768 ms falls to
+0.032768/0.031744/0.032768/0.031744 ms. The affected geomean speedup is
+**1.0397x** (3.820% lower latency), with maximum absolute error below
+`1.53e-05`. Artifacts are
+`artifacts/a100_p32_window/v18_m8_fullkv_packed_ldmatrix_x4_control.json` and
+`artifacts/a100_p32_window/v18_m8_fullkv_packed_ldmatrix_x2_candidate.json`.
+Affected-case log weighting now reaches **1.562%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
+The twelfth v18 progression bypasses the Python autotune-key lookup for the
+measured M8 `(K,N)=(5120,1024)` hot shape and directly launches its stable
+48-way plan. Unknown MKNs still use the default-on process-local tuner, and
+no plan is written to disk. In the matched 100-warmup/4000-iteration screen,
+latency falls from a 0.033533 ms affected geomean to 0.033276 ms, a
+**1.0077x** speedup, with maximum absolute error below `1.53e-05`. Artifacts
+are `artifacts/a100_p32_window/v18_m8_fullkv_x2_scalar_guard_control.json`
+and
+`artifacts/a100_p32_window/v18_m8_fullkv_minimal_fastreturn_candidate.json`.
+Affected-case log weighting now reaches **1.584%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
+The thirteenth v18 progression directly dispatches the stable M1 full-Q and
+full-KV plans, avoiding the hot Python cache key for these eight cases while
+leaving unknown shapes on the live tuner. In the focused screen, the
+affected geomean falls by **1.124%** (a **1.0114x** speedup): full-Q has two
+wins and two ties, while full-KV has two wins, one tie, and one event-tick
+loss. Exactness remains below `1.34e-05`. The matched control and candidate
+are `artifacts/a100_p32_window/v18_m1_fastplans_control.json` and
+`artifacts/a100_p32_window/v18_m1_fastplans_narrow_candidate.json`.
+Affected-case log weighting now reaches **1.650%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
+The fourteenth v18 progression replaces the serial small-N split reducer
+with a four-output-per-warp Ampere reducer for the measured full-KV waves:
+split 64 for M1/M2/M4 and split 48 for M8. Four interleaved lane groups load
+adjacent outputs while eight lanes parallelize each output's split sum. This
+preserves useful coalescing and expands the reducer from 4-16 blocks to
+32-256 blocks on the 124-SM A100. M2/M4 now directly dispatch their measured
+split-64 plan so normal `split_count=0` calls reach the new reducer; unknown
+MKNs remain on the default-on in-memory tuner.
+
+Against the pre-change fixed-split controls, the affected geomean speedups
+are **1.0331x** for M1, **1.0588x** for M2, **1.0903x** for M4, and
+**1.0580x** for M8. All 16 medians win or tie, for a combined **1.0598x**
+speedup (5.645% lower latency); maximum absolute error stays below
+`1.15e-05`. Candidate artifacts are
+`v18_m124_fullkv_warpreduce4_candidate.json` and
+`v18_m8_fullkv_warpreduce4_candidate.json`; controls are
+`v18_m1_fullkv_packed_pgc_control.json`,
+`v18_m2_fullkv_packed_pgc_candidate.json`,
+`v18_m4_fullkv_packed_pgc_control.json`, and
+`v18_m8_fullkv_x2_scalar_store_control.json` under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**2.327%** cumulative median improvement versus fetched main; planar timings
+remain excluded.
+
+Two structural experiments were rejected before this progression. Direct
+FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
+reducer launch, but atomic contention plus output zero-fill raised latency
+from roughly 0.032-0.034 ms to 0.037-0.039 ms. Warp-private staging on M16
+full-Q replaced CTA barriers with duplicated activation/window stages, but
+the extra traffic raised latency from 0.106-0.110 ms to 0.116-0.119 ms.
+Their diagnostics are `v18_m1_fullkv_atomic_candidate.json` and
+`v18_m16_fullq_warp_private_candidate.json`; both source changes were fully
+restored.
+
+Further packed-transform expansions were narrowed out. M16 non-KV paths
+were event-quantized neutral in normal samples and occasionally suffered a
+large schedule outlier, so their dispatch remains unchanged. M2's existing
+two-row bank groups and M1 static routes showed promising one-tick wins, but
+long multi-case runs intermittently charged 0.22-0.28 ms allocator/queue
+stalls to individual CUDA-event intervals; neither path is committed without
+a clean aggregate. Diagnostics use the `v18_m16_packed_pgc_`,
+`v18_m2_packed_pgc_`, and `v18_m1_packed_pgc_` prefixes.
+
+Three additional experiments were rejected. Replacing the packed helper's
+mask/shift lane assembly with explicit PRMT instructions regressed M8 by
+roughly 1-2%. Shortening the decoded-pair live ranges was neutral on full-Q
+and linear-Z but regressed M8 MLP-down. Finally, a Marlin-style last-CTA
+split reducer remained exact but extended the M8 full-Q critical tail:
+split-16 latency rose to 0.112-0.117 ms from the accepted 0.095-0.098 ms.
+The fused-reducer diagnostics are
+`artifacts/a100_p32_window/v18_m8_fused_reduce_s16_candidate.json` and
+`artifacts/a100_p32_window/v18_m8_fused_reduce_s24_candidate.json`; all three
+source experiments were restored.
+
+M1 full-KV paired decode was also rejected after a matched split-64 control.
+The initially promising candidate measured 0.0317-0.0328 ms, but the restored
+control measured 0.0307-0.0328 ms and won three rates. Diagnostics are
+`artifacts/a100_p32_window/v18_m1_fullkv_packed_pgc_candidate.json` and
+`artifacts/a100_p32_window/v18_m1_fullkv_packed_pgc_control.json`.
+
+M4 full-KV paired decode was rejected after its matched split-64 control:
+W2/W2.5 were slower and W3 tied, while W3.5 never entered the candidate path.
+Diagnostics are `v18_m4_fullkv_packed_pgc_candidate.json` and
+`v18_m4_fullkv_packed_pgc_control.json`.
+
+M16 full-KV paired decode was rejected after its matched split-32 control:
+W2/W3 tied and W2.5/W3.5 regressed. Replacing the packed hash's two scalar
+increments with `__vadd2`, and separately replicating the shared bank mask
+with an integer multiply, both made normal M8 full-Q slower. Batched-event
+autotuning reduced timer quantization but changed the clean 28-case M1 hot
+geomean by only +0.061% versus main, below the acceptance threshold. These
+diagnostics use the `v18_m16_fullkv_packed_pgc_`, `v18_m8_packed_vadd2_`,
+`v18_m8_mask_replicate_`, and `v18_m1_batch_autotune_` prefixes; all source
+changes were restored.
+
+Packing distance-64 states with independent bank masks was exact but
+regressed every M4 W3.5 shape by a 4.03% geomean; the same layout was neutral
+to slower on M16. Compile-time K on packed M8 full-Q raised every rate by one
+event tick. A scalar `(K,N,split)=(5120,1024,64)` specialization also lost
+across M1/M2/M4 because its larger scheduled body outweighed eliminating the
+uniform divisions. Diagnostics use the `v18_m4_w35_vertical_packed_`,
+`v18_m16_vertical_packed_`, `v18_m8_fullq_statick_packed_`, and
+`v18_scalar_fullkv_static_ksplit_` prefixes; all source changes were restored.
+
+Four later host/epilogue experiments were rejected. Skipping dead-row shared
+staging after the accepted M8 `ldmatrix.x2` load and replacing scalar output
+stores with `float2` both regressed their matched full-KV controls. A final
+head-to-head autotune pass and a 2% selection hysteresis still mis-ranked the
+short split-48 launch because CUDA-event quantization dominated first-use
+samples. Finally, generalizing direct measured dispatch across all 28 M8
+cases was event-quantized neutral (three wins, 22 ties, two losses after
+excluding one queue-stall sample), so only the focused full-KV path remains.
+Diagnostics use the `v18_m8_fullkv_x2_deadrows_`,
+`v18_m8_fullkv_x2_float2_`, `v18_m8_fullkv_x2_autotune_`, and
+`v18_m8_fastplans_` prefixes; rejected source changes were restored.
+
+Generalizing the same direct-plan path across all 28 M1 cases was narrowed
+to the retained full-Q/full-KV subset. The broad screen had five wins and 20
+ties, but M1 linear-Z W2 and MLP-down W2 each lost one event tick. Those
+shapes retain normal in-memory autotuning. Diagnostics are
+`artifacts/a100_p32_window/v18_m1_fastplans_control.json` and
+`artifacts/a100_p32_window/v18_m1_fastplans_candidate.json`.
+
+Two reducer variants were rejected while finding the retained layout. The
+first assigned one complete warp to each output, improving M1/M2 and slightly
+improving M4 but issuing split-strided loads; it regressed M8 by 3.03% and
+M16 by 6.99%. The retained four-output layout recovered coalescing and won
+through M8, but remained 0.70% slower at M16 split 32, so M16 keeps the
+serial reducer. Diagnostics use the `v18_m*_fullkv_warpreduce_` and
+`v18_m*_fullkv_warpreduce4_` prefixes.
+
+The direct 140-case post-progression refresh is diagnostic only. Isolated
+0.22-0.29 ms charges appeared in otherwise stable M2, M16, and full-KV
+samples despite the exclusivity gate, matching the previously documented
+queued CUDA-event stall signature. It is retained as
+`artifacts/a100_p32_window/qwen38_v18_current_all_55b5c849.json` and is not
+used in the cumulative comparison.
+
 ## Reproduction
 
 ```bash
