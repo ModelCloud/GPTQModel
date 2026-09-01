@@ -693,10 +693,14 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(bank_alt_id);
   constexpr bool kUsePairWrapPredicate =
-      StaticN == 5120 && StageKTiles != kScalarLongStageKTiles &&
-      (Rows == 1 ||
-       (Rows == 2 && TransitionBits == 4) ||
-       (Rows == 4 && TransitionBits == 6));
+      (Rows == 1 &&
+       ((StaticN == 1024 && TransitionBits != 7) ||
+        (TransitionBits == 6 &&
+         !(StaticN == 5120 && StageKTiles == kScalarLongStageKTiles)) ||
+        (StaticN == 5120 && StageKTiles != kScalarLongStageKTiles))) ||
+      (StaticN == 5120 && StageKTiles != kScalarLongStageKTiles &&
+       ((Rows == 2 && TransitionBits == 4) ||
+        (Rows == 4 && TransitionBits == 6)));
 
   auto stage = [&](int k_tile_base, int destination) {
     auto* input_vectors = reinterpret_cast<uint4*>(input_tile[destination]);

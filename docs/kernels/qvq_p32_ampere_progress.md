@@ -1816,6 +1816,23 @@ and the `v19_selective_wrap_attention_*_deep.json` confirmations under
 `artifacts/a100_p32_window/`. Affected-case log weighting now reaches
 **1.436% cumulative improvement** versus fetched main.
 
+The seventeenth v19 progression extends the direct pair-wrap predicate to
+six additional M1 cases. Full-KV W2/W2.5/W3 improve from
+`0.033792/0.034816/0.032768 ms` to
+`0.032768/0.032768/0.031744 ms`; W3 full-Q, linear-QKV, and MLP-gate/up
+improve from `0.069632/0.059392/0.091136 ms` to
+`0.066560/0.057344/0.088064 ms`. W3 linear-Z is neutral at `0.041984 ms`.
+Across the seven measured retained cases the affected geomean speedup is
+**1.0345x** (3.338% lower latency), with maximum absolute error below
+`4.01e-05`. The broad candidate exposed regressions for full-KV W3.5 and
+W3 MLP-down, so both are compile-time excluded; narrowed confirmations
+restore their controls at `0.032768` and `0.092160 ms`. Artifacts use the
+`v19_wrap_m1_{fullkv,w3_other}_{control,candidate}_deep.json` and
+`v19_wrap_m1_{fullkv_w35,mlpdown_w3}_narrow_verify.json` names under
+`artifacts/a100_p32_window/`. The complete 38-case Ampere suite passes.
+Affected-case log weighting now reaches **1.608% cumulative improvement**
+versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1930,8 +1947,9 @@ retained; the combined diagnostic is
 Applying the direct pair-wrap predicate to every specialization was also
 rejected. The matched attention screen exposed losses on M2 W3/W3.5, M4
 W2.5, and M16 W2.5-W3.5, while a broader M1 screen was mixed outside
-attention-out. The final template flag is therefore enabled only for the
-eight deeply confirmed attention cases. The broad diagnostics are
+attention-out. The initial template flag was therefore narrowed to the
+eight deeply confirmed attention cases before the later case-by-case M1
+extension described above. The broad diagnostics are
 `v19_wrap_pair_predicate_attention_{control,candidate}.json` and
 `v19_selective_wrap_predicate_m1_candidate.json`.
 
