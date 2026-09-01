@@ -1780,6 +1780,17 @@ accumulation and the existing split-32 launch. Against the matched
 `artifacts/a100_p32_window/`. Affected-case log weighting now reaches
 **1.181% cumulative improvement** versus fetched main.
 
+The fourteenth v19 progression narrows the same packed PGC16 transform to
+M16 W2 full-Q. Against the matched 60-warmup/2000-iteration control, W2
+improves from `0.107520` to `0.106496 ms` (**1.0096x**, 0.952% lower
+latency). W2.5 and W3.5 were median-neutral in the broad diagnostic and W3
+lost one event tick, so all three retain the prior decoder. Maximum absolute
+error for the accepted W2 path is `2.68e-05`. Artifacts are
+`v19_m16_packed_fullq_control.json` and
+`v19_m16_packed_fullq_mlpdown_candidate.json` under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**1.188% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
