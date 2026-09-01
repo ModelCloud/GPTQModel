@@ -1740,7 +1740,8 @@ at::Tensor p32_window_ampere_impl(
     const bool use_m1_warp_reducer =
         size_m == 1 &&
         ((size_k == 6144 && size_n == 5120) ||
-         (size_k == 5120 && size_n == 6144));
+         (size_k == 5120 && size_n == 6144) ||
+         (size_k == 17408 && size_n == 5120));
     if (use_m1_warp_reducer) {
       constexpr int kReductionWarps = kReductionThreads / 32;
       constexpr int kOutputsPerWarp = 16;
@@ -1763,11 +1764,18 @@ at::Tensor p32_window_ampere_impl(
         case 48:
           QVQ_LAUNCH_WARP_REDUCER(48);
           break;
+        case 96:
+          QVQ_LAUNCH_WARP_REDUCER(96);
+          break;
+        case 128:
+          QVQ_LAUNCH_WARP_REDUCER(128);
+          break;
         default:
           break;
       }
 #undef QVQ_LAUNCH_WARP_REDUCER
-      if (split_count == 24 || split_count == 40 || split_count == 48) {
+      if (split_count == 24 || split_count == 40 || split_count == 48 ||
+          split_count == 96 || split_count == 128) {
         C10_CUDA_KERNEL_LAUNCH_CHECK();
         return output;
       }

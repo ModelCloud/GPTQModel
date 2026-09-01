@@ -1693,6 +1693,17 @@ four-output control is `v19_m1_selective_warpreduce_candidate.json` in the
 same directory. Affected-case log weighting now reaches **0.844% cumulative
 improvement** versus fetched main.
 
+The sixth v19 progression extends the 16-output M1 reducer to long-K
+MLP-down split 96/128. In the 60-warmup/2000-iteration screen all four rates
+improve one event tick, from `0.083968/0.094208/0.097280/0.095232 ms` to
+`0.082944/0.093184/0.096256/0.094208 ms`. That is a **1.0112x** affected
+geomean speedup (1.109% lower latency), with maximum absolute error below
+`2.48e-05`. The candidate is
+`artifacts/a100_p32_window/v19_m1_mlpdown_warpreduce16_candidate.json`; its
+control is the M1 MLP-down subset of `qwen38_v19_current_all_0904e361.json`.
+Affected-case log weighting now reaches **0.876% cumulative improvement**
+versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1730,6 +1741,13 @@ rates. An intermediate eight-output M1 reducer was superseded by the retained
 `v19_warpreduce128_screen.json`,
 `v19_m16_fullkv_bankid_cpasync4_candidate.json`, and
 `v19_m1_warpreduce8_candidate.json` under `artifacts/a100_p32_window/`.
+
+Broadening the 16-output M1 reducer to linear-QKV and MLP-gate/up was
+rejected: linear-QKV was median-neutral and MLP-gate W2.5 lost one event
+tick. Widening the accepted M2 projection reducer from eight to 16 outputs
+was also rejected because both attention-out W2 and linear-Z W2 regressed.
+Diagnostics are `v19_m1_warpreduce16_wide_candidate.json` and
+`v19_m2_warpreduce16_candidate.json` under `artifacts/a100_p32_window/`.
 
 ## Reproduction
 
