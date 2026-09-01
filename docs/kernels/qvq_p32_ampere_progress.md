@@ -1463,6 +1463,15 @@ and
 Affected-case log weighting now reaches **1.405%** cumulative median
 improvement versus fetched main; planar timings remain excluded.
 
+The tenth v18 progression resolves the final contaminated scalar case. In a
+focused matched split-32 60-warmup/2000-iteration pair, M2 MLP-gate/up W3.5
+falls from 0.106496 ms to 0.100352 ms, a **1.0612x** speedup (5.769% lower
+latency), with maximum absolute error `9.54e-06`. Artifacts are
+`artifacts/a100_p32_window/v18_m2_mlpgate_w35_packed_control.json` and
+`artifacts/a100_p32_window/v18_m2_mlpgate_w35_packed_candidate.json`.
+Affected-case log weighting now reaches **1.449%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
@@ -1503,6 +1512,16 @@ M4 full-KV paired decode was rejected after its matched split-64 control:
 W2/W2.5 were slower and W3 tied, while W3.5 never entered the candidate path.
 Diagnostics are `v18_m4_fullkv_packed_pgc_candidate.json` and
 `v18_m4_fullkv_packed_pgc_control.json`.
+
+M16 full-KV paired decode was rejected after its matched split-32 control:
+W2/W3 tied and W2.5/W3.5 regressed. Replacing the packed hash's two scalar
+increments with `__vadd2`, and separately replicating the shared bank mask
+with an integer multiply, both made normal M8 full-Q slower. Batched-event
+autotuning reduced timer quantization but changed the clean 28-case M1 hot
+geomean by only +0.061% versus main, below the acceptance threshold. These
+diagnostics use the `v18_m16_fullkv_packed_pgc_`, `v18_m8_packed_vadd2_`,
+`v18_m8_mask_replicate_`, and `v18_m1_batch_autotune_` prefixes; all source
+changes were restored.
 
 The direct 140-case post-progression refresh is diagnostic only. Isolated
 0.22-0.29 ms charges appeared in otherwise stable M2, M16, and full-KV
