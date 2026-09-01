@@ -1214,6 +1214,24 @@ only the selector from `cp.async.ca` to `cp.async.cg` improved the clean
 the event median. The earlier combined cache-policy diagnostic was therefore
 not hiding a material selector-only gain; retain `.ca`.
 
+The fifth v17 progression narrows the earlier broad M1 selector experiment to
+the W2.5/W3.5 non-full-KV routes that were consistently positive. One
+16-byte `cp.async.ca` now replaces 16 distributed selector-byte loads per
+scalar K stage; W2/W3 and full-KV keep their accepted synchronous paths. In
+the clean matched 60-warmup/2000-iteration 12-case pair, the median and mean
+geomeans improve 1.626% and 0.976%. Every shape improves by median, from
+1.021% on MLP-down to 2.613% on linear-QKV. The exact accepted `088f0dbe`
+binary was preloaded from JIT fingerprint `9f664b2065b9d1fb` for the control.
+Artifacts are
+`artifacts/a100_p32_window/v17_m1_async_selector_selective_control.json` and
+`artifacts/a100_p32_window/v17_m1_async_selector_selective_repeat.json`.
+
+Including the fifth progression, affected-case log weighting gives
+`exp(28/140 * ln(1.02161) + 24/140 * ln(1.00958) + 12/140 *
+ln(1.03524076) + 12/140 * ln(1.01210067) + 12/140 * ln(1.01625809)) =
+1.011356x`, or **1.136%** cumulative median improvement versus fetched
+`6b3cea54` main. Planar timings remain excluded.
+
 ## Reproduction
 
 ```bash
