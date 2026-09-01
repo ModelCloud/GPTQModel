@@ -895,6 +895,57 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
                 }
               }
             }
+          } else if constexpr (
+              Rows == 4 && StaticN != 1024 && TransitionBits != 7) {
+#pragma unroll
+            for (int bank_group = 0; bank_group < 4; ++bank_group) {
+              const uint32_t bank_mask_0 =
+                  selected_bank_mask(packed_bank_id, bank_group, alt_mask);
+              const uint32_t bank_mask_8 =
+                  selected_bank_mask(packed_bank_id, bank_group + 4, alt_mask);
+              uint32_t state_0[2];
+              uint32_t state_8[2];
+#pragma unroll
+              for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
+                const int row = bank_group * 2 + row_in_group;
+                const int pair = row * 8 + pair_column;
+                window_state_pair64<TransitionBits>(
+                    words, pair, state_0[row_in_group], state_8[row_in_group]);
+              }
+              uint32_t decoded_0[2];
+              uint32_t decoded_8[2];
+              decode_state_pair_bits(
+                  state_0[0], state_0[1], bank_mask_0, levels,
+                  decoded_0[0], decoded_0[1]);
+              decode_state_pair_bits(
+                  state_8[0], state_8[1], bank_mask_8, levels,
+                  decoded_8[0], decoded_8[1]);
+#pragma unroll
+              for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
+                const int row = bank_group * 2 + row_in_group;
+                union {
+                  uint32_t bits;
+                  half2 values;
+                } pair_0{decoded_0[row_in_group]}, pair_8{decoded_8[row_in_group]};
+#pragma unroll
+                for (int output_row = 0; output_row < Rows; ++output_row) {
+                  const int row_base = output_row * (StageKTiles * kTileRows) +
+                      stage_k_tile * kTileRows;
+                  const float input_0 =
+                      __half2float(input_tile[parity][row_base + row]);
+                  const float input_8 =
+                      __half2float(input_tile[parity][row_base + row + 8]);
+                  accumulator_0[output_row] = fmaf(
+                      input_0, __half2float(pair_0.values.x), accumulator_0[output_row]);
+                  accumulator_1[output_row] = fmaf(
+                      input_0, __half2float(pair_0.values.y), accumulator_1[output_row]);
+                  accumulator_0[output_row] = fmaf(
+                      input_8, __half2float(pair_8.values.x), accumulator_0[output_row]);
+                  accumulator_1[output_row] = fmaf(
+                      input_8, __half2float(pair_8.values.y), accumulator_1[output_row]);
+                }
+              }
+            }
           } else {
 #pragma unroll
             for (int row = 0; row < 8; ++row) {

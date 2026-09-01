@@ -1373,6 +1373,21 @@ Affected-case log weighting gives
 `exp(24/140 * ln(1.023186)) = 1.003937x`, or **0.394%** cumulative median
 improvement versus fetched `90c4fa5f` main. Planar timings are excluded.
 
+The second v18 progression applies the packed transform to M4 scalar decode
+groups for W2, W2.5, and W3. Two adjacent K rows share each lower/upper bank
+selector, so the PGC transform is packed while each decoded weight pair is
+still reused across all four output rows. In the 20-warmup/100-iteration
+18-case screen all cases are non-regressing: 12 improve and six tie at CUDA
+event resolution. The median geomean improves **1.003%**; per-shape geomean
+gains are 1.220% full-Q, 1.042% attention-out, 0.917% linear-QKV, 1.437%
+linear-Z, 0.287% MLP-gate/up, and 1.117% MLP-down. W3.5 is deliberately
+excluded because all six shapes regressed. The candidate artifact is
+`artifacts/a100_p32_window/v18_m14_packed_pgc_candidate.json`; its control is
+the fetched-main 140-case artifact above. Affected-case log weighting now
+gives
+`exp(24/140 * ln(1.023186) + 18/140 * ln(1.010027)) = 1.005226x`, or
+**0.523%** cumulative median improvement versus fetched main.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
@@ -1382,6 +1397,15 @@ the extra traffic raised latency from 0.106-0.110 ms to 0.116-0.119 ms.
 Their diagnostics are `v18_m1_fullkv_atomic_candidate.json` and
 `v18_m16_fullq_warp_private_candidate.json`; both source changes were fully
 restored.
+
+Further packed-transform expansions were narrowed out. M16 non-KV paths
+were event-quantized neutral in normal samples and occasionally suffered a
+large schedule outlier, so their dispatch remains unchanged. M2's existing
+two-row bank groups and M1 static routes showed promising one-tick wins, but
+long multi-case runs intermittently charged 0.22-0.28 ms allocator/queue
+stalls to individual CUDA-event intervals; neither path is committed without
+a clean aggregate. Diagnostics use the `v18_m16_packed_pgc_`,
+`v18_m2_packed_pgc_`, and `v18_m1_packed_pgc_` prefixes.
 
 ## Reproduction
 
