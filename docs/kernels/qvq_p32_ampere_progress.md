@@ -1440,6 +1440,17 @@ Artifacts are
 Affected-case log weighting now reaches **1.231%** cumulative median
 improvement versus fetched main; planar timings remain excluded.
 
+The eighth v18 progression enables paired PGC16 decode for M2 full-KV. In
+the matched split-64 40-warmup/1000-iteration pair, three rates win and W3
+ties: latency falls from 0.0328/0.0348/0.0328/0.0348 ms to
+0.0307/0.0328/0.0328/0.0328 ms. The affected geomean speedup is **1.0475x**
+(4.538% lower latency), with maximum absolute error below `1.15e-05`.
+Artifacts are
+`artifacts/a100_p32_window/v18_m2_fullkv_packed_pgc_control.json` and
+`artifacts/a100_p32_window/v18_m2_fullkv_packed_pgc_candidate.json`.
+Affected-case log weighting now reaches **1.365%** cumulative median
+improvement versus fetched main; planar timings remain excluded.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
@@ -1469,6 +1480,12 @@ The fused-reducer diagnostics are
 `artifacts/a100_p32_window/v18_m8_fused_reduce_s16_candidate.json` and
 `artifacts/a100_p32_window/v18_m8_fused_reduce_s24_candidate.json`; all three
 source experiments were restored.
+
+M1 full-KV paired decode was also rejected after a matched split-64 control.
+The initially promising candidate measured 0.0317-0.0328 ms, but the restored
+control measured 0.0307-0.0328 ms and won three rates. Diagnostics are
+`artifacts/a100_p32_window/v18_m1_fullkv_packed_pgc_candidate.json` and
+`artifacts/a100_p32_window/v18_m1_fullkv_packed_pgc_control.json`.
 
 The direct 140-case post-progression refresh is diagnostic only. Isolated
 0.22-0.29 ms charges appeared in otherwise stable M2, M16, and full-KV

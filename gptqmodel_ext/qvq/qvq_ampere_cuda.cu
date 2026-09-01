@@ -849,7 +849,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
           const uint8_t packed_bank_id =
               packed_bank_ids[parity][stage_k_tile][shared_tile];
           if constexpr (
-              Rows == 2 && StaticN != 1024 &&
+              Rows == 2 &&
               !(StaticN == 17408 && TransitionBits == 7) &&
               !(TransitionBits == 4 &&
                 (StaticN == 6144 ||
