@@ -1417,6 +1417,16 @@ the distinct four-stage W2 MLP-down path remains enabled. The candidate is
 Affected-case log weighting now reaches **0.984%** cumulative median
 improvement versus fetched main.
 
+The sixth v18 progression extends the paired PGC16 transform to M8 full-KV.
+At the same 48-way split, the clean 40-warmup/1000-iteration four-rate screen
+has three wins and one event-quantized tie; its median geomean improves
+**3.078%**. Maximum absolute error remains below `1.53e-05`. The matched
+control and candidate are
+`artifacts/a100_p32_window/v18_fullkv_s48_current.json` and
+`artifacts/a100_p32_window/v18_m8_fullkv_packed_pgc_candidate.json`.
+Affected-case log weighting now reaches **1.071%** cumulative median
+improvement versus fetched main. Planar timings remain excluded.
+
 Two structural experiments were rejected before this progression. Direct
 FP32 atomic split accumulation for M1 full-KV removed the partial tensor and
 reducer launch, but atomic contention plus output zero-fill raised latency
@@ -1435,6 +1445,24 @@ long multi-case runs intermittently charged 0.22-0.28 ms allocator/queue
 stalls to individual CUDA-event intervals; neither path is committed without
 a clean aggregate. Diagnostics use the `v18_m16_packed_pgc_`,
 `v18_m2_packed_pgc_`, and `v18_m1_packed_pgc_` prefixes.
+
+Three additional experiments were rejected. Replacing the packed helper's
+mask/shift lane assembly with explicit PRMT instructions regressed M8 by
+roughly 1-2%. Shortening the decoded-pair live ranges was neutral on full-Q
+and linear-Z but regressed M8 MLP-down. Finally, a Marlin-style last-CTA
+split reducer remained exact but extended the M8 full-Q critical tail:
+split-16 latency rose to 0.112-0.117 ms from the accepted 0.095-0.098 ms.
+The fused-reducer diagnostics are
+`artifacts/a100_p32_window/v18_m8_fused_reduce_s16_candidate.json` and
+`artifacts/a100_p32_window/v18_m8_fused_reduce_s24_candidate.json`; all three
+source experiments were restored.
+
+The direct 140-case post-progression refresh is diagnostic only. Isolated
+0.22-0.29 ms charges appeared in otherwise stable M2, M16, and full-KV
+samples despite the exclusivity gate, matching the previously documented
+queued CUDA-event stall signature. It is retained as
+`artifacts/a100_p32_window/qwen38_v18_current_all_55b5c849.json` and is not
+used in the cumulative comparison.
 
 ## Reproduction
 
