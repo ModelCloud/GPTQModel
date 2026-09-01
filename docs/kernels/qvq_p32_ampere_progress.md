@@ -1190,6 +1190,30 @@ is retained. Diagnostics use the `v17_m1_bank_cpasync_`,
 `v17_m8_shared_levels4_`, and `v17_scalar_bank_group_` labels; contention-only
 files remain untracked.
 
+The fourth v17 progression pipelines the packed 16-byte M2 bank-selector copy
+only on the same validated non-full-KV W2.5/W3.5 routes. The earlier broad M2
+async experiment predated bank-mask grouping and was slightly negative; after
+grouping shortens the selector's decode use, `cp.async.ca` overlaps its global
+load with the scalar input and trellis stage. The clean 60-warmup/2000-iteration
+repeat improves the 12-case median and mean geomeans by 1.210% and 0.993%.
+Every shape is non-negative by median; gains range from 0.462% on MLP-down to
+1.600% on linear-QKV. The accepted repeat is
+`artifacts/a100_p32_window/v17_m2_group_async_selector_repeat.json`; its
+immediate control is
+`artifacts/a100_p32_window/v17_m2_bank_mask_group_selective_candidate.json`.
+
+Including this fourth progression, affected-case log weighting gives
+`exp(28/140 * ln(1.02161) + 24/140 * ln(1.00958) + 12/140 *
+ln(1.03524076) + 12/140 * ln(1.01210067)) = 1.009959x`, or **0.996%**
+cumulative median improvement versus fetched `6b3cea54` main. Planar timings
+remain excluded.
+
+An isolated M4 selector cache-policy follow-up was also rejected. Changing
+only the selector from `cp.async.ca` to `cp.async.cg` improved the clean
+24-case median geomean by just 0.036%, with 22 cases bit-for-bit identical in
+the event median. The earlier combined cache-policy diagnostic was therefore
+not hiding a material selector-only gain; retain `.ca`.
+
 ## Reproduction
 
 ```bash

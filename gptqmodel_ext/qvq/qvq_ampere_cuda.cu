@@ -719,10 +719,21 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
         const int k_tile = k_tile_base + thread;
         auto* destination_ids = reinterpret_cast<uint4*>(
             packed_bank_ids[destination][thread]);
-        *destination_ids = k_tile < k_tiles
-            ? __ldg(reinterpret_cast<const uint4*>(
-                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + block_n_tile_base))
-            : make_uint4(0u, 0u, 0u, 0u);
+        if constexpr (StaticN != 1024 && (TransitionBits == 5 || TransitionBits == 7)) {
+          if (k_tile < k_tiles) {
+            copy_async_ca_16(
+                destination_ids,
+                reinterpret_cast<const uint4*>(
+                    bank_ids + static_cast<int64_t>(k_tile) * n_tiles + block_n_tile_base));
+          } else {
+            *destination_ids = make_uint4(0u, 0u, 0u, 0u);
+          }
+        } else {
+          *destination_ids = k_tile < k_tiles
+              ? __ldg(reinterpret_cast<const uint4*>(
+                    bank_ids + static_cast<int64_t>(k_tile) * n_tiles + block_n_tile_base))
+              : make_uint4(0u, 0u, 0u, 0u);
+        }
       }
     } else if constexpr (
         StaticN > 0 && TilesPerBlock == 16 && Rows == 4 && StaticN != 1024) {
