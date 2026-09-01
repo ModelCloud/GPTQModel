@@ -159,10 +159,10 @@ absolute error was `6.49e-5`.
 Benchmark harness/head: `65379257`; kernel source: `8fbf39d2`. Artifact:
 `artifacts/h200_p32_window/qwen38_m1_m2_m4_m8_m16_p32_vs_machete_65379257.json`.
 All 140 exact-P32 rows passed their dense references; the worst maximum
-absolute error was `7.44e-5`. The production prototype is currently fixed at
-M16, so M1/M2/M4/M8 measurements include copying live rows into a persistent
-zero-padded M16 input inside the timed CUDA graph. Machete and planar P32 run
-at their native logical M.
+absolute error was `7.44e-5`. The direct window microkernel is fixed at M16;
+the production `QVQLinear` dispatch pads logical M1/M2/M4/M8 inputs to M16
+and slices the result, while Machete and planar P32 run at their native logical
+M.
 
 Each full-matrix cell below is `P32 milliseconds / xMachete`.
 
@@ -352,6 +352,33 @@ zero-padded M16 input inside the timed graph.
 | 16 | 28 | 27.866x | 0.751x |
 | **All** | **140** | **19.570x** | **0.723x** |
 
+## H200 production P32 dispatch
+
+Commit `9390b79d` wires the exact continuous-window TMA RS-WGMMA kernel into
+`QVQLinear` for H200 FP16 V2B2-P32 inference. Checkpoints remain canonical
+planar P32; each module repacks once on first eligible CUDA use and retains the
+same-size window payload with identity/version invalidation. Unsupported
+devices, dtypes, rates, and geometries continue using the planar kernel.
+
+The H200 Qwen3.8-27B MLP gate/up probe (`K=5120, N=17408, W3`) passed the dense
+P32 reference at every logical M. The direct planar-versus-window medians below
+are from `artifacts/h200_p32_window/m_all_dispatch_probe.json`; the integrated
+`QVQLinear` smoke path measured the same exact output for M1/2/4/8/16.
+
+| M | Planar P32 ms | TMA RS-WGMMA ms | Speedup |
+|---:|---:|---:|---:|
+| 1 | 2.43024 | 0.06835 | 35.56x |
+| 2 | 2.41966 | 0.06882 | 35.16x |
+| 4 | 2.43722 | 0.06878 | 35.43x |
+| 8 | 2.43515 | 0.06902 | 35.28x |
+| 16 | 2.52286 | 0.06674 | 37.80x |
+
+The new dispatch regression test is exact at K=N=256 for M1/2/4/8/16 and
+verifies that the cached repack is reused. The latest H200 NCU capture is
+`artifacts/h200_p32_window/profiles/9390b79d/h200_w3_gate_tma_dispatch.ncu-rep`:
+63.392 us kernel duration, 37.484M instructions, 48.8% active warp issue,
+4.93% tensor-pipe activity, 0.46% TMA activity, and 82.8% L1 throughput.
+
 ## Coverage queue
 
 | Priority | Coverage | State |
@@ -359,7 +386,7 @@ zero-padded M16 input inside the timed graph.
 | 1 | Warp-register PGC table versus read-only L1 | rejected; keep read-only L1 |
 | 2 | Rate-specific split/grid policy for all seven Qwen shapes | accepted at `d9464071` |
 | 3 | Generalize direct-window TMA RS-WGMMA to W2, W2.5, and W3.5 | accepted at `874d9632` |
-| 4 | Qwen3.8 M1/M2/M4/M8 specializations | pending; zero-padded M16 baseline complete |
+| 4 | Qwen3.8 M1/M2/M4/M8 specializations | accepted in `9390b79d`; logical rows are zero-padded to M16 and sliced |
 | 5 | Full seven-shape W2-W3.5 P32 versus Machete sweep | complete for M1/M2/M4/M8/M16 |
 | 6 | Producer-contiguous four-state decode and fixed WGMMA register transpose | rejected for the current RS fragment ownership |
 | 7 | Storage-neutral P32 Anchor-4 load-time repack | exact format accepted at `27573a3c`; CUDA mappings rejected |
