@@ -1578,7 +1578,7 @@ at::Tensor p32_window_ampere_impl(
         size_n != 1024 &&
         (size_m == 2 || size_m == 4 || size_m == 8 || size_m == 16 ||
          (size_m == 1 &&
-          (size_n == 12288 || size_n == 10240 ||
+          (size_n == 12288 || size_n == 10240 || size_n == 17408 ||
            (size_k == 17408 && size_n == 5120))));
     if (use_static_reducer) {
       switch (split_count) {

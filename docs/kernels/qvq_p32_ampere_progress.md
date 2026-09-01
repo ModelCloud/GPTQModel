@@ -1321,6 +1321,32 @@ accepted `31caa82d` from JIT fingerprint `a73a469768c9542b`. Artifacts are
 log weighting now gives **1.951%** cumulative median improvement versus
 fetched `6b3cea54` main; planar timings remain excluded.
 
+The eleventh v17 progression adds M1 MLP-gate/up to the static-reducer set.
+The final-source matched 60-warmup/2000-iteration pair improves every rate:
+the median, mean, and p95 geomeans improve 2.300%, 2.350%, and 2.280%.
+The control again preloads exact accepted `c3c21fbb` from fingerprint
+`847808c5f0c8f7c3`. Artifacts are
+`artifacts/a100_p32_window/v17_m1_mlpgate_static_reducer_control.json` and
+`artifacts/a100_p32_window/v17_m1_mlpgate_static_reducer_candidate.json`.
+Attention-out and linear-Z were screened at the same time but remain on the
+runtime reducer: attention W2 regressed 4.88%, while linear-Z had a slightly
+negative p95 aggregate. With only the robust MLP-gate subset retained,
+affected-case log weighting reaches **2.018%** cumulative median improvement
+versus fetched `6b3cea54` main. Planar timings remain excluded.
+
+Nsight profiling and follow-up experiments close several additional dead
+ends. The M8 full-Q kernel is limited by random codebook traffic through the
+unified L1/TEX path and integer ALU work, but its read-only-cache hit rate is
+96.2%. Distributing the 256-entry codebook across warp registers required
+four shuffles per random half lookup and slowed W2 full-Q from about 0.098 ms
+to 0.140 ms. Fetching aligned 32-bit codebook words instead of 16-bit values
+slowed it to 0.108 ms. Replacing shared trellis-word loads with warp shuffles
+was also 2.08% slower. Marking the split-reducer input loads `__ldg` regressed
+the full-KV screen. Finally, wave-adjacent M8 splits 21 (full-Q), 19
+(linear-QKV), 31 (linear-Z), and 25 (attention-out) all lost to the existing
+autotuned choices, so the profiler's theoretical tail-wave estimate does not
+translate into a useful tuning candidate for these imbalanced K slices.
+
 ## Reproduction
 
 ```bash
