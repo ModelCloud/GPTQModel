@@ -32,7 +32,9 @@ from ..quantization.qvq import (
 from ..quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
 from ..utils.qvq_wgmma_cuda import (
     QVQHopperGroupedP32Payload,
+    qvq_h100_grouped_ordered_split_counts,
     qvq_p32_window_wgmma_group_plan,
+    qvq_p32_window_wgmma_grouped_ordered_packed,
     qvq_p32_window_wgmma_grouped_packed,
 )
 from .qlinear.qvq import QVQLinear
@@ -93,6 +95,8 @@ def _source_key(children: Sequence[QVQLinear]) -> tuple[Any, ...]:
                 int(child.trellis_window),
                 int(child.bank_count),
                 bool(child.v2b2_p32),
+                bool(child.input_hadamard),
+                bool(child.output_hadamard),
             )
         )
     return tuple(key)
@@ -156,6 +160,8 @@ def _validate_static_group(
         raise _R0Fallback("grouped Hopper requires concrete co-located P32 payloads")
     if any(not _same_tensor_bits(first.SU, child.SU) for child in resolved[1:]):
         raise _R0Fallback("R0 requires bit-identical SU vectors")
+    if any(child.input_hadamard != first.input_hadamard for child in resolved[1:]):
+        raise _R0Fallback("R0 requires identical input-Hadamard state")
     return resolved
 
 
@@ -176,6 +182,8 @@ class QVQGroupedRuntimeTelemetry:
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
+    ordered_split_launches: int = 0
+    active_split_counts: tuple[int, ...] = ()
     last_fallback_reason: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
@@ -195,6 +203,8 @@ class QVQGroupedRuntimeTelemetry:
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
+            "ordered_split_launches": self.ordered_split_launches,
+            "active_split_counts": self.active_split_counts,
             "last_fallback_reason": self.last_fallback_reason,
         }
 
@@ -246,6 +256,7 @@ class QVQHopperGroupedRuntime:
         self.telemetry.grouped_window_bytes = 0
         self.telemetry.grouped_selector_bytes = 0
         self.telemetry.child_window_bytes_avoided = 0
+        self.telemetry.active_split_counts = ()
 
     def _fallback(
         self, member_index: int, x: torch.Tensor, reason: str
@@ -311,6 +322,19 @@ class QVQHopperGroupedRuntime:
             raise _R0Fallback("V2B2-P32 alternative bank IDs must remain in [1, 3]")
         from ..utils.qvq_cuda import _pgc16_levels
 
+        properties = torch.cuda.get_device_properties(device)
+        measured_splits = None
+        if self.category == "qkv":
+            measured_splits = qvq_h100_grouped_ordered_split_counts(
+                device_name=properties.name,
+                compute_capability=(properties.major, properties.minor),
+                in_features=children[0].in_features,
+                out_features=tuple(child.out_features for child in children),
+                transition_bits=qvq_transition_bits(
+                    children[0].bits, vector_size=children[0].vector_size
+                ),
+            )
+
         plan = qvq_p32_window_wgmma_group_plan(
             placeholder,
             tuple(child.trellis for child in children),
@@ -319,11 +343,13 @@ class QVQHopperGroupedRuntime:
             children[0].bits,
             out_features=tuple(child.out_features for child in children),
             bank_alt_ids=alt_ids,
-            split_counts=None,
+            split_counts=measured_splits,
         )
-        if any(segment.split_count != 1 for segment in plan.segments):
+        if measured_splits is None and any(
+            segment.split_count != 1 for segment in plan.segments
+        ):
             raise _R0Fallback(
-                "a child requires split-K, whose reduction order cannot be fused exactly"
+                "a child requires an unvalidated grouped split-K schedule"
             )
 
         k_tiles = children[0].in_features // 16
@@ -378,6 +404,9 @@ class QVQHopperGroupedRuntime:
             grouped_selectors.numel() * grouped_selectors.element_size()
         )
         self.telemetry.child_window_bytes_avoided = avoided
+        self.telemetry.active_split_counts = tuple(
+            segment.split_count for segment in plan.segments
+        )
         return payload
 
     def _ensure_payload(self) -> QVQHopperGroupedP32Payload:
@@ -406,11 +435,18 @@ class QVQHopperGroupedRuntime:
         payload = self._ensure_payload()
         from ..utils.qvq_cuda import _pgc16_levels
 
-        inner_outputs = qvq_p32_window_wgmma_grouped_packed(
+        grouped_inner = (
+            qvq_p32_window_wgmma_grouped_ordered_packed
+            if any(segment.split_count != 1 for segment in payload.plan.segments)
+            else qvq_p32_window_wgmma_grouped_packed
+        )
+        inner_outputs = grouped_inner(
             padded,
             payload,
             _pgc16_levels(x.device, children[0].codebook_version),
         )
+        if grouped_inner is qvq_p32_window_wgmma_grouped_ordered_packed:
+            self.telemetry.ordered_split_launches += 1
 
         # Gate and up have equal-width, independent output transforms.  One
         # grid schedules both row sets concurrently, applies each child's own

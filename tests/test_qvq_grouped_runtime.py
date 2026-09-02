@@ -17,8 +17,14 @@ from gptqmodel.nn_modules.qvq_grouped_runtime import (
     qvq_grouped_runtime_telemetry,
     uninstall_qvq_hopper_groups,
 )
-from gptqmodel.quantization.qvq import pack_qvq_binary_bank_ids
+from gptqmodel.quantization.qvq import (
+    pack_qvq_binary_bank_ids,
+    unpack_qvq_binary_bank_ids,
+)
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
+from gptqmodel.utils.qvq_wgmma_cuda import (
+    qvq_p32_window_wgmma_m16_tma_ordered_split,
+)
 
 
 def _child(
@@ -112,6 +118,26 @@ def test_r0_installs_only_bit_identical_input_transforms():
     assert install_qvq_hopper_groups(model) == {"qkv": 0, "gate_up": 0}
     assert uninstall_qvq_hopper_groups(model) == 1
     assert not hasattr(accepted.q_proj, "_gptqmodel_qvq_grouped_runtime")
+
+
+def test_r0_accepts_child_local_output_axes_but_rejects_mixed_input_axes():
+    shared = torch.ones(256)
+    accepted_children = tuple(
+        _child(name, su=shared, alt_id=index + 1, seed=35 + index)
+        for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+    )
+    accepted_children[2].output_hadamard = False
+    accepted = _Attention(accepted_children)
+    assert install_qvq_hopper_groups(accepted, gate_up=False) == {"qkv": 1}
+    assert uninstall_qvq_hopper_groups(accepted) == 1
+
+    rejected_children = tuple(
+        _child(name, su=shared, alt_id=index + 1, seed=38 + index)
+        for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+    )
+    rejected_children[1].input_hadamard = False
+    rejected = _Attention(rejected_children)
+    assert install_qvq_hopper_groups(rejected, gate_up=False) == {"qkv": 0}
 
 
 def test_sibling_lifecycle_fires_once_and_never_returns_stale_output(monkeypatch):
@@ -229,6 +255,47 @@ def _h100_device() -> torch.device | None:
     return None
 
 
+def _independent_ordered_qkv_reference(
+    children: tuple[QVQLinear, ...], x: torch.Tensor
+) -> tuple[torch.Tensor, ...]:
+    """Reference the production split-8 schedule without grouped packing."""
+
+    from gptqmodel.utils.qvq_cuda import _pgc16_levels
+
+    rows = x.numel() // children[0].in_features
+    transformed = children[0]._qvq_prepare_inference_input(
+        x.reshape(rows, children[0].in_features), torch.float16
+    )
+    padded = torch.zeros(
+        (16, children[0].in_features), device=x.device, dtype=torch.float16
+    )
+    padded[:rows].copy_(transformed)
+    levels = _pgc16_levels(x.device, children[0].codebook_version)
+    outputs = []
+    for child in children:
+        tile_count = (child.in_features // 16) * (child.out_features // 16)
+        selectors = pack_qvq_binary_bank_ids(
+            unpack_qvq_binary_bank_ids(child.bank_ids, tile_count * 8)
+        ).to(device=x.device)
+        window = child._prepare_hopper_p32_window(x.device)
+        inner = qvq_p32_window_wgmma_m16_tma_ordered_split(
+            padded,
+            window,
+            levels,
+            selectors,
+            child.bits,
+            out_features=child.out_features,
+            bank_alt_id=int(child.bank_alt_id.detach().item()),
+            split_count=8,
+        )
+        outputs.append(
+            child._qvq_recover_inference_output(inner[:rows], torch.float16)
+            .reshape(*x.shape[:-1], child.out_features)
+            .to(x.dtype)
+        )
+    return tuple(outputs)
+
+
 @pytest.mark.parametrize(
     ("category", "widths"),
     (
@@ -278,7 +345,12 @@ def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
     ).half()
 
     with torch.inference_mode():
-        expected = tuple(child(x) for child in children)
+        previous = tuple(child(x) for child in children)
+        expected = (
+            _independent_ordered_qkv_reference(children, x)
+            if category == "qkv"
+            else previous
+        )
     assert all(child._qvq_cuda_window_cache is not None for child in children)
 
     counts = install_qvq_hopper_groups(
@@ -292,6 +364,10 @@ def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
         torch.equal(output, reference)
         for output, reference in zip(actual, expected, strict=True)
     )
+    # Split-K changes FP32 parenthesization relative to the previous split-1
+    # path.  Its exact reference is the same ordered schedule executed by
+    # independent children, not the arithmetically different split-1 result.
+    assert all(torch.isfinite(output).all() for output in actual)
     assert all(child._qvq_cuda_window_cache is None for child in children)
     telemetry = qvq_grouped_runtime_telemetry(model)
     assert len(telemetry) == 1
@@ -308,6 +384,8 @@ def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
     else:
         assert telemetry[0]["paired_recovery_launches"] == 0
         assert telemetry[0]["independent_recovery_children"] == 3
+        assert telemetry[0]["active_split_counts"] == (8, 8, 8)
+        assert telemetry[0]["ordered_split_launches"] == 1
 
 
 def test_unequal_gate_up_widths_retain_exact_independent_recovery():
@@ -588,8 +666,10 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
             do_sample=False,
             use_cache=True,
         )
+        repeated_logits = model(input_ids=input_ids, use_cache=False).logits
 
-    assert torch.equal(actual_logits, expected_logits)
+    assert torch.equal(actual_logits, repeated_logits)
+    torch.testing.assert_close(actual_logits, expected_logits, rtol=0, atol=2e-3)
     assert torch.equal(actual_tokens, expected_tokens)
     telemetry = qvq_grouped_runtime_telemetry(model)
     assert {entry["category"] for entry in telemetry} == {"qkv", "gate_up"}

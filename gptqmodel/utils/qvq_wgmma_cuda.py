@@ -211,6 +211,35 @@ def qvq_h100_ordered_split_count(
     return 0
 
 
+def qvq_h100_grouped_ordered_split_counts(
+    *,
+    device_name: str,
+    compute_capability: tuple[int, int],
+    in_features: int,
+    out_features: Sequence[int],
+    transition_bits: int,
+) -> tuple[int, ...] | None:
+    """Return a measured H100 grouped split policy, or no override.
+
+    Keep this helper geometry-only: architecture code decides which children
+    form a legal group, while the Hopper backend owns the measured execution
+    schedule for that geometry.  The Llama 3.2 1B query/key/value sweep found
+    split 8 for every child to be the winner at M1, M2, M4, M8, and M16 for
+    every supported P32 rate.
+    """
+
+    widths = tuple(int(value) for value in out_features)
+    if (
+        "H100" in device_name
+        and compute_capability == (9, 0)
+        and int(in_features) == 2048
+        and widths == (2048, 512, 512)
+        and int(transition_bits) in (4, 5, 6, 7)
+    ):
+        return (8, 8, 8)
+    return None
+
+
 def qvq_p32_window_wgmma_w3_m16(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -584,6 +613,7 @@ __all__ = [
     "QVQHopperGroupedP32Payload",
     "QVQHopperGroupedP32Plan",
     "QVQHopperP32SegmentPlan",
+    "qvq_h100_grouped_ordered_split_counts",
     "qvq_h100_ordered_split_count",
     "qvq_p32_window_wgmma_group_plan",
     "qvq_p32_window_wgmma_grouped",
