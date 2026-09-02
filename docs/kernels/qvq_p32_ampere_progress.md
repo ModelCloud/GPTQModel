@@ -1885,6 +1885,17 @@ and MLP-gate/up W2.5/W3.5 were already screen regressions. All are excluded.
 Affected-case log weighting now reaches **1.926% cumulative improvement**
 versus fetched main.
 
+The twenty-first v19 progression enables packed two-state PGC16 decode for
+M8 MLP-gate/up, complementing its selective pair-wrap path. In a matched
+100-warmup/4000-iteration pair, W2 improves from `0.132096` to
+`0.131072 ms`, W3 from `0.135168` to `0.134144 ms`, and W3.5 from
+`0.136192` to `0.134144 ms`; W2.5 ties at `0.135168 ms`. The affected
+geomean speedup is **1.0077x** (0.761% lower latency), with maximum absolute
+error below `3.63e-05`, and the complete 38-case Ampere suite passes.
+Artifacts are `v19_m8_gate_packed_{control,candidate}_deep.json` under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**1.948% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
