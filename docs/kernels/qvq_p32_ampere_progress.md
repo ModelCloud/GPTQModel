@@ -2174,6 +2174,17 @@ leaving the second M8 tile group uninitialized. Extending that stage to
 fixed active-row kernels restores exactness before timing; the invalid
 artifact without the `v2` suffix is retained only as a failed diagnostic.
 
+The thirty-sixth v19 progression extends the corrected 128-thread N128 M8
+path to full-Q. Against the fresh split-16 narrow control medians of
+`0.094208/0.097280/0.096256/0.097280 ms`, the
+200-warmup/8000-iteration candidate measures
+`0.089088/0.092160/0.091136/0.093184 ms`. The affected geomean speedup is
+**1.0533x** (5.058% lower latency), maximum absolute error stays below
+`3.44e-05`, and affected-case log weighting reaches **3.167% cumulative
+improvement** versus fetched main. Artifacts are
+`v19_m8_fullq_n64_control_deep.json` and
+`v19_m8_fullq_wide_n128_128t_candidate_{deep,verify8000}.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
