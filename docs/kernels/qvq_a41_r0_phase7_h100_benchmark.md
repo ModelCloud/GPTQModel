@@ -27,3 +27,39 @@ repeatability, CUDA Graph, and dense accuracy gates.
 
 The raw record is
 `artifacts/a41_phase7_h100/qkv_w3_m1_probe.json`.
+
+## Full rate and row sweep
+
+The formal sweep evaluates every combination of query split
+\(\{1,2,4,8\}\) and shared key/value split \(\{1,2,4,8\}\).  Split 8 for all
+three children is the winner in every one of the 20 rate/row cases.
+
+| M | W | K | Q/K/V N | Query split | Key/value split | Median (us) | vs grouped split 1 | Better | Repeatable | Graph | Max abs |
+|---:|---:|---:|:---|---:|---:|---:|---:|:---:|:---:|:---:|---:|
+| 1 | 2 | 2048 | 2048/512/512 | 8 | 8 | 13.216 | 1.724x | Yes | Yes | Yes | 1.43e-06 |
+| 2 | 2 | 2048 | 2048/512/512 | 8 | 8 | 13.234 | 1.664x | Yes | Yes | Yes | 1.91e-06 |
+| 4 | 2 | 2048 | 2048/512/512 | 8 | 8 | 13.201 | 1.662x | Yes | Yes | Yes | 1.67e-06 |
+| 8 | 2 | 2048 | 2048/512/512 | 8 | 8 | 13.301 | 1.648x | Yes | Yes | Yes | 1.91e-06 |
+| 16 | 2 | 2048 | 2048/512/512 | 8 | 8 | 13.123 | 1.674x | Yes | Yes | Yes | 1.91e-06 |
+| 1 | 2.5 | 2048 | 2048/512/512 | 8 | 8 | 13.407 | 1.561x | Yes | Yes | Yes | 1.43e-06 |
+| 2 | 2.5 | 2048 | 2048/512/512 | 8 | 8 | 13.406 | 1.525x | Yes | Yes | Yes | 1.67e-06 |
+| 4 | 2.5 | 2048 | 2048/512/512 | 8 | 8 | 13.414 | 1.523x | Yes | Yes | Yes | 1.67e-06 |
+| 8 | 2.5 | 2048 | 2048/512/512 | 8 | 8 | 13.619 | 1.505x | Yes | Yes | Yes | 1.67e-06 |
+| 16 | 2.5 | 2048 | 2048/512/512 | 8 | 8 | 13.654 | 1.502x | Yes | Yes | Yes | 2.38e-06 |
+| 1 | 3 | 2048 | 2048/512/512 | 8 | 8 | 13.782 | 1.544x | Yes | Yes | Yes | 1.67e-06 |
+| 2 | 3 | 2048 | 2048/512/512 | 8 | 8 | 13.520 | 1.525x | Yes | Yes | Yes | 1.43e-06 |
+| 4 | 3 | 2048 | 2048/512/512 | 8 | 8 | 13.622 | 1.504x | Yes | Yes | Yes | 1.91e-06 |
+| 8 | 3 | 2048 | 2048/512/512 | 8 | 8 | 13.483 | 1.522x | Yes | Yes | Yes | 1.79e-06 |
+| 16 | 3 | 2048 | 2048/512/512 | 8 | 8 | 13.505 | 1.517x | Yes | Yes | Yes | 1.67e-06 |
+| 1 | 3.5 | 2048 | 2048/512/512 | 8 | 8 | 13.278 | 1.594x | Yes | Yes | Yes | 1.43e-06 |
+| 2 | 3.5 | 2048 | 2048/512/512 | 8 | 8 | 13.481 | 1.513x | Yes | Yes | Yes | 1.67e-06 |
+| 4 | 3.5 | 2048 | 2048/512/512 | 8 | 8 | 13.241 | 1.554x | Yes | Yes | Yes | 1.91e-06 |
+| 8 | 3.5 | 2048 | 2048/512/512 | 8 | 8 | 13.198 | 1.559x | Yes | Yes | Yes | 1.91e-06 |
+| 16 | 3.5 | 2048 | 2048/512/512 | 8 | 8 | 13.349 | 1.529x | Yes | Yes | Yes | 1.91e-06 |
+
+This is an inner-operation policy sweep, so Marlin and Machete are not
+applicable to this table.  The next production benchmark applies the winning
+policy to the complete grouped projections and reports both baselines.
+
+The full 320-row record is
+`artifacts/a41_phase7_h100/qkv_all_rates_ordered_sweep.json`.
