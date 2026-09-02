@@ -2185,6 +2185,24 @@ improvement** versus fetched main. Artifacts are
 `v19_m8_fullq_n64_control_deep.json` and
 `v19_m8_fullq_wide_n128_128t_candidate_{deep,verify8000}.json`.
 
+Retuning that wider M8 full-Q path to split 10 and split 12 was rejected.
+Their respective medians were
+`0.092160/0.094208/0.093184/0.093184 ms` and
+`0.092160/0.095232/0.094208/0.094208 ms`, both slower than the retained
+split-16 geometry. Diagnostics are
+`v19_m8_fullq_wide_n128_split{10,12}_deep.json`.
+
+The thirty-seventh v19 progression extends 128-thread N128 ownership to M8
+long-K MLP-down. Against the fresh narrow split-32 control medians of
+`0.130048/0.132096/0.132096/0.133120 ms`, the
+200-warmup/8000-iteration candidate measures
+`0.123904/0.126976/0.126976/0.128000 ms`. The affected geomean speedup is
+**1.0426x** (4.081% lower latency), maximum absolute error stays below
+`7.25e-05`, and affected-case log weighting reaches **3.290% cumulative
+improvement** versus fetched main. Artifacts are
+`v19_m8_down_n64_control_deep.json` and
+`v19_m8_down_wide_n128_candidate_{deep,verify8000}.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
