@@ -34,7 +34,6 @@ _QVQ_CUDA_OPS_NAME = "gptqmodel_qvq_cuda_ops"
 _QVQ_CUDA_NAMESPACE = "gptqmodel_qvq"
 _QVQ_CUDA_OP: Callable | None = None
 _QVQ_CUDA_GROUPED_P32_OP: Callable | None = None
-_QVQ_CUDA_LR_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_TRUSTED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_TAIL_TRUSTED_OP: Callable | None = None
@@ -98,7 +97,6 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     required_ops=(
         "gemv",
         "gemv_grouped_p32",
-        "gemv_lr",
         "gemv_v4",
         "viterbi",
         "viterbi_trusted",
@@ -194,17 +192,6 @@ def _qvq_cuda_grouped_p32_op() -> Callable:
                     "qvq_cuda", "gemv_grouped_p32"
                 )
     return _QVQ_CUDA_GROUPED_P32_OP
-
-
-def _qvq_cuda_lr_op() -> Callable:
-    """Resolve the native K32 x N8 local-ring GEMV operator once."""
-
-    global _QVQ_CUDA_LR_OP
-    if _QVQ_CUDA_LR_OP is None:
-        with _QVQ_CUDA_OP_LOCK:
-            if _QVQ_CUDA_LR_OP is None:
-                _QVQ_CUDA_LR_OP = _extension_api().op("qvq_cuda", "gemv_lr")
-    return _QVQ_CUDA_LR_OP
 
 
 def _qvq_cuda_viterbi_op() -> Callable:
@@ -752,11 +739,9 @@ def qvq_cuda_gemv(
     bank_ids: torch.Tensor | None = None,
     v2b4_p64: bool = False,
     v2b2_p32: bool = False,
-    v2b2_p32_lr: bool = False,
     bank_alt_id: int = 0,
     bank_alt_ids: torch.Tensor | None = None,
     bank_alt_boundaries: tuple[int, ...] | None = None,
-    lr_split_count: int = 0,
     _bank_alt_ids_validated: bool = False,
 ) -> torch.Tensor:
     """Multiply transformed activations by planar QVQ tiles on the current CUDA stream.
@@ -767,39 +752,32 @@ def qvq_cuda_gemv(
     bits = normalize_qvq_rate(bits)
     if vector_size not in (2, 4):
         raise ValueError("QVQ CUDA vector_size must be 2 or 4")
-    if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool) or not isinstance(v2b2_p32_lr, bool):
+    if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool):
         raise TypeError("QVQ CUDA segmented-bank format flags must be bools")
-    if sum((v2b4_p64, v2b2_p32, v2b2_p32_lr)) > 1:
-        raise ValueError("QVQ CUDA V2B4-P64, V2B2-P32, and V2B2-P32-LR are mutually exclusive")
-    if (v2b4_p64 or v2b2_p32 or v2b2_p32_lr) and vector_size != 2:
+    if v2b4_p64 and v2b2_p32:
+        raise ValueError("QVQ CUDA V2B4-P64 and V2B2-P32 are mutually exclusive")
+    if (v2b4_p64 or v2b2_p32) and vector_size != 2:
         raise ValueError("QVQ CUDA segmented-bank formats require vector_size=2")
-    if bank_ids is not None and vector_size != 4 and not (v2b4_p64 or v2b2_p32 or v2b2_p32_lr):
+    if bank_ids is not None and vector_size != 4 and not (v2b4_p64 or v2b2_p32):
         raise ValueError("QVQ CUDA bank selectors require V4 or a segmented-bank V2 format")
-    if vector_size == 2 and (v2b4_p64 or v2b2_p32 or v2b2_p32_lr) != (bank_ids is not None):
+    if vector_size == 2 and (v2b4_p64 or v2b2_p32) != (bank_ids is not None):
         raise ValueError("QVQ CUDA segmented-bank formats require exactly one packed selector byte per tile")
     bank_alt_id = _integer_argument("bank_alt_id", bank_alt_id)
-    lr_split_count = _integer_argument("lr_split_count", lr_split_count)
     if not isinstance(_bank_alt_ids_validated, bool):
         raise TypeError("_bank_alt_ids_validated must be boolean")
-    if lr_split_count < 0:
-        raise ValueError("QVQ CUDA lr_split_count must be non-negative")
-    if lr_split_count > 64:
-        raise ValueError("QVQ CUDA lr_split_count must be in [1, 64] or 0 for automatic selection")
-    if lr_split_count and not v2b2_p32_lr:
-        raise ValueError("QVQ CUDA lr_split_count is valid only for V2B2-P32-LR")
     if (bank_alt_ids is not None or bank_alt_boundaries is not None) and not v2b2_p32:
         raise ValueError("QVQ CUDA grouped alternative-bank metadata requires V2B2-P32")
     if (bank_alt_ids is None) != (bank_alt_boundaries is None):
         raise ValueError(
             "QVQ CUDA grouped alternative-bank IDs and boundaries must be provided together"
         )
-    if v2b2_p32 or v2b2_p32_lr:
+    if v2b2_p32:
         if bank_alt_ids is None and not 1 <= bank_alt_id <= 3:
             raise ValueError("QVQ CUDA V2B2-P32 bank_alt_id must be in [1, 3]")
     elif bank_alt_id != 0:
         raise ValueError("QVQ CUDA bank_alt_id is valid only for V2B2-P32")
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
-    if (v2b4_p64 or v2b2_p32 or v2b2_p32_lr) and transition_bits > 7:
+    if (v2b4_p64 or v2b2_p32) and transition_bits > 7:
         raise ValueError("QVQ CUDA segmented-bank V2 inference supports only rates W1 through W3.5")
     out_features = _integer_argument("out_features", out_features)
     if x.ndim != 2 or trellis.ndim != 2:
@@ -815,17 +793,9 @@ def qvq_cuda_gemv(
 
     m, k = x.shape
     n = out_features
-    if k <= 0 or n <= 0 or k % (32 if v2b2_p32_lr else 16) or n % (8 if v2b2_p32_lr else 16):
-        divisor = "K32/N8" if v2b2_p32_lr else "16"
-        raise ValueError(f"QVQ CUDA requires positive dimensions divisible by {divisor}, got K={k}, N={n}")
-    tile_count = (k // 32) * (n // 8) if v2b2_p32_lr else (k // 16) * (n // 16)
-    if v2b2_p32_lr and tile_count > 2**31 - 1:
-        raise ValueError("QVQ CUDA LR32 tile count exceeds the int32 kernel index limit")
-    if v2b2_p32_lr and lr_split_count and lr_split_count > min(k // 32, 64):
-        raise ValueError("QVQ CUDA lr_split_count must be in [1, min(K/32, 64)]")
-    if v2b2_p32_lr and lr_split_count and (k // 32) * lr_split_count > 2**31 - 1:
-        raise ValueError("QVQ CUDA lr_split_count overflows the int32 kernel partition limit")
-    expected = (tile_count, qvq_words_per_tile(bits, vector_size=vector_size))
+    if k <= 0 or n <= 0 or k % 16 or n % 16:
+        raise ValueError(f"QVQ CUDA requires positive K/N divisible by 16, got K={k}, N={n}")
+    expected = ((k // 16) * (n // 16), qvq_words_per_tile(bits, vector_size=vector_size))
     if tuple(trellis.shape) != expected:
         raise ValueError(f"QVQ planar trellis must have shape {expected}, got {tuple(trellis.shape)}")
     if not isinstance(output_fp32, bool):
@@ -835,8 +805,9 @@ def qvq_cuda_gemv(
             raise TypeError("QVQ CUDA bank selectors must be contiguous uint8 on the input CUDA device")
         if not bank_ids.is_contiguous():
             raise ValueError("QVQ CUDA bank selectors must be contiguous")
-        if tuple(bank_ids.shape) != (tile_count,):
-            raise ValueError(f"QVQ CUDA bank selectors must have shape {(tile_count,)}")
+        expected_selectors = expected[0] if (v2b4_p64 or v2b2_p32) else expected[0]
+        if tuple(bank_ids.shape) != (expected_selectors,):
+            raise ValueError(f"QVQ CUDA bank selectors must have shape {(expected_selectors,)}")
         if vector_size == 4 and torch.any(bank_ids > 3):
             raise ValueError("QVQ V4 bank selectors must be in [0, 3]")
     if bank_alt_ids is not None:
@@ -882,10 +853,6 @@ def qvq_cuda_gemv(
         raise ValueError("QVQ CUDA dimensions exceed the int32 kernel limit")
     if torch.cuda.get_device_capability(x.device) < (8, 0):
         raise RuntimeError("QVQ CUDA requires a compute capability >= 8.0 device")
-    if v2b2_p32_lr:
-        return _qvq_cuda_lr_op()(
-            x, trellis, levels, transition_bits, n, output_fp32, bank_ids, bank_alt_id, lr_split_count
-        )
     if bank_alt_ids is not None:
         return _qvq_cuda_grouped_p32_op()(
             x,

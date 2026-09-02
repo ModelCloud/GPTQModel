@@ -574,7 +574,6 @@ def make_quant(
     extension = qcfg.adapter
     # Backend selection may intentionally collapse METHOD.QVQ to the generic
     # QVQ family, but module validation must retain the serialized layout ID.
-    # LR32 has a K32 x N8 ABI that cannot be validated as legacy QVQ/P32.
     backend_format = resolve_quant_format(qcfg.format, qcfg.method)
     # QVQ layout IDs are FORMAT enum members and must remain specific for
     # module validation. Other methods intentionally use string subtypes
@@ -1005,7 +1004,6 @@ def _hf_is_native_gptqmodel_config(qcfg: QuantizeConfig) -> bool:
             FORMAT.QVQ_DUAL_V2,
             FORMAT.QVQ_V2B4_P64,
             FORMAT.QVQ_V2B2_P32,
-            FORMAT.QVQ_V2B2_P32_LR,
         )
     )
 
@@ -1023,7 +1021,6 @@ def _quantized_weight_suffix(qcfg: QuantizeConfig) -> str:
             FORMAT.QVQ_DUAL_V2,
             FORMAT.QVQ_V2B4_P64,
             FORMAT.QVQ_V2B2_P32,
-            FORMAT.QVQ_V2B2_P32_LR,
         )
         else ".qweight"
     )

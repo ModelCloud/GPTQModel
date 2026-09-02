@@ -435,7 +435,6 @@ _QVQ_V4_BANK_MASKS_METAL = _qvq_v4_bank_masks_metal("qbank_masks")
 _QVQ_V2_BANK_MASKS_METAL = _qvq_v2_bank_masks_metal("qv2bank_masks")
 
 
-
 _HEADER = r"""
 inline uint qpw(uint remaining) {
   if(remaining>=16)return 16;if(remaining>=8)return 8;if(remaining>=4)return 4;if(remaining>=2)return 2;return 1;
@@ -468,15 +467,6 @@ __QVQ_V4_BANK_MASKS_METAL__
 __QVQ_V2_BANK_MASKS_METAL__
 inline float2 qlevelsv2b(device const half* levels,uint s,uint bank,uint eb){
   uint p=s^uint(qv2bank_masks[eb-2u][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
-  return float2(float(levels[p>>8]),float(levels[p&255u]));}
-inline float2 qlevelsv2b(threadgroup const half* levels,uint s,uint bank,uint eb){
-  uint p=s^uint(qv2bank_masks[eb-2u][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
-  return float2(float(levels[p>>8]),float(levels[p&255u]));}
-inline float2 qlevelsv2b_w2(device const half* levels,uint s,uint bank){
-  uint p=s^uint(qv2bank_masks[2][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
-  return float2(float(levels[p>>8]),float(levels[p&255u]));}
-inline float2 qlevelsv2b_w2(threadgroup const half* levels,uint s,uint bank){
-  uint p=s^uint(qv2bank_masks[2][bank]);p^=p>>8;p=(p*40503u+17011u)&0xffffu;p^=p>>7;
   return float2(float(levels[p>>8]),float(levels[p&255u]));}
 inline uint qbank(constant const uchar* ids,uint tile){return(uint(ids[tile>>2])>>((tile&3u)<<1))&3u;}
 inline uint qbank(device const uchar* ids,uint tile){return(uint(ids[tile>>2])>>((tile&3u)<<1))&3u;}
@@ -2663,14 +2653,8 @@ def qvq_mlx_gemv(
         raise ValueError("QVQ MLX banked-V2 formats require L16/V2, packed selectors, and W1 through W3.5")
     if v2b2_p32:
         if bank_alt_id is None or bank_alt_id.dtype != mx.uint8 or bank_alt_id.shape != (1,):
-            raise ValueError("QVQ MLX V2B2-P32 formats require one uint8 alternative-bank ID")
-        if _bank_alt_id_value is None:
-            # Compatibility path for direct callers that have not wrapped the
-            # payload in QVQMLXLinear.  The loadable MLX module resolves this
-            # immutable metadata once in __init__ and passes the Python value.
-            alt_id = int(bank_alt_id.item())
-        else:
-            alt_id = _integer_argument(_bank_alt_id_value, "bank_alt_id")
+            raise ValueError("QVQ MLX V2B2-P32 requires one uint8 alternative-bank ID")
+        alt_id = int(bank_alt_id.item())
         if not 1 <= alt_id <= 3:
             raise ValueError("QVQ MLX V2B2-P32 alternative-bank ID must be in [1, 3]")
     elif bank_alt_id is not None:
@@ -2686,9 +2670,8 @@ def qvq_mlx_gemv(
     n = _integer_argument(out_features, "out_features")
     if k <= 0 or n <= 0 or k % 16 or n % 16:
         raise ValueError(f"QVQ MLX requires positive K/N divisible by 16, got K={k}, N={n}")
-    tile_count = (k // 16) * (n // 16)
     expected = (
-        tile_count,
+        (k // 16) * (n // 16),
         qvq_words_per_tile(bits, vector_size=vector_size),
     )
     if trellis.shape != expected:
@@ -2885,14 +2868,7 @@ def _qvq_mlx_hadamard(x, hadamard_matrix=None):
 
     original_shape = x.shape
     width = original_shape[-1]
-    if hadamard_matrix is None:
-        # MLX has a fused Walsh-Hadamard implementation for power-of-two
-        # widths.  Besides reducing the Python/MLX graph to one operation,
-        # this keeps the transform on the GPU and avoids materializing every
-        # butterfly stage as a separate lazy op.  Preserve QVQ's normalized
-        # convention explicitly rather than relying on the API default.
-        return mx.hadamard_transform(x, scale=width**-0.5)
-    factor = hadamard_matrix.shape[0]
+    factor = 1 if hadamard_matrix is None else hadamard_matrix.shape[0]
     work = x.reshape(-1, width, 1)
     while work.shape[1] > factor:
         work = work.reshape(work.shape[0], work.shape[1] // 2, 2, work.shape[2])

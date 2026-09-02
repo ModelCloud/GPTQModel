@@ -209,7 +209,6 @@ class QVQGroupedP32InputTransformState:
             "vector_size",
             "trellis_window",
             "v2b2_p32",
-            "v2b2_p32_lr",
             "dual_v2",
         )
         k_tiles = reference.in_features // 16
@@ -233,7 +232,6 @@ class QVQGroupedP32InputTransformState:
                 )
             if (
                 not module.v2b2_p32
-                or module.v2b2_p32_lr
                 or module.dual_v2
                 or module.vector_size != 2
                 or module.trellis_window != 16

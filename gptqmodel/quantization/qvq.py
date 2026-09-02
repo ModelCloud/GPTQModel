@@ -58,13 +58,6 @@ QVQ_V2B4_P64_STEPS_PER_SEGMENT = QVQ_V2B4_P64_SEGMENT_WEIGHTS // 2
 QVQ_V2B2_P32_SEGMENT_WEIGHTS = 32
 QVQ_V2B2_P32_SEGMENTS_PER_TILE = 8
 QVQ_V2B2_P32_STEPS_PER_SEGMENT = QVQ_V2B2_P32_SEGMENT_WEIGHTS // 2
-# LR32 keeps the same eight 32-weight binary-bank rings, but makes each ring
-# one output column over a K32 x N8 logical tile.  The serialized payload is
-# still 256 weights and therefore has the same word count/BPW as P32.
-QVQ_V2B2_P32_LR_RINGS_PER_TILE = 8
-QVQ_V2B2_P32_LR_RING_STEPS = 16
-QVQ_V2B2_P32_LR_TILE_ROWS = 32
-QVQ_V2B2_P32_LR_TILE_COLS = 8
 QVQ_YAQA_SAMPLE_TILE_COUNTS = {
     "full": None,
     "32_16x16": 32,
@@ -1415,177 +1408,6 @@ def reconstruct_p32_anchor4_inner_weight(
     )
 
 
-def unpack_local_ring_edges(
-    trellis: torch.Tensor,
-    *,
-    bits: float,
-) -> torch.Tensor:
-    """Unpack an LR32 planar tile into ``[..., 8, 16]`` local-ring edges.
-
-    LR32 deliberately retains the P32 planar byte layout.  The only semantic
-    difference is that the 128 edge stream is interpreted as eight adjacent
-    16-edge rings instead of one 128-edge circular stream.
-    """
-
-    shift = qvq_transition_bits(bits, vector_size=2)
-    if trellis.dtype != torch.int32:
-        raise TypeError(f"QVQ LR32 planar trellis words must use torch.int32, got {trellis.dtype}.")
-    if trellis.ndim < 1 or trellis.shape[-1] != qvq_words_per_tile(bits, weight_count=256, vector_size=2):
-        raise ValueError("QVQ LR32 trellis must contain the canonical 256-weight tile payload.")
-    columns = trellis.reshape(-1, trellis.shape[-1]).transpose(0, 1).contiguous()
-    edges = planar_unpack_rows(columns, shift).transpose(0, 1)
-    edges = edges.reshape(*trellis.shape[:-1], 128).to(torch.int64)
-    return edges.reshape(*trellis.shape[:-1], QVQ_V2B2_P32_LR_RINGS_PER_TILE, QVQ_V2B2_P32_LR_RING_STEPS)
-
-
-def local_ring_states_from_edges(
-    edges: torch.Tensor,
-    *,
-    bits: float,
-) -> torch.Tensor:
-    """Build L16 states independently for each LR32 ring."""
-
-    shift = qvq_transition_bits(bits, vector_size=2)
-    if edges.ndim < 2 or tuple(edges.shape[-2:]) != (
-        QVQ_V2B2_P32_LR_RINGS_PER_TILE,
-        QVQ_V2B2_P32_LR_RING_STEPS,
-    ):
-        raise ValueError("QVQ LR32 edges must have shape [..., 8, 16].")
-    if edges.dtype not in (
-        torch.uint8,
-        torch.int8,
-        torch.int16,
-        torch.int32,
-        torch.int64,
-    ):
-        raise TypeError("QVQ LR32 edges must use an integer dtype.")
-    edge_mask = (1 << shift) - 1
-    edges_i64 = edges.to(torch.int64)
-    if torch.any((edges_i64 < 0) | (edges_i64 > edge_mask)):
-        raise ValueError(f"QVQ LR32 edges must be in [0, {edge_mask}].")
-    states = _states_from_circular_edges(
-        edges_i64.reshape(-1, QVQ_V2B2_P32_LR_RING_STEPS),
-        shift=shift,
-        trellis_window=16,
-    )
-    return states.reshape(*edges.shape[:-2], QVQ_V2B2_P32_LR_RINGS_PER_TILE, QVQ_V2B2_P32_LR_RING_STEPS)
-
-
-def pack_local_ring_states(states: torch.Tensor, *, bits: float) -> torch.Tensor:
-    """Pack ``[..., 8, 16]`` LR32 states into the canonical planar words."""
-
-    shift = qvq_transition_bits(bits, vector_size=2)
-    if states.ndim < 2 or tuple(states.shape[-2:]) != (
-        QVQ_V2B2_P32_LR_RINGS_PER_TILE,
-        QVQ_V2B2_P32_LR_RING_STEPS,
-    ):
-        raise ValueError("QVQ LR32 states must have shape [..., 8, 16].")
-    state_mask = (1 << 16) - 1
-    states_i64 = states.to(torch.int64)
-    if torch.any((states_i64 < 0) | (states_i64 > state_mask)):
-        raise ValueError("QVQ LR32 states must be in [0, 65535].")
-    edges = states_i64 & ((1 << shift) - 1)
-    flat_edges = edges.reshape(-1, 128)
-    packed = planar_pack_rows(flat_edges.transpose(0, 1).contiguous(), shift)
-    packed = packed.transpose(0, 1).reshape(*states.shape[:-2], -1).contiguous()
-    recovered_edges = unpack_local_ring_edges(packed, bits=bits)
-    recovered_states = local_ring_states_from_edges(recovered_edges, bits=bits)
-    if not torch.equal(recovered_states, states_i64):
-        raise ValueError("QVQ LR32 states must form eight transition-consistent local rings.")
-    return packed
-
-
-def unpack_local_ring_states(trellis: torch.Tensor, *, bits: float) -> torch.Tensor:
-    """Recover all eight independent L16 state paths from LR32 words."""
-
-    return local_ring_states_from_edges(unpack_local_ring_edges(trellis, bits=bits), bits=bits)
-
-
-def decode_local_ring_states(trellis: torch.Tensor, *, bits: float) -> torch.Tensor:
-    """Public readable alias for the LR32 state decoder."""
-
-    return unpack_local_ring_states(trellis, bits=bits)
-
-
-def reconstruct_local_ring_inner_weight(
-    trellis: torch.Tensor,
-    *,
-    bits: float,
-    in_features: int,
-    out_features: int,
-    codebook_version: str = PGC16_CODEBOOK_VERSION,
-    bank_ids: torch.Tensor | None,
-    bank_alt_id: torch.Tensor | None,
-) -> torch.Tensor:
-    """Decode LR32 tiles into the transformed ``[in_features, out_features]`` matrix.
-
-    LR32 stores eight independent 16-transition rings per serialized tile.  A
-    ring decodes to one 32-value output column of the logical K32 x N8 tile;
-    this reshape is the part that must remain separate from the legacy P32
-    16x16 mapping.
-    """
-
-    if (
-        isinstance(in_features, bool)
-        or not isinstance(in_features, int)
-        or isinstance(out_features, bool)
-        or not isinstance(out_features, int)
-        or in_features <= 0
-        or out_features <= 0
-        or in_features % QVQ_V2B2_P32_LR_TILE_ROWS
-        or out_features % QVQ_V2B2_P32_LR_TILE_COLS
-    ):
-        raise ValueError("QVQ LR32 in/out features must be positive and divisible by K32/N8.")
-    tile_count = (in_features // QVQ_V2B2_P32_LR_TILE_ROWS) * (
-        out_features // QVQ_V2B2_P32_LR_TILE_COLS
-    )
-    expected_words = qvq_words_per_tile(bits, weight_count=256, vector_size=2)
-    if trellis.ndim != 2 or tuple(trellis.shape) != (tile_count, expected_words):
-        raise ValueError(
-            f"QVQ LR32 trellis must have shape `{(tile_count, expected_words)}`, got `{tuple(trellis.shape)}`."
-        )
-    decoded = decode_trellis_tiles(
-        trellis,
-        bits=bits,
-        vector_size=2,
-        trellis_window=16,
-        codebook_version=codebook_version,
-        bank_ids=bank_ids,
-        v2b2_p32_lr=True,
-        bank_alt_id=bank_alt_id,
-    )
-    k_blocks = in_features // QVQ_V2B2_P32_LR_TILE_ROWS
-    n_blocks = out_features // QVQ_V2B2_P32_LR_TILE_COLS
-    return (
-        decoded.reshape(k_blocks, n_blocks, QVQ_V2B2_P32_LR_RINGS_PER_TILE, 32)
-        .permute(0, 3, 1, 2)
-        .reshape(in_features, out_features)
-        .contiguous()
-    )
-
-
-def decode_local_ring_tiles(
-    trellis: torch.Tensor,
-    *,
-    bits: float,
-    codebook_version: str = PGC16_CODEBOOK_VERSION,
-    bank_ids: torch.Tensor,
-    bank_alt_id: torch.Tensor,
-) -> torch.Tensor:
-    """Decode LR32 tiles to ``[..., 8, 16, 2]`` value pairs."""
-
-    return decode_trellis_tiles(
-        trellis,
-        bits=bits,
-        vector_size=2,
-        trellis_window=16,
-        codebook_version=codebook_version,
-        bank_ids=bank_ids,
-        v2b2_p32_lr=True,
-        bank_alt_id=bank_alt_id,
-    )
-
-
 def _states_from_circular_edges(edges: torch.Tensor, *, shift: int, trellis_window: int) -> torch.Tensor:
     """Recover circular states from one logical edge stream."""
 
@@ -1647,7 +1469,6 @@ def decode_trellis_tiles(
     dual_v2: bool = False,
     v2b4_p64: bool = False,
     v2b2_p32: bool = False,
-    v2b2_p32_lr: bool = False,
     bank_alt_id: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Decode packed PGC16 QVQ tiles to scalar values in row-major order."""
@@ -1658,10 +1479,8 @@ def decode_trellis_tiles(
         raise TypeError("QVQ v2b4_p64 must be a bool.")
     if not isinstance(v2b2_p32, bool):
         raise TypeError("QVQ v2b2_p32 must be a bool.")
-    if not isinstance(v2b2_p32_lr, bool):
-        raise TypeError("QVQ v2b2_p32_lr must be a bool.")
-    if sum((dual_v2, v2b4_p64, v2b2_p32, v2b2_p32_lr)) > 1:
-        raise ValueError("QVQ Dual-V2, V2B4-P64, V2B2-P32, and V2B2-P32-LR are mutually exclusive.")
+    if sum((dual_v2, v2b4_p64, v2b2_p32)) > 1:
+        raise ValueError("QVQ Dual-V2, V2B4-P64, and V2B2-P32 are mutually exclusive.")
     if dual_v2 and (vector_size != 2 or trellis_window != 16 or bank_ids is not None):
         raise ValueError("QVQ Dual-V2 requires vector_size=2, trellis_window=16, and no bank_ids.")
     if v2b4_p64 and (vector_size != 2 or trellis_window != 16 or bank_ids is None or bits > 3.5):
@@ -1677,17 +1496,6 @@ def decode_trellis_tiles(
             "QVQ V2B2-P32 requires vector_size=2, trellis_window=16, binary selectors, an alternative bank, "
             "and W1-W3.5."
         )
-    if v2b2_p32_lr and (
-        vector_size != 2
-        or trellis_window != 16
-        or bank_ids is None
-        or bank_alt_id is None
-        or bits > 3.5
-    ):
-        raise ValueError(
-            "QVQ V2B2-P32-LR requires vector_size=2, trellis_window=16, binary selectors, an alternative bank, "
-            "and W1-W3.5."
-        )
     if vector_size not in (2, 4) or trellis_window not in (16, 18):
         raise ValueError(
             "PGC16 requires vector_size 2 or 4 with trellis_window=16; L18/V4 requires vector_size=4."
@@ -1700,40 +1508,6 @@ def decode_trellis_tiles(
         raise ValueError("QVQ L18 uses implicit history-selected banks and rejects serialized bank_ids.")
 
     levels = pgc16_levels_for_version(codebook_version).to(device=trellis.device)
-    if v2b2_p32_lr:
-        states = unpack_local_ring_states(trellis, bits=bits)
-        if bank_alt_id.numel() != 1 or bank_alt_id.dtype not in (
-            torch.uint8,
-            torch.int8,
-            torch.int16,
-            torch.int32,
-            torch.int64,
-        ):
-            raise ValueError("QVQ V2B2-P32-LR alternative bank ID must be one integer scalar.")
-        if bank_alt_id.device != trellis.device:
-            raise ValueError("QVQ V2B2-P32-LR alternative bank ID must be on the trellis device.")
-        alt_id = int(bank_alt_id.item())
-        if not 1 <= alt_id < 4:
-            raise ValueError("QVQ V2B2-P32-LR alternative bank ID must be in [1, 3].")
-        tile_count = states.numel() // (QVQ_V2B2_P32_LR_RINGS_PER_TILE * QVQ_V2B2_P32_LR_RING_STEPS)
-        binary_ids = unpack_qvq_binary_bank_ids(bank_ids, tile_count * QVQ_V2B2_P32_LR_RINGS_PER_TILE)
-        state_bank_ids = (
-            binary_ids.reshape(tile_count, QVQ_V2B2_P32_LR_RINGS_PER_TILE)
-            .repeat_interleave(QVQ_V2B2_P32_LR_RING_STEPS, dim=1)
-            .mul(alt_id)
-        )
-        decoded = pgc16_decode_states_v2_banked(
-            states.reshape(tile_count, -1),
-            state_bank_ids,
-            bits=bits,
-            levels=levels,
-        ).reshape(
-            *trellis.shape[:-1],
-            QVQ_V2B2_P32_LR_RINGS_PER_TILE,
-            QVQ_V2B2_P32_LR_RING_STEPS,
-            2,
-        )
-        return decoded.to(torch.float32).contiguous()
 
     states = (
         unpack_dual_v2_states(trellis, bits=bits)
@@ -1815,21 +1589,10 @@ def reconstruct_qvq_inner_weight(
     dual_v2: bool = False,
     v2b4_p64: bool = False,
     v2b2_p32: bool = False,
-    v2b2_p32_lr: bool = False,
     bank_alt_id: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Materialize the transformed ``[in_features, out_features]`` weight."""
 
-    if v2b2_p32_lr:
-        return reconstruct_local_ring_inner_weight(
-            trellis,
-            bits=bits,
-            in_features=in_features,
-            out_features=out_features,
-            codebook_version=codebook_version,
-            bank_ids=bank_ids,
-            bank_alt_id=bank_alt_id,
-        )
     if in_features <= 0 or out_features <= 0 or in_features % tile_rows or out_features % tile_cols:
         raise ValueError("QVQ in/out features must be positive and divisible by the tile dimensions.")
     tile_count = (in_features // tile_rows) * (out_features // tile_cols)
@@ -1863,7 +1626,6 @@ def reconstruct_qvq_inner_weight(
         dual_v2=dual_v2,
         v2b4_p64=v2b4_p64,
         v2b2_p32=v2b2_p32,
-        v2b2_p32_lr=v2b2_p32_lr,
         bank_alt_id=bank_alt_id,
     )
     return (
@@ -7169,7 +6931,6 @@ def quantize_qvq_linear(
     dual_v2: bool = False,
     v2b4_p64: bool = False,
     v2b2_p32: bool = False,
-    v2b2_p32_lr: bool = False,
     experimental_codebook: torch.Tensor | None = None,
     telemetry: QVQQuantizationTelemetry | None = None,
     bank_count: int = 1,
@@ -7200,15 +6961,8 @@ def quantize_qvq_linear(
         raise TypeError("QVQ `v2b4_p64` must be a bool.")
     if not isinstance(v2b2_p32, bool):
         raise TypeError("QVQ `v2b2_p32` must be a bool.")
-    if not isinstance(v2b2_p32_lr, bool):
-        raise TypeError("QVQ `v2b2_p32_lr` must be a bool.")
-    if sum((dual_v2, v2b4_p64, v2b2_p32, v2b2_p32_lr)) > 1:
-        raise ValueError("QVQ Dual-V2, V2B4-P64, V2B2-P32, and V2B2-P32-LR are mutually exclusive.")
-    if v2b2_p32_lr:
-        raise NotImplementedError(
-            "QVQ V2B2-P32-LR encoding is not implemented yet; use the Torch oracle and MLX inference path "
-            "with an externally encoded LR32 checkpoint."
-        )
+    if sum((dual_v2, v2b4_p64, v2b2_p32)) > 1:
+        raise ValueError("QVQ Dual-V2, V2B4-P64, and V2B2-P32 are mutually exclusive.")
     if vector_size not in (2, 4) or (vector_size == 4 and bits > 4):
         raise ValueError("QVQ `vector_size` must be 2, or 4 for rates W1-W4.")
     if trellis_window not in (16, 18):
@@ -7604,7 +7358,6 @@ def quantize_qvq_linear(
                 "dual_v2": bool(dual_v2),
                 "v2b4_p64": bool(v2b4_p64),
                 "v2b2_p32": bool(v2b2_p32),
-                "v2b2_p32_lr": bool(v2b2_p32_lr),
                 "bank_count": int(bank_count),
                 "yaqa_v2b2_family_mode": yaqa_v2b2_family_mode,
                 "yaqa_v2b2_fixed_family_id": yaqa_v2b2_fixed_family_id,

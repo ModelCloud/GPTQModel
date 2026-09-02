@@ -696,7 +696,6 @@ class FORMAT(str, Enum):
     QVQ_DUAL_V2 = "qvq_dual_v2"
     QVQ_V2B4_P64 = "qvq_v2b4_p64"
     QVQ_V2B2_P32 = "qvq_v2b2_p32"
-    QVQ_V2B2_P32_LR = "qvq_v2b2_p32_lr"
     MXFP4 = "mxfp4"
 
     GEMM = "gemm"
@@ -1248,7 +1247,6 @@ def _normalize_quant_bits(
         FORMAT.QVQ_DUAL_V2,
         FORMAT.QVQ_V2B4_P64,
         FORMAT.QVQ_V2B2_P32,
-        FORMAT.QVQ_V2B2_P32_LR,
     }:
         if isinstance(bits, GGUFBits):
             raise ValueError("QuantizeConfig: GGUF bit encodings require `format=gguf`.")
@@ -2771,7 +2769,6 @@ QUANT_METHOD_FORMAT_MAPPING = {
         FORMAT.QVQ_DUAL_V2,
         FORMAT.QVQ_V2B4_P64,
         FORMAT.QVQ_V2B2_P32,
-        FORMAT.QVQ_V2B2_P32_LR,
     },
     METHOD.GGUF: {
         FORMAT.GGUF,
@@ -2836,7 +2833,6 @@ QVQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.QVQ_DUAL_V2,
     FORMAT.QVQ_V2B4_P64,
     FORMAT.QVQ_V2B2_P32,
-    FORMAT.QVQ_V2B2_P32_LR,
 )
 RTN_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.GPTQ,
@@ -2864,7 +2860,6 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.QVQ_DUAL_V2: METHOD.QVQ,
     FORMAT.QVQ_V2B4_P64: METHOD.QVQ,
     FORMAT.QVQ_V2B2_P32: METHOD.QVQ,
-    FORMAT.QVQ_V2B2_P32_LR: METHOD.QVQ,
     FORMAT.GGUF: METHOD.GGUF,
     FORMAT.BITBLAS: METHOD.GPTQ,
     FORMAT.GEMM: METHOD.AWQ,
@@ -3350,8 +3345,6 @@ def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
         if value == FORMAT.QVQ_V2B4_P64:
             return METHOD.QVQ
         if value == FORMAT.QVQ_V2B2_P32:
-            return METHOD.QVQ
-        if value == FORMAT.QVQ_V2B2_P32_LR:
             return METHOD.QVQ
         if value == FORMAT.PAROQUANT:
             return METHOD.PARO
@@ -4007,7 +4000,6 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
             FORMAT.QVQ_DUAL_V2,
             FORMAT.QVQ_V2B4_P64,
             FORMAT.QVQ_V2B2_P32,
-            FORMAT.QVQ_V2B2_P32_LR,
         }:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QVQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.QVQ
@@ -6364,9 +6356,7 @@ class QVQConfig(BaseQuantizeConfig):
     # Block-LDLQ. False is an explicit opt-out for A/B comparisons; True is an
     # explicit request and still requires a supplied/derived gate.
     propagated_bank_selection: Optional[bool] = field(default=None)
-    # These fields describe YAQA/Hessian processing geometry and remain 16x16
-    # for LR32. The serialized LR32 codec geometry is fixed independently at
-    # K32 x N8 by FORMAT.QVQ_V2B2_P32_LR.
+    # These fields describe YAQA/Hessian processing geometry.
     tile_rows: int = field(default=16)
     tile_cols: int = field(default=16)
     # YAQA is the production QVQ lifecycle default; callers that need the
@@ -6454,10 +6444,6 @@ class QVQConfig(BaseQuantizeConfig):
                 raise ValueError(
                     f"QVQConfig: layer `{layer_name}` with `format=qvq_v2b2_p32` only supports W1 through W3.5."
                 )
-            if self.format == FORMAT.QVQ_V2B2_P32_LR and layer_bits > 3.5:
-                raise ValueError(
-                    f"QVQConfig: layer `{layer_name}` with `format=qvq_v2b2_p32_lr` only supports W1 through W3.5."
-                )
             layer_dict["bits"] = layer_bits
         if "yaqa_regularization" in layer_dict:
             value = layer_dict["yaqa_regularization"]
@@ -6531,14 +6517,6 @@ class QVQConfig(BaseQuantizeConfig):
             self.vector_size = 2
             self.trellis_window = 16
             self.bank_count = 2
-        elif self.format == FORMAT.QVQ_V2B2_P32_LR:
-            if self.bits > 3.5:
-                raise ValueError("QVQConfig: `format=qvq_v2b2_p32_lr` supports only rates W1 through W3.5.")
-            if self.bank_count not in (1, 2):
-                raise ValueError("QVQConfig: `format=qvq_v2b2_p32_lr` requires bank_count=2.")
-            self.vector_size = 2
-            self.trellis_window = 16
-            self.bank_count = 2
 
         self.codebook = str(self.codebook).strip().lower()
         pgc16_levels_for_version(self.codebook)
@@ -6562,14 +6540,14 @@ class QVQConfig(BaseQuantizeConfig):
         else:
             raise TypeError("QVQConfig: `viterbi_pruning` must be a ViterbiPruningConfig or dictionary.")
         if (self.yaqa.spectral_refinement or self.yaqa.spectral_push or self.yaqa.spectral_localized) and (
-            self.rounding != "yaqa" or self.format not in (FORMAT.QVQ_V2B2_P32, FORMAT.QVQ_V2B2_P32_LR)
+            self.rounding != "yaqa" or self.format != FORMAT.QVQ_V2B2_P32
         ):
             raise ValueError(
                 "QVQConfig: YAQA spectral experiment requires `format=qvq_v2b2_p32` "
                 "with YAQA rounding."
             )
         if self.yaqa.sample_strategy != "full" and (
-            self.rounding != "yaqa" or self.format not in (FORMAT.QVQ_V2B2_P32, FORMAT.QVQ_V2B2_P32_LR)
+            self.rounding != "yaqa" or self.format != FORMAT.QVQ_V2B2_P32
         ):
             raise ValueError(
                 "QVQConfig: sampled YAQA family selection requires `format=qvq_v2b2_p32` with YAQA rounding."
@@ -6613,7 +6591,7 @@ class QVQConfig(BaseQuantizeConfig):
             else:
                 raise TypeError("QVQConfig: `smooth_swiglu` must be a SmoothSwiGLUConfig, dictionary, or None.")
         if self.module_granular_replay is not None:
-            if self.format not in (FORMAT.QVQ_V2B2_P32, FORMAT.QVQ_V2B2_P32_LR) or self.rounding != "yaqa":
+            if self.format != FORMAT.QVQ_V2B2_P32 or self.rounding != "yaqa":
                 raise ValueError(
                     "QVQConfig: module-granular replay requires `format=qvq_v2b2_p32` with YAQA rounding."
                 )
@@ -6646,7 +6624,7 @@ class QVQConfig(BaseQuantizeConfig):
             raise ValueError("QVQConfig: YAQA does not support quantizing the language-model head.")
         if self.format == FORMAT.QVQ_V2B4_P64 and self.tail_biting_candidates != 1:
             raise ValueError("QVQConfig: `format=qvq_v2b4_p64` initially requires one tail-biting candidate.")
-        if self.format in (FORMAT.QVQ_V2B2_P32, FORMAT.QVQ_V2B2_P32_LR) and self.tail_biting_candidates != 1:
+        if self.format == FORMAT.QVQ_V2B2_P32 and self.tail_biting_candidates != 1:
             raise ValueError("QVQConfig: V2B2-P32 formats initially require one tail-biting candidate.")
         canonical_fields = {
             "tile_rows": (self.tile_rows, 16),
@@ -6671,7 +6649,7 @@ class QVQConfig(BaseQuantizeConfig):
             raise ValueError("QVQConfig: `vector_size=4` supports only rates W1 through W4.")
         if isinstance(self.bank_count, bool) or not isinstance(self.bank_count, int) or self.bank_count not in (1, 2, 4):
             raise ValueError("QVQConfig: `bank_count` must be 1, 2, or 4.")
-        if self.bank_count == 2 and self.format not in (FORMAT.QVQ_V2B2_P32, FORMAT.QVQ_V2B2_P32_LR):
+        if self.bank_count == 2 and self.format != FORMAT.QVQ_V2B2_P32:
             raise ValueError("QVQConfig: `bank_count=2` requires a V2B2-P32 format.")
         if self.bank_count == 4 and self.format not in (FORMAT.QVQ_V4, FORMAT.QVQ_V2B4_P64):
             raise ValueError("QVQConfig: `bank_count=4` requires `format=qvq_v4` or `format=qvq_v2b4_p64`.")
@@ -6680,12 +6658,12 @@ class QVQConfig(BaseQuantizeConfig):
         if self.propagated_bank_selection is not None and not isinstance(self.propagated_bank_selection, bool):
             raise TypeError("QVQConfig: `propagated_bank_selection` must be boolean or None.")
         localized_v2b2_propagation = (
-            self.format in (FORMAT.QVQ_V2B2_P32, FORMAT.QVQ_V2B2_P32_LR)
+            self.format == FORMAT.QVQ_V2B2_P32
             and self.rounding == "yaqa"
             and self.yaqa.spectral_localized
         )
         if (
-            self.format in (FORMAT.QVQ_V2B2_P32, FORMAT.QVQ_V2B2_P32_LR)
+            self.format == FORMAT.QVQ_V2B2_P32
             and self.propagated_bank_selection is True
             and not localized_v2b2_propagation
         ):
@@ -6728,7 +6706,7 @@ class QVQConfig(BaseQuantizeConfig):
         self.pack_dtype = torch.int32
 
     def calculate_bits_per_weight(self):
-        banked_v2 = self.format in (FORMAT.QVQ_V2B4_P64, FORMAT.QVQ_V2B2_P32, FORMAT.QVQ_V2B2_P32_LR)
+        banked_v2 = self.format in (FORMAT.QVQ_V2B4_P64, FORMAT.QVQ_V2B2_P32)
         effective_bpw = self.bits + (2 / 64 if banked_v2 else 0)
         description = " including the segmented-bank selector payload" if banked_v2 else ""
         log.info(
@@ -6772,7 +6750,6 @@ class QVQConfig(BaseQuantizeConfig):
             "dual_v2": self.format == FORMAT.QVQ_DUAL_V2,
             "v2b4_p64": self.format == FORMAT.QVQ_V2B4_P64,
             "v2b2_p32": self.format == FORMAT.QVQ_V2B2_P32,
-            "v2b2_p32_lr": self.format == FORMAT.QVQ_V2B2_P32_LR,
         }
 
 
@@ -7199,7 +7176,6 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         FORMAT.QVQ_DUAL_V2,
         FORMAT.QVQ_V2B4_P64,
         FORMAT.QVQ_V2B2_P32,
-        FORMAT.QVQ_V2B2_P32_LR,
     ):
         return QVQConfig
     if method == METHOD.PARO or format_value == FORMAT.PAROQUANT:

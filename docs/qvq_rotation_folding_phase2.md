@@ -575,10 +575,10 @@ Harness artifacts:
 ### Canonical P32 runtime and recovery oracles
 
 Two stricter no-requantization profiles were added after merging
-`origin/main` at `03144a22`; the bit-exact follow-up is based on latest main
-`60240d22`. These are runtime oracles, not additional quantization arms. Both
-use the A31/A25-compatible transformed-weight plan and materialize one
-canonical per-module P32 payload:
+`origin/main` at `03144a22`; the bit-exact artifact run is based on the
+then-current main `60240d22`. These are runtime oracles, not additional
+quantization arms. Both use the A31/A25-compatible transformed-weight plan and
+materialize one canonical per-module P32 payload:
 
 - `P0` executes those bytes through seven ordinary per-module `QVQLinear`
   calls. No shared-transform or grouped-runtime hook is installed, so the
@@ -704,6 +704,14 @@ seven-minute aggregate run; all five pass in isolation on both this head and
 unmodified latest main `60240d22`. They are recorded as aggregate-suite
 interference, not hidden as a green broad result. Ruff, Python compilation,
 artifact JSON parsing, and `git diff --check` pass.
+
+The branch was subsequently merged with main `c5408f61`, including main's
+repository-wide removal of the inaccurate LR32 experiment. The semantic merge
+keeps direct P32 on CUDA and MLX, keeps grouped P32, and removes LR32's format
+flag, kernels, conversion guards, scripts, and tests. Post-merge validation is
+`30/30` for the exact runtime/harness set and `85 passed, 8 skipped` for the
+Ampere P32, P32-window, folded-axis, and transform-planner matrix. The rebuilt
+CUDA namespace exposes `gemv_grouped_p32` and does not expose `gemv_lr`.
 
 Further fusion opportunities remain even when a transform must remain:
 
