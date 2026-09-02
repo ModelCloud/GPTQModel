@@ -113,8 +113,14 @@ __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix_masked(
   // the raw circular-window funnel result and shifting that temporary again.
   const uint32_t high_byte = __byte_perm(state, 0u, 0x4441u);
   uint32_t mixed = state ^ high_byte ^ bank_mask;
-  mixed = (mixed * kPgc16Multiplier + kPgc16Increment) & 0xffffu;
-  return mixed ^ (mixed >> 7);
+  mixed = mixed * kPgc16Multiplier + kPgc16Increment;
+  uint32_t shifted;
+  asm("bfe.u32 %0, %1, 7, 9;" : "=r"(shifted) : "r"(mixed));
+  return mixed ^ shifted;
+}
+
+__device__ __forceinline__ uint32_t qvq_wgmma_high_byte(uint32_t value) {
+  return __byte_perm(value, 0u, 0x4441u);
 }
 
 __device__ __forceinline__ Element qvq_wgmma_load_level(
@@ -299,12 +305,12 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
 
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
-  fragment(0) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed00 >> 8);
-  fragment(1) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed01 >> 8);
+  fragment(0) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, qvq_wgmma_high_byte(mixed00));
+  fragment(1) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, qvq_wgmma_high_byte(mixed01));
   fragment(2) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed00 & 0xffu);
   fragment(3) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed01 & 0xffu);
-  fragment(4) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed10 >> 8);
-  fragment(5) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed11 >> 8);
+  fragment(4) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, qvq_wgmma_high_byte(mixed10));
+  fragment(5) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, qvq_wgmma_high_byte(mixed11));
   fragment(6) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed10 & 0xffu);
   fragment(7) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed11 & 0xffu);
 }
