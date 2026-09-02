@@ -179,3 +179,7 @@ Artifacts and driver:
 
 Nsight reports and source/raw exports are kept outside Git under
 `/root/qvq-profiler-artifacts/phase9-half2-precondition/`.
+
+Phase 10 subsequently promoted exact SiLU fusion into the low stage.  See
+`qvq_a41_r0_phase10_h100_fused_silu.md`; the remaining vectorization target is
+the low-stage bit-1 lane exchange.

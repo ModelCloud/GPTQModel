@@ -1,0 +1,156 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "153ce6c5ece770d357e0411a166ca7084f5b8242",
+  "rows": [
+    {
+      "activated_gate_bytes_eliminated": 16384,
+      "better_than_unfused": true,
+      "bit_exact": true,
+      "fused_silu_precondition": {
+        "max_ms": 0.004413439929485321,
+        "mean_ms": 0.004380870428681374,
+        "median_ms": 0.004382400065660477,
+        "min_ms": 0.004295679926872254,
+        "p95_ms": 0.004386560022830963
+      },
+      "gpu_launches": {
+        "fused": 2,
+        "unfused": 3
+      },
+      "m": 1,
+      "n": 8192,
+      "speedup_vs_unfused": 1.3975903057311971,
+      "unfused_silu_precondition": {
+        "max_ms": 0.0062291198968887325,
+        "mean_ms": 0.006125247997045517,
+        "median_ms": 0.006124799847602844,
+        "min_ms": 0.006096640229225158,
+        "p95_ms": 0.0061363202333450315
+      },
+      "workspace_bytes": 16384
+    },
+    {
+      "activated_gate_bytes_eliminated": 32768,
+      "better_than_unfused": true,
+      "bit_exact": true,
+      "fused_silu_precondition": {
+        "max_ms": 0.004572800099849701,
+        "mean_ms": 0.004561439967155457,
+        "median_ms": 0.004563199877738952,
+        "min_ms": 0.0044915199279785155,
+        "p95_ms": 0.004568319916725159
+      },
+      "gpu_launches": {
+        "fused": 2,
+        "unfused": 3
+      },
+      "m": 2,
+      "n": 8192,
+      "speedup_vs_unfused": 1.34600280389494,
+      "unfused_silu_precondition": {
+        "max_ms": 0.006223359704017639,
+        "mean_ms": 0.0061429760277271275,
+        "median_ms": 0.006142079830169678,
+        "min_ms": 0.006135680079460144,
+        "p95_ms": 0.0061471998691558834
+      },
+      "workspace_bytes": 32768
+    },
+    {
+      "activated_gate_bytes_eliminated": 65536,
+      "better_than_unfused": true,
+      "bit_exact": true,
+      "fused_silu_precondition": {
+        "max_ms": 0.004727039933204651,
+        "mean_ms": 0.004662649568915367,
+        "median_ms": 0.00466048002243042,
+        "min_ms": 0.0046572801470756535,
+        "p95_ms": 0.0046713599562644955
+      },
+      "gpu_launches": {
+        "fused": 2,
+        "unfused": 3
+      },
+      "m": 4,
+      "n": 8192,
+      "speedup_vs_unfused": 1.3327382009027253,
+      "unfused_silu_precondition": {
+        "max_ms": 0.006243199706077575,
+        "mean_ms": 0.006211327993869782,
+        "median_ms": 0.006211199760437012,
+        "min_ms": 0.006170880198478699,
+        "p95_ms": 0.006216959953308105
+      },
+      "workspace_bytes": 65536
+    },
+    {
+      "activated_gate_bytes_eliminated": 131072,
+      "better_than_unfused": true,
+      "bit_exact": true,
+      "fused_silu_precondition": {
+        "max_ms": 0.004816640019416809,
+        "mean_ms": 0.0047262719839811325,
+        "median_ms": 0.004724479913711548,
+        "min_ms": 0.004718720018863678,
+        "p95_ms": 0.004733439981937409
+      },
+      "gpu_launches": {
+        "fused": 2,
+        "unfused": 3
+      },
+      "m": 8,
+      "n": 8192,
+      "speedup_vs_unfused": 1.3501761589995513,
+      "unfused_silu_precondition": {
+        "max_ms": 0.006394240260124207,
+        "mean_ms": 0.006379040038585662,
+        "median_ms": 0.006378880143165589,
+        "min_ms": 0.006334720253944397,
+        "p95_ms": 0.006383360028266906
+      },
+      "workspace_bytes": 131072
+    },
+    {
+      "activated_gate_bytes_eliminated": 262144,
+      "better_than_unfused": true,
+      "bit_exact": true,
+      "fused_silu_precondition": {
+        "max_ms": 0.005187839865684509,
+        "mean_ms": 0.005081446409225464,
+        "median_ms": 0.005078399777412415,
+        "min_ms": 0.005059199929237365,
+        "p95_ms": 0.00510591983795166
+      },
+      "gpu_launches": {
+        "fused": 2,
+        "unfused": 3
+      },
+      "m": 16,
+      "n": 8192,
+      "speedup_vs_unfused": 1.3319470886690725,
+      "unfused_silu_precondition": {
+        "max_ms": 0.00685696005821228,
+        "mean_ms": 0.006766118407249451,
+        "median_ms": 0.006764159798622132,
+        "min_ms": 0.0067558401823043825,
+        "p95_ms": 0.006773759722709656
+      },
+      "workspace_bytes": 262144
+    }
+  ],
+  "source_fingerprint": "0deaa84788be11317ba2e4c120a46cf98b09f47a889520c2bf97729e6b0d590a",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 100,
+    "warmup": 30
+  },
+  "workload": "exact FP16 SiLU plus N=8192 SwiGLU/down precondition"
+}
