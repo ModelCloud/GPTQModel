@@ -432,6 +432,17 @@ def qvq_p32_window_ampere(
             bank_alt_id,
             32,
         )
+    if split_count == 0 and out_features == 5120 and input.shape == (16, 17408):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            24,
+        )
     if split_count == 0 and input.shape[0] == 1:
         shape = (int(input.shape[1]), int(out_features))
         measured_m1_projection_split = None

@@ -2143,6 +2143,18 @@ improvement** versus fetched main. Artifacts are
 `v19_m16_down_n64_control_deep.json` and
 `v19_m16_down_wide_n128_candidate_{deep,verify8000}.json`.
 
+The thirty-fourth v19 progression retunes the wider M16 long-K projection
+from split 32 to split 24 and pins the exact geometry. The fixed
+200-warmup/8000-iteration confirmation measures
+`0.138240/0.141312/0.141312/0.142336 ms`, a **1.0145x** incremental
+speedup (1.434% lower latency). Combined with N128 ownership this is a
+**1.0437x** speedup (4.184% lower latency) versus the narrow split-32
+control, taking affected-case log weighting to **2.772% cumulative
+improvement** versus fetched main. Split 20 regresses every rate to
+`0.146432-0.150528 ms` and is rejected. Diagnostics are
+`v19_m16_down_wide_n128_split{20,24}_deep.json` and
+`v19_m16_down_wide_n128_split24_verify8000.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
