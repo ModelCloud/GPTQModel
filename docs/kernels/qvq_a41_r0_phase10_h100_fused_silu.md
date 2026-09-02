@@ -241,9 +241,10 @@ Git under `/root/qvq-profiler-artifacts/phase10-fused-silu/`.
 
 ## Next experiment
 
-The next representation-level target is `half2` vectorization of the
-precondition low stage.  Its bit-1 butterfly crosses the two lanes in each
-packed value, so promotion requires an exact lane-exchange design and matched
-shared-memory bank-conflict profiling.  Further isolated SiLU algebra is a
-lower priority: Phase 10 already shows that removing the launch/materialized
-boundary matters more than shaving the activation dependency chain.
+Phase 11 subsequently promoted exact `half2` vectorization of the
+precondition low stage. Its bit-1 lane exchange and warp-local packed
+butterflies are documented in
+`qvq_a41_r0_phase11_h100_half2_precondition_low.md`. Further isolated SiLU
+algebra remains a lower priority: Phase 10 shows that removing the
+launch/materialized boundary matters more than shaving the activation
+dependency chain.

@@ -1,0 +1,201 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "e68634d45905522a1090007aae6cb01ded063685",
+  "rows": [
+    {
+      "better_than_scalar_low": true,
+      "bit_exact": true,
+      "gpu_launches": {
+        "half2_low": 2,
+        "scalar_low": 2
+      },
+      "half2_low_precondition": {
+        "max_ms": 0.004448640048503876,
+        "mean_ms": 0.00433091837366422,
+        "median_ms": 0.004329600036144256,
+        "min_ms": 0.004325119853019714,
+        "p95_ms": 0.004336000084877014
+      },
+      "low_stage_geometry": {
+        "half2": {
+          "threads_per_block": 256,
+          "warps_per_block": 8
+        },
+        "scalar": {
+          "threads_per_block": 256,
+          "warps_per_block": 8
+        }
+      },
+      "m": 1,
+      "n": 8192,
+      "scalar_low_precondition": {
+        "max_ms": 0.004688639938831329,
+        "mean_ms": 0.0046144746959209445,
+        "median_ms": 0.0046143999695777895,
+        "min_ms": 0.0046009600162506105,
+        "p95_ms": 0.004618879854679108
+      },
+      "speedup_vs_scalar_low": 1.065779732782699,
+      "workspace_bytes": 16384
+    },
+    {
+      "better_than_scalar_low": true,
+      "bit_exact": true,
+      "gpu_launches": {
+        "half2_low": 2,
+        "scalar_low": 2
+      },
+      "half2_low_precondition": {
+        "max_ms": 0.004518400132656098,
+        "mean_ms": 0.00440360533396403,
+        "median_ms": 0.004401920139789581,
+        "min_ms": 0.004373120069503784,
+        "p95_ms": 0.004425599873065948
+      },
+      "low_stage_geometry": {
+        "half2": {
+          "threads_per_block": 256,
+          "warps_per_block": 8
+        },
+        "scalar": {
+          "threads_per_block": 256,
+          "warps_per_block": 8
+        }
+      },
+      "m": 2,
+      "n": 8192,
+      "scalar_low_precondition": {
+        "max_ms": 0.004702720046043396,
+        "mean_ms": 0.0045582016368707024,
+        "median_ms": 0.004557439982891083,
+        "min_ms": 0.004551680088043213,
+        "p95_ms": 0.004561280012130737
+      },
+      "speedup_vs_scalar_low": 1.035330001036533,
+      "workspace_bytes": 32768
+    },
+    {
+      "better_than_scalar_low": true,
+      "bit_exact": true,
+      "gpu_launches": {
+        "half2_low": 2,
+        "scalar_low": 2
+      },
+      "half2_low_precondition": {
+        "max_ms": 0.004670720100402832,
+        "mean_ms": 0.004628595210115115,
+        "median_ms": 0.004628480076789856,
+        "min_ms": 0.004615040123462677,
+        "p95_ms": 0.004633600115776062
+      },
+      "low_stage_geometry": {
+        "half2": {
+          "threads_per_block": 256,
+          "warps_per_block": 8
+        },
+        "scalar": {
+          "threads_per_block": 256,
+          "warps_per_block": 8
+        }
+      },
+      "m": 4,
+      "n": 8192,
+      "scalar_low_precondition": {
+        "max_ms": 0.0047257599234580994,
+        "mean_ms": 0.004651121088862419,
+        "median_ms": 0.004650880098342896,
+        "min_ms": 0.004645760059356689,
+        "p95_ms": 0.00465472012758255
+      },
+      "speedup_vs_scalar_low": 1.004839606346232,
+      "workspace_bytes": 65536
+    },
+    {
+      "better_than_scalar_low": true,
+      "bit_exact": true,
+      "gpu_launches": {
+        "half2_low": 2,
+        "scalar_low": 2
+      },
+      "half2_low_precondition": {
+        "max_ms": 0.004570240080356598,
+        "mean_ms": 0.004515884796778361,
+        "median_ms": 0.004536640048027039,
+        "min_ms": 0.004426240026950836,
+        "p95_ms": 0.004552319943904877
+      },
+      "low_stage_geometry": {
+        "half2": {
+          "threads_per_block": 256,
+          "warps_per_block": 8
+        },
+        "scalar": {
+          "threads_per_block": 256,
+          "warps_per_block": 8
+        }
+      },
+      "m": 8,
+      "n": 8192,
+      "scalar_low_precondition": {
+        "max_ms": 0.004885759949684143,
+        "mean_ms": 0.004845162684718768,
+        "median_ms": 0.004844799935817719,
+        "min_ms": 0.004840959906578064,
+        "p95_ms": 0.004849280118942261
+      },
+      "speedup_vs_scalar_low": 1.067926898437688,
+      "workspace_bytes": 131072
+    },
+    {
+      "better_than_scalar_low": true,
+      "bit_exact": true,
+      "gpu_launches": {
+        "half2_low": 2,
+        "scalar_low": 2
+      },
+      "half2_low_precondition": {
+        "max_ms": 0.0047942399978637695,
+        "mean_ms": 0.0046938688367605215,
+        "median_ms": 0.004693120121955872,
+        "min_ms": 0.004688639938831329,
+        "p95_ms": 0.0046969598531723025
+      },
+      "low_stage_geometry": {
+        "half2": {
+          "threads_per_block": 256,
+          "warps_per_block": 8
+        },
+        "scalar": {
+          "threads_per_block": 256,
+          "warps_per_block": 8
+        }
+      },
+      "m": 16,
+      "n": 8192,
+      "scalar_low_precondition": {
+        "max_ms": 0.005175039768218994,
+        "mean_ms": 0.005094574908415477,
+        "median_ms": 0.005093759894371033,
+        "min_ms": 0.005089920163154602,
+        "p95_ms": 0.0050995200872421265
+      },
+      "speedup_vs_scalar_low": 1.0853674659936454,
+      "workspace_bytes": 262144
+    }
+  ],
+  "source_fingerprint": "c39520515811b195bedf0f80fc51f1918e9e74d4b6b984e822781bd7f9209ac0",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 300,
+    "warmup": 30
+  },
+  "workload": "exact fused-SiLU plus N=8192 SwiGLU/down precondition"
+}
