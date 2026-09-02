@@ -2155,6 +2155,25 @@ improvement** versus fetched main. Split 20 regresses every rate to
 `v19_m16_down_wide_n128_split{20,24}_deep.json` and
 `v19_m16_down_wide_n128_split24_verify8000.json`.
 
+The thirty-fifth v19 progression extends N128 ownership to M8 MLP-gate/up
+while retaining the 128-thread CTA. This differs from the rejected v16
+experiment, which doubled both N ownership and the CTA to 256 threads and
+regressed by 6-12%. Against the accepted narrow split-10 control medians of
+`0.128000/0.130048/0.130048/0.131072 ms`, the
+200-warmup/8000-iteration candidate measures
+`0.116736/0.119808/0.119808/0.121856 ms`. The affected geomean speedup is
+**1.0857x** (7.897% lower latency), maximum absolute error stays below
+`4.39e-05`, and affected-case log weighting reaches **3.014% cumulative
+improvement** versus fetched main. Artifacts are
+`v19_wide_n128_m8_gate_nonregression_deep.json` and
+`v19_m8_gate_wide_n128_128t_candidate_{v2_deep,verify8000}.json`.
+
+The first M8 prototype exposed a correctness bug rather than a performance
+result: the wide bank-ID stage copied eight IDs only for full-row kernels,
+leaving the second M8 tile group uninitialized. Extending that stage to
+fixed active-row kernels restores exactness before timing; the invalid
+artifact without the `v2` suffix is retained only as a failed diagnostic.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
