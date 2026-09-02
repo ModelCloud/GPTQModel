@@ -2352,6 +2352,12 @@ improvement** versus fetched main. Artifacts are
 `v19_m16_linearz_pow2_control.json`, `v19_m16_linearz_pow2_candidate.json`,
 and `v19_m16_linearz_pow2_candidate_verify8000.json`.
 
+A direct Hopper-style `mad.lo.u32` rewrite of the paired PGC16 multiply was
+also rejected on Ampere: M16 full-Q W2 regressed from `0.097280` to
+`0.100352 ms` while preserving exactness. The compiler’s existing integer
+schedule is retained; the diagnostic is
+`v19_m16_decode_mad_candidate.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
