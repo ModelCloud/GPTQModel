@@ -2037,6 +2037,13 @@ maximum absolute error below `3.63e-05`. Artifacts are
 corresponding `s{10,16}_verify8000.json` pair. Affected-case log weighting now
 reaches **2.222% cumulative improvement** versus fetched main.
 
+The adjacent M16 full-Q wave audit found no additional rate-specific win.
+Against split 16, split 10 and split 12 both tie W2.5 at `0.109568 ms`,
+regress W3 from `0.108544` to `0.109568 ms`, and regress W3.5 from
+`0.109568` to `0.110592 ms`; the earlier W2 audit also rejected both shorter
+waves. The split-16 policy is retained for every full-Q rate. Diagnostics are
+`v19_m16_fullq_remaining_resplit_s{10_candidate,12_candidate,16_control}_deep.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
