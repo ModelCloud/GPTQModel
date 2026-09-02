@@ -2299,6 +2299,13 @@ affected-case log weighting reaches **3.997% cumulative improvement** versus
 fetched main. Artifacts are `v19_m16_fullq_pow2_control.json` and
 `v19_m16_fullq_pow2_candidate.json`.
 
+The same W2 mask was screened on M16 attention-out and linear-QKV. Attention
+out tied all four rates. Linear-QKV also tied W2/W2.5/W3; an apparent W3.5
+one-tick improvement did not identify a changed instruction path because the
+power-of-two specialization is W2-only, so neither probe is dispatched.
+Diagnostics are `v19_m16_attention_pow2_{control,candidate}.json` and
+`v19_m16_qkv_pow2_{control,candidate,verify8000}.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
