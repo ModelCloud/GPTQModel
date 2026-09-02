@@ -594,11 +594,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
 #pragma unroll
     for (int k_block = 0; k_block < kP32K16TilesPerStage; ++k_block) {
       auto& fragment_a = (k_block & 1) == 0 ? fragment_a0 : fragment_a1;
-      uint32_t bank_id = 0;
-      if (lane == 0) {
-        bank_id = s_bank_ids(bank_n16_offset + warp, k_block, read_stage);
-      }
-      bank_id = __shfl_sync(0xffffffffu, bank_id, 0);
+      const uint32_t bank_id = s_bank_ids(bank_n16_offset + warp, k_block, read_stage);
       if (k_block >= 2) {
         cute::warpgroup_wait<1>();
       }
