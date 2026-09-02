@@ -2227,6 +2227,15 @@ that exact K/N pair; other M8/N5120 inputs retain the original narrow path.
 Artifacts are `v19_m8_attention_n64_control_deep.json` and
 `v19_m8_attention_wide_n128_candidate_{deep,verify8000}.json`.
 
+The forty-second v19 progression retunes the widened M8 attention-out route
+from split 32 to split 24. The fixed 200-warmup/8000-iteration confirmation
+measures `0.051200/0.053248/0.053248/0.052224 ms`, a **1.0147x** incremental
+speedup (1.446% lower latency) over split 32 and a **1.0635x** combined
+speedup (5.972% lower latency) versus the narrow control. The cumulative
+affected-case log weighting reaches **3.939% improvement** versus fetched
+main. Split 24 is retained; its error remains below `2.67e-05`. Diagnostic
+artifacts are `v19_m8_attention_wide_n128_split24_{deep,verify8000}.json`.
+
 The fortieth v19 progression applies the same layout to the measured M8
 linear-Z tuple `(K,N)=(5120,6144)`. Against the fresh narrow split-32
 control medians of `0.055296/0.056320/0.055296/0.056320 ms`, the
