@@ -2325,6 +2325,11 @@ The M2 full-Q scalar W2 mask likewise tied all four rates and was rejected;
 the existing scalar wrap policy remains in place. Its diagnostic pair is
 `v19_m2_fullq_pow2_{control,candidate}.json`.
 
+The M4 full-Q scalar W2 mask also tied W2 and showed no attributable gain on
+the other rates; it was rejected after fixing an initial temporary parenthesis
+error in the test condition. Its diagnostic pair is
+`v19_m4_fullq_pow2_{control,candidate}.json`.
+
 The forty-seventh v19 progression applies the exact power-of-two circular-word
 wrap to W2 in the widened M16 long-K MLP-down tuple
 `(K,N)=(17408,5120)`. Against the split-24 control medians of
