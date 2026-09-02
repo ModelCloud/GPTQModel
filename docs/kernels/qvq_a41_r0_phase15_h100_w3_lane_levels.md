@@ -211,11 +211,8 @@ Artifacts:
 
 ## Next experiment
 
-The accepted layout still leaves 1.05M bank conflicts because two adjacent
-lanes share one bank pair. A full lane-private 32-bit table could remove that
-last pair conflict but would exceed the default shared-memory budget. The next
-phase should instead test whether a smaller exact subword/bank layout can
-separate each lane without increasing the 16-KiB table, or reduce the added
-high-index/address instructions while preserving the lane mapping. Any such
-candidate must retain Phase 15's conflict/wavefront reduction; returning to
-global/L1 or adding a fourth WGMMA fragment is already disproven.
+Phase 16 keeps this exact 16-KiB lane table and uses its two half-word slots as
+canonical and high-permuted views. That removes the hot-loop high-index
+permutation without changing the table footprint or returning the level loads
+to global/L1. See
+`docs/kernels/qvq_a41_r0_phase16_h100_w3_dual_view_levels.md`.
