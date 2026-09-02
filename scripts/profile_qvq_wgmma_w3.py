@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -28,7 +29,26 @@ from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_m16_tma,
     qvq_p32_window_wgmma_w3_m16,
 )
-from scripts.benchmark_qvq_p32_window_vs_machete import QWEN38_27B_SHAPES
+
+
+@dataclass(frozen=True)
+class ShapeCase:
+    """Qwen3.8-27B projection shape used by the Hopper profiling harness."""
+
+    name: str
+    in_features: int
+    out_features: int
+
+
+QWEN38_27B_SHAPES = (
+    ShapeCase("qwen38_full_q_gate", 5120, 12288),
+    ShapeCase("qwen38_full_kv", 5120, 1024),
+    ShapeCase("qwen38_attn_out", 6144, 5120),
+    ShapeCase("qwen38_linear_qkv", 5120, 10240),
+    ShapeCase("qwen38_linear_z", 5120, 6144),
+    ShapeCase("qwen38_mlp_gate_up", 5120, 17408),
+    ShapeCase("qwen38_mlp_down", 17408, 5120),
+)
 
 
 def _args() -> argparse.Namespace:
