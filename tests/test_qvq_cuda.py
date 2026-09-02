@@ -392,6 +392,50 @@ def test_qvq_cuda_range_safe_hadamard_is_bitwise_identical_when_prescale_fits_fp
     assert torch.equal(range_safe, original)
 
 
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_hadamard_direct_padding_is_exact_and_graph_stable(m):
+    n = 2048
+    generator = torch.Generator(device="cuda").manual_seed(20261800 + m)
+    x = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float16
+    )
+    pre_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    expected = qvq_cuda_hadamard(x, pre_scale=pre_scale, scale_mode=2)
+    actual = qvq_cuda_hadamard(
+        x,
+        pre_scale=pre_scale,
+        scale_mode=2,
+        pad_to_16=True,
+    )
+    assert actual.shape == (16, n)
+    assert torch.equal(actual[:m].view(torch.int16), expected.view(torch.int16))
+    assert torch.count_nonzero(actual[m:]).item() == 0
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard(
+            x,
+            pre_scale=pre_scale,
+            scale_mode=2,
+            pad_to_16=True,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
+def test_qvq_cuda_hadamard_direct_padding_guards():
+    x = torch.ones((1, 2048), device="cuda", dtype=torch.float16)
+    with pytest.raises(TypeError, match="pad_to_16"):
+        qvq_cuda_hadamard(x, pad_to_16=1)
+    with pytest.raises(ValueError, match="nonempty 2D"):
+        qvq_cuda_hadamard(x.expand(17, -1).contiguous(), pad_to_16=True)
+    with pytest.raises(ValueError, match="nonempty 2D"):
+        qvq_cuda_hadamard(x.reshape(1, 1, 2048), pad_to_16=True)
+
+
 def test_qvq_cuda_float32_hadamard_preserves_postscale_and_bias_precision():
     generator = torch.Generator().manual_seed(20260813)
     x = torch.randn((3, 32), generator=generator, dtype=torch.float32).cuda()

@@ -200,6 +200,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_fused_silu_precondition_low_launches: int = 0
     h100_half2_precondition_low_launches: int = 0
     h100_direct_padded_precondition_launches: int = 0
+    h100_direct_padded_input_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -228,6 +229,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_fused_silu_precondition_low_launches": self.h100_fused_silu_precondition_low_launches,
             "h100_half2_precondition_low_launches": self.h100_half2_precondition_low_launches,
             "h100_direct_padded_precondition_launches": self.h100_direct_padded_precondition_launches,
+            "h100_direct_padded_input_launches": self.h100_direct_padded_input_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -254,6 +256,7 @@ class QVQHopperGroupedRuntime:
         self._payload: QVQHopperGroupedP32Payload | None = None
         self._payload_source_key: tuple[Any, ...] | None = None
         self._h100_multiblock_intermediate_enabled = False
+        self._h100_direct_padded_input_enabled = False
         self._input: torch.Tensor | None = None
         self._input_version: int | None = None
         self._outputs: tuple[torch.Tensor, ...] | None = None
@@ -284,6 +287,7 @@ class QVQHopperGroupedRuntime:
         self._payload = None
         self._payload_source_key = None
         self._h100_multiblock_intermediate_enabled = False
+        self._h100_direct_padded_input_enabled = False
         self.telemetry.grouped_window_bytes = 0
         self.telemetry.grouped_selector_bytes = 0
         self.telemetry.child_window_bytes_avoided = 0
@@ -358,6 +362,12 @@ class QVQHopperGroupedRuntime:
             self.category == "gate_up"
             and len(children) == 2
             and all(child.out_features == 8192 for child in children)
+            and properties.name == "NVIDIA H100"
+            and (properties.major, properties.minor) == (9, 0)
+        )
+        self._h100_direct_padded_input_enabled = (
+            children[0].input_hadamard
+            and children[0].in_features == 2048
             and properties.name == "NVIDIA H100"
             and (properties.major, properties.minor) == (9, 0)
         )
@@ -462,15 +472,23 @@ class QVQHopperGroupedRuntime:
         children = self._children()
         rows = x.numel() // children[0].in_features
         x_2d = x.reshape(rows, children[0].in_features).to(torch.float16)
-        transformed = children[0]._qvq_prepare_inference_input(x_2d, torch.float16)
-        if rows == 16:
+        payload = self._ensure_payload()
+        direct_pad = self._h100_direct_padded_input_enabled and rows < 16
+        transformed = children[0]._qvq_prepare_inference_input(
+            x_2d,
+            torch.float16,
+            pad_to_16=direct_pad,
+        )
+        if direct_pad:
+            padded = transformed
+            self.telemetry.h100_direct_padded_input_launches += 1
+        elif rows == 16:
             padded = transformed.contiguous()
         else:
             padded = torch.zeros(
                 (16, children[0].in_features), device=x.device, dtype=torch.float16
             )
             padded[:rows].copy_(transformed)
-        payload = self._ensure_payload()
         from ..utils.qvq_cuda import _pgc16_levels
 
         grouped_inner = (

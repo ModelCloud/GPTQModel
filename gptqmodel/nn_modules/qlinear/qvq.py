@@ -81,6 +81,7 @@ def _qvq_hadamard_fused(
     post_scale: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
     scale_mode: int = 0,
+    pad_to_16: bool = False,
 ) -> torch.Tensor:
     """One fused Hadamard launch (CUDA or CPU AVX-512); Python butterfly fallback otherwise.
 
@@ -129,7 +130,16 @@ def _qvq_hadamard_fused(
             if scale_mode >= 2 or x.dtype == torch.float32
             else (0 if n >= _FP16_STABLE_HADAMARD_MIN_WIDTH else 1)
         )
-        return qvq_cuda_hadamard(x, pre_scale=pre_scale, post_scale=post_scale, bias=bias, scale_mode=mode)
+        return qvq_cuda_hadamard(
+            x,
+            pre_scale=pre_scale,
+            post_scale=post_scale,
+            bias=bias,
+            scale_mode=mode,
+            pad_to_16=pad_to_16,
+        )
+    if pad_to_16:
+        raise RuntimeError("direct padded QVQ Hadamard requires the native CUDA path")
     if x.device.type == "cuda" and x.dtype == torch.float32 and scale_mode in (3, 4):
         return _qvq_fp16_emulated_hadamard_fallback(
             x,
@@ -1300,6 +1310,8 @@ class QVQLinear(BaseQuantLinear):
         self,
         x_2d: torch.Tensor,
         compute_dtype: torch.dtype,
+        *,
+        pad_to_16: bool = False,
     ) -> torch.Tensor:
         """Apply the exact inference-side ``SU -> Hadamard`` transform.
 
@@ -1310,6 +1322,8 @@ class QVQLinear(BaseQuantLinear):
         """
 
         if not self.input_hadamard:
+            if pad_to_16:
+                raise RuntimeError("direct padded input requires an input Hadamard")
             return x_2d * self._cached_cast("SU", compute_dtype)
         return _qvq_hadamard_fused(
             x_2d,
@@ -1320,6 +1334,7 @@ class QVQLinear(BaseQuantLinear):
                 and self.in_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
                 else 1
             ),
+            pad_to_16=pad_to_16,
         )
 
     def _qvq_recover_inference_output(

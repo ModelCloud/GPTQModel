@@ -393,6 +393,9 @@ def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
     assert telemetry[0]["payload_builds"] == 1
     assert telemetry[0]["grouped_window_bytes"] == expected_window_bytes
     assert telemetry[0]["child_window_bytes_avoided"] == expected_window_bytes
+    assert telemetry[0]["h100_direct_padded_input_launches"] == (
+        1 if logical_m < 16 else 0
+    )
     if category == "gate_up":
         assert telemetry[0]["paired_recovery_launches"] == 1
         assert telemetry[0]["independent_recovery_children"] == 0
@@ -691,6 +694,7 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     assert {entry["category"] for entry in telemetry} == {"qkv", "gate_up"}
     assert all(entry["grouped_launches"] >= 4 for entry in telemetry)
     assert all(entry["plain_fallbacks"] == 0 for entry in telemetry)
+    assert all(entry["h100_direct_padded_input_launches"] >= 4 for entry in telemetry)
     gate_up_telemetry = next(
         entry for entry in telemetry if entry["category"] == "gate_up"
     )

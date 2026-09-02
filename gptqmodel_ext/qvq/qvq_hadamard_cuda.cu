@@ -62,7 +62,7 @@ __device__ __forceinline__ float round_fp16_unless_overflow(float value) {
 
 // One block per row; the row lives in dynamic shared memory. log2n must be >= 1
 // (n >= 2) and n * sizeof(Scalar) must fit the device's dynamic shared limit.
-template <typename Scalar>
+template <typename Scalar, bool PadTo16 = false>
 __global__ void __launch_bounds__(kHadamardThreads) qvq_hadamard_kernel(
     const Scalar* __restrict__ input,
     Scalar* __restrict__ output,
@@ -70,7 +70,8 @@ __global__ void __launch_bounds__(kHadamardThreads) qvq_hadamard_kernel(
     const Scalar* __restrict__ post_scale,  // optional, [n]
     const Scalar* __restrict__ bias,        // optional, [n]
     int n,
-    int scale_mode) {
+    int scale_mode,
+    int logical_rows) {
   // scale_mode 0 mirrors matmul_hadU_stable (normalize FIRST, fp16(sqrtf(n))
   // divisor); scale_mode 1 mirrors matmul_hadU (normalize LAST, float sqrtf(n)
   // divisor). Mode 2 is the range-safe QVQ input epilogue: fuse x*SU/sqrt(n)
@@ -181,6 +182,20 @@ __global__ void __launch_bounds__(kHadamardThreads) qvq_hadamard_kernel(
           : QvqHadamardTraits<Scalar>::to_float(QvqHadamardTraits<Scalar>::from_float(value));
     }
     out_row[i] = QvqHadamardTraits<Scalar>::from_float(value);
+  }
+
+  // Hopper P32 consumes exactly sixteen rows.  A padded specialization lets
+  // the logical transform blocks also own the disjoint zero tail, deleting a
+  // separate allocation/fill/copy boundary.  No padded row participates in a
+  // butterfly and every valid-row instruction above is unchanged.
+  if constexpr (PadTo16) {
+    for (int padded_row = logical_rows + row; padded_row < 16;
+         padded_row += logical_rows) {
+      Scalar* padded = output + static_cast<int64_t>(padded_row) * n;
+      for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        padded[i] = QvqHadamardTraits<Scalar>::from_float(0.0f);
+      }
+    }
   }
 }
 
@@ -737,7 +752,8 @@ at::Tensor qvq_hadamard_cuda(
     const c10::optional<at::Tensor>& pre_scale,
     const c10::optional<at::Tensor>& post_scale,
     const c10::optional<at::Tensor>& bias,
-    int64_t scale_mode) {
+    int64_t scale_mode,
+    bool pad_to_16) {
   TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor");
   TORCH_CHECK(input.dim() >= 1, "input must be at least rank one");
   TORCH_CHECK(input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16 ||
@@ -756,6 +772,8 @@ at::Tensor qvq_hadamard_cuda(
   const int n = static_cast<int>(n64);
   const int64_t rows = input.numel() / n;
   TORCH_CHECK(rows <= std::numeric_limits<int>::max(), "row count exceeds int32 kernel limit");
+  TORCH_CHECK(!pad_to_16 || (input.dim() == 2 && rows > 0 && rows <= 16),
+              "padded Hadamard requires a nonempty 2D input with at most 16 rows");
 
   const auto check_optional = [&](const c10::optional<at::Tensor>& t, const char* name) {
     if (t.has_value()) {
@@ -781,10 +799,12 @@ at::Tensor qvq_hadamard_cuda(
   TORCH_CHECK(smem_bytes <= static_cast<size_t>(properties.sharedMemPerBlockOptin),
               "n too large for the device dynamic shared memory limit");
 
-  at::Tensor output = at::empty_like(input);
+  at::Tensor output = pad_to_16
+      ? at::empty({16, n64}, input.options())
+      : at::empty_like(input);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const dim3 grid(static_cast<unsigned int>(rows));
-#define QVQ_HADAMARD_LAUNCH(SCALAR)                                                                                \
+#define QVQ_HADAMARD_LAUNCH(SCALAR, PAD)                                                                           \
   {                                                                                                               \
     const SCALAR* in_ptr = reinterpret_cast<const SCALAR*>(input.const_data_ptr());                                \
     SCALAR* out_ptr = reinterpret_cast<SCALAR*>(output.mutable_data_ptr());                                        \
@@ -797,17 +817,31 @@ at::Tensor qvq_hadamard_cuda(
     const SCALAR* bia = bias.has_value()                                                                           \
         ? reinterpret_cast<const SCALAR*>(bias->const_data_ptr())                                                  \
         : nullptr;                                                                                                 \
-    qvq_hadamard_kernel<SCALAR><<<grid, kHadamardThreads, smem_bytes, stream>>>(                                   \
-        in_ptr, out_ptr, pre, post, bia, n, static_cast<int>(scale_mode));                                          \
+    qvq_hadamard_kernel<SCALAR, PAD><<<grid, kHadamardThreads, smem_bytes, stream>>>(                              \
+        in_ptr, out_ptr, pre, post, bia, n, static_cast<int>(scale_mode), static_cast<int>(rows));                  \
   }
   if (input.scalar_type() == at::kHalf) {
-    QVQ_HADAMARD_LAUNCH(half)
+    if (pad_to_16) {
+      QVQ_HADAMARD_LAUNCH(half, true)
+    } else {
+      QVQ_HADAMARD_LAUNCH(half, false)
+    }
   } else if (input.scalar_type() == at::kBFloat16) {
-    QVQ_HADAMARD_LAUNCH(nv_bfloat16)
+    if (pad_to_16) {
+      QVQ_HADAMARD_LAUNCH(nv_bfloat16, true)
+    } else {
+      QVQ_HADAMARD_LAUNCH(nv_bfloat16, false)
+    }
   } else {
     C10_CUDA_CHECK(cudaFuncSetAttribute(
-        qvq_hadamard_kernel<float>, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
-    QVQ_HADAMARD_LAUNCH(float)
+        qvq_hadamard_kernel<float, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
+    if (pad_to_16) {
+      C10_CUDA_CHECK(cudaFuncSetAttribute(
+          qvq_hadamard_kernel<float, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
+      QVQ_HADAMARD_LAUNCH(float, true)
+    } else {
+      QVQ_HADAMARD_LAUNCH(float, false)
+    }
   }
 #undef QVQ_HADAMARD_LAUNCH
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -1205,7 +1239,7 @@ void qvq_def_shared_schema(DefFn&& def_fn) {
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   qvq_def_shared_schema([&] {
-    m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode) -> Tensor");
+    m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode, bool pad_to_16=False) -> Tensor");
 });
   m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode, bool warp_low=False) -> (Tensor, Tensor)");
