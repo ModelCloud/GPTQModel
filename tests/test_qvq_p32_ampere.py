@@ -158,7 +158,7 @@ def test_p32_ampere_dispatches_measured_m8_gate_plan_directly(monkeypatch):
 
 @pytest.mark.parametrize(
     ("in_features", "out_features", "expected_split"),
-    ((5120, 1024, 64), (5120, 12288, 40), (6144, 5120, 48)),
+    ((5120, 1024, 56), (5120, 12288, 40), (6144, 5120, 48)),
 )
 def test_p32_ampere_dispatches_measured_m1_plans_directly(
     monkeypatch, in_features, out_features, expected_split

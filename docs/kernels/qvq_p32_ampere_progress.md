@@ -1964,6 +1964,23 @@ L1/shared traffic they removed. Diagnostics are
 `v19_m16_fullq_symmetric_levels_candidate_deep.json`, and
 `v19_w2_single_word_m16_candidate_deep.json`.
 
+The twenty-fifth v19 progression retunes pair-wrapped M1 full-KV from split
+64 to split 56. In a matched 100-warmup/4000-iteration pair, W2 improves
+from `0.031744` to `0.030720 ms`, W3 from `0.033792` to `0.032768 ms`, and
+W3.5 from `0.032768` to `0.030720 ms`; W2.5 ties at `0.032768 ms`. The
+affected geomean speedup is **1.0325x** (3.152% lower latency), with maximum
+absolute error below `1.05e-05`. The control and candidate are
+`v19_m1_kv_wrap_resplit_s64_control_deep.json` and
+`v19_m1_kv_wrap_resplit_s56_deep.json` under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**2.190% cumulative improvement** versus fetched main.
+
+Two post-transform wave retunes were rejected. M8 full-Q and linear-QKV at
+splits 12, 14, and 18 were uniformly slower than the retained split 16.
+Packed M16 long-K MLP-down at splits 28 and 36 was likewise slower than the
+retained split 32. Diagnostics use the `v19_m8_q_qkv_resplit_` and
+`v19_m16_down_packed_resplit_` prefixes.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively

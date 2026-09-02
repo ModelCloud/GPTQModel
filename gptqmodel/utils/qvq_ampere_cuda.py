@@ -343,7 +343,7 @@ def qvq_p32_window_ampere(
             transition_bits,
             out_features,
             bank_alt_id,
-            64 if out_features == 1024 else 40,
+            56 if out_features == 1024 else 40,
         )
     if (
         split_count == 0
