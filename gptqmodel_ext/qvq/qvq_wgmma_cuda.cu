@@ -116,7 +116,11 @@ __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_product_masked(
   // the raw circular-window funnel result and shifting that temporary again.
   const uint32_t high_byte = __byte_perm(state, 0u, 0x4441u);
   uint32_t mixed = state ^ high_byte ^ bank_mask;
-  return mixed * kPgc16Multiplier + kPgc16Increment;
+  uint32_t product;
+  asm("mad.lo.u32 %0, %1, 40503, 17011;"
+      : "=r"(product)
+      : "r"(mixed));
+  return product;
 }
 
 __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_finish(uint32_t mixed) {
@@ -129,8 +133,19 @@ __device__ __forceinline__ uint32_t qvq_wgmma_high_byte(uint32_t value) {
   return __byte_perm(value, 0u, 0x4441u);
 }
 
-__device__ __forceinline__ uint32_t qvq_wgmma_pgc16_low_index(uint32_t product) {
-  return (product ^ (product >> 7)) & 0xffu;
+__device__ __forceinline__ uint32_t qvq_wgmma_pgc16_low_byte_offset(uint32_t& product) {
+  // Form the two-byte table offset directly:
+  //   2 * ((product ^ (product >> 7)) & 0xff)
+  //     == ((product << 1) ^ (product >> 6)) & 0x1fe.
+  // Distributing the scale removes a separate post-XOR shift in the hot path.
+  uint32_t shifted;
+  asm("shr.u32 %0, %1, 6;" : "=r"(shifted) : "r"(product));
+  asm("shl.b32 %0, %0, 1;" : "+r"(product));
+  // 0x28 is (a ^ b) & c for PTX lop3 inputs a, b, c.
+  asm("lop3.b32 %0, %0, %1, 0x1fe, 0x28;"
+      : "+r"(product)
+      : "r"(shifted));
+  return product;
 }
 
 __device__ __forceinline__ Element qvq_wgmma_load_level(
@@ -151,6 +166,15 @@ __device__ __forceinline__ Element qvq_wgmma_load_level_shared(
     uint32_t levels_base,
     uint32_t index) {
   const uint32_t address = levels_base + index * sizeof(Element);
+  uint16_t bits;
+  asm("ld.shared.u16 %0, [%1];" : "=h"(bits) : "r"(address));
+  return Element::bitcast(bits);
+}
+
+__device__ __forceinline__ Element qvq_wgmma_load_level_shared_byte_offset(
+    uint32_t levels_base,
+    uint32_t byte_offset) {
+  const uint32_t address = levels_base + byte_offset;
   uint16_t bits;
   asm("ld.shared.u16 %0, [%1];" : "=h"(bits) : "r"(address));
   return Element::bitcast(bits);
@@ -309,22 +333,26 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   const uint32_t alternate_mix_mask = alternate_bank_mask & 0xff00u;
   const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_mix_mask;
   const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_mix_mask;
-  const uint32_t product00 = qvq_wgmma_pgc16_product_masked(state00, bank_mask0);
-  const uint32_t product01 = qvq_wgmma_pgc16_product_masked(state01, bank_mask0);
-  const uint32_t product10 = qvq_wgmma_pgc16_product_masked(state10, bank_mask1);
-  const uint32_t product11 = qvq_wgmma_pgc16_product_masked(state11, bank_mask1);
+  uint32_t product00 = qvq_wgmma_pgc16_product_masked(state00, bank_mask0);
+  uint32_t product01 = qvq_wgmma_pgc16_product_masked(state01, bank_mask0);
+  uint32_t product10 = qvq_wgmma_pgc16_product_masked(state10, bank_mask1);
+  uint32_t product11 = qvq_wgmma_pgc16_product_masked(state11, bank_mask1);
 
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
   if constexpr (LevelsInShared) {
     fragment(0) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product00));
     fragment(1) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product01));
-    fragment(2) = qvq_wgmma_load_level_shared(levels_shared_base, qvq_wgmma_pgc16_low_index(product00));
-    fragment(3) = qvq_wgmma_load_level_shared(levels_shared_base, qvq_wgmma_pgc16_low_index(product01));
+    fragment(2) = qvq_wgmma_load_level_shared_byte_offset(
+        levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product00));
+    fragment(3) = qvq_wgmma_load_level_shared_byte_offset(
+        levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product01));
     fragment(4) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product10));
     fragment(5) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product11));
-    fragment(6) = qvq_wgmma_load_level_shared(levels_shared_base, qvq_wgmma_pgc16_low_index(product10));
-    fragment(7) = qvq_wgmma_load_level_shared(levels_shared_base, qvq_wgmma_pgc16_low_index(product11));
+    fragment(6) = qvq_wgmma_load_level_shared_byte_offset(
+        levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product10));
+    fragment(7) = qvq_wgmma_load_level_shared_byte_offset(
+        levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product11));
   } else {
     const uint32_t mixed00 = qvq_wgmma_pgc16_finish(product00);
     const uint32_t mixed01 = qvq_wgmma_pgc16_finish(product01);
