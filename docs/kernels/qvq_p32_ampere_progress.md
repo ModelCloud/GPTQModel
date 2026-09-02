@@ -1907,6 +1907,31 @@ latency), with maximum absolute error below `4.58e-05`. The candidate is
 `artifacts/a100_p32_window/`. Affected-case log weighting now reaches
 **1.965% cumulative improvement** versus fetched main.
 
+The twenty-third v19 progression replaces the W2 circular next-word
+compare/select with the power-of-two mask `(first_word + 1) & 15` for five
+deep-confirmed cases. M2 full-KV improves from `0.033792` to `0.032768 ms`,
+M4 long-K MLP-down from `0.106496` to `0.105472 ms`, M8 full-Q from
+`0.095232` to `0.094208 ms`, M8 full-KV from `0.033792` to `0.032768 ms`,
+and M8 linear-QKV from `0.082944` to `0.081920 ms`. The affected geomean
+speedup is **1.0191x** (1.871% lower latency), with maximum absolute error
+below `4.20e-05`, and the complete 38-case Ampere suite passes. Deep
+fixed-split artifacts use the `v19_w2_pow2_wrap_*_deep.json` names under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**2.034% cumulative improvement** versus fetched main.
+
+The initial 35-case W2 screen was mixed, so the bitmask path was narrowed
+to those five wins. M2 MLP-gate/up, M4 full-KV, and M16 full-KV tied their
+controls in deep runs and remain unchanged. A later all-35 selective run
+entered a queue-stall cluster after M4 MLP-down; those affected samples were
+discarded in favor of explicit known-good-split deep runs. Combined packed
+plus pair-wrap M16 MLP-gate/up was also rejected after W2 tied and W2.5/W3
+regressed. Giving packed M8 MLP-gate/up a static K regressed W2/W3/W3.5,
+and fixed split 8 versus 16 tied at W2.5. Diagnostics are
+`v19_w2_pow2_wrap_{control,candidate,selective_final}.json`,
+`v19_m16_gate_packed_wrap_{control,candidate}_deep.json`,
+`v19_m8_gate_static_k_candidate_deep.json`, and
+`v19_m8_gate_wrap_split{8,16}_deep.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
