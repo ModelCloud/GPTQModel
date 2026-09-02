@@ -1981,6 +1981,15 @@ Packed M16 long-K MLP-down at splits 28 and 36 was likewise slower than the
 retained split 32. Diagnostics use the `v19_m8_q_qkv_resplit_` and
 `v19_m16_down_packed_resplit_` prefixes.
 
+The adjacent full-KV wave did not extend beyond M1. Split 56 regressed M2
+W2.5/W3 and M4 W2.5-W3.5. Its apparent M4 W2 screen win also failed the
+isolated 200-warmup/8000-iteration check, which measured `0.033792 ms`
+against the split-64 control's `0.031744 ms`. M2 pair-wrapped long-K
+MLP-down at split 80 was uniformly slower than its retained rate-specific
+plans. Diagnostics are `v19_m24_kv_wrap_resplit_s{56,64}_deep.json`,
+`v19_m4_w2_kv_wrap_resplit_s56_verify.json`, and
+`v19_m2_down_wrap_resplit_s80_deep.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
