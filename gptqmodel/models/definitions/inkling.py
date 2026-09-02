@@ -9,7 +9,7 @@ import torch
 from transformers import AutoModelForMultimodalLM, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
@@ -128,7 +128,7 @@ class InklingMMQModel(BaseQModel):
         del kwargs
         processor = self.load_processor()
         calibration_data = []
-        for batch in batched(calibration_dataset, batch_size):
+        for batch in batched_conversations(calibration_dataset, batch_size):
             calibration_data.append(self.prepare_inputs_for_conversations(processor, batch))
         del processor
         return calibration_data

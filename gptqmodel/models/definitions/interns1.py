@@ -9,7 +9,7 @@ import requests
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
@@ -130,7 +130,7 @@ class InternS1QModel(BaseQModel):
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         processor = self.load_processor()
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
             batched_samples = []
             for sample in batch:
                 batched_samples.append(self.replace_image_with_pil(sample))
