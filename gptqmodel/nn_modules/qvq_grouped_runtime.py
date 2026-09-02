@@ -180,6 +180,7 @@ class QVQGroupedRuntimeTelemetry:
     child_window_bytes_avoided: int = 0
     paired_recovery_launches: int = 0
     h100_multiblock_recovery_launches: int = 0
+    h100_multiblock_precondition_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -202,6 +203,7 @@ class QVQGroupedRuntimeTelemetry:
             "child_window_bytes_avoided": self.child_window_bytes_avoided,
             "paired_recovery_launches": self.paired_recovery_launches,
             "h100_multiblock_recovery_launches": self.h100_multiblock_recovery_launches,
+            "h100_multiblock_precondition_launches": self.h100_multiblock_precondition_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -227,7 +229,7 @@ class QVQHopperGroupedRuntime:
         self.telemetry = QVQGroupedRuntimeTelemetry(self.category, self.member_names)
         self._payload: QVQHopperGroupedP32Payload | None = None
         self._payload_source_key: tuple[Any, ...] | None = None
-        self._h100_multiblock_recovery_enabled = False
+        self._h100_multiblock_intermediate_enabled = False
         self._input: torch.Tensor | None = None
         self._input_version: int | None = None
         self._outputs: tuple[torch.Tensor, ...] | None = None
@@ -256,7 +258,7 @@ class QVQHopperGroupedRuntime:
             self.telemetry.payload_drops += 1
         self._payload = None
         self._payload_source_key = None
-        self._h100_multiblock_recovery_enabled = False
+        self._h100_multiblock_intermediate_enabled = False
         self.telemetry.grouped_window_bytes = 0
         self.telemetry.grouped_selector_bytes = 0
         self.telemetry.child_window_bytes_avoided = 0
@@ -327,7 +329,7 @@ class QVQHopperGroupedRuntime:
         from ..utils.qvq_cuda import _pgc16_levels
 
         properties = torch.cuda.get_device_properties(device)
-        self._h100_multiblock_recovery_enabled = (
+        self._h100_multiblock_intermediate_enabled = (
             self.category == "gate_up"
             and len(children) == 2
             and all(child.out_features == 8192 for child in children)
@@ -482,7 +484,7 @@ class QVQHopperGroupedRuntime:
             # products keep the established single-CTA path until separately
             # measured; device identity comes from CUDA properties, never a
             # visible-device index.
-            use_h100_multiblock = self._h100_multiblock_recovery_enabled
+            use_h100_multiblock = self._h100_multiblock_intermediate_enabled
             recovery = (
                 qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock
                 if use_h100_multiblock
@@ -567,14 +569,24 @@ class QVQHopperGroupedRuntime:
                 "fused MLP activation must return contiguous FP16 gate geometry"
             )
 
-        from ..utils.qvq_cuda import qvq_cuda_swiglu_precondition
+        from ..utils.qvq_cuda import (
+            qvq_cuda_swiglu_precondition,
+            qvq_cuda_swiglu_precondition_multiblock,
+        )
 
         rows = x.numel() // self._children()[0].in_features
-        transformed = qvq_cuda_swiglu_precondition(
+        precondition = (
+            qvq_cuda_swiglu_precondition_multiblock
+            if self._h100_multiblock_intermediate_enabled
+            else qvq_cuda_swiglu_precondition
+        )
+        transformed = precondition(
             activated_gate.reshape(rows, down.in_features),
             up.reshape(rows, down.in_features),
             down._cached_cast("SU", torch.float16),
         )
+        if self._h100_multiblock_intermediate_enabled:
+            self.telemetry.h100_multiblock_precondition_launches += 1
         inner = down._inner_forward(transformed)
         recovered = down._qvq_recover_inference_output(inner, torch.float16)
         return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)

@@ -685,3 +685,4 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     assert gate_up_telemetry["fused_mlp_launches"] >= 4
     assert gate_up_telemetry["fused_mlp_fallbacks"] == 0
     assert gate_up_telemetry["h100_multiblock_recovery_launches"] >= 4
+    assert gate_up_telemetry["h100_multiblock_precondition_launches"] >= 4

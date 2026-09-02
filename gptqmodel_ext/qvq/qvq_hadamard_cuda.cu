@@ -416,6 +416,84 @@ __global__ void __launch_bounds__(kHadamardThreads) qvq_swiglu_precondition_kern
   }
 }
 
+// Exact N=8192 multiblock factorization of qvq_swiglu_precondition_kernel.
+// The workspace is FP16 because the single-CTA reference stores every stage
+// in FP16 shared memory.  Splitting after bit 128 therefore preserves the
+// existing rounding boundary byte-for-byte while exposing 32 independent low
+// tiles and four high-column blocks per MLP row.
+__global__ void qvq_swiglu_precondition_multiblock_low_kernel(
+    const half* __restrict__ activated_gate,
+    const half* __restrict__ up,
+    const half* __restrict__ pre_scale,
+    half* __restrict__ workspace) {
+  __shared__ half buf[kHadamardPairMultiblockTile + kHadamardPairMultiblockTile / 32];
+  const int row = static_cast<int>(blockIdx.y);
+  const int tile = static_cast<int>(blockIdx.x);
+  const int local = static_cast<int>(threadIdx.x);
+  const int column = tile * kHadamardPairMultiblockTile + local;
+  const int64_t offset =
+      static_cast<int64_t>(row) * kHadamardPairMultiblockN + column;
+  auto p = [](int i) { return i + (i >> 5); };
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(kHadamardPairMultiblockN))));
+
+  const half product_half = __float2half_rn(
+      __half2float(activated_gate[offset]) * __half2float(up[offset]));
+  float value = __half2float(product_half) * __half2float(pre_scale[column]);
+  value = round_fp16_unless_overflow(value);
+  buf[p(local)] = __float2half_rn(value / divisor);
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 1; bit < kHadamardPairMultiblockTile; bit <<= 1) {
+    const int peer = local ^ bit;
+    if (local < peer) {
+      const float a = __half2float(buf[p(local)]);
+      const float b = __half2float(buf[p(peer)]);
+      buf[p(local)] = __float2half_rn(a + b);
+      buf[p(peer)] = __float2half_rn(a - b);
+    }
+    __syncthreads();
+  }
+  workspace[offset] = buf[p(local)];
+}
+
+__global__ void qvq_swiglu_precondition_multiblock_high_kernel(
+    const half* __restrict__ workspace,
+    half* __restrict__ output) {
+  const int row = static_cast<int>(blockIdx.y);
+  const int local = static_cast<int>(blockIdx.x) * kHadamardPairMultiblockHighThreads +
+      static_cast<int>(threadIdx.x);
+  half values[kHadamardPairMultiblockTiles];
+#pragma unroll
+  for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+    const int column = tile * kHadamardPairMultiblockTile + local;
+    values[tile] = workspace[
+        static_cast<int64_t>(row) * kHadamardPairMultiblockN + column];
+  }
+
+#pragma unroll
+  for (int bit = 1; bit < kHadamardPairMultiblockTiles; bit <<= 1) {
+#pragma unroll
+    for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+      const int peer = tile ^ bit;
+      if (tile < peer) {
+        const float a = __half2float(values[tile]);
+        const float b = __half2float(values[peer]);
+        values[tile] = __float2half_rn(a + b);
+        values[peer] = __float2half_rn(a - b);
+      }
+    }
+  }
+
+#pragma unroll
+  for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+    const int column = tile * kHadamardPairMultiblockTile + local;
+    output[static_cast<int64_t>(row) * kHadamardPairMultiblockN + column] =
+        values[tile];
+  }
+}
+
 at::Tensor qvq_hadamard_cuda(
     const at::Tensor& input,
     const c10::optional<at::Tensor>& pre_scale,
@@ -710,6 +788,63 @@ at::Tensor qvq_swiglu_precondition_cuda(
   return output;
 }
 
+at::Tensor qvq_swiglu_precondition_multiblock_cuda(
+    const at::Tensor& activated_gate,
+    const at::Tensor& up,
+    const at::Tensor& pre_scale) {
+  TORCH_CHECK(activated_gate.is_cuda() && up.is_cuda() && pre_scale.is_cuda(),
+              "multiblock SwiGLU precondition tensors must be CUDA tensors");
+  TORCH_CHECK(activated_gate.device() == up.device() && activated_gate.device() == pre_scale.device(),
+              "multiblock SwiGLU precondition tensors must share a device");
+  TORCH_CHECK(activated_gate.scalar_type() == at::kHalf && up.scalar_type() == at::kHalf &&
+                  pre_scale.scalar_type() == at::kHalf,
+              "multiblock SwiGLU precondition tensors must be float16");
+  TORCH_CHECK(activated_gate.sizes() == up.sizes(),
+              "multiblock activated gate and up tensors must have identical shapes");
+  TORCH_CHECK(activated_gate.dim() >= 1 && activated_gate.is_contiguous() &&
+                  up.is_contiguous() && pre_scale.is_contiguous(),
+              "multiblock SwiGLU precondition tensors must be contiguous with rank >= 1");
+  TORCH_CHECK(activated_gate.size(-1) == kHadamardPairMultiblockN,
+              "multiblock SwiGLU precondition requires last dimension 8192");
+  TORCH_CHECK(pre_scale.numel() == kHadamardPairMultiblockN,
+              "multiblock SwiGLU precondition scale must have 8192 values");
+  const int64_t rows64 = activated_gate.numel() / kHadamardPairMultiblockN;
+  TORCH_CHECK(rows64 <= std::numeric_limits<int>::max(),
+              "multiblock SwiGLU precondition row count exceeds launch limit");
+  at::Tensor output = at::empty_like(activated_gate);
+  if (rows64 == 0) {
+    return output;
+  }
+
+  const c10::cuda::CUDAGuard device_guard(activated_gate.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, activated_gate.get_device()));
+  TORCH_CHECK(properties.major == 9,
+              "multiblock SwiGLU precondition is a Hopper-only operator");
+  at::Tensor workspace = at::empty_like(activated_gate);
+  const int rows = static_cast<int>(rows64);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(activated_gate.get_device());
+  qvq_swiglu_precondition_multiblock_low_kernel<<<
+      dim3(kHadamardPairMultiblockTiles, rows),
+      kHadamardPairMultiblockTile,
+      0,
+      stream>>>(
+      reinterpret_cast<const half*>(activated_gate.const_data_ptr()),
+      reinterpret_cast<const half*>(up.const_data_ptr()),
+      reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+      reinterpret_cast<half*>(workspace.mutable_data_ptr()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  qvq_swiglu_precondition_multiblock_high_kernel<<<
+      dim3(kHadamardPairMultiblockTile / kHadamardPairMultiblockHighThreads, rows),
+      kHadamardPairMultiblockHighThreads,
+      0,
+      stream>>>(
+      reinterpret_cast<const half*>(workspace.const_data_ptr()),
+      reinterpret_cast<half*>(output.mutable_data_ptr()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
 }  // namespace
 
 
@@ -738,6 +873,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
+  m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
@@ -745,4 +881,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("hadamard_pair_fp32_to_fp16", &qvq_hadamard_pair_fp32_to_fp16_cuda);
   m.impl("hadamard_pair_fp32_to_fp16_multiblock", &qvq_hadamard_pair_fp32_to_fp16_multiblock_cuda);
   m.impl("swiglu_precondition", &qvq_swiglu_precondition_cuda);
+  m.impl("swiglu_precondition_multiblock", &qvq_swiglu_precondition_multiblock_cuda);
 }

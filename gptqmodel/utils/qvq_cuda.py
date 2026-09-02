@@ -72,6 +72,7 @@ _QVQ_CUDA_HADAMARD_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_OP: Callable | None = None
+_QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP: Callable | None = None
@@ -117,6 +118,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "hadamard_pair_fp32_to_fp16",
         "hadamard_pair_fp32_to_fp16_multiblock",
         "swiglu_precondition",
+        "swiglu_precondition_multiblock",
         "yaqa_feedback",
         "yaqa_feedback_update_",
         "norm_rank_telemetry_snapshot",
@@ -283,6 +285,19 @@ def _qvq_cuda_swiglu_precondition_op() -> Callable:
                     "qvq_cuda", "swiglu_precondition"
                 )
     return _QVQ_CUDA_SWIGLU_PRECONDITION_OP
+
+
+def _qvq_cuda_swiglu_precondition_multiblock_op() -> Callable:
+    """Resolve the exact Hopper N=8192 multiblock precondition operator."""
+
+    global _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP
+    if _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP is None:
+                _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP = _extension_api().op(
+                    "qvq_cuda", "swiglu_precondition_multiblock"
+                )
+    return _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP
 
 
 def _qvq_cuda_yaqa_feedback_op() -> Callable:
@@ -874,6 +889,44 @@ def qvq_cuda_swiglu_precondition(
     if torch.cuda.get_device_capability(activated_gate.device) < (8, 0):
         raise RuntimeError("QVQ SwiGLU precondition requires compute capability >= 8.0")
     return _qvq_cuda_swiglu_precondition_op()(activated_gate, up, pre_scale)
+
+
+def qvq_cuda_swiglu_precondition_multiblock(
+    activated_gate: torch.Tensor,
+    up: torch.Tensor,
+    pre_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Run the exact Hopper multiblock N=8192 SwiGLU/down precondition."""
+
+    if activated_gate.device.type != "cuda" or up.device.type != "cuda":
+        raise ValueError("multiblock QVQ SwiGLU precondition inputs must be CUDA tensors")
+    if activated_gate.device != up.device or activated_gate.device != pre_scale.device:
+        raise ValueError("multiblock QVQ SwiGLU precondition tensors must share a device")
+    if (
+        activated_gate.dtype != torch.float16
+        or up.dtype != torch.float16
+        or pre_scale.dtype != torch.float16
+    ):
+        raise TypeError("multiblock QVQ SwiGLU precondition tensors must be float16")
+    if activated_gate.shape != up.shape:
+        raise ValueError("multiblock activated gate and up tensors must have identical shapes")
+    if (
+        activated_gate.ndim < 1
+        or not activated_gate.is_contiguous()
+        or not up.is_contiguous()
+        or not pre_scale.is_contiguous()
+        or activated_gate.shape[-1] != 8192
+    ):
+        raise ValueError(
+            "multiblock QVQ SwiGLU precondition requires contiguous N=8192 tensors"
+        )
+    if pre_scale.numel() != 8192:
+        raise ValueError("multiblock QVQ SwiGLU precondition scale must contain 8192 values")
+    if torch.cuda.get_device_capability(activated_gate.device)[0] != 9:
+        raise RuntimeError("multiblock QVQ SwiGLU precondition requires a Hopper device")
+    return _qvq_cuda_swiglu_precondition_multiblock_op()(
+        activated_gate, up, pre_scale
+    )
 
 
 def qvq_cuda_device_supported(device: torch.device | str) -> bool:
