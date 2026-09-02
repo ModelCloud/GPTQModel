@@ -698,6 +698,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   auto thread_coordinate_a = thread_mma.partition_A(coordinate_a);
   auto fragment_a0 = cute::make_tensor<Element>(thread_coordinate_a.shape());
   auto fragment_a1 = cute::make_tensor<Element>(thread_coordinate_a.shape());
+  auto fragment_a2 = cute::make_tensor<Element>(thread_coordinate_a.shape());
   static_assert(cute::size(decltype(fragment_a0){}) == 8);
 
   auto coordinate_c = cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_16{}));
@@ -723,10 +724,16 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
 
 #pragma unroll
     for (int k_block = 0; k_block < kP32K16TilesPerStage; ++k_block) {
-      auto& fragment_a = (k_block & 1) == 0 ? fragment_a0 : fragment_a1;
+      // W3's conflict-heavy shared decode benefits from one more pending
+      // register-sourced WGMMA group. Other rates retain the measured depth-2
+      // schedule; ptxas removes their unreachable third fragment.
+      constexpr int kDecodeDepth = TransitionBits == kW3TransitionBits ? 3 : 2;
+      auto& fragment_a = (k_block % kDecodeDepth) == 0 ? fragment_a0
+          : (k_block % kDecodeDepth) == 1 ? fragment_a1
+                                         : fragment_a2;
       const uint32_t bank_id = s_bank_ids(bank_n16_offset + warp, k_block, read_stage);
-      if (k_block >= 2) {
-        cute::warpgroup_wait<1>();
+      if (k_block >= kDecodeDepth) {
+        cute::warpgroup_wait<kDecodeDepth - 1>();
       }
       const auto trellis_layout = TrellisSmemLayout{};
       const uint32_t* window_words = shared.trellis.begin() +
