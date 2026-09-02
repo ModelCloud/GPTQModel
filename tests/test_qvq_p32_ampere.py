@@ -310,6 +310,28 @@ def test_p32_ampere_dispatches_measured_m8_wide_linear_z_plan_directly(
     assert calls[0][-1] == 32
 
 
+def test_p32_ampere_dispatches_measured_m8_wide_qkv_plan_directly(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((8, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=10240,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 16
+
+
 @pytest.mark.parametrize(
     ("in_features", "out_features", "expected_split"),
     ((5120, 1024, 56), (5120, 12288, 40), (6144, 5120, 48)),
