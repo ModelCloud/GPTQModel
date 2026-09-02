@@ -97,17 +97,9 @@ struct alignas(128) P32WgmmaTmaSharedStorageFor {
 static_assert(cute::size(WgmmaTiledMma{}) == kThreads);
 
 __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix(uint32_t state) {
-  // The PGC16 affine map is defined modulo 2^16.  Keep the multiply-add in
-  // the native 16-bit integer pipe so the compiler does not materialize a
-  // wider multiply and mask for every decoded state.
-  const uint16_t input = static_cast<uint16_t>(state ^ (state >> 8));
-  uint16_t mixed;
-  asm("mad.lo.u16 %0, %1, %2, %3;"
-      : "=h"(mixed)
-      : "h"(input), "h"(static_cast<uint16_t>(kPgc16Multiplier)),
-        "h"(static_cast<uint16_t>(kPgc16Increment)));
-  const uint32_t expanded = static_cast<uint32_t>(mixed);
-  return expanded ^ (expanded >> 7);
+  uint32_t mixed = state ^ (state >> 8);
+  mixed = (mixed * kPgc16Multiplier + kPgc16Increment) & 0xffffu;
+  return mixed ^ (mixed >> 7);
 }
 
 __device__ __forceinline__ Element qvq_wgmma_load_level(
