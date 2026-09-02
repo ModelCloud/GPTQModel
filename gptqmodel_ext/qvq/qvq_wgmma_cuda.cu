@@ -92,6 +92,9 @@ struct alignas(128) P32WgmmaTmaSharedStorageFor {
   // Reused by every decode lane and K16 tile; avoid dependent L1/global
   // lookups for the small, read-only PGC level table.
   alignas(128) cute::ArrayEngine<Element, 256> levels;
+  // The PGC high byte is b ^ (b >> 7).  Store that fixed permutation once so
+  // the hot loop can index it directly with affine-product byte 1.
+  alignas(128) cute::ArrayEngine<Element, 256> levels_high;
 };
 
 static_assert(cute::size(WgmmaTiledMma{}) == kThreads);
@@ -102,7 +105,7 @@ __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix(uint32_t state) {
   return mixed ^ (mixed >> 7);
 }
 
-__device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix_masked(
+__device__ __forceinline__ uint32_t qvq_wgmma_pgc16_product_masked(
     uint32_t state,
     uint32_t bank_mask) {
   // Every supported alternate-bank mask repeats one byte in both halves.
@@ -113,7 +116,10 @@ __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix_masked(
   // the raw circular-window funnel result and shifting that temporary again.
   const uint32_t high_byte = __byte_perm(state, 0u, 0x4441u);
   uint32_t mixed = state ^ high_byte ^ bank_mask;
-  mixed = mixed * kPgc16Multiplier + kPgc16Increment;
+  return mixed * kPgc16Multiplier + kPgc16Increment;
+}
+
+__device__ __forceinline__ uint32_t qvq_wgmma_pgc16_finish(uint32_t mixed) {
   uint32_t shifted;
   asm("bfe.u32 %0, %1, 7, 9;" : "=r"(shifted) : "r"(mixed));
   return mixed ^ shifted;
@@ -121,6 +127,10 @@ __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix_masked(
 
 __device__ __forceinline__ uint32_t qvq_wgmma_high_byte(uint32_t value) {
   return __byte_perm(value, 0u, 0x4441u);
+}
+
+__device__ __forceinline__ uint32_t qvq_wgmma_pgc16_low_index(uint32_t product) {
+  return (product ^ (product >> 7)) & 0xffu;
 }
 
 __device__ __forceinline__ Element qvq_wgmma_load_level(
@@ -273,6 +283,7 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     uint8_t bank_id,
     const Element* __restrict__ levels,
     uint32_t levels_shared_base,
+    uint32_t levels_high_shared_base,
     uint32_t alternate_bank_mask) {
   uint32_t state00;
   uint32_t state01;
@@ -298,21 +309,36 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   const uint32_t alternate_mix_mask = alternate_bank_mask & 0xff00u;
   const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_mix_mask;
   const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_mix_mask;
-  const uint32_t mixed00 = qvq_wgmma_pgc16_mix_masked(state00, bank_mask0);
-  const uint32_t mixed01 = qvq_wgmma_pgc16_mix_masked(state01, bank_mask0);
-  const uint32_t mixed10 = qvq_wgmma_pgc16_mix_masked(state10, bank_mask1);
-  const uint32_t mixed11 = qvq_wgmma_pgc16_mix_masked(state11, bank_mask1);
+  const uint32_t product00 = qvq_wgmma_pgc16_product_masked(state00, bank_mask0);
+  const uint32_t product01 = qvq_wgmma_pgc16_product_masked(state01, bank_mask0);
+  const uint32_t product10 = qvq_wgmma_pgc16_product_masked(state10, bank_mask1);
+  const uint32_t product11 = qvq_wgmma_pgc16_product_masked(state11, bank_mask1);
 
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
-  fragment(0) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, qvq_wgmma_high_byte(mixed00));
-  fragment(1) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, qvq_wgmma_high_byte(mixed01));
-  fragment(2) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed00 & 0xffu);
-  fragment(3) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed01 & 0xffu);
-  fragment(4) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, qvq_wgmma_high_byte(mixed10));
-  fragment(5) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, qvq_wgmma_high_byte(mixed11));
-  fragment(6) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed10 & 0xffu);
-  fragment(7) = qvq_wgmma_decode_level<TransitionBits, LevelsInShared>(levels, levels_shared_base, mixed11 & 0xffu);
+  if constexpr (LevelsInShared) {
+    fragment(0) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product00));
+    fragment(1) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product01));
+    fragment(2) = qvq_wgmma_load_level_shared(levels_shared_base, qvq_wgmma_pgc16_low_index(product00));
+    fragment(3) = qvq_wgmma_load_level_shared(levels_shared_base, qvq_wgmma_pgc16_low_index(product01));
+    fragment(4) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product10));
+    fragment(5) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product11));
+    fragment(6) = qvq_wgmma_load_level_shared(levels_shared_base, qvq_wgmma_pgc16_low_index(product10));
+    fragment(7) = qvq_wgmma_load_level_shared(levels_shared_base, qvq_wgmma_pgc16_low_index(product11));
+  } else {
+    const uint32_t mixed00 = qvq_wgmma_pgc16_finish(product00);
+    const uint32_t mixed01 = qvq_wgmma_pgc16_finish(product01);
+    const uint32_t mixed10 = qvq_wgmma_pgc16_finish(product10);
+    const uint32_t mixed11 = qvq_wgmma_pgc16_finish(product11);
+    fragment(0) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, qvq_wgmma_high_byte(mixed00));
+    fragment(1) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, qvq_wgmma_high_byte(mixed01));
+    fragment(2) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, mixed00 & 0xffu);
+    fragment(3) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, mixed01 & 0xffu);
+    fragment(4) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, qvq_wgmma_high_byte(mixed10));
+    fragment(5) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, qvq_wgmma_high_byte(mixed11));
+    fragment(6) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, mixed10 & 0xffu);
+    fragment(7) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, mixed11 & 0xffu);
+  }
 }
 
 __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
@@ -410,6 +436,7 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
           decode_plan,
           packed_bank_ids[k_block][warp],
           levels,
+          0,
           0,
           alternate_bank_mask);
       cute::warpgroup_fence_operand(fragment_a);
@@ -538,6 +565,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
 
   for (int index = thread; index < 256; index += kTmaThreads) {
     shared.levels.begin()[index] = levels[index];
+    shared.levels_high.begin()[index] = levels[index ^ (index >> 7)];
   }
 
   __syncthreads();
@@ -593,6 +621,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   const int bank_n16_offset = (n64_block & 3) * kP32N16TilesPerBlock;
   const auto decode_plan = qvq_p32_window_lane_plan<TransitionBits>(lane);
   const uint32_t shared_levels_base = __cvta_generic_to_shared(shared.levels.begin());
+  const uint32_t shared_levels_high_base = __cvta_generic_to_shared(shared.levels_high.begin());
   WgmmaTmaPipelineState read_state;
   WgmmaTmaPipelineState release_state;
 
@@ -618,6 +647,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
           static_cast<uint8_t>(bank_id),
           shared.levels.begin(),
           shared_levels_base,
+          shared_levels_high_base,
           alternate_bank_mask);
       cute::warpgroup_fence_operand(fragment_a);
       cute::warpgroup_arrive();
