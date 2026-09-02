@@ -390,3 +390,51 @@ verifies that the cached repack is reused. The latest H200 NCU capture is
 | 5 | Full seven-shape W2-W3.5 P32 versus Machete sweep | complete for M1/M2/M4/M8/M16 |
 | 6 | Producer-contiguous four-state decode and fixed WGMMA register transpose | rejected for the current RS fragment ownership |
 | 7 | Storage-neutral P32 Anchor-4 load-time repack | exact format accepted at `27573a3c`; CUDA mappings rejected |
+
+## H200 self-baseline gate (origin/main)
+
+This section is intentionally a self-comparison of the Hopper P32
+TMA/RS-WGMMA kernel.  It does not use the planar/scalar implementation or any
+other kernel as a performance reference.
+
+Hardware and protocol:
+
+| Item | Value |
+|---|---|
+| GPU | NVIDIA H200, PCI `00000000:1C:00.0`, UUID `GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea` |
+| Compute capability / SMs | 9.0 / 132 |
+| Baseline | `origin/main` at `c5408f617c66dce4a7baf1ff67b77681ba317efb` |
+| Candidate source | `f08de2c2` (production P32 source is byte-identical to baseline) |
+| Shapes | Qwen3.8-27B gate/up `(K=5120,N=17408)` and down `(K=17408,N=5120)` |
+| Rates / M | W2, W2.5, W3, W3.5; M=1,2,4,8,16 |
+| Timing | CUDA events, 12 warmups, 60 iterations, idle H200 |
+| Accuracy | all rows passed; max absolute error below `2e-3` |
+
+The following values are `baseline median / candidate median` in milliseconds;
+the final value is `baseline / candidate` (values above `1.0x` favor the
+candidate).
+
+| Shape | Rate | M=1 | M=2 | M=4 | M=8 | M=16 | Geomean |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| gate/up | W2 | 0.067424/0.067760 (0.995x) | 0.067552/0.067744 (0.997x) | 0.067632/0.067712 (0.999x) | 0.067888/0.067888 (1.000x) | 0.065936/0.065904 (1.000x) | 0.998x |
+| gate/up | W2.5 | 0.067520/0.067840 (0.995x) | 0.067760/0.068032 (0.996x) | 0.067744/0.068000 (0.996x) | 0.067696/0.068096 (0.994x) | 0.065968/0.066416 (0.993x) | 0.995x |
+| gate/up | W3 | 0.068224/0.068560 (0.995x) | 0.068464/0.068800 (0.995x) | 0.068608/0.069024 (0.994x) | 0.068784/0.069040 (0.996x) | 0.066640/0.066784 (0.998x) | 0.996x |
+| gate/up | W3.5 | 0.071616/0.071840 (0.997x) | 0.071216/0.071568 (0.995x) | 0.071648/0.071872 (0.997x) | 0.071664/0.071920 (0.996x) | 0.069664/0.069728 (0.999x) | 0.997x |
+| down | W2 | 0.067232/0.067744 (0.992x) | 0.067424/0.067888 (0.993x) | 0.067296/0.068000 (0.990x) | 0.067504/0.067968 (0.993x) | 0.065808/0.066112 (0.995x) | 0.993x |
+| down | W2.5 | 0.067536/0.068080 (0.992x) | 0.067600/0.068288 (0.990x) | 0.067712/0.068544 (0.988x) | 0.067712/0.068704 (0.986x) | 0.065696/0.066304 (0.991x) | 0.989x |
+| down | W3 | 0.068224/0.068912 (0.990x) | 0.068272/0.069008 (0.989x) | 0.068512/0.069120 (0.991x) | 0.068416/0.069392 (0.986x) | 0.066368/0.066960 (0.991x) | 0.990x |
+| down | W3.5 | 0.068992/0.069712 (0.990x) | 0.069200/0.069920 (0.990x) | 0.069264/0.070016 (0.989x) | 0.069424/0.070464 (0.985x) | 0.066944/0.067264 (0.995x) | 0.990x |
+
+The exact JSON artifacts are `artifacts/h200_p32_window/self_c5408f61_*_allrates_allm.json`
+and `artifacts/h200_p32_window/self_a8084df6_*_allrates_allm.json`.
+
+The matched NCU capture (`artifacts/h200_p32_window/profiles/a8084df6_w3_gate_full.ncu-rep`)
+measured 63.296 us, 37.484M executed warp instructions, 81.75% L1/LSU
+throughput, 5.06M shared-bank conflicts, 64.62% ALU throughput, and 4.62%
+tensor-pipe utilization.  This identifies the remaining limit as the shared
+PGC/decode instruction stream rather than HBM bandwidth.
+
+The tested 16-bit PGC multiply-add change (`d842e1cb`) was rejected: it was
+within timing noise on gate/up and approximately 1% slower on down across the
+same matrix.  It is not present in the production source.  The next source
+optimization must beat this exact self-baseline on H200 before being merged.
