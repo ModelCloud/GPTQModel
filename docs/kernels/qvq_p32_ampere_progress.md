@@ -2269,6 +2269,14 @@ affected-case log weighting reaches **3.953% improvement** versus fetched
 main. Diagnostic artifacts are
 `v19_m8_linearz_wide_n128_split{24,40}_{deep,verify8000}.json`.
 
+The forty-fourth v19 progression retunes widened M8 full-Q from split 16 to
+split 14. The fixed 200-warmup/8000-iteration confirmation measures
+`0.089088/0.092160/0.091136/0.092160 ms`, a **1.0028x** incremental
+speedup (0.276% lower latency) over split 16. The cumulative affected-case
+log weighting reaches **3.961% improvement** versus fetched main; maximum
+absolute error remains below `3.25e-05`. Diagnostic artifacts are
+`v19_m8_fullq_wide_n128_split14_{deep,verify8000}.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
