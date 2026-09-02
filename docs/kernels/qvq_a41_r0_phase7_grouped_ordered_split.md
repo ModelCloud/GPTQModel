@@ -118,6 +118,32 @@ unchanged.
 
 Phase 7 registers a separate grouped ordered operation.  The former grouped
 split-1 operation and H200 atomic operations keep their existing template
-specializations and launch behavior.  Production dispatch remains unchanged
-until a complete H100 rate/M policy has passed the benchmark and correctness
-gates.
+specializations and launch behavior.
+
+After the complete 320-case inner sweep and 20-case production sweep passed,
+production dispatch enabled the measured policy only when all of these gates
+match:
+
+\[
+\text{device name contains H100},\quad
+\text{compute capability}=9.0,
+\]
+
+\[
+K=2048,\quad(N_0,N_1,N_2)=(2048,512,512),
+\]
+
+\[
+\text{transition bits}\in\{4,5,6,7\}.
+\]
+
+The selected schedule is
+
+\[
+(S_0,S_1,S_2)=(8,8,8).
+\]
+
+The architecture runtime invokes this geometry policy only for a legal
+query/key/value group.  H200, non-Hopper devices, two-child groups, unmatched
+widths, and unsupported rates continue through their former paths.  Runtime
+telemetry exposes the active split counts and ordered-split launch count.
