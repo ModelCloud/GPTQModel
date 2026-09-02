@@ -458,8 +458,9 @@ def test_qvq_cuda_paired_output_recovery_is_bit_exact_and_repeatable(m, seed):
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
 @pytest.mark.parametrize("seed", (20260921, 20260922, 20260923))
 @pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("warp_low", (False, True))
 def test_qvq_cuda_multiblock_paired_recovery_is_bit_exact_and_repeatable(
-    m, seed, scale_mode
+    m, seed, scale_mode, warp_low
 ):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("experimental multiblock recovery requires Hopper")
@@ -487,12 +488,14 @@ def test_qvq_cuda_multiblock_paired_recovery_is_bit_exact_and_repeatable(
             post_scale1=scale1,
             bias0=bias0,
             scale_mode=scale_mode,
+            warp_low=warp_low,
         )
         assert torch.equal(actual[0], expected[0])
         assert torch.equal(actual[1], expected[1])
 
 
-def test_qvq_cuda_multiblock_paired_recovery_graph_and_contract_guards():
+@pytest.mark.parametrize("warp_low", (False, True))
+def test_qvq_cuda_multiblock_paired_recovery_graph_and_contract_guards(warp_low):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("experimental multiblock recovery requires Hopper")
     n = 8192
@@ -510,6 +513,7 @@ def test_qvq_cuda_multiblock_paired_recovery_graph_and_contract_guards():
         input1,
         post_scale0=scale,
         post_scale1=scale,
+        warp_low=warp_low,
     )
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -518,6 +522,7 @@ def test_qvq_cuda_multiblock_paired_recovery_graph_and_contract_guards():
             input1,
             post_scale0=scale,
             post_scale1=scale,
+            warp_low=warp_low,
         )
     graph.replay()
     torch.cuda.synchronize()
@@ -530,12 +535,22 @@ def test_qvq_cuda_multiblock_paired_recovery_graph_and_contract_guards():
             input1[:, :4096],
             post_scale0=scale[:4096],
             post_scale1=scale[:4096],
+            warp_low=warp_low,
+        )
+    with pytest.raises(TypeError, match="warp_low"):
+        qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+            input0,
+            input1,
+            post_scale0=scale,
+            post_scale1=scale,
+            warp_low=1,
         )
 
 
 @pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("warp_low", (False, True))
 def test_qvq_cuda_multiblock_paired_recovery_preserves_overflow_rounding_bits(
-    scale_mode,
+    scale_mode, warp_low
 ):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("experimental multiblock recovery requires Hopper")
@@ -564,6 +579,7 @@ def test_qvq_cuda_multiblock_paired_recovery_preserves_overflow_rounding_bits(
             post_scale1=scale1,
             bias0=bias0,
             scale_mode=scale_mode,
+            warp_low=warp_low,
         )
         assert torch.equal(actual[0].view(torch.int16), expected[0].view(torch.int16))
         assert torch.equal(actual[1].view(torch.int16), expected[1].view(torch.int16))

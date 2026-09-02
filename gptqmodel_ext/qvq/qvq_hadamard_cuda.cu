@@ -315,6 +315,64 @@ __global__ void qvq_hadamard_pair_fp32_to_fp16_multiblock_low_kernel(
       buf[p(local)];
 }
 
+// Exact warp-local form of the first eight N=8192 recovery stages. The first
+// five butterfly bits never cross a warp, so each lane computes its own sum or
+// lower-minus-upper difference from an XOR-shuffled peer and retains the
+// historical round_fp16_unless_overflow boundary. Only bits 32, 64, and 128
+// use shared memory and CTA barriers. Values stay FP32 throughout so the
+// existing overflow-preserving contract is unchanged.
+__global__ void qvq_hadamard_pair_fp32_to_fp16_multiblock_warp_low_kernel(
+    const float* __restrict__ input0,
+    const float* __restrict__ input1,
+    float* __restrict__ workspace,
+    int rows,
+    int scale_mode) {
+  __shared__ float buf[
+      kHadamardPairMultiblockTile + kHadamardPairMultiblockTile / 32];
+  const int projection_row = static_cast<int>(blockIdx.y);
+  const bool second = projection_row >= rows;
+  const int row = projection_row - (second ? rows : 0);
+  const float* input = second ? input1 : input0;
+  const int tile = static_cast<int>(blockIdx.x);
+  const int local = static_cast<int>(threadIdx.x);
+  const int column = tile * kHadamardPairMultiblockTile + local;
+  auto p = [](int i) { return i + (i >> 5); };
+
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(kHadamardPairMultiblockN))));
+  float value = round_fp16_unless_overflow(
+      input[static_cast<int64_t>(row) * kHadamardPairMultiblockN + column]);
+  if (scale_mode == 3) {
+    value = round_fp16_unless_overflow(value / divisor);
+  }
+
+#pragma unroll
+  for (int bit = 1; bit < 32; bit <<= 1) {
+    const float peer = __shfl_xor_sync(0xffffffffu, value, bit);
+    value = (local & bit) == 0
+        ? round_fp16_unless_overflow(value + peer)
+        : round_fp16_unless_overflow(peer - value);
+  }
+  buf[p(local)] = value;
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 32; bit < kHadamardPairMultiblockTile; bit <<= 1) {
+    const int peer = local ^ bit;
+    if (local < peer) {
+      const float a = buf[p(local)];
+      const float b = buf[p(peer)];
+      buf[p(local)] = round_fp16_unless_overflow(a + b);
+      buf[p(peer)] = round_fp16_unless_overflow(a - b);
+    }
+    __syncthreads();
+  }
+
+  workspace[
+      static_cast<int64_t>(projection_row) * kHadamardPairMultiblockN + column] =
+      buf[p(local)];
+}
+
 __global__ void qvq_hadamard_pair_fp32_to_fp16_multiblock_high_kernel(
     const float* __restrict__ workspace,
     half* __restrict__ output0,
@@ -813,7 +871,8 @@ std::tuple<at::Tensor, at::Tensor> qvq_hadamard_pair_fp32_to_fp16_multiblock_cud
     const at::Tensor& post_scale1,
     const c10::optional<at::Tensor>& bias0,
     const c10::optional<at::Tensor>& bias1,
-    int64_t scale_mode) {
+    int64_t scale_mode,
+    bool warp_low) {
   TORCH_CHECK(input0.is_cuda() && input1.is_cuda(), "multiblock paired Hadamard inputs must be CUDA tensors");
   TORCH_CHECK(input0.device() == input1.device(), "multiblock paired Hadamard inputs must share a device");
   TORCH_CHECK(input0.scalar_type() == at::kFloat && input1.scalar_type() == at::kFloat,
@@ -862,16 +921,29 @@ std::tuple<at::Tensor, at::Tensor> qvq_hadamard_pair_fp32_to_fp16_multiblock_cud
   at::Tensor workspace = at::empty(
       {rows * 2, kHadamardPairMultiblockN}, input0.options());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input0.get_device());
-  qvq_hadamard_pair_fp32_to_fp16_multiblock_low_kernel<<<
-      dim3(kHadamardPairMultiblockTiles, rows * 2),
-      kHadamardPairMultiblockTile,
-      0,
-      stream>>>(
-      input0.const_data_ptr<float>(),
-      input1.const_data_ptr<float>(),
-      workspace.mutable_data_ptr<float>(),
-      rows,
-      static_cast<int>(scale_mode));
+  if (warp_low) {
+    qvq_hadamard_pair_fp32_to_fp16_multiblock_warp_low_kernel<<<
+        dim3(kHadamardPairMultiblockTiles, rows * 2),
+        kHadamardPairMultiblockTile,
+        0,
+        stream>>>(
+        input0.const_data_ptr<float>(),
+        input1.const_data_ptr<float>(),
+        workspace.mutable_data_ptr<float>(),
+        rows,
+        static_cast<int>(scale_mode));
+  } else {
+    qvq_hadamard_pair_fp32_to_fp16_multiblock_low_kernel<<<
+        dim3(kHadamardPairMultiblockTiles, rows * 2),
+        kHadamardPairMultiblockTile,
+        0,
+        stream>>>(
+        input0.const_data_ptr<float>(),
+        input1.const_data_ptr<float>(),
+        workspace.mutable_data_ptr<float>(),
+        rows,
+        static_cast<int>(scale_mode));
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   qvq_hadamard_pair_fp32_to_fp16_multiblock_high_kernel<<<
       dim3(kHadamardPairMultiblockTile / kHadamardPairMultiblockHighThreads, rows * 2),
@@ -1072,7 +1144,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
     m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode) -> Tensor");
 });
   m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
-  m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
+  m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode, bool warp_low=False) -> (Tensor, Tensor)");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
   m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False, bool half2_low=False) -> Tensor");
 }

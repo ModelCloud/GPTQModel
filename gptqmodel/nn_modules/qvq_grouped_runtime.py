@@ -194,6 +194,7 @@ class QVQGroupedRuntimeTelemetry:
     child_window_bytes_avoided: int = 0
     paired_recovery_launches: int = 0
     h100_multiblock_recovery_launches: int = 0
+    h100_warp_recovery_low_launches: int = 0
     h100_multiblock_precondition_launches: int = 0
     h100_half2_precondition_high_launches: int = 0
     h100_fused_silu_precondition_low_launches: int = 0
@@ -220,6 +221,7 @@ class QVQGroupedRuntimeTelemetry:
             "child_window_bytes_avoided": self.child_window_bytes_avoided,
             "paired_recovery_launches": self.paired_recovery_launches,
             "h100_multiblock_recovery_launches": self.h100_multiblock_recovery_launches,
+            "h100_warp_recovery_low_launches": self.h100_warp_recovery_low_launches,
             "h100_multiblock_precondition_launches": self.h100_multiblock_precondition_launches,
             "h100_half2_precondition_high_launches": self.h100_half2_precondition_high_launches,
             "h100_fused_silu_precondition_low_launches": self.h100_fused_silu_precondition_low_launches,
@@ -519,10 +521,12 @@ class QVQHopperGroupedRuntime:
                 bias0=children[0]._cached_cast("bias", torch.float16, output_dtype),
                 bias1=children[1]._cached_cast("bias", torch.float16, output_dtype),
                 scale_mode=3 if children[0].out_features >= 2048 else 4,
+                **({"warp_low": True} if use_h100_multiblock else {}),
             )
             self.telemetry.paired_recovery_launches += 1
             if use_h100_multiblock:
                 self.telemetry.h100_multiblock_recovery_launches += 1
+                self.telemetry.h100_warp_recovery_low_launches += 1
             return tuple(
                 recovered.reshape(*x.shape[:-1], child.out_features)
                 for child, recovered in zip(children, recovered_pair, strict=True)

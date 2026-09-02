@@ -793,8 +793,13 @@ def qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
     bias0: torch.Tensor | None = None,
     bias1: torch.Tensor | None = None,
     scale_mode: int = 3,
+    warp_low: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Run the experimental exact Hopper multiblock N=8192 recovery."""
+    """Run exact Hopper multiblock N=8192 recovery.
+
+    ``warp_low=True`` keeps the first five low butterfly stages in warp
+    registers while preserving every FP16-emulation rounding boundary.
+    """
 
     if input0.device.type != "cuda" or input1.device.type != "cuda":
         raise ValueError("multiblock paired QVQ Hadamard inputs must be CUDA tensors")
@@ -815,6 +820,8 @@ def qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
         )
     if scale_mode not in (3, 4):
         raise ValueError("multiblock paired QVQ Hadamard scale_mode must be 3 or 4")
+    if not isinstance(warp_low, bool):
+        raise TypeError("multiblock paired QVQ Hadamard warp_low must be a bool")
     for name, tensor in (
         ("post_scale0", post_scale0),
         ("post_scale1", post_scale1),
@@ -844,6 +851,7 @@ def qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
         bias0,
         bias1,
         scale_mode,
+        warp_low,
     )
 
 
