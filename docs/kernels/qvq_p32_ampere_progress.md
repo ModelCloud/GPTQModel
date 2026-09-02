@@ -2317,6 +2317,10 @@ rate-wise win: W2/W2.5 tied, while W3 lost one event tick. The fixed-N scalar
 launcher therefore retains its existing wrap policy. The diagnostic pair is
 `v19_m1_fullq_pow2_{control,candidate}.json`.
 
+The same scalar W2 mask on M1 long-K MLP-down tied all four rates, so the
+already tuned four-K16 stage keeps its existing generic wrap. Its diagnostic
+pair is `v19_m1_down_pow2_{control,candidate}.json`.
+
 The forty-seventh v19 progression applies the exact power-of-two circular-word
 wrap to W2 in the widened M16 long-K MLP-down tuple
 `(K,N)=(17408,5120)`. Against the split-24 control medians of
