@@ -715,7 +715,7 @@ def main():
         ),
         help=(
             "fit one canonical A31-basis P32 payload and execute it as ordinary "
-            "per-module P32 versus the fail-closed refactored grouped runtime"
+            "per-module P32 versus a fail-closed grouped runtime"
         ),
     )
     parser.add_argument("--model", default=MODEL_ID)

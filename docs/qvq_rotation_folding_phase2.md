@@ -751,6 +751,36 @@ compiled, and zero fallback. It is a plumbing smoke, not promotion evidence;
 the deterministic `p0-c0-checkpoint-runtime` profile is the independent-seed
 full-16-layer gate.
 
+That gate subsequently passed at source revision `18bb77b9` with the new
+independent fitting seed `20260902`. One canonical 112-module payload was fit
+and executed first as P0 and then through the metadata-compiled C0 runtime.
+All 112 payload hash dictionaries matched, all 32 sibling groups compiled,
+and there were zero plain fallbacks. Across 5,252 held-out tokens, C0 versus
+P0 had zero logits relative L2, zero maximum logit delta, 100% exact-logit
+identity, and 100% Top-1/5/10 identity. The reported KL of `-9.44e-10` is
+softmax/log-softmax evaluation roundoff on identical logits.
+
+| Batch | P0 decode median (p95) ms | C0 decode median (p95) ms | Median delta | p95 delta |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | `38.2608 (42.6126)` | **`34.8884 (40.7874)`** | **-8.81%** | **-4.28%** |
+| 2 | `38.1529 (40.0684)` | **`34.8871 (40.1168)`** | **-8.56%** | +0.12% |
+| 4 | `38.5688 (41.3375)` | **`34.9526 (42.0117)`** | **-9.38%** | +1.63% |
+| 8 | `38.6055 (45.7028)` | **`34.3649 (41.4202)`** | **-10.98%** | **-9.37%** |
+
+B1 throughput rises from `26.14` to `28.66 tok/s` (`1.0967x`). The isolated
+112-projection suite improves by `17.72%`, `13.47%`, `13.95%`, and `11.32%`
+at M1/M2/M4/M8 median. Suite p95 improves at every measured M; full-model B2
+and B4 p95 are effectively flat/slightly worse, so no uniform tail-latency
+claim is made.
+
+The full 32-group manifest is 4,240 compact bytes (`33,920` bits). Canonical
+QVQ payload BPW remains `2.0544190242`; manifest-inclusive effective BPW is
+`2.0544538827`, an absolute increase of `0.0000348584` BPW. The deterministic
+harness reports the run as promotable. Artifacts:
+
+- `artifacts/qvq_validation/p0-c0-checkpoint-runtime_seed20260902_18bb77b9.json`;
+- `artifacts/qvq_validation/summary_p0-c0-checkpoint-runtime_18bb77b9.json`.
+
 Further fusion opportunities remain even when a transform must remain:
 
 - batch/fuse Q and K output transforms when their chosen basis permits it;
@@ -846,6 +876,6 @@ A0 production control. The latest same-payload A31/A41 profile measures a
 9.71% B1 gain and a 0.52% B8 regression, so the incremental grouped-runtime
 claim remains workload- and run-sensitive. The next milestone is to repeat the
 production profile with an independent fitting seed, stabilize tail latency,
-run the new canonical-checkpoint profile at full depth, and only then push
-toward the learned 5-H A33/A34 topology. Grouped checkpoint loading and the
-plain-P32/refactored-P32 same-payload oracle are now implemented.
+and then push toward the learned 5-H A33/A34 topology. Grouped checkpoint
+loading, the plain-P32/refactored-P32 same-payload oracle, and the independent
+full-depth canonical-checkpoint profile are now complete.

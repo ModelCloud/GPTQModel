@@ -1,0 +1,137 @@
+{
+  "schema": "qvq.validation-harness.v1",
+  "status": "pass",
+  "profile": "p0-c0-checkpoint-runtime",
+  "reference_arm": "P0",
+  "candidate_arm": "C0",
+  "repository_revision": "18bb77b9faedaf44a0179c0bf466105d6f4c7f45",
+  "promotable": true,
+  "runs": [
+    {
+      "artifact": "/root/polly-work/qvq-pr84-a100/artifacts/qvq_validation/p0-c0-checkpoint-runtime_seed20260902_18bb77b9.json",
+      "status": "pass",
+      "dataset": {
+        "calibration_samples": 16,
+        "validation_streams": 3,
+        "validation_samples": 48,
+        "validation_tokens": 5252
+      },
+      "payload_identity_required": true,
+      "payload_identity": true,
+      "reference_effective_bpw": 2.054419024237271,
+      "candidate_effective_bpw": 2.0544538826778016,
+      "bootstrap": {
+        "kl_delta_median": 0.0,
+        "kl_ci95": [
+          0.0,
+          0.0
+        ],
+        "top1_delta_median": 0.0,
+        "top1_ci95": [
+          0.0,
+          0.0
+        ],
+        "kl_ci_crosses_zero": true,
+        "top1_ci_crosses_zero": true
+      },
+      "decode": {
+        "1": {
+          "reference_ms": 38.26083010062575,
+          "candidate_ms": 34.888372756540775,
+          "candidate_latency_delta_fraction": -0.08814386241007932,
+          "candidate_speedup": 1.096664220129118
+        },
+        "2": {
+          "reference_ms": 38.15285908058286,
+          "candidate_ms": 34.88712012767792,
+          "candidate_latency_delta_fraction": -0.08559617893923377,
+          "candidate_speedup": 1.0936087284061617
+        },
+        "4": {
+          "reference_ms": 38.56881149113178,
+          "candidate_ms": 34.95261957868934,
+          "candidate_latency_delta_fraction": -0.09375948525854694,
+          "candidate_speedup": 1.1034598252157113
+        },
+        "8": {
+          "reference_ms": 38.605475798249245,
+          "candidate_ms": 34.36490194872022,
+          "candidate_latency_delta_fraction": -0.10984384369953393,
+          "candidate_speedup": 1.1233983980474285
+        }
+      },
+      "runtime_oracle": {
+        "reference_runtime_mode": "plain_per_module_p32",
+        "candidate_runtime_mode": "checkpointed_grouped_or_plain_p32",
+        "candidate_group_count": 32,
+        "candidate_plain_fallback_count": 0,
+        "candidate_checkpoint_metadata_bytes": 4240,
+        "packed_runtime_equivalence": {
+          "tokens": 5252,
+          "final_kl": -9.442120606582501e-10,
+          "logits_relative_l2": 0.0,
+          "max_abs_logits_delta": 0.0,
+          "top1": 1.0,
+          "top5": 1.0,
+          "top10": 1.0,
+          "exact_logits_fraction": 1.0,
+          "limits": {
+            "absolute_final_kl": 1e-06,
+            "logits_relative_l2": 1e-08,
+            "max_abs_logits_delta": 1e-07,
+            "exact_logits_fraction": 1.0,
+            "top1": 1.0,
+            "top5": 1.0,
+            "top10": 1.0
+          }
+        }
+      },
+      "fixed_trellis_correction": null,
+      "seed": 20260902,
+      "engine_command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "/root/polly-work/qvq-pr84-a100/scripts/benchmark_qvq_rotation_full_model_cuda.py",
+        "--arms",
+        "P0,C0",
+        "--bits",
+        "2",
+        "--seed",
+        "20260902",
+        "--layers",
+        "16",
+        "--calibration-samples",
+        "16",
+        "--validation-streams",
+        "3",
+        "--validation-samples",
+        "16",
+        "--sequence-length",
+        "128",
+        "--decode-batches",
+        "1",
+        "2",
+        "4",
+        "8",
+        "--prefill-warmup",
+        "2",
+        "--prefill-iterations",
+        "5",
+        "--decode-warmup",
+        "5",
+        "--decode-iterations",
+        "30",
+        "--module-suite-warmup",
+        "10",
+        "--module-suite-iterations",
+        "30",
+        "--timing-cycles",
+        "5",
+        "--json",
+        "/root/polly-work/qvq-pr84-a100/artifacts/qvq_validation/p0-c0-checkpoint-runtime_seed20260902_18bb77b9.json",
+        "--runtime-oracle",
+        "plain-checkpointed",
+        "--local-files-only"
+      ]
+    }
+  ]
+}
