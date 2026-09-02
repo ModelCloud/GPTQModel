@@ -895,6 +895,8 @@ def qvq_cuda_swiglu_precondition_multiblock(
     activated_gate: torch.Tensor,
     up: torch.Tensor,
     pre_scale: torch.Tensor,
+    *,
+    half2_high: bool = False,
 ) -> torch.Tensor:
     """Run the exact Hopper multiblock N=8192 SwiGLU/down precondition."""
 
@@ -922,10 +924,12 @@ def qvq_cuda_swiglu_precondition_multiblock(
         )
     if pre_scale.numel() != 8192:
         raise ValueError("multiblock QVQ SwiGLU precondition scale must contain 8192 values")
+    if not isinstance(half2_high, bool):
+        raise TypeError("multiblock QVQ SwiGLU half2_high must be a bool")
     if torch.cuda.get_device_capability(activated_gate.device)[0] != 9:
         raise RuntimeError("multiblock QVQ SwiGLU precondition requires a Hopper device")
     return _qvq_cuda_swiglu_precondition_multiblock_op()(
-        activated_gate, up, pre_scale
+        activated_gate, up, pre_scale, half2_high
     )
 
 

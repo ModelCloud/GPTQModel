@@ -670,8 +670,9 @@ def test_qvq_cuda_swiglu_precondition_is_bit_exact_and_repeatable(m, seed):
 
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
 @pytest.mark.parametrize("seed", (20260931, 20260932, 20260933))
+@pytest.mark.parametrize("half2_high", (False, True))
 def test_qvq_cuda_multiblock_swiglu_precondition_is_bit_exact_and_repeatable(
-    m, seed
+    m, seed, half2_high
 ):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("multiblock SwiGLU precondition requires Hopper")
@@ -691,12 +692,13 @@ def test_qvq_cuda_multiblock_swiglu_precondition_is_bit_exact_and_repeatable(
 
     for _ in range(10):
         actual = qvq_cuda_swiglu_precondition_multiblock(
-            activated_gate, up, pre_scale
+            activated_gate, up, pre_scale, half2_high=half2_high
         )
         assert torch.equal(actual, expected)
 
 
-def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards():
+@pytest.mark.parametrize("half2_high", (False, True))
+def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(half2_high):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("multiblock SwiGLU precondition requires Hopper")
     n = 8192
@@ -704,17 +706,24 @@ def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards():
     up = torch.randn((1, n), device="cuda", dtype=torch.float16)
     pre_scale = torch.ones((n,), device="cuda", dtype=torch.float16)
     expected = qvq_cuda_swiglu_precondition(gate, up, pre_scale)
-    qvq_cuda_swiglu_precondition_multiblock(gate, up, pre_scale)
+    qvq_cuda_swiglu_precondition_multiblock(
+        gate, up, pre_scale, half2_high=half2_high
+    )
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        captured = qvq_cuda_swiglu_precondition_multiblock(gate, up, pre_scale)
+        captured = qvq_cuda_swiglu_precondition_multiblock(
+            gate, up, pre_scale, half2_high=half2_high
+        )
     graph.replay()
     torch.cuda.synchronize()
     assert torch.equal(captured, expected)
 
     with pytest.raises(ValueError, match="N=8192"):
         qvq_cuda_swiglu_precondition_multiblock(
-            gate[:, :4096], up[:, :4096], pre_scale[:4096]
+            gate[:, :4096],
+            up[:, :4096],
+            pre_scale[:4096],
+            half2_high=half2_high,
         )
 
 

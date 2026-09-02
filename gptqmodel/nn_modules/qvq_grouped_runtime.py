@@ -181,6 +181,7 @@ class QVQGroupedRuntimeTelemetry:
     paired_recovery_launches: int = 0
     h100_multiblock_recovery_launches: int = 0
     h100_multiblock_precondition_launches: int = 0
+    h100_half2_precondition_high_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -204,6 +205,7 @@ class QVQGroupedRuntimeTelemetry:
             "paired_recovery_launches": self.paired_recovery_launches,
             "h100_multiblock_recovery_launches": self.h100_multiblock_recovery_launches,
             "h100_multiblock_precondition_launches": self.h100_multiblock_precondition_launches,
+            "h100_half2_precondition_high_launches": self.h100_half2_precondition_high_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -575,18 +577,21 @@ class QVQHopperGroupedRuntime:
         )
 
         rows = x.numel() // self._children()[0].in_features
-        precondition = (
-            qvq_cuda_swiglu_precondition_multiblock
-            if self._h100_multiblock_intermediate_enabled
-            else qvq_cuda_swiglu_precondition
-        )
-        transformed = precondition(
-            activated_gate.reshape(rows, down.in_features),
-            up.reshape(rows, down.in_features),
-            down._cached_cast("SU", torch.float16),
-        )
         if self._h100_multiblock_intermediate_enabled:
+            transformed = qvq_cuda_swiglu_precondition_multiblock(
+                activated_gate.reshape(rows, down.in_features),
+                up.reshape(rows, down.in_features),
+                down._cached_cast("SU", torch.float16),
+                half2_high=True,
+            )
             self.telemetry.h100_multiblock_precondition_launches += 1
+            self.telemetry.h100_half2_precondition_high_launches += 1
+        else:
+            transformed = qvq_cuda_swiglu_precondition(
+                activated_gate.reshape(rows, down.in_features),
+                up.reshape(rows, down.in_features),
+                down._cached_cast("SU", torch.float16),
+            )
         inner = down._inner_forward(transformed)
         recovered = down._qvq_recover_inference_output(inner, torch.float16)
         return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
