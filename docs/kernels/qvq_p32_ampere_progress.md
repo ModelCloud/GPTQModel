@@ -2306,6 +2306,18 @@ power-of-two specialization is W2-only, so neither probe is dispatched.
 Diagnostics are `v19_m16_attention_pow2_{control,candidate}.json` and
 `v19_m16_qkv_pow2_{control,candidate,verify8000}.json`.
 
+The forty-seventh v19 progression applies the exact power-of-two circular-word
+wrap to W2 in the widened M16 long-K MLP-down tuple
+`(K,N)=(17408,5120)`. Against the split-24 control medians of
+`0.138240/0.141312/0.141312/0.142336 ms`, the candidate measures
+`0.132096/0.141312/0.141312/0.142336 ms` in the matched
+100-warmup/4000-iteration run. The W2 gain is 1.0465x (4.44% lower latency),
+the other rates tie, and the W2 result reproduces at 8,000 iterations.
+Maximum absolute error remains below `9.54e-05`; cumulative affected-case log
+weighting reaches **4.031% improvement** versus fetched main. Artifacts are
+`v19_m16_down_pow2_control.json`, `v19_m16_down_pow2_candidate.json`, and
+`v19_m16_down_pow2_candidate_verify8000.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
