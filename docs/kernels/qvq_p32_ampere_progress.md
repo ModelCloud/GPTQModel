@@ -2215,6 +2215,18 @@ W3.5, so it is rejected. Diagnostics are
 `v19_m8_down_wide_n128_split{24,40}_deep.json` and
 `v19_m8_down_wide_n128_split40_verify8000.json`.
 
+The thirty-ninth v19 progression extends the 128-thread N128 layout to the
+measured M8 attention-out tuple `(K,N)=(6144,5120)`. Against the fresh
+narrow split-32 control medians of `0.055296/0.056320/0.055296/0.056320 ms`,
+the 200-warmup/8000-iteration candidate measures
+`0.052224/0.054272/0.053248/0.053248 ms`. The affected geomean speedup is
+**1.0481x** (4.592% lower latency), maximum absolute error stays below
+`2.48e-05`, and affected-case log weighting reaches **3.545% cumulative
+improvement** versus fetched main. The specialization is restricted to
+that exact K/N pair; other M8/N5120 inputs retain the original narrow path.
+Artifacts are `v19_m8_attention_n64_control_deep.json` and
+`v19_m8_attention_wide_n128_candidate_{deep,verify8000}.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
