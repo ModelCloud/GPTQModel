@@ -671,8 +671,9 @@ def test_qvq_cuda_swiglu_precondition_is_bit_exact_and_repeatable(m, seed):
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
 @pytest.mark.parametrize("seed", (20260931, 20260932, 20260933))
 @pytest.mark.parametrize("half2_high", (False, True))
+@pytest.mark.parametrize("fuse_silu", (False, True))
 def test_qvq_cuda_multiblock_swiglu_precondition_is_bit_exact_and_repeatable(
-    m, seed, half2_high
+    m, seed, half2_high, fuse_silu
 ):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("multiblock SwiGLU precondition requires Hopper")
@@ -689,30 +690,47 @@ def test_qvq_cuda_multiblock_swiglu_precondition_is_bit_exact_and_repeatable(
     )
     activated_gate = torch.nn.functional.silu(gate)
     expected = qvq_cuda_swiglu_precondition(activated_gate, up, pre_scale)
+    gate_input = gate if fuse_silu else activated_gate
 
     for _ in range(10):
         actual = qvq_cuda_swiglu_precondition_multiblock(
-            activated_gate, up, pre_scale, half2_high=half2_high
+            gate_input,
+            up,
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=fuse_silu,
         )
         assert torch.equal(actual, expected)
 
 
 @pytest.mark.parametrize("half2_high", (False, True))
-def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(half2_high):
+@pytest.mark.parametrize("fuse_silu", (False, True))
+def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(
+    half2_high, fuse_silu
+):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("multiblock SwiGLU precondition requires Hopper")
     n = 8192
     gate = torch.randn((1, n), device="cuda", dtype=torch.float16)
     up = torch.randn((1, n), device="cuda", dtype=torch.float16)
     pre_scale = torch.ones((n,), device="cuda", dtype=torch.float16)
-    expected = qvq_cuda_swiglu_precondition(gate, up, pre_scale)
+    activated_gate = torch.nn.functional.silu(gate) if fuse_silu else gate
+    expected = qvq_cuda_swiglu_precondition(activated_gate, up, pre_scale)
     qvq_cuda_swiglu_precondition_multiblock(
-        gate, up, pre_scale, half2_high=half2_high
+        gate,
+        up,
+        pre_scale,
+        half2_high=half2_high,
+        fuse_silu=fuse_silu,
     )
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         captured = qvq_cuda_swiglu_precondition_multiblock(
-            gate, up, pre_scale, half2_high=half2_high
+            gate,
+            up,
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=fuse_silu,
         )
     graph.replay()
     torch.cuda.synchronize()
@@ -724,7 +742,42 @@ def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(half2_high):
             up[:, :4096],
             pre_scale[:4096],
             half2_high=half2_high,
+            fuse_silu=fuse_silu,
         )
+    with pytest.raises(TypeError, match="fuse_silu"):
+        qvq_cuda_swiglu_precondition_multiblock(
+            gate,
+            up,
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=1,
+        )
+
+
+def test_qvq_cuda_multiblock_fused_silu_covers_every_finite_fp16_value():
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("multiblock SwiGLU precondition requires Hopper")
+    n = 8192
+    all_bits = torch.arange(1 << 16, dtype=torch.int32).to(torch.int16).view(torch.float16)
+    finite = all_bits[torch.isfinite(all_bits)]
+    gate = torch.zeros((8, n), device="cuda", dtype=torch.float16)
+    gate.view(-1)[: finite.numel()].copy_(finite.to(device="cuda"))
+    up = torch.ones_like(gate)
+    pre_scale = torch.full((n,), 0.125, device="cuda", dtype=torch.float16)
+    expected = qvq_cuda_swiglu_precondition_multiblock(
+        torch.nn.functional.silu(gate),
+        up,
+        pre_scale,
+        half2_high=True,
+    )
+    actual = qvq_cuda_swiglu_precondition_multiblock(
+        gate,
+        up,
+        pre_scale,
+        half2_high=True,
+        fuse_silu=True,
+    )
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
 
 def test_qvq_cuda_swiglu_precondition_graph_stream_overflow_and_guards():

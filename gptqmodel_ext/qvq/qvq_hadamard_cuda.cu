@@ -417,13 +417,27 @@ __global__ void __launch_bounds__(kHadamardThreads) qvq_swiglu_precondition_kern
   }
 }
 
+// PyTorch's FP16 SiLU CUDA path evaluates the activation in FP32 as
+// x / (1 + exp(-x)) and rounds the result once to FP16.  Keep that exact
+// division form: x * sigmoid(x) differs by one FP16 ULP for at least one
+// finite input value on Hopper.  An exhaustive 63,488-value finite-FP16 test
+// guards this boundary before the product below consumes the rounded result.
+__device__ __forceinline__ half qvq_silu_fp16(half gate) {
+  const float value = __half2float(gate);
+  return __float2half_rn(value / (1.0f + expf(-value)));
+}
+
 // Exact N=8192 multiblock factorization of qvq_swiglu_precondition_kernel.
 // The workspace is FP16 because the single-CTA reference stores every stage
 // in FP16 shared memory.  Splitting after bit 128 therefore preserves the
 // existing rounding boundary byte-for-byte while exposing 32 independent low
-// tiles and four high-column blocks per MLP row.
+// tiles and four high-column blocks per MLP row. FuseSilu adds exactly one
+// fixed H100 candidate specialization; it consumes the recovered FP16 gate,
+// reproduces PyTorch's rounded FP16 SiLU boundary in-register, and deletes the
+// standalone activation launch/materialization.
+template <bool FuseSilu>
 __global__ void qvq_swiglu_precondition_multiblock_low_kernel(
-    const half* __restrict__ activated_gate,
+    const half* __restrict__ gate_or_activated_gate,
     const half* __restrict__ up,
     const half* __restrict__ pre_scale,
     half* __restrict__ workspace) {
@@ -438,8 +452,11 @@ __global__ void qvq_swiglu_precondition_multiblock_low_kernel(
   const float divisor = __half2float(
       __float2half_rn(sqrtf(static_cast<float>(kHadamardPairMultiblockN))));
 
+  const half activated_gate = FuseSilu
+      ? qvq_silu_fp16(gate_or_activated_gate[offset])
+      : gate_or_activated_gate[offset];
   const half product_half = __float2half_rn(
-      __half2float(activated_gate[offset]) * __half2float(up[offset]));
+      __half2float(activated_gate) * __half2float(up[offset]));
   float value = __half2float(product_half) * __half2float(pre_scale[column]);
   value = round_fp16_unless_overflow(value);
   buf[p(local)] = __float2half_rn(value / divisor);
@@ -838,7 +855,8 @@ at::Tensor qvq_swiglu_precondition_multiblock_cuda(
     const at::Tensor& activated_gate,
     const at::Tensor& up,
     const at::Tensor& pre_scale,
-    bool half2_high) {
+    bool half2_high,
+    bool fuse_silu) {
   TORCH_CHECK(activated_gate.is_cuda() && up.is_cuda() && pre_scale.is_cuda(),
               "multiblock SwiGLU precondition tensors must be CUDA tensors");
   TORCH_CHECK(activated_gate.device() == up.device() && activated_gate.device() == pre_scale.device(),
@@ -871,15 +889,27 @@ at::Tensor qvq_swiglu_precondition_multiblock_cuda(
   at::Tensor workspace = at::empty_like(activated_gate);
   const int rows = static_cast<int>(rows64);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(activated_gate.get_device());
-  qvq_swiglu_precondition_multiblock_low_kernel<<<
-      dim3(kHadamardPairMultiblockTiles, rows),
-      kHadamardPairMultiblockTile,
-      0,
-      stream>>>(
-      reinterpret_cast<const half*>(activated_gate.const_data_ptr()),
-      reinterpret_cast<const half*>(up.const_data_ptr()),
-      reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
-      reinterpret_cast<half*>(workspace.mutable_data_ptr()));
+  if (fuse_silu) {
+    qvq_swiglu_precondition_multiblock_low_kernel<true><<<
+        dim3(kHadamardPairMultiblockTiles, rows),
+        kHadamardPairMultiblockTile,
+        0,
+        stream>>>(
+        reinterpret_cast<const half*>(activated_gate.const_data_ptr()),
+        reinterpret_cast<const half*>(up.const_data_ptr()),
+        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+        reinterpret_cast<half*>(workspace.mutable_data_ptr()));
+  } else {
+    qvq_swiglu_precondition_multiblock_low_kernel<false><<<
+        dim3(kHadamardPairMultiblockTiles, rows),
+        kHadamardPairMultiblockTile,
+        0,
+        stream>>>(
+        reinterpret_cast<const half*>(activated_gate.const_data_ptr()),
+        reinterpret_cast<const half*>(up.const_data_ptr()),
+        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+        reinterpret_cast<half*>(workspace.mutable_data_ptr()));
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   if (half2_high) {
     qvq_swiglu_precondition_multiblock_half2_high_kernel<<<
@@ -933,7 +963,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
-  m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False) -> Tensor");
+  m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {

@@ -57,6 +57,20 @@ class _R0Fallback(RuntimeError):
     """An expected exactness/dispatch rejection, not a kernel failure."""
 
 
+def _is_exact_silu_activation(act_fn: Any) -> bool:
+    """Return whether ``act_fn`` has PyTorch's standard non-inplace SiLU contract."""
+
+    if act_fn is torch.nn.functional.silu:
+        return True
+    if isinstance(act_fn, nn.SiLU):
+        return not act_fn.inplace
+    try:
+        from transformers.activations import SiLUActivation
+    except ImportError:
+        return False
+    return isinstance(act_fn, SiLUActivation)
+
+
 def _tensor_version(tensor: torch.Tensor) -> int | None:
     try:
         return tensor._version
@@ -182,6 +196,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_multiblock_recovery_launches: int = 0
     h100_multiblock_precondition_launches: int = 0
     h100_half2_precondition_high_launches: int = 0
+    h100_fused_silu_precondition_low_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -206,6 +221,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_multiblock_recovery_launches": self.h100_multiblock_recovery_launches,
             "h100_multiblock_precondition_launches": self.h100_multiblock_precondition_launches,
             "h100_half2_precondition_high_launches": self.h100_half2_precondition_high_launches,
+            "h100_fused_silu_precondition_low_launches": self.h100_fused_silu_precondition_low_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -239,6 +255,7 @@ class QVQHopperGroupedRuntime:
         self._mlp_parent_ref: Any = None
         self._mlp_down_ref: Any = None
         self._mlp_act_fn: Any = None
+        self._mlp_activation_is_exact_silu = False
 
     def _children(self) -> tuple[QVQLinear, ...]:
         children = tuple(child_ref() for child_ref in self._refs)
@@ -527,11 +544,13 @@ class QVQHopperGroupedRuntime:
         self._mlp_parent_ref = ref(parent)
         self._mlp_down_ref = ref(down)
         self._mlp_act_fn = act_fn
+        self._mlp_activation_is_exact_silu = _is_exact_silu_activation(act_fn)
 
     def _clear_mlp_fusion(self) -> None:
         self._mlp_parent_ref = None
         self._mlp_down_ref = None
         self._mlp_act_fn = None
+        self._mlp_activation_is_exact_silu = False
 
     def _mlp_rejection(self, x: torch.Tensor) -> str | None:
         rejection = self._runtime_eligible(x)
@@ -559,16 +578,15 @@ class QVQHopperGroupedRuntime:
     def _execute_mlp(self, x: torch.Tensor) -> torch.Tensor:
         down = self._mlp_down_ref()
         gate, up = self._execute(x)
-        activated_gate = self._mlp_act_fn(gate)
         if (
-            not isinstance(activated_gate, torch.Tensor)
-            or activated_gate.shape != up.shape
-            or activated_gate.dtype != torch.float16
-            or not activated_gate.is_contiguous()
+            not isinstance(gate, torch.Tensor)
+            or gate.shape != up.shape
+            or gate.dtype != torch.float16
+            or not gate.is_contiguous()
             or not up.is_contiguous()
         ):
             raise _R0Fallback(
-                "fused MLP activation must return contiguous FP16 gate geometry"
+                "fused MLP recovery must return contiguous FP16 gate/up geometry"
             )
 
         from ..utils.qvq_cuda import (
@@ -577,21 +595,46 @@ class QVQHopperGroupedRuntime:
         )
 
         rows = x.numel() // self._children()[0].in_features
-        if self._h100_multiblock_intermediate_enabled:
+        if (
+            self._h100_multiblock_intermediate_enabled
+            and self._mlp_activation_is_exact_silu
+        ):
             transformed = qvq_cuda_swiglu_precondition_multiblock(
-                activated_gate.reshape(rows, down.in_features),
+                gate.reshape(rows, down.in_features),
                 up.reshape(rows, down.in_features),
                 down._cached_cast("SU", torch.float16),
                 half2_high=True,
+                fuse_silu=True,
             )
             self.telemetry.h100_multiblock_precondition_launches += 1
             self.telemetry.h100_half2_precondition_high_launches += 1
+            self.telemetry.h100_fused_silu_precondition_low_launches += 1
         else:
-            transformed = qvq_cuda_swiglu_precondition(
-                activated_gate.reshape(rows, down.in_features),
-                up.reshape(rows, down.in_features),
-                down._cached_cast("SU", torch.float16),
-            )
+            activated_gate = self._mlp_act_fn(gate)
+            if (
+                not isinstance(activated_gate, torch.Tensor)
+                or activated_gate.shape != up.shape
+                or activated_gate.dtype != torch.float16
+                or not activated_gate.is_contiguous()
+            ):
+                raise _R0Fallback(
+                    "fused MLP activation must return contiguous FP16 gate geometry"
+                )
+            if self._h100_multiblock_intermediate_enabled:
+                transformed = qvq_cuda_swiglu_precondition_multiblock(
+                    activated_gate.reshape(rows, down.in_features),
+                    up.reshape(rows, down.in_features),
+                    down._cached_cast("SU", torch.float16),
+                    half2_high=True,
+                )
+                self.telemetry.h100_multiblock_precondition_launches += 1
+                self.telemetry.h100_half2_precondition_high_launches += 1
+            else:
+                transformed = qvq_cuda_swiglu_precondition(
+                    activated_gate.reshape(rows, down.in_features),
+                    up.reshape(rows, down.in_features),
+                    down._cached_cast("SU", torch.float16),
+                )
         inner = down._inner_forward(transformed)
         recovered = down._qvq_recover_inference_output(inner, torch.float16)
         return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)

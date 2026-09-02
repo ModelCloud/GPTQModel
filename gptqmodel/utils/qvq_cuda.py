@@ -897,8 +897,14 @@ def qvq_cuda_swiglu_precondition_multiblock(
     pre_scale: torch.Tensor,
     *,
     half2_high: bool = False,
+    fuse_silu: bool = False,
 ) -> torch.Tensor:
-    """Run the exact Hopper multiblock N=8192 SwiGLU/down precondition."""
+    """Run the exact Hopper multiblock N=8192 SwiGLU/down precondition.
+
+    ``activated_gate`` is the rounded FP16 activation by default.  With
+    ``fuse_silu=True`` it is the recovered FP16 pre-activation gate and the
+    kernel reproduces PyTorch's FP16 SiLU boundary before the product.
+    """
 
     if activated_gate.device.type != "cuda" or up.device.type != "cuda":
         raise ValueError("multiblock QVQ SwiGLU precondition inputs must be CUDA tensors")
@@ -926,10 +932,12 @@ def qvq_cuda_swiglu_precondition_multiblock(
         raise ValueError("multiblock QVQ SwiGLU precondition scale must contain 8192 values")
     if not isinstance(half2_high, bool):
         raise TypeError("multiblock QVQ SwiGLU half2_high must be a bool")
+    if not isinstance(fuse_silu, bool):
+        raise TypeError("multiblock QVQ SwiGLU fuse_silu must be a bool")
     if torch.cuda.get_device_capability(activated_gate.device)[0] != 9:
         raise RuntimeError("multiblock QVQ SwiGLU precondition requires a Hopper device")
     return _qvq_cuda_swiglu_precondition_multiblock_op()(
-        activated_gate, up, pre_scale, half2_high
+        activated_gate, up, pre_scale, half2_high, fuse_silu
     )
 
 
