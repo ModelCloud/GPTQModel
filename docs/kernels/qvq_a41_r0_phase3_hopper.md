@@ -174,3 +174,7 @@ Native development validation and performance measurement use only the
 exclusive H100.  H100 and H200 both execute this same SM90a kernel, but results
 must retain the device name and memory system because the two products have
 different HBM capacity and bandwidth.
+
+The H100 performance comparison against the byte-identical pre-Phase-3
+`origin/main` Hopper sources is in
+[`qvq_a41_r0_phase3_h100_benchmark.md`](qvq_a41_r0_phase3_h100_benchmark.md).

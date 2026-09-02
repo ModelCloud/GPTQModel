@@ -1,0 +1,275 @@
+{
+  "commit": "37edcaad3dad824a50d738eee4ca4ca8012f9426",
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "dtype": "float16 input/levels, float32 accumulation/output",
+  "label": "pre_phase3_w3_repeat",
+  "mode": "plain",
+  "repo_root": "/tmp/qvq-phase3-main-baseline",
+  "rows": [
+    {
+      "bits": 3.0,
+      "checksum": -110.71949768066406,
+      "child_ns": [
+        2048,
+        512,
+        512
+      ],
+      "group": "qkv",
+      "k": 2048,
+      "kernel_m": 16,
+      "m": 1,
+      "split_counts": [
+        1,
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.0675381342569987,
+        "mean_ms": 0.0663631784915924,
+        "median_ms": 0.0662506659825643,
+        "min_ms": 0.0652010679244995,
+        "p95_ms": 0.06734293301900228
+      },
+      "total_n": 3072
+    },
+    {
+      "bits": 3.0,
+      "checksum": 22.210845947265625,
+      "child_ns": [
+        2048,
+        512,
+        512
+      ],
+      "group": "qkv",
+      "k": 2048,
+      "kernel_m": 16,
+      "m": 2,
+      "split_counts": [
+        1,
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.06659839948018392,
+        "mean_ms": 0.06582846935590109,
+        "median_ms": 0.06577386657396952,
+        "min_ms": 0.06505599816640219,
+        "p95_ms": 0.066594131787618
+      },
+      "total_n": 3072
+    },
+    {
+      "bits": 3.0,
+      "checksum": -679.2370910644531,
+      "child_ns": [
+        2048,
+        512,
+        512
+      ],
+      "group": "qkv",
+      "k": 2048,
+      "kernel_m": 16,
+      "m": 4,
+      "split_counts": [
+        1,
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.06635200182596843,
+        "mean_ms": 0.06570759471257528,
+        "median_ms": 0.06540853182474772,
+        "min_ms": 0.06518613497416179,
+        "p95_ms": 0.06623253424962362
+      },
+      "total_n": 3072
+    },
+    {
+      "bits": 3.0,
+      "checksum": 958.2006378173828,
+      "child_ns": [
+        2048,
+        512,
+        512
+      ],
+      "group": "qkv",
+      "k": 2048,
+      "kernel_m": 16,
+      "m": 8,
+      "split_counts": [
+        1,
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.06621119976043702,
+        "mean_ms": 0.06543366384506226,
+        "median_ms": 0.06507733265558878,
+        "min_ms": 0.06504106521606445,
+        "p95_ms": 0.06608746846516927
+      },
+      "total_n": 3072
+    },
+    {
+      "bits": 3.0,
+      "checksum": -1783.7178344726562,
+      "child_ns": [
+        2048,
+        512,
+        512
+      ],
+      "group": "qkv",
+      "k": 2048,
+      "kernel_m": 16,
+      "m": 16,
+      "split_counts": [
+        1,
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.0653717319170634,
+        "mean_ms": 0.06525108269850413,
+        "median_ms": 0.06525546709696452,
+        "min_ms": 0.06519999901453653,
+        "p95_ms": 0.06528106530507406
+      },
+      "total_n": 3072
+    },
+    {
+      "bits": 3.0,
+      "checksum": 375.818603515625,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "kernel_m": 16,
+      "m": 1,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.04561920166015625,
+        "mean_ms": 0.04538298662503561,
+        "median_ms": 0.04544746478398641,
+        "min_ms": 0.044427732626597084,
+        "p95_ms": 0.04545706510543823
+      },
+      "total_n": 16384
+    },
+    {
+      "bits": 3.0,
+      "checksum": 579.8142852783203,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "kernel_m": 16,
+      "m": 2,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.04511466821034749,
+        "mean_ms": 0.044606720010439554,
+        "median_ms": 0.044374400377273554,
+        "min_ms": 0.04426986773808797,
+        "p95_ms": 0.044946134090423584
+      },
+      "total_n": 16384
+    },
+    {
+      "bits": 3.0,
+      "checksum": -521.6015625,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "kernel_m": 16,
+      "m": 4,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.04531626701354981,
+        "mean_ms": 0.045032533367474877,
+        "median_ms": 0.04528319835662842,
+        "min_ms": 0.04428693453470866,
+        "p95_ms": 0.04530133406321208
+      },
+      "total_n": 16384
+    },
+    {
+      "bits": 3.0,
+      "checksum": 1992.7064208984375,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "kernel_m": 16,
+      "m": 8,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.04482133388519287,
+        "mean_ms": 0.044480234662691756,
+        "median_ms": 0.04435253341992696,
+        "min_ms": 0.04429440100987752,
+        "p95_ms": 0.04465386470158895
+      },
+      "total_n": 16384
+    },
+    {
+      "bits": 3.0,
+      "checksum": 2181.2505493164062,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "kernel_m": 16,
+      "m": 16,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.0451690673828125,
+        "mean_ms": 0.04497382402420044,
+        "median_ms": 0.04514666795730591,
+        "min_ms": 0.044446933269500735,
+        "p95_ms": 0.04515626827875773
+      },
+      "total_n": 16384
+    }
+  ],
+  "source_fingerprint": "dd33002d06755bf6ed45a1ac55794124d4a837077a629edae1595c991496f0f0",
+  "timing": {
+    "method": "CUDA Graph replay bracketed by CUDA events",
+    "replays_per_sample": 30,
+    "samples": 100,
+    "warmup": 20
+  },
+  "torch": "2.15.0.dev20260828+cu130",
+  "torch_cuda": "13.0"
+}
