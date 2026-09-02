@@ -1,0 +1,126 @@
+{
+  "schema": "qvq.validation-harness.v1",
+  "status": "pass",
+  "profile": "p0-r0-runtime",
+  "reference_arm": "P0",
+  "candidate_arm": "R0",
+  "repository_revision": "02b201516bcaf96f6b0040a8ef893bf71cd9bcc3",
+  "promotable": true,
+  "runs": [
+    {
+      "artifact": "/root/polly-work/qvq-pr84-a100/artifacts/qvq_validation/p0-r0-runtime_seed20260831_02b20151.json",
+      "status": "pass",
+      "dataset": {
+        "calibration_samples": 16,
+        "validation_streams": 3,
+        "validation_samples": 48,
+        "validation_tokens": 5630
+      },
+      "payload_identity_required": true,
+      "payload_identity": true,
+      "reference_effective_bpw": 2.054419024237271,
+      "candidate_effective_bpw": 2.054419024237271,
+      "bootstrap": {
+        "kl_delta_median": -0.00015967452220816414,
+        "kl_ci95": [
+          -0.0004033546833350776,
+          6.20443424558248e-05
+        ],
+        "top1_delta_median": -0.0005327650506127268,
+        "top1_ci95": [
+          -0.002116402116402183,
+          0.0012551551013089135
+        ],
+        "kl_ci_crosses_zero": true,
+        "top1_ci_crosses_zero": true
+      },
+      "decode": {
+        "1": {
+          "reference_ms": 37.14274428784847,
+          "candidate_ms": 30.828729271888733,
+          "candidate_latency_delta_fraction": -0.16999322847626575,
+          "candidate_speedup": 1.2048094477159392
+        },
+        "2": {
+          "reference_ms": 37.13772539049387,
+          "candidate_ms": 32.62018691748381,
+          "candidate_latency_delta_fraction": -0.12164284229874822,
+          "candidate_speedup": 1.138489043132636
+        },
+        "4": {
+          "reference_ms": 36.92298196256161,
+          "candidate_ms": 32.06816129386425,
+          "candidate_latency_delta_fraction": -0.13148506460339382,
+          "candidate_speedup": 1.1513906776322176
+        },
+        "8": {
+          "reference_ms": 36.84663167223334,
+          "candidate_ms": 31.874793581664562,
+          "candidate_latency_delta_fraction": -0.13493331316673451,
+          "candidate_speedup": 1.1559802443216054
+        }
+      },
+      "runtime_oracle": {
+        "reference_runtime_mode": "plain_per_module_p32",
+        "candidate_runtime_mode": "refactored_grouped_or_plain_p32",
+        "candidate_group_count": 32,
+        "candidate_plain_fallback_count": 0,
+        "packed_runtime_equivalence": {
+          "tokens": 5630,
+          "final_kl": 7.497749215266527e-05,
+          "logits_relative_l2": 0.004625771015370033,
+          "max_abs_logits_delta": 0.232421875,
+          "top1": 0.991829484902309,
+          "top5": 1.0,
+          "top10": 1.0
+        }
+      },
+      "fixed_trellis_correction": null,
+      "seed": 20260831,
+      "engine_command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "/root/polly-work/qvq-pr84-a100/scripts/benchmark_qvq_rotation_full_model_cuda.py",
+        "--arms",
+        "P0,R0",
+        "--bits",
+        "2",
+        "--seed",
+        "20260831",
+        "--layers",
+        "16",
+        "--calibration-samples",
+        "16",
+        "--validation-streams",
+        "3",
+        "--validation-samples",
+        "16",
+        "--sequence-length",
+        "128",
+        "--decode-batches",
+        "1",
+        "2",
+        "4",
+        "8",
+        "--prefill-warmup",
+        "2",
+        "--prefill-iterations",
+        "5",
+        "--decode-warmup",
+        "5",
+        "--decode-iterations",
+        "30",
+        "--module-suite-warmup",
+        "10",
+        "--module-suite-iterations",
+        "30",
+        "--timing-cycles",
+        "5",
+        "--json",
+        "/root/polly-work/qvq-pr84-a100/artifacts/qvq_validation/p0-r0-runtime_seed20260831_02b20151.json",
+        "--runtime-oracle",
+        "plain-refactored",
+        "--local-files-only"
+      ]
+    }
+  ]
+}

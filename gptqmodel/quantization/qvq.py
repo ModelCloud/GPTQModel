@@ -417,6 +417,8 @@ class QVQLinearQuantizationResult:
     output_scale_optimized_channels: int
     hessian_viterbi_selected: bool
     hessian_viterbi_candidate_relative_improvement: float | None
+    input_hadamard: bool = True
+    output_hadamard: bool = True
     rounding: str = "block_ldlq"
     kronecker_proxy_loss: torch.Tensor | None = None
     module_scale_search_selected: bool = False
@@ -6467,6 +6469,9 @@ def rht_preprocess_weight(
     weight: torch.Tensor,
     SU: torch.Tensor,
     SV: torch.Tensor,
+    *,
+    input_hadamard: bool = True,
+    output_hadamard: bool = True,
 ) -> torch.Tensor:
     """Map dense ``[out, in]`` weights into QVQ's ``[in, out]`` RHT basis."""
 
@@ -6483,13 +6488,23 @@ def rht_preprocess_weight(
     _validate_fp32_representable(SU, name="QVQ input signs")
     _validate_fp32_representable(SV, name="QVQ output signs")
 
+    if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
+        raise TypeError("QVQ RHT transform flags must be bools.")
     work = weight.transpose(0, 1).to(torch.float32) * SU.to(torch.float32).unsqueeze(1)
-    work = matmul_hadU(work.transpose(0, 1)).transpose(0, 1)
+    if input_hadamard:
+        work = matmul_hadU(work.transpose(0, 1)).transpose(0, 1)
     work = work * SV.to(torch.float32).unsqueeze(0)
-    return matmul_hadU(work, transpose=True).contiguous()
+    if output_hadamard:
+        work = matmul_hadU(work, transpose=True)
+    return work.contiguous()
 
 
-def rht_preprocess_hessian(H: torch.Tensor, SU: torch.Tensor) -> torch.Tensor:
+def rht_preprocess_hessian(
+    H: torch.Tensor,
+    SU: torch.Tensor,
+    *,
+    hadamard: bool = True,
+) -> torch.Tensor:
     """Transform an input Hessian into the runtime's randomized Hadamard basis."""
 
     if H.ndim != 2 or H.shape[0] != H.shape[1] or not H.is_floating_point():
@@ -6501,16 +6516,23 @@ def rht_preprocess_hessian(H: torch.Tensor, SU: torch.Tensor) -> torch.Tensor:
     _validate_fp32_representable(H, name="QVQ Hessian")
     _validate_fp32_representable(SU, name="QVQ input signs")
 
+    if not isinstance(hadamard, bool):
+        raise TypeError("QVQ Hessian Hadamard flag must be a bool.")
     signs = SU.to(torch.float32)
     transformed = H.to(torch.float32) * signs.unsqueeze(0) * signs.unsqueeze(1)
-    transformed = matmul_hadU(transformed)
-    return matmul_hadU(transformed.transpose(0, 1)).transpose(0, 1).contiguous()
+    if hadamard:
+        transformed = matmul_hadU(transformed)
+        transformed = matmul_hadU(transformed.transpose(0, 1)).transpose(0, 1)
+    return transformed.contiguous()
 
 
 def rht_reconstruct_weight(
     inner_weight: torch.Tensor,
     SU: torch.Tensor,
     SV: torch.Tensor,
+    *,
+    input_hadamard: bool = True,
+    output_hadamard: bool = True,
 ) -> torch.Tensor:
     """Invert :func:`rht_preprocess_weight` through the inference dataflow."""
 
@@ -6527,9 +6549,15 @@ def rht_reconstruct_weight(
     _validate_fp32_representable(SU, name="QVQ input signs")
     _validate_fp32_representable(SV, name="QVQ output signs")
 
-    work = matmul_hadU(inner_weight.transpose(0, 1), transpose=True).transpose(0, 1)
+    if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
+        raise TypeError("QVQ RHT transform flags must be bools.")
+    work = inner_weight
+    if input_hadamard:
+        work = matmul_hadU(work.transpose(0, 1), transpose=True).transpose(0, 1)
     work = work * SU.to(work.dtype).unsqueeze(1)
-    work = matmul_hadU(work) * SV.to(work.dtype).unsqueeze(0)
+    if output_hadamard:
+        work = matmul_hadU(work)
+    work = work * SV.to(work.dtype).unsqueeze(0)
     return work.transpose(0, 1).contiguous()
 
 
@@ -6537,6 +6565,9 @@ def rht_reconstruct_weight_adjoint(
     weight_gradient: torch.Tensor,
     SU: torch.Tensor,
     SV: torch.Tensor,
+    *,
+    input_hadamard: bool = True,
+    output_hadamard: bool = True,
 ) -> torch.Tensor:
     """Map a dense-weight gradient into the exact QVQ inner-weight basis.
 
@@ -6563,7 +6594,13 @@ def rht_reconstruct_weight_adjoint(
             dtype=torch.float32,
             requires_grad=True,
         )
-        reconstructed = rht_reconstruct_weight(inner, SU, SV)
+        reconstructed = rht_reconstruct_weight(
+            inner,
+            SU,
+            SV,
+            input_hadamard=input_hadamard,
+            output_hadamard=output_hadamard,
+        )
         (inner_gradient,) = torch.autograd.grad(
             reconstructed,
             inner,
@@ -6664,6 +6701,8 @@ def optimize_qvq_output_channel_scales(
     denominator_epsilon: float | None = None,
     optimization_H: torch.Tensor | None = None,
     correction_strength: float = 1.0,
+    input_hadamard: bool = True,
+    output_hadamard: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Optimize fixed-trellis output scales and reject every non-improving row.
 
@@ -6675,7 +6714,13 @@ def optimize_qvq_output_channel_scales(
     unchanged.
     """
 
-    current = rht_reconstruct_weight(inner_weight, SU, SV)
+    current = rht_reconstruct_weight(
+        inner_weight,
+        SU,
+        SV,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+    )
     if current.shape != weight.shape:
         raise ValueError("QVQ output-scale reconstruction must match the source weight shape.")
     if tuple(H.shape) != (weight.shape[1], weight.shape[1]):
@@ -6728,7 +6773,13 @@ def optimize_qvq_output_channel_scales(
     # back to its current value, which must remain a no-op rather than being
     # reported as an optimized channel.
     candidate_SV = (SV.to(torch.float32) * correction).to(SV.dtype)
-    candidate = rht_reconstruct_weight(inner_weight, SU, candidate_SV)
+    candidate = rht_reconstruct_weight(
+        inner_weight,
+        SU,
+        candidate_SV,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+    )
     current_error = current_fp32 - target_fp32
     candidate_error = candidate.to(torch.float32) - target_fp32
     current_row_loss = (current_error @ H_fp32 * current_error).sum(dim=1)
@@ -6736,7 +6787,13 @@ def optimize_qvq_output_channel_scales(
     accepted = valid & torch.isfinite(candidate_row_loss) & (candidate_row_loss < current_row_loss)
 
     optimized_SV = torch.where(accepted, candidate_SV, SV)
-    optimized_weight = rht_reconstruct_weight(inner_weight, SU, optimized_SV)
+    optimized_weight = rht_reconstruct_weight(
+        inner_weight,
+        SU,
+        optimized_SV,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+    )
     optimized_loss = _qvq_proxy_loss_unchecked(weight, optimized_weight, H)
     current_loss = current_row_loss.sum()
     if not torch.isfinite(optimized_loss) or optimized_loss > current_loss:
@@ -6753,6 +6810,8 @@ def optimize_qvq_module_scale(
     *,
     denominator_epsilon: float | None = None,
     optimization_H: torch.Tensor | None = None,
+    input_hadamard: bool = True,
+    output_hadamard: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float, bool]:
     """Optimize one fixed-trellis module scale already represented by ``SV``.
 
@@ -6763,7 +6822,13 @@ def optimize_qvq_module_scale(
     :func:`quantize_qvq_linear`; neither path changes the inference format.
     """
 
-    current = rht_reconstruct_weight(inner_weight, SU, SV)
+    current = rht_reconstruct_weight(
+        inner_weight,
+        SU,
+        SV,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+    )
     if current.shape != weight.shape:
         raise ValueError("QVQ module-scale reconstruction must match the source weight shape.")
     if tuple(H.shape) != (weight.shape[1], weight.shape[1]):
@@ -6809,7 +6874,13 @@ def optimize_qvq_module_scale(
     correction = correction if valid else torch.ones_like(correction)
 
     candidate_SV = (SV.to(torch.float32) * correction).to(SV.dtype)
-    candidate = rht_reconstruct_weight(inner_weight, SU, candidate_SV)
+    candidate = rht_reconstruct_weight(
+        inner_weight,
+        SU,
+        candidate_SV,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+    )
     current_loss = _qvq_proxy_loss_unchecked(weight, current, H)
     candidate_loss = _qvq_proxy_loss_unchecked(weight, candidate, H)
     accepted = bool(valid and torch.isfinite(candidate_loss) and candidate_loss < current_loss)
@@ -6830,6 +6901,8 @@ def quantize_qvq_linear(
     output_hessian: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
     seed: int = 0,
+    input_hadamard: bool = True,
+    output_hadamard: bool = True,
     damp_percent: float | None = None,
     trellis_batch_size: int | None = None,
     codebook_version: str = PGC16_CODEBOOK_VERSION,
@@ -6880,6 +6953,8 @@ def quantize_qvq_linear(
     """
 
     bits = normalize_qvq_rate(bits)
+    if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
+        raise TypeError("QVQ transform-axis flags must be bools.")
     if not isinstance(dual_v2, bool):
         raise TypeError("QVQ `dual_v2` must be a bool.")
     if not isinstance(v2b4_p64, bool):
@@ -6951,6 +7026,8 @@ def quantize_qvq_linear(
         input_hessian_preparation, QVQInputHessianPreparation
     ):
         raise TypeError("QVQ shared input-Hessian preparation has an invalid type.")
+    if input_hessian_preparation is not None and not input_hadamard:
+        raise ValueError("QVQ folded input basis cannot reuse a two-sided RHT Hessian preparation.")
     rounding = rounding.strip().lower()
     if rounding not in {"block_ldlq", "yaqa"}:
         raise ValueError("QVQ rounding must be `block_ldlq` or `yaqa`.")
@@ -7174,7 +7251,13 @@ def quantize_qvq_linear(
     SV_sign = SV_sign.to(device=device, dtype=torch.float32)
 
     with _qvq_phase(telemetry, "rht_weight", device):
-        transformed_weight = rht_preprocess_weight(weight, SU, SV_sign)
+        transformed_weight = rht_preprocess_weight(
+            weight,
+            SU,
+            SV_sign,
+            input_hadamard=input_hadamard,
+            output_hadamard=output_hadamard,
+        )
     with _qvq_phase(telemetry, "rht_hessian", device):
         block_ldlq_control_H = None
         if input_hessian_preparation is not None:
@@ -7201,7 +7284,11 @@ def quantize_qvq_linear(
             transformed_H = preparation.hessian
             damping = preparation.damping
         else:
-            transformed_H = rht_preprocess_hessian(H.to(device=device), SU)
+            transformed_H = rht_preprocess_hessian(
+                H.to(device=device),
+                SU,
+                hadamard=input_hadamard,
+            )
             transformed_H = (transformed_H + transformed_H.transpose(0, 1)) * 0.5
             mean_diagonal = transformed_H.diagonal().abs().mean()
             if rounding == "yaqa" and (v2b4_p64 or v2b2_p32):
@@ -7219,7 +7306,11 @@ def quantize_qvq_linear(
     transformed_output_hessian = None
     if output_hessian is not None:
         with _qvq_phase(telemetry, "rht_output_hessian", device):
-            transformed_output_hessian = rht_preprocess_hessian(output_hessian.to(device=device), SV_sign)
+            transformed_output_hessian = rht_preprocess_hessian(
+                output_hessian.to(device=device),
+                SV_sign,
+                hadamard=output_hadamard,
+            )
             transformed_output_hessian = (
                 transformed_output_hessian + transformed_output_hessian.transpose(0, 1)
             ) * 0.5
@@ -7257,6 +7348,8 @@ def quantize_qvq_linear(
                 else transformed_output_hessian.detach().to(device="cpu", dtype=torch.float32).contiguous(),
                 "bits": float(bits),
                 "seed": int(seed),
+                "input_hadamard": input_hadamard,
+                "output_hadamard": output_hadamard,
                 "damp_percent": float(damp_percent),
                 "rounding": rounding,
                 "codebook_version": codebook_version,
@@ -7648,10 +7741,12 @@ def quantize_qvq_linear(
             heldout_target = propagated_target_output
             if bias is not None:
                 heldout_target = heldout_target - bias.to(device=weight.device, dtype=heldout_target.dtype)
-            localized_search_inputs = matmul_hadU(propagated_inputs * SU.to(torch.float32))
-            localized_search_target = matmul_hadU(
-                heldout_target / (SV_sign.to(torch.float32) * scale), transpose=True
-            )
+            localized_search_inputs = propagated_inputs * SU.to(torch.float32)
+            if input_hadamard:
+                localized_search_inputs = matmul_hadU(localized_search_inputs)
+            localized_search_target = heldout_target / (SV_sign.to(torch.float32) * scale)
+            if output_hadamard:
+                localized_search_target = matmul_hadU(localized_search_target, transpose=True)
 
         def localized_serialized_weight(
             candidate_inner: torch.Tensor,
@@ -7683,6 +7778,8 @@ def quantize_qvq_linear(
                 serialized_inner.to(dtype=candidate_inner.dtype),
                 SU,
                 SV_sign * scale,
+                input_hadamard=input_hadamard,
+                output_hadamard=output_hadamard,
             )
 
         localized_replay_gradient = None
@@ -7701,6 +7798,8 @@ def quantize_qvq_linear(
                     full_gradient.to(torch.float32),
                     SU,
                     SV_sign * scale,
+                    input_hadamard=input_hadamard,
+                    output_hadamard=output_hadamard,
                 )
             except Exception:  # noqa: BLE001 - an external gradient callback must fail closed
                 localized_gradient_callback_error = True
@@ -7767,7 +7866,13 @@ def quantize_qvq_linear(
         candidate_SV: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor]:
         with _qvq_phase(telemetry, "candidate_reconstruct_proxy", device):
-            candidate_weight = rht_reconstruct_weight(candidate_inner, SU, candidate_SV)
+            candidate_weight = rht_reconstruct_weight(
+                candidate_inner,
+                SU,
+                candidate_SV,
+                input_hadamard=input_hadamard,
+                output_hadamard=output_hadamard,
+            )
             unoptimized_loss = _qvq_proxy_loss_unchecked(weight, candidate_weight, source_H)
             candidate_loss = unoptimized_loss
             optimized_channels = 0
@@ -7781,6 +7886,8 @@ def quantize_qvq_linear(
                         candidate_SV,
                         optimization_H=scale_optimization_H,
                         correction_strength=_QVQ_LOW_RATE_OUTPUT_SCALE_STRENGTH if bits <= 1.5 else 1.0,
+                        input_hadamard=input_hadamard,
+                        output_hadamard=output_hadamard,
                     )
                 )
         return (
@@ -7811,6 +7918,8 @@ def quantize_qvq_linear(
             SU,
             module_SV,
             optimization_H=scale_optimization_H,
+            input_hadamard=input_hadamard,
+            output_hadamard=output_hadamard,
         )
         if proposed:
             fixed_SV, fixed_weight, fixed_loss, fixed_channels, _ = finish_candidate(
@@ -7939,7 +8048,13 @@ def quantize_qvq_linear(
             accepted = torch.equal(serialized_inner.to(dtype=quantized_inner.dtype), quantized_inner)
         if accepted:
             quantized_inner = serialized_inner.to(dtype=quantized_inner.dtype)
-            reconstructed_weight = rht_reconstruct_weight(quantized_inner, SU, SV_sign * selected_encoding_scale)
+            reconstructed_weight = rht_reconstruct_weight(
+                quantized_inner,
+                SU,
+                SV_sign * selected_encoding_scale,
+                input_hadamard=input_hadamard,
+                output_hadamard=output_hadamard,
+            )
             try:
                 accepted = bool(propagated_acceptance(reconstructed_weight, rollback_weight))
             except Exception:  # noqa: BLE001 - an external confirmation gate must fail closed
@@ -7996,10 +8111,12 @@ def quantize_qvq_linear(
         # Score in the same inner space used by QVQ inference. Hadamard is
         # orthogonal, so this is exactly equivalent to output-space MSE while
         # avoiding a dense reconstruction for every bank/tile proposal.
-        transformed_inputs = matmul_hadU(propagated_inputs * SU.to(torch.float32))
-        transformed_target = matmul_hadU(
-            heldout_target / (SV_sign.to(torch.float32) * selected_encoding_scale), transpose=True
-        )
+        transformed_inputs = propagated_inputs * SU.to(torch.float32)
+        if input_hadamard:
+            transformed_inputs = matmul_hadU(transformed_inputs)
+        transformed_target = heldout_target / (SV_sign.to(torch.float32) * selected_encoding_scale)
+        if output_hadamard:
+            transformed_target = matmul_hadU(transformed_target, transpose=True)
         propagation_baseline_inner = preprop_inner
         propagation_baseline_states = preprop_states
         baseline_output = transformed_inputs @ propagation_baseline_inner
@@ -8131,7 +8248,13 @@ def quantize_qvq_linear(
                 transformed_target - transformed_inputs @ working_inner.to(dtype=transformed_inputs.dtype)
             ).square().sum()
             accepted = torch.isfinite(selected_loss) and selected_loss < baseline_loss
-        proposed_weight = rht_reconstruct_weight(working_inner, SU, SV_sign * selected_encoding_scale)
+        proposed_weight = rht_reconstruct_weight(
+            working_inner,
+            SU,
+            SV_sign * selected_encoding_scale,
+            input_hadamard=input_hadamard,
+            output_hadamard=output_hadamard,
+        )
         proposed_dense_loss = (
             heldout_target - propagated_inputs @ proposed_weight.to(torch.float32).transpose(0, 1)
         ).square().sum()
@@ -8264,13 +8387,17 @@ def quantize_qvq_linear(
         output_scale_optimized_channels=optimized_channels,
         hessian_viterbi_selected=hessian_viterbi_selected,
         hessian_viterbi_candidate_relative_improvement=hessian_viterbi_candidate_relative_improvement,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
         rounding=rounding,
         kronecker_proxy_loss=kronecker_proxy_loss,
         module_scale_search_selected=module_scale_search_selected,
         module_scale_multiplier=module_scale_multiplier,
         module_scale_reencoded=module_scale_reencoded,
         telemetry=telemetry_result,
-        serialization_allowed=experimental_codebook is None,
+        serialization_allowed=(
+            experimental_codebook is None and input_hadamard and output_hadamard
+        ),
         bank_ids=None if selected_bank_ids is None else selected_bank_ids.detach().clone(),
         bank_selector_bits=1 if v2b2_p32 else 2,
         bank_alt_id=None if selected_bank_alt_id is None else selected_bank_alt_id.detach().clone(),

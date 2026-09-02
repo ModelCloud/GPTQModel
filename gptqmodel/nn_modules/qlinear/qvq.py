@@ -245,6 +245,8 @@ class QVQLinear(BaseQuantLinear):
         dual_v2: bool = False,
         v2b4_p64: bool = False,
         v2b2_p32: bool = False,
+        input_hadamard: bool = True,
+        output_hadamard: bool = True,
         **kwargs,
     ):
         del kwargs
@@ -318,6 +320,10 @@ class QVQLinear(BaseQuantLinear):
         if v2b2_p32 and (vector_size != 2 or trellis_window != 16 or bank_count != 2 or self.bits > 3.5):
             raise ValueError("QVQ V2B2-P32 requires vector_size=2, trellis_window=16, bank_count=2, and W1-W3.5")
         self.v2b2_p32 = v2b2_p32
+        if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
+            raise TypeError("QVQ transform-axis flags must be bools")
+        self.input_hadamard = input_hadamard
+        self.output_hadamard = output_hadamard
         if isinstance(bank_count, bool) or not isinstance(bank_count, int) or bank_count not in (1, 2, 4):
             raise ValueError("QVQ bank_count must be 1, 2, or 4")
         if bank_count == 4 and vector_size != 4 and not v2b4_p64:
@@ -407,6 +413,7 @@ class QVQLinear(BaseQuantLinear):
         """Exclude transient selector state from deepcopy/pickle."""
         state = super().__getstate__()
         state.pop("_qvq_cuda_bank_cache_lock", None)
+        state.pop("_qvq_grouped_p32_delegate", None)
         state["_qvq_cuda_bank_cache"] = None
         state["_qvq_cuda_window_cache"] = None
         return state
@@ -416,6 +423,15 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_cuda_bank_cache_lock = threading.Lock()
         self._qvq_cuda_bank_cache = None
         self._qvq_cuda_window_cache = None
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        delegate = getattr(self, "_qvq_grouped_p32_delegate", None)
+        if delegate is None:
+            return
+        state, consumer_index, _ = delegate
+        for name, tensor in state.canonical_child_payload(consumer_index).items():
+            destination[f"{prefix}{name}"] = tensor if keep_vars else tensor.detach()
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
@@ -504,7 +520,6 @@ class QVQLinear(BaseQuantLinear):
         for accepted, requirement in checks:
             if not accepted:
                 return False, NotImplementedError(f"QVQLinear requires {requirement}.")
-        format_code = args.get("format", FORMAT.QVQ)
         in_features = args.get("in_features")
         out_features = args.get("out_features")
         if (in_features is not None and in_features % 16) or (out_features is not None and out_features % 16):
@@ -1018,6 +1033,10 @@ class QVQLinear(BaseQuantLinear):
             )
         if x.numel() == 0:
             return x.new_empty((*x.shape[:-1], self.out_features))
+        delegate = getattr(self, "_qvq_grouped_p32_delegate", None)
+        if delegate is not None:
+            state, consumer_index, module_name = delegate
+            return state.consume(consumer_index, module_name, self, x)
         input_dtype = x.dtype
         compute_dtype = _qvq_compute_dtype(input_dtype, x.device.type)
         x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
@@ -1066,47 +1085,174 @@ class QVQLinear(BaseQuantLinear):
                 )
         return output.reshape(*x.shape[:-1], self.out_features).to(input_dtype)
 
-    def _forward_compute_dtype(self, x_2d: torch.Tensor, compute_dtype: torch.dtype) -> torch.Tensor:
+    def transform_input(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply this module's complete input-side QVQ transform.
+
+        This is the ownership boundary used by graph planners that share one
+        identical input transform across sibling projections.  The returned
+        tensor is still an activation; no inner QVQ decode has run.  Callers
+        must prove that every consumer has identical ``SU`` and
+        ``input_hadamard`` state before reusing it.
+        """
+
+        if x.shape[-1] != self.in_features:
+            raise ValueError(
+                f"QVQ expected input width {self.in_features}, got {x.shape[-1]}"
+            )
         if self.training:
-            # Keep the differentiable Python butterfly path for the reference
-            # forward used in training.
-            transformed_input = x_2d * self.SU.to(compute_dtype)
-            input_transform = (
-                matmul_hadU_stable
-                if compute_dtype == torch.float16
-                and (
-                    transformed_input.device.type == "mps"
-                    or transformed_input.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH
-                )
-                else matmul_hadU
-            )
-            transformed = input_transform(transformed_input)
-            output = self._inner_forward(transformed)
-            output_transform = (
-                matmul_hadU_stable
-                if compute_dtype == torch.float16
-                and (
-                    output.device.type == "mps"
-                    or output.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH
-                )
-                else matmul_hadU
-            )
-            output = output_transform(output) * self.SV.to(compute_dtype)
-            if self.bias is not None:
-                output = output + self.bias.to(compute_dtype)
-        else:
+            raise RuntimeError("shared QVQ input transforms are inference-only")
+        if x.numel() == 0:
+            return x
+        compute_dtype = _qvq_compute_dtype(x.dtype, x.device.type)
+        x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
+        if self.input_hadamard:
             transformed = _qvq_hadamard_fused(
                 x_2d,
                 pre_scale=self._cached_cast("SU", compute_dtype),
                 scale_mode=(
                     2
-                    if compute_dtype == torch.float16 and self.in_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                    if compute_dtype == torch.float16
+                    and self.in_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
                     else 1
                 ),
             )
+        else:
+            transformed = x_2d * self._cached_cast("SU", compute_dtype)
+        return transformed.reshape(*x.shape[:-1], self.in_features)
+
+    def forward_pretransformed(
+        self,
+        transformed: torch.Tensor,
+        *,
+        output_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        """Run inner decode/output recovery on a proven input transform.
+
+        ``transformed`` must equal :meth:`transform_input` for this module.
+        The method intentionally bypasses both ``SU`` and the input Hadamard,
+        allowing an architecture-level shared-transform coordinator to avoid
+        duplicate launches without changing checkpoint tensor semantics.
+        """
+
+        if transformed.shape[-1] != self.in_features:
+            raise ValueError(
+                f"QVQ expected transformed input width {self.in_features}, "
+                f"got {transformed.shape[-1]}"
+            )
+        if self.training:
+            raise RuntimeError("pretransformed QVQ inference is unavailable in training mode")
+        if transformed.numel() == 0:
+            return transformed.new_empty(
+                (*transformed.shape[:-1], self.out_features),
+                dtype=output_dtype or transformed.dtype,
+            )
+        target_dtype = transformed.dtype if output_dtype is None else output_dtype
+        compute_dtype = _qvq_compute_dtype(transformed.dtype, transformed.device.type)
+        transformed_2d = transformed.reshape(-1, self.in_features).to(compute_dtype)
+        output = self._forward_pretransformed_compute_dtype(
+            transformed_2d,
+            compute_dtype,
+        )
+        return output.reshape(*transformed.shape[:-1], self.out_features).to(target_dtype)
+
+    def recover_output(
+        self,
+        inner_output: torch.Tensor,
+        *,
+        output_dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        """Apply this module's output-side QVQ recovery to decoded inner output.
+
+        Grouped packed decoders use this boundary to decode several sibling
+        projections in one kernel while retaining each module's independent
+        output Hadamard, ``SV``, and bias.  No input transform or trellis decode
+        runs here.
+        """
+
+        if inner_output.shape[-1] != self.out_features:
+            raise ValueError(
+                f"QVQ expected inner output width {self.out_features}, "
+                f"got {inner_output.shape[-1]}"
+            )
+        if self.training:
+            raise RuntimeError("separate QVQ output recovery is inference-only")
+        target_dtype = inner_output.dtype if output_dtype is None else output_dtype
+        if inner_output.numel() == 0:
+            return inner_output.to(target_dtype)
+        compute_dtype = _qvq_compute_dtype(target_dtype, inner_output.device.type)
+        recovered = self._recover_output_compute_dtype(
+            inner_output.reshape(-1, self.out_features),
+            compute_dtype,
+        )
+        return recovered.reshape(*inner_output.shape[:-1], self.out_features).to(
+            target_dtype
+        )
+
+    def _forward_compute_dtype(self, x_2d: torch.Tensor, compute_dtype: torch.dtype) -> torch.Tensor:
+        if self.training:
+            # Keep the differentiable Python butterfly path for the reference
+            # forward used in training.
+            transformed_input = x_2d * self.SU.to(compute_dtype)
+            if self.input_hadamard:
+                input_transform = (
+                    matmul_hadU_stable
+                    if compute_dtype == torch.float16
+                    and (
+                        transformed_input.device.type == "mps"
+                        or transformed_input.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                    )
+                    else matmul_hadU
+                )
+                transformed = input_transform(transformed_input)
+            else:
+                transformed = transformed_input
             output = self._inner_forward(transformed)
-            output_dtype = output.dtype
-            output = _qvq_hadamard_fused(
+            if self.output_hadamard:
+                output_transform = (
+                    matmul_hadU_stable
+                    if compute_dtype == torch.float16
+                    and (
+                        output.device.type == "mps"
+                        or output.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                    )
+                    else matmul_hadU
+                )
+                output = output_transform(output)
+            output = output * self.SV.to(compute_dtype)
+            if self.bias is not None:
+                output = output + self.bias.to(compute_dtype)
+        else:
+            if self.input_hadamard:
+                transformed = _qvq_hadamard_fused(
+                    x_2d,
+                    pre_scale=self._cached_cast("SU", compute_dtype),
+                    scale_mode=(
+                        2
+                        if compute_dtype == torch.float16 and self.in_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                        else 1
+                    ),
+                )
+            else:
+                transformed = x_2d * self._cached_cast("SU", compute_dtype)
+            return self._forward_pretransformed_compute_dtype(transformed, compute_dtype)
+        return output
+
+    def _forward_pretransformed_compute_dtype(
+        self,
+        transformed: torch.Tensor,
+        compute_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        output = self._inner_forward(transformed)
+        return self._recover_output_compute_dtype(output, compute_dtype)
+
+    def _recover_output_compute_dtype(
+        self,
+        output: torch.Tensor,
+        compute_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        output_dtype = output.dtype
+        if self.output_hadamard:
+            return _qvq_hadamard_fused(
                 output,
                 post_scale=self._cached_cast("SV", compute_dtype, output_dtype),
                 bias=self._cached_cast("bias", compute_dtype, output_dtype),
@@ -1117,7 +1263,9 @@ class QVQLinear(BaseQuantLinear):
                     else 4 if output_dtype == torch.float32 else 0
                 ),
             )
-        return output
+        output = output * self._cached_cast("SV", compute_dtype, output_dtype)
+        cached_bias = self._cached_cast("bias", compute_dtype, output_dtype)
+        return output if cached_bias is None else output + cached_bias
 
 
 def qvq_dense_oracle_forward(
@@ -1169,8 +1317,12 @@ def qvq_dense_oracle_forward(
                 ),
             ).to(dtype=torch.float32)
             x_2d = x.to(device=compute_device, dtype=torch.float32).reshape(-1, layer.in_features)
-            transformed = matmul_hadU(x_2d * layer.SU.to(device=compute_device, dtype=torch.float32))
-            output = matmul_hadU(transformed @ inner)
+            transformed = x_2d * layer.SU.to(device=compute_device, dtype=torch.float32)
+            if layer.input_hadamard:
+                transformed = matmul_hadU(transformed)
+            output = transformed @ inner
+            if layer.output_hadamard:
+                output = matmul_hadU(output)
             output = output * layer.SV.to(device=compute_device, dtype=torch.float32)
             if layer.bias is not None:
                 output = output + layer.bias.to(device=compute_device, dtype=torch.float32)

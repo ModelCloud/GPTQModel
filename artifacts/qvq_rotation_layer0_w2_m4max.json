@@ -1,0 +1,261 @@
+{
+  "schema": "qvq.rotation-folding.layer-propagation.v1",
+  "model": "ModelCloud/Llama3.2-1B-Instruct",
+  "device": "mps",
+  "bits": 2.0,
+  "layer": 0,
+  "calibration": [
+    "A small compiler lowers typed expressions into a compact instruction stream.",
+    "Explain why ocean tides depend on both the Moon and the Sun.",
+    "The customer ordered tea, bread, fruit, and a blue ceramic bowl.",
+    "Write a careful invariant for a ring buffer with one producer and one consumer."
+  ],
+  "validation": [
+    "A telescope collects light and focuses it onto a detector.",
+    "Compare a balanced binary tree with a hash table for ordered queries.",
+    "The train crossed the valley just before the evening storm arrived."
+  ],
+  "arms": {
+    "A0": {
+      "description": "current per-linear two-sided RHT control",
+      "online_hadamards_per_block": 14,
+      "rewrite": {
+        "arm": "A0",
+        "rewritten": false,
+        "blockers": []
+      },
+      "modules": [
+        {
+          "module": "model.layers.0.self_attn.q_proj",
+          "role": "attention_q",
+          "shape": [
+            2048,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.28316065669059753,
+          "effective_bpw": 2.062501907348633,
+          "fit_seconds": 33.32374958298169,
+          "serialized_bytes": 1081345
+        },
+        {
+          "module": "model.layers.0.self_attn.k_proj",
+          "role": "attention_k",
+          "shape": [
+            512,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.2802770137786865,
+          "effective_bpw": 2.1093826293945312,
+          "fit_seconds": 8.345728417043574,
+          "serialized_bytes": 276481
+        },
+        {
+          "module": "model.layers.0.self_attn.v_proj",
+          "role": "attention_v",
+          "shape": [
+            512,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.27585214376449585,
+          "effective_bpw": 2.1093826293945312,
+          "fit_seconds": 8.331288250046782,
+          "serialized_bytes": 276481
+        },
+        {
+          "module": "model.layers.0.self_attn.o_proj",
+          "role": "attention_o",
+          "shape": [
+            2048,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.2779187560081482,
+          "effective_bpw": 2.062501907348633,
+          "fit_seconds": 33.33365570800379,
+          "serialized_bytes": 1081345
+        },
+        {
+          "module": "model.layers.0.mlp.gate_proj",
+          "role": "mlp_gate",
+          "shape": [
+            8192,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.2801034152507782,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 140.61388266598806,
+          "serialized_bytes": 4300801
+        },
+        {
+          "module": "model.layers.0.mlp.up_proj",
+          "role": "mlp_up",
+          "shape": [
+            8192,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.2799864709377289,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 132.56877300003543,
+          "serialized_bytes": 4300801
+        },
+        {
+          "module": "model.layers.0.mlp.down_proj",
+          "role": "mlp_down",
+          "shape": [
+            2048,
+            8192
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.2595565915107727,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 136.96790124999825,
+          "serialized_bytes": 4300801
+        }
+      ],
+      "metrics": {
+        "final_kl": 0.02973460778594017,
+        "logits_relative_l2": 0.09691054373979568,
+        "layer_output_relative_l2": 0.04164735972881317,
+        "top1": 0.7179487347602844,
+        "top5": 1.0,
+        "top10": 1.0
+      },
+      "elapsed_seconds": 495.13751308305655
+    },
+    "A22": {
+      "description": "A1 plus exact SwiGLU folding while retaining online Q/K and down Hadamards",
+      "online_hadamards_per_block": 3,
+      "rewrite": {
+        "arm": "A22",
+        "rewritten": true,
+        "residual_seed": 20260831,
+        "residual_kind": "hadamard",
+        "blockers": [],
+        "vo_folded": true,
+        "swiglu_permutation_scaling_folded": true
+      },
+      "modules": [
+        {
+          "module": "model.layers.0.self_attn.q_proj",
+          "role": "attention_q",
+          "shape": [
+            2048,
+            2048
+          ],
+          "input_hadamard": false,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.3022042214870453,
+          "effective_bpw": 2.062501907348633,
+          "fit_seconds": 33.833611999987625,
+          "serialized_bytes": 1081345
+        },
+        {
+          "module": "model.layers.0.self_attn.k_proj",
+          "role": "attention_k",
+          "shape": [
+            512,
+            2048
+          ],
+          "input_hadamard": false,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.288179486989975,
+          "effective_bpw": 2.1093826293945312,
+          "fit_seconds": 8.353708292008378,
+          "serialized_bytes": 276481
+        },
+        {
+          "module": "model.layers.0.self_attn.v_proj",
+          "role": "attention_v",
+          "shape": [
+            512,
+            2048
+          ],
+          "input_hadamard": false,
+          "output_hadamard": false,
+          "weight_relative_l2": 0.29099684953689575,
+          "effective_bpw": 2.1093826293945312,
+          "fit_seconds": 8.298680457985029,
+          "serialized_bytes": 276481
+        },
+        {
+          "module": "model.layers.0.self_attn.o_proj",
+          "role": "attention_o",
+          "shape": [
+            2048,
+            2048
+          ],
+          "input_hadamard": false,
+          "output_hadamard": false,
+          "weight_relative_l2": 0.3085300028324127,
+          "effective_bpw": 2.062501907348633,
+          "fit_seconds": 32.39790570898913,
+          "serialized_bytes": 1081345
+        },
+        {
+          "module": "model.layers.0.mlp.gate_proj",
+          "role": "mlp_gate",
+          "shape": [
+            8192,
+            2048
+          ],
+          "input_hadamard": false,
+          "output_hadamard": false,
+          "weight_relative_l2": 0.28286391496658325,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 135.09402529196814,
+          "serialized_bytes": 4300801
+        },
+        {
+          "module": "model.layers.0.mlp.up_proj",
+          "role": "mlp_up",
+          "shape": [
+            8192,
+            2048
+          ],
+          "input_hadamard": false,
+          "output_hadamard": false,
+          "weight_relative_l2": 0.2993033230304718,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 135.31853124999907,
+          "serialized_bytes": 4300801
+        },
+        {
+          "module": "model.layers.0.mlp.down_proj",
+          "role": "mlp_down",
+          "shape": [
+            2048,
+            8192
+          ],
+          "input_hadamard": true,
+          "output_hadamard": false,
+          "weight_relative_l2": 0.2587353587150574,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 133.86219787504524,
+          "serialized_bytes": 4300801
+        }
+      ],
+      "metrics": {
+        "final_kl": 0.05790787562727928,
+        "logits_relative_l2": 0.13963298499584198,
+        "layer_output_relative_l2": 0.12841039896011353,
+        "top1": 0.8461538553237915,
+        "top5": 1.0,
+        "top10": 1.0
+      },
+      "elapsed_seconds": 493.8270407919772
+    }
+  },
+  "storage_accounting": "canonical P32 payload + packed 1-bit-per-32 selector metadata + FP32 SU/SV + one alternative-bank byte"
+}

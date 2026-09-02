@@ -1,0 +1,143 @@
+{
+  "schema": "qvq.rotation-folding.layer-propagation.v1",
+  "model": "ModelCloud/Llama3.2-1B-Instruct",
+  "device": "mps",
+  "bits": 2.0,
+  "layer": 0,
+  "calibration": [
+    "A small compiler lowers typed expressions into a compact instruction stream.",
+    "Explain why ocean tides depend on both the Moon and the Sun.",
+    "The customer ordered tea, bread, fruit, and a blue ceramic bowl.",
+    "Write a careful invariant for a ring buffer with one producer and one consumer."
+  ],
+  "validation": [
+    "A telescope collects light and focuses it onto a detector.",
+    "Compare a balanced binary tree with a hash table for ordered queries.",
+    "The train crossed the valley just before the evening storm arrived."
+  ],
+  "arms": {
+    "A27": {
+      "description": "permutation-only SwiGLU folding; retain A0 attention and residual axes",
+      "online_hadamards_per_block": 12,
+      "rewrite": {
+        "arm": "A27",
+        "rewritten": true,
+        "residual_seed": 20260831,
+        "residual_kind": "hadamard",
+        "blockers": [],
+        "residual_folded": false,
+        "swiglu_permutation_scaling_folded": true
+      },
+      "modules": [
+        {
+          "module": "model.layers.0.self_attn.q_proj",
+          "role": "attention_q",
+          "shape": [
+            2048,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.28316065669059753,
+          "effective_bpw": 2.062501907348633,
+          "fit_seconds": 32.47118379198946,
+          "serialized_bytes": 1081345
+        },
+        {
+          "module": "model.layers.0.self_attn.k_proj",
+          "role": "attention_k",
+          "shape": [
+            512,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.2802770137786865,
+          "effective_bpw": 2.1093826293945312,
+          "fit_seconds": 8.5298417910235,
+          "serialized_bytes": 276481
+        },
+        {
+          "module": "model.layers.0.self_attn.v_proj",
+          "role": "attention_v",
+          "shape": [
+            512,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.27585214376449585,
+          "effective_bpw": 2.1093826293945312,
+          "fit_seconds": 8.546997917001136,
+          "serialized_bytes": 276481
+        },
+        {
+          "module": "model.layers.0.self_attn.o_proj",
+          "role": "attention_o",
+          "shape": [
+            2048,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.2779187560081482,
+          "effective_bpw": 2.062501907348633,
+          "fit_seconds": 33.22635558305774,
+          "serialized_bytes": 1081345
+        },
+        {
+          "module": "model.layers.0.mlp.gate_proj",
+          "role": "mlp_gate",
+          "shape": [
+            8192,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": false,
+          "weight_relative_l2": 0.28399696946144104,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 143.76138645794708,
+          "serialized_bytes": 4300801
+        },
+        {
+          "module": "model.layers.0.mlp.up_proj",
+          "role": "mlp_up",
+          "shape": [
+            8192,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": false,
+          "weight_relative_l2": 0.28022342920303345,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 132.72212520893663,
+          "serialized_bytes": 4300801
+        },
+        {
+          "module": "model.layers.0.mlp.down_proj",
+          "role": "mlp_down",
+          "shape": [
+            2048,
+            8192
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.2595294415950775,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 138.61134062509518,
+          "serialized_bytes": 4300801
+        }
+      ],
+      "metrics": {
+        "final_kl": 0.034170377999544144,
+        "logits_relative_l2": 0.10532894730567932,
+        "layer_output_relative_l2": 0.1309904158115387,
+        "top1": 0.8461538553237915,
+        "top5": 1.0,
+        "top10": 1.0
+      },
+      "elapsed_seconds": 499.75865299999714
+    }
+  },
+  "storage_accounting": "canonical P32 payload + packed 1-bit-per-32 selector metadata + FP32 SU/SV + one alternative-bank byte"
+}

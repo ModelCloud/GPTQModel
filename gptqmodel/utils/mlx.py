@@ -83,6 +83,8 @@ def _qvq_mlx_linear_from_torch(module):
         v2b4_p64=module.v2b4_p64,
         v2b2_p32=module.v2b2_p32,
         bank_alt_id=copy_array(module.bank_alt_id),
+        input_hadamard=module.input_hadamard,
+        output_hadamard=module.output_hadamard,
     )
 
 
