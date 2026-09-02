@@ -517,3 +517,29 @@ across W2, W2.5, W3, and W3.5, and all 26 exact P32 window tests pass.
 The rejected predicate-select bank-mask lowering raised the matched instruction
 count from 32.374M to 32.722M and registers from 48 to 49; the multiply form is
 retained.
+
+Commit `45fd0868` forms the low-level shared-table byte address directly.  The
+exact identity
+
+```text
+2 * ((p ^ (p >> 7)) & 0xff) == ((p << 1) ^ (p >> 6)) & 0x1fe
+```
+
+lets one `LOP3` consume the already scaled product and removes the separate
+post-XOR shift/mask operation.  Destructive inline PTX makes the product's last
+use explicit so the compiler can reuse its register.  Matched W3 NCU falls from
+32.374M to 31.002M executed instructions (**-1.372M, -4.24%**); the 60.38 us
+profile duration is close to the preceding 59.84 us capture, while the
+120-sample CUDA-event matrix improves every rate/direction and gains 1.0099x
+geomean over `cfc41314`.  All 26 exact-P32 window tests pass.
+
+| Rate | Gate/up `cfc41314` ms | Gate/up `45fd0868` ms | Gain | Down `cfc41314` ms | Down `45fd0868` ms | Gain |
+|---:|---:|---:|---:|---:|---:|---:|
+| W2 | 0.063328 | 0.062400 | 1.015x | 0.063120 | 0.062368 | 1.012x |
+| W2.5 | 0.063488 | 0.062880 | 1.010x | 0.062912 | 0.062592 | 1.005x |
+| W3 | 0.063584 | 0.063168 | 1.007x | 0.063136 | 0.062784 | 1.006x |
+| W3.5 | 0.064896 | 0.063776 | 1.018x | 0.063808 | 0.063328 | 1.008x |
+
+From fetched `origin/main` `c0469004` through `45fd0868`, the eight-cell M16
+Qwen3.8 gate/down geomean improves **1.0589x** and the matched W3 instruction
+count improves from 37.484M to 31.002M (**-6.482M, -17.29%**).
