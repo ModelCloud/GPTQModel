@@ -10,6 +10,7 @@ import pytest
 
 from scripts.qvq_validation_harness import (
     PROFILES,
+    RUNTIME_ORACLE_LIMITS,
     _engine_environment,
     validate_artifact,
 )
@@ -21,6 +22,7 @@ def _quality_block():
             "tokens": 100,
             "final_kl": 0.1,
             "logits_relative_l2": 0.2,
+            "exact_logits_fraction": 0.5,
             "top1": 0.8,
             "top5": 0.9,
             "top10": 0.95,
@@ -33,6 +35,7 @@ def _quality_block():
             "final_kl": 0.1,
             "logits_relative_l2": 0.2,
             "max_abs_logits_delta": 1.0,
+            "exact_logits_fraction": 0.5,
             "top1": 0.8,
             "top5": 0.9,
             "top10": 0.95,
@@ -241,8 +244,9 @@ def _artifact(profile_name: str, revision="deadbeef"):
         equivalence.update(
             {
                 "final_kl": 1e-7,
-                "logits_relative_l2": 1e-4,
-                "max_abs_logits_delta": 0.01,
+                "logits_relative_l2": 0.0,
+                "max_abs_logits_delta": 0.0,
+                "exact_logits_fraction": 1.0,
                 "top1": 1.0,
                 "top5": 1.0,
                 "top10": 1.0,
@@ -295,9 +299,40 @@ def test_plain_refactored_oracle_rejects_packed_output_drift(tmp_path):
     payload = _artifact("p0-r0-runtime")
     payload["runtime_oracle"]["packed_runtime_equivalence"]["aggregate"][
         "logits_relative_l2"
-    ] = 0.011
+    ] = RUNTIME_ORACLE_LIMITS["logits_relative_l2"] * 1.01
 
     with pytest.raises(RuntimeError, match="packed logits relative L2"):
+        _validate(_write(tmp_path, payload), "p0-r0-runtime")
+
+
+@pytest.mark.parametrize(
+    ("metric", "value", "message"),
+    (
+        (
+            "final_kl",
+            RUNTIME_ORACLE_LIMITS["absolute_final_kl"] * -1.01,
+            "packed KL",
+        ),
+        (
+            "max_abs_logits_delta",
+            RUNTIME_ORACLE_LIMITS["max_abs_logits_delta"] * 1.01,
+            "maximum logit delta",
+        ),
+        ("exact_logits_fraction", 1.0 - 1e-12, "exact-logit identity"),
+        ("top1", 1.0 - 1e-12, "Top1 identity"),
+        ("top5", 1.0 - 1e-12, "Top5 identity"),
+        ("top10", 1.0 - 1e-12, "Top10 identity"),
+    ),
+)
+def test_plain_refactored_oracle_rejects_tight_delta_boundary(
+    tmp_path, metric, value, message
+):
+    payload = _artifact("p0-r0-runtime")
+    payload["runtime_oracle"]["packed_runtime_equivalence"]["aggregate"][
+        metric
+    ] = value
+
+    with pytest.raises(RuntimeError, match=message):
         _validate(_write(tmp_path, payload), "p0-r0-runtime")
 
 

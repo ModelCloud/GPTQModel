@@ -170,6 +170,8 @@ def _evaluate(model, encoded, dense_logits, dense_layers, device, *, layer_indic
     logits_delta_sq = 0.0
     logits_reference_sq = 0.0
     max_abs = 0.0
+    exact_logit_values = 0
+    logit_values = 0
     top_hits = {1: 0, 5: 0, 10: 0}
     layer_delta_sq = defaultdict(float)
     layer_reference_sq = defaultdict(float)
@@ -199,6 +201,8 @@ def _evaluate(model, encoded, dense_logits, dense_layers, device, *, layer_indic
                 reduction="sum",
             )
             delta = actual - target_logits
+            text_exact_logit_values = int((actual == target_logits).sum())
+            text_logit_values = actual.numel()
             text_delta_sq = float(delta.square().sum())
             text_reference_sq = float(target_logits.square().sum())
             target = target_logits.argmax(dim=-1, keepdim=True)
@@ -212,6 +216,8 @@ def _evaluate(model, encoded, dense_logits, dense_layers, device, *, layer_indic
                     "tokens": tokens,
                     "final_kl": float(text_kl_sum) / tokens,
                     "logits_relative_l2": math.sqrt(text_delta_sq / text_reference_sq),
+                    "exact_logits_fraction": text_exact_logit_values
+                    / text_logit_values,
                     **text_hits,
                 }
             )
@@ -219,6 +225,8 @@ def _evaluate(model, encoded, dense_logits, dense_layers, device, *, layer_indic
             kl_sum += float(text_kl_sum)
             logits_delta_sq += text_delta_sq
             logits_reference_sq += text_reference_sq
+            exact_logit_values += text_exact_logit_values
+            logit_values += text_logit_values
             max_abs = max(max_abs, float(delta.abs().max()))
             for layer_index in layer_indices:
                 actual_layer = current_layers[layer_index]
@@ -236,6 +244,7 @@ def _evaluate(model, encoded, dense_logits, dense_layers, device, *, layer_indic
         "final_kl": kl_sum / token_count,
         "logits_relative_l2": math.sqrt(logits_delta_sq / logits_reference_sq),
         "max_abs_logits_delta": max_abs,
+        "exact_logits_fraction": exact_logit_values / logit_values,
         "per_text": per_text,
     }
     for k, hits in top_hits.items():

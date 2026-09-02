@@ -91,6 +91,20 @@ PROFILES = {
     ),
 }
 
+# Same-payload P0/R0 is a correctness oracle, not an accuracy comparison.
+# Grouped P32 preserves each child's split-K partition, so every packed output
+# and final FP32 logit is expected to be bit-identical.  The tiny KL allowance
+# covers only softmax/log-softmax roundoff when evaluating identical logits.
+RUNTIME_ORACLE_LIMITS = {
+    "absolute_final_kl": 1e-6,
+    "logits_relative_l2": 1e-8,
+    "max_abs_logits_delta": 1e-7,
+    "exact_logits_fraction": 1.0,
+    "top1": 1.0,
+    "top5": 1.0,
+    "top10": 1.0,
+}
+
 
 def _git(*args: str) -> str:
     return subprocess.check_output(
@@ -309,30 +323,44 @@ def _validate_runtime_oracle(
         "candidate_plain_fallback_count": int(candidate_runtime["plain_fallback_count"]),
     }
     if profile.require_runtime_equivalence:
+        equivalence = oracle.get("packed_runtime_equivalence", {})
         quality = _validate_quality_block(
             "runtime_oracle.packed_runtime_equivalence",
-            oracle.get("packed_runtime_equivalence", {}),
+            equivalence,
+        )
+        aggregate = equivalence.get("aggregate", {})
+        exact_logits_fraction = aggregate.get("exact_logits_fraction")
+        _require(
+            _finite_number(exact_logits_fraction),
+            "plain/refactored packed exact-logit identity metric is missing",
         )
         _require(
-            float(quality["final_kl"]) <= 1e-3,
+            abs(float(quality["final_kl"]))
+            <= RUNTIME_ORACLE_LIMITS["absolute_final_kl"],
             "plain/refactored packed KL gate failed",
         )
         _require(
-            float(quality["logits_relative_l2"]) <= 1e-2,
+            float(quality["logits_relative_l2"])
+            <= RUNTIME_ORACLE_LIMITS["logits_relative_l2"],
             "plain/refactored packed logits relative L2 gate failed",
         )
         _require(
-            float(quality["max_abs_logits_delta"]) <= 0.5,
+            float(quality["max_abs_logits_delta"])
+            <= RUNTIME_ORACLE_LIMITS["max_abs_logits_delta"],
             "plain/refactored packed maximum logit delta gate failed",
         )
         _require(
-            float(quality["top1"]) >= 0.99,
-            "plain/refactored packed Top-1 identity gate failed",
+            float(exact_logits_fraction)
+            == RUNTIME_ORACLE_LIMITS["exact_logits_fraction"],
+            "plain/refactored packed exact-logit identity gate failed",
         )
-        _require(
-            float(quality["top5"]) >= 0.999,
-            "plain/refactored packed Top-5 identity gate failed",
-        )
+        for metric in ("top1", "top5", "top10"):
+            _require(
+                float(quality[metric]) == RUNTIME_ORACLE_LIMITS[metric],
+                f"plain/refactored packed {metric.title()} identity gate failed",
+            )
+        quality["exact_logits_fraction"] = float(exact_logits_fraction)
+        quality["limits"] = dict(RUNTIME_ORACLE_LIMITS)
         result["packed_runtime_equivalence"] = quality
     return result
 

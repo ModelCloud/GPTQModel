@@ -22,6 +22,7 @@ from gptqmodel.quantization.qvq_transform_runtime import (
     install_qvq_refactored_p32_runtime,
     install_qvq_shared_input_transforms,
 )
+from gptqmodel.utils.qvq_cuda import qvq_cuda_gemv
 
 
 def _packed_layer(
@@ -241,8 +242,8 @@ def test_qvq_grouped_p32_runtime_runs_one_decode_and_releases_child_payloads():
 
     assert isinstance(root.first, QVQGroupedP32Linear)
     assert isinstance(root.second, QVQGroupedP32Linear)
-    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=2e-3)
-    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=2e-3)
+    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
     state = states["test.shared.input"]
     assert state.transform_invocations == 1
     assert state.grouped_gemv_invocations == 1
@@ -280,5 +281,88 @@ def test_qvq_refactored_runtime_groups_compatible_payloads():
 
     assert compiled.plain_fallbacks == {}
     assert set(compiled.grouped_states) == {"test.shared.input"}
-    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=2e-3)
-    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=2e-3)
+    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 0),
+    reason="requires NVIDIA CUDA compute capability >= 8.0",
+)
+def test_qvq_grouped_p32_preserves_child_split_k_arithmetic():
+    """Grouped Llama QKV must retain each plain child's FP32 reduction order."""
+
+    generator = torch.Generator(device="cuda").manual_seed(700)
+    k = 2048
+    widths = (2048, 512, 512)
+    alternatives = (1, 2, 3)
+    k_tiles = k // 16
+    trellis_parts = []
+    selector_parts = []
+    child_payloads = []
+    for width in widths:
+        n_tiles = width // 16
+        tile_count = k_tiles * n_tiles
+        trellis = torch.randint(
+            -(2**31),
+            2**31 - 1,
+            (tile_count, 16),
+            generator=generator,
+            device="cuda",
+            dtype=torch.int32,
+        )
+        selectors = torch.randint(
+            0,
+            256,
+            (tile_count,),
+            generator=generator,
+            device="cuda",
+            dtype=torch.uint8,
+        )
+        child_payloads.append((trellis, selectors))
+        trellis_parts.append(trellis.view(k_tiles, n_tiles, 16))
+        selector_parts.append(selectors.view(k_tiles, n_tiles))
+
+    grouped_trellis = torch.cat(trellis_parts, dim=1).reshape(-1, 16)
+    grouped_selectors = torch.cat(selector_parts, dim=1).reshape(-1)
+    grouped_alternatives = torch.tensor(
+        alternatives, device="cuda", dtype=torch.uint8
+    )
+
+    for dtype in (torch.float16, torch.bfloat16):
+        for rows in (1, 2, 4, 8):
+            x = torch.randn(
+                (rows, k), generator=generator, device="cuda", dtype=dtype
+            )
+            expected = tuple(
+                qvq_cuda_gemv(
+                    x,
+                    trellis,
+                    2,
+                    out_features=width,
+                    output_fp32=True,
+                    bank_ids=selectors,
+                    v2b2_p32=True,
+                    bank_alt_id=alternative,
+                )
+                for width, alternative, (trellis, selectors) in zip(
+                    widths, alternatives, child_payloads, strict=True
+                )
+            )
+            grouped = qvq_cuda_gemv(
+                x,
+                grouped_trellis,
+                2,
+                out_features=sum(widths),
+                output_fp32=True,
+                bank_ids=grouped_selectors,
+                v2b2_p32=True,
+                bank_alt_ids=grouped_alternatives,
+                bank_alt_boundaries=(128, 160),
+                _bank_alt_ids_validated=True,
+            )
+            for child, segment in zip(
+                expected, grouped.split(widths, dim=-1), strict=True
+            ):
+                torch.testing.assert_close(segment, child, rtol=0, atol=0)
