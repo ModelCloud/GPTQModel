@@ -2099,6 +2099,25 @@ pre-wide split-16 controls, the finalized affected geomean speedup is
 `v19_m16_fullq_wide_n128_autotune_audit_deep.json` and
 `v19_m16_fullq_wide_n128_split10_verify8000.json`.
 
+Extending the N128 CTA to M16 linear-QKV was rejected. Against the retained
+N64 split-10 medians of `0.091136-0.092160 ms`, the wide candidate measures
+`0.092160/0.094208/0.093184/0.094208 ms`; every rate regresses because the
+smaller N already supplies enough CTA parallelism and cannot amortize the
+second accumulator pair. The diagnostic is
+`v19_m16_qkv_wide_n128_candidate_deep.json`.
+
+The thirty-first v19 progression extends the Marlin-style N128 CTA to M16
+MLP-gate/up, whose larger N amortizes the second accumulator pair. In the
+matched 100-warmup/4000-iteration control and candidate, the narrow kernel
+measures `0.149504/0.151552/0.152576/0.153600 ms`; the candidate-first
+200-warmup/8000-iteration confirmation measures
+`0.137216/0.139264/0.140288/0.141312 ms`. The affected geomean speedup is
+**1.0881x** (8.095% lower latency), maximum absolute error stays below
+`3.63e-05`, and affected-case log weighting reaches **2.604% cumulative
+improvement** versus fetched main. Artifacts are
+`v19_m16_gate_n64_control_deep.json` and
+`v19_m16_gate_wide_n128_candidate_{deep,verify8000}.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
