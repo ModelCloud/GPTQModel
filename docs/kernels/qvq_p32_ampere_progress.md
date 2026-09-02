@@ -2321,6 +2321,16 @@ weighting reaches **4.031% improvement** versus fetched main. Artifacts are
 `v19_m16_down_pow2_control.json`, `v19_m16_down_pow2_candidate.json`, and
 `v19_m16_down_pow2_candidate_verify8000.json`.
 
+The forty-eighth v19 progression applies the same exact W2 mask to the fixed-N
+M16 linear-Z tuple `(K,N)=(5120,6144)`. Against split-16 control medians of
+`0.062464 ms` at every rate, the candidate measures
+`0.061440/0.062464/0.062464/0.062464 ms`; the W2 gain is 1.0167x and
+reproduces at 8,000 iterations. Maximum absolute error remains below
+`2.67e-05`, and cumulative affected-case log weighting reaches **4.043%
+improvement** versus fetched main. Artifacts are
+`v19_m16_linearz_pow2_control.json`, `v19_m16_linearz_pow2_candidate.json`,
+and `v19_m16_linearz_pow2_candidate_verify8000.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
