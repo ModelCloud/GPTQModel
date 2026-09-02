@@ -307,7 +307,7 @@ def test_p32_ampere_dispatches_measured_m8_wide_linear_z_plan_directly(
         bank_alt_id=3,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == 32
+    assert calls[0][-1] == 40
 
 
 def test_p32_ampere_dispatches_measured_m8_wide_qkv_plan_directly(

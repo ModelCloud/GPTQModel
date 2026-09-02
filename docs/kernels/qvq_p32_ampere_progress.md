@@ -2227,15 +2227,6 @@ that exact K/N pair; other M8/N5120 inputs retain the original narrow path.
 Artifacts are `v19_m8_attention_n64_control_deep.json` and
 `v19_m8_attention_wide_n128_candidate_{deep,verify8000}.json`.
 
-The forty-second v19 progression retunes the widened M8 attention-out route
-from split 32 to split 24. The fixed 200-warmup/8000-iteration confirmation
-measures `0.051200/0.053248/0.053248/0.052224 ms`, a **1.0147x** incremental
-speedup (1.446% lower latency) over split 32 and a **1.0635x** combined
-speedup (5.972% lower latency) versus the narrow control. The cumulative
-affected-case log weighting reaches **3.939% improvement** versus fetched
-main. Split 24 is retained; its error remains below `2.67e-05`. Diagnostic
-artifacts are `v19_m8_attention_wide_n128_split24_{deep,verify8000}.json`.
-
 The fortieth v19 progression applies the same layout to the measured M8
 linear-Z tuple `(K,N)=(5120,6144)`. Against the fresh narrow split-32
 control medians of `0.055296/0.056320/0.055296/0.056320 ms`, the
@@ -2260,6 +2251,23 @@ improvement** versus fetched main. The specialization is restricted to
 that exact K/N pair; other M8/N10240 inputs retain the original narrow path.
 Artifacts are `v19_m8_qkv_n64_control_deep.json` and
 `v19_m8_qkv_wide_n128_candidate_{deep,verify8000}.json`.
+
+The forty-second v19 progression retunes the widened M8 attention-out route
+from split 32 to split 24. The fixed 200-warmup/8000-iteration confirmation
+measures `0.051200/0.053248/0.053248/0.052224 ms`, a **1.0147x** incremental
+speedup (1.446% lower latency) over split 32 and a **1.0635x** combined
+speedup (5.972% lower latency) versus the narrow control. The cumulative
+affected-case log weighting reaches **3.939% improvement** versus fetched
+main. Split 24 is retained; its error remains below `2.67e-05`. Diagnostic
+artifacts are `v19_m8_attention_wide_n128_split24_{deep,verify8000}.json`.
+
+The forty-third v19 progression retunes widened M8 linear-Z from split 32 to
+split 40. Split 24 regresses all four rates, while split 40 confirms
+`0.051200/0.052224/0.052224/0.053248 ms` at 8,000 iterations: a **1.0050x**
+incremental speedup (0.494% lower latency) over split 32. The cumulative
+affected-case log weighting reaches **3.953% improvement** versus fetched
+main. Diagnostic artifacts are
+`v19_m8_linearz_wide_n128_split{24,40}_{deep,verify8000}.json`.
 
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
