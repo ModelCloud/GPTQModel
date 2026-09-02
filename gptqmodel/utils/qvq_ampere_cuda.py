@@ -372,6 +372,17 @@ def qvq_p32_window_ampere(
             bank_alt_id,
             48,
         )
+    if split_count == 0 and out_features == 17408 and input.shape == (8, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            10,
+        )
     if split_count == 0 and out_features == 1024 and input.shape == (16, 5120):
         return _p32_window_op()(
             input,

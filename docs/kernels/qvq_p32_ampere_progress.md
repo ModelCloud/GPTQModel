@@ -1932,6 +1932,38 @@ and fixed split 8 versus 16 tied at W2.5. Diagnostics are
 `v19_m8_gate_static_k_candidate_deep.json`, and
 `v19_m8_gate_wrap_split{8,16}_deep.json`.
 
+The twenty-fourth v19 progression retunes the newly packed and pair-wrapped
+M8 MLP-gate/up kernel to split 10. In a 100-warmup/4000-iteration run, W2
+improves from `0.130048` to `0.128000 ms`, W2.5 from `0.134144` to
+`0.131072 ms`, W3 from `0.133120` to `0.130048 ms`, and W3.5 from
+`0.134144` to `0.131072 ms`. The affected geomean speedup is **1.0216x**
+(2.116% lower latency), with maximum absolute error below `4.39e-05`.
+Because all four rates select the same wave, the measured plan bypasses the
+first-use autotuner directly. The deep candidate is
+`v19_m8_gate_split10_candidate_deep.json`; its immediate packed/pair-wrap
+control is `v19_m8_gate_packed_wrap_candidate_deep.json` under
+`artifacts/a100_p32_window/`. The normal default-dispatch retry reproduces
+W2 at `0.128000 ms` over 8000 iterations; an earlier first-case interval that
+held at `0.258048 ms` was discarded as a queue/clock stall after the isolated
+retry. Affected-case log weighting now reaches
+**2.096% cumulative improvement** versus fetched main.
+
+Four structural follow-ups were rejected before this progression. Hoisting
+W3.5 window-lane plans, as in the Hopper kernel, made M8 mostly neutral but
+regressed every M16 shape by roughly 3-5% because the longer live geometry
+reinforced Ampere's register occupancy limit. A Hopper-style atomic split
+epilogue lost one event tick on M16 full-Q W2-W3 and tied MLP-down, while
+small-N full-KV regressed sharply. A two-warp/N32 M16 CTA duplicated enough
+activation and staging traffic to lose 9-11% versus N64. Finally, reflecting
+the symmetric PGC16 level table into its positive half and a divergent W2
+single-word extraction path each added more integer/control cost than the
+L1/shared traffic they removed. Diagnostics are
+`v19_w35_laneplan_{control,candidate}_deep.json`,
+`v19_m16_atomic_narrow_{control,candidate}_deep.json`,
+`v19_m16_fullq_n32_candidate_deep.json`,
+`v19_m16_fullq_symmetric_levels_candidate_deep.json`, and
+`v19_w2_single_word_m16_candidate_deep.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
