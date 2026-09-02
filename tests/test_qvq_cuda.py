@@ -68,7 +68,9 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_yaqa_feedback_update_op,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
+    qvq_cuda_hadamard_pair_fp32_to_fp16,
     qvq_cuda_supported,
+    qvq_cuda_swiglu_precondition,
     qvq_cuda_viterbi,
     qvq_cuda_viterbi_banked,
     qvq_cuda_viterbi_v2_segment_banked,
@@ -414,6 +416,173 @@ def test_qvq_cuda_fp16_emulation_rescues_late_butterfly_and_sv_overflow():
     assert not torch.isfinite(historical).all()
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, reference, rtol=2e-3, atol=16.0)
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("seed", (20260901, 20260902, 20260903))
+def test_qvq_cuda_paired_output_recovery_is_bit_exact_and_repeatable(m, seed):
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    input0 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    input1 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    scale0 = torch.randn((n,), generator=generator, device="cuda")
+    scale1 = torch.randn((n,), generator=generator, device="cuda")
+    bias0 = torch.randn((n,), generator=generator, device="cuda")
+    bias1 = torch.randn((n,), generator=generator, device="cuda")
+    expected = (
+        qvq_cuda_hadamard(
+            input0, post_scale=scale0, bias=bias0, scale_mode=3
+        ).half(),
+        qvq_cuda_hadamard(
+            input1, post_scale=scale1, bias=bias1, scale_mode=3
+        ).half(),
+    )
+
+    for _ in range(10):
+        actual = qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0,
+            input1,
+            post_scale0=scale0,
+            post_scale1=scale1,
+            bias0=bias0,
+            bias1=bias1,
+        )
+        assert actual[0].dtype == torch.float16
+        assert actual[1].dtype == torch.float16
+        assert torch.equal(actual[0], expected[0])
+        assert torch.equal(actual[1], expected[1])
+
+
+def test_qvq_cuda_paired_output_recovery_handles_overflow_optional_bias_and_stream():
+    n = 32
+    input0 = torch.zeros((1, n), device="cuda")
+    input1 = torch.zeros((1, n), device="cuda")
+    input0[0, :2] = 40000
+    input1[0, 0] = -40000
+    scale0 = torch.full((n,), 2.0, device="cuda")
+    scale1 = torch.full((n,), 0.25, device="cuda")
+    bias0 = torch.full((n,), -60000.0, device="cuda")
+    expected = (
+        qvq_cuda_hadamard(
+            input0, post_scale=scale0, bias=bias0, scale_mode=4
+        ).half(),
+        qvq_cuda_hadamard(input1, post_scale=scale1, scale_mode=4).half(),
+    )
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        actual = qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0,
+            input1,
+            post_scale0=scale0,
+            post_scale1=scale1,
+            bias0=bias0,
+            scale_mode=4,
+        )
+    stream.synchronize()
+
+    assert torch.equal(actual[0], expected[0])
+    assert torch.equal(actual[1], expected[1])
+
+
+def test_qvq_cuda_paired_output_recovery_empty_graph_and_contract_guards():
+    n = 32
+    empty = torch.empty((0, n), device="cuda")
+    scale = torch.ones(n, device="cuda")
+    outputs = qvq_cuda_hadamard_pair_fp32_to_fp16(
+        empty, empty, post_scale0=scale, post_scale1=scale
+    )
+    assert tuple(output.shape for output in outputs) == ((0, n), (0, n))
+    assert all(output.dtype == torch.float16 for output in outputs)
+
+    input0 = torch.randn((1, n), device="cuda")
+    input1 = torch.randn((1, n), device="cuda")
+    qvq_cuda_hadamard_pair_fp32_to_fp16(
+        input0, input1, post_scale0=scale, post_scale1=scale
+    )
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0, input1, post_scale0=scale, post_scale1=scale
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    reference = (
+        qvq_cuda_hadamard(input0, post_scale=scale, scale_mode=3).half(),
+        qvq_cuda_hadamard(input1, post_scale=scale, scale_mode=3).half(),
+    )
+    assert torch.equal(captured[0], reference[0])
+    assert torch.equal(captured[1], reference[1])
+
+    with pytest.raises(TypeError, match="float32"):
+        qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0.half(), input1.half(), post_scale0=scale, post_scale1=scale
+        )
+    with pytest.raises(ValueError, match="identical shapes"):
+        qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0, input1[:, :-1], post_scale0=scale, post_scale1=scale
+        )
+    with pytest.raises(ValueError, match="scale_mode"):
+        qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0,
+            input1,
+            post_scale0=scale,
+            post_scale1=scale,
+            scale_mode=2,
+        )
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("seed", (20260911, 20260912, 20260913))
+def test_qvq_cuda_swiglu_precondition_is_bit_exact_and_repeatable(m, seed):
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    gate = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
+    up = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
+    pre_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    activated_gate = torch.nn.functional.silu(gate)
+    reference = qvq_cuda_hadamard(
+        activated_gate * up,
+        pre_scale=pre_scale,
+        scale_mode=2,
+    )
+
+    for _ in range(10):
+        actual = qvq_cuda_swiglu_precondition(activated_gate, up, pre_scale)
+        assert actual.dtype == torch.float16
+        assert torch.equal(actual, reference)
+
+
+def test_qvq_cuda_swiglu_precondition_graph_stream_overflow_and_guards():
+    n = 32
+    gate = torch.zeros((1, n), device="cuda", dtype=torch.float16)
+    up = torch.ones((1, n), device="cuda", dtype=torch.float16)
+    gate[0, :2] = 40000
+    up[0, :2] = 2
+    pre_scale = torch.full((n,), 0.25, device="cuda", dtype=torch.float16)
+    reference = qvq_cuda_hadamard(
+        gate * up,
+        pre_scale=pre_scale,
+        scale_mode=2,
+    )
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        actual = qvq_cuda_swiglu_precondition(gate, up, pre_scale)
+    stream.synchronize()
+    assert torch.equal(actual.view(torch.int16), reference.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_swiglu_precondition(gate, up, pre_scale)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), reference.view(torch.int16))
+
+    empty = qvq_cuda_swiglu_precondition(gate[:0], up[:0], pre_scale)
+    assert empty.shape == (0, n)
+    with pytest.raises(TypeError, match="float16"):
+        qvq_cuda_swiglu_precondition(gate.float(), up.float(), pre_scale.float())
+    with pytest.raises(ValueError, match="identical shapes"):
+        qvq_cuda_swiglu_precondition(gate, up[:, :-1], pre_scale)
 
 
 @pytest.mark.parametrize("bits", QVQ_CUDA_BITS)

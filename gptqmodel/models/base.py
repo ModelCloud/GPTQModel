@@ -2412,6 +2412,7 @@ class BaseQModel(nn.Module):
             gate_up_candidates=gateup_candidates,
             qkv=qkv,
             gate_up=gate_up,
+            gate_up_activation=gate_up_activation,
         )
         if qkv:
             counts["qkv"] = qvq_counts.get("qkv", 0) + install_fused_qkv(

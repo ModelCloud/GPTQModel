@@ -15,8 +15,10 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <limits>
 #include <torch/library.h>
 #include <torch/types.h>
+#include <tuple>
 
 namespace {
 
@@ -172,6 +174,127 @@ __global__ void __launch_bounds__(kHadamardThreads) qvq_hadamard_kernel(
   }
 }
 
+// Gate and up own independent output transforms with the same geometry.  A
+// single grid lets both sets of row blocks run concurrently instead of
+// serializing two tiny launches.  The inputs and shared butterfly remain FP32,
+// while every historical FP16 operation is emulated exactly as modes 3/4 of
+// qvq_hadamard_kernel<float>.  The final FP16 store is the same rounding step
+// as the production caller's former output.to(torch.float16) kernels.
+//
+// Specialization budget: this is one fixed FP32->FP16 device kernel.  Rates,
+// row counts, widths, bias presence, and normalization mode stay runtime data.
+__global__ void __launch_bounds__(kHadamardThreads) qvq_hadamard_pair_fp32_to_fp16_kernel(
+    const float* __restrict__ input0,
+    const float* __restrict__ input1,
+    half* __restrict__ output0,
+    half* __restrict__ output1,
+    const float* __restrict__ post_scale0,
+    const float* __restrict__ post_scale1,
+    const float* __restrict__ bias0,
+    const float* __restrict__ bias1,
+    int n,
+    int rows,
+    int scale_mode) {
+  extern __shared__ char smem_raw[];
+  float* buf = reinterpret_cast<float*>(smem_raw);
+  const bool second = static_cast<int>(blockIdx.x) >= rows;
+  const int row = static_cast<int>(blockIdx.x) - (second ? rows : 0);
+  const float* input = second ? input1 : input0;
+  half* output = second ? output1 : output0;
+  const float* post_scale = second ? post_scale1 : post_scale0;
+  const float* bias = second ? bias1 : bias0;
+  const float* in_row = input + static_cast<int64_t>(row) * n;
+  half* out_row = output + static_cast<int64_t>(row) * n;
+  auto p = [](int i) { return i + (i >> 5); };
+
+  const bool normalize_first = scale_mode == 3;
+  const float divisor = __half2float(__float2half_rn(sqrtf(static_cast<float>(n))));
+  const float reciprocal = 1.0f / sqrtf(static_cast<float>(n));
+
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    float value = round_fp16_unless_overflow(in_row[i]);
+    if (normalize_first) {
+      value = round_fp16_unless_overflow(value / divisor);
+    }
+    buf[p(i)] = value;
+  }
+  __syncthreads();
+
+  for (int bit = 1; bit < n; bit <<= 1) {
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+      const int j = i ^ bit;
+      if (i < j) {
+        const float a = buf[p(i)];
+        const float b = buf[p(j)];
+        buf[p(i)] = round_fp16_unless_overflow(a + b);
+        buf[p(j)] = round_fp16_unless_overflow(a - b);
+      }
+    }
+    __syncthreads();
+  }
+
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    float value = buf[p(i)];
+    if (!normalize_first) {
+      value = round_fp16_unless_overflow(value * reciprocal);
+    }
+    if (post_scale != nullptr) {
+      value = round_fp16_unless_overflow(value * post_scale[i]);
+    }
+    if (bias != nullptr) {
+      value = round_fp16_unless_overflow(value + bias[i]);
+    }
+    out_row[i] = __float2half_rn(value);
+  }
+}
+
+// Consume the already-activated FP16 gate and FP16 up output, reproduce the
+// standalone FP16 multiply rounding, then execute the down projection's
+// range-safe SU -> Hadamard input transform.  This removes the materialized
+// SwiGLU product and one launch without changing SiLU itself or any rounding
+// boundary.  One fixed FP16 specialization serves every legal row count and
+// transform width.
+__global__ void __launch_bounds__(kHadamardThreads) qvq_swiglu_precondition_kernel(
+    const half* __restrict__ activated_gate,
+    const half* __restrict__ up,
+    const half* __restrict__ pre_scale,
+    half* __restrict__ output,
+    int n) {
+  extern __shared__ char smem_raw[];
+  half* buf = reinterpret_cast<half*>(smem_raw);
+  const int row = static_cast<int>(blockIdx.x);
+  const half* gate_row = activated_gate + static_cast<int64_t>(row) * n;
+  const half* up_row = up + static_cast<int64_t>(row) * n;
+  half* out_row = output + static_cast<int64_t>(row) * n;
+  auto p = [](int i) { return i + (i >> 5); };
+  const float divisor = __half2float(__float2half_rn(sqrtf(static_cast<float>(n))));
+
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    const half product_half = __float2half_rn(__half2float(gate_row[i]) * __half2float(up_row[i]));
+    float value = __half2float(product_half) * __half2float(pre_scale[i]);
+    value = round_fp16_unless_overflow(value);
+    buf[p(i)] = __float2half_rn(value / divisor);
+  }
+  __syncthreads();
+
+  for (int bit = 1; bit < n; bit <<= 1) {
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+      const int j = i ^ bit;
+      if (i < j) {
+        const float a = __half2float(buf[p(i)]);
+        const float b = __half2float(buf[p(j)]);
+        buf[p(i)] = __float2half_rn(a + b);
+        buf[p(j)] = __float2half_rn(a - b);
+      }
+    }
+    __syncthreads();
+  }
+
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    out_row[i] = buf[p(i)];
+  }
+}
+
 at::Tensor qvq_hadamard_cuda(
     const at::Tensor& input,
     const c10::optional<at::Tensor>& pre_scale,
@@ -254,6 +377,133 @@ at::Tensor qvq_hadamard_cuda(
   return output;
 }
 
+std::tuple<at::Tensor, at::Tensor> qvq_hadamard_pair_fp32_to_fp16_cuda(
+    const at::Tensor& input0,
+    const at::Tensor& input1,
+    const at::Tensor& post_scale0,
+    const at::Tensor& post_scale1,
+    const c10::optional<at::Tensor>& bias0,
+    const c10::optional<at::Tensor>& bias1,
+    int64_t scale_mode) {
+  TORCH_CHECK(input0.is_cuda() && input1.is_cuda(), "paired Hadamard inputs must be CUDA tensors");
+  TORCH_CHECK(input0.device() == input1.device(), "paired Hadamard inputs must share a device");
+  TORCH_CHECK(input0.scalar_type() == at::kFloat && input1.scalar_type() == at::kFloat,
+              "paired Hadamard inputs must be float32");
+  TORCH_CHECK(input0.sizes() == input1.sizes(), "paired Hadamard inputs must have identical shapes");
+  TORCH_CHECK(input0.dim() >= 1, "paired Hadamard inputs must be at least rank one");
+  TORCH_CHECK(input0.is_contiguous() && input1.is_contiguous(), "paired Hadamard inputs must be contiguous");
+  TORCH_CHECK(scale_mode == 3 || scale_mode == 4, "paired Hadamard scale_mode must be 3 or 4");
+  const int64_t n64 = input0.size(-1);
+  TORCH_CHECK(n64 >= 2 && (n64 & (n64 - 1)) == 0,
+              "paired Hadamard requires a power-of-two last dimension");
+  TORCH_CHECK(n64 <= 16384, "paired Hadamard supports a last dimension up to 16384");
+  const int n = static_cast<int>(n64);
+  const int64_t rows64 = input0.numel() / n;
+  TORCH_CHECK(rows64 <= std::numeric_limits<int>::max() / 2, "paired Hadamard row count exceeds launch limit");
+
+  const auto check_vector = [&](const at::Tensor& tensor, const char* name) {
+    TORCH_CHECK(tensor.is_cuda() && tensor.device() == input0.device(), name, " must be on the input device");
+    TORCH_CHECK(tensor.scalar_type() == at::kFloat, name, " must be float32");
+    TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
+    TORCH_CHECK(tensor.numel() == n, name, " must have one value per output column");
+  };
+  check_vector(post_scale0, "post_scale0");
+  check_vector(post_scale1, "post_scale1");
+  const auto check_bias = [&](const c10::optional<at::Tensor>& tensor, const char* name) {
+    if (tensor.has_value()) {
+      check_vector(*tensor, name);
+    }
+  };
+  check_bias(bias0, "bias0");
+  check_bias(bias1, "bias1");
+
+  auto output_options = input0.options().dtype(at::kHalf);
+  at::Tensor output0 = at::empty(input0.sizes(), output_options);
+  at::Tensor output1 = at::empty(input1.sizes(), output_options);
+  if (rows64 == 0) {
+    return {output0, output1};
+  }
+
+  const c10::cuda::CUDAGuard device_guard(input0.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input0.get_device()));
+  const size_t smem_bytes = static_cast<size_t>(n + n / 32) * sizeof(float);
+  TORCH_CHECK(smem_bytes <= static_cast<size_t>(properties.sharedMemPerBlockOptin),
+              "paired Hadamard width exceeds the device dynamic shared-memory limit");
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      qvq_hadamard_pair_fp32_to_fp16_kernel,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(smem_bytes)));
+
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input0.get_device());
+  const int rows = static_cast<int>(rows64);
+  qvq_hadamard_pair_fp32_to_fp16_kernel<<<static_cast<unsigned int>(rows * 2), kHadamardThreads,
+                                           smem_bytes, stream>>>(
+      input0.const_data_ptr<float>(),
+      input1.const_data_ptr<float>(),
+      reinterpret_cast<half*>(output0.mutable_data_ptr()),
+      reinterpret_cast<half*>(output1.mutable_data_ptr()),
+      post_scale0.const_data_ptr<float>(),
+      post_scale1.const_data_ptr<float>(),
+      bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
+      bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
+      n,
+      rows,
+      static_cast<int>(scale_mode));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {output0, output1};
+}
+
+at::Tensor qvq_swiglu_precondition_cuda(
+    const at::Tensor& activated_gate,
+    const at::Tensor& up,
+    const at::Tensor& pre_scale) {
+  TORCH_CHECK(activated_gate.is_cuda() && up.is_cuda() && pre_scale.is_cuda(),
+              "SwiGLU precondition tensors must be CUDA tensors");
+  TORCH_CHECK(activated_gate.device() == up.device() && activated_gate.device() == pre_scale.device(),
+              "SwiGLU precondition tensors must share a device");
+  TORCH_CHECK(activated_gate.scalar_type() == at::kHalf && up.scalar_type() == at::kHalf &&
+                  pre_scale.scalar_type() == at::kHalf,
+              "SwiGLU precondition tensors must be float16");
+  TORCH_CHECK(activated_gate.sizes() == up.sizes(),
+              "activated gate and up tensors must have identical shapes");
+  TORCH_CHECK(activated_gate.dim() >= 1, "SwiGLU precondition inputs must be at least rank one");
+  TORCH_CHECK(activated_gate.is_contiguous() && up.is_contiguous() && pre_scale.is_contiguous(),
+              "SwiGLU precondition tensors must be contiguous");
+  const int64_t n64 = activated_gate.size(-1);
+  TORCH_CHECK(n64 >= 2 && (n64 & (n64 - 1)) == 0,
+              "SwiGLU precondition requires a power-of-two last dimension");
+  TORCH_CHECK(n64 <= 16384, "SwiGLU precondition supports a last dimension up to 16384");
+  TORCH_CHECK(pre_scale.numel() == n64, "SwiGLU precondition scale must have one value per column");
+  const int n = static_cast<int>(n64);
+  const int64_t rows64 = activated_gate.numel() / n;
+  TORCH_CHECK(rows64 <= std::numeric_limits<int>::max(), "SwiGLU precondition row count exceeds launch limit");
+  at::Tensor output = at::empty_like(activated_gate);
+  if (rows64 == 0) {
+    return output;
+  }
+
+  const c10::cuda::CUDAGuard device_guard(activated_gate.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, activated_gate.get_device()));
+  const size_t smem_bytes = static_cast<size_t>(n + n / 32) * sizeof(half);
+  TORCH_CHECK(smem_bytes <= static_cast<size_t>(properties.sharedMemPerBlockOptin),
+              "SwiGLU precondition width exceeds the device dynamic shared-memory limit");
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      qvq_swiglu_precondition_kernel,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(smem_bytes)));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(activated_gate.get_device());
+  qvq_swiglu_precondition_kernel<<<static_cast<unsigned int>(rows64), kHadamardThreads, smem_bytes, stream>>>(
+      reinterpret_cast<const half*>(activated_gate.const_data_ptr()),
+      reinterpret_cast<const half*>(up.const_data_ptr()),
+      reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+      reinterpret_cast<half*>(output.mutable_data_ptr()),
+      n);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
 }  // namespace
 
 
@@ -279,8 +529,12 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   qvq_def_shared_schema([&] {
     m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode) -> Tensor");
 });
+  m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
+  m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("hadamard", &qvq_hadamard_cuda);
+  m.impl("hadamard_pair_fp32_to_fp16", &qvq_hadamard_pair_fp32_to_fp16_cuda);
+  m.impl("swiglu_precondition", &qvq_swiglu_precondition_cuda);
 }

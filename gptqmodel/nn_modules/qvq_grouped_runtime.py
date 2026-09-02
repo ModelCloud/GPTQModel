@@ -172,6 +172,10 @@ class QVQGroupedRuntimeTelemetry:
     grouped_window_bytes: int = 0
     grouped_selector_bytes: int = 0
     child_window_bytes_avoided: int = 0
+    paired_recovery_launches: int = 0
+    independent_recovery_children: int = 0
+    fused_mlp_launches: int = 0
+    fused_mlp_fallbacks: int = 0
     last_fallback_reason: str | None = None
 
     def snapshot(self) -> dict[str, Any]:
@@ -187,6 +191,10 @@ class QVQGroupedRuntimeTelemetry:
             "grouped_window_bytes": self.grouped_window_bytes,
             "grouped_selector_bytes": self.grouped_selector_bytes,
             "child_window_bytes_avoided": self.child_window_bytes_avoided,
+            "paired_recovery_launches": self.paired_recovery_launches,
+            "independent_recovery_children": self.independent_recovery_children,
+            "fused_mlp_launches": self.fused_mlp_launches,
+            "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
             "last_fallback_reason": self.last_fallback_reason,
         }
 
@@ -211,6 +219,9 @@ class QVQHopperGroupedRuntime:
         self._input_version: int | None = None
         self._outputs: tuple[torch.Tensor, ...] | None = None
         self._next_index = 0
+        self._mlp_parent_ref: Any = None
+        self._mlp_down_ref: Any = None
+        self._mlp_act_fn: Any = None
 
     def _children(self) -> tuple[QVQLinear, ...]:
         children = tuple(child_ref() for child_ref in self._refs)
@@ -400,13 +411,134 @@ class QVQHopperGroupedRuntime:
             payload,
             _pgc16_levels(x.device, children[0].codebook_version),
         )
+
+        # Gate and up have equal-width, independent output transforms.  One
+        # grid schedules both row sets concurrently, applies each child's own
+        # SV/bias, and performs the final FP16 cast at the store.  Query/key/
+        # value and unusual gate/up geometries retain the established exact
+        # child-local path.
+        if (
+            self.category == "gate_up"
+            and len(children) == 2
+            and children[0].out_features == children[1].out_features
+            and children[0].out_features <= 16384
+            and children[0].out_features & (children[0].out_features - 1) == 0
+        ):
+            from ..utils.qvq_cuda import qvq_cuda_hadamard_pair_fp32_to_fp16
+
+            output_dtype = inner_outputs[0].dtype
+            recovered_pair = qvq_cuda_hadamard_pair_fp32_to_fp16(
+                inner_outputs[0][:rows],
+                inner_outputs[1][:rows],
+                post_scale0=children[0]._cached_cast("SV", torch.float16, output_dtype),
+                post_scale1=children[1]._cached_cast("SV", torch.float16, output_dtype),
+                bias0=children[0]._cached_cast("bias", torch.float16, output_dtype),
+                bias1=children[1]._cached_cast("bias", torch.float16, output_dtype),
+                scale_mode=3 if children[0].out_features >= 2048 else 4,
+            )
+            self.telemetry.paired_recovery_launches += 1
+            return tuple(
+                recovered.reshape(*x.shape[:-1], child.out_features)
+                for child, recovered in zip(children, recovered_pair, strict=True)
+            )
+
         outputs = []
         for child, inner in zip(children, inner_outputs, strict=True):
             recovered = child._qvq_recover_inference_output(inner[:rows], torch.float16)
             outputs.append(
                 recovered.reshape(*x.shape[:-1], child.out_features).to(x.dtype)
             )
+        self.telemetry.independent_recovery_children += len(children)
         return tuple(outputs)
+
+    def _configure_mlp_fusion(
+        self,
+        parent: nn.Module,
+        down: QVQLinear,
+        act_fn: Any,
+    ) -> None:
+        self._mlp_parent_ref = ref(parent)
+        self._mlp_down_ref = ref(down)
+        self._mlp_act_fn = act_fn
+
+    def _clear_mlp_fusion(self) -> None:
+        self._mlp_parent_ref = None
+        self._mlp_down_ref = None
+        self._mlp_act_fn = None
+
+    def _mlp_rejection(self, x: torch.Tensor) -> str | None:
+        rejection = self._runtime_eligible(x)
+        if rejection is not None:
+            return rejection
+        down = None if self._mlp_down_ref is None else self._mlp_down_ref()
+        if not isinstance(down, QVQLinear):
+            return "fused MLP lost its QVQ down projection"
+        children = self._children()
+        if (
+            len(children) != 2
+            or children[0].out_features != children[1].out_features
+            or children[0].out_features != down.in_features
+            or down.out_features != children[0].in_features
+        ):
+            return "fused MLP projection geometry changed"
+        if down.training or getattr(down, "adapter", None) is not None:
+            return "fused MLP down projection requires the original path"
+        if down.trellis.device != x.device:
+            return "fused MLP down payload and activation devices differ"
+        if not callable(self._mlp_act_fn):
+            return "fused MLP activation is unavailable"
+        return None
+
+    def _execute_mlp(self, x: torch.Tensor) -> torch.Tensor:
+        down = self._mlp_down_ref()
+        gate, up = self._execute(x)
+        activated_gate = self._mlp_act_fn(gate)
+        if (
+            not isinstance(activated_gate, torch.Tensor)
+            or activated_gate.shape != up.shape
+            or activated_gate.dtype != torch.float16
+            or not activated_gate.is_contiguous()
+            or not up.is_contiguous()
+        ):
+            raise _R0Fallback(
+                "fused MLP activation must return contiguous FP16 gate geometry"
+            )
+
+        from ..utils.qvq_cuda import qvq_cuda_swiglu_precondition
+
+        rows = x.numel() // self._children()[0].in_features
+        transformed = qvq_cuda_swiglu_precondition(
+            activated_gate.reshape(rows, down.in_features),
+            up.reshape(rows, down.in_features),
+            down._cached_cast("SU", torch.float16),
+        )
+        inner = down._inner_forward(transformed)
+        recovered = down._qvq_recover_inference_output(inner, torch.float16)
+        return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
+
+    def forward_mlp(self, x: torch.Tensor) -> torch.Tensor:
+        """Execute exact gate/up, activation, precondition, and down projection."""
+
+        if self._outputs is not None:
+            self.telemetry.stale_cycles += 1
+            self._clear_cycle()
+        rejection = self._mlp_rejection(x)
+        if rejection is not None:
+            self.telemetry.fused_mlp_fallbacks += 1
+            self.telemetry.last_fallback_reason = rejection
+            parent = self._mlp_parent_ref()
+            return parent._gptqmodel_qvq_fused_mlp_original_forward(x)
+        try:
+            output = self._execute_mlp(x)
+        except _R0Fallback as exc:
+            self.telemetry.fused_mlp_fallbacks += 1
+            self.telemetry.last_fallback_reason = str(exc)
+            parent = self._mlp_parent_ref()
+            return parent._gptqmodel_qvq_fused_mlp_original_forward(x)
+        self.telemetry.grouped_launches += 1
+        self.telemetry.fused_mlp_launches += 1
+        self.telemetry.last_fallback_reason = None
+        return output
 
     def forward(self, member_index: int, x: torch.Tensor) -> torch.Tensor:
         if not 0 <= member_index < len(self._refs):
@@ -460,17 +592,86 @@ def _qvq_grouped_projection_forward(self: QVQLinear, x: torch.Tensor) -> torch.T
     return runtime.forward(self._gptqmodel_qvq_grouped_index, x)
 
 
+@torch._dynamo.disable
+def _qvq_fused_mlp_forward(self: nn.Module, x: torch.Tensor) -> torch.Tensor:
+    runtime = self._gptqmodel_qvq_fused_mlp_runtime
+    return runtime.forward_mlp(x)
+
+
+def _maybe_install_qvq_mlp_fusion(
+    parent: nn.Module,
+    parent_name: str,
+    children: tuple[QVQLinear, ...],
+    runtime: QVQHopperGroupedRuntime,
+) -> bool:
+    """Install only after exact one-row parity proves the parent structure."""
+
+    if len(children) != 2 or children[0].out_features != children[1].out_features:
+        return False
+    from .fused_quant_linear import (
+        _detect_mlp_activation,
+        _find_gate_up_down_module,
+        _is_safe_mlp_parent,
+    )
+
+    down = _find_gate_up_down_module(
+        parent,
+        list(children),
+        children[0].out_features,
+        children[0].in_features,
+    )
+    act_fn = _detect_mlp_activation(parent)
+    if (
+        not isinstance(down, QVQLinear)
+        or act_fn is None
+        or not _is_safe_mlp_parent(parent, parent_name)
+        or children[0].trellis.device.type != "cuda"
+    ):
+        return False
+    properties = torch.cuda.get_device_properties(children[0].trellis.device)
+    if (properties.major, properties.minor) != (9, 0):
+        return False
+
+    runtime._configure_mlp_fusion(parent, down, act_fn)
+    sample = torch.linspace(
+        -0.01,
+        0.01,
+        children[0].in_features,
+        device=children[0].trellis.device,
+        dtype=torch.float16,
+    ).reshape(1, -1)
+    try:
+        with torch.inference_mode():
+            expected = parent.forward(sample)
+            actual = runtime._execute_mlp(sample)
+        exact = torch.equal(actual, expected)
+    except (AttributeError, RuntimeError, TypeError, ValueError, _R0Fallback):
+        exact = False
+    runtime.invalidate()
+    runtime.telemetry = QVQGroupedRuntimeTelemetry(
+        runtime.category, runtime.member_names
+    )
+    if not exact:
+        runtime._clear_mlp_fusion()
+        return False
+
+    parent._gptqmodel_qvq_fused_mlp_runtime = runtime
+    parent._gptqmodel_qvq_fused_mlp_original_forward = parent.forward
+    parent.forward = MethodType(_qvq_fused_mlp_forward, parent)
+    return True
+
+
 def _install_candidates(
     model: nn.Module,
     candidates: Sequence[tuple[str, ...]],
     *,
     category: str,
+    fuse_activation: bool = False,
 ) -> int:
     installed = 0
     # Materialize the traversal before replacing methods.  The runtime object
     # is deliberately not an nn.Module, so it never alters the model tree.
     for parent_name, parent in tuple(model.named_modules()):
-        del parent_name
         for member_names in candidates:
             members = tuple(getattr(parent, name, None) for name in member_names)
             try:
@@ -487,6 +688,13 @@ def _install_candidates(
                 child._gptqmodel_qvq_grouped_index = index
                 child._gptqmodel_qvq_grouped_original_forward = child.forward
                 child.forward = MethodType(_qvq_grouped_projection_forward, child)
+            if category == "gate_up" and fuse_activation:
+                _maybe_install_qvq_mlp_fusion(
+                    parent,
+                    parent_name,
+                    children,
+                    runtime,
+                )
             installed += 1
     return installed
 
@@ -498,6 +706,7 @@ def install_qvq_hopper_groups(
     gate_up_candidates: Sequence[tuple[str, ...]] | None = None,
     qkv: bool = True,
     gate_up: bool = True,
+    gate_up_activation: bool = True,
 ) -> dict[str, int]:
     """Install exact architecture-declared QVQ groups for production inference."""
 
@@ -513,6 +722,7 @@ def install_qvq_hopper_groups(
             model,
             _GATE_UP_CANDIDATES if gate_up_candidates is None else gate_up_candidates,
             category="gate_up",
+            fuse_activation=gate_up_activation,
         )
     return counts
 
@@ -541,6 +751,24 @@ def uninstall_qvq_hopper_groups(model: nn.Module) -> int:
         if runtime is None:
             continue
         if id(runtime) not in seen:
+            parent = (
+                None if runtime._mlp_parent_ref is None else runtime._mlp_parent_ref()
+            )
+            if parent is not None:
+                original_parent_forward = getattr(
+                    parent,
+                    "_gptqmodel_qvq_fused_mlp_original_forward",
+                    None,
+                )
+                if original_parent_forward is not None:
+                    parent.forward = original_parent_forward
+                for parent_attr in (
+                    "_gptqmodel_qvq_fused_mlp_runtime",
+                    "_gptqmodel_qvq_fused_mlp_original_forward",
+                ):
+                    if hasattr(parent, parent_attr):
+                        delattr(parent, parent_attr)
+                runtime._clear_mlp_fusion()
             runtime.invalidate()
             seen.add(id(runtime))
             removed += 1

@@ -15,6 +15,7 @@ import os
 import statistics
 import subprocess
 import sys
+import time
 from argparse import Namespace
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -34,7 +35,9 @@ SOURCE_PATHS = (
     Path("gptqmodel/models/base.py"),
     Path("gptqmodel/nn_modules/qlinear/qvq.py"),
     Path("gptqmodel/nn_modules/qvq_grouped_runtime.py"),
+    Path("gptqmodel/utils/qvq_cuda.py"),
     Path("gptqmodel/utils/qvq_wgmma_cuda.py"),
+    Path("gptqmodel_ext/qvq/qvq_hadamard_cuda.cu"),
     Path("gptqmodel_ext/qvq/qvq_wgmma_cuda.cu"),
     Path("scripts/benchmark_qvq_a41_phase4_production.py"),
 )
@@ -63,6 +66,15 @@ def _args() -> argparse.Namespace:
             "string to disable prior-run comparisons"
         ),
     )
+    parser.add_argument(
+        "--previous-output",
+        type=Path,
+        default=None,
+        help="result path at --previous-git-ref; defaults to --output",
+    )
+    parser.add_argument("--idle-samples", type=int, default=3)
+    parser.add_argument("--idle-interval", type=float, default=0.5)
+    parser.add_argument("--idle-memory-mib", type=int, default=0)
     args = parser.parse_args()
     if any(rate not in RATES for rate in args.rates):
         parser.error("rates must be W2, W2.5, W3, or W3.5")
@@ -70,6 +82,10 @@ def _args() -> argparse.Namespace:
         parser.error("M must be one of 1, 2, 4, 8, or 16")
     if min(args.warmup, args.samples, args.replays_per_sample) <= 0:
         parser.error("timing counts must be positive")
+    if args.idle_samples < 3 or args.idle_interval < 0 or args.idle_memory_mib < 0:
+        parser.error(
+            "idle gate requires at least three samples and nonnegative thresholds"
+        )
     return args
 
 
@@ -85,6 +101,61 @@ def _physical_h100() -> tuple[str, str]:
     if len(matches) != 1:
         raise RuntimeError(f"expected one physical H100, found {matches}")
     return matches[0]
+
+
+def _idle_h100_preflight(args) -> None:
+    """Fail before importing Torch unless the requested physical H100 is idle."""
+
+    inventory = subprocess.check_output(
+        [
+            "nvidia-smi",
+            "--query-gpu=index,pci.bus_id,uuid,name",
+            "--format=csv,noheader",
+        ],
+        text=True,
+    )
+    matches = []
+    for line in inventory.splitlines():
+        index_value, pci_bus_id, uuid, name = (
+            part.strip() for part in line.split(",", 3)
+        )
+        if "H100" in name:
+            matches.append((index_value, pci_bus_id, uuid, name))
+    if len(matches) != 1:
+        raise RuntimeError(f"expected one physical H100, found {matches}")
+    physical_index, pci_bus_id, uuid, name = matches[0]
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible not in {physical_index, uuid}:
+        raise RuntimeError(
+            f"set CUDA_VISIBLE_DEVICES={physical_index} or {uuid} for the physical H100"
+        )
+
+    accepted = []
+    for sample in range(args.idle_samples):
+        state = subprocess.check_output(
+            [
+                "nvidia-smi",
+                f"--id={uuid}",
+                "--query-gpu=utilization.gpu,memory.used",
+                "--format=csv,noheader,nounits",
+            ],
+            text=True,
+        ).strip()
+        utilization, memory_mib = (int(value.strip()) for value in state.split(","))
+        if utilization != 0 or memory_mib > args.idle_memory_mib:
+            raise RuntimeError(
+                f"H100 idle gate failed at sample {sample + 1}: "
+                f"utilization={utilization}%, memory={memory_mib} MiB"
+            )
+        accepted.append((utilization, memory_mib))
+        if sample + 1 < args.idle_samples:
+            time.sleep(args.idle_interval)
+    print(
+        f"idle H100 accepted: physical={physical_index} pci={pci_bus_id} "
+        f"uuid={uuid} name={name} samples={len(accepted)} "
+        f"utilization=0% memory<={args.idle_memory_mib}MiB",
+        flush=True,
+    )
 
 
 def _source_fingerprint() -> str:
@@ -215,13 +286,24 @@ def _graph_timing(
     }, snapshots
 
 
-def _qvq_child(torch, name, width, bits, alt_id, seed, device, shared_su):
+def _qvq_child(
+    torch,
+    name,
+    width,
+    bits,
+    alt_id,
+    seed,
+    device,
+    shared_su,
+    *,
+    in_features=K,
+):
     from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
     from gptqmodel.quantization.qvq import pack_qvq_binary_bank_ids
     from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 
     generator = torch.Generator(device=device).manual_seed(seed)
-    tiles = (K // 16) * (width // 16)
+    tiles = (in_features // 16) * (width // 16)
     words = qvq_words_per_tile(bits, weight_count=256, vector_size=2)
     tensors = {
         "trellis": torch.randint(
@@ -248,7 +330,7 @@ def _qvq_child(torch, name, width, bits, alt_id, seed, device, shared_su):
     }
     return QVQLinear.from_tensors(
         bits=bits,
-        in_features=K,
+        in_features=in_features,
         out_features=width,
         name=name,
         tensors=tensors,
@@ -268,7 +350,7 @@ def _call_children(parent, names, x):
     return tuple(getattr(parent, name)(x) for name in names)
 
 
-def _gptq_modules(torch, kernel: str, names, widths, device):
+def _gptq_modules(torch, kernel: str, names, widths, device, *, in_features=K):
     from scripts import benchmark_qwen3_27b_gptq_fp16 as builder
 
     cls = builder._resolve_linear_cls("cuda", kernel)
@@ -284,7 +366,7 @@ def _gptq_modules(torch, kernel: str, names, widths, device):
         builder._build_module(
             cls,
             args=args,
-            case=builder.LayerCase(name, K, width),
+            case=builder.LayerCase(name, in_features, width),
             device=device,
             seed=900 + index,
         )
@@ -302,7 +384,8 @@ def _run(args):
 
     source_fingerprint = _source_fingerprint()
     previous_payload, previous_rows = _previous_benchmark(
-        args.previous_git_ref, args.output
+        args.previous_git_ref,
+        args.output if args.previous_output is None else args.previous_output,
     )
     device_info = _assert_h100(torch)
     device = torch.device("cuda:0")
@@ -493,4 +576,6 @@ def _run(args):
 
 
 if __name__ == "__main__":
-    _run(_args())
+    parsed_args = _args()
+    _idle_h100_preflight(parsed_args)
+    _run(parsed_args)

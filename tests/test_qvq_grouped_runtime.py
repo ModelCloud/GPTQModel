@@ -302,6 +302,50 @@ def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
     assert telemetry[0]["payload_builds"] == 1
     assert telemetry[0]["grouped_window_bytes"] == expected_window_bytes
     assert telemetry[0]["child_window_bytes_avoided"] == expected_window_bytes
+    if category == "gate_up":
+        assert telemetry[0]["paired_recovery_launches"] == 1
+        assert telemetry[0]["independent_recovery_children"] == 0
+    else:
+        assert telemetry[0]["paired_recovery_launches"] == 0
+        assert telemetry[0]["independent_recovery_children"] == 3
+
+
+def test_unequal_gate_up_widths_retain_exact_independent_recovery():
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    shared = torch.ones(256, device=device)
+    children = (
+        _child(
+            "gate_proj",
+            out_features=256,
+            su=shared,
+            seed=180,
+            device=device,
+        ),
+        _child(
+            "up_proj",
+            out_features=512,
+            su=shared,
+            seed=181,
+            device=device,
+        ),
+    )
+    mlp = _MLP(children)
+    x = torch.randn((2, 256), device=device, dtype=torch.float16) * 0.02
+    with torch.inference_mode():
+        expected = tuple(child(x) for child in children)
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+    with torch.inference_mode():
+        actual = (mlp.gate_proj(x), mlp.up_proj(x))
+
+    assert all(
+        torch.equal(output, reference)
+        for output, reference in zip(actual, expected, strict=True)
+    )
+    telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
+    assert telemetry["paired_recovery_launches"] == 0
+    assert telemetry["independent_recovery_children"] == 2
 
 
 def test_warmed_production_group_is_cuda_graph_capturable():
@@ -346,6 +390,88 @@ def test_warmed_production_group_is_cuda_graph_capturable():
     # alter host telemetry.
     assert telemetry["grouped_launches"] == 2
     assert telemetry["sibling_cache_hits"] == 4
+
+
+def test_warmed_gate_up_paired_recovery_is_cuda_graph_capturable():
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    shared = torch.ones(256, device=device)
+    children = tuple(
+        _child(name, su=shared, alt_id=index + 1, seed=250 + index, device=device)
+        for index, name in enumerate(("gate_proj", "up_proj"))
+    )
+    mlp = _MLP(children)
+    install_qvq_hopper_groups(mlp, qkv=False)
+    static_input = torch.randn((1, 256), device=device, dtype=torch.float16) * 0.02
+
+    with torch.inference_mode():
+        expected = (mlp.gate_proj(static_input), mlp.up_proj(static_input))
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = (mlp.gate_proj(static_input), mlp.up_proj(static_input))
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    assert torch.equal(captured[0], expected[0])
+    assert torch.equal(captured[1], expected[1])
+    telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
+    assert telemetry["paired_recovery_launches"] == 2
+    assert telemetry["independent_recovery_children"] == 0
+
+
+def test_fused_mlp_lifecycle_flag_fallback_and_uninstall_are_exact():
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+
+    class LlamaLikeMLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            shared = torch.ones(256, device=device)
+            self.gate_proj = _child(
+                "gate_proj", su=shared, alt_id=1, seed=270, device=device
+            )
+            self.up_proj = _child(
+                "up_proj", su=shared, alt_id=2, seed=271, device=device
+            )
+            self.down_proj = _child(
+                "down_proj", su=shared, alt_id=3, seed=272, device=device
+            )
+            self.act_fn = nn.SiLU()
+
+        def forward(self, x):
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+    disabled = LlamaLikeMLP().eval()
+    assert install_qvq_hopper_groups(disabled, qkv=False, gate_up_activation=False) == {
+        "gate_up": 1
+    }
+    assert not hasattr(disabled, "_gptqmodel_qvq_fused_mlp_runtime")
+    assert uninstall_qvq_hopper_groups(disabled) == 1
+
+    mlp = LlamaLikeMLP().eval()
+    x = torch.randn((2, 256), device=device, dtype=torch.float16) * 0.02
+    fallback_x = torch.randn((17, 256), device=device, dtype=torch.float16) * 0.02
+    with torch.inference_mode():
+        expected = mlp(x)
+        expected_fallback = mlp(fallback_x)
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+    assert hasattr(mlp, "_gptqmodel_qvq_fused_mlp_runtime")
+    with torch.inference_mode():
+        actual = mlp(x)
+        actual_fallback = mlp(fallback_x)
+
+    assert torch.equal(actual, expected)
+    assert torch.equal(actual_fallback, expected_fallback)
+    telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
+    assert telemetry["fused_mlp_launches"] == 1
+    assert telemetry["fused_mlp_fallbacks"] == 1
+    assert uninstall_qvq_hopper_groups(mlp) == 1
+    assert not hasattr(mlp, "_gptqmodel_qvq_fused_mlp_runtime")
+    with torch.inference_mode():
+        assert torch.equal(mlp(x), expected)
 
 
 def test_real_llama32_layer_logits_and_cached_generation_are_exact():
@@ -419,6 +545,15 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
             seed=304,
             device=device,
         ),
+        "down_proj": _child(
+            "down_proj",
+            in_features=8192,
+            out_features=2048,
+            su=torch.ones(8192, device=device),
+            alt_id=2,
+            seed=305,
+            device=device,
+        ),
     }
     # Keep the random synthetic quantized layer in the ordinary activation
     # range so the test measures execution equivalence rather than overflow.
@@ -431,6 +566,7 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     layer.self_attn.v_proj = replacements["v_proj"]
     layer.mlp.gate_proj = replacements["gate_proj"]
     layer.mlp.up_proj = replacements["up_proj"]
+    layer.mlp.down_proj = replacements["down_proj"]
 
     input_ids = torch.tensor([[1, 7, 11, 19]], device=device)
     with torch.inference_mode():
@@ -459,3 +595,8 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     assert {entry["category"] for entry in telemetry} == {"qkv", "gate_up"}
     assert all(entry["grouped_launches"] >= 4 for entry in telemetry)
     assert all(entry["plain_fallbacks"] == 0 for entry in telemetry)
+    gate_up_telemetry = next(
+        entry for entry in telemetry if entry["category"] == "gate_up"
+    )
+    assert gate_up_telemetry["fused_mlp_launches"] >= 4
+    assert gate_up_telemetry["fused_mlp_fallbacks"] == 0

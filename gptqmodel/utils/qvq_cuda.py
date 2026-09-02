@@ -68,6 +68,8 @@ def _validate_viterbi_distance_range(
             "squared-distance arithmetic"
         )
 _QVQ_CUDA_HADAMARD_OP: Callable | None = None
+_QVQ_CUDA_HADAMARD_PAIR_OP: Callable | None = None
+_QVQ_CUDA_SWIGLU_PRECONDITION_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP: Callable | None = None
@@ -109,6 +111,8 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "viterbi_v2_segment_midpoint_trusted",
         "viterbi_v2_segment_family_grid_trusted",
         "hadamard",
+        "hadamard_pair_fp32_to_fp16",
+        "swiglu_precondition",
         "yaqa_feedback",
         "yaqa_feedback_update_",
         "norm_rank_telemetry_snapshot",
@@ -223,6 +227,32 @@ def _qvq_cuda_hadamard_op() -> Callable:
             if _QVQ_CUDA_HADAMARD_OP is None:
                 _QVQ_CUDA_HADAMARD_OP = _extension_api().op("qvq_cuda", "hadamard")
     return _QVQ_CUDA_HADAMARD_OP
+
+
+def _qvq_cuda_hadamard_pair_op() -> Callable:
+    """Resolve the paired output-recovery operator once."""
+
+    global _QVQ_CUDA_HADAMARD_PAIR_OP
+    if _QVQ_CUDA_HADAMARD_PAIR_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_HADAMARD_PAIR_OP is None:
+                _QVQ_CUDA_HADAMARD_PAIR_OP = _extension_api().op(
+                    "qvq_cuda", "hadamard_pair_fp32_to_fp16"
+                )
+    return _QVQ_CUDA_HADAMARD_PAIR_OP
+
+
+def _qvq_cuda_swiglu_precondition_op() -> Callable:
+    """Resolve the fused SwiGLU-product/down-input-transform operator once."""
+
+    global _QVQ_CUDA_SWIGLU_PRECONDITION_OP
+    if _QVQ_CUDA_SWIGLU_PRECONDITION_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_SWIGLU_PRECONDITION_OP is None:
+                _QVQ_CUDA_SWIGLU_PRECONDITION_OP = _extension_api().op(
+                    "qvq_cuda", "swiglu_precondition"
+                )
+    return _QVQ_CUDA_SWIGLU_PRECONDITION_OP
 
 
 def _qvq_cuda_yaqa_feedback_op() -> Callable:
@@ -638,6 +668,119 @@ def qvq_cuda_hadamard(
     if torch.cuda.get_device_capability(x.device) < (8, 0):
         raise RuntimeError("QVQ CUDA Hadamard requires a compute capability >= 8.0 device")
     return _qvq_cuda_hadamard_op()(x, pre_scale, post_scale, bias, scale_mode)
+
+
+def qvq_cuda_hadamard_pair_fp32_to_fp16(
+    input0: torch.Tensor,
+    input1: torch.Tensor,
+    *,
+    post_scale0: torch.Tensor,
+    post_scale1: torch.Tensor,
+    bias0: torch.Tensor | None = None,
+    bias1: torch.Tensor | None = None,
+    scale_mode: int = 3,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Recover two equal-width QVQ outputs in one CUDA launch.
+
+    This is the exact production sequence used by two independent
+    ``qvq_cuda_hadamard(...).to(torch.float16)`` calls: the butterfly remains
+    FP32 with finite FP16-operation emulation, child-local scale and bias are
+    applied in their original order, and the final store performs the former
+    FP16 cast.  The narrow contract keeps every unsupported shape on the
+    established independent path.
+    """
+
+    if input0.device.type != "cuda" or input1.device.type != "cuda":
+        raise ValueError("paired QVQ Hadamard inputs must be CUDA tensors")
+    if input0.device != input1.device:
+        raise ValueError("paired QVQ Hadamard inputs must share a device")
+    if input0.dtype != torch.float32 or input1.dtype != torch.float32:
+        raise TypeError("paired QVQ Hadamard inputs must be float32")
+    if input0.shape != input1.shape:
+        raise ValueError("paired QVQ Hadamard inputs must have identical shapes")
+    if input0.ndim < 1 or not input0.is_contiguous() or not input1.is_contiguous():
+        raise ValueError("paired QVQ Hadamard inputs must be contiguous with rank >= 1")
+    n = input0.shape[-1]
+    if n < 2 or n & (n - 1) or n > 16384:
+        raise ValueError(
+            "paired QVQ Hadamard requires a power-of-two last dimension in [2, 16384]"
+        )
+    if scale_mode not in (3, 4):
+        raise ValueError("paired QVQ Hadamard scale_mode must be 3 or 4")
+    for name, tensor in (
+        ("post_scale0", post_scale0),
+        ("post_scale1", post_scale1),
+        ("bias0", bias0),
+        ("bias1", bias1),
+    ):
+        if tensor is None:
+            if name.startswith("post_scale"):
+                raise TypeError(f"{name} is required")
+            continue
+        if (
+            tensor.device != input0.device
+            or tensor.dtype != torch.float32
+            or not tensor.is_contiguous()
+            or tensor.numel() != n
+        ):
+            raise ValueError(
+                f"{name} must be contiguous CUDA float32 with {n} elements on the input device"
+            )
+    if torch.cuda.get_device_capability(input0.device) < (8, 0):
+        raise RuntimeError("paired QVQ Hadamard requires compute capability >= 8.0")
+    return _qvq_cuda_hadamard_pair_op()(
+        input0,
+        input1,
+        post_scale0,
+        post_scale1,
+        bias0,
+        bias1,
+        scale_mode,
+    )
+
+
+def qvq_cuda_swiglu_precondition(
+    activated_gate: torch.Tensor,
+    up: torch.Tensor,
+    pre_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Fuse the FP16 gate/up product with the down-input ``SU -> Hadamard``.
+
+    ``activated_gate`` is deliberately produced by the model's original
+    activation function.  The kernel therefore changes neither activation
+    math nor its FP16 rounding; it only reproduces the following standalone
+    FP16 multiply and the established range-safe QVQ input transform.
+    """
+
+    if activated_gate.device.type != "cuda" or up.device.type != "cuda":
+        raise ValueError("QVQ SwiGLU precondition inputs must be CUDA tensors")
+    if activated_gate.device != up.device or activated_gate.device != pre_scale.device:
+        raise ValueError("QVQ SwiGLU precondition tensors must share a device")
+    if (
+        activated_gate.dtype != torch.float16
+        or up.dtype != torch.float16
+        or pre_scale.dtype != torch.float16
+    ):
+        raise TypeError("QVQ SwiGLU precondition tensors must be float16")
+    if activated_gate.shape != up.shape:
+        raise ValueError("QVQ SwiGLU activated gate and up tensors must have identical shapes")
+    if (
+        activated_gate.ndim < 1
+        or not activated_gate.is_contiguous()
+        or not up.is_contiguous()
+        or not pre_scale.is_contiguous()
+    ):
+        raise ValueError("QVQ SwiGLU precondition tensors must be contiguous with rank >= 1")
+    n = activated_gate.shape[-1]
+    if n < 2 or n & (n - 1) or n > 16384:
+        raise ValueError(
+            "QVQ SwiGLU precondition requires a power-of-two last dimension in [2, 16384]"
+        )
+    if pre_scale.numel() != n:
+        raise ValueError(f"QVQ SwiGLU precondition scale must contain {n} values")
+    if torch.cuda.get_device_capability(activated_gate.device) < (8, 0):
+        raise RuntimeError("QVQ SwiGLU precondition requires compute capability >= 8.0")
+    return _qvq_cuda_swiglu_precondition_op()(activated_gate, up, pre_scale)
 
 
 def qvq_cuda_device_supported(device: torch.device | str) -> bool:
