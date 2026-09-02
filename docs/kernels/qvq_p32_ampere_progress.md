@@ -1990,6 +1990,28 @@ plans. Diagnostics are `v19_m24_kv_wrap_resplit_s{56,64}_deep.json`,
 `v19_m4_w2_kv_wrap_resplit_s56_verify.json`, and
 `v19_m2_down_wrap_resplit_s80_deep.json`.
 
+The twenty-sixth v19 progression retunes the packed M16 W3 linear-QKV case
+from split 16 to split 10. The matched 100-warmup/4000-iteration control and
+candidate improve from `0.093184` to `0.092160 ms`, a **1.0111x** speedup
+(1.099% lower latency), with maximum absolute error below `3.82e-05`.
+Split 12 measured `0.094208 ms` and was rejected. Artifacts are
+`v19_m16_w3_qkv_packed_resplit_s{10,12,16}_deep.json` under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**2.198% cumulative improvement** versus fetched main.
+
+Three register/barrier experiments were rejected before this progression.
+Serializing the two M16 N8 weight fragments left both ptxas allocation at 64
+registers and W3.5 full-Q latency at `0.109568 ms`; ptxas had already
+shortened those live ranges. A nine-CTA launch bound forced 54 registers with
+zero spills but regressed the same case to `0.119808 ms`, showing that the
+compiler's recomputation/schedule cost exceeded the occupancy gain. A
+two-warp-pair staging design duplicated activation data only twice rather
+than the rejected warp-private design's four copies, but its named-barrier
+path still regressed to `0.147456 ms`. Diagnostics are
+`v19_m16_serial_weight_fragment_candidate_screen.json`,
+`v19_m16_fullq_minblocks9_candidate_screen.json`, and
+`v19_m16_fullq_pair_private_stage_candidate_screen.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
