@@ -82,3 +82,51 @@ expected FP32 reduction parenthesization change.
 
 The raw probe is
 `artifacts/a41_phase7_h100/production_qkv_w3_m1_probe.json`.
+
+## Production query/key/value matrix
+
+This is the complete production projection path at all requested rates and
+rows.  `vs previous` compares against the committed Phase 4 grouped split-1
+artifact.  A ratio above one means QVQ is faster.
+
+| W | M | K | Q/K/V N | QVQ (us) | vs previous | Better | Marlin W4 (us) | vs Marlin | Machete W4 (us) | vs Machete |
+|---:|---:|---:|:---|---:|---:|:---:|---:|---:|---:|---:|
+| 2 | 1 | 2048 | 2048/512/512 | 36.230 | 1.249x | Yes | 49.868 | 1.376x | 35.098 | 0.969x |
+| 2 | 2 | 2048 | 2048/512/512 | 36.371 | 1.241x | Yes | 58.725 | 1.615x | 34.793 | 0.957x |
+| 2 | 4 | 2048 | 2048/512/512 | 36.648 | 1.238x | Yes | 59.188 | 1.615x | 34.652 | 0.946x |
+| 2 | 8 | 2048 | 2048/512/512 | 37.067 | 1.235x | Yes | 51.114 | 1.379x | 34.136 | 0.921x |
+| 2 | 16 | 2048 | 2048/512/512 | 34.972 | 1.241x | Yes | 55.172 | 1.578x | 34.270 | 0.980x |
+| 2.5 | 1 | 2048 | 2048/512/512 | 36.611 | 1.195x | Yes | 49.868 | 1.362x | 35.098 | 0.959x |
+| 2.5 | 2 | 2048 | 2048/512/512 | 36.566 | 1.195x | Yes | 58.725 | 1.606x | 34.793 | 0.951x |
+| 2.5 | 4 | 2048 | 2048/512/512 | 37.002 | 1.191x | Yes | 59.188 | 1.600x | 34.652 | 0.937x |
+| 2.5 | 8 | 2048 | 2048/512/512 | 37.117 | 1.194x | Yes | 51.114 | 1.377x | 34.136 | 0.920x |
+| 2.5 | 16 | 2048 | 2048/512/512 | 35.453 | 1.182x | Yes | 55.172 | 1.556x | 34.270 | 0.967x |
+| 3 | 1 | 2048 | 2048/512/512 | 36.843 | 1.191x | Yes | 49.868 | 1.354x | 35.098 | 0.953x |
+| 3 | 2 | 2048 | 2048/512/512 | 36.469 | 1.196x | Yes | 58.725 | 1.610x | 34.793 | 0.954x |
+| 3 | 4 | 2048 | 2048/512/512 | 36.741 | 1.191x | Yes | 59.188 | 1.611x | 34.652 | 0.943x |
+| 3 | 8 | 2048 | 2048/512/512 | 37.302 | 1.180x | Yes | 51.114 | 1.370x | 34.136 | 0.915x |
+| 3 | 16 | 2048 | 2048/512/512 | 35.143 | 1.196x | Yes | 55.172 | 1.570x | 34.270 | 0.975x |
+| 3.5 | 1 | 2048 | 2048/512/512 | 36.367 | 1.206x | Yes | 49.868 | 1.371x | 35.098 | 0.965x |
+| 3.5 | 2 | 2048 | 2048/512/512 | 36.510 | 1.195x | Yes | 58.725 | 1.608x | 34.793 | 0.953x |
+| 3.5 | 4 | 2048 | 2048/512/512 | 36.680 | 1.204x | Yes | 59.188 | 1.614x | 34.652 | 0.945x |
+| 3.5 | 8 | 2048 | 2048/512/512 | 36.682 | 1.205x | Yes | 51.114 | 1.393x | 34.136 | 0.931x |
+| 3.5 | 16 | 2048 | 2048/512/512 | 34.994 | 1.200x | Yes | 55.172 | 1.577x | 34.270 | 0.979x |
+
+Geometric means across the 20 cases are:
+
+| Comparison | QVQ ratio |
+|:---|---:|
+| vs previous grouped QVQ | 1.206x |
+| vs ordinary per-child QVQ | 2.680x |
+| vs Marlin W4 | 1.503x |
+| vs Machete W4 | 0.951x |
+
+Thus Phase 7 removes 17.1% of the previous grouped latency on the geometric
+mean (`1 - 1/1.206`) and leaves a 5.2% geometric-mean latency gap to Machete
+(`1/0.951 - 1`).  Every case is deterministic and better than the previous
+benchmark.  The largest recorded difference from the old split-1 output is
+`0.00390625`; correctness is defined by bit-exact equality to independent
+ordered split-8 children plus the existing dense-inner accuracy gate.
+
+The raw record is
+`artifacts/a41_phase7_h100/production_qkv_vs_baselines.json`.
