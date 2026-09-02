@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 from collections import defaultdict
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -69,6 +70,24 @@ from scripts.validate_qvq_rotation_full_model_mlx import (  # noqa: E402
     _synchronize,
     _write,
 )
+
+
+def _layer_adaptation_seeds(value: str) -> tuple[int | None, ...]:
+    seeds = []
+    for item in value.split(","):
+        item = item.strip().lower()
+        if item in {"none", "identity", "id"}:
+            seeds.append(None)
+            continue
+        try:
+            seeds.append(int(item))
+        except ValueError as exc:
+            raise argparse.ArgumentTypeError(
+                "layer adaptation seeds must be integers or `identity`"
+            ) from exc
+    if not seeds:
+        raise argparse.ArgumentTypeError("at least one layer adaptation seed is required")
+    return tuple(seeds)
 
 
 def _percentile(values, fraction):
@@ -688,6 +707,26 @@ def main():
     parser.add_argument("--arms", type=_csv, default=("A0", "A25"))
     parser.add_argument("--bits", type=float, default=2.0, choices=(2.0,))
     parser.add_argument("--seed", type=int, default=20260831)
+    parser.add_argument(
+        "--validation-seed",
+        type=int,
+        help="optional held-out row-selection seed independent of fitting",
+    )
+    parser.add_argument(
+        "--residual-core-seed",
+        type=int,
+        help="fixed Hadamard-core seed for a fitted A33 residual basis",
+    )
+    parser.add_argument(
+        "--residual-adaptation-seed",
+        type=int,
+        help="optional held-out-selected signed-permutation seed for A33",
+    )
+    parser.add_argument(
+        "--residual-layer-adaptation-seeds",
+        type=_layer_adaptation_seeds,
+        help="comma-separated per-layer A34 seeds; use `identity` for no adaptation",
+    )
     parser.add_argument("--layers", type=int, default=16)
     parser.add_argument("--calibration-samples", type=int, default=16)
     parser.add_argument("--validation-streams", type=int, default=3)
@@ -742,6 +781,15 @@ def main():
             "--runtime-oracle already enforces canonical payload reuse and cannot "
             "be combined with --reuse-identical-a31-payloads"
         )
+    if "A33" in args.arms and args.residual_core_seed is None:
+        parser.error("A33 requires --residual-core-seed")
+    if "A34" in args.arms and (
+        args.residual_layer_adaptation_seeds is None
+        or len(args.residual_layer_adaptation_seeds) != args.layers
+    ):
+        parser.error(
+            "A34 requires one --residual-layer-adaptation-seeds entry per quantized layer"
+        )
     if not torch.cuda.is_available():
         parser.error("CUDA is required")
     device = torch.device("cuda")
@@ -776,10 +824,11 @@ def main():
         args.model, local_files_only=args.local_files_only
     )
     calibration_samples = _select_wikitext("train", args.calibration_samples, args.seed)
+    validation_seed = args.seed if args.validation_seed is None else args.validation_seed
     validation_sample_streams = _validation_streams(
         stream_count=args.validation_streams,
         samples_per_stream=args.validation_samples,
-        seed=args.seed,
+        seed=validation_seed,
     )
     calibration = _encode(tokenizer, calibration_samples, args.sequence_length)
     validation_streams = [
@@ -827,6 +876,7 @@ def main():
         "bits": args.bits,
         "quantized_layers": args.layers,
         "seed": args.seed,
+        "validation_seed": validation_seed,
         "sequence_length": args.sequence_length,
         "calibration_source": f"{WIKITEXT_ID}/wikitext-2-raw-v1:train",
         "validation_source": f"{WIKITEXT_ID}/wikitext-2-raw-v1:validation",
@@ -882,6 +932,33 @@ def main():
         planner = QVQTransformPlanner(model, LlamaQVQTransformImplementor())
         planning_arm = "A31" if args.runtime_oracle else arm
         plan = planner.build_transform_plan(planning_arm)
+        if planning_arm == "A33":
+            plan_metadata = copy.deepcopy(plan.metadata)
+            plan_metadata["fitted_residual_basis"] = {
+                "schema": "qvq.signed-permutation.v1",
+                "core_seed": args.residual_core_seed,
+                "adaptation_seed": args.residual_adaptation_seed,
+            }
+            plan = replace(plan, metadata=plan_metadata)
+        elif planning_arm == "A34":
+            plan_metadata = copy.deepcopy(plan.metadata)
+            layer_adaptation_seeds = list(args.residual_layer_adaptation_seeds)
+            model_layer_count = int(model.config.num_hidden_layers)
+            if len(layer_adaptation_seeds) < model_layer_count:
+                layer_adaptation_seeds.extend(
+                    [layer_adaptation_seeds[-1]]
+                    * (model_layer_count - len(layer_adaptation_seeds))
+                )
+            plan_metadata["fitted_layer_bases"] = {
+                "schema": "qvq.layered-signed-permutation.v1",
+                "core_seed": (
+                    args.seed
+                    if args.residual_core_seed is None
+                    else args.residual_core_seed
+                ),
+                "adaptation_seeds": layer_adaptation_seeds,
+            }
+            plan = replace(plan, metadata=plan_metadata)
         rewrite = planner.rewrite_dense_weights(plan, seed=args.seed)
         dense_parity = _evaluate(model, validation_all, dense_logits_all, {}, device)
         descriptors_by_layer = defaultdict(list)

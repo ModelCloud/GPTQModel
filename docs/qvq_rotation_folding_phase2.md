@@ -879,3 +879,76 @@ production profile with an independent fitting seed, stabilize tail latency,
 and then push toward the learned 5-H A33/A34 topology. Grouped checkpoint
 loading, the plain-P32/refactored-P32 same-payload oracle, and the independent
 full-depth canonical-checkpoint profile are now complete.
+
+## A33/A34 five-H screening result
+
+The first gated implementation of A33 and A34 is complete. A33 represents the
+residual stream in one held-out-selected structured orthogonal basis. A34 uses
+`R_l = H S_l`, where every layer shares the expensive randomized-Hadamard core
+`H` and `S_l` is a signed permutation. Its exact inter-layer bridge is
+`S_l^T S_{l+1}`; identical adjacent adaptations now produce no hook or runtime
+work. Both arms retain A25's exact head-local V/O fold and the five recovery-
+sensitive online Hadamards on Q output, K output, gate output, up output, and
+down input.
+
+The implementation is experimental and fail-closed. A33 requires a versioned
+core/adaptation descriptor, A34 requires one versioned adaptation entry per
+decoder layer, malformed descriptors are rejected, and checkpoint
+serialization remains disabled. Dense tests cover both the global rewrite and
+an actual layer bridge. They also caught and fixed a lifecycle issue where
+untying `lm_head` under `torch.inference_mode()` created inference tensors that
+could not later be converted to FP16; rewritten parameters are now ordinary
+materialized parameters.
+
+All screens used W2, fitting seed `20260902`, 16 calibration rows, three
+16-row validation streams, and one or four progressively quantized decoder
+layers. Streams 0 and 1 were fixed before the search as selection streams.
+Stream 2 is reported only as a diagnostic because it had already been read by
+earlier arms. A new disjoint acceptance seed was reserved and was not opened,
+because no candidate passed the stage-1 promotion gate.
+
+### Stage-1 basis selection
+
+| Arm/basis | Dense Top-1 | Selection KL | vs A0 | Diagnostic KL | Aggregate KL | Decision |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| A0 | 100% | `0.062081` | control | `0.077635` | `0.067453` | control |
+| A1 fixed global H | 100% | `0.068601` | +10.50% | `0.098482` | `0.078926` | rejected |
+| A33 post-H adaptation 11 | 99.981% | `0.081101` | +30.64% | `0.073139` | `0.078340` | dense gate |
+| A33 post-H adaptation 29 | 99.981% | `0.068935` | +11.04% | `0.082510` | `0.073630` | dense gate |
+| A33 post-H adaptation 47 | 99.981% | `0.068023` | +9.57% | `0.086819` | `0.074519` | dense gate |
+| A33 post-H adaptation 71 | 100% | `0.071715` | +15.52% | `0.094431` | `0.079562` | quality gate |
+| A33 core 11, identity adaptation | 99.981% | `0.069775` | +12.39% | `0.094220` | `0.078226` | dense gate |
+| A33 core 29, identity adaptation | 100% | `0.071014` | +14.39% | `0.086417` | `0.076332` | quality gate |
+| A33 core 47, identity adaptation | 100% | **`0.068504`** | **+10.35%** | `0.090607` | **`0.076139`** | quality gate |
+| A33 core 71, identity adaptation | 100% | `0.070163` | +13.02% | `0.092264` | `0.077802` | quality gate |
+
+Core 47 is the best dense-valid core, but misses the predeclared `<=10%`
+selection-KL gate. The result is not rescued by local reconstruction: its mean
+local output relative L2 is `0.071660`, versus `0.060388` for A0. Therefore it
+was not evaluated on the sealed acceptance split or at W1.5/W2.5.
+
+### Four-layer propagation diagnostics
+
+Two candidates had already reached a four-layer diagnostic before the strict
+core screen completed:
+
+| Arm | Online H/block | Other exact bridge | Dense Top-1 | Final KL | vs A0 | Logits rel-L2 | Top-1 |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| A0 | 14 | none | 100% | **`0.240390`** | control | **`0.279431`** | **77.323%** |
+| A33 post-H adaptation 47 | 5 | none | 99.981% | `0.259670` | +8.02% | `0.287858` | 75.209% |
+| A34 identity then adaptation 71 | 5 | one signed-permutation bridge | 100% | `0.262462` | +9.18% | `0.290762` | 76.504% |
+
+A34 proves the common-core bridge algebra: dense logits relative L2 is
+`1.76e-6` with 100% dense Top-1 identity. It does not improve the QVQ
+coordinate system. Its diagnostic stream KL is `0.302325`, 14.37% above A0's
+`0.264337` on that stream.
+
+The tested five-H family is therefore rejected. The blocker remains the QVQ
+trellis manifold rather than dense algebra: a globally persistent basis and
+cheap layer adaptation are exactly function-preserving, but all dense-valid
+bases materially worsen W2 quantization. This satisfies the staged-search stop
+condition for this family; spending a fresh acceptance stream, additional bit
+rates, or a 16-layer fit would be selection leakage and wasted compute. A41
+remains the production-performance candidate, while A0 remains the canonical
+quality control. Full machine-readable values are in
+`artifacts/qvq_validation/a33-a34-stage-screen_seed20260902.json`.

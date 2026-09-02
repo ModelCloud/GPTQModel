@@ -1,0 +1,156 @@
+{
+  "schema": "qvq.rotation-folding.a33-a34-screen.v1",
+  "status": "rejected",
+  "promotable": false,
+  "source_base_revision": "8f4dab7ff9f096f13dfce0cacfa3893362ad448c",
+  "origin_main_revision": "c04690043422495c20b9d59959663f3298a88a74",
+  "hardware": "NVIDIA PG506-230",
+  "compute_capability": "8.0",
+  "bits": 2.0,
+  "fitting_seed": 20260902,
+  "validation_seed": 20260902,
+  "calibration_samples": 16,
+  "validation_streams": 3,
+  "validation_samples_per_stream": 16,
+  "sequence_length": 128,
+  "selection_streams": [0, 1],
+  "diagnostic_streams": [2],
+  "fresh_acceptance_stream_read": false,
+  "promotion_gate": {
+    "dense_logits_relative_l2_max": 0.00002,
+    "dense_top1_identity_min": 1.0,
+    "selection_kl_regression_vs_a0_max_fraction": 0.1
+  },
+  "stage1": {
+    "A0": {
+      "online_hadamards_per_block": 14,
+      "selection_mean_kl": 0.062081080102073485,
+      "diagnostic_stream_kl": 0.07763453329009674,
+      "aggregate_kl": 0.06745345760009167,
+      "aggregate_logits_relative_l2": 0.15282964572925387,
+      "aggregate_top1": 0.8853769992383854,
+      "mean_local_output_relative_l2": 0.0603884362748691,
+      "dense_logits_relative_l2": 0.0,
+      "dense_top1_identity": 1.0
+    },
+    "A1_fixed_global_core": {
+      "online_hadamards_per_block": 5,
+      "selection_mean_kl": 0.06860080385634079,
+      "diagnostic_stream_kl": 0.09848230227573795,
+      "aggregate_kl": 0.07892636551896944,
+      "aggregate_logits_relative_l2": 0.1661593972026088,
+      "aggregate_top1": 0.8754760091393755,
+      "mean_local_output_relative_l2": 0.07006143432642732,
+      "dense_logits_relative_l2": 0.0000017738553602624245,
+      "dense_top1_identity": 1.0
+    },
+    "A33_post_core_adaptation": [
+      {
+        "adaptation_seed": 11,
+        "selection_mean_kl": 0.08110073223195809,
+        "diagnostic_stream_kl": 0.07313948787695507,
+        "aggregate_kl": 0.07834011316299438,
+        "dense_logits_relative_l2": 0.0000017666055558105983,
+        "dense_top1_identity": 0.9998095963442498,
+        "status": "rejected_dense_top1"
+      },
+      {
+        "adaptation_seed": 29,
+        "selection_mean_kl": 0.06893487196953405,
+        "diagnostic_stream_kl": 0.08250985095706954,
+        "aggregate_kl": 0.07362994558467996,
+        "dense_logits_relative_l2": 0.0000017542270473584676,
+        "dense_top1_identity": 0.9998095963442498,
+        "status": "rejected_dense_top1"
+      },
+      {
+        "adaptation_seed": 47,
+        "selection_mean_kl": 0.06802289256347027,
+        "diagnostic_stream_kl": 0.08681879111811167,
+        "aggregate_kl": 0.0745194242459985,
+        "dense_logits_relative_l2": 0.000001729724872386912,
+        "dense_top1_identity": 0.9998095963442498,
+        "status": "rejected_dense_top1"
+      },
+      {
+        "adaptation_seed": 71,
+        "selection_mean_kl": 0.07171511404558281,
+        "diagnostic_stream_kl": 0.0944310876125153,
+        "aggregate_kl": 0.07956207270669464,
+        "dense_logits_relative_l2": 0.000001762444242575629,
+        "dense_top1_identity": 1.0,
+        "status": "rejected_quality"
+      }
+    ],
+    "A33_core_screen": [
+      {
+        "core_seed": 11,
+        "selection_mean_kl": 0.06977510585187774,
+        "selection_kl_regression_vs_a0_fraction": 0.12393511416286195,
+        "diagnostic_stream_kl": 0.09422001696971333,
+        "aggregate_kl": 0.07822593031997274,
+        "dense_logits_relative_l2": 0.0000017820147222624397,
+        "dense_top1_identity": 0.9998095963442498,
+        "status": "rejected_dense_top1"
+      },
+      {
+        "core_seed": 29,
+        "selection_mean_kl": 0.07101411788663554,
+        "selection_kl_regression_vs_a0_fraction": 0.14389307933873564,
+        "diagnostic_stream_kl": 0.08641718325538825,
+        "aggregate_kl": 0.0763319778537714,
+        "dense_logits_relative_l2": 0.0000018427428030989276,
+        "dense_top1_identity": 1.0,
+        "status": "rejected_quality"
+      },
+      {
+        "core_seed": 47,
+        "selection_mean_kl": 0.06850404306883505,
+        "selection_kl_regression_vs_a0_fraction": 0.10346087658592529,
+        "diagnostic_stream_kl": 0.09060688680124991,
+        "aggregate_kl": 0.07613863240464988,
+        "dense_logits_relative_l2": 0.0000017677329629226128,
+        "dense_top1_identity": 1.0,
+        "status": "rejected_quality"
+      },
+      {
+        "core_seed": 71,
+        "selection_mean_kl": 0.07016289797958515,
+        "selection_kl_regression_vs_a0_fraction": 0.1301816570237433,
+        "diagnostic_stream_kl": 0.09226395116773489,
+        "aggregate_kl": 0.07780239673761222,
+        "dense_logits_relative_l2": 0.0000017682488240092834,
+        "dense_top1_identity": 1.0,
+        "status": "rejected_quality"
+      }
+    ]
+  },
+  "stage2_four_layer": {
+    "A0": {
+      "aggregate_kl": 0.2403904083387051,
+      "aggregate_logits_relative_l2": 0.2794307043969681,
+      "aggregate_top1": 0.7732292460015232
+    },
+    "A33_post_core_adaptation_seed_47": {
+      "aggregate_kl": 0.2596699220028345,
+      "kl_regression_vs_a0_fraction": 0.08020084410757766,
+      "aggregate_logits_relative_l2": 0.28785840783645367,
+      "aggregate_top1": 0.7520944402132521,
+      "dense_logits_relative_l2": 0.000001729724872386912,
+      "dense_top1_identity": 0.9998095963442498,
+      "status": "rejected_dense_top1_and_quality"
+    },
+    "A34_identity_then_adaptation_71": {
+      "layer_adaptation_seeds": [null, 71, 71, 71],
+      "non_identity_bridges": 1,
+      "aggregate_kl": 0.26246187547101196,
+      "kl_regression_vs_a0_fraction": 0.09181509064708027,
+      "aggregate_logits_relative_l2": 0.2907619124182629,
+      "aggregate_top1": 0.765041888804265,
+      "dense_logits_relative_l2": 0.0000017556609556019227,
+      "dense_top1_identity": 1.0,
+      "status": "rejected_quality"
+    }
+  },
+  "decision": "Reject the tested 5-H global and common-core signed-permutation families. No candidate cleared stage 1, so no fresh acceptance stream, W1.5/W2.5 sweep, or 16-layer run was consumed. Retain A41 as the production-performance candidate and A0 as the quality control."
+}

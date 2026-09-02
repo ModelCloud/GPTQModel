@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+from dataclasses import replace
 
 import pytest
 import torch
@@ -56,6 +57,8 @@ def test_qvq_transform_plan_counts_and_role_descriptors():
     assert planner.build_transform_plan("A29").online_hadamards_per_block == 12
     assert planner.build_transform_plan("A30").online_hadamards_per_block == 10
     assert planner.build_transform_plan("A31").online_hadamards_per_block == 9
+    assert planner.build_transform_plan("A33").online_hadamards_per_block == 5
+    assert planner.build_transform_plan("A34").online_hadamards_per_block == 5
     assert planner.build_transform_plan("A41").online_hadamards_per_block == 9
 
     a31 = planner.build_transform_plan("A31")
@@ -133,6 +136,21 @@ def test_qvq_a0_rewrite_is_byte_preserving():
         assert torch.equal(value, before[name])
 
 
+def test_qvq_residual_rewrite_materializes_ordinary_untied_lm_head_parameter():
+    model = _tiny_llama()
+    assert model.model.embed_tokens.weight is model.lm_head.weight
+    planner = QVQTransformPlanner(model, LlamaQVQTransformImplementor())
+
+    planner.rewrite_dense_weights(planner.build_transform_plan("A1"), seed=13)
+
+    assert model.model.embed_tokens.weight is not model.lm_head.weight
+    assert not torch.is_inference(model.lm_head.weight)
+    model.half()
+    with torch.inference_mode():
+        logits = model(input_ids=torch.tensor([[1, 2, 3]])).logits
+    assert torch.isfinite(logits).all()
+
+
 @pytest.mark.parametrize("arm", ("A2", "A8", "A9"))
 def test_qvq_learned_folded_arms_fail_closed_without_a_fitted_basis(arm):
     model = _tiny_llama()
@@ -140,6 +158,104 @@ def test_qvq_learned_folded_arms_fail_closed_without_a_fitted_basis(arm):
 
     with pytest.raises(NotImplementedError, match="refuses to substitute"):
         planner.rewrite_dense_weights(planner.build_transform_plan(arm), seed=9)
+
+
+def test_qvq_a33_requires_fitted_basis_metadata():
+    model = _tiny_llama()
+    planner = QVQTransformPlanner(model, LlamaQVQTransformImplementor())
+
+    with pytest.raises(NotImplementedError, match="fitted_residual_basis"):
+        planner.rewrite_dense_weights(planner.build_transform_plan("A33"), seed=9)
+
+
+def test_qvq_a33_fitted_structured_basis_preserves_final_logits():
+    original = _tiny_llama()
+    rewritten = copy.deepcopy(original)
+    input_ids = torch.tensor([[1, 17, 9, 41, 3], [1, 5, 6, 7, 8]], dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
+    with torch.inference_mode():
+        expected = original(input_ids=input_ids, attention_mask=attention_mask).logits
+
+    planner = QVQTransformPlanner(rewritten, LlamaQVQTransformImplementor())
+    plan = planner.build_transform_plan("A33")
+    plan_metadata = copy.deepcopy(plan.metadata)
+    plan_metadata["fitted_residual_basis"] = {
+        "schema": "qvq.signed-permutation.v1",
+        "core_seed": 29,
+        "adaptation_seed": 101,
+    }
+    metadata = planner.rewrite_dense_weights(
+        replace(plan, metadata=plan_metadata), seed=7
+    )
+    with torch.inference_mode():
+        actual = rewritten(input_ids=input_ids, attention_mask=attention_mask).logits
+
+    delta = actual - expected
+    assert metadata["fitted_residual_basis"] == plan_metadata[
+        "fitted_residual_basis"
+    ]
+    assert metadata["residual_condition_number"] == 1.0
+    assert delta.abs().max().item() < 2e-5
+    assert torch.linalg.vector_norm(delta) / torch.linalg.vector_norm(expected) < 2e-5
+    assert torch.equal(actual.argmax(dim=-1), expected.argmax(dim=-1))
+
+
+def test_qvq_a34_requires_one_fitted_adaptation_per_layer():
+    model = _tiny_llama()
+    planner = QVQTransformPlanner(model, LlamaQVQTransformImplementor())
+
+    with pytest.raises(NotImplementedError, match="fitted_layer_bases"):
+        planner.rewrite_dense_weights(planner.build_transform_plan("A34"), seed=9)
+
+
+def test_qvq_a34_layer_bridges_are_dense_exact():
+    original = _tiny_llama()
+    rewritten = copy.deepcopy(original)
+    input_ids = torch.tensor([[1, 17, 9, 41, 3], [1, 5, 6, 7, 8]], dtype=torch.long)
+    attention_mask = torch.ones_like(input_ids)
+    with torch.inference_mode():
+        expected = original(input_ids=input_ids, attention_mask=attention_mask).logits
+
+    planner = QVQTransformPlanner(rewritten, LlamaQVQTransformImplementor())
+    plan = planner.build_transform_plan("A34")
+    plan_metadata = copy.deepcopy(plan.metadata)
+    plan_metadata["fitted_layer_bases"] = {
+        "schema": "qvq.layered-signed-permutation.v1",
+        "core_seed": 29,
+        "adaptation_seeds": [None, 71],
+    }
+    metadata = planner.rewrite_dense_weights(
+        replace(plan, metadata=plan_metadata), seed=7
+    )
+    with torch.inference_mode():
+        actual = rewritten(input_ids=input_ids, attention_mask=attention_mask).logits
+
+    delta = actual - expected
+    assert metadata["online_residual_bridges"] == 1
+    assert metadata["residual_bridge_kind"] == "signed_permutation"
+    assert len(rewritten._qvq_residual_bridge_handles) == 1
+    assert delta.abs().max().item() < 2e-5
+    assert torch.linalg.vector_norm(delta) / torch.linalg.vector_norm(expected) < 2e-5
+    assert torch.equal(actual.argmax(dim=-1), expected.argmax(dim=-1))
+
+
+def test_qvq_a34_skips_identity_layer_bridges():
+    model = _tiny_llama()
+    planner = QVQTransformPlanner(model, LlamaQVQTransformImplementor())
+    plan = planner.build_transform_plan("A34")
+    plan_metadata = copy.deepcopy(plan.metadata)
+    plan_metadata["fitted_layer_bases"] = {
+        "schema": "qvq.layered-signed-permutation.v1",
+        "core_seed": 29,
+        "adaptation_seeds": [71, 71],
+    }
+
+    metadata = planner.rewrite_dense_weights(
+        replace(plan, metadata=plan_metadata), seed=7
+    )
+
+    assert metadata["online_residual_bridges"] == 0
+    assert model._qvq_residual_bridge_handles == ()
 
 
 def test_qvq_qk_fold_fails_closed_with_intervening_norm():

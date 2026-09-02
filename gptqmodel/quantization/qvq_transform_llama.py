@@ -40,6 +40,42 @@ class _RandomHadamardBasis:
         return self.apply_right(values.transpose(0, 1)).transpose(0, 1)
 
 
+@dataclass(frozen=True)
+class _StructuredResidualBasis:
+    """A randomized Hadamard core followed by a fitted signed permutation."""
+
+    core: _RandomHadamardBasis
+    permutation: torch.Tensor
+    signs: torch.Tensor
+
+    @property
+    def size(self) -> int:
+        return self.core.size
+
+    def _apply_adaptation(self, values: torch.Tensor) -> torch.Tensor:
+        permutation = self.permutation.to(device=values.device)
+        signs = self.signs.to(device=values.device, dtype=values.dtype)
+        return values.index_select(-1, permutation) * signs
+
+    def _apply_adaptation_transpose(self, values: torch.Tensor) -> torch.Tensor:
+        permutation = self.permutation.to(device=values.device)
+        signs = self.signs.to(device=values.device, dtype=values.dtype)
+        result = torch.empty_like(values)
+        result.index_copy_(-1, permutation, values * signs)
+        return result
+
+    def apply_right(self, values: torch.Tensor) -> torch.Tensor:
+        return self._apply_adaptation(self.core.apply_right(values))
+
+    def apply_right_transpose(self, values: torch.Tensor) -> torch.Tensor:
+        return self.core.apply_right_transpose(
+            self._apply_adaptation_transpose(values)
+        )
+
+    def apply_left_transpose(self, values: torch.Tensor) -> torch.Tensor:
+        return self.apply_right(values.transpose(0, 1)).transpose(0, 1)
+
+
 def _random_hadamard_basis(size: int, *, seed: int) -> _RandomHadamardBasis:
     if size < 1 or size & (size - 1):
         raise ValueError(f"QVQ randomized Hadamard basis requires a power-of-two width, got {size}")
@@ -48,13 +84,42 @@ def _random_hadamard_basis(size: int, *, seed: int) -> _RandomHadamardBasis:
     return _RandomHadamardBasis(signs.to(torch.float32))
 
 
+def _structured_residual_basis(
+    size: int,
+    *,
+    core_seed: int,
+    adaptation_seed: int | None,
+    device: torch.device | None = None,
+) -> _StructuredResidualBasis:
+    if adaptation_seed is None:
+        permutation = torch.arange(size)
+        signs = torch.ones(size, dtype=torch.float32)
+    else:
+        generator = torch.Generator(device="cpu").manual_seed(adaptation_seed)
+        permutation = torch.randperm(size, generator=generator)
+        signs = torch.randint(0, 2, (size,), generator=generator, dtype=torch.int8)
+        signs = signs.mul_(2).sub_(1).to(torch.float32)
+    if device is not None:
+        permutation = permutation.to(device=device)
+        signs = signs.to(device=device)
+    return _StructuredResidualBasis(
+        core=_random_hadamard_basis(size, seed=core_seed),
+        permutation=permutation,
+        signs=signs,
+    )
+
+
 def _copy_weight(module: torch.nn.Module, value: torch.Tensor) -> None:
     module.weight.data.copy_(value.to(device=module.weight.device, dtype=module.weight.dtype))
 
 
 def _copy_bias(module: torch.nn.Module, value: torch.Tensor) -> None:
     if module.bias is None:
-        module.bias = torch.nn.Parameter(value.to(device=module.weight.device, dtype=module.weight.dtype))
+        with torch.inference_mode(False):
+            materialized = value.detach().to(
+                device=module.weight.device, dtype=module.weight.dtype
+            ).clone()
+        module.bias = torch.nn.Parameter(materialized)
     else:
         module.bias.data.copy_(value.to(device=module.bias.device, dtype=module.bias.dtype))
 
@@ -181,6 +246,63 @@ class LlamaQVQTransformImplementor:
         }
         del descriptor_by_role
 
+        fitted_residual_basis = None
+        fitted_layer_bases = None
+        residual_bridge_count = 0
+        if plan.arm == "A33":
+            fitted_residual_basis = plan.metadata.get("fitted_residual_basis")
+            expected_keys = {"schema", "core_seed", "adaptation_seed"}
+            if not isinstance(fitted_residual_basis, dict) or set(
+                fitted_residual_basis
+            ) != expected_keys:
+                raise NotImplementedError(
+                    "A33 requires a held-out-selected fitted_residual_basis with "
+                    f"exact keys {sorted(expected_keys)}"
+                )
+            if fitted_residual_basis["schema"] != "qvq.signed-permutation.v1":
+                raise ValueError("A33 has an unsupported fitted residual-basis schema")
+            core_seed = fitted_residual_basis["core_seed"]
+            if isinstance(core_seed, bool) or not isinstance(core_seed, int):
+                raise TypeError("A33 fitted residual-basis core_seed must be an integer")
+            adaptation_seed = fitted_residual_basis["adaptation_seed"]
+            if adaptation_seed is not None and (
+                isinstance(adaptation_seed, bool)
+                or not isinstance(adaptation_seed, int)
+            ):
+                raise TypeError(
+                    "A33 fitted residual-basis adaptation_seed must be an integer or null"
+                )
+        elif plan.arm == "A34":
+            fitted_layer_bases = plan.metadata.get("fitted_layer_bases")
+            expected_keys = {"schema", "core_seed", "adaptation_seeds"}
+            if not isinstance(fitted_layer_bases, dict) or set(
+                fitted_layer_bases
+            ) != expected_keys:
+                raise NotImplementedError(
+                    "A34 requires held-out-selected fitted_layer_bases with "
+                    f"exact keys {sorted(expected_keys)}"
+                )
+            if fitted_layer_bases["schema"] != "qvq.layered-signed-permutation.v1":
+                raise ValueError("A34 has an unsupported fitted layer-basis schema")
+            core_seed = fitted_layer_bases["core_seed"]
+            if isinstance(core_seed, bool) or not isinstance(core_seed, int):
+                raise TypeError("A34 fitted layer-basis core_seed must be an integer")
+            adaptation_seeds = fitted_layer_bases["adaptation_seeds"]
+            if not isinstance(adaptation_seeds, list) or len(adaptation_seeds) != len(
+                layers
+            ):
+                raise ValueError(
+                    f"A34 requires exactly {len(layers)} layer adaptation seeds"
+                )
+            if any(
+                value is not None
+                and (isinstance(value, bool) or not isinstance(value, int))
+                for value in adaptation_seeds
+            ):
+                raise TypeError(
+                    "A34 layer adaptation seeds must be integers or null identity maps"
+                )
+
         residual_folded = plan.arm not in {
             "A24",
             "A25",
@@ -193,12 +315,42 @@ class LlamaQVQTransformImplementor:
             "A41",
         }
         if residual_folded:
-            residual_basis = _random_hadamard_basis(hidden_size, seed=seed)
-            self._rewrite_residual_basis(model, root, layers, residual_basis)
+            if fitted_layer_bases is not None:
+                basis_device = root.embed_tokens.weight.device
+                residual_bases = tuple(
+                    _structured_residual_basis(
+                        hidden_size,
+                        core_seed=fitted_layer_bases["core_seed"],
+                        adaptation_seed=adaptation_seed,
+                        device=basis_device,
+                    )
+                    for adaptation_seed in fitted_layer_bases["adaptation_seeds"]
+                )
+                residual_bridge_count = self._rewrite_layered_residual_bases(
+                    model, root, layers, residual_bases
+                )
+            elif fitted_residual_basis is None:
+                residual_basis = _random_hadamard_basis(hidden_size, seed=seed)
+                self._rewrite_residual_basis(model, root, layers, residual_basis)
+            else:
+                residual_basis = _structured_residual_basis(
+                    hidden_size,
+                    core_seed=fitted_residual_basis["core_seed"],
+                    adaptation_seed=fitted_residual_basis["adaptation_seed"],
+                )
+                self._rewrite_residual_basis(model, root, layers, residual_basis)
         metadata: dict[str, Any] = {
             "arm": plan.arm,
             "rewritten": True,
-            "residual_seed": seed,
+            "residual_seed": (
+                seed
+                if fitted_residual_basis is None and fitted_layer_bases is None
+                else (
+                    fitted_residual_basis["core_seed"]
+                    if fitted_residual_basis is not None
+                    else fitted_layer_bases["core_seed"]
+                )
+            ),
             "residual_kind": next(
                 descriptor.input_transform.kind.value
                 for descriptor in plan.modules
@@ -207,6 +359,14 @@ class LlamaQVQTransformImplementor:
             "blockers": [],
             "residual_folded": residual_folded,
         }
+        if fitted_residual_basis is not None:
+            metadata["fitted_residual_basis"] = dict(fitted_residual_basis)
+            metadata["residual_condition_number"] = 1.0
+        if fitted_layer_bases is not None:
+            metadata["fitted_layer_bases"] = dict(fitted_layer_bases)
+            metadata["residual_condition_number"] = 1.0
+            metadata["online_residual_bridges"] = residual_bridge_count
+            metadata["residual_bridge_kind"] = "signed_permutation"
 
         vo_enabled = any(
             descriptor.role == ProjectionRole.ATTENTION_V
@@ -264,11 +424,13 @@ class LlamaQVQTransformImplementor:
         return metadata
 
     @staticmethod
-    def _rewrite_residual_basis(model, root, layers, basis: _RandomHadamardBasis) -> None:
+    def _prepare_residual_rewrite(model, root, layers):
         lm_head = model.lm_head
         embedding = root.embed_tokens
         if embedding.weight is lm_head.weight:
-            lm_head.weight = torch.nn.Parameter(lm_head.weight.detach().clone())
+            with torch.inference_mode(False):
+                untied_weight = lm_head.weight.detach().clone()
+            lm_head.weight = torch.nn.Parameter(untied_weight)
         for layer in layers:
             _fuse_norm(
                 layer.input_layernorm,
@@ -279,6 +441,17 @@ class LlamaQVQTransformImplementor:
                 (layer.mlp.gate_proj, layer.mlp.up_proj),
             )
         _fuse_norm(root.norm, (lm_head,))
+        return lm_head, embedding
+
+    @classmethod
+    def _rewrite_residual_basis(
+        cls,
+        model,
+        root,
+        layers,
+        basis: _RandomHadamardBasis | _StructuredResidualBasis,
+    ) -> None:
+        lm_head, embedding = cls._prepare_residual_rewrite(model, root, layers)
 
         _copy_weight(embedding, basis.apply_right(embedding.weight.detach().to(torch.float32)))
         _copy_weight(lm_head, basis.apply_right(lm_head.weight.detach().to(torch.float32)))
@@ -298,6 +471,79 @@ class LlamaQVQTransformImplementor:
                         module,
                         basis.apply_right(module.bias.detach().to(torch.float32).unsqueeze(0)).squeeze(0),
                     )
+
+    @classmethod
+    def _rewrite_layered_residual_bases(
+        cls,
+        model,
+        root,
+        layers,
+        bases: tuple[_StructuredResidualBasis, ...],
+    ) -> int:
+        if len(bases) != len(layers):
+            raise ValueError("layered residual-basis count must match decoder layers")
+        lm_head, embedding = cls._prepare_residual_rewrite(model, root, layers)
+        _copy_weight(
+            embedding,
+            bases[0].apply_right(embedding.weight.detach().to(torch.float32)),
+        )
+        _copy_weight(
+            lm_head,
+            bases[-1].apply_right(lm_head.weight.detach().to(torch.float32)),
+        )
+        for layer, basis in zip(layers, bases, strict=True):
+            for module in (
+                layer.self_attn.q_proj,
+                layer.self_attn.k_proj,
+                layer.self_attn.v_proj,
+                layer.mlp.gate_proj,
+                layer.mlp.up_proj,
+            ):
+                _copy_weight(
+                    module,
+                    basis.apply_right(module.weight.detach().to(torch.float32)),
+                )
+            for module in (layer.self_attn.o_proj, layer.mlp.down_proj):
+                _copy_weight(
+                    module,
+                    basis.apply_left_transpose(
+                        module.weight.detach().to(torch.float32)
+                    ),
+                )
+                if module.bias is not None:
+                    _copy_bias(
+                        module,
+                        basis.apply_right(
+                            module.bias.detach().to(torch.float32).unsqueeze(0)
+                        ).squeeze(0),
+                    )
+
+        handles = []
+        for layer, current_basis, next_basis in zip(
+            layers[:-1], bases[:-1], bases[1:], strict=True
+        ):
+            if torch.equal(current_basis.permutation, next_basis.permutation) and torch.equal(
+                current_basis.signs, next_basis.signs
+            ):
+                continue
+
+            def bridge_hook(
+                _module,
+                _inputs,
+                output,
+                current=current_basis,
+                following=next_basis,
+            ):
+                if not isinstance(output, torch.Tensor):
+                    raise TypeError("A34 residual bridge expects a tensor layer output")
+                canonical_core_coordinates = current._apply_adaptation_transpose(
+                    output
+                )
+                return following._apply_adaptation(canonical_core_coordinates)
+
+            handles.append(layer.register_forward_hook(bridge_hook))
+        object.__setattr__(model, "_qvq_residual_bridge_handles", tuple(handles))
+        return len(handles)
 
     @staticmethod
     def _rewrite_vo(layer, layer_index, num_heads, num_kv_heads, head_dim, q_per_kv, seed):

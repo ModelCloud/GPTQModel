@@ -186,12 +186,14 @@ class QVQTransformPlanner:
             "A0", "A1", "A2", "A3", "A4", "A5", "A6", "A8", "A9",
             "A12", "A13", "A14", "A15", "A16", "A17", "A18",
             "A20", "A21", "A22", "A23", "A24", "A25", "A26", "A27", "A28", "A29", "A30",
-            "A31", "A41",
+            "A31", "A33", "A34", "A41",
         }:
             raise ValueError(f"unsupported QVQ transform-search arm: {arm}")
 
         residual_kind = (
-            TransformKind.STRUCTURED_ORTHOGONAL if arm in {"A2", "A9"} else TransformKind.HADAMARD
+            TransformKind.STRUCTURED_ORTHOGONAL
+            if arm in {"A2", "A9", "A33", "A34"}
+            else TransformKind.HADAMARD
         )
         learned_vo = arm in {"A2", "A8"}
         descriptions = {
@@ -223,6 +225,8 @@ class QVQTransformPlanner:
             "A29": "remove gate/up output Hadamards without SwiGLU reparameterization",
             "A30": "A29 plus head-local V/O folding",
             "A31": "sibling-shared QKV and gate/up input RHTs plus head-local V/O folding",
+            "A33": "QVQ-fitted persistent structured residual basis plus head-local V/O folding",
+            "A34": "layer-adapted residual bases with a cancelling Hadamard core and cheap bridges",
             "A41": "A31 topology with grouped sibling CUDA P32 decode fusion",
         }
         descriptors = []
@@ -326,6 +330,7 @@ class QVQTransformPlanner:
                     "A0", "A1", "A3", "A4", "A6", "A18", "A20", "A21", "A22", "A23", "A24",
                     "A25", "A26", "A27", "A28", "A29", "A30",
                     "A31", "A41",
+                    "A33", "A34",
                 },
                 "checkpoint_serialization_implemented": arm == "A0",
             },
