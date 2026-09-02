@@ -328,7 +328,7 @@ def _qvq_child(
         ),
         "bank_alt_id": torch.tensor([alt_id], device=device, dtype=torch.uint8),
     }
-    return QVQLinear.from_tensors(
+    child = QVQLinear.from_tensors(
         bits=bits,
         in_features=in_features,
         out_features=width,
@@ -337,6 +337,11 @@ def _qvq_child(
         bank_count=2,
         v2b2_p32=True,
     ).eval()
+    # A41 folds the value projection's output Hadamard into the following
+    # attention consumer. Query/key retain their output transforms.
+    if name == "v_proj":
+        child.output_hadamard = False
+    return child
 
 
 def _projection_parent(torch, names, children):
@@ -585,6 +590,13 @@ def _run(args):
             "host_launch_gaps_included": False,
         },
         "workload": "Llama 3.2 1B grouped QKV and gate/up full projection forwards",
+        "axis_topology": {
+            "q_proj": {"input_hadamard": True, "output_hadamard": True},
+            "k_proj": {"input_hadamard": True, "output_hadamard": True},
+            "v_proj": {"input_hadamard": True, "output_hadamard": False},
+            "gate_proj": {"input_hadamard": True, "output_hadamard": True},
+            "up_proj": {"input_hadamard": True, "output_hadamard": True},
+        },
         "previous_benchmark": (
             {
                 "git_ref": args.previous_git_ref,

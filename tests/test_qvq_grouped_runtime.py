@@ -335,6 +335,8 @@ def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
         )
         for index, (name, width) in enumerate(zip(names, widths, strict=True))
     )
+    if category == "qkv":
+        children[2].output_hadamard = False
     model = _Attention(children) if category == "qkv" else _MLP(children)
     x = (
         torch.randn(
@@ -634,6 +636,7 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
             device=device,
         ),
     }
+    replacements["v_proj"].output_hadamard = False
     # Keep the random synthetic quantized layer in the ordinary activation
     # range so the test measures execution equivalence rather than overflow.
     with torch.no_grad():
