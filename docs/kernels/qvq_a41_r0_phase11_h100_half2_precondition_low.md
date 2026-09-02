@@ -225,10 +225,10 @@ reports are large.
 
 ## Next experiment
 
-The next phase should delete a boundary rather than continue isolated low
-arithmetic work. The best candidate is an exact persistent or cluster-local
-handoff from low to high that removes the global workspace and one launch,
-but it must first prove that cluster synchronization does not repeat the
-earlier wide-cluster regressions. A lower-risk alternative is to vectorize a
-larger representation boundary in gate/up recovery; small SASS folds that do
-not remove materialization remain low priority.
+Phase 12 tested exact cooperative-grid and row-local completion-counter
+low/high fusion. Both regressed every M, so neither was promoted. The accepted
+alternative keeps the first five paired-recovery low butterflies warp-local,
+removes 30.5% of that stage's executed instructions, and improves all 20
+complete-MLP rate/M cells. See
+`qvq_a41_r0_phase12_h100_warp_recovery_low.md` for the exact math, rejected
+candidate data, matched SASS analysis, and production benchmark.
