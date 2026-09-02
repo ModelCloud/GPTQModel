@@ -652,24 +652,26 @@ M1/M2/M4/M8 median. Its p95 improves at M1/M2/M4 but regresses `16.08%` at
 M8, so the full-model B8 median is evidence while isolated-suite B8 tail
 latency still needs stabilization.
 
-The `p0c-r0c-correction` profile at `f495e745` also passed. Correction accepted
-374,732 output-channel updates across all 112 modules; every module changed
-only `SV`. The summed local Hessian proxy fell from `474.7300` to `468.7766`
-(`-1.25%`). R0+C still compiled 32/32 groups with zero fallback and retained
-identical EBPW and payload hashes. Direct R0+C-versus-P0+C packed equivalence
-is KL `6.8878e-5`, relative L2 `0.004352`, maximum delta `0.210938`, Top-1
-identity `99.325%`, and Top-5/10 identity `100%`.
+The initial corrected profile at `f495e745` had the same split-order flaw and
+is likewise retained only as characterization. The clean-tree exact rerun at
+`42e9318a` passed the tightened gates. Correction accepted 374,732
+output-channel updates across all 112 modules; every module changed only
+`SV`. The summed local Hessian proxy fell from `474.7300` to `468.7766`
+(`-1.25%`). R0+C compiled 32/32 groups with zero fallback and retained
+identical EBPW and payload hashes. Direct R0+C-versus-P0+C logits relative L2
+and maximum delta are both `0`; exact-logit and Top-1/5/10 identity are all
+`100%`. The reported KL is `2.48e-9`, evaluation roundoff on identical logits.
 
 | Batch | P0+C decode median (p95) ms | R0+C decode median (p95) ms | Median delta | p95 delta |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | `38.5307 (45.8208)` | **`32.6092 (38.6828)`** | **-15.37%** | **-15.58%** |
-| 2 | `37.8954 (43.6457)` | **`34.4376 (41.0248)`** | **-9.12%** | **-6.00%** |
-| 4 | `38.3092 (44.9101)` | **`33.9781 (40.6990)`** | **-11.31%** | **-9.38%** |
-| 8 | `39.8481 (45.3532)` | **`33.5493 (275.4560)`** | **-15.81%** | `+507.36%` outlier |
+| 1 | `37.0603 (38.2176)` | **`30.4326 (31.9106)`** | **-17.88%** | **-16.50%** |
+| 2 | `36.9682 (39.3348)` | **`32.0950 (33.9023)`** | **-13.18%** | **-13.81%** |
+| 4 | `37.0250 (39.3202)` | **`32.0176 (33.8857)`** | **-13.52%** | **-13.82%** |
+| 8 | `36.8703 (39.1625)` | **`31.8434 (33.8707)`** | **-13.63%** | **-13.51%** |
 
-The corrected B8 p95 contains one extreme R0+C sample and is explicitly not
-tail-latency evidence. Its median and the independent isolated suite remain
-favorable; the corrected suite improves `19.16--25.98%` at M1--M8 median.
+The corrected isolated suite improves `23.59%`, `18.45%`, `19.32%`, and
+`19.55%` at M1/M2/M4/M8 median; all four suite p95 deltas are favorable in
+this rerun.
 
 The correction itself is a negative propagated-quality result. P0+C versus
 uncorrected P0 moves full-model packed KL from `0.916587` to `0.958022`
@@ -685,15 +687,23 @@ Oracle artifacts:
 
 - `artifacts/qvq_validation/p0-r0-runtime_seed20260831_506c8898.json`;
 - `artifacts/qvq_validation/summary_p0-r0-runtime_506c8898.json`;
+- `artifacts/qvq_validation/p0c-r0c-correction_seed20260831_42e9318a.json`;
+- `artifacts/qvq_validation/summary_p0c-r0c-correction_42e9318a.json`;
 - `artifacts/qvq_validation/p0-r0-runtime_seed20260831_02b20151.json`;
 - `artifacts/qvq_validation/summary_p0-r0-runtime_02b20151.json`;
 - `artifacts/qvq_validation/p0c-r0c-correction_seed20260831_f495e745.json`;
 - `artifacts/qvq_validation/summary_p0c-r0c-correction_f495e745.json`.
 
-Post-oracle validation on the merged latest-main SM80 head is green:
-`2,179 passed, 136 skipped, 0 failed`. This is the previous 2,308-test matrix
-plus the seven new runtime-oracle and semantic-fallback cases. Ruff, Python
-compilation, artifact JSON parsing, and `git diff --check` also pass.
+Focused post-oracle validation is green: the runtime/harness set passes
+`30/30`, including 18 harness cases and real Llama QKV geometry across
+FP16/BF16 and M=1/2/4/8. The complete `tests/test_qvq*.py` SM80 collection
+reports `2,900 passed, 343 skipped, 9 failed`. Four EXL3 diagnostics fail at
+import because this host does not have the optional `pydantic` dependency.
+The other five are process-wide file-descriptor count assertions after the
+seven-minute aggregate run; all five pass in isolation on both this head and
+unmodified latest main `60240d22`. They are recorded as aggregate-suite
+interference, not hidden as a green broad result. Ruff, Python compilation,
+artifact JSON parsing, and `git diff --check` pass.
 
 Further fusion opportunities remain even when a transform must remain:
 
