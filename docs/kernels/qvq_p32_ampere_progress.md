@@ -2118,6 +2118,18 @@ improvement** versus fetched main. Artifacts are
 `v19_m16_gate_n64_control_deep.json` and
 `v19_m16_gate_wide_n128_candidate_{deep,verify8000}.json`.
 
+The thirty-second v19 progression retunes the wider M16 MLP-gate/up CTA from
+split 16 to split 10 and pins the exact geometry. The fixed
+200-warmup/8000-iteration confirmation measures
+`0.135168/0.137216/0.138240/0.139264 ms`, a **1.0149x** incremental
+speedup (1.468% lower latency). Combined with N128 ownership, this is a
+**1.1043x** speedup (9.445% lower latency) versus the narrow split-16
+control, taking affected-case log weighting to **2.647% cumulative
+improvement** versus fetched main. Split 12 regresses every rate to
+`0.141312-0.145408 ms` and is rejected. Diagnostics are
+`v19_m16_gate_wide_n128_split{10,12}_deep.json` and
+`v19_m16_gate_wide_n128_split10_verify8000.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively

@@ -156,6 +156,26 @@ def test_p32_ampere_dispatches_measured_m8_gate_plan_directly(monkeypatch):
     assert calls[0][-1] == 10
 
 
+def test_p32_ampere_dispatches_measured_m16_wide_gate_plan_directly(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((16, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=17408,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 10
+
+
 @pytest.mark.parametrize("rate", (2, 2.5, 3, 3.5))
 def test_p32_ampere_dispatches_measured_m16_packed_qkv_plan_directly(
     monkeypatch, rate
