@@ -1852,6 +1852,22 @@ to reproduce their screen wins at 2000 iterations and were narrowed out.
 Affected-case log weighting now reaches **1.732% cumulative improvement**
 versus fetched main.
 
+The nineteenth v19 progression extends the direct pair-wrap predicate to
+five selected M4 scalar cases. In the matched 60-warmup/2000-iteration pair,
+full-Q W2.5/W3 improve from `0.088064/0.089088 ms` to
+`0.087040/0.088064 ms`, linear-QKV W2.5 improves from `0.074752` to
+`0.073728 ms`, linear-Z W3 improves from `0.051200` to `0.050176 ms`, and
+MLP-gate/up W2.5 improves from `0.116736` to `0.113664 ms`. The affected
+geomean speedup is **1.0169x** (1.664% lower latency), with maximum absolute
+error below `1.91e-05`, and the complete 38-case Ampere suite passes.
+Artifacts are `v19_wrap_m4_selected_{control,candidate}_deep.json` under
+`artifacts/a100_p32_window/`. The broad diagnostic is
+`v19_wrap_m4_all_{control,candidate}.json`; its full-Q W3.5, full-KV W3.5,
+attention-out W2.5, linear-QKV W3.5, linear-Z W2/W3.5, MLP-gate/up W3.5,
+and MLP-down W3/W3.5 losses were excluded. MLP-down W2.5 was narrowed out
+after its screen win became neutral in the deep pair. Affected-case log
+weighting now reaches **1.793% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
@@ -1971,6 +1987,11 @@ eight deeply confirmed attention cases before the later case-by-case M1
 extension described above. The broad diagnostics are
 `v19_wrap_pair_predicate_attention_{control,candidate}.json` and
 `v19_selective_wrap_predicate_m1_candidate.json`.
+
+The later all-shape M16 pair-wrap screen was rejected completely. Most
+non-KV shapes lost one event tick, full-KV W2 and W3.5 regressed, and there
+was no clean winning subset. The restored matched diagnostics are
+`v19_wrap_m16_all_{control,candidate}.json`.
 
 ## Reproduction
 
