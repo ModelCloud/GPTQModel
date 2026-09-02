@@ -63,3 +63,22 @@ policy to the complete grouped projections and reports both baselines.
 
 The full 320-row record is
 `artifacts/a41_phase7_h100/qkv_all_rates_ordered_sweep.json`.
+
+## Production W3 M1 probe
+
+The production path includes the one shared input scale/Hadamard transform,
+the grouped ordered inner kernel, three independent child output recoveries,
+and the sibling coordinator.  The prior grouped result is the committed Phase
+4 artifact at `566cc427`.
+
+| M | K | Q/K/V N | QVQ W3 (us) | Previous QVQ (us) | vs previous | Marlin W4 (us) | vs Marlin | Machete W4 (us) | vs Machete | Better |
+|---:|---:|:---|---:|---:|---:|---:|---:|---:|---:|:---:|
+| 1 | 2048 | 2048/512/512 | 38.002 | 43.873 | 1.154x | 49.880 | 1.313x | 35.311 | 0.929x | Yes |
+
+The result is deterministic and its maximum absolute difference from the old
+split-1 output is `0.001953125`.  The grouped output is bit-exact to three
+independent ordered split-8 child kernels; the difference from split 1 is the
+expected FP32 reduction parenthesization change.
+
+The raw probe is
+`artifacts/a41_phase7_h100/production_qkv_w3_m1_probe.json`.

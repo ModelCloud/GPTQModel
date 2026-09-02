@@ -475,12 +475,38 @@ def _run(args):
                     samples=args.samples,
                     replays_per_sample=args.replays_per_sample,
                 )
+                with torch.inference_mode():
+                    repeated = tuple(
+                        output.detach().clone()
+                        for output in _call_children(
+                            parent, names, inputs[(group_name, m)]
+                        )
+                    )
                 if not all(
-                    torch.equal(actual, reference)
-                    for actual, reference in zip(outputs, expected[m], strict=True)
+                    torch.equal(actual, repeat)
+                    for actual, repeat in zip(outputs, repeated, strict=True)
                 ):
                     raise RuntimeError(
-                        f"grouped production output changed at W{bits:g} {group_name} M{m}"
+                        f"grouped production output is not repeatable at "
+                        f"W{bits:g} {group_name} M{m}"
+                    )
+                max_abs_vs_plain = max(
+                    float((actual.float() - reference.float()).abs().max().item())
+                    for actual, reference in zip(
+                        outputs, expected[m], strict=True
+                    )
+                )
+                if group_name == "gate_up":
+                    if max_abs_vs_plain != 0:
+                        raise RuntimeError(
+                            f"split-1 grouped output changed at "
+                            f"W{bits:g} {group_name} M{m}"
+                        )
+                elif max_abs_vs_plain > 2e-3:
+                    raise RuntimeError(
+                        f"ordered split-8 grouped output exceeds the established "
+                        f"absolute tolerance at W{bits:g} {group_name} M{m}: "
+                        f"{max_abs_vs_plain}"
                     )
                 marlin = baseline_timings[(group_name, m, "marlin")]
                 machete = baseline_timings[(group_name, m, "machete")]
@@ -518,6 +544,8 @@ def _run(args):
                         / (machete["median_ms"] * 1e9),
                         "better_than_plain_qvq": timing["median_ms"]
                         < plain[m]["median_ms"],
+                        "repeatable": True,
+                        "max_abs_vs_previous_split1": max_abs_vs_plain,
                         "previous_grouped_qvq_median_ms": previous_median_ms,
                         "better_than_previous_benchmark": (
                             timing["median_ms"] < previous_median_ms
