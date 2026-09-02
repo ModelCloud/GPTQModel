@@ -44,6 +44,11 @@ struct QvqHadamardTraits<float> {
 };
 
 constexpr int kHadamardThreads = 1024;
+constexpr int kHadamardPairMultiblockN = 8192;
+constexpr int kHadamardPairMultiblockTile = 256;
+constexpr int kHadamardPairMultiblockTiles =
+    kHadamardPairMultiblockN / kHadamardPairMultiblockTile;
+constexpr int kHadamardPairMultiblockHighThreads = 64;
 
 __device__ __forceinline__ float round_fp16_unless_overflow(float value) {
   const float narrowed = __half2float(__float2half_rn(value));
@@ -245,6 +250,122 @@ __global__ void __launch_bounds__(kHadamardThreads) qvq_hadamard_pair_fp32_to_fp
       value = round_fp16_unless_overflow(value + bias[i]);
     }
     out_row[i] = __float2half_rn(value);
+  }
+}
+
+// Exact two-stage factorization of the N=8192 paired recovery transform.
+//
+// The ordinary kernel executes butterfly bits 1..4096 in ascending order in
+// one CTA.  The first eight bits never cross a contiguous 256-value tile, so
+// stage one assigns all 32 independent tiles to separate CTAs.  Stage two
+// keeps one within-tile column in a thread and executes the remaining five
+// tile-index bits in registers.  The global workspace stores FP32 values and
+// therefore introduces no new rounding boundary between bits 128 and 256.
+// Every call to round_fp16_unless_overflow remains in the same mathematical
+// location as the single-CTA kernel.
+//
+// Specialization budget: two fixed N=8192 FP32->FP16 device kernels.  Rates,
+// rows, bias presence, and normalization mode remain runtime data.  The
+// separate public operator keeps this experimental launch geometry out of the
+// production dispatch until H100 correctness and latency promotion gates pass.
+__global__ void qvq_hadamard_pair_fp32_to_fp16_multiblock_low_kernel(
+    const float* __restrict__ input0,
+    const float* __restrict__ input1,
+    float* __restrict__ workspace,
+    int rows,
+    int scale_mode) {
+  __shared__ float buf[kHadamardPairMultiblockTile + kHadamardPairMultiblockTile / 32];
+  const int projection_row = static_cast<int>(blockIdx.y);
+  const bool second = projection_row >= rows;
+  const int row = projection_row - (second ? rows : 0);
+  const float* input = second ? input1 : input0;
+  const int tile = static_cast<int>(blockIdx.x);
+  const int local = static_cast<int>(threadIdx.x);
+  const int column = tile * kHadamardPairMultiblockTile + local;
+  auto p = [](int i) { return i + (i >> 5); };
+
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(kHadamardPairMultiblockN))));
+  float value = round_fp16_unless_overflow(
+      input[static_cast<int64_t>(row) * kHadamardPairMultiblockN + column]);
+  if (scale_mode == 3) {
+    value = round_fp16_unless_overflow(value / divisor);
+  }
+  buf[p(local)] = value;
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 1; bit < kHadamardPairMultiblockTile; bit <<= 1) {
+    const int peer = local ^ bit;
+    if (local < peer) {
+      const float a = buf[p(local)];
+      const float b = buf[p(peer)];
+      buf[p(local)] = round_fp16_unless_overflow(a + b);
+      buf[p(peer)] = round_fp16_unless_overflow(a - b);
+    }
+    __syncthreads();
+  }
+
+  workspace[static_cast<int64_t>(projection_row) * kHadamardPairMultiblockN + column] =
+      buf[p(local)];
+}
+
+__global__ void qvq_hadamard_pair_fp32_to_fp16_multiblock_high_kernel(
+    const float* __restrict__ workspace,
+    half* __restrict__ output0,
+    half* __restrict__ output1,
+    const float* __restrict__ post_scale0,
+    const float* __restrict__ post_scale1,
+    const float* __restrict__ bias0,
+    const float* __restrict__ bias1,
+    int rows,
+    int scale_mode) {
+  const int projection_row = static_cast<int>(blockIdx.y);
+  const bool second = projection_row >= rows;
+  const int row = projection_row - (second ? rows : 0);
+  half* output = second ? output1 : output0;
+  const float* post_scale = second ? post_scale1 : post_scale0;
+  const float* bias = second ? bias1 : bias0;
+  const int local = static_cast<int>(blockIdx.x) * kHadamardPairMultiblockHighThreads +
+      static_cast<int>(threadIdx.x);
+
+  float values[kHadamardPairMultiblockTiles];
+#pragma unroll
+  for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+    const int column = tile * kHadamardPairMultiblockTile + local;
+    values[tile] = workspace[
+        static_cast<int64_t>(projection_row) * kHadamardPairMultiblockN + column];
+  }
+
+#pragma unroll
+  for (int bit = 1; bit < kHadamardPairMultiblockTiles; bit <<= 1) {
+#pragma unroll
+    for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+      const int peer = tile ^ bit;
+      if (tile < peer) {
+        const float a = values[tile];
+        const float b = values[peer];
+        values[tile] = round_fp16_unless_overflow(a + b);
+        values[peer] = round_fp16_unless_overflow(a - b);
+      }
+    }
+  }
+
+  const float reciprocal = 1.0f /
+      sqrtf(static_cast<float>(kHadamardPairMultiblockN));
+#pragma unroll
+  for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+    const int column = tile * kHadamardPairMultiblockTile + local;
+    float value = values[tile];
+    if (scale_mode == 4) {
+      value = round_fp16_unless_overflow(value * reciprocal);
+    }
+    value = round_fp16_unless_overflow(value * post_scale[column]);
+    if (bias != nullptr) {
+      value = round_fp16_unless_overflow(value + bias[column]);
+    }
+    output[static_cast<int64_t>(row) * kHadamardPairMultiblockN + column] =
+        __float2half_rn(value);
   }
 }
 
@@ -454,6 +575,91 @@ std::tuple<at::Tensor, at::Tensor> qvq_hadamard_pair_fp32_to_fp16_cuda(
   return {output0, output1};
 }
 
+std::tuple<at::Tensor, at::Tensor> qvq_hadamard_pair_fp32_to_fp16_multiblock_cuda(
+    const at::Tensor& input0,
+    const at::Tensor& input1,
+    const at::Tensor& post_scale0,
+    const at::Tensor& post_scale1,
+    const c10::optional<at::Tensor>& bias0,
+    const c10::optional<at::Tensor>& bias1,
+    int64_t scale_mode) {
+  TORCH_CHECK(input0.is_cuda() && input1.is_cuda(), "multiblock paired Hadamard inputs must be CUDA tensors");
+  TORCH_CHECK(input0.device() == input1.device(), "multiblock paired Hadamard inputs must share a device");
+  TORCH_CHECK(input0.scalar_type() == at::kFloat && input1.scalar_type() == at::kFloat,
+              "multiblock paired Hadamard inputs must be float32");
+  TORCH_CHECK(input0.sizes() == input1.sizes(),
+              "multiblock paired Hadamard inputs must have identical shapes");
+  TORCH_CHECK(input0.dim() >= 1 && input0.is_contiguous() && input1.is_contiguous(),
+              "multiblock paired Hadamard inputs must be contiguous with rank >= 1");
+  TORCH_CHECK(input0.size(-1) == kHadamardPairMultiblockN,
+              "multiblock paired Hadamard requires last dimension 8192");
+  TORCH_CHECK(scale_mode == 3 || scale_mode == 4,
+              "multiblock paired Hadamard scale_mode must be 3 or 4");
+  const int64_t rows64 = input0.numel() / kHadamardPairMultiblockN;
+  TORCH_CHECK(rows64 <= std::numeric_limits<int>::max() / 2,
+              "multiblock paired Hadamard row count exceeds launch limit");
+
+  const auto check_vector = [&](const at::Tensor& tensor, const char* name) {
+    TORCH_CHECK(tensor.is_cuda() && tensor.device() == input0.device(), name, " must be on the input device");
+    TORCH_CHECK(tensor.scalar_type() == at::kFloat, name, " must be float32");
+    TORCH_CHECK(tensor.is_contiguous(), name, " must be contiguous");
+    TORCH_CHECK(tensor.numel() == kHadamardPairMultiblockN,
+                name, " must have one value per output column");
+  };
+  check_vector(post_scale0, "post_scale0");
+  check_vector(post_scale1, "post_scale1");
+  if (bias0.has_value()) {
+    check_vector(*bias0, "bias0");
+  }
+  if (bias1.has_value()) {
+    check_vector(*bias1, "bias1");
+  }
+
+  auto output_options = input0.options().dtype(at::kHalf);
+  at::Tensor output0 = at::empty(input0.sizes(), output_options);
+  at::Tensor output1 = at::empty(input1.sizes(), output_options);
+  if (rows64 == 0) {
+    return {output0, output1};
+  }
+
+  const c10::cuda::CUDAGuard device_guard(input0.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input0.get_device()));
+  TORCH_CHECK(properties.major == 9,
+              "multiblock paired Hadamard is an experimental Hopper-only operator");
+  const int rows = static_cast<int>(rows64);
+  at::Tensor workspace = at::empty(
+      {rows * 2, kHadamardPairMultiblockN}, input0.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input0.get_device());
+  qvq_hadamard_pair_fp32_to_fp16_multiblock_low_kernel<<<
+      dim3(kHadamardPairMultiblockTiles, rows * 2),
+      kHadamardPairMultiblockTile,
+      0,
+      stream>>>(
+      input0.const_data_ptr<float>(),
+      input1.const_data_ptr<float>(),
+      workspace.mutable_data_ptr<float>(),
+      rows,
+      static_cast<int>(scale_mode));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  qvq_hadamard_pair_fp32_to_fp16_multiblock_high_kernel<<<
+      dim3(kHadamardPairMultiblockTile / kHadamardPairMultiblockHighThreads, rows * 2),
+      kHadamardPairMultiblockHighThreads,
+      0,
+      stream>>>(
+      workspace.const_data_ptr<float>(),
+      reinterpret_cast<half*>(output0.mutable_data_ptr()),
+      reinterpret_cast<half*>(output1.mutable_data_ptr()),
+      post_scale0.const_data_ptr<float>(),
+      post_scale1.const_data_ptr<float>(),
+      bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
+      bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
+      rows,
+      static_cast<int>(scale_mode));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {output0, output1};
+}
+
 at::Tensor qvq_swiglu_precondition_cuda(
     const at::Tensor& activated_gate,
     const at::Tensor& up,
@@ -530,11 +736,13 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
     m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode) -> Tensor");
 });
   m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
+  m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("hadamard", &qvq_hadamard_cuda);
   m.impl("hadamard_pair_fp32_to_fp16", &qvq_hadamard_pair_fp32_to_fp16_cuda);
+  m.impl("hadamard_pair_fp32_to_fp16_multiblock", &qvq_hadamard_pair_fp32_to_fp16_multiblock_cuda);
   m.impl("swiglu_precondition", &qvq_swiglu_precondition_cuda);
 }

@@ -70,6 +70,7 @@ def _validate_viterbi_distance_range(
         )
 _QVQ_CUDA_HADAMARD_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_OP: Callable | None = None
+_QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP: Callable | None = None
@@ -114,6 +115,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "viterbi_v2_segment_family_grid_trusted",
         "hadamard",
         "hadamard_pair_fp32_to_fp16",
+        "hadamard_pair_fp32_to_fp16_multiblock",
         "swiglu_precondition",
         "yaqa_feedback",
         "yaqa_feedback_update_",
@@ -255,6 +257,19 @@ def _qvq_cuda_hadamard_pair_op() -> Callable:
                     "qvq_cuda", "hadamard_pair_fp32_to_fp16"
                 )
     return _QVQ_CUDA_HADAMARD_PAIR_OP
+
+
+def _qvq_cuda_hadamard_pair_multiblock_op() -> Callable:
+    """Resolve the experimental Hopper N=8192 multiblock recovery operator."""
+
+    global _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP
+    if _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP is None:
+                _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP = _extension_api().op(
+                    "qvq_cuda", "hadamard_pair_fp32_to_fp16_multiblock"
+                )
+    return _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP
 
 
 def _qvq_cuda_swiglu_precondition_op() -> Callable:
@@ -744,6 +759,69 @@ def qvq_cuda_hadamard_pair_fp32_to_fp16(
     if torch.cuda.get_device_capability(input0.device) < (8, 0):
         raise RuntimeError("paired QVQ Hadamard requires compute capability >= 8.0")
     return _qvq_cuda_hadamard_pair_op()(
+        input0,
+        input1,
+        post_scale0,
+        post_scale1,
+        bias0,
+        bias1,
+        scale_mode,
+    )
+
+
+def qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+    input0: torch.Tensor,
+    input1: torch.Tensor,
+    *,
+    post_scale0: torch.Tensor,
+    post_scale1: torch.Tensor,
+    bias0: torch.Tensor | None = None,
+    bias1: torch.Tensor | None = None,
+    scale_mode: int = 3,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Run the experimental exact Hopper multiblock N=8192 recovery."""
+
+    if input0.device.type != "cuda" or input1.device.type != "cuda":
+        raise ValueError("multiblock paired QVQ Hadamard inputs must be CUDA tensors")
+    if input0.device != input1.device:
+        raise ValueError("multiblock paired QVQ Hadamard inputs must share a device")
+    if input0.dtype != torch.float32 or input1.dtype != torch.float32:
+        raise TypeError("multiblock paired QVQ Hadamard inputs must be float32")
+    if input0.shape != input1.shape:
+        raise ValueError("multiblock paired QVQ Hadamard inputs must have identical shapes")
+    if (
+        input0.ndim < 1
+        or not input0.is_contiguous()
+        or not input1.is_contiguous()
+        or input0.shape[-1] != 8192
+    ):
+        raise ValueError(
+            "multiblock paired QVQ Hadamard inputs must be contiguous with last dimension 8192"
+        )
+    if scale_mode not in (3, 4):
+        raise ValueError("multiblock paired QVQ Hadamard scale_mode must be 3 or 4")
+    for name, tensor in (
+        ("post_scale0", post_scale0),
+        ("post_scale1", post_scale1),
+        ("bias0", bias0),
+        ("bias1", bias1),
+    ):
+        if tensor is None:
+            if name.startswith("post_scale"):
+                raise TypeError(f"{name} is required")
+            continue
+        if (
+            tensor.device != input0.device
+            or tensor.dtype != torch.float32
+            or not tensor.is_contiguous()
+            or tensor.numel() != 8192
+        ):
+            raise ValueError(
+                f"{name} must be contiguous CUDA float32 with 8192 elements on the input device"
+            )
+    if torch.cuda.get_device_capability(input0.device)[0] != 9:
+        raise RuntimeError("multiblock paired QVQ Hadamard requires a Hopper device")
+    return _qvq_cuda_hadamard_pair_multiblock_op()(
         input0,
         input1,
         post_scale0,

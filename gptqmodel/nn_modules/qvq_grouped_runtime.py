@@ -179,6 +179,7 @@ class QVQGroupedRuntimeTelemetry:
     grouped_selector_bytes: int = 0
     child_window_bytes_avoided: int = 0
     paired_recovery_launches: int = 0
+    h100_multiblock_recovery_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -200,6 +201,7 @@ class QVQGroupedRuntimeTelemetry:
             "grouped_selector_bytes": self.grouped_selector_bytes,
             "child_window_bytes_avoided": self.child_window_bytes_avoided,
             "paired_recovery_launches": self.paired_recovery_launches,
+            "h100_multiblock_recovery_launches": self.h100_multiblock_recovery_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -225,6 +227,7 @@ class QVQHopperGroupedRuntime:
         self.telemetry = QVQGroupedRuntimeTelemetry(self.category, self.member_names)
         self._payload: QVQHopperGroupedP32Payload | None = None
         self._payload_source_key: tuple[Any, ...] | None = None
+        self._h100_multiblock_recovery_enabled = False
         self._input: torch.Tensor | None = None
         self._input_version: int | None = None
         self._outputs: tuple[torch.Tensor, ...] | None = None
@@ -253,6 +256,7 @@ class QVQHopperGroupedRuntime:
             self.telemetry.payload_drops += 1
         self._payload = None
         self._payload_source_key = None
+        self._h100_multiblock_recovery_enabled = False
         self.telemetry.grouped_window_bytes = 0
         self.telemetry.grouped_selector_bytes = 0
         self.telemetry.child_window_bytes_avoided = 0
@@ -323,6 +327,13 @@ class QVQHopperGroupedRuntime:
         from ..utils.qvq_cuda import _pgc16_levels
 
         properties = torch.cuda.get_device_properties(device)
+        self._h100_multiblock_recovery_enabled = (
+            self.category == "gate_up"
+            and len(children) == 2
+            and all(child.out_features == 8192 for child in children)
+            and properties.name == "NVIDIA H100"
+            and (properties.major, properties.minor) == (9, 0)
+        )
         measured_splits = None
         if self.category == "qkv":
             measured_splits = qvq_h100_grouped_ordered_split_counts(
@@ -460,10 +471,24 @@ class QVQHopperGroupedRuntime:
             and children[0].out_features <= 16384
             and children[0].out_features & (children[0].out_features - 1) == 0
         ):
-            from ..utils.qvq_cuda import qvq_cuda_hadamard_pair_fp32_to_fp16
+            from ..utils.qvq_cuda import (
+                qvq_cuda_hadamard_pair_fp32_to_fp16,
+                qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock,
+            )
 
             output_dtype = inner_outputs[0].dtype
-            recovered_pair = qvq_cuda_hadamard_pair_fp32_to_fp16(
+            # The N=8192 factorization is promoted only on the physical H100
+            # where its launch geometry was validated.  H200 and other Hopper
+            # products keep the established single-CTA path until separately
+            # measured; device identity comes from CUDA properties, never a
+            # visible-device index.
+            use_h100_multiblock = self._h100_multiblock_recovery_enabled
+            recovery = (
+                qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock
+                if use_h100_multiblock
+                else qvq_cuda_hadamard_pair_fp32_to_fp16
+            )
+            recovered_pair = recovery(
                 inner_outputs[0][:rows],
                 inner_outputs[1][:rows],
                 post_scale0=children[0]._cached_cast("SV", torch.float16, output_dtype),
@@ -473,6 +498,8 @@ class QVQHopperGroupedRuntime:
                 scale_mode=3 if children[0].out_features >= 2048 else 4,
             )
             self.telemetry.paired_recovery_launches += 1
+            if use_h100_multiblock:
+                self.telemetry.h100_multiblock_recovery_launches += 1
             return tuple(
                 recovered.reshape(*x.shape[:-1], child.out_features)
                 for child, recovered in zip(children, recovered_pair, strict=True)

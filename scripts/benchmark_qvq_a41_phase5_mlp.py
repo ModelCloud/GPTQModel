@@ -52,6 +52,14 @@ def _args() -> argparse.Namespace:
         type=Path,
         default=Path("artifacts/a41_phase5_h100/fused_mlp_vs_baselines.json"),
     )
+    parser.add_argument(
+        "--previous-artifact",
+        type=Path,
+        default=Path(
+            "artifacts/a41_phase7_h100/production_mlp_refresh_vs_baselines.json"
+        ),
+        help="Last committed comparable matrix used for per-row regression telemetry.",
+    )
     args = parser.parse_args()
     if any(rate not in RATES for rate in args.rates):
         parser.error("rates must be W2, W2.5, W3, or W3.5")
@@ -165,6 +173,11 @@ def _run(args):
     )
 
     source_fingerprint = _source_fingerprint()
+    previous_payload = json.loads(args.previous_artifact.read_text())
+    previous_rows = {
+        (float(row["bits"]), int(row["m"])): row
+        for row in previous_payload["rows"]
+    }
     device_info = common._assert_h100(torch)
     device = torch.device("cuda:0")
     inputs = {
@@ -254,6 +267,7 @@ def _run(args):
             logical_flops = (
                 2 * m * (HIDDEN * (2 * INTERMEDIATE) + INTERMEDIATE * HIDDEN)
             )
+            previous = previous_rows[(float(bits), int(m))]["fused_mlp_qvq"]
             rows.append(
                 {
                     "bits": bits,
@@ -273,7 +287,11 @@ def _run(args):
                     / timing["median_ms"],
                     "speedup_vs_marlin_w4": marlin["median_ms"] / timing["median_ms"],
                     "speedup_vs_machete_w4": machete["median_ms"] / timing["median_ms"],
-                    "better_than_previous_stage": timing["median_ms"]
+                    "speedup_vs_previous_benchmark": previous["median_ms"]
+                    / timing["median_ms"],
+                    "better_than_previous_benchmark": timing["median_ms"]
+                    < previous["median_ms"],
+                    "better_than_paired_recovery_stage": timing["median_ms"]
                     < paired_recovery[m]["median_ms"],
                     "plain_qvq_effective_tflops": logical_flops
                     / (plain[m]["median_ms"] * 1e9),

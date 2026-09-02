@@ -69,6 +69,7 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
     qvq_cuda_hadamard_pair_fp32_to_fp16,
+    qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock,
     qvq_cuda_supported,
     qvq_cuda_swiglu_precondition,
     qvq_cuda_viterbi,
@@ -451,6 +452,84 @@ def test_qvq_cuda_paired_output_recovery_is_bit_exact_and_repeatable(m, seed):
         assert actual[1].dtype == torch.float16
         assert torch.equal(actual[0], expected[0])
         assert torch.equal(actual[1], expected[1])
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("seed", (20260921, 20260922, 20260923))
+@pytest.mark.parametrize("scale_mode", (3, 4))
+def test_qvq_cuda_multiblock_paired_recovery_is_bit_exact_and_repeatable(
+    m, seed, scale_mode
+):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("experimental multiblock recovery requires Hopper")
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    input0 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    input1 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    scale0 = torch.randn((n,), generator=generator, device="cuda")
+    scale1 = torch.randn((n,), generator=generator, device="cuda")
+    bias0 = torch.randn((n,), generator=generator, device="cuda")
+    expected = qvq_cuda_hadamard_pair_fp32_to_fp16(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        bias0=bias0,
+        scale_mode=scale_mode,
+    )
+
+    for _ in range(10):
+        actual = qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+            input0,
+            input1,
+            post_scale0=scale0,
+            post_scale1=scale1,
+            bias0=bias0,
+            scale_mode=scale_mode,
+        )
+        assert torch.equal(actual[0], expected[0])
+        assert torch.equal(actual[1], expected[1])
+
+
+def test_qvq_cuda_multiblock_paired_recovery_graph_and_contract_guards():
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("experimental multiblock recovery requires Hopper")
+    n = 8192
+    input0 = torch.randn((1, n), device="cuda")
+    input1 = torch.randn((1, n), device="cuda")
+    scale = torch.ones((n,), device="cuda")
+    expected = qvq_cuda_hadamard_pair_fp32_to_fp16(
+        input0,
+        input1,
+        post_scale0=scale,
+        post_scale1=scale,
+    )
+    qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+        input0,
+        input1,
+        post_scale0=scale,
+        post_scale1=scale,
+    )
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+            input0,
+            input1,
+            post_scale0=scale,
+            post_scale1=scale,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured[0], expected[0])
+    assert torch.equal(captured[1], expected[1])
+
+    with pytest.raises(ValueError, match="last dimension 8192"):
+        qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+            input0[:, :4096],
+            input1[:, :4096],
+            post_scale0=scale[:4096],
+            post_scale1=scale[:4096],
+        )
 
 
 def test_qvq_cuda_paired_output_recovery_handles_overflow_optional_bias_and_stream():
