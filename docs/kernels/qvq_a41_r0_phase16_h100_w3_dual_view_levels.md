@@ -199,9 +199,8 @@ Artifacts:
 
 ## Next experiment
 
-Phase 16 removes the hot high-index permutation but leaves 1.05M pair-local
-shared conflicts and the same 2.228M level loads. The next phase should test a
-representation-level way to reduce those dependent loads or the remaining
-pair conflict without exceeding the 48-KiB shared-memory limit. Preload-only
-load deduplication is lower priority because it executes once per block, while
-the decode lookup repeats for every K tile.
+The decoder experiments that followed Phase 16 did not satisfy the complete
+MLP promotion gate. Phase 17 therefore moved to the next measurable operation
+boundary and made the down precondition write its final M16-padded input
+directly. See
+`docs/kernels/qvq_a41_r0_phase17_h100_direct_padding.md`.
