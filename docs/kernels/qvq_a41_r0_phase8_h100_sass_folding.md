@@ -7,13 +7,15 @@ can be folded without moving or deleting any of the FP16 rounding boundaries
 that define the production result.
 
 The result is that these transforms are **latency and instruction bound, not
-HBM-bandwidth bound**.  The safest first fold is to pack the two independent
+HBM-bandwidth bound**.  The first experiment packed the two independent
 FP32-to-FP16 conversions produced by every recovery butterfly into one Hopper
-`F2FP.F16.F32.PACK_AB` instruction.  The next larger opportunity is to keep
-two adjacent FP16 columns in one `half2` throughout the precondition
-butterfly.  Fusing SiLU into the precondition low stage is useful primarily
-because it deletes a launch and a materialized tensor, not because SiLU has a
-large arithmetic cost.
+`F2FP.F16.F32.PACK_AB` instruction.  It was exact and removed 3.57% of the
+combined low/high instructions, but the full MLP improved by only 0.19%
+geometric mean with 6/20 regressions.  It is therefore rejected and not in
+production.  The next larger opportunity is to keep two adjacent FP16 columns
+in one `half2` throughout the precondition butterfly.  Fusing SiLU into the
+precondition low stage is useful primarily because it deletes a launch and a
+materialized tensor, not because SiLU has a large arithmetic cost.
 
 No production benchmark was run for this document.  Nsight Compute durations
 below are replay/instrumentation data and must not be compared with the CUDA
@@ -151,8 +153,81 @@ the same repeated scalar pattern, although its predication and shared-memory
 work make a static percentage less reliable; its actual delta must be read
 from a new capture.
 
-This is the first implementation candidate because it is local, exact, uses
-no extra memory, and does not reduce the number of active blocks.
+This was the first implementation candidate because it is local, exact, uses
+no extra memory, and does not reduce the number of active blocks.  The
+following benchmark shows why instruction reduction alone was insufficient.
+
+## Paired-round benchmark: rejected
+
+Two implementations were tested:
+
+1. pair every butterfly sum/difference and pair the high-stage epilogue;
+2. pair only butterfly sum/difference, leaving independent epilogue chains.
+
+The first version removed 5,312 combined executed instructions but regressed
+the isolated recovery at all M values versus the committed artifact.  The
+second version was better and is the formal result below.
+
+The isolated benchmark used 30 warmups, 100 CUDA-event samples, and 50 CUDA
+Graph replays per sample.  Baseline commit `1a30c8d6` was built and measured
+from a detached worktree on the same idle H100.  The candidate source
+fingerprint was
+`76d49aaff19d22058911819c6e81aaa94b01d39249d0cedf59a10b58a7d271f5`.
+
+| M | Baseline recovery us | Paired-butterfly us | Baseline/candidate | Better |
+|---:|---:|---:|---:|:---:|
+| 1 | 5.944 | 6.018 | 0.9878x | No |
+| 2 | 6.266 | 6.230 | 1.0058x | Yes |
+| 4 | 6.322 | 6.304 | 1.0029x | Yes |
+| 8 | 6.850 | 6.726 | 1.0185x | Yes |
+| 16 | 7.768 | 7.681 | 1.0114x | Yes |
+
+The isolated geometric mean is `1.0052x`, or 0.52%.  A matched Nsight Compute
+capture confirms that the source rewrite did produce the intended SASS:
+
+| Stage | Baseline instructions | Candidate instructions | Delta | Registers/thread | Warp latency baseline -> candidate | Long-scoreboard baseline -> candidate |
+|:--|--:|--:|--:|--:|--:|--:|
+| recovery low | 107,520 | 104,192 | -3,328 (-3.10%) | 28 -> 28 | 12.371 -> 12.791 | 3.527 -> 3.678 |
+| recovery high | 21,440 | 20,160 | -1,280 (-5.97%) | 48 -> 48 | 8.596 -> 8.998 | 5.680 -> 5.871 |
+| combined | 128,960 | 124,352 | -4,608 (-3.57%) | no change | worse | worse |
+
+The conversion count fell exactly as intended, without spills, but longer
+dependency latency consumed most of the benefit.  In the low stage, eligible
+warps fell from 0.181 to 0.166 per cycle and issue activity fell from 16.12%
+to 14.86%.
+
+The complete MLP benchmark used 20 warmups, 50 CUDA-event samples, and 20
+CUDA Graph replays per sample.  `vs` is comparator latency divided by QVQ
+latency.  `Better` compares with the immediately preceding committed Phase-8
+matrix.
+
+| Rate | M | MKN (gate/up; down) | QVQ us | vs Marlin W4 | vs Machete W4 | vs last | Better |
+|---:|---:|:---|---:|---:|---:|---:|:---:|
+| W2 | 1 | 1x2048x8192 (x2); 1x8192x2048 | 70.778 | 0.420x | 0.732x | 0.9968x | No |
+| W2 | 2 | 2x2048x8192 (x2); 2x8192x2048 | 70.743 | 0.453x | 0.731x | 1.0044x | Yes |
+| W2 | 4 | 4x2048x8192 (x2); 4x8192x2048 | 71.798 | 0.450x | 0.716x | 1.0002x | Yes |
+| W2 | 8 | 8x2048x8192 (x2); 8x8192x2048 | 72.726 | 0.415x | 0.707x | 0.9963x | No |
+| W2 | 16 | 16x2048x8192 (x2); 16x8192x2048 | 68.084 | 0.485x | 0.754x | 1.0038x | Yes |
+| W2.5 | 1 | 1x2048x8192 (x2); 1x8192x2048 | 71.487 | 0.416x | 0.725x | 1.0016x | Yes |
+| W2.5 | 2 | 2x2048x8192 (x2); 2x8192x2048 | 71.851 | 0.446x | 0.719x | 1.0039x | Yes |
+| W2.5 | 4 | 4x2048x8192 (x2); 4x8192x2048 | 72.362 | 0.447x | 0.710x | 1.0063x | Yes |
+| W2.5 | 8 | 8x2048x8192 (x2); 8x8192x2048 | 73.049 | 0.413x | 0.704x | 1.0068x | Yes |
+| W2.5 | 16 | 16x2048x8192 (x2); 16x8192x2048 | 69.042 | 0.478x | 0.744x | 0.9970x | No |
+| W3 | 1 | 1x2048x8192 (x2); 1x8192x2048 | 71.860 | 0.414x | 0.721x | 1.0018x | Yes |
+| W3 | 2 | 2x2048x8192 (x2); 2x8192x2048 | 71.997 | 0.445x | 0.718x | 0.9976x | No |
+| W3 | 4 | 4x2048x8192 (x2); 4x8192x2048 | 72.464 | 0.446x | 0.709x | 1.0013x | Yes |
+| W3 | 8 | 8x2048x8192 (x2); 8x8192x2048 | 73.544 | 0.410x | 0.699x | 1.0020x | Yes |
+| W3 | 16 | 16x2048x8192 (x2); 16x8192x2048 | 69.498 | 0.475x | 0.739x | 0.9987x | No |
+| W3.5 | 1 | 1x2048x8192 (x2); 1x8192x2048 | 71.450 | 0.416x | 0.725x | 0.9990x | No |
+| W3.5 | 2 | 2x2048x8192 (x2); 2x8192x2048 | 71.814 | 0.446x | 0.720x | 1.0047x | Yes |
+| W3.5 | 4 | 4x2048x8192 (x2); 4x8192x2048 | 72.354 | 0.447x | 0.710x | 1.0017x | Yes |
+| W3.5 | 8 | 8x2048x8192 (x2); 8x8192x2048 | 72.446 | 0.417x | 0.710x | 1.0097x | Yes |
+| W3.5 | 16 | 16x2048x8192 (x2); 16x8192x2048 | 68.534 | 0.481x | 0.749x | 1.0048x | Yes |
+
+Geometric means are `1.0019x` versus the last Phase-8 benchmark, `0.440x`
+versus Marlin W4, and `0.722x` versus Machete W4.  Although 14/20 medians
+improve, the 0.19% aggregate effect and six regressions are consistent with
+measurement noise.  The paired-round production change was reverted.
 
 ## Fold 2: two-column `half2` precondition butterfly
 
@@ -252,11 +327,11 @@ instructions first.
 
 | Priority | Experiment | Expected mechanism | Required promotion gates |
 |--:|:--|:--|:--|
-| 1 | Pair guarded recovery rounds | One `F2FP.PACK_AB` for two FP32 results | Byte-exact recovery/MLP, exact repeatability and graph replay; fewer executed `F2FP`; positive CUDA-event full-MLP result |
-| 2 | `half2` precondition high | Two columns per thread; packed FP16 add/sub and 32-bit loads/stores | Byte-exact precondition; no new bank conflict or spills; positive isolated and full-MLP timing |
-| 3 | Fuse exact SiLU into precondition low | Delete one launch and activated-gate materialization | Byte-exact versus PyTorch SiLU lifecycle, graph safety, positive full-MLP timing |
-| 4 | `half2` precondition low | Packed bits 2--128 plus explicit bit-1 lane exchange | Byte-exact; source/SASS proof; bank-conflict and latency improvement |
-| 5 | Cross-stage transpose/cluster fusion | Eliminate workspace and another launch | Only after the preceding local folds; must beat the non-cluster path in CUDA-event timing |
+| Rejected | Pair guarded recovery rounds | Removed 3.57% of combined instructions | Exact, but only 0.19% full-MLP geometric-mean change with 6/20 regressions |
+| 1 | `half2` precondition high | Two columns per thread; packed FP16 add/sub and 32-bit loads/stores | Byte-exact precondition; no new bank conflict or spills; positive isolated and full-MLP timing |
+| 2 | Fuse exact SiLU into precondition low | Delete one launch and activated-gate materialization | Byte-exact versus PyTorch SiLU lifecycle, graph safety, positive full-MLP timing |
+| 3 | `half2` precondition low | Packed bits 2--128 plus explicit bit-1 lane exchange | Byte-exact; source/SASS proof; bank-conflict and latency improvement |
+| 4 | Cross-stage transpose/cluster fusion | Eliminate workspace and another launch | Only after the preceding local folds; must beat the non-cluster path in CUDA-event timing |
 
 For every promoted experiment, the formal H100 benchmark must report the full
 W2/W2.5/W3/W3.5 by M=1/2/4/8/16 matrix, MKN, ratios versus Marlin W4 and
