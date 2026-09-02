@@ -2012,6 +2012,19 @@ path still regressed to `0.147456 ms`. Diagnostics are
 `v19_m16_fullq_minblocks9_candidate_screen.json`, and
 `v19_m16_fullq_pair_private_stage_candidate_screen.json`.
 
+The twenty-seventh v19 progression extends the packed M16 linear-QKV split-10
+plan to W2. The fixed-split 100-warmup/4000-iteration screen improves from
+`0.092160` at split 16 to `0.091136 ms` at split 10, a **1.0112x** speedup
+(1.111% lower latency); split 12 regresses to `0.094208 ms`. A reversed
+200-warmup/8000-iteration confirmation reproduces both winning and control
+medians exactly, with maximum absolute error below `4.20e-05`. Artifacts are
+`v19_m16_w2_qkv_resplit_s{10,12,16}_deep.json` and the corresponding
+`s{10,16}_verify8000.json` pair under `artifacts/a100_p32_window/`. Affected-
+case log weighting now reaches **2.206% cumulative improvement** versus
+fetched main. The adjacent W2 full-Q split-10 and split-12 experiments both
+measured `0.107520 ms` against the split-16 control's `0.106496 ms` and were
+rejected; their diagnostics are `v19_m16_w2_fullq_resplit_s{10,12,16}_deep.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively

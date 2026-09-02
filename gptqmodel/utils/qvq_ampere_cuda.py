@@ -385,7 +385,7 @@ def qvq_p32_window_ampere(
         )
     if (
         split_count == 0
-        and transition_bits == 6
+        and transition_bits in (4, 6)
         and out_features == 10240
         and input.shape == (16, 5120)
     ):
