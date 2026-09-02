@@ -478,3 +478,42 @@ Artifacts are
 `artifacts/h200_p32_window/candidate_shared_bank_broadcast_8d2164b5_*_allrates_m16.json`
 and
 `artifacts/h200_p32_window/profiles/candidate_shared_bank_broadcast_8d2164b5_w3_gate_targeted.ncu-rep`.
+
+## H200 modulo-width PGC fusions
+
+Commit `69079a99` keeps each circular-window funnel result as a raw 32-bit
+value.  Because the affine PGC step is reduced modulo 2^16, a single `PRMT`
+extract of state byte 1 supplies the only high state bits that can affect the
+result.  This removes one LOP3 per decoded state.  Matched W3 NCU falls from
+36.395M to 35.002M instructions and 62.11 to 60.99 us.
+
+Commit `78c668ad` applies the same width reasoning after the affine product.
+An exact PTX `bfe.u32` retains only the nine shifted product bits that can
+affect the final low word; Hopper lowers it to `SHF` plus `SGXT`.  The important
+win is that the compiler no longer materializes and masks the full 16-bit
+intermediate before both level addresses: NCU falls again to 33.609M
+instructions and 60.19 us.
+
+Commit `cfc41314` separates the two final PGC indices.  The low byte is formed
+directly, while a second 256-entry shared view pre-applies the fixed
+`b ^ (b >> 7)` high-byte permutation.  The extra 512 bytes of shared storage
+reduces allocation to 48 registers/thread and reaches 32.374M instructions at
+59.84 us.  Its eight-cell latency geomean is effectively flat versus
+`78c668ad` (+0.09%), so the acceptance evidence is the exact 1.235M instruction
+reduction and two-register reduction rather than an overstated timing claim.
+
+Combined from fetched `origin/main` `c0469004` through `cfc41314`, the matched
+W3 profile improves from 37.484M to 32.374M instructions (**-5.110M,
+-13.63%**).  The M16 Qwen3.8 gate/down CUDA-event geomean improves **1.0486x**
+across W2, W2.5, W3, and W3.5, and all 26 exact P32 window tests pass.
+
+| Rate | Gate/up origin ms | Gate/up current ms | Speedup | Down origin ms | Down current ms | Speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| W2 | 0.065936 | 0.063328 | 1.041x | 0.065808 | 0.063120 | 1.043x |
+| W2.5 | 0.065968 | 0.063488 | 1.039x | 0.065696 | 0.062912 | 1.044x |
+| W3 | 0.066640 | 0.063584 | 1.048x | 0.066368 | 0.063136 | 1.051x |
+| W3.5 | 0.069664 | 0.064896 | 1.074x | 0.066944 | 0.063808 | 1.049x |
+
+The rejected predicate-select bank-mask lowering raised the matched instruction
+count from 32.374M to 32.722M and registers from 48 to 49; the multiply form is
+retained.
