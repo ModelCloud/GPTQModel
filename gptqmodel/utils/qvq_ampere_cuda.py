@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import os
 import threading
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
 
@@ -37,6 +39,41 @@ _AUTOTUNE_CACHE: dict[_AutotuneCacheKey, int] = {}
 _AUTOTUNE_CACHE_LOCK = threading.RLock()
 _P32_TRANSITION_BITS = {2: 4, 2.5: 5, 3: 6, 3.5: 7}
 _P32_WINDOW_OP: object | None = None
+_P32_WINDOW_GROUPED_OP: object | None = None
+_P32_WINDOW_GROUPED_FUSED_OP: object | None = None
+
+
+@dataclass(frozen=True)
+class QVQAmpereP32SegmentPlan:
+    """The independently resolved launch plan for one grouped P32 child."""
+
+    output_tile_start: int
+    output_tile_count: int
+    out_features: int
+    bank_alt_id: int
+    split_count: int
+
+
+@dataclass(frozen=True)
+class QVQAmpereGroupedP32Plan:
+    """A segmented SM80 plan that never derives policy from synthetic total N."""
+
+    in_features: int
+    transition_bits: int
+    segments: tuple[QVQAmpereP32SegmentPlan, ...]
+
+    @property
+    def out_features(self) -> int:
+        return sum(segment.out_features for segment in self.segments)
+
+
+@dataclass(frozen=True)
+class QVQAmpereGroupedP32Payload:
+    """Cached K-major grouped continuous-window payload for one launch plan."""
+
+    trellis: torch.Tensor
+    bank_ids: torch.Tensor
+    plan: QVQAmpereGroupedP32Plan
 
 
 def _project_root() -> Path:
@@ -71,7 +108,7 @@ def _cuda_flags() -> list[str]:
 _QVQ_AMPERE_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_AMPERE_NAME,
     namespace=_QVQ_AMPERE_NAMESPACE,
-    required_ops=("p32_window",),
+    required_ops=("p32_window", "p32_window_grouped", "p32_window_grouped_fused"),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_AMPERE_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qvq_ampere"),
@@ -161,6 +198,28 @@ def _p32_window_op() -> object:
     if op is None:
         op = _QVQ_AMPERE_EXTENSION.op("p32_window")
         _P32_WINDOW_OP = op
+    return op
+
+
+def _p32_window_grouped_op() -> object:
+    """Resolve the native segmented dispatcher once."""
+
+    global _P32_WINDOW_GROUPED_OP
+    op = _P32_WINDOW_GROUPED_OP
+    if op is None:
+        op = _QVQ_AMPERE_EXTENSION.op("p32_window_grouped")
+        _P32_WINDOW_GROUPED_OP = op
+    return op
+
+
+def _p32_window_grouped_fused_op() -> object:
+    """Resolve the one-main-kernel segmented operator once."""
+
+    global _P32_WINDOW_GROUPED_FUSED_OP
+    op = _P32_WINDOW_GROUPED_FUSED_OP
+    if op is None:
+        op = _QVQ_AMPERE_EXTENSION.op("p32_window_grouped_fused")
+        _P32_WINDOW_GROUPED_FUSED_OP = op
     return op
 
 
@@ -308,6 +367,131 @@ def _autotune_split_count(
         return int(best_split)
 
 
+def _resolve_transition_bits(bits: float) -> int:
+    try:
+        transition_bits = None if isinstance(bits, bool) else _P32_TRANSITION_BITS[bits]
+    except (KeyError, TypeError):
+        transition_bits = None
+    if transition_bits is None:
+        transition_bits = qvq_transition_bits(bits, vector_size=2)
+    if transition_bits not in (4, 5, 6, 7):
+        raise ValueError("QVQ P32 Ampere WMMA supports W2 through W3.5")
+    return transition_bits
+
+
+def _resolve_split_count(
+    input: torch.Tensor,
+    trellis: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    *,
+    transition_bits: int,
+    out_features: int,
+    bank_alt_id: int,
+    split_count: int,
+) -> int:
+    """Resolve exactly the split policy used by an independent child launch."""
+
+    if split_count < 0:
+        raise ValueError("QVQ P32 Ampere split_count must be non-negative")
+    if split_count:
+        return int(split_count)
+    if (
+        input.shape[0] == 1
+        and input.shape[1] == 5120
+        and out_features in (1024, 12288)
+    ):
+        return 64 if out_features == 1024 else 40
+    if (
+        input.shape[0] in (2, 4)
+        and input.shape[1] == 5120
+        and out_features == 1024
+    ):
+        return 64
+    if out_features == 1024 and input.shape == (8, 5120):
+        return 48
+
+    # Environment configuration is process-level. Reading ``os.environ`` on
+    # every cached launch costs more than the cache lookup itself, so refresh
+    # it only when the process-local plan cache is cleared.
+    autotune = _AUTOTUNE_ENABLED
+    autotune_key = None
+    if autotune:
+        autotune_key = _autotune_cache_key(
+            input,
+            transition_bits=transition_bits,
+            out_features=out_features,
+            bank_alt_id=bank_alt_id,
+        )
+        cached = _AUTOTUNE_CACHE.get(autotune_key)
+        if cached is not None:
+            return min(int(cached), int(input.shape[1]) // 16)
+
+    if not input.is_cuda:
+        raise ValueError("QVQ P32 Ampere input must be CUDA")
+
+    split_count = _auto_split_count(
+        in_features=int(input.shape[1]),
+        out_features=int(out_features),
+        k_tiles=int(input.shape[1]) // 16,
+        sm_count=_device_sm_count(input.device),
+    )
+    # The scalar M<=4 kernel groups sixteen N16 tiles per CTA. Wide
+    # projections therefore need a fuller split wave than the WMMA shape
+    # table to keep the Ampere SMs resident during the short decode.
+    if input.shape[0] <= 4 and input.shape[1] <= 6144:
+        shape = (int(input.shape[1]), int(out_features))
+        small_m_split = (
+            24
+            if shape == (6144, 5120)
+            else 32
+            if shape == (5120, 1024)
+            else 40
+            if input.shape[0] == 4
+            else 32
+        )
+        split_count = min(small_m_split, int(input.shape[1]) // 16)
+    elif input.shape[0] == 8 and input.shape[1] <= 6144:
+        m8_split = {
+            1024: 48,
+            5120: 32,
+            6144: 32,
+            10240: 16,
+            12288: 16,
+            17408: 16,
+        }.get(int(out_features))
+        if m8_split is not None:
+            split_count = min(m8_split, int(input.shape[1]) // 16)
+    elif input.shape[0] == 16 and input.shape[1] <= 6144:
+        m16_split = {
+            1024: 32,
+            5120: 12,
+            6144: 16,
+            10240: 16,
+            17408: 10,
+        }.get(int(out_features))
+        if m16_split is not None:
+            split_count = min(m16_split, int(input.shape[1]) // 16)
+    elif (int(input.shape[1]), int(out_features)) == (17408, 5120):
+        long_k_split = (
+            128 if input.shape[0] == 1 else 96 if input.shape[0] == 2 else 32
+        )
+        split_count = min(long_k_split, int(input.shape[1]) // 16)
+    if autotune and autotune_key is not None:
+        split_count = _autotune_split_count(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits=transition_bits,
+            out_features=int(out_features),
+            bank_alt_id=int(bank_alt_id),
+            fallback=int(split_count),
+            cache_key=autotune_key,
+        )
+    return int(split_count)
+
+
 def qvq_p32_window_ampere(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -321,170 +505,17 @@ def qvq_p32_window_ampere(
 ) -> torch.Tensor:
     """Run exact continuous-window P32 with FP16 WMMA and FP32 accumulation."""
 
-    try:
-        transition_bits = None if isinstance(bits, bool) else _P32_TRANSITION_BITS[bits]
-    except (KeyError, TypeError):
-        transition_bits = None
-    if transition_bits is None:
-        transition_bits = qvq_transition_bits(bits, vector_size=2)
-    if transition_bits not in (4, 5, 6, 7):
-        raise ValueError("QVQ P32 Ampere WMMA supports W2 through W3.5")
-    if (
-        split_count == 0
-        and input.shape[0] == 1
-        and input.shape[1] == 5120
-        and out_features in (1024, 12288)
-    ):
-        return _p32_window_op()(
-            input,
-            trellis,
-            levels,
-            bank_ids,
-            transition_bits,
-            out_features,
-            bank_alt_id,
-            64 if out_features == 1024 else 40,
-        )
-    if (
-        split_count == 0
-        and input.shape[0] in (2, 4)
-        and input.shape[1] == 5120
-        and out_features == 1024
-    ):
-        return _p32_window_op()(
-            input,
-            trellis,
-            levels,
-            bank_ids,
-            transition_bits,
-            out_features,
-            bank_alt_id,
-            64,
-        )
-    if split_count == 0 and out_features == 1024 and input.shape == (8, 5120):
-        return _p32_window_op()(
-            input,
-            trellis,
-            levels,
-            bank_ids,
-            transition_bits,
-            out_features,
-            bank_alt_id,
-            48,
-        )
-    if split_count == 0:
-        # Environment configuration is process-level. Reading ``os.environ``
-        # on every cached launch costs more than the cache lookup itself, so
-        # refresh it only when the process-local plan cache is cleared.
-        autotune = _AUTOTUNE_ENABLED
-        autotune_key = None
-        if autotune:
-            autotune_key = _autotune_cache_key(
-                input,
-                transition_bits=transition_bits,
-                out_features=out_features,
-                bank_alt_id=bank_alt_id,
-            )
-            # A cache hit only reads one process-local dictionary entry. Keep
-            # that overwhelmingly common path out of the tuning lock; the
-            # cold helper acquires the lock and rechecks before benchmarking,
-            # so concurrent misses still tune exactly once.
-            cached = _AUTOTUNE_CACHE.get(autotune_key)
-            if cached is not None:
-                return _p32_window_op()(
-                    input,
-                    trellis,
-                    levels,
-                    bank_ids,
-                    transition_bits,
-                    out_features,
-                    bank_alt_id,
-                    cached,
-                )
-
-        if not input.is_cuda:
-            raise ValueError("QVQ P32 Ampere input must be CUDA")
-
-        if split_count == 0:
-            split_count = _auto_split_count(
-                in_features=int(input.shape[1]),
-                out_features=int(out_features),
-                k_tiles=int(input.shape[1]) // 16,
-                sm_count=_device_sm_count(input.device),
-            )
-        # The scalar M<=4 kernel groups sixteen N16 tiles per CTA.  Wide
-        # projections therefore need a fuller split wave than the WMMA
-        # shape table (which was tuned for four-warp/N64 CTAs) to keep all
-        # 124 Ampere SMs resident during the short decode.  The same policy
-        # applies to M=1, whose scalar route was tuned first.
-        if input.shape[0] <= 4 and input.shape[1] <= 6144:
-            # Attention-out has enough N64 CTAs that 24 slices beat the
-            # reduction overhead of a 32-way wave for the scalar M1-M4
-            # route. Other short-K projections retain the fuller 32-way wave.
-            shape = (int(input.shape[1]), int(out_features))
-            small_m_split = (
-                24
-                if shape == (6144, 5120)
-                else 32
-                if shape == (5120, 1024)
-                else 40
-                if input.shape[0] == 4
-                else 32
-            )
-            split_count = min(small_m_split, int(input.shape[1]) // 16)
-        elif input.shape[0] == 8 and input.shape[1] <= 6144:
-            # The WMMA partial-row path uses four N16 tiles per CTA.  The
-            # original shape table was tuned for M16 and leaves short-M8
-            # projections under-filled, especially the small-N KV and
-            # attention projections. Keep the measured split choices local
-            # to M8; M5-M7 retain the conservative generic table.
-            m8_split = {
-                1024: 48,
-                5120: 32,
-                6144: 32,
-                10240: 16,
-                12288: 16,
-                17408: 16,
-            }.get(int(out_features))
-            if m8_split is not None:
-                split_count = min(m8_split, int(input.shape[1]) // 16)
-        elif input.shape[0] == 16 and input.shape[1] <= 6144:
-            # The full-row WMMA path also benefits from a fuller wave on
-            # small-N projections. These choices are deliberately shape
-            # specific: the wide Q and MLP projections already have enough
-            # CTAs at their original measured splits.
-            m16_split = {
-                1024: 32,
-                5120: 12,
-                6144: 16,
-                10240: 16,
-                17408: 10,
-            }.get(int(out_features))
-            if m16_split is not None:
-                split_count = min(m16_split, int(input.shape[1]) // 16)
-        elif (int(input.shape[1]), int(out_features)) == (17408, 5120):
-            # MLP-down is the only measured long-K Qwen shape. Its original
-            # eight-way wave leaves too few CTAs per SM on the 124-SM A100;
-            # a wider wave reduces the per-CTA K span and the split reducer
-            # remains cheaper than the additional idle time. M1-M2 use the
-            # scalar route and continue to benefit from a wide wave (128 for
-            # M1, 96 for M2); M4+ retain the measured 32-way WMMA wave.
-            long_k_split = (
-                128 if input.shape[0] == 1 else 96 if input.shape[0] == 2 else 32
-            )
-            split_count = min(long_k_split, int(input.shape[1]) // 16)
-        if autotune and autotune_key is not None:
-            split_count = _autotune_split_count(
-                input,
-                trellis,
-                levels,
-                bank_ids,
-                transition_bits=transition_bits,
-                out_features=int(out_features),
-                bank_alt_id=int(bank_alt_id),
-                fallback=int(split_count),
-                cache_key=autotune_key,
-            )
+    transition_bits = _resolve_transition_bits(bits)
+    split_count = _resolve_split_count(
+        input,
+        trellis,
+        levels,
+        bank_ids,
+        transition_bits=transition_bits,
+        out_features=int(out_features),
+        bank_alt_id=int(bank_alt_id),
+        split_count=int(split_count),
+    )
     return _p32_window_op()(
         input,
         trellis,
@@ -497,7 +528,257 @@ def qvq_p32_window_ampere(
     )
 
 
+def qvq_p32_window_ampere_group_plan(
+    input: torch.Tensor,
+    trellises: Sequence[torch.Tensor],
+    levels: torch.Tensor,
+    bank_ids: Sequence[torch.Tensor],
+    bits: float,
+    *,
+    out_features: Sequence[int],
+    bank_alt_ids: Sequence[int],
+    split_counts: Sequence[int] | None = None,
+) -> QVQAmpereGroupedP32Plan:
+    """Resolve every child exactly as an independent P32 launch.
+
+    Every segment resolves the same launch policy it would receive as an
+    independent projection.  In particular, no policy is selected from the
+    synthetic sum of the output widths.
+    """
+
+    trellises = tuple(trellises)
+    bank_ids = tuple(bank_ids)
+    out_features = tuple(int(value) for value in out_features)
+    bank_alt_ids = tuple(int(value) for value in bank_alt_ids)
+    if not trellises:
+        raise ValueError("QVQ P32 Ampere grouped execution requires at least one segment")
+    segment_count = len(trellises)
+    if not (
+        len(bank_ids) == segment_count
+        and len(out_features) == segment_count
+        and len(bank_alt_ids) == segment_count
+    ):
+        raise ValueError("QVQ P32 Ampere grouped segment metadata lengths must match")
+    if split_counts is None:
+        requested_splits = (0,) * segment_count
+    else:
+        requested_splits = tuple(int(value) for value in split_counts)
+        if len(requested_splits) != segment_count:
+            raise ValueError("QVQ P32 Ampere grouped split_counts length must match")
+    if input.ndim != 2 or input.shape[1] <= 0 or input.shape[1] % 16:
+        raise ValueError("QVQ P32 Ampere grouped input must be a 2D K16 matrix")
+    for width, alt_id in zip(out_features, bank_alt_ids, strict=True):
+        if width <= 0 or width % 16:
+            raise ValueError(
+                "QVQ P32 Ampere grouped output widths must be positive multiples of 16"
+            )
+        if alt_id < 0 or alt_id > 3:
+            raise ValueError("QVQ P32 Ampere grouped bank IDs must be in [0, 3]")
+
+    transition_bits = _resolve_transition_bits(bits)
+    resolved_splits = tuple(
+        _resolve_split_count(
+            input,
+            trellis,
+            levels,
+            selectors,
+            transition_bits=transition_bits,
+            out_features=width,
+            bank_alt_id=alt_id,
+            split_count=requested_split,
+        )
+        for trellis, selectors, width, alt_id, requested_split in zip(
+            trellises,
+            bank_ids,
+            out_features,
+            bank_alt_ids,
+            requested_splits,
+            strict=True,
+        )
+    )
+    output_tile_start = 0
+    segments = []
+    for width, alt_id, split_count in zip(
+        out_features, bank_alt_ids, resolved_splits, strict=True
+    ):
+        output_tile_count = width // 16
+        segments.append(
+            QVQAmpereP32SegmentPlan(
+                output_tile_start=output_tile_start,
+                output_tile_count=output_tile_count,
+                out_features=width,
+                bank_alt_id=alt_id,
+                split_count=split_count,
+            )
+        )
+        output_tile_start += output_tile_count
+    return QVQAmpereGroupedP32Plan(
+        in_features=int(input.shape[1]),
+        transition_bits=transition_bits,
+        segments=tuple(segments),
+    )
+
+
+def qvq_pack_p32_window_ampere_group(
+    trellises: Sequence[torch.Tensor],
+    bank_ids: Sequence[torch.Tensor],
+    plan: QVQAmpereGroupedP32Plan,
+) -> QVQAmpereGroupedP32Payload:
+    """Losslessly pack child window payloads along the N16 tile dimension.
+
+    The returned tensors are intended to be cached with the quantized module
+    group.  Repacking on every inference call would erase the launch savings.
+    """
+
+    trellises = tuple(trellises)
+    bank_ids = tuple(bank_ids)
+    if len(trellises) != len(plan.segments) or len(bank_ids) != len(plan.segments):
+        raise ValueError("QVQ P32 Ampere grouped payload lengths must match the plan")
+    k_tiles = plan.in_features // 16
+    words_per_tile = 4 * plan.transition_bits
+    trellis_parts = []
+    bank_parts = []
+    for trellis, selectors, segment in zip(
+        trellises, bank_ids, plan.segments, strict=True
+    ):
+        expected_tiles = k_tiles * segment.output_tile_count
+        if trellis.dtype != torch.int32 or trellis.numel() != expected_tiles * words_per_tile:
+            raise ValueError("QVQ P32 Ampere grouped trellis has the wrong dtype or word count")
+        if selectors.dtype != torch.uint8 or selectors.numel() != expected_tiles:
+            raise ValueError("QVQ P32 Ampere grouped bank ids have the wrong dtype or length")
+        if trellis.device != trellises[0].device or selectors.device != trellises[0].device:
+            raise ValueError("QVQ P32 Ampere grouped payloads must share one device")
+        trellis_parts.append(
+            trellis.reshape(k_tiles, segment.output_tile_count, words_per_tile)
+        )
+        bank_parts.append(selectors.reshape(k_tiles, segment.output_tile_count))
+    grouped_trellis = torch.cat(trellis_parts, dim=1).reshape(
+        -1, words_per_tile
+    ).contiguous()
+    grouped_bank_ids = torch.cat(bank_parts, dim=1).reshape(-1).contiguous()
+    return QVQAmpereGroupedP32Payload(
+        trellis=grouped_trellis,
+        bank_ids=grouped_bank_ids,
+        plan=plan,
+    )
+
+
+def qvq_p32_window_ampere_grouped_packed(
+    input: torch.Tensor,
+    payload: QVQAmpereGroupedP32Payload,
+    levels: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Execute a cached grouped payload with one segmented main launch."""
+
+    plan = payload.plan
+    if int(input.shape[1]) != plan.in_features:
+        raise ValueError("QVQ P32 Ampere grouped input K does not match the plan")
+    widths = [segment.out_features for segment in plan.segments]
+    alt_ids = [segment.bank_alt_id for segment in plan.segments]
+    split_counts = [segment.split_count for segment in plan.segments]
+    # The plain kernel uses a warp-parallel reducer for these two KV cases.
+    # Its tree order cannot be represented by the generic segmented reducer,
+    # so fail closed to the exact child dispatcher rather than changing bits.
+    uses_warp_reducer = any(
+        segment.out_features == 1024
+        and (
+            (input.shape[0] <= 4 and segment.split_count == 64)
+            or (input.shape[0] == 8 and segment.split_count == 48)
+        )
+        for segment in plan.segments
+    )
+    if len(plan.segments) > 3 or plan.in_features > 6144 or uses_warp_reducer:
+        k_tiles = plan.in_features // 16
+        words_per_tile = 4 * plan.transition_bits
+        total_n_tiles = plan.out_features // 16
+        grouped_trellis = payload.trellis.reshape(k_tiles, total_n_tiles, words_per_tile)
+        grouped_bank_ids = payload.bank_ids.reshape(k_tiles, total_n_tiles)
+        child_trellises = []
+        child_bank_ids = []
+        for segment in plan.segments:
+            start = segment.output_tile_start
+            stop = start + segment.output_tile_count
+            child_trellises.append(
+                grouped_trellis[:, start:stop].reshape(-1, words_per_tile).contiguous()
+            )
+            child_bank_ids.append(
+                grouped_bank_ids[:, start:stop].reshape(-1).contiguous()
+            )
+        return tuple(
+            _p32_window_grouped_op()(
+                input,
+                child_trellises,
+                levels,
+                child_bank_ids,
+                plan.transition_bits,
+                widths,
+                alt_ids,
+                split_counts,
+            )
+        )
+    grouped_output = _p32_window_grouped_fused_op()(
+        input,
+        payload.trellis,
+        levels,
+        payload.bank_ids,
+        plan.transition_bits,
+        widths,
+        alt_ids,
+        split_counts,
+    )
+    row_count = int(input.shape[0])
+    return tuple(
+        child.reshape(row_count, width)
+        for child, width in zip(
+            torch.split(grouped_output, [row_count * width for width in widths]),
+            widths,
+            strict=True,
+        )
+    )
+
+
+def qvq_p32_window_ampere_grouped(
+    input: torch.Tensor,
+    trellises: Sequence[torch.Tensor],
+    levels: torch.Tensor,
+    bank_ids: Sequence[torch.Tensor],
+    bits: float,
+    *,
+    out_features: Sequence[int],
+    bank_alt_ids: Sequence[int],
+    split_counts: Sequence[int] | None = None,
+) -> tuple[torch.Tensor, ...]:
+    """Run legal P32 siblings from one shared transformed activation.
+
+    The fused route preserves every child K partition and its left-to-right
+    FP32 split reduction. Unsupported exact-reduction cases fail closed to the
+    ordinary native child dispatcher.
+    """
+
+    trellises = tuple(trellises)
+    bank_ids = tuple(bank_ids)
+    plan = qvq_p32_window_ampere_group_plan(
+        input,
+        trellises,
+        levels,
+        bank_ids,
+        bits,
+        out_features=out_features,
+        bank_alt_ids=bank_alt_ids,
+        split_counts=split_counts,
+    )
+    payload = qvq_pack_p32_window_ampere_group(trellises, bank_ids, plan)
+    return qvq_p32_window_ampere_grouped_packed(input, payload, levels)
+
+
 __all__ = [
+    "QVQAmpereGroupedP32Payload",
+    "QVQAmpereGroupedP32Plan",
+    "QVQAmpereP32SegmentPlan",
     "clear_qvq_ampere_autotune_cache",
     "qvq_p32_window_ampere",
+    "qvq_p32_window_ampere_group_plan",
+    "qvq_p32_window_ampere_grouped",
+    "qvq_p32_window_ampere_grouped_packed",
+    "qvq_pack_p32_window_ampere_group",
 ]

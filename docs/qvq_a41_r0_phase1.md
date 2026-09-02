@@ -157,3 +157,7 @@ For descriptors with both Hadamard flags enabled, the grouped result must be
 Phase 2 may implement the same descriptor and segment contract in the SM80
 path.  Phase 3 may implement it in the SM90a TMA/RS-WGMMA path.  Neither phase
 may change this Torch definition of A41 semantics.
+
+The Phase-2 implementation and its exact split/reduction contract are
+documented in
+[`kernels/qvq_a41_r0_phase2_ampere.md`](kernels/qvq_a41_r0_phase2_ampere.md).
