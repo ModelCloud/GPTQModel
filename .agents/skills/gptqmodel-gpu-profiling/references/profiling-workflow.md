@@ -37,3 +37,22 @@ Keep thresholds explicit. Preserve a residual/other row when filtering so percen
 - Quantized kernels can move the bottleneck to dequantization, scale loads, reductions, epilogues, sampling, or CPU dispatch.
 - Multi-rank averages hide stragglers. When communication matters, report rank spread and topology.
 - Trace time is not final performance evidence. Confirm the conclusion with warmed, synchronized latency/throughput measurements.
+
+## SASS-guided math and movement reduction
+
+Use this workflow after Nsight Systems has identified a custom CUDA kernel and a reproducible microbenchmark exists. It is especially useful for quantized decoders whose C++ expressions can compile into unexpectedly large mask, shift, address, shuffle, or local-memory streams.
+
+1. Capture one representative launch with Nsight Compute. Prefer focused sections such as `SpeedOfLight`, `ComputeWorkloadAnalysis`, `MemoryWorkloadAnalysis`, `SchedulerStats`, `WarpStateStats`, `InstructionStats`, `LaunchStats`, and `Occupancy`; use `--set full` only when the extra replay cost is justified.
+2. Export the source-correlated instruction page with `ncu --import <report> --page source --csv`. Preserve the `.ncu-rep`, exact capture command, source revision, kernel demangled name, and workload shape.
+3. Aggregate executed SASS opcodes and inspect the hot basic blocks. Use `cuobjdump --dump-resource-usage` or `nvdisasm` as a corroborating resource/disassembly view, not as a substitute for executed NCU counts.
+4. Trace each dominant instruction family back to its mathematical or data-movement role. Look specifically for:
+   - repeated `LOP3`, `SHF`, `PRMT`, or `IMAD` chains implementing equivalent bit algebra;
+   - per-consumer address calculations or loads that could be produced once and routed cheaply;
+   - shared/local store-load round trips for values already resident in registers;
+   - barriers, waits, and pipeline state updates whose work is too short to amortize them;
+   - widened tiles or producer/consumer ownership that can reuse activation, scale, or compressed-weight fetches.
+5. Prove any algebraic rewrite over the complete supported input domain or with an exact reference test. Source-level operation counts are hypotheses: verify the generated SASS actually removed instructions and did not add register moves, permutations, spills, or longer dependencies elsewhere.
+6. Compare a matched before/after NCU capture. Report total executed instructions, relevant opcode deltas, registers, local memory, shared conflicts, occupancy, scheduler eligibility, dominant stalls, and achieved memory/tensor-pipe throughput.
+7. Gate production acceptance separately with warmed CUDA-event timing and numerical/model-quality tests. An exact instruction reduction is useful evidence even when sub-microsecond event timing is noisy; record both facts without presenting profiler duration as application speedup.
+
+Do not infer a fusion opportunity solely from adjacent source expressions. The proposed ownership and routing must cost less than the work removed; fixed warp transposes and gathers can dominate an otherwise cheaper decoder.
