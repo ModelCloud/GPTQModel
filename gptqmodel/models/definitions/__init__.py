@@ -111,7 +111,7 @@ from .zamba2 import Zamba2QModel
 from .pangu_alpha import PanguAlphaQModel
 from .longcat_flash import LongCatFlashQModel
 from .locateanything import LocateAnythingQModel
-from .apertus import ApertusQModel
+from .apertus import Apertus1p5QModel, Apertus1p5TextQModel, ApertusQModel
 from .axk2 import AXK2QModel
 from .klear import KlearQModel
 from .laguna import LagunaQModel
