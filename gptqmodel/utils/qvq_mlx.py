@@ -30,6 +30,7 @@ from ..quantization.qvq_rates import (
     qvq_transition_bits,
     qvq_words_per_tile,
 )
+from .qvq_p32_mlx import qvq_mlx_p32_window_gemv, qvq_mlx_repack_p32_planar_to_window
 
 QVQ_MLX_BITS = QVQ_BITS
 _KERNEL: Any | None = None
@@ -82,7 +83,6 @@ _SYMMETRIC_GRAM_KERNELS: dict[str, Any] = {}
 _SYMMETRIC_GRAM_KERNEL_ERRORS: dict[str, str] = {}
 _V2_BANKED_KERNELS: dict[tuple[str, int, bool], Any] = {}
 _V2_BANKED_KERNEL_ERRORS: dict[tuple[str, int, bool], str] = {}
-
 _SYMMETRIC_GRAM_PACK_SOURCE = r"""
 uint index = thread_position_in_grid.x;
 uint count = dims[1];
@@ -2610,6 +2610,9 @@ def qvq_mlx_gemv(
     v2b2_p32: bool = False,
     bank_alt_id=None,
     output_fp32: bool = False,
+    _bank_alt_id_value: int | None = None,
+    _inputs_contiguous: bool = False,
+    _p32_window: bool = False,
     _prepared_compander: _QVQMLXPreparedCompander | None = None,
 ):
     """Multiply transformed MLX activations by planar PGC16 tiles."""
@@ -2619,6 +2622,10 @@ def qvq_mlx_gemv(
     bits = normalize_qvq_rate(bits)
     if not isinstance(output_fp32, bool):
         raise TypeError("QVQ MLX output_fp32 must be a bool")
+    if not isinstance(_inputs_contiguous, bool):
+        raise TypeError("QVQ MLX _inputs_contiguous must be a bool")
+    if not isinstance(_p32_window, bool):
+        raise TypeError("QVQ MLX _p32_window must be a bool")
     if not isinstance(dual_v2, bool):
         raise TypeError("QVQ MLX dual_v2 must be a bool")
     if not isinstance(v2b4_p64, bool) or not isinstance(v2b2_p32, bool):
@@ -2655,8 +2662,10 @@ def qvq_mlx_gemv(
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
     if x.ndim != 2 or trellis.ndim != 2:
         raise ValueError("QVQ MLX expects 2D x and trellis arrays")
-    if x.dtype != mx.float16 or trellis.dtype != mx.int32:
-        raise TypeError("QVQ MLX requires float16 x and int32 planar trellis words")
+    if trellis.dtype != mx.int32:
+        raise TypeError("QVQ MLX requires int32 planar trellis words")
+    if x.dtype != mx.float16 and not (x.dtype == mx.float32 and v2b2_p32 and _p32_window):
+        raise TypeError("QVQ MLX requires FP16 x, or FP32 x for direct-window P32")
     m, k = x.shape
     n = _integer_argument(out_features, "out_features")
     if k <= 0 or n <= 0 or k % 16 or n % 16:
@@ -2681,6 +2690,17 @@ def qvq_mlx_gemv(
     selector_size = 0 if bank_ids is None else bank_ids.size
     if max(m, k, n, m * n, x.size, trellis.size, levels.size, selector_size) > 2**32 - 1:
         raise ValueError("QVQ MLX dimensions exceed the uint32 kernel limit")
+    if _p32_window:
+        if not v2b2_p32 or not output_fp32:
+            raise ValueError("QVQ MLX continuous-window dispatch requires V2B2-P32 with FP32 output")
+        return qvq_mlx_p32_window_gemv(
+            x,
+            trellis,
+            bits,
+            out_features=n,
+            bank_ids=bank_ids,
+            bank_alt_id=alt_id,
+        )
     if output_fp32:
         if v2b4_p64 or v2b2_p32:
             return _run_v2_banked(
@@ -2911,6 +2931,8 @@ if _mlx_nn is not None:
             v2b4_p64: bool = False,
             v2b2_p32: bool = False,
             bank_alt_id=None,
+            input_hadamard: bool = True,
+            output_hadamard: bool = True,
         ):
             super().__init__()
             import mlx.core as mx
@@ -2930,6 +2952,10 @@ if _mlx_nn is not None:
                 raise ValueError("QVQ MLX Dual-V2, V2B4-P64, and V2B2-P32 are mutually exclusive")
             self.v2b4_p64 = v2b4_p64
             self.v2b2_p32 = v2b2_p32
+            if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
+                raise TypeError("QVQ MLX transform-axis flags must be bools")
+            self.input_hadamard = input_hadamard
+            self.output_hadamard = output_hadamard
             if self.trellis_window not in (16, 18):
                 raise ValueError("QVQ MLX trellis_window must be 16 or 18")
             if self.trellis_window == 18 and self.vector_size != 4:
@@ -2950,8 +2976,29 @@ if _mlx_nn is not None:
             self.bias = None if bias is None else bias.astype(mx.float32)
             self.bank_ids = None if bank_ids is None else bank_ids.astype(mx.uint8)
             self.bank_alt_id = None if bank_alt_id is None else bank_alt_id.astype(mx.uint8)
-            self._input_hadamard = _qvq_mlx_hadamard_matrix(self.in_features)
-            self._output_hadamard = _qvq_mlx_hadamard_matrix(self.out_features)
+            self._bank_alt_id_value = None
+            if self.v2b2_p32:
+                if self.bank_alt_id is None or self.bank_alt_id.shape != (1,):
+                    raise ValueError("QVQ MLX V2B2-P32 formats require one bank_alt_id value")
+                # This is immutable checkpoint metadata.  Resolve it once at
+                # construction so every forward can stay on the MLX graph.
+                self._bank_alt_id_value = int(self.bank_alt_id.item())
+                if not 1 <= self._bank_alt_id_value <= 3:
+                    raise ValueError("QVQ MLX V2B2-P32 alternative-bank ID must be in [1, 3]")
+            self._p32_window = self.v2b2_p32 and self.codebook_version == PGC16_CODEBOOK_VERSION
+            self._runtime_trellis = self.trellis
+            if self._p32_window:
+                # Standard P32 checkpoints retain their canonical planar
+                # bytes. Repack once into the storage-neutral direct-window
+                # runtime layout used by the promoted Metal kernel.
+                self._runtime_trellis = qvq_mlx_repack_p32_planar_to_window(self.trellis, self.bits)
+                mx.eval(self._runtime_trellis)
+            self._input_hadamard = (
+                _qvq_mlx_hadamard_matrix(self.in_features) if self.input_hadamard else None
+            )
+            self._output_hadamard = (
+                _qvq_mlx_hadamard_matrix(self.out_features) if self.output_hadamard else None
+            )
 
             expected_trellis = (
                 (self.in_features // 16) * (self.out_features // 16),
@@ -2965,6 +3012,21 @@ if _mlx_nn is not None:
                 raise ValueError("QVQ MLX SU/SV shapes must match the linear dimensions")
             if self.bias is not None and self.bias.shape != (self.out_features,):
                 raise ValueError("QVQ MLX bias shape must match out_features")
+            if self.v2b4_p64 or self.v2b2_p32:
+                if self.bank_ids is None or self.bank_ids.ndim != 1:
+                    raise ValueError("QVQ MLX banked formats require one-dimensional packed selectors")
+                expected_selectors = expected_trellis[0]
+                if self.bank_ids.size != expected_selectors:
+                    raise ValueError(
+                        f"QVQ MLX bank selectors must have packed shape {(expected_selectors,)}, got {self.bank_ids.shape}"
+                    )
+            if self._p32_window:
+                # Presence and shape are validated before the one-time scalar
+                # extraction above; keep this branch as a defensive invariant.
+                if self.bank_alt_id is None or self.bank_alt_id.shape != (1,):
+                    raise ValueError("QVQ MLX V2B2-P32 formats require one bank_alt_id value")
+            elif self.bank_alt_id is not None:
+                raise ValueError("QVQ MLX bank_alt_id is valid only for V2B2-P32 formats")
 
         def __call__(self, x):
             import mlx.core as mx
@@ -2975,14 +3037,19 @@ if _mlx_nn is not None:
             leading_shape = x.shape[:-1]
             if x.size == 0:
                 return mx.empty((*leading_shape, self.out_features), dtype=input_dtype)
-            transformed = _qvq_mlx_hadamard(
-                x.reshape(-1, self.in_features).astype(mx.float32) * self.SU,
-                self._input_hadamard,
-            )
-            native_input, row_scale = _qvq_mlx_narrow_with_row_scale(transformed)
+            transformed = x.reshape(-1, self.in_features).astype(mx.float32) * self.SU
+            if self.input_hadamard:
+                transformed = _qvq_mlx_hadamard(transformed, self._input_hadamard)
+            if self._p32_window:
+                # The direct-window P32 kernel accumulates from FP32
+                # activations. Keep the transformed row wide and avoid the
+                # legacy max/log2/ceil/pow/narrow/rescale graph.
+                native_input, row_scale = transformed, None
+            else:
+                native_input, row_scale = _qvq_mlx_narrow_with_row_scale(transformed)
             output = qvq_mlx_gemv(
                 native_input,
-                self.trellis,
+                self._runtime_trellis,
                 self.bits,
                 out_features=self.out_features,
                 codebook_version=self.codebook_version,
@@ -2994,8 +3061,14 @@ if _mlx_nn is not None:
                 v2b2_p32=self.v2b2_p32,
                 bank_alt_id=self.bank_alt_id,
                 output_fp32=True,
+                _bank_alt_id_value=self._bank_alt_id_value,
+                _inputs_contiguous=False,
+                _p32_window=self._p32_window,
             )
-            output = _qvq_mlx_hadamard(output * row_scale, self._output_hadamard)
+            if row_scale is not None:
+                output = output * row_scale
+            if self.output_hadamard:
+                output = _qvq_mlx_hadamard(output, self._output_hadamard)
             output = output * self.SV
             if self.bias is not None:
                 output = output + self.bias

@@ -1,0 +1,133 @@
+{
+  "schema": "qvq.validation-harness.v1",
+  "status": "pass",
+  "profile": "p0c-r0c-correction",
+  "reference_arm": "P0+C",
+  "candidate_arm": "R0+C",
+  "repository_revision": "f495e745819818cd26e9d92ba0d00dd0445e350a",
+  "promotable": true,
+  "runs": [
+    {
+      "artifact": "/root/polly-work/qvq-pr84-a100/artifacts/qvq_validation/p0c-r0c-correction_seed20260831_f495e745.json",
+      "status": "pass",
+      "dataset": {
+        "calibration_samples": 16,
+        "validation_streams": 3,
+        "validation_samples": 48,
+        "validation_tokens": 5630
+      },
+      "payload_identity_required": true,
+      "payload_identity": true,
+      "reference_effective_bpw": 2.054419024237271,
+      "candidate_effective_bpw": 2.054419024237271,
+      "bootstrap": {
+        "kl_delta_median": -0.0004139617001954754,
+        "kl_ci95": [
+          -0.0006616309416793698,
+          -0.0001600479938574928
+        ],
+        "top1_delta_median": 0.0003542017428745936,
+        "top1_ci95": [
+          -0.0010670460608216414,
+          0.0017328019407382156
+        ],
+        "kl_ci_crosses_zero": false,
+        "top1_ci_crosses_zero": true
+      },
+      "decode": {
+        "1": {
+          "reference_ms": 38.530739955604076,
+          "candidate_ms": 32.60924108326435,
+          "candidate_latency_delta_fraction": -0.15368245923028212,
+          "candidate_speedup": 1.1815895947170247
+        },
+        "2": {
+          "reference_ms": 37.89542615413666,
+          "candidate_ms": 34.4376084394753,
+          "candidate_latency_delta_fraction": -0.09124630768359643,
+          "candidate_speedup": 1.1004081837081845
+        },
+        "4": {
+          "reference_ms": 38.30916853621602,
+          "candidate_ms": 33.97809946909547,
+          "candidate_latency_delta_fraction": -0.11305567916531845,
+          "candidate_speedup": 1.1274664897328894
+        },
+        "8": {
+          "reference_ms": 39.84811622649431,
+          "candidate_ms": 33.54926872998476,
+          "candidate_latency_delta_fraction": -0.15807139942845172,
+          "candidate_speedup": 1.187749174123725
+        }
+      },
+      "runtime_oracle": {
+        "reference_runtime_mode": "plain_per_module_p32",
+        "candidate_runtime_mode": "refactored_grouped_or_plain_p32",
+        "candidate_group_count": 32,
+        "candidate_plain_fallback_count": 0,
+        "packed_runtime_equivalence": {
+          "tokens": 5630,
+          "final_kl": 6.887761075347397e-05,
+          "logits_relative_l2": 0.004352146594265514,
+          "max_abs_logits_delta": 0.2109375,
+          "top1": 0.9932504440497336,
+          "top5": 1.0,
+          "top10": 1.0
+        }
+      },
+      "fixed_trellis_correction": {
+        "corrected_module_records": 224,
+        "accepted_channels_across_both_identical_arms": 749464,
+        "mutable_tensors": [
+          "SV"
+        ],
+        "SU_trainable": false
+      },
+      "seed": 20260831,
+      "engine_command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "/root/polly-work/qvq-pr84-a100/scripts/benchmark_qvq_rotation_full_model_cuda.py",
+        "--arms",
+        "P0+C,R0+C",
+        "--bits",
+        "2",
+        "--seed",
+        "20260831",
+        "--layers",
+        "16",
+        "--calibration-samples",
+        "16",
+        "--validation-streams",
+        "3",
+        "--validation-samples",
+        "16",
+        "--sequence-length",
+        "128",
+        "--decode-batches",
+        "1",
+        "2",
+        "4",
+        "8",
+        "--prefill-warmup",
+        "2",
+        "--prefill-iterations",
+        "5",
+        "--decode-warmup",
+        "5",
+        "--decode-iterations",
+        "30",
+        "--module-suite-warmup",
+        "10",
+        "--module-suite-iterations",
+        "30",
+        "--timing-cycles",
+        "5",
+        "--json",
+        "/root/polly-work/qvq-pr84-a100/artifacts/qvq_validation/p0c-r0c-correction_seed20260831_f495e745.json",
+        "--runtime-oracle",
+        "plain-refactored-corrected",
+        "--local-files-only"
+      ]
+    }
+  ]
+}

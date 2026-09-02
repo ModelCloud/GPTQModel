@@ -300,6 +300,8 @@ def test_qvq_mlx_loader_conversion_preserves_native_v4_payload():
         tensors=tensors,
         vector_size=4,
         bank_count=4,
+        input_hadamard=False,
+        output_hadamard=False,
     )
 
     converted = _qvq_mlx_linear_from_torch(source)
@@ -307,6 +309,8 @@ def test_qvq_mlx_loader_conversion_preserves_native_v4_payload():
     assert isinstance(converted, QVQMLXLinear)
     assert converted.bits == bits
     assert converted.vector_size == 4
+    assert converted.input_hadamard is False
+    assert converted.output_hadamard is False
     np.testing.assert_array_equal(np.asarray(converted.trellis), trellis.numpy())
     np.testing.assert_array_equal(np.asarray(converted.bank_ids), bank_ids.numpy())
     np.testing.assert_array_equal(np.asarray(converted.SU), tensors["SU"].numpy())
@@ -1146,14 +1150,24 @@ def test_qvq_v2_banked_mlx_loader_conversion_auto_dispatches_native(monkeypatch,
         },
     ).eval()
     converted = _qvq_mlx_linear_from_torch(source)
-    original = qvq_mlx._run_v2_banked
     launches = []
 
-    def counted(*args, **kwargs):
-        launches.append((kwargs["kind"], kwargs["output_fp32"]))
-        return original(*args, **kwargs)
+    if kind == "v2b2_p32":
+        original = qvq_mlx.qvq_mlx_p32_window_gemv
 
-    monkeypatch.setattr(qvq_mlx, "_run_v2_banked", counted)
+        def counted(*args, **kwargs):
+            launches.append(("v2b2_p32", True))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(qvq_mlx, "qvq_mlx_p32_window_gemv", counted)
+    else:
+        original = qvq_mlx._run_v2_banked
+
+        def counted(*args, **kwargs):
+            launches.append((kwargs["kind"], kwargs["output_fp32"]))
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(qvq_mlx, "_run_v2_banked", counted)
     actual = converted(x)
     mx.eval(actual)
     expected = source(torch.from_numpy(np.asarray(x)))

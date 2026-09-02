@@ -1,0 +1,142 @@
+{
+  "schema": "qvq.rotation-folding.layer-propagation.v1",
+  "model": "ModelCloud/Llama3.2-1B-Instruct",
+  "device": "mps",
+  "bits": 2.0,
+  "layer": 0,
+  "calibration": [
+    "A small compiler lowers typed expressions into a compact instruction stream.",
+    "Explain why ocean tides depend on both the Moon and the Sun.",
+    "The customer ordered tea, bread, fruit, and a blue ceramic bowl.",
+    "Write a careful invariant for a ring buffer with one producer and one consumer."
+  ],
+  "validation": [
+    "A telescope collects light and focuses it onto a detector.",
+    "Compare a balanced binary tree with a hash table for ordered queries.",
+    "The train crossed the valley just before the evening storm arrived."
+  ],
+  "arms": {
+    "A29": {
+      "description": "remove gate/up output Hadamards without SwiGLU reparameterization",
+      "online_hadamards_per_block": 12,
+      "rewrite": {
+        "arm": "A29",
+        "rewritten": true,
+        "residual_seed": 20260831,
+        "residual_kind": "hadamard",
+        "blockers": [],
+        "residual_folded": false
+      },
+      "modules": [
+        {
+          "module": "model.layers.0.self_attn.q_proj",
+          "role": "attention_q",
+          "shape": [
+            2048,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.28316065669059753,
+          "effective_bpw": 2.062501907348633,
+          "fit_seconds": 33.67879687505774,
+          "serialized_bytes": 1081345
+        },
+        {
+          "module": "model.layers.0.self_attn.k_proj",
+          "role": "attention_k",
+          "shape": [
+            512,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.2802770137786865,
+          "effective_bpw": 2.1093826293945312,
+          "fit_seconds": 8.78350387501996,
+          "serialized_bytes": 276481
+        },
+        {
+          "module": "model.layers.0.self_attn.v_proj",
+          "role": "attention_v",
+          "shape": [
+            512,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.27585214376449585,
+          "effective_bpw": 2.1093826293945312,
+          "fit_seconds": 8.642108959029429,
+          "serialized_bytes": 276481
+        },
+        {
+          "module": "model.layers.0.self_attn.o_proj",
+          "role": "attention_o",
+          "shape": [
+            2048,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.2779187560081482,
+          "effective_bpw": 2.062501907348633,
+          "fit_seconds": 34.501367624965496,
+          "serialized_bytes": 1081345
+        },
+        {
+          "module": "model.layers.0.mlp.gate_proj",
+          "role": "mlp_gate",
+          "shape": [
+            8192,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": false,
+          "weight_relative_l2": 0.2839750051498413,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 144.64000474999193,
+          "serialized_bytes": 4300801
+        },
+        {
+          "module": "model.layers.0.mlp.up_proj",
+          "role": "mlp_up",
+          "shape": [
+            8192,
+            2048
+          ],
+          "input_hadamard": true,
+          "output_hadamard": false,
+          "weight_relative_l2": 0.280104398727417,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 141.84049595799297,
+          "serialized_bytes": 4300801
+        },
+        {
+          "module": "model.layers.0.mlp.down_proj",
+          "role": "mlp_down",
+          "shape": [
+            2048,
+            8192
+          ],
+          "input_hadamard": true,
+          "output_hadamard": true,
+          "weight_relative_l2": 0.2595565915107727,
+          "effective_bpw": 2.050781726837158,
+          "fit_seconds": 141.81156595796347,
+          "serialized_bytes": 4300801
+        }
+      ],
+      "metrics": {
+        "final_kl": 0.034276332706213,
+        "logits_relative_l2": 0.11356998234987259,
+        "layer_output_relative_l2": 0.12847869098186493,
+        "top1": 0.9487179517745972,
+        "top5": 1.0,
+        "top10": 1.0
+      },
+      "elapsed_seconds": 515.4830207499908
+    }
+  },
+  "storage_accounting": "canonical P32 payload + packed 1-bit-per-32 selector metadata + FP32 SU/SV + one alternative-bank byte"
+}

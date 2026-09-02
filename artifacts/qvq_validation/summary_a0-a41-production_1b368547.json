@@ -1,0 +1,108 @@
+{
+  "schema": "qvq.validation-harness.v1",
+  "status": "pass",
+  "profile": "a0-a41-production",
+  "reference_arm": "A0",
+  "candidate_arm": "A41",
+  "repository_revision": "1b368547b09c712613070a0e35b51a01257b59c0",
+  "promotable": true,
+  "runs": [
+    {
+      "artifact": "/root/polly-work/qvq-pr84-a100/artifacts/qvq_validation/a0-a41-production_seed20260831_1b368547.json",
+      "status": "pass",
+      "dataset": {
+        "calibration_samples": 16,
+        "validation_streams": 3,
+        "validation_samples": 48,
+        "validation_tokens": 5630
+      },
+      "payload_identity_required": false,
+      "payload_identity": false,
+      "reference_effective_bpw": 2.054419024237271,
+      "candidate_effective_bpw": 2.054419024237271,
+      "bootstrap": {
+        "kl_delta_median": -0.001463460025741714,
+        "kl_ci95": [
+          -0.028651904443035114,
+          0.02678907223451743
+        ],
+        "top1_delta_median": -0.008511392920881544,
+        "top1_ci95": [
+          -0.021935255616486793,
+          0.004123711340206282
+        ],
+        "kl_ci_crosses_zero": true,
+        "top1_ci_crosses_zero": true
+      },
+      "decode": {
+        "1": {
+          "reference_ms": 39.287596475332975,
+          "candidate_ms": 31.360789202153683,
+          "candidate_latency_delta_fraction": -0.20176360949329641,
+          "candidate_speedup": 1.252761728095635
+        },
+        "2": {
+          "reference_ms": 39.52959692105651,
+          "candidate_ms": 32.820635475218296,
+          "candidate_latency_delta_fraction": -0.1697199558911896,
+          "candidate_speedup": 1.2044129051341468
+        },
+        "4": {
+          "reference_ms": 39.500752463936806,
+          "candidate_ms": 32.91586181148887,
+          "candidate_latency_delta_fraction": -0.1667029168231613,
+          "candidate_speedup": 1.2000522024961706
+        },
+        "8": {
+          "reference_ms": 39.47807941585779,
+          "candidate_ms": 33.17548055201769,
+          "candidate_latency_delta_fraction": -0.15964806183829794,
+          "candidate_speedup": 1.1899776207900865
+        }
+      },
+      "seed": 20260831,
+      "engine_command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "/root/polly-work/qvq-pr84-a100/scripts/benchmark_qvq_rotation_full_model_cuda.py",
+        "--arms",
+        "A0,A41",
+        "--bits",
+        "2",
+        "--seed",
+        "20260831",
+        "--layers",
+        "16",
+        "--calibration-samples",
+        "16",
+        "--validation-streams",
+        "3",
+        "--validation-samples",
+        "16",
+        "--sequence-length",
+        "128",
+        "--decode-batches",
+        "1",
+        "2",
+        "4",
+        "8",
+        "--prefill-warmup",
+        "2",
+        "--prefill-iterations",
+        "5",
+        "--decode-warmup",
+        "5",
+        "--decode-iterations",
+        "30",
+        "--module-suite-warmup",
+        "10",
+        "--module-suite-iterations",
+        "30",
+        "--timing-cycles",
+        "5",
+        "--json",
+        "/root/polly-work/qvq-pr84-a100/artifacts/qvq_validation/a0-a41-production_seed20260831_1b368547.json",
+        "--local-files-only"
+      ]
+    }
+  ]
+}
