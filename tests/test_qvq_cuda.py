@@ -533,6 +533,42 @@ def test_qvq_cuda_multiblock_paired_recovery_graph_and_contract_guards():
         )
 
 
+@pytest.mark.parametrize("scale_mode", (3, 4))
+def test_qvq_cuda_multiblock_paired_recovery_preserves_overflow_rounding_bits(
+    scale_mode,
+):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("experimental multiblock recovery requires Hopper")
+    n = 8192
+    input0 = torch.full((1, n), 60000.0, device="cuda")
+    input1 = torch.empty((1, n), device="cuda")
+    input1[:, 0::2] = 60000.0
+    input1[:, 1::2] = -60000.0
+    scale0 = torch.full((n,), 1.0e-4, device="cuda")
+    scale1 = torch.full((n,), -1.0e-4, device="cuda")
+    bias0 = torch.linspace(-0.125, 0.125, n, device="cuda")
+    expected = qvq_cuda_hadamard_pair_fp32_to_fp16(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        bias0=bias0,
+        scale_mode=scale_mode,
+    )
+
+    for _ in range(10):
+        actual = qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+            input0,
+            input1,
+            post_scale0=scale0,
+            post_scale1=scale1,
+            bias0=bias0,
+            scale_mode=scale_mode,
+        )
+        assert torch.equal(actual[0].view(torch.int16), expected[0].view(torch.int16))
+        assert torch.equal(actual[1].view(torch.int16), expected[1].view(torch.int16))
+
+
 def test_qvq_cuda_paired_output_recovery_handles_overflow_optional_bias_and_stream():
     n = 32
     input0 = torch.zeros((1, n), device="cuda")
