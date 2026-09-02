@@ -186,5 +186,8 @@ The development host has no SM80 GPU.  Native validation runs only on its H100
 by JIT-compiling the extension's embedded compute-80 PTX; this is opt-in via
 `QVQ_AMPERE_ALLOW_SM90_VALIDATION=1` and does not enable the Ampere path in
 normal Hopper routing.  Final SM80 promotion still requires the same tests on
-an A100.  H100 timing of this compatibility path is not a meaningful Ampere
-benchmark and is intentionally not reported.
+an A100.  The H100 compatibility-path benchmark is reported separately in
+[`qvq_a41_r0_phase2_h100_benchmark.md`](qvq_a41_r0_phase2_h100_benchmark.md).
+Its same-device comparison isolates the Phase-2 launch change, but its absolute
+latencies must not be presented as an A100 result or as native Hopper-kernel
+performance.
