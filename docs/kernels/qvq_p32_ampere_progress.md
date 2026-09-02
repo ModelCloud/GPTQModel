@@ -2288,6 +2288,17 @@ M16/K6144/N5120 plan is pinned at split 12. Artifacts are
 `v19_m16_attention_n64_control_deep.json` and
 `v19_m16_attention_wide_n128_candidate_{deep,verify8000}.json`.
 
+The forty-sixth v19 progression applies the exact power-of-two circular-word
+wrap to W2 in the widened M16 full-Q tuple `(K,N)=(5120,12288)`. The W2
+specialization replaces the generic next-word boundary compare with a mask;
+W2.5, W3, and W3.5 retain the prior instruction path. In a matched
+100-warmup/4000-iteration pair, W2 improves from `0.100352` to `0.097280 ms`
+(1.0316x), while the other three rates tie at their control medians. Maximum
+absolute error remains below `4.01e-05`, and all 55 Ampere tests pass. The
+affected-case log weighting reaches **3.997% cumulative improvement** versus
+fetched main. Artifacts are `v19_m16_fullq_pow2_control.json` and
+`v19_m16_fullq_pow2_candidate.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
