@@ -438,3 +438,43 @@ The tested 16-bit PGC multiply-add change (`d842e1cb`) was rejected: it was
 within timing noise on gate/up and approximately 1% slower on down across the
 same matrix.  It is not present in the production source.  The next source
 optimization must beat this exact self-baseline on H200 before being merged.
+
+## H200 shared bank-ID broadcast
+
+Commit `8d2164b5` keeps the exact repeated-byte bank-mask algebra explicit in
+the PGC mixer.  The complete 26-test P32 window suite passes, but matched NCU
+shows that ptxas had already performed this fusion: executed instructions are
+unchanged at 37.484M.  The source form is retained because it is exact for all
+supported V2B2 bank masks and lowers allocation from 51 to 50 registers/thread;
+its sub-microsecond event-timing movement is treated as noise.
+
+Commit `1ad56eb8` then replaces the lane-0 bank-ID load plus warp shuffle with
+one same-address shared load by every lane.  Hopper shared memory broadcasts
+that load without a bank conflict.  This removes the complete `SHFL.IDX` class
+from the decode loop and also lets ptxas delete associated moves and predicates.
+
+Matched W3 M16/K5120/N17408 split-10 NCU evidence:
+
+| Metric | `origin/main` `c0469004` | `1ad56eb8` | Change |
+|---|---:|---:|---:|
+| Event median | 0.067040 ms | 0.065632 ms | **1.0215x** |
+| NCU duration | 63.26 us | 62.11 us | **1.0185x** |
+| Executed instructions | 37.484M | 36.395M | **-1.089M (-2.91%)** |
+| `SHFL.IDX` instructions | 361,760 | 0 | **-100%** |
+| Registers/thread | 51 | 50 | -1 |
+| Maximum absolute error | 3.05e-05 | 3.05e-05 | unchanged |
+
+The 100-sample M16 Qwen3.8 all-rate validation remains monotonic against the
+fetched-main self baseline:
+
+| Rate | Gate/up baseline ms | Gate/up candidate ms | Speedup | Down baseline ms | Down candidate ms | Speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| W2 | 0.065936 | 0.065184 | 1.012x | 0.065808 | 0.064400 | 1.022x |
+| W2.5 | 0.065968 | 0.065328 | 1.010x | 0.065696 | 0.064768 | 1.014x |
+| W3 | 0.066640 | 0.065680 | 1.015x | 0.066368 | 0.065216 | 1.018x |
+| W3.5 | 0.069664 | 0.066256 | 1.051x | 0.066944 | 0.065392 | 1.024x |
+
+Artifacts are
+`artifacts/h200_p32_window/candidate_shared_bank_broadcast_8d2164b5_*_allrates_m16.json`
+and
+`artifacts/h200_p32_window/profiles/candidate_shared_bank_broadcast_8d2164b5_w3_gate_targeted.ncu-rep`.
