@@ -103,12 +103,22 @@ struct alignas(128) P32WgmmaTmaSharedStorageFor {
       cute::cosize_v<P32TrellisTmaSmemLayoutFor<TransitionBits>>> trellis;
   alignas(128) cute::ArrayEngine<uint8_t, cute::cosize_v<P32BankTmaSmemLayout>> bank_ids;
   // Reused by every decode lane and K16 tile; avoid dependent L1/global
-  // lookups for the small, read-only PGC level table.
-  alignas(128) cute::ArrayEngine<Element, 256> levels;
+  // lookups for the small, read-only PGC level table. W3 stores
+  // levels[index][lane], assigning each lane pair its own two alternating
+  // shared banks. The extra shared footprint removes cross-pair conflicts.
+  static constexpr int kLevelEntries =
+      TransitionBits == kW3TransitionBits ? 256 * 32 : 256;
+  alignas(128) cute::ArrayEngine<Element, kLevelEntries> levels;
   // The PGC high byte is b ^ (b >> 7).  Store that fixed permutation once so
   // the hot loop can index it directly with affine-product byte 1.
-  alignas(128) cute::ArrayEngine<Element, 256> levels_high;
+  static constexpr int kHighLevelEntries =
+      TransitionBits == kW3TransitionBits ? 1 : 256;
+  alignas(128) cute::ArrayEngine<Element, kHighLevelEntries> levels_high;
 };
+
+static_assert(
+    sizeof(P32WgmmaTmaSharedStorageFor<kW3TransitionBits>) <= 48 * 1024,
+    "W3 lane-interleaved levels must fit the default Hopper shared-memory limit");
 
 static_assert(cute::size(WgmmaTiledMma{}) == kThreads);
 
@@ -188,6 +198,26 @@ __device__ __forceinline__ Element qvq_wgmma_load_level_shared_byte_offset(
     uint32_t levels_base,
     uint32_t byte_offset) {
   const uint32_t address = levels_base + byte_offset;
+  uint16_t bits;
+  asm("ld.shared.u16 %0, [%1];" : "=h"(bits) : "r"(address));
+  return Element::bitcast(bits);
+}
+
+__device__ __forceinline__ Element qvq_wgmma_load_level_shared_lane(
+    uint32_t levels_base,
+    uint32_t index,
+    uint32_t lane) {
+  const uint32_t address = levels_base + (index << 6) + (lane << 1);
+  uint16_t bits;
+  asm("ld.shared.u16 %0, [%1];" : "=h"(bits) : "r"(address));
+  return Element::bitcast(bits);
+}
+
+__device__ __forceinline__ Element qvq_wgmma_load_level_shared_lane_byte_offset(
+    uint32_t levels_base,
+    uint32_t byte_offset,
+    uint32_t lane) {
+  const uint32_t address = levels_base + (byte_offset << 5) + (lane << 1);
   uint16_t bits;
   asm("ld.shared.u16 %0, [%1];" : "=h"(bits) : "r"(address));
   return Element::bitcast(bits);
@@ -353,18 +383,46 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
   if constexpr (LevelsInShared) {
-    fragment(0) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product00));
-    fragment(1) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product01));
-    fragment(2) = qvq_wgmma_load_level_shared_byte_offset(
-        levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product00));
-    fragment(3) = qvq_wgmma_load_level_shared_byte_offset(
-        levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product01));
-    fragment(4) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product10));
-    fragment(5) = qvq_wgmma_load_level_shared(levels_high_shared_base, qvq_wgmma_high_byte(product11));
-    fragment(6) = qvq_wgmma_load_level_shared_byte_offset(
-        levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product10));
-    fragment(7) = qvq_wgmma_load_level_shared_byte_offset(
-        levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product11));
+    if constexpr (TransitionBits == kW3TransitionBits) {
+      const uint32_t lane = static_cast<uint32_t>(threadIdx.x) & 31u;
+      uint32_t high00 = qvq_wgmma_high_byte(product00);
+      uint32_t high01 = qvq_wgmma_high_byte(product01);
+      uint32_t high10 = qvq_wgmma_high_byte(product10);
+      uint32_t high11 = qvq_wgmma_high_byte(product11);
+      high00 ^= high00 >> 7;
+      high01 ^= high01 >> 7;
+      high10 ^= high10 >> 7;
+      high11 ^= high11 >> 7;
+      fragment(0) = qvq_wgmma_load_level_shared_lane(levels_shared_base, high00, lane);
+      fragment(1) = qvq_wgmma_load_level_shared_lane(levels_shared_base, high01, lane);
+      fragment(2) = qvq_wgmma_load_level_shared_lane_byte_offset(
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product00), lane);
+      fragment(3) = qvq_wgmma_load_level_shared_lane_byte_offset(
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product01), lane);
+      fragment(4) = qvq_wgmma_load_level_shared_lane(levels_shared_base, high10, lane);
+      fragment(5) = qvq_wgmma_load_level_shared_lane(levels_shared_base, high11, lane);
+      fragment(6) = qvq_wgmma_load_level_shared_lane_byte_offset(
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product10), lane);
+      fragment(7) = qvq_wgmma_load_level_shared_lane_byte_offset(
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product11), lane);
+    } else {
+      fragment(0) = qvq_wgmma_load_level_shared(
+          levels_high_shared_base, qvq_wgmma_high_byte(product00));
+      fragment(1) = qvq_wgmma_load_level_shared(
+          levels_high_shared_base, qvq_wgmma_high_byte(product01));
+      fragment(2) = qvq_wgmma_load_level_shared_byte_offset(
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product00));
+      fragment(3) = qvq_wgmma_load_level_shared_byte_offset(
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product01));
+      fragment(4) = qvq_wgmma_load_level_shared(
+          levels_high_shared_base, qvq_wgmma_high_byte(product10));
+      fragment(5) = qvq_wgmma_load_level_shared(
+          levels_high_shared_base, qvq_wgmma_high_byte(product11));
+      fragment(6) = qvq_wgmma_load_level_shared_byte_offset(
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product10));
+      fragment(7) = qvq_wgmma_load_level_shared_byte_offset(
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product11));
+    }
   } else {
     const uint32_t mixed00 = qvq_wgmma_pgc16_finish(product00);
     const uint32_t mixed01 = qvq_wgmma_pgc16_finish(product01);
@@ -653,9 +711,21 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       cute::group_modes<0, 2>(s_bank_ids),
       cute::group_modes<0, 2>(tiled_bank_ids));
 
-  for (int index = thread; index < 256; index += kTmaThreads) {
-    shared.levels.begin()[index] = levels[index];
-    shared.levels_high.begin()[index] = levels[index ^ (index >> 7)];
+  if constexpr (TransitionBits == kW3TransitionBits) {
+    auto* vectors = reinterpret_cast<uint4*>(shared.levels.begin());
+    for (int entry = thread; entry < 256 * 4; entry += kTmaThreads) {
+      const int index = entry >> 2;
+      const uint16_t bits = reinterpret_cast<const uint16_t*>(levels)[index];
+      const uint32_t pair = static_cast<uint32_t>(bits) |
+          (static_cast<uint32_t>(bits) << 16);
+      const uint4 replicated = make_uint4(pair, pair, pair, pair);
+      vectors[entry] = replicated;
+    }
+  } else {
+    for (int index = thread; index < 256; index += kTmaThreads) {
+      shared.levels.begin()[index] = levels[index];
+      shared.levels_high.begin()[index] = levels[index ^ (index >> 7)];
+    }
   }
 
   __syncthreads();
