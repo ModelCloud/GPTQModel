@@ -198,8 +198,6 @@ the direct-padding production commit.
 
 ## Next experiment
 
-The grouped gate/up input has an analogous boundary: the shared input
-Hadamard produces `Mx2048`, after which runtime allocates/fills `16x2048` and
-copies the valid rows before grouped P32. Phase 18 should test an exact
-H100-only direct-padded input-Hadamard specialization. It may also benefit QKV
-because both groups consume the same M16 Hopper P32 geometry.
+Phase 18 implements the analogous direct-padded shared input Hadamard for both
+grouped gate/up and QKV. See
+`docs/kernels/qvq_a41_r0_phase18_h100_direct_input_padding.md`.

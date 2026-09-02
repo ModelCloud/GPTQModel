@@ -1,0 +1,131 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "2e49f7e9fbb7e1cc17f07e0ac0e16740521f5925",
+  "rows": [
+    {
+      "better_than_separate_padding": true,
+      "bit_exact": true,
+      "direct_padding": {
+        "max_ms": 0.009208319783210754,
+        "mean_ms": 0.009141302400827408,
+        "median_ms": 0.009141759872436523,
+        "min_ms": 0.009104639887809754,
+        "p95_ms": 0.009160320162773133
+      },
+      "eliminated_transient_bytes": 4096,
+      "k": 2048,
+      "m": 1,
+      "separate_padding": {
+        "max_ms": 0.009816960096359253,
+        "mean_ms": 0.009641654407978057,
+        "median_ms": 0.009640960097312927,
+        "min_ms": 0.009617919921875,
+        "p95_ms": 0.009656320214271546
+      },
+      "speedup_vs_separate_padding": 1.0546065781471192
+    },
+    {
+      "better_than_separate_padding": true,
+      "bit_exact": true,
+      "direct_padding": {
+        "max_ms": 0.008050559759140015,
+        "mean_ms": 0.008008339217305184,
+        "median_ms": 0.008008319735527038,
+        "min_ms": 0.007972480058670043,
+        "p95_ms": 0.008032640218734741
+      },
+      "eliminated_transient_bytes": 8192,
+      "k": 2048,
+      "m": 2,
+      "separate_padding": {
+        "max_ms": 0.009739519953727722,
+        "mean_ms": 0.00967739200592041,
+        "median_ms": 0.009678080081939697,
+        "min_ms": 0.009646080136299133,
+        "p95_ms": 0.009694079756736756
+      },
+      "speedup_vs_separate_padding": 1.208503206859381
+    },
+    {
+      "better_than_separate_padding": true,
+      "bit_exact": true,
+      "direct_padding": {
+        "max_ms": 0.007546240091323852,
+        "mean_ms": 0.007480444777011871,
+        "median_ms": 0.007480319738388062,
+        "min_ms": 0.0074726402759552005,
+        "p95_ms": 0.007484800219535828
+      },
+      "eliminated_transient_bytes": 16384,
+      "k": 2048,
+      "m": 4,
+      "separate_padding": {
+        "max_ms": 0.009722239971160888,
+        "mean_ms": 0.009635651198029518,
+        "median_ms": 0.009633920192718505,
+        "min_ms": 0.009611520171165466,
+        "p95_ms": 0.009653760194778442
+      },
+      "speedup_vs_separate_padding": 1.2879021926400334
+    },
+    {
+      "better_than_separate_padding": true,
+      "bit_exact": true,
+      "direct_padding": {
+        "max_ms": 0.007240960001945495,
+        "mean_ms": 0.007207625591754914,
+        "median_ms": 0.007207679748535156,
+        "min_ms": 0.007171840071678161,
+        "p95_ms": 0.007229440212249756
+      },
+      "eliminated_transient_bytes": 32768,
+      "k": 2048,
+      "m": 8,
+      "separate_padding": {
+        "max_ms": 0.009735040068626404,
+        "mean_ms": 0.009668956813216209,
+        "median_ms": 0.009668480157852172,
+        "min_ms": 0.009653760194778442,
+        "p95_ms": 0.0096806401014328
+      },
+      "speedup_vs_separate_padding": 1.341413671968033
+    },
+    {
+      "better_than_separate_padding": true,
+      "bit_exact": true,
+      "direct_padding": {
+        "max_ms": 0.007038080096244812,
+        "mean_ms": 0.006916825568675995,
+        "median_ms": 0.006915839910507202,
+        "min_ms": 0.006909440159797668,
+        "p95_ms": 0.00692031979560852
+      },
+      "eliminated_transient_bytes": 0,
+      "k": 2048,
+      "m": 16,
+      "separate_padding": {
+        "max_ms": 0.007006080150604248,
+        "mean_ms": 0.006934380793571472,
+        "median_ms": 0.0069337600469589235,
+        "min_ms": 0.006928640007972717,
+        "p95_ms": 0.006938880085945129
+      },
+      "speedup_vs_separate_padding": 1.0025911728269614
+    }
+  ],
+  "source_fingerprint": "e0fc491859d37740cd45f230913e1c5fac83a787c09bd1de9b829d5f889f572e",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 200,
+    "warmup": 30
+  },
+  "workload": "exact K=2048 input Hadamard direct-padding experiment"
+}
