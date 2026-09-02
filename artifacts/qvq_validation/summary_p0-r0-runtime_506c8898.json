@@ -1,0 +1,136 @@
+{
+  "schema": "qvq.validation-harness.v1",
+  "status": "pass",
+  "profile": "p0-r0-runtime",
+  "reference_arm": "P0",
+  "candidate_arm": "R0",
+  "repository_revision": "506c8898a39a8bbd9eb97e4ea42b48f7fce39613",
+  "promotable": true,
+  "runs": [
+    {
+      "artifact": "/root/polly-work/qvq-pr84-a100/artifacts/qvq_validation/p0-r0-runtime_seed20260831_506c8898.json",
+      "status": "pass",
+      "dataset": {
+        "calibration_samples": 16,
+        "validation_streams": 3,
+        "validation_samples": 48,
+        "validation_tokens": 5630
+      },
+      "payload_identity_required": true,
+      "payload_identity": true,
+      "reference_effective_bpw": 2.054419024237271,
+      "candidate_effective_bpw": 2.054419024237271,
+      "bootstrap": {
+        "kl_delta_median": 0.0,
+        "kl_ci95": [
+          0.0,
+          0.0
+        ],
+        "top1_delta_median": 0.0,
+        "top1_ci95": [
+          0.0,
+          0.0
+        ],
+        "kl_ci_crosses_zero": true,
+        "top1_ci_crosses_zero": true
+      },
+      "decode": {
+        "1": {
+          "reference_ms": 39.74306071177125,
+          "candidate_ms": 32.61591121554375,
+          "candidate_latency_delta_fraction": -0.17933066473958204,
+          "candidate_speedup": 1.2185175649126405
+        },
+        "2": {
+          "reference_ms": 40.06686247885227,
+          "candidate_ms": 33.70371833443642,
+          "candidate_latency_delta_fraction": -0.15881313760902527,
+          "candidate_speedup": 1.188796502548337
+        },
+        "4": {
+          "reference_ms": 40.62884720042348,
+          "candidate_ms": 34.51598063111305,
+          "candidate_latency_delta_fraction": -0.15045631344535693,
+          "candidate_speedup": 1.1771025031750142
+        },
+        "8": {
+          "reference_ms": 39.45712512359023,
+          "candidate_ms": 34.92794092744589,
+          "candidate_latency_delta_fraction": -0.11478748595995603,
+          "candidate_speedup": 1.1296722359200215
+        }
+      },
+      "runtime_oracle": {
+        "reference_runtime_mode": "plain_per_module_p32",
+        "candidate_runtime_mode": "refactored_grouped_or_plain_p32",
+        "candidate_group_count": 32,
+        "candidate_plain_fallback_count": 0,
+        "packed_runtime_equivalence": {
+          "tokens": 5630,
+          "final_kl": -2.9878201397894965e-09,
+          "logits_relative_l2": 0.0,
+          "max_abs_logits_delta": 0.0,
+          "top1": 1.0,
+          "top5": 1.0,
+          "top10": 1.0,
+          "exact_logits_fraction": 1.0,
+          "limits": {
+            "absolute_final_kl": 1e-06,
+            "logits_relative_l2": 1e-08,
+            "max_abs_logits_delta": 1e-07,
+            "exact_logits_fraction": 1.0,
+            "top1": 1.0,
+            "top5": 1.0,
+            "top10": 1.0
+          }
+        }
+      },
+      "fixed_trellis_correction": null,
+      "seed": 20260831,
+      "engine_command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "/root/polly-work/qvq-pr84-a100/scripts/benchmark_qvq_rotation_full_model_cuda.py",
+        "--arms",
+        "P0,R0",
+        "--bits",
+        "2",
+        "--seed",
+        "20260831",
+        "--layers",
+        "16",
+        "--calibration-samples",
+        "16",
+        "--validation-streams",
+        "3",
+        "--validation-samples",
+        "16",
+        "--sequence-length",
+        "128",
+        "--decode-batches",
+        "1",
+        "2",
+        "4",
+        "8",
+        "--prefill-warmup",
+        "2",
+        "--prefill-iterations",
+        "5",
+        "--decode-warmup",
+        "5",
+        "--decode-iterations",
+        "30",
+        "--module-suite-warmup",
+        "10",
+        "--module-suite-iterations",
+        "30",
+        "--timing-cycles",
+        "5",
+        "--json",
+        "/root/polly-work/qvq-pr84-a100/artifacts/qvq_validation/p0-r0-runtime_seed20260831_506c8898.json",
+        "--runtime-oracle",
+        "plain-refactored",
+        "--local-files-only"
+      ]
+    }
+  ]
+}

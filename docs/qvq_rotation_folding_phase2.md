@@ -575,9 +575,10 @@ Harness artifacts:
 ### Canonical P32 runtime and recovery oracles
 
 Two stricter no-requantization profiles were added after merging
-`origin/main` at `03144a22`. These are runtime oracles, not additional
-quantization arms. Both use the A31/A25-compatible transformed-weight plan and
-materialize one canonical per-module P32 payload:
+`origin/main` at `03144a22`; the bit-exact follow-up is based on latest main
+`60240d22`. These are runtime oracles, not additional quantization arms. Both
+use the A31/A25-compatible transformed-weight plan and materialize one
+canonical per-module P32 payload:
 
 - `P0` executes those bytes through seven ordinary per-module `QVQLinear`
   calls. No shared-transform or grouped-runtime hook is installed, so the
@@ -596,28 +597,60 @@ test with unequal module-local `SU` proves that fallback is exact. This matters
 for any future recovery algorithm that learns input scales independently;
 the current production alignment explicitly freezes `SU` and is SV-only.
 
-The clean-tree `p0-r0-runtime` profile at `02b20151` passed all harness gates:
+The initial clean-tree `p0-r0-runtime` profile at `02b20151` passed the first
+oracle gates, but it exposed a non-trivial same-payload delta: logits relative
+L2 `0.004626`, maximum delta `0.232422`, and Top-1 identity `99.183%`. That
+artifact is retained as diagnosis history, not as the permanent correctness
+baseline.
+
+The source was the direct-P32 split-K occupancy heuristic. On the 124-SM SM80
+host at Llama decode shapes, plain Q used 6 K partitions, plain K/V used 24,
+and concatenated grouped QKV used 4. Gate/up used one partition in both paths
+and was already bit-identical. The QKV FP32 inner-output discrepancy was only
+`1.46e-7--1.70e-7` relative L2 with maximum delta `3.81e-5`, but the different
+sum could cross a BF16 output-recovery rounding boundary and then propagate
+through 16 layers.
+
+Grouped P32 now maps each segment's original `(N tile, split)` work compactly
+inside one launch. Q therefore retains the plain Q partition and K/V retain
+their plain K/V partition; the reducer also consumes the segment-specific
+number of partials in the same order. A real-shape regression covers FP16 and
+BF16 at M=1/2/4/8 and requires zero-tolerance equality for every Q/K/V FP32
+inner output.
+
+The permanent same-payload gates are now:
+
+- absolute KL `<=1e-6` (only softmax/log-softmax evaluation roundoff);
+- logits relative L2 `<=1e-8`;
+- maximum absolute logit delta `<=1e-7`;
+- exact-logit value fraction exactly `100%`;
+- Top-1/5/10 identity each exactly `100%`.
+
+The clean-tree rerun at `506c8898` passed all of those gates:
 
 - 112/112 complete projection records and byte-identical payload hashes;
 - one canonical payload materialization and no candidate fit;
 - 32/32 grouped sibling sets, zero fallback;
 - identical `2.054419024` effective BPW;
-- direct R0-versus-P0 packed logits KL `7.4977e-5`, relative L2 `0.004626`,
-  maximum absolute delta `0.232422`, Top-1 identity `99.183%`, and Top-5/10
-  identity `100%` across 5,630 held-out tokens.
+- direct R0-versus-P0 packed logits relative L2 `0`, maximum absolute delta
+  `0`, exact-logit fraction `100%`, and Top-1/5/10 identity `100%` across
+  5,630 held-out tokens. The reported KL is `-2.99e-9`, numerical evaluation
+  roundoff on identical logits.
 
 Five alternating timing cycles give a material runtime win against plain P32:
 
 | Batch | P0 decode median (p95) ms | R0 decode median (p95) ms | Median delta | p95 delta |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | `37.1427 (39.9424)` | **`30.8287 (32.2134)`** | **-17.00%** | **-19.35%** |
-| 2 | `37.1377 (41.5199)` | **`32.6202 (35.4383)`** | **-12.16%** | **-14.65%** |
-| 4 | `36.9230 (40.2394)` | **`32.0682 (34.2309)`** | **-13.15%** | **-14.93%** |
-| 8 | `36.8466 (40.2223)` | **`31.8748 (33.2723)`** | **-13.49%** | **-17.28%** |
+| 1 | `39.7431 (44.2876)` | **`32.6159 (37.5996)`** | **-17.93%** | **-15.10%** |
+| 2 | `40.0669 (47.0567)` | **`33.7037 (39.4374)`** | **-15.88%** | **-16.19%** |
+| 4 | `40.6288 (47.6857)` | **`34.5160 (40.5514)`** | **-15.05%** | **-14.96%** |
+| 8 | `39.4571 (43.2133)` | **`34.9279 (41.1816)`** | **-11.48%** | **-4.70%** |
 
-B1 throughput rises from `26.92` to `32.44` token/s (`+20.48%`). The isolated
-112-projection suite improves `21.61%` at M1 and `15.67--17.56%` at M2--M8;
-all suite p95 deltas are favorable.
+B1 throughput rises from `25.16` to `30.66` token/s (`+21.85%`). The isolated
+112-projection suite improves `25.74%`, `19.04%`, `21.64%`, and `22.82%` at
+M1/M2/M4/M8 median. Its p95 improves at M1/M2/M4 but regresses `16.08%` at
+M8, so the full-model B8 median is evidence while isolated-suite B8 tail
+latency still needs stabilization.
 
 The `p0c-r0c-correction` profile at `f495e745` also passed. Correction accepted
 374,732 output-channel updates across all 112 modules; every module changed
@@ -650,6 +683,8 @@ quality default.
 
 Oracle artifacts:
 
+- `artifacts/qvq_validation/p0-r0-runtime_seed20260831_506c8898.json`;
+- `artifacts/qvq_validation/summary_p0-r0-runtime_506c8898.json`;
 - `artifacts/qvq_validation/p0-r0-runtime_seed20260831_02b20151.json`;
 - `artifacts/qvq_validation/summary_p0-r0-runtime_02b20151.json`;
 - `artifacts/qvq_validation/p0c-r0c-correction_seed20260831_f495e745.json`;
