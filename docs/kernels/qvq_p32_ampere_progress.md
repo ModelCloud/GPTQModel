@@ -2130,6 +2130,19 @@ improvement** versus fetched main. Split 12 regresses every rate to
 `v19_m16_gate_wide_n128_split{10,12}_deep.json` and
 `v19_m16_gate_wide_n128_split10_verify8000.json`.
 
+The thirty-third v19 progression extends N128 ownership to the M16 long-K
+MLP-down projection. Although N=5120 is smaller than the rejected QKV route,
+K=17408 reuses each activation fragment over enough reduction work to repay
+the second accumulator pair. The matched split-32 narrow control measures
+`0.145408/0.147456/0.146432/0.148480 ms`; the conservative
+200-warmup/8000-iteration candidate measures
+`0.140288/0.143360/0.143360/0.144384 ms`. The affected geomean speedup is
+**1.0287x** (2.790% lower latency), maximum absolute error remains below
+`8.40e-05`, and affected-case log weighting reaches **2.730% cumulative
+improvement** versus fetched main. Artifacts are
+`v19_m16_down_n64_control_deep.json` and
+`v19_m16_down_wide_n128_candidate_{deep,verify8000}.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
