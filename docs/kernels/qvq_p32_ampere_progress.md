@@ -2062,6 +2062,32 @@ while the alternatives measure `0.033792-0.034816 ms`. Diagnostics are
 `v19_m4_fullkv_resplit_s{48_candidate,64_control}_deep.json` and
 `v19_m16_fullkv_resplit_s{24_candidate,32_control,40_candidate}_deep.json`.
 
+The twenty-ninth v19 progression gives the exact M16 full-Q geometry a
+Marlin-style N128 CTA. Each of the four warps now owns two N16 tiles and
+reuses one `ldmatrix` activation fragment across both pairs of `mma.sync`
+instructions, halving activation staging/CTA ownership without relying on
+Hopper TMA. In the candidate-first 200-warmup/8000-iteration reversal, the
+conservative W2/W2.5/W3/W3.5 controls measure
+`0.106496/0.108544/0.108544/0.109568 ms`, while the wide kernel measures
+`0.101376/0.104448/0.104448/0.105472 ms`. The affected geomean speedup is
+**1.0419x** (4.024% lower latency), maximum absolute error stays below
+`3.44e-05`, and affected-case log weighting reaches **2.342% cumulative
+improvement** versus fetched main. Artifacts are
+`v19_m16_fullq_wide_n128_candidate_{deep,verify8000}.json`,
+`v19_m16_fullq_n64_control_verify8000.json`, and the isolated
+`v19_m16_fullq_n64_w35_control_verify8000_retry.json` that replaces the
+control sweep's contaminated `0.245760 ms` W3.5 interval.
+
+Hoisting `ldmatrix` before decode for every WMMA route was narrowed out: it
+cost M16 linear-QKV W2 and W3.5 one event tick. The retained template hoists
+and reuses the fragment only for the two-tile specialization; the original
+one-tile schedule remains intact. The QKV W2.5 isolated retry reproduces
+`0.092160 ms`, and the M8 MLP-gate/up canary matches or improves all four
+accepted medians. Diagnostics are
+`v19_wide_n128_m16_qkv_nonregression_{deep,v2_deep}.json`,
+`v19_wide_n128_m16_qkv_w25_nonregression_retry8000.json`, and
+`v19_wide_n128_m8_gate_nonregression_deep.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
