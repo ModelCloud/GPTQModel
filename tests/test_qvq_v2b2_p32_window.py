@@ -190,8 +190,10 @@ def test_p32_window_tma_wgmma_matches_exact_matrix(bits):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache():
     properties = torch.cuda.get_device_properties(0)
-    if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
-        pytest.skip("Hopper P32 QVQLinear dispatch is H200-specific")
+    if (properties.major, properties.minor) != (9, 0) or not (
+        "H100" in properties.name or "H200" in properties.name
+    ):
+        pytest.skip("Hopper P32 QVQLinear dispatch requires H100 or H200 SM90")
     bits = 3.0
     in_features = out_features = 256
     tile_count = (in_features // 16) * (out_features // 16)

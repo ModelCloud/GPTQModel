@@ -2347,20 +2347,21 @@ class BaseQModel(nn.Module):
         """Fuse compatible quantized projection groups for inference.
 
         This is an opt-in step after `GPTQModel.load(...)`. It scans the
-        underlying `transformers` model for `q_proj`/`k_proj`/`v_proj` and
-        `gate_proj`/`up_proj` groups that share the same GPTQ backend,
-        `bits`, `group_size`, `g_idx`, and device, and replaces their forward
-        methods with a single concatenated GEMM. The fused state is kept only in
-        memory and is not persisted to disk on `save()`.
+        underlying `transformers` model for architecture-declared QKV and
+        gate/up groups and replaces their forward methods with grouped
+        inference execution. QVQ V2B2-P32 uses the exact A41/R0 Hopper
+        coordinator (one shared input transform and one segmented kernel).
+        Compatible GPTQ modules that share their backend, bits, group size,
+        `g_idx`, and device use a concatenated GEMM. Fused state is kept only
+        in memory and is not persisted to disk on `save()`.
 
         Args:
             qkv: Whether to fuse attention QKV projections.
             gate_up: Whether to fuse MLP gate/up projections.
-            free_original_weights: Whether to delete the per-member packed
-                weight buffers after the fused kernel owns a concatenated copy.
-                This roughly halves the fused group's memory footprint but means
-                `save()` cannot serialize the fused model; call `fuse()` again
-                with `free_original_weights=False` if you need to save.
+            free_original_weights: Whether GPTQ fusion may delete per-member
+                packed buffers after its kernel owns a concatenated copy. QVQ
+                always retains canonical buffers for exact fallback and save;
+                its grouped window replaces equal-sized child window caches.
             gate_up_activation: Whether to also fuse the MLP activation
                 (SiLU, GeLU, ReLU, tanh, etc.) and down projection into a single
                 gate/up/down pass when the MLP structure can be detected. This
@@ -2378,10 +2379,11 @@ class BaseQModel(nn.Module):
 
         if free_original_weights:
             log.warn.once(
-                "BaseQModel.fuse(free_original_weights=True) removes per-member "
-                "packed weight buffers. `model.save()` and any code that reads "
-                "member `.qweight`/`.scales` buffers will fail after this call. "
-                "Pass free_original_weights=False if you need to save or inspect."
+                "BaseQModel.fuse(free_original_weights=True) may remove per-member "
+                "GPTQ packed weight buffers. `model.save()` and code that reads "
+                "member `.qweight`/`.scales` can fail afterward. QVQ canonical "
+                "buffers are retained. Pass free_original_weights=False if a "
+                "GPTQ model must remain saveable or inspectable."
             )
 
         from ..nn_modules.fused_quant_linear import (
@@ -2389,6 +2391,7 @@ class BaseQModel(nn.Module):
             install_fused_gate_up,
             install_fused_qkv,
         )
+        from ..nn_modules.qvq_grouped_runtime import install_qvq_hopper_groups
 
         qkv_candidates = None
         gateup_candidates = None
@@ -2403,14 +2406,21 @@ class BaseQModel(nn.Module):
                 pass
 
         counts: Dict[str, int] = {}
+        qvq_counts = install_qvq_hopper_groups(
+            self.model,
+            qkv_candidates=qkv_candidates,
+            gate_up_candidates=gateup_candidates,
+            qkv=qkv,
+            gate_up=gate_up,
+        )
         if qkv:
-            counts["qkv"] = install_fused_qkv(
+            counts["qkv"] = qvq_counts.get("qkv", 0) + install_fused_qkv(
                 self.model,
                 candidates=qkv_candidates,
                 free_original_weights=free_original_weights,
             )
         if gate_up:
-            counts["gate_up"] = install_fused_gate_up(
+            counts["gate_up"] = qvq_counts.get("gate_up", 0) + install_fused_gate_up(
                 self.model,
                 candidates=gateup_candidates,
                 free_original_weights=free_original_weights,

@@ -1,0 +1,566 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+"""Production A41/R0 grouped V2B2-P32 execution on Hopper.
+
+The architecture layer declares ordered same-input projection names.  R0
+accepts only groups whose canonical QVQ state proves that the complete input
+transform is identical.  The first sibling then performs one ``SU -> H``
+transform and one segmented Hopper launch; output recovery stays child-local.
+
+This module owns transient inference state only.  Checkpoint buffers remain on
+the original :class:`QVQLinear` children and every unsupported runtime case
+uses the unmodified child forward method.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from types import MethodType
+from typing import Any
+from weakref import ref
+
+import torch
+from torch import nn
+
+from ..quantization.qvq import (
+    pack_qvq_binary_bank_ids,
+    repack_p32_planar_to_window,
+    unpack_qvq_binary_bank_ids,
+)
+from ..quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
+from ..utils.qvq_wgmma_cuda import (
+    QVQHopperGroupedP32Payload,
+    qvq_p32_window_wgmma_group_plan,
+    qvq_p32_window_wgmma_grouped_packed,
+)
+from .qlinear.qvq import QVQLinear
+
+_QKV_CANDIDATES: tuple[tuple[str, ...], ...] = (
+    ("q_proj", "k_proj", "v_proj"),
+    ("wq", "wk", "wv"),
+    ("query", "key", "value"),
+    ("q", "k", "v"),
+)
+_GATE_UP_CANDIDATES: tuple[tuple[str, ...], ...] = (
+    ("gate_proj", "up_proj"),
+    ("w2", "w1"),
+    ("w1", "w3"),
+    ("gate", "up"),
+)
+
+
+class _R0Fallback(RuntimeError):
+    """An expected exactness/dispatch rejection, not a kernel failure."""
+
+
+def _tensor_version(tensor: torch.Tensor) -> int | None:
+    try:
+        return tensor._version
+    except RuntimeError:
+        # Inference tensors do not expose mutation counters.  Canonical QVQ
+        # buffers are made versioned by post_init(), but activation tensors may
+        # legitimately be inference tensors.  Identity still prevents sibling
+        # cycles from crossing activation objects.
+        return None
+
+
+def _same_tensor_bits(left: torch.Tensor, right: torch.Tensor) -> bool:
+    return (
+        left.dtype == right.dtype
+        and left.device == right.device
+        and tuple(left.shape) == tuple(right.shape)
+        and torch.equal(left, right)
+    )
+
+
+def _source_key(children: Sequence[QVQLinear]) -> tuple[Any, ...]:
+    key: list[Any] = []
+    for child in children:
+        for name in ("trellis", "bank_ids", "bank_alt_id", "SU"):
+            tensor = getattr(child, name, None)
+            key.extend(
+                (id(tensor), None if tensor is None else _tensor_version(tensor))
+            )
+        key.extend(
+            (
+                float(child.bits),
+                int(child.in_features),
+                int(child.out_features),
+                str(child.codebook_version).strip().lower(),
+                int(child.vector_size),
+                int(child.trellis_window),
+                int(child.bank_count),
+                bool(child.v2b2_p32),
+            )
+        )
+    return tuple(key)
+
+
+def _validate_static_group(
+    children: Sequence[nn.Module],
+    *,
+    allow_installed: bool = False,
+) -> tuple[QVQLinear, ...]:
+    if len(children) not in (2, 3) or not all(
+        isinstance(child, QVQLinear) for child in children
+    ):
+        raise _R0Fallback("members are not a two- or three-child QVQLinear group")
+    resolved = tuple(children)
+    first = resolved[0]
+    if not allow_installed and any(
+        getattr(child, "_gptqmodel_qvq_grouped_runtime", None) is not None
+        for child in resolved
+    ):
+        raise _R0Fallback("group is already installed")
+    if any(
+        getattr(child, "_gptqmodel_fused_group", None) is not None for child in resolved
+    ):
+        raise _R0Fallback("child already belongs to another fused group")
+    if any(
+        child.training or getattr(child, "adapter", None) is not None
+        for child in resolved
+    ):
+        raise _R0Fallback("training and adapters retain ordinary per-child execution")
+    if any(
+        not child.v2b2_p32
+        or child.vector_size != 2
+        or child.trellis_window != 16
+        or child.bank_count != 2
+        for child in resolved
+    ):
+        raise _R0Fallback("group requires V2B2-P32 vector-size-2 children")
+    if qvq_transition_bits(first.bits, vector_size=2) not in (4, 5, 6, 7):
+        raise _R0Fallback("grouped Hopper supports W2 through W3.5")
+    if any(
+        child.in_features != first.in_features
+        or float(child.bits) != float(first.bits)
+        or child.codebook_version != first.codebook_version
+        or child.trellis.device != first.trellis.device
+        for child in resolved[1:]
+    ):
+        raise _R0Fallback("children disagree on K, rate, codebook, or device")
+    if first.in_features <= 0 or first.in_features % 256:
+        raise _R0Fallback("grouped Hopper requires K divisible by 256")
+    if any(child.out_features <= 0 or child.out_features % 256 for child in resolved):
+        raise _R0Fallback("grouped Hopper requires every child N divisible by 256")
+    if any(
+        child.trellis.device.type == "meta"
+        or child.bank_ids is None
+        or child.bank_ids.device != child.trellis.device
+        or child.bank_alt_id is None
+        or child.bank_alt_id.device != child.trellis.device
+        for child in resolved
+    ):
+        raise _R0Fallback("grouped Hopper requires concrete co-located P32 payloads")
+    if any(not _same_tensor_bits(first.SU, child.SU) for child in resolved[1:]):
+        raise _R0Fallback("R0 requires bit-identical SU vectors")
+    return resolved
+
+
+@dataclass
+class QVQGroupedRuntimeTelemetry:
+    category: str
+    members: tuple[str, ...]
+    grouped_launches: int = 0
+    sibling_cache_hits: int = 0
+    plain_fallbacks: int = 0
+    payload_builds: int = 0
+    payload_drops: int = 0
+    stale_cycles: int = 0
+    grouped_window_bytes: int = 0
+    grouped_selector_bytes: int = 0
+    child_window_bytes_avoided: int = 0
+    last_fallback_reason: str | None = None
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "category": self.category,
+            "members": self.members,
+            "grouped_launches": self.grouped_launches,
+            "sibling_cache_hits": self.sibling_cache_hits,
+            "plain_fallbacks": self.plain_fallbacks,
+            "payload_builds": self.payload_builds,
+            "payload_drops": self.payload_drops,
+            "stale_cycles": self.stale_cycles,
+            "grouped_window_bytes": self.grouped_window_bytes,
+            "grouped_selector_bytes": self.grouped_selector_bytes,
+            "child_window_bytes_avoided": self.child_window_bytes_avoided,
+            "last_fallback_reason": self.last_fallback_reason,
+        }
+
+
+class QVQHopperGroupedRuntime:
+    """One ordered, fail-closed production sibling group."""
+
+    def __init__(
+        self,
+        children: Sequence[QVQLinear],
+        member_names: Sequence[str],
+        *,
+        category: str,
+    ) -> None:
+        self._refs = tuple(ref(child) for child in children)
+        self.member_names = tuple(member_names)
+        self.category = str(category)
+        self.telemetry = QVQGroupedRuntimeTelemetry(self.category, self.member_names)
+        self._payload: QVQHopperGroupedP32Payload | None = None
+        self._payload_source_key: tuple[Any, ...] | None = None
+        self._input: torch.Tensor | None = None
+        self._input_version: int | None = None
+        self._outputs: tuple[torch.Tensor, ...] | None = None
+        self._next_index = 0
+
+    def _children(self) -> tuple[QVQLinear, ...]:
+        children = tuple(child_ref() for child_ref in self._refs)
+        if any(child is None for child in children):
+            raise RuntimeError("QVQ grouped runtime lost a child module")
+        return children  # type: ignore[return-value]
+
+    def _clear_cycle(self) -> None:
+        self._input = None
+        self._input_version = None
+        self._outputs = None
+        self._next_index = 0
+
+    def invalidate(self) -> None:
+        """Release all transient state after source/device ownership changes."""
+
+        self._clear_cycle()
+        if self._payload is not None:
+            self.telemetry.payload_drops += 1
+        self._payload = None
+        self._payload_source_key = None
+        self.telemetry.grouped_window_bytes = 0
+        self.telemetry.grouped_selector_bytes = 0
+        self.telemetry.child_window_bytes_avoided = 0
+
+    def _fallback(
+        self, member_index: int, x: torch.Tensor, reason: str
+    ) -> torch.Tensor:
+        self._drop_payload_before_plain()
+        self.telemetry.plain_fallbacks += 1
+        self.telemetry.last_fallback_reason = reason
+        child = self._children()[member_index]
+        original = child._gptqmodel_qvq_grouped_original_forward
+        return original(x)
+
+    def _drop_payload_before_plain(self) -> None:
+        # A plain child may lazily build its own continuous-window cache.  Drop
+        # the grouped window first so an unsupported prefill cannot make both
+        # representations persistent at once.
+        if self._payload is not None:
+            self.invalidate()
+
+    def _runtime_eligible(self, x: torch.Tensor) -> str | None:
+        children = self._children()
+        if not isinstance(x, torch.Tensor):
+            return "input is not a tensor"
+        if x.requires_grad or any(child.training for child in children):
+            return "autograd/training requires the original forward"
+        if any(getattr(child, "adapter", None) is not None for child in children):
+            return "an attached adapter requires the original forward"
+        if x.device.type != "cuda" or x.dtype != torch.float16:
+            return "grouped Hopper currently requires FP16 CUDA activations"
+        if x.shape[-1] != children[0].in_features or x.numel() == 0:
+            return "input shape is unsupported"
+        rows = x.numel() // children[0].in_features
+        if not 1 <= rows <= 16:
+            return "grouped Hopper decode requires one through sixteen rows"
+        if any(child.trellis.device != x.device for child in children):
+            return "activation and grouped payload devices differ"
+        properties = torch.cuda.get_device_properties(x.device)
+        if (properties.major, properties.minor) != (9, 0):
+            return "grouped runtime requires Hopper SM90"
+        return None
+
+    def _packed_selectors(self, child: QVQLinear) -> torch.Tensor:
+        tile_count = (child.in_features // 16) * (child.out_features // 16)
+        return pack_qvq_binary_bank_ids(
+            unpack_qvq_binary_bank_ids(child.bank_ids, tile_count * 8)
+        ).to(device=child.trellis.device)
+
+    def _build_payload(
+        self,
+        children: tuple[QVQLinear, ...],
+        source_key: tuple[Any, ...],
+    ) -> QVQHopperGroupedP32Payload:
+        # Re-run R0 only when a canonical source identity/version changed.  The
+        # equality check may synchronize and therefore never occurs in the
+        # warmed CUDA-graph capture path.
+        _validate_static_group(children, allow_installed=True)
+        device = children[0].trellis.device
+        placeholder = torch.empty(
+            (16, children[0].in_features), device=device, dtype=torch.float16
+        )
+        selectors = tuple(self._packed_selectors(child) for child in children)
+        alt_ids = tuple(int(child.bank_alt_id.detach().item()) for child in children)
+        if any(not 1 <= alt_id <= 3 for alt_id in alt_ids):
+            raise _R0Fallback("V2B2-P32 alternative bank IDs must remain in [1, 3]")
+        from ..utils.qvq_cuda import _pgc16_levels
+
+        plan = qvq_p32_window_wgmma_group_plan(
+            placeholder,
+            tuple(child.trellis for child in children),
+            _pgc16_levels(device, children[0].codebook_version),
+            selectors,
+            children[0].bits,
+            out_features=tuple(child.out_features for child in children),
+            bank_alt_ids=alt_ids,
+            split_counts=None,
+        )
+        if any(segment.split_count != 1 for segment in plan.segments):
+            raise _R0Fallback(
+                "a child requires split-K, whose reduction order cannot be fused exactly"
+            )
+
+        k_tiles = children[0].in_features // 16
+        words_per_tile = qvq_words_per_tile(
+            children[0].bits, weight_count=256, vector_size=2
+        )
+        planar = torch.cat(
+            tuple(
+                child.trellis.reshape(k_tiles, child.out_features // 16, words_per_tile)
+                for child in children
+            ),
+            dim=1,
+        ).reshape(-1, words_per_tile)
+        grouped_window = repack_p32_planar_to_window(planar, bits=children[0].bits)
+        grouped_selectors = (
+            torch.cat(
+                tuple(
+                    child_selectors.reshape(k_tiles, child.out_features // 16)
+                    for child, child_selectors in zip(children, selectors, strict=True)
+                ),
+                dim=1,
+            )
+            .reshape(-1)
+            .contiguous()
+        )
+        if source_key != _source_key(children):
+            raise RuntimeError("QVQ grouped canonical payload changed during repack")
+        payload = QVQHopperGroupedP32Payload(
+            trellis=grouped_window,
+            bank_ids=grouped_selectors,
+            plan=plan,
+        )
+
+        # A grouped window has exactly the same number of words as the child
+        # windows it replaces.  Clear any plain-path windows/selectors left by
+        # an earlier prefill before publishing the grouped payload.
+        avoided = 0
+        for child in children:
+            cached = child._qvq_cuda_window_cache
+            if cached is not None:
+                avoided += cached[3].numel() * cached[3].element_size()
+            else:
+                avoided += child.trellis.numel() * child.trellis.element_size()
+            with child._qvq_cuda_bank_cache_lock:
+                child._qvq_cuda_window_cache = None
+                child._qvq_cuda_bank_cache = None
+        self.telemetry.payload_builds += 1
+        self.telemetry.grouped_window_bytes = (
+            grouped_window.numel() * grouped_window.element_size()
+        )
+        self.telemetry.grouped_selector_bytes = (
+            grouped_selectors.numel() * grouped_selectors.element_size()
+        )
+        self.telemetry.child_window_bytes_avoided = avoided
+        return payload
+
+    def _ensure_payload(self) -> QVQHopperGroupedP32Payload:
+        children = self._children()
+        source_key = _source_key(children)
+        if self._payload is not None and source_key == self._payload_source_key:
+            return self._payload
+        self.invalidate()
+        payload = self._build_payload(children, source_key)
+        self._payload = payload
+        self._payload_source_key = source_key
+        return payload
+
+    def _execute(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        children = self._children()
+        rows = x.numel() // children[0].in_features
+        x_2d = x.reshape(rows, children[0].in_features).to(torch.float16)
+        transformed = children[0]._qvq_prepare_inference_input(x_2d, torch.float16)
+        if rows == 16:
+            padded = transformed.contiguous()
+        else:
+            padded = torch.zeros(
+                (16, children[0].in_features), device=x.device, dtype=torch.float16
+            )
+            padded[:rows].copy_(transformed)
+        payload = self._ensure_payload()
+        from ..utils.qvq_cuda import _pgc16_levels
+
+        inner_outputs = qvq_p32_window_wgmma_grouped_packed(
+            padded,
+            payload,
+            _pgc16_levels(x.device, children[0].codebook_version),
+        )
+        outputs = []
+        for child, inner in zip(children, inner_outputs, strict=True):
+            recovered = child._qvq_recover_inference_output(inner[:rows], torch.float16)
+            outputs.append(
+                recovered.reshape(*x.shape[:-1], child.out_features).to(x.dtype)
+            )
+        return tuple(outputs)
+
+    def forward(self, member_index: int, x: torch.Tensor) -> torch.Tensor:
+        if not 0 <= member_index < len(self._refs):
+            raise IndexError("QVQ grouped runtime member index is out of range")
+
+        if member_index == 0:
+            if self._outputs is not None:
+                self.telemetry.stale_cycles += 1
+                self._clear_cycle()
+            rejection = self._runtime_eligible(x)
+            if rejection is not None:
+                return self._fallback(member_index, x, rejection)
+            try:
+                outputs = self._execute(x)
+            except _R0Fallback as exc:
+                return self._fallback(member_index, x, str(exc))
+            self.telemetry.grouped_launches += 1
+            self.telemetry.last_fallback_reason = None
+            self._input = x
+            self._input_version = _tensor_version(x)
+            self._outputs = outputs
+            self._next_index = 1
+            return outputs[0]
+
+        if self._outputs is None:
+            return self._fallback(
+                member_index, x, "sibling arrived without an active primary"
+            )
+        if (
+            member_index != self._next_index
+            or self._input is not x
+            or self._input_version != _tensor_version(x)
+        ):
+            self.telemetry.stale_cycles += 1
+            self._clear_cycle()
+            return self._fallback(
+                member_index, x, "sibling order, identity, or mutation version changed"
+            )
+
+        output = self._outputs[member_index]
+        self.telemetry.sibling_cache_hits += 1
+        self._next_index += 1
+        if self._next_index == len(self._refs):
+            self._clear_cycle()
+        return output
+
+
+@torch._dynamo.disable
+def _qvq_grouped_projection_forward(self: QVQLinear, x: torch.Tensor) -> torch.Tensor:
+    runtime = self._gptqmodel_qvq_grouped_runtime
+    return runtime.forward(self._gptqmodel_qvq_grouped_index, x)
+
+
+def _install_candidates(
+    model: nn.Module,
+    candidates: Sequence[tuple[str, ...]],
+    *,
+    category: str,
+) -> int:
+    installed = 0
+    # Materialize the traversal before replacing methods.  The runtime object
+    # is deliberately not an nn.Module, so it never alters the model tree.
+    for parent_name, parent in tuple(model.named_modules()):
+        del parent_name
+        for member_names in candidates:
+            members = tuple(getattr(parent, name, None) for name in member_names)
+            try:
+                children = _validate_static_group(members)
+            except (AttributeError, TypeError, ValueError, _R0Fallback):
+                continue
+            runtime = QVQHopperGroupedRuntime(
+                children,
+                member_names,
+                category=category,
+            )
+            for index, child in enumerate(children):
+                child._gptqmodel_qvq_grouped_runtime = runtime
+                child._gptqmodel_qvq_grouped_index = index
+                child._gptqmodel_qvq_grouped_original_forward = child.forward
+                child.forward = MethodType(_qvq_grouped_projection_forward, child)
+            installed += 1
+    return installed
+
+
+def install_qvq_hopper_groups(
+    model: nn.Module,
+    *,
+    qkv_candidates: Sequence[tuple[str, ...]] | None = None,
+    gate_up_candidates: Sequence[tuple[str, ...]] | None = None,
+    qkv: bool = True,
+    gate_up: bool = True,
+) -> dict[str, int]:
+    """Install exact architecture-declared QVQ groups for production inference."""
+
+    counts: dict[str, int] = {}
+    if qkv:
+        counts["qkv"] = _install_candidates(
+            model,
+            _QKV_CANDIDATES if qkv_candidates is None else qkv_candidates,
+            category="qkv",
+        )
+    if gate_up:
+        counts["gate_up"] = _install_candidates(
+            model,
+            _GATE_UP_CANDIDATES if gate_up_candidates is None else gate_up_candidates,
+            category="gate_up",
+        )
+    return counts
+
+
+def qvq_grouped_runtime_telemetry(model: nn.Module) -> list[dict[str, Any]]:
+    """Return one telemetry snapshot for every unique installed QVQ group."""
+
+    seen: set[int] = set()
+    snapshots = []
+    for module in model.modules():
+        runtime = getattr(module, "_gptqmodel_qvq_grouped_runtime", None)
+        if runtime is None or id(runtime) in seen:
+            continue
+        seen.add(id(runtime))
+        snapshots.append(runtime.telemetry.snapshot())
+    return snapshots
+
+
+def uninstall_qvq_hopper_groups(model: nn.Module) -> int:
+    """Restore original child forwards and release grouped transient buffers."""
+
+    seen: set[int] = set()
+    removed = 0
+    for module in model.modules():
+        runtime = getattr(module, "_gptqmodel_qvq_grouped_runtime", None)
+        if runtime is None:
+            continue
+        if id(runtime) not in seen:
+            runtime.invalidate()
+            seen.add(id(runtime))
+            removed += 1
+        original = getattr(module, "_gptqmodel_qvq_grouped_original_forward", None)
+        if original is not None:
+            module.forward = original
+        for name in (
+            "_gptqmodel_qvq_grouped_runtime",
+            "_gptqmodel_qvq_grouped_index",
+            "_gptqmodel_qvq_grouped_original_forward",
+        ):
+            if hasattr(module, name):
+                delattr(module, name)
+    return removed
+
+
+__all__ = [
+    "QVQGroupedRuntimeTelemetry",
+    "QVQHopperGroupedRuntime",
+    "install_qvq_hopper_groups",
+    "qvq_grouped_runtime_telemetry",
+    "uninstall_qvq_hopper_groups",
+]

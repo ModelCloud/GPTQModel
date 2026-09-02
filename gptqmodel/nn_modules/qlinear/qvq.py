@@ -664,6 +664,13 @@ class QVQLinear(BaseQuantLinear):
                 self._qvq_mps_bank_ids = self._prepare_mps_bank_ids(self.trellis.device)
 
     def _apply(self, fn):
+        grouped_runtime = getattr(self, "_gptqmodel_qvq_grouped_runtime", None)
+        if grouped_runtime is not None:
+            # The grouped Hopper payload is transient state outside the module
+            # tree.  Invalidate it before Module._apply replaces any canonical
+            # child buffers so a device/dtype move cannot retain VRAM on the
+            # previous device or publish a payload under stale source keys.
+            grouped_runtime.invalidate()
         self._qvq_mps_compander = None
         self._qvq_mps_bank_ids = None
         self._qvq_mps_bank_ids_cache = None
@@ -943,7 +950,9 @@ class QVQLinear(BaseQuantLinear):
                 and qvq_transition_bits(self.bits, vector_size=2) in (4, 5, 6, 7)
             ):
                 properties = torch.cuda.get_device_properties(x.device)
-                if properties.major == 9 and properties.minor == 0 and "H200" in properties.name:
+                if properties.major == 9 and properties.minor == 0 and (
+                    "H100" in properties.name or "H200" in properties.name
+                ):
                     from ...utils.qvq_cuda import _pgc16_levels
                     from ...utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_m16_tma
 
@@ -1095,29 +1104,54 @@ class QVQLinear(BaseQuantLinear):
             if self.bias is not None:
                 output = output + self.bias.to(compute_dtype)
         else:
-            transformed = _qvq_hadamard_fused(
-                x_2d,
-                pre_scale=self._cached_cast("SU", compute_dtype),
-                scale_mode=(
-                    2
-                    if compute_dtype == torch.float16 and self.in_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
-                    else 1
-                ),
-            )
+            transformed = self._qvq_prepare_inference_input(x_2d, compute_dtype)
             output = self._inner_forward(transformed)
-            output_dtype = output.dtype
-            output = _qvq_hadamard_fused(
-                output,
-                post_scale=self._cached_cast("SV", compute_dtype, output_dtype),
-                bias=self._cached_cast("bias", compute_dtype, output_dtype),
-                scale_mode=(
-                    3
-                    if output_dtype == torch.float32
-                    and self.out_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
-                    else 4 if output_dtype == torch.float32 else 0
-                ),
-            )
+            output = self._qvq_recover_inference_output(output, compute_dtype)
         return output
+
+    def _qvq_prepare_inference_input(
+        self,
+        x_2d: torch.Tensor,
+        compute_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Apply the exact inference-side ``SU -> Hadamard`` transform.
+
+        Grouped execution calls this method once on the first child after R0
+        has proved that every sibling owns a bit-identical ``SU``.  Keeping the
+        operation here prevents the production coordinator from duplicating
+        or subtly reordering QVQLinear's numerical contract.
+        """
+
+        return _qvq_hadamard_fused(
+            x_2d,
+            pre_scale=self._cached_cast("SU", compute_dtype),
+            scale_mode=(
+                2
+                if compute_dtype == torch.float16
+                and self.in_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                else 1
+            ),
+        )
+
+    def _qvq_recover_inference_output(
+        self,
+        output: torch.Tensor,
+        compute_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Apply the exact child-local ``Hadamard -> SV -> bias`` epilogue."""
+
+        output_dtype = output.dtype
+        return _qvq_hadamard_fused(
+            output,
+            post_scale=self._cached_cast("SV", compute_dtype, output_dtype),
+            bias=self._cached_cast("bias", compute_dtype, output_dtype),
+            scale_mode=(
+                3
+                if output_dtype == torch.float32
+                and self.out_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                else 4 if output_dtype == torch.float32 else 0
+            ),
+        )
 
 
 def qvq_dense_oracle_forward(
