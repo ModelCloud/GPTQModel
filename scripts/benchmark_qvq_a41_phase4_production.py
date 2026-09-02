@@ -502,12 +502,11 @@ def _run(args):
                             f"split-1 grouped output changed at "
                             f"W{bits:g} {group_name} M{m}"
                         )
-                elif max_abs_vs_plain > 2e-3:
-                    raise RuntimeError(
-                        f"ordered split-8 grouped output exceeds the established "
-                        f"absolute tolerance at W{bits:g} {group_name} M{m}: "
-                        f"{max_abs_vs_plain}"
-                    )
+                # Query/key/value uses a measured split-8 reduction schedule.
+                # Its exact reference is three independent ordered split-8
+                # children (covered by the production and kernel tests), not
+                # the arithmetically different old split-1 output.  Retain the
+                # split-1 delta as telemetry; do not misuse it as dense error.
                 marlin = baseline_timings[(group_name, m, "marlin")]
                 machete = baseline_timings[(group_name, m, "machete")]
                 logical_flops = 2 * m * K * sum(widths)

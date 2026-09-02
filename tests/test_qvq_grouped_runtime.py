@@ -303,9 +303,10 @@ def _independent_ordered_qkv_reference(
         ("gate_up", (8192, 8192)),
     ),
 )
+@pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
 @pytest.mark.parametrize("logical_m", (1, 2, 4, 8, 16))
 def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
-    category, widths, logical_m
+    category, widths, bits, logical_m
 ):
     device = _h100_device()
     if device is None:
@@ -326,7 +327,7 @@ def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
             name,
             in_features=in_features,
             out_features=width,
-            bits=3,
+                bits=bits,
             su=shared,
             alt_id=index + 1,
             seed=110 + index,
