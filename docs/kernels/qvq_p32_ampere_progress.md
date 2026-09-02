@@ -1868,6 +1868,23 @@ and MLP-down W3/W3.5 losses were excluded. MLP-down W2.5 was narrowed out
 after its screen win became neutral in the deep pair. Affected-case log
 weighting now reaches **1.793% cumulative improvement** versus fetched main.
 
+The twentieth v19 progression extends the direct pair-wrap predicate to
+five selected M2 scalar cases. In matched 60-warmup/2000-iteration runs,
+full-KV W3 improves from `0.034816` to `0.033792 ms`, MLP-gate/up W3
+improves from `0.098304` to `0.097280 ms`, and long-K MLP-down
+W2.5/W3/W3.5 improves from `0.100352/0.102400/0.105472 ms` to
+`0.096256/0.097280/0.100352 ms`. The affected geomean speedup is
+**1.0373x** (3.595% lower latency), with maximum absolute error below
+`3.91e-05`, and the complete 38-case Ampere suite passes. Matched artifacts
+use the `v19_wrap_m2_selected_{control,candidate}_` prefix under
+`artifacts/a100_p32_window/`. The broad
+`v19_wrap_m2_all_{control,candidate}.json` screen also suggested full-KV
+W2/W3.5 and projection wins, but the deep pair made those regress or tie;
+full-Q W2.5/W3.5, attention-out W3.5, linear-QKV W2.5/W3.5, linear-Z W3.5,
+and MLP-gate/up W2.5/W3.5 were already screen regressions. All are excluded.
+Affected-case log weighting now reaches **1.926% cumulative improvement**
+versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
