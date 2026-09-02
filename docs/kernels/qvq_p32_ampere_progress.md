@@ -2300,14 +2300,17 @@ fetched main. Artifacts are `v19_m16_fullq_pow2_control.json` and
 `v19_m16_fullq_pow2_candidate.json`.
 
 The same W2 mask was screened on M16 attention-out and linear-QKV, plus M8
-attention-out and linear-Z. M16 attention and M8 linear-Z tied all four rates.
-M16 linear-QKV tied W2/W2.5/W3; an apparent W3.5 one-tick improvement did not
+attention-out, linear-Z, and MLP-gate/up. M16 attention and M8 linear-Z tied
+all four rates. M8 gate/up W2 tied, while W2.5 appeared one tick faster and
+W3.5 one tick slower; since the specialization is W2-only, those unrelated
+rate changes are treated as timer noise and the probe is rejected. M16
+linear-QKV tied W2/W2.5/W3; an apparent W3.5 one-tick improvement did not
 identify a changed instruction path because the power-of-two specialization is
 W2-only. M8 attention tied W2/W2.5/W3 and lost one W3.5 tick. None of these
 probes is dispatched. Diagnostics are
 `v19_m16_attention_pow2_{control,candidate}.json`,
 `v19_m16_qkv_pow2_{control,candidate,verify8000}.json`, and
-`v19_m8_{attention,linearz}_pow2_{control,candidate}.json`.
+`v19_m8_{attention,linearz,gate}_pow2_{control,candidate}.json`.
 
 The forty-seventh v19 progression applies the exact power-of-two circular-word
 wrap to W2 in the widened M16 long-K MLP-down tuple
