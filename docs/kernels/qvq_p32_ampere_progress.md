@@ -2088,6 +2088,17 @@ accepted medians. Diagnostics are
 `v19_wide_n128_m16_qkv_w25_nonregression_retry8000.json`, and
 `v19_wide_n128_m8_gate_nonregression_deep.json`.
 
+The thirtieth v19 progression retunes the wider M16 full-Q CTA from split
+16 to split 10 and pins the known geometry so it bypasses first-use
+autotuning. The default in-memory tuner independently selected split 10 at
+all four rates, and the fixed 200-warmup/8000-iteration confirmation
+reproduces `0.101376/0.103424/0.103424/0.105472 ms`. Relative to the
+pre-wide split-16 controls, the finalized affected geomean speedup is
+**1.0471x** (4.496% lower latency), and affected-case log weighting reaches
+**2.356% cumulative improvement** versus fetched main. Diagnostics are
+`v19_m16_fullq_wide_n128_autotune_audit_deep.json` and
+`v19_m16_fullq_wide_n128_split10_verify8000.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
