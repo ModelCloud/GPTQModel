@@ -1833,6 +1833,25 @@ restore their controls at `0.032768` and `0.092160 ms`. Artifacts use the
 Affected-case log weighting now reaches **1.608% cumulative improvement**
 versus fetched main.
 
+The eighteenth v19 progression extends the direct pair-wrap predicate to
+15 selected M8 WMMA cases. The retained set is full-Q W3/W3.5, all four
+linear-QKV and linear-Z rates, all four MLP-down rates, and MLP-gate/up
+W3.5. Thirteen medians improve and two tie: full-Q falls from
+`0.097280/0.098304 ms` to `0.096256/0.097280 ms`; linear-QKV improves by
+one event tick at W2/W2.5/W3.5; every linear-Z rate improves by one tick;
+MLP-down improves by one tick at W2/W2.5 and two ticks at W3.5; and
+MLP-gate/up W3.5 falls from `0.136192` to `0.135168 ms`. W3 linear-QKV and
+MLP-down are neutral. The affected geomean speedup is **1.0114x** (1.127%
+lower latency), with maximum absolute error below `7.63e-05`, and the
+complete 38-case Ampere suite passes. Matched artifacts are
+`v19_wrap_m8_selected_{control,candidate}_{a,b}.json` under
+`artifacts/a100_p32_window/`. The broad diagnostic is
+`v19_wrap_m8_all_{control,candidate}.json`; its full-KV regressions were
+excluded, while full-Q W2.5, attention-out W2.5, and MLP-gate/up W3 failed
+to reproduce their screen wins at 2000 iterations and were narrowed out.
+Affected-case log weighting now reaches **1.732% cumulative improvement**
+versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively

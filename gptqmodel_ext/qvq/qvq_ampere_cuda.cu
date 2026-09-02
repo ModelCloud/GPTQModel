@@ -1484,6 +1484,22 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
+  } else if (
+      size_m == 8 && size_n == 12288 && TransitionBits >= 6) {
+    p32_window_ampere_kernel<
+        TransitionBits, false, 8, 12288, true, true, 0, true>
+        <<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 12288) {
     p32_window_ampere_kernel<TransitionBits, false, 8, 12288, true, true><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
@@ -1514,6 +1530,21 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
+  } else if (size_m == 8 && size_k == 17408 && size_n == 5120) {
+    p32_window_ampere_kernel<
+        TransitionBits, false, 8, 5120, true, true, 0, true>
+        <<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 5120) {
     p32_window_ampere_kernel<TransitionBits, false, 8, 5120, true, true><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
@@ -1528,7 +1559,9 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_k == 5120 && size_n == 10240) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 10240, true, true, 5120><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<
+        TransitionBits, false, 8, 10240, true, true, 5120, true>
+        <<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -1541,7 +1574,9 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 6144) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 6144, true, true><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<
+        TransitionBits, false, 8, 6144, true, true, 0, true>
+        <<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -1555,6 +1590,22 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_k == 5120 && size_n == 1024) {
     p32_window_ampere_kernel<TransitionBits, false, 8, 1024, true, true, 5120><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (
+      size_m == 8 && size_n == 17408 && TransitionBits == 7) {
+    p32_window_ampere_kernel<
+        TransitionBits, false, 8, 17408, false, true, 0, true>
+        <<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
