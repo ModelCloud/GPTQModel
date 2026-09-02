@@ -55,6 +55,14 @@ def _args() -> argparse.Namespace:
         type=Path,
         default=Path("artifacts/a41_phase4_h100/production_grouped_vs_baselines.json"),
     )
+    parser.add_argument(
+        "--previous-git-ref",
+        default="HEAD",
+        help=(
+            "git ref containing the preceding result at --output; pass an empty "
+            "string to disable prior-run comparisons"
+        ),
+    )
     args = parser.parse_args()
     if any(rate not in RATES for rate in args.rates):
         parser.error("rates must be W2, W2.5, W3, or W3.5")
@@ -85,6 +93,38 @@ def _source_fingerprint() -> str:
         digest.update(str(relative_path).encode())
         digest.update((REPO_ROOT / relative_path).read_bytes())
     return digest.hexdigest()
+
+
+def _previous_benchmark(git_ref: str, output_path: Path):
+    if not git_ref:
+        return None, {}
+    try:
+        relative_path = output_path.resolve().relative_to(REPO_ROOT)
+    except ValueError as exc:
+        raise ValueError(
+            "--output must be inside the repository when --previous-git-ref is set"
+        ) from exc
+    try:
+        raw = subprocess.check_output(
+            ["git", "show", f"{git_ref}:{relative_path.as_posix()}"],
+            cwd=REPO_ROOT,
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        return None, {}
+    payload = json.loads(raw)
+    rows = {
+        (
+            float(row["bits"]),
+            row["group"],
+            int(row["m"]),
+            int(row["k"]),
+            tuple(row["child_n"]),
+        ): row
+        for row in payload.get("rows", ())
+    }
+    return payload, rows
 
 
 def _assert_h100(torch):
@@ -261,6 +301,9 @@ def _run(args):
     )
 
     source_fingerprint = _source_fingerprint()
+    previous_payload, previous_rows = _previous_benchmark(
+        args.previous_git_ref, args.output
+    )
     device_info = _assert_h100(torch)
     device = torch.device("cuda:0")
     inputs = {
@@ -359,6 +402,12 @@ def _run(args):
                 marlin = baseline_timings[(group_name, m, "marlin")]
                 machete = baseline_timings[(group_name, m, "machete")]
                 logical_flops = 2 * m * K * sum(widths)
+                previous = previous_rows.get((bits, group_name, m, K, tuple(widths)))
+                previous_median_ms = (
+                    previous["grouped_qvq"]["median_ms"]
+                    if previous is not None
+                    else None
+                )
                 rows.append(
                     {
                         "bits": bits,
@@ -384,8 +433,14 @@ def _run(args):
                         / (marlin["median_ms"] * 1e9),
                         "machete_effective_tflops": logical_flops
                         / (machete["median_ms"] * 1e9),
-                        "better_than_last_comparable": timing["median_ms"]
+                        "better_than_plain_qvq": timing["median_ms"]
                         < plain[m]["median_ms"],
+                        "previous_grouped_qvq_median_ms": previous_median_ms,
+                        "better_than_previous_benchmark": (
+                            timing["median_ms"] < previous_median_ms
+                            if previous_median_ms is not None
+                            else None
+                        ),
                     }
                 )
                 print(
@@ -420,6 +475,15 @@ def _run(args):
             "host_launch_gaps_included": False,
         },
         "workload": "Llama 3.2 1B grouped QKV and gate/up full projection forwards",
+        "previous_benchmark": (
+            {
+                "git_ref": args.previous_git_ref,
+                "git_base_commit": previous_payload.get("git_base_commit"),
+                "source_fingerprint": previous_payload.get("source_fingerprint"),
+            }
+            if previous_payload is not None
+            else None
+        ),
         "rows": rows,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
