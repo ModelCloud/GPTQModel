@@ -328,10 +328,10 @@ instructions first.
 | Priority | Experiment | Expected mechanism | Required promotion gates |
 |--:|:--|:--|:--|
 | Rejected | Pair guarded recovery rounds | Removed 3.57% of combined instructions | Exact, but only 0.19% full-MLP geometric-mean change with 6/20 regressions |
-| 1 | `half2` precondition high | Two columns per thread; packed FP16 add/sub and 32-bit loads/stores | Byte-exact precondition; no new bank conflict or spills; positive isolated and full-MLP timing |
-| 2 | Fuse exact SiLU into precondition low | Delete one launch and activated-gate materialization | Byte-exact versus PyTorch SiLU lifecycle, graph safety, positive full-MLP timing |
-| 3 | `half2` precondition low | Packed bits 2--128 plus explicit bit-1 lane exchange | Byte-exact; source/SASS proof; bank-conflict and latency improvement |
-| 4 | Cross-stage transpose/cluster fusion | Eliminate workspace and another launch | Only after the preceding local folds; must beat the non-cluster path in CUDA-event timing |
+| Promoted | `half2` precondition high | Removed 75.7% of high-stage instructions | 1.131x isolated and 1.0102x full-MLP geometric mean; all 20 cells improved |
+| 1 | Fuse exact SiLU into precondition low | Delete one launch and activated-gate materialization | Byte-exact versus PyTorch SiLU lifecycle, graph safety, positive full-MLP timing |
+| 2 | `half2` precondition low | Packed bits 2--128 plus explicit bit-1 lane exchange | Byte-exact; source/SASS proof; bank-conflict and latency improvement |
+| 3 | Cross-stage transpose/cluster fusion | Eliminate workspace and another launch | Only after the preceding local folds; must beat the non-cluster path in CUDA-event timing |
 
 For every promoted experiment, the formal H100 benchmark must report the full
 W2/W2.5/W3/W3.5 by M=1/2/4/8/16 matrix, MKN, ratios versus Marlin W4 and
