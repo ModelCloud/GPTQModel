@@ -102,6 +102,17 @@ __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix(uint32_t state) {
   return mixed ^ (mixed >> 7);
 }
 
+__device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix_masked(
+    uint32_t state,
+    uint32_t bank_mask) {
+  // Every supported alternate-bank mask repeats one byte in both halves.
+  // Therefore, for x = state ^ bank_mask:
+  //   x ^ (x >> 8) == state ^ (state >> 8) ^ (bank_mask & 0xff00).
+  uint32_t mixed = state ^ (state >> 8) ^ bank_mask;
+  mixed = (mixed * kPgc16Multiplier + kPgc16Increment) & 0xffffu;
+  return mixed ^ (mixed >> 7);
+}
+
 __device__ __forceinline__ Element qvq_wgmma_load_level(
     const Element* __restrict__ levels,
     uint32_t index) {
@@ -274,12 +285,13 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     qvq_p32_window_state_pair<TransitionBits>(window_words, pair00, state00, state10);
     qvq_p32_window_state_pair<TransitionBits>(window_words, pair01, state01, state11);
   }
-  const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_bank_mask;
-  const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_bank_mask;
-  const uint32_t mixed00 = qvq_wgmma_pgc16_mix(state00 ^ bank_mask0);
-  const uint32_t mixed01 = qvq_wgmma_pgc16_mix(state01 ^ bank_mask0);
-  const uint32_t mixed10 = qvq_wgmma_pgc16_mix(state10 ^ bank_mask1);
-  const uint32_t mixed11 = qvq_wgmma_pgc16_mix(state11 ^ bank_mask1);
+  const uint32_t alternate_mix_mask = alternate_bank_mask & 0xff00u;
+  const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_mix_mask;
+  const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_mix_mask;
+  const uint32_t mixed00 = qvq_wgmma_pgc16_mix_masked(state00, bank_mask0);
+  const uint32_t mixed01 = qvq_wgmma_pgc16_mix_masked(state01, bank_mask0);
+  const uint32_t mixed10 = qvq_wgmma_pgc16_mix_masked(state10, bank_mask1);
+  const uint32_t mixed11 = qvq_wgmma_pgc16_mix_masked(state11, bank_mask1);
 
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
