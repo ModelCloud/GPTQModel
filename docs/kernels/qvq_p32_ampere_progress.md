@@ -1896,6 +1896,17 @@ Artifacts are `v19_m8_gate_packed_{control,candidate}_deep.json` under
 `artifacts/a100_p32_window/`. Affected-case log weighting now reaches
 **1.948% cumulative improvement** versus fetched main.
 
+The twenty-second v19 progression combines pair-wrap selection with packed
+PGC16 decode for the remaining M8 MLP-gate/up rates. Relative to the packed
+control, W2 improves from `0.131072` to `0.130048 ms`, W2.5 from `0.135168`
+to `0.134144 ms`, and W3 from `0.134144` to `0.133120 ms`; W3.5 ties at
+`0.134144 ms`. The affected geomean speedup is **1.0058x** (0.576% lower
+latency), with maximum absolute error below `4.58e-05`. The candidate is
+`v19_m8_gate_packed_wrap_candidate_deep.json`; its control is
+`v19_m8_gate_packed_candidate_deep.json` under
+`artifacts/a100_p32_window/`. Affected-case log weighting now reaches
+**1.965% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively

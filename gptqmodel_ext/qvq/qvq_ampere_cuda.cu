@@ -1629,7 +1629,9 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_n == 17408) {
-    p32_window_ampere_kernel<TransitionBits, false, 8, 17408, true, true><<<grid, kThreads, 0, stream>>>(
+    p32_window_ampere_kernel<
+        TransitionBits, false, 8, 17408, true, true, 0, true>
+        <<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
