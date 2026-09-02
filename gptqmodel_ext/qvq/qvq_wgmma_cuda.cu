@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 
 namespace {
 
@@ -59,6 +60,16 @@ constexpr int kP32TileColumns = 16;
 constexpr int kP32PairsPerTile = 128;
 constexpr int kP32N16TilesPerBlock = kOutputColumns / kP32TileColumns;
 constexpr int kP32K16TilesPerStage = kKPerStage / kP32TileRows;
+constexpr int kMaxGroupedP32Segments = 3;
+
+struct HopperGroupedP32LaunchParams {
+  int segment_count;
+  int n_tile_start[kMaxGroupedP32Segments];
+  int n_tiles[kMaxGroupedP32Segments];
+  int bank_alt_id[kMaxGroupedP32Segments];
+  int split_count[kMaxGroupedP32Segments];
+  int64_t output_offset[kMaxGroupedP32Segments];
+};
 
 using WgmmaTmaSmemLayoutB = decltype(cute::tile_to_shape(
     WgmmaSmemLayoutAtomB{},
@@ -420,17 +431,23 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
 #endif
 }
 
-template <int TransitionBits, class InputTma, class TrellisTma, class BankTma>
+template <
+    int TransitionBits,
+    bool Grouped,
+    class InputTma,
+    class TrellisTma,
+    class BankTma>
 __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kernel(
     CUTE_GRID_CONSTANT InputTma const input_tma,
     CUTE_GRID_CONSTANT TrellisTma const trellis_tma,
     CUTE_GRID_CONSTANT BankTma const bank_tma,
     const Element* __restrict__ levels,
     float* __restrict__ partial_output,
+    HopperGroupedP32LaunchParams grouped_params,
     int size_k,
-    int size_n,
-    int split_count,
-    int bank_alt_id) {
+    int launch_size_n,
+    int launch_split_count,
+    int launch_bank_alt_id) {
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
   using TrellisSmemLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
@@ -441,8 +458,31 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   const int thread = static_cast<int>(threadIdx.x);
   const bool is_consumer = thread < kThreads;
   const bool is_producer = !is_consumer;
+  const int segment = static_cast<int>(blockIdx.y);
   const int n64_block = static_cast<int>(blockIdx.x);
-  const int n_tiles = size_n / kP32TileColumns;
+  int n64_block_global = n64_block;
+  int total_n_tiles = launch_size_n / kP32TileColumns;
+  int size_n = launch_size_n;
+  int split_count = launch_split_count;
+  int bank_alt_id = launch_bank_alt_id;
+  int64_t output_offset = 0;
+  if constexpr (Grouped) {
+    if (segment >= grouped_params.segment_count) {
+      return;
+    }
+    const int segment_n_tiles = grouped_params.n_tiles[segment];
+    split_count = grouped_params.split_count[segment];
+    if (n64_block * kP32N16TilesPerBlock >= segment_n_tiles ||
+        static_cast<int>(blockIdx.z) >= split_count) {
+      return;
+    }
+    n64_block_global =
+        grouped_params.n_tile_start[segment] / kP32N16TilesPerBlock + n64_block;
+    size_n = segment_n_tiles * kP32TileColumns;
+    total_n_tiles = launch_size_n / kP32TileColumns;
+    bank_alt_id = grouped_params.bank_alt_id[segment];
+    output_offset = grouped_params.output_offset[segment];
+  }
   const int k_tiles = size_k / kP32TileRows;
   const int split = static_cast<int>(blockIdx.z);
   const int k_tile_begin = (k_tiles * split) / split_count;
@@ -487,14 +527,14 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       cute::group_modes<0, 2>(tiled_input));
 
   auto p32_full_trellis = trellis_tma.get_tma_tensor(
-      cute::make_shape(cute::Int<kWordsPerP32Tile>{}, n_tiles, k_tiles));
+      cute::make_shape(cute::Int<kWordsPerP32Tile>{}, total_n_tiles, k_tiles));
   auto tiled_trellis = cute::local_tile(
       p32_full_trellis,
       cute::make_shape(
           cute::Int<kWordsPerP32Tile>{},
           cute::Int<kP32N16TilesPerBlock>{},
           cute::Int<kP32K16TilesPerStage>{}),
-      cute::make_coord(cute::_0{}, n64_block, cute::_));
+      cute::make_coord(cute::_0{}, n64_block_global, cute::_));
   auto [tma_global_trellis, tma_shared_trellis] = cute::tma_partition(
       trellis_tma,
       cute::Int<0>{},
@@ -502,11 +542,12 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       cute::group_modes<0, 3>(s_trellis),
       cute::group_modes<0, 3>(tiled_trellis));
 
-  auto full_bank_ids = bank_tma.get_tma_tensor(cute::make_shape(n_tiles, k_tiles));
+  auto full_bank_ids =
+      bank_tma.get_tma_tensor(cute::make_shape(total_n_tiles, k_tiles));
   auto tiled_bank_ids = cute::local_tile(
       full_bank_ids,
       cute::make_shape(cute::_16{}, cute::_16{}),
-      cute::make_coord(n64_block >> 2, cute::_));
+      cute::make_coord(n64_block_global >> 2, cute::_));
   auto [tma_global_bank_ids, tma_shared_bank_ids] = cute::tma_partition(
       bank_tma,
       cute::Int<0>{},
@@ -568,7 +609,8 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
 
   const int warp = thread >> 5;
   const int lane = thread & 31;
-  const int bank_n16_offset = (n64_block & 3) * kP32N16TilesPerBlock;
+  const int bank_n16_offset =
+      (n64_block_global & 3) * kP32N16TilesPerBlock;
   const auto decode_plan = qvq_p32_window_lane_plan<TransitionBits>(lane);
   const uint32_t shared_levels_base = __cvta_generic_to_shared(shared.levels.begin());
   WgmmaTmaPipelineState read_state;
@@ -627,7 +669,8 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
     const int tile_column = wgmma_column & 15;
     const int p32_column = (wgmma_column & ~15) + ((tile_column & 7) << 1) + (tile_column >> 3);
     const int64_t output_index =
-        static_cast<int64_t>(output_row) * size_n + n64_block * kOutputColumns + p32_column;
+        output_offset + static_cast<int64_t>(output_row) * size_n +
+        n64_block * kOutputColumns + p32_column;
     if (split_count > 1) {
       atomicAdd(partial_output + output_index, accumulator(index));
     } else {
@@ -832,12 +875,15 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
       : at::zeros({kRows, size_n}, input.options().dtype(at::kFloat));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns), 1, static_cast<unsigned>(split_count));
-  qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits><<<grid, kTmaThreads, 0, stream>>>(
+  HopperGroupedP32LaunchParams grouped_params{};
+  qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, false>
+      <<<grid, kTmaThreads, 0, stream>>>(
       input_tma,
       trellis_tma,
       bank_tma,
       reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
       partial_output.data_ptr<float>(),
+      grouped_params,
       size_k,
       size_n,
       static_cast<int>(split_count),
@@ -889,16 +935,214 @@ at::Tensor qvq_p32_window_wgmma_m16_tma(
   }
 }
 
+template <int TransitionBits>
+at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef split_counts) {
+  TORCH_CHECK(input.is_cuda(), "grouped QVQ P32 TMA WGMMA input must be CUDA");
+  c10::cuda::CUDAGuard device_guard(input.device());
+  TORCH_CHECK(
+      trellis.device() == input.device() && levels.device() == input.device() &&
+          bank_ids.device() == input.device(),
+      "grouped QVQ P32 TMA WGMMA tensors must share one CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf && levels.scalar_type() == at::kHalf,
+      "grouped QVQ P32 TMA WGMMA requires FP16 input and levels");
+  TORCH_CHECK(
+      trellis.scalar_type() == at::kInt,
+      "grouped QVQ P32 TMA WGMMA trellis must be int32");
+  TORCH_CHECK(
+      bank_ids.scalar_type() == at::kByte,
+      "grouped QVQ P32 TMA WGMMA bank ids must be uint8");
+  TORCH_CHECK(
+      input.is_contiguous() && trellis.is_contiguous() && levels.is_contiguous() &&
+          bank_ids.is_contiguous(),
+      "grouped QVQ P32 TMA WGMMA tensors must be contiguous");
+  TORCH_CHECK(
+      input.dim() == 2 && input.size(0) == kRows,
+      "grouped QVQ P32 TMA WGMMA requires M=16");
+  TORCH_CHECK(
+      input.size(1) > 0 && input.size(1) % kKPerStage == 0,
+      "grouped QVQ P32 TMA WGMMA K must be a positive multiple of 256");
+  const int64_t segment_count = static_cast<int64_t>(out_features.size());
+  TORCH_CHECK(
+      segment_count >= 1 && segment_count <= kMaxGroupedP32Segments,
+      "grouped QVQ P32 TMA WGMMA requires one to three segments");
+  TORCH_CHECK(
+      static_cast<int64_t>(bank_alt_ids.size()) == segment_count &&
+          static_cast<int64_t>(split_counts.size()) == segment_count,
+      "grouped QVQ P32 TMA WGMMA metadata lengths must match");
+
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
+  TORCH_CHECK(
+      properties.major == 9 && properties.minor == 0,
+      "grouped QVQ P32 TMA WGMMA requires an SM90 H100/H200 device");
+
+  const int size_k = static_cast<int>(input.size(1));
+  const int k_tiles = size_k / kP32TileRows;
+  int64_t total_n = 0;
+  int max_n64_blocks = 0;
+  int max_split_count = 1;
+  HopperGroupedP32LaunchParams grouped_params{};
+  grouped_params.segment_count = static_cast<int>(segment_count);
+  for (int segment = 0; segment < segment_count; ++segment) {
+    const int64_t width = out_features[segment];
+    const int64_t alt_id = bank_alt_ids[segment];
+    const int64_t split_count = split_counts[segment];
+    TORCH_CHECK(
+        width > 0 && width % 256 == 0,
+        "grouped QVQ P32 TMA WGMMA widths must be positive multiples of 256");
+    TORCH_CHECK(
+        alt_id >= 0 && alt_id <= 3,
+        "grouped QVQ P32 TMA WGMMA alternative bank IDs must be in [0, 3]");
+    TORCH_CHECK(
+        split_count >= 1 && split_count <= 64,
+        "grouped QVQ P32 TMA WGMMA split counts must be in [1, 64]");
+    TORCH_CHECK(
+        k_tiles % split_count == 0 &&
+            (k_tiles / split_count) % kP32K16TilesPerStage == 0,
+        "grouped QVQ P32 TMA WGMMA split partitions must contain a multiple "
+        "of sixteen K16 tiles");
+    grouped_params.n_tile_start[segment] =
+        static_cast<int>(total_n / kP32TileColumns);
+    grouped_params.n_tiles[segment] =
+        static_cast<int>(width / kP32TileColumns);
+    grouped_params.bank_alt_id[segment] = static_cast<int>(alt_id);
+    grouped_params.split_count[segment] = static_cast<int>(split_count);
+    grouped_params.output_offset[segment] = total_n * kRows;
+    total_n += width;
+    max_n64_blocks = std::max(
+        max_n64_blocks, static_cast<int>(width / kOutputColumns));
+    max_split_count =
+        std::max(max_split_count, static_cast<int>(split_count));
+  }
+  TORCH_CHECK(
+      total_n <= std::numeric_limits<int>::max(),
+      "grouped QVQ P32 TMA WGMMA total N exceeds int32 range");
+  const int total_n_tiles = static_cast<int>(total_n / kP32TileColumns);
+  const int64_t expected_tiles = static_cast<int64_t>(k_tiles) * total_n_tiles;
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  using TrellisSmemLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
+  TORCH_CHECK(
+      trellis.numel() == expected_tiles * kWordsPerP32Tile,
+      "grouped QVQ P32 TMA WGMMA trellis size mismatch");
+  TORCH_CHECK(
+      bank_ids.numel() == expected_tiles,
+      "grouped QVQ P32 TMA WGMMA bank-id size mismatch");
+  TORCH_CHECK(
+      levels.numel() == 256,
+      "grouped QVQ P32 TMA WGMMA requires 256 PGC16 levels");
+
+  const auto* input_ptr =
+      reinterpret_cast<const Element*>(input.data_ptr<at::Half>());
+  const auto* trellis_ptr =
+      reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>());
+  auto input_tensor = cute::make_tensor(
+      input_ptr,
+      cute::make_shape(kRows, size_k),
+      cute::make_stride(static_cast<int64_t>(size_k), cute::_1{}));
+  auto trellis_tensor = cute::make_tensor(
+      trellis_ptr,
+      cute::make_shape(kWordsPerP32Tile, total_n_tiles, k_tiles),
+      cute::make_stride(
+          cute::_1{},
+          cute::Int<kWordsPerP32Tile>{},
+          static_cast<int64_t>(total_n_tiles) * kWordsPerP32Tile));
+  auto bank_tensor = cute::make_tensor(
+      bank_ids.data_ptr<uint8_t>(),
+      cute::make_shape(total_n_tiles, k_tiles),
+      cute::make_stride(cute::_1{}, static_cast<int64_t>(total_n_tiles)));
+  auto input_tma = cute::make_tma_atom(
+      cute::SM90_TMA_LOAD{},
+      input_tensor,
+      WgmmaTmaSmemLayoutB{}(cute::_, cute::_, cute::_0{}),
+      cute::make_shape(cute::_16{}, cute::_256{}));
+  auto trellis_tma = cute::make_tma_atom(
+      cute::SM90_TMA_LOAD{},
+      trellis_tensor,
+      TrellisSmemLayout{}(cute::_, cute::_, cute::_, cute::_0{}),
+      cute::make_shape(
+          cute::Int<kWordsPerP32Tile>{},
+          cute::Int<kP32N16TilesPerBlock>{},
+          cute::Int<kP32K16TilesPerStage>{}));
+  auto bank_tma = cute::make_tma_atom(
+      cute::SM90_TMA_LOAD{},
+      bank_tensor,
+      P32BankTmaSmemLayout{}(cute::_, cute::_, cute::_0{}),
+      cute::make_shape(cute::_16{}, cute::_16{}));
+
+  auto output = max_split_count == 1
+      ? at::empty({kRows * total_n}, input.options().dtype(at::kFloat))
+      : at::zeros({kRows * total_n}, input.options().dtype(at::kFloat));
+  const cudaStream_t stream =
+      at::cuda::getCurrentCUDAStream(input.get_device());
+  const dim3 grid(
+      static_cast<unsigned>(max_n64_blocks),
+      static_cast<unsigned>(segment_count),
+      static_cast<unsigned>(max_split_count));
+  qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, true>
+      <<<grid, kTmaThreads, 0, stream>>>(
+          input_tma,
+          trellis_tma,
+          bank_tma,
+          reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+          output.data_ptr<float>(),
+          grouped_params,
+          size_k,
+          static_cast<int>(total_n),
+          1,
+          0);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+at::Tensor qvq_p32_window_wgmma_m16_tma_grouped(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t transition_bits,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef split_counts) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<4>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 5:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<5>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 6:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<6>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 7:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<7>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    default:
+      TORCH_CHECK(
+          false,
+          "grouped QVQ P32 TMA WGMMA transition bits must be in [4, 7]");
+  }
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_w3_m16(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_w3_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
+  m.def("p32_window_m16_tma_grouped(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_w3_m16", qvq_p32_window_wgmma_w3_m16);
   m.impl("p32_window_w3_m16_tma", qvq_p32_window_wgmma_w3_m16_tma);
   m.impl("p32_window_m16_tma", qvq_p32_window_wgmma_m16_tma);
+  m.impl("p32_window_m16_tma_grouped", qvq_p32_window_wgmma_m16_tma_grouped);
 }

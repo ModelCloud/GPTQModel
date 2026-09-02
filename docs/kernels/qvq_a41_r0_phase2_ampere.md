@@ -191,3 +191,6 @@ an A100.  The H100 compatibility-path benchmark is reported separately in
 Its same-device comparison isolates the Phase-2 launch change, but its absolute
 latencies must not be presented as an A100 result or as native Hopper-kernel
 performance.
+
+The native SM90a implementation of the same execution contract is documented
+in [`qvq_a41_r0_phase3_hopper.md`](qvq_a41_r0_phase3_hopper.md).
