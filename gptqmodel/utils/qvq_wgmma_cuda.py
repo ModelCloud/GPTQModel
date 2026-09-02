@@ -188,6 +188,28 @@ def _resolve_hopper_split_count(
     }[transition_bits].get(shape, 1)
 
 
+def qvq_h100_ordered_split_count(
+    *,
+    device_name: str,
+    compute_capability: tuple[int, int],
+    logical_rows: int,
+    in_features: int,
+    out_features: int,
+    transition_bits: int,
+) -> int:
+    """Return a measured H100 ordered split, or zero for the ordinary path."""
+
+    if (
+        "H100" in device_name
+        and compute_capability == (9, 0)
+        and logical_rows in (1, 2, 4, 8, 16)
+        and (in_features, out_features) == (8192, 2048)
+        and transition_bits in (4, 5, 6, 7)
+    ):
+        return 16
+    return 0
+
+
 def qvq_p32_window_wgmma_w3_m16(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -530,10 +552,12 @@ __all__ = [
     "QVQHopperGroupedP32Payload",
     "QVQHopperGroupedP32Plan",
     "QVQHopperP32SegmentPlan",
+    "qvq_h100_ordered_split_count",
     "qvq_p32_window_wgmma_group_plan",
     "qvq_p32_window_wgmma_grouped",
     "qvq_p32_window_wgmma_grouped_packed",
     "qvq_p32_window_wgmma_m16_tma",
+    "qvq_p32_window_wgmma_m16_tma_ordered_split",
     "qvq_p32_window_wgmma_w3_m16",
     "qvq_p32_window_wgmma_w3_m16_tma",
     "qvq_pack_p32_window_hopper_group",

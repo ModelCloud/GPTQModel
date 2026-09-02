@@ -954,7 +954,11 @@ class QVQLinear(BaseQuantLinear):
                     "H100" in properties.name or "H200" in properties.name
                 ):
                     from ...utils.qvq_cuda import _pgc16_levels
-                    from ...utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_m16_tma
+                    from ...utils.qvq_wgmma_cuda import (
+                        qvq_h100_ordered_split_count,
+                        qvq_p32_window_wgmma_m16_tma,
+                        qvq_p32_window_wgmma_m16_tma_ordered_split,
+                    )
 
                     with self._qvq_cuda_bank_cache_lock:
                         window = self._prepare_hopper_p32_window(x.device)
@@ -967,7 +971,22 @@ class QVQLinear(BaseQuantLinear):
                         )
                         padded[: wgmma_input.shape[0]].copy_(wgmma_input)
                         wgmma_input = padded
-                    output = qvq_p32_window_wgmma_m16_tma(
+                    transition_bits = qvq_transition_bits(self.bits, vector_size=2)
+                    ordered_split = qvq_h100_ordered_split_count(
+                        device_name=properties.name,
+                        compute_capability=(properties.major, properties.minor),
+                        logical_rows=int(x.shape[0]),
+                        in_features=self.in_features,
+                        out_features=self.out_features,
+                        transition_bits=transition_bits,
+                    )
+                    kernel = (
+                        qvq_p32_window_wgmma_m16_tma_ordered_split
+                        if ordered_split
+                        else qvq_p32_window_wgmma_m16_tma
+                    )
+                    kernel_kwargs = {"split_count": ordered_split} if ordered_split else {}
+                    output = kernel(
                         wgmma_input,
                         window,
                         _pgc16_levels(x.device, self.codebook_version),
@@ -975,6 +994,7 @@ class QVQLinear(BaseQuantLinear):
                         self.bits,
                         out_features=self.out_features,
                         bank_alt_id=cuda_bank_alt_id,
+                        **kernel_kwargs,
                     )
                     return output[: x.shape[0]]
 

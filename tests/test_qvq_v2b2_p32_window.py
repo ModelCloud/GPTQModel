@@ -24,11 +24,53 @@ from gptqmodel.quantization.qvq_codecs import (
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.utils.qvq_wgmma_cuda import (
+    qvq_h100_ordered_split_count,
     qvq_p32_window_wgmma_m16_tma,
     qvq_p32_window_wgmma_m16_tma_ordered_split,
 )
 
 P32_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
+
+
+@pytest.mark.parametrize("transition_bits", (4, 5, 6, 7))
+@pytest.mark.parametrize("logical_rows", (1, 2, 4, 8, 16))
+def test_h100_llama_down_uses_measured_ordered_split(transition_bits, logical_rows):
+    assert (
+        qvq_h100_ordered_split_count(
+            device_name="NVIDIA H100 80GB HBM3",
+            compute_capability=(9, 0),
+            logical_rows=logical_rows,
+            in_features=8192,
+            out_features=2048,
+            transition_bits=transition_bits,
+        )
+        == 16
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides"),
+    (
+        {"device_name": "NVIDIA H200"},
+        {"compute_capability": (8, 0)},
+        {"logical_rows": 3},
+        {"logical_rows": 17},
+        {"in_features": 2048},
+        {"out_features": 8192},
+        {"transition_bits": 3},
+    ),
+)
+def test_ordered_split_policy_fails_closed(overrides):
+    arguments = {
+        "device_name": "NVIDIA H100 80GB HBM3",
+        "compute_capability": (9, 0),
+        "logical_rows": 1,
+        "in_features": 8192,
+        "out_features": 2048,
+        "transition_bits": 6,
+    }
+    arguments.update(overrides)
+    assert qvq_h100_ordered_split_count(**arguments) == 0
 
 
 def _random_planar_words(
