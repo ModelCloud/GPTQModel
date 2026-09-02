@@ -219,3 +219,7 @@ gate. The next phase should target a larger representation-level source of
 the remaining `IMAD`, `PRMT`, `LOP3`, `SHF`, and shared level-lookup stream,
 while preserving the split-1 accumulation order and N64 launch geometry that
 won the rejected-candidate comparison.
+
+Phase 14 retained that exact geometry and increased only the W3
+decode/WGMMA pending depth from two to three. See
+`docs/kernels/qvq_a41_r0_phase14_h100_w3_decode_overlap.md`.
