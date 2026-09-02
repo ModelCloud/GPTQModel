@@ -2044,6 +2044,16 @@ regress W3 from `0.108544` to `0.109568 ms`, and regress W3.5 from
 waves. The split-16 policy is retained for every full-Q rate. Diagnostics are
 `v19_m16_fullq_remaining_resplit_s{10_candidate,12_candidate,16_control}_deep.json`.
 
+Two further wave audits were rejected. M16 attention-out split 12 measures
+`0.061440 ms` at every rate; split 16 regresses to `0.062464-0.063488 ms`
+and split 10 to `0.064512-0.065536 ms`. For M8 full-KV, split 40 initially
+appeared to improve W2 from `0.032768` to `0.031744 ms`, but the reversed
+200-warmup/8000-iteration control also measured `0.031744 ms`; W2.5
+regressed at split 40, while split 56 regressed all four rates to
+`0.033792 ms`. The retained plans therefore remain split 12 and split 48,
+respectively. Diagnostics use the `v19_m16_attention_resplit_` and
+`v19_m8_fullkv_resplit_` prefixes, including the W2 `verify8000` pair.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
