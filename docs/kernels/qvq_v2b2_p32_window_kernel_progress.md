@@ -159,10 +159,10 @@ absolute error was `6.49e-5`.
 Benchmark harness/head: `65379257`; kernel source: `8fbf39d2`. Artifact:
 `artifacts/h200_p32_window/qwen38_m1_m2_m4_m8_m16_p32_vs_machete_65379257.json`.
 All 140 exact-P32 rows passed their dense references; the worst maximum
-absolute error was `7.44e-5`. The production prototype is currently fixed at
-M16, so M1/M2/M4/M8 measurements include copying live rows into a persistent
-zero-padded M16 input inside the timed CUDA graph. Machete and planar P32 run
-at their native logical M.
+absolute error was `7.44e-5`. The direct window microkernel is fixed at M16;
+the production `QVQLinear` dispatch pads logical M1/M2/M4/M8 inputs to M16
+and slices the result, while Machete and planar P32 run at their native logical
+M.
 
 Each full-matrix cell below is `P32 milliseconds / xMachete`.
 
@@ -352,6 +352,33 @@ zero-padded M16 input inside the timed graph.
 | 16 | 28 | 27.866x | 0.751x |
 | **All** | **140** | **19.570x** | **0.723x** |
 
+## H200 production P32 dispatch
+
+Commit `9390b79d` wires the exact continuous-window TMA RS-WGMMA kernel into
+`QVQLinear` for H200 FP16 V2B2-P32 inference. Checkpoints remain canonical
+planar P32; each module repacks once on first eligible CUDA use and retains the
+same-size window payload with identity/version invalidation. Unsupported
+devices, dtypes, rates, and geometries continue using the planar kernel.
+
+The H200 Qwen3.8-27B MLP gate/up probe (`K=5120, N=17408, W3`) passed the dense
+P32 reference at every logical M. The direct planar-versus-window medians below
+are from `artifacts/h200_p32_window/m_all_dispatch_probe.json`; the integrated
+`QVQLinear` smoke path measured the same exact output for M1/2/4/8/16.
+
+| M | Planar P32 ms | TMA RS-WGMMA ms | Speedup |
+|---:|---:|---:|---:|
+| 1 | 2.43024 | 0.06835 | 35.56x |
+| 2 | 2.41966 | 0.06882 | 35.16x |
+| 4 | 2.43722 | 0.06878 | 35.43x |
+| 8 | 2.43515 | 0.06902 | 35.28x |
+| 16 | 2.52286 | 0.06674 | 37.80x |
+
+The new dispatch regression test is exact at K=N=256 for M1/2/4/8/16 and
+verifies that the cached repack is reused. The latest H200 NCU capture is
+`artifacts/h200_p32_window/profiles/9390b79d/h200_w3_gate_tma_dispatch.ncu-rep`:
+63.392 us kernel duration, 37.484M instructions, 48.8% active warp issue,
+4.93% tensor-pipe activity, 0.46% TMA activity, and 82.8% L1 throughput.
+
 ## Coverage queue
 
 | Priority | Coverage | State |
@@ -359,7 +386,160 @@ zero-padded M16 input inside the timed graph.
 | 1 | Warp-register PGC table versus read-only L1 | rejected; keep read-only L1 |
 | 2 | Rate-specific split/grid policy for all seven Qwen shapes | accepted at `d9464071` |
 | 3 | Generalize direct-window TMA RS-WGMMA to W2, W2.5, and W3.5 | accepted at `874d9632` |
-| 4 | Qwen3.8 M1/M2/M4/M8 specializations | pending; zero-padded M16 baseline complete |
+| 4 | Qwen3.8 M1/M2/M4/M8 specializations | accepted in `9390b79d`; logical rows are zero-padded to M16 and sliced |
 | 5 | Full seven-shape W2-W3.5 P32 versus Machete sweep | complete for M1/M2/M4/M8/M16 |
 | 6 | Producer-contiguous four-state decode and fixed WGMMA register transpose | rejected for the current RS fragment ownership |
 | 7 | Storage-neutral P32 Anchor-4 load-time repack | exact format accepted at `27573a3c`; CUDA mappings rejected |
+
+## H200 self-baseline gate (origin/main)
+
+This section is intentionally a self-comparison of the Hopper P32
+TMA/RS-WGMMA kernel.  It does not use the planar/scalar implementation or any
+other kernel as a performance reference.
+
+Hardware and protocol:
+
+| Item | Value |
+|---|---|
+| GPU | NVIDIA H200, PCI `00000000:1C:00.0`, UUID `GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea` |
+| Compute capability / SMs | 9.0 / 132 |
+| Baseline | `origin/main` at `c5408f617c66dce4a7baf1ff67b77681ba317efb` |
+| Candidate source | `f08de2c2` (production P32 source is byte-identical to baseline) |
+| Shapes | Qwen3.8-27B gate/up `(K=5120,N=17408)` and down `(K=17408,N=5120)` |
+| Rates / M | W2, W2.5, W3, W3.5; M=1,2,4,8,16 |
+| Timing | CUDA events, 12 warmups, 60 iterations, idle H200 |
+| Accuracy | all rows passed; max absolute error below `2e-3` |
+
+The following values are `baseline median / candidate median` in milliseconds;
+the final value is `baseline / candidate` (values above `1.0x` favor the
+candidate).
+
+| Shape | Rate | M=1 | M=2 | M=4 | M=8 | M=16 | Geomean |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| gate/up | W2 | 0.067424/0.067760 (0.995x) | 0.067552/0.067744 (0.997x) | 0.067632/0.067712 (0.999x) | 0.067888/0.067888 (1.000x) | 0.065936/0.065904 (1.000x) | 0.998x |
+| gate/up | W2.5 | 0.067520/0.067840 (0.995x) | 0.067760/0.068032 (0.996x) | 0.067744/0.068000 (0.996x) | 0.067696/0.068096 (0.994x) | 0.065968/0.066416 (0.993x) | 0.995x |
+| gate/up | W3 | 0.068224/0.068560 (0.995x) | 0.068464/0.068800 (0.995x) | 0.068608/0.069024 (0.994x) | 0.068784/0.069040 (0.996x) | 0.066640/0.066784 (0.998x) | 0.996x |
+| gate/up | W3.5 | 0.071616/0.071840 (0.997x) | 0.071216/0.071568 (0.995x) | 0.071648/0.071872 (0.997x) | 0.071664/0.071920 (0.996x) | 0.069664/0.069728 (0.999x) | 0.997x |
+| down | W2 | 0.067232/0.067744 (0.992x) | 0.067424/0.067888 (0.993x) | 0.067296/0.068000 (0.990x) | 0.067504/0.067968 (0.993x) | 0.065808/0.066112 (0.995x) | 0.993x |
+| down | W2.5 | 0.067536/0.068080 (0.992x) | 0.067600/0.068288 (0.990x) | 0.067712/0.068544 (0.988x) | 0.067712/0.068704 (0.986x) | 0.065696/0.066304 (0.991x) | 0.989x |
+| down | W3 | 0.068224/0.068912 (0.990x) | 0.068272/0.069008 (0.989x) | 0.068512/0.069120 (0.991x) | 0.068416/0.069392 (0.986x) | 0.066368/0.066960 (0.991x) | 0.990x |
+| down | W3.5 | 0.068992/0.069712 (0.990x) | 0.069200/0.069920 (0.990x) | 0.069264/0.070016 (0.989x) | 0.069424/0.070464 (0.985x) | 0.066944/0.067264 (0.995x) | 0.990x |
+
+The exact JSON artifacts are `artifacts/h200_p32_window/self_c5408f61_*_allrates_allm.json`
+and `artifacts/h200_p32_window/self_a8084df6_*_allrates_allm.json`.
+
+The matched NCU capture (`artifacts/h200_p32_window/profiles/a8084df6_w3_gate_full.ncu-rep`)
+measured 63.296 us, 37.484M executed warp instructions, 81.75% L1/LSU
+throughput, 5.06M shared-bank conflicts, 64.62% ALU throughput, and 4.62%
+tensor-pipe utilization.  This identifies the remaining limit as the shared
+PGC/decode instruction stream rather than HBM bandwidth.
+
+The tested 16-bit PGC multiply-add change (`d842e1cb`) was rejected: it was
+within timing noise on gate/up and approximately 1% slower on down across the
+same matrix.  It is not present in the production source.  The next source
+optimization must beat this exact self-baseline on H200 before being merged.
+
+## H200 shared bank-ID broadcast
+
+Commit `8d2164b5` keeps the exact repeated-byte bank-mask algebra explicit in
+the PGC mixer.  The complete 26-test P32 window suite passes, but matched NCU
+shows that ptxas had already performed this fusion: executed instructions are
+unchanged at 37.484M.  The source form is retained because it is exact for all
+supported V2B2 bank masks and lowers allocation from 51 to 50 registers/thread;
+its sub-microsecond event-timing movement is treated as noise.
+
+Commit `1ad56eb8` then replaces the lane-0 bank-ID load plus warp shuffle with
+one same-address shared load by every lane.  Hopper shared memory broadcasts
+that load without a bank conflict.  This removes the complete `SHFL.IDX` class
+from the decode loop and also lets ptxas delete associated moves and predicates.
+
+Matched W3 M16/K5120/N17408 split-10 NCU evidence:
+
+| Metric | `origin/main` `c0469004` | `1ad56eb8` | Change |
+|---|---:|---:|---:|
+| Event median | 0.067040 ms | 0.065632 ms | **1.0215x** |
+| NCU duration | 63.26 us | 62.11 us | **1.0185x** |
+| Executed instructions | 37.484M | 36.395M | **-1.089M (-2.91%)** |
+| `SHFL.IDX` instructions | 361,760 | 0 | **-100%** |
+| Registers/thread | 51 | 50 | -1 |
+| Maximum absolute error | 3.05e-05 | 3.05e-05 | unchanged |
+
+The 100-sample M16 Qwen3.8 all-rate validation remains monotonic against the
+fetched-main self baseline:
+
+| Rate | Gate/up baseline ms | Gate/up candidate ms | Speedup | Down baseline ms | Down candidate ms | Speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| W2 | 0.065936 | 0.065184 | 1.012x | 0.065808 | 0.064400 | 1.022x |
+| W2.5 | 0.065968 | 0.065328 | 1.010x | 0.065696 | 0.064768 | 1.014x |
+| W3 | 0.066640 | 0.065680 | 1.015x | 0.066368 | 0.065216 | 1.018x |
+| W3.5 | 0.069664 | 0.066256 | 1.051x | 0.066944 | 0.065392 | 1.024x |
+
+Artifacts are
+`artifacts/h200_p32_window/candidate_shared_bank_broadcast_8d2164b5_*_allrates_m16.json`
+and
+`artifacts/h200_p32_window/profiles/candidate_shared_bank_broadcast_8d2164b5_w3_gate_targeted.ncu-rep`.
+
+## H200 modulo-width PGC fusions
+
+Commit `69079a99` keeps each circular-window funnel result as a raw 32-bit
+value.  Because the affine PGC step is reduced modulo 2^16, a single `PRMT`
+extract of state byte 1 supplies the only high state bits that can affect the
+result.  This removes one LOP3 per decoded state.  Matched W3 NCU falls from
+36.395M to 35.002M instructions and 62.11 to 60.99 us.
+
+Commit `78c668ad` applies the same width reasoning after the affine product.
+An exact PTX `bfe.u32` retains only the nine shifted product bits that can
+affect the final low word; Hopper lowers it to `SHF` plus `SGXT`.  The important
+win is that the compiler no longer materializes and masks the full 16-bit
+intermediate before both level addresses: NCU falls again to 33.609M
+instructions and 60.19 us.
+
+Commit `cfc41314` separates the two final PGC indices.  The low byte is formed
+directly, while a second 256-entry shared view pre-applies the fixed
+`b ^ (b >> 7)` high-byte permutation.  The extra 512 bytes of shared storage
+reduces allocation to 48 registers/thread and reaches 32.374M instructions at
+59.84 us.  Its eight-cell latency geomean is effectively flat versus
+`78c668ad` (+0.09%), so the acceptance evidence is the exact 1.235M instruction
+reduction and two-register reduction rather than an overstated timing claim.
+
+Combined from fetched `origin/main` `c0469004` through `cfc41314`, the matched
+W3 profile improves from 37.484M to 32.374M instructions (**-5.110M,
+-13.63%**).  The M16 Qwen3.8 gate/down CUDA-event geomean improves **1.0486x**
+across W2, W2.5, W3, and W3.5, and all 26 exact P32 window tests pass.
+
+| Rate | Gate/up origin ms | Gate/up current ms | Speedup | Down origin ms | Down current ms | Speedup |
+|---:|---:|---:|---:|---:|---:|---:|
+| W2 | 0.065936 | 0.063328 | 1.041x | 0.065808 | 0.063120 | 1.043x |
+| W2.5 | 0.065968 | 0.063488 | 1.039x | 0.065696 | 0.062912 | 1.044x |
+| W3 | 0.066640 | 0.063584 | 1.048x | 0.066368 | 0.063136 | 1.051x |
+| W3.5 | 0.069664 | 0.064896 | 1.074x | 0.066944 | 0.063808 | 1.049x |
+
+The rejected predicate-select bank-mask lowering raised the matched instruction
+count from 32.374M to 32.722M and registers from 48 to 49; the multiply form is
+retained.
+
+Commit `45fd0868` forms the low-level shared-table byte address directly.  The
+exact identity
+
+```text
+2 * ((p ^ (p >> 7)) & 0xff) == ((p << 1) ^ (p >> 6)) & 0x1fe
+```
+
+lets one `LOP3` consume the already scaled product and removes the separate
+post-XOR shift/mask operation.  Destructive inline PTX makes the product's last
+use explicit so the compiler can reuse its register.  Matched W3 NCU falls from
+32.374M to 31.002M executed instructions (**-1.372M, -4.24%**); the 60.38 us
+profile duration is close to the preceding 59.84 us capture, while the
+120-sample CUDA-event matrix improves every rate/direction and gains 1.0099x
+geomean over `cfc41314`.  All 26 exact-P32 window tests pass.
+
+| Rate | Gate/up `cfc41314` ms | Gate/up `45fd0868` ms | Gain | Down `cfc41314` ms | Down `45fd0868` ms | Gain |
+|---:|---:|---:|---:|---:|---:|---:|
+| W2 | 0.063328 | 0.062400 | 1.015x | 0.063120 | 0.062368 | 1.012x |
+| W2.5 | 0.063488 | 0.062880 | 1.010x | 0.062912 | 0.062592 | 1.005x |
+| W3 | 0.063584 | 0.063168 | 1.007x | 0.063136 | 0.062784 | 1.006x |
+| W3.5 | 0.064896 | 0.063776 | 1.018x | 0.063808 | 0.063328 | 1.008x |
+
+From fetched `origin/main` `c0469004` through `45fd0868`, the eight-cell M16
+Qwen3.8 gate/down geomean improves **1.0589x** and the matched W3 instruction
+count improves from 37.484M to 31.002M (**-6.482M, -17.29%**).

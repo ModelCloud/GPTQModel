@@ -40,7 +40,8 @@ Do not compare the two as if disabling graphs were free. In distributed runs, st
 2. Identify uncovered CPU launch gaps, serialization, synchronization, and communication that could overlap, with dependencies stated.
 3. Map dominant kernels to the local wrapper, backend, and extension source before recommending a change.
 4. List fusion candidates only when the producer-consumer relationship and layout/dtype contract support them. Do not classify by fuzzy kernel-name similarity alone.
-5. Re-run the synchronized benchmark and correctness check after any optimization; then capture a matched follow-up trace if attribution changed.
+5. For a dominant custom CUDA kernel, inspect a source-correlated SASS page rather than reasoning from C++ alone. Use the SASS instruction mix and dependency/stall samples to find duplicated address arithmetic, redundant masks/shifts, materialized intermediates, and producer-consumer round trips. Follow the matched workflow in the reference.
+6. Re-run the synchronized benchmark and correctness check after any optimization; then capture a matched follow-up trace if attribution changed.
 
 Return the artifact path, capture command, environment/configuration record, whether evidence is mapping or formal, and complete ASCII tables for dominant kernels, overlap opportunities, and source-backed fusion candidates. Clean up only processes launched by the profiling run, using recorded PIDs and graceful termination before escalation.
 

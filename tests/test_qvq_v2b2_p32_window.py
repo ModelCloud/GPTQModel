@@ -6,6 +6,7 @@
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.qvq import (
     decode_p32_window_tiles,
     decode_trellis_tiles,
@@ -17,8 +18,11 @@ from gptqmodel.quantization.qvq import (
     unpack_p32_window_states,
     unpack_trellis_states,
 )
+from gptqmodel.quantization.qvq_codecs import (
+    PGC16_CODEBOOK_VERSION,
+    pgc16_levels_for_version,
+)
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
-from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
 from gptqmodel.utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_m16_tma
 
 P32_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
@@ -181,3 +185,53 @@ def test_p32_window_tma_wgmma_matches_exact_matrix(bits):
     )
 
     torch.testing.assert_close(actual, expected, atol=2e-3, rtol=0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache():
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
+        pytest.skip("Hopper P32 QVQLinear dispatch is H200-specific")
+    bits = 3.0
+    in_features = out_features = 256
+    tile_count = (in_features // 16) * (out_features // 16)
+    planar = _random_planar_words(bits, tiles=tile_count, device="cuda")
+    generator = torch.Generator(device="cuda").manual_seed(20260905)
+    selectors = torch.randint(
+        0, 2, (tile_count * 8,), generator=generator, device="cuda", dtype=torch.uint8
+    )
+    bank_ids = pack_qvq_binary_bank_ids(selectors)
+    bank_alt_id = torch.tensor([3], dtype=torch.uint8, device="cuda")
+    layer = QVQLinear(
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        tensors={
+            "trellis": planar,
+            "SU": torch.ones(in_features, device="cuda"),
+            "SV": torch.ones(out_features, device="cuda"),
+            "bank_ids": bank_ids,
+            "bank_alt_id": bank_alt_id,
+        },
+        bank_count=2,
+        v2b2_p32=True,
+    ).eval()
+    x = torch.randn((3, in_features), generator=generator, device="cuda", dtype=torch.float16)
+    dense = reconstruct_qvq_inner_weight(
+        planar,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=bank_ids,
+        v2b2_p32=True,
+        bank_alt_id=bank_alt_id,
+    )
+    expected = x.float() @ dense
+    actual = layer._inner_forward(x)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=0.0)
+    assert layer._qvq_cuda_window_cache is not None
+    cached_window = layer._qvq_cuda_window_cache[3]
+    layer._inner_forward(x)
+    torch.cuda.synchronize()
+    assert layer._qvq_cuda_window_cache[3] is cached_window

@@ -2,7 +2,7 @@
 
 Architectural limits come from NVIDIA's [Hopper Tuning Guide](https://docs.nvidia.com/cuda/hopper-tuning-guide/) and compatibility semantics from the [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/). Query the live runtime before allocating resources.
 
-## H100-class facts
+## H100/H200-class facts
 
 - Compute capability: 9.0.
 - Combined L1/shared-memory capacity: 256 KiB per SM.
@@ -22,3 +22,5 @@ Architectural limits come from NVIDIA's [Hopper Tuning Guide](https://docs.nvidi
 | Cluster/TMA behavior | Not established | Exercise resource limits, capture, streams, and repeated launches |
 
 Record the exact H100 variant, SM count, memory, clocks/power state when controlled, driver, CUDA toolkit/runtime, PyTorch, compiler flags, and whether the binary used `sm_90` or `sm_90a`.
+
+Record H200 by its live device identity and properties rather than treating it as an H100 alias. It shares compute capability 9.0 and Hopper architecture-accelerated instructions, but its SM count, HBM capacity/bandwidth, power behavior, and optimal split/grid policy can differ materially.

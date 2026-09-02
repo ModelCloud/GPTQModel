@@ -1,6 +1,6 @@
 ---
 name: gptqmodel-hopper-kernels
-description: Optimize, review, port, or validate GPT-QModel CUDA and Triton quantized kernels for NVIDIA Hopper H100 sm_90 GPUs. Use for TMA, thread-block clusters, distributed shared memory, WGMMA, FP8, Hopper resource limits, sm_90 versus sm_90a builds, or H100 benchmarks; combine with the general CUDA-kernel skill.
+description: Optimize, review, port, or validate GPT-QModel CUDA and Triton quantized kernels for NVIDIA Hopper H100/H200 sm_90 GPUs. Use for CUTLASS/CuTe, TMA, thread-block clusters, distributed shared memory, WGMMA, FP8, Hopper resource limits, sm_90 versus sm_90a builds, or Hopper benchmarks; combine with the general CUDA-kernel skill.
 ---
 
 # GPT-QModel Hopper kernels
@@ -35,6 +35,21 @@ The 2026-07-20 audit host had no Hopper GPU. An actual H100 run is therefore req
 - Tune warp-group MMA pipelines with register pressure, stage count, shared memory, and producer/consumer synchronization considered together.
 - Compare specialized Hopper paths to the repository's production alternatives, including Machete or Marlin where their method/format contract matches.
 - Measure decode and prefill separately; large Hopper GEMM gains do not imply small-M latency gains.
+
+### CUTLASS and CuTe primitive audit
+
+Before hand-writing a Hopper mechanism, identify the repository's vendored CUTLASS release and compare it with the current supported release. Verify the selected headers and compile flags actually instantiate the expected `sm_90a` operation. Treat the Python CUTLASS DSL package and the vendored C++ headers as separate dependencies; installing one does not update the other.
+
+For each hot producer, decode, MMA, and epilogue step, check whether current CuTe exposes a suitable primitive or layout abstraction, including:
+
+- `cute::make_tma_atom`, `cute::tma_partition`, TMA descriptor prefetch/cache policy, and multicast when reuse crosses CTAs;
+- `cutlass::PipelineTmaAsync` and matching producer/consumer barrier accounting;
+- `cute::GMMA::rs_op_selector` or shared-sourced WGMMA selected for the actual operand ownership;
+- `cute::warpgroup_arrive`, `warpgroup_commit_batch`, `warpgroup_wait`, operand fences, and supported register reconfiguration;
+- CuTe shared-memory layout/swizzle selectors instead of accumulating manual padding/permutations;
+- fixed warp data-movement primitives such as `movmatrix` only when their lane mapping matches the mathematical tensor ownership.
+
+Use these primitives to remove address generation, redundant transfers, or synchronization—not merely to replace syntax. Confirm the generated SASS, TMA/WGMMA activity, register/shared footprint, and event-timed latency. A newer primitive is not a win when the CTA has too little work to amortize its producer/barrier machinery.
 
 ### TMA and warp specialization
 

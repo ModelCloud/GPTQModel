@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 
+#include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAStream.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_pipeline.h>
@@ -12,11 +12,9 @@
 #include <torch/library.h>
 #include <torch/types.h>
 
-#include <array>
 #include <algorithm>
 #include <cstdint>
 #include <limits>
-#include <mutex>
 
 namespace {
 
@@ -24,10 +22,6 @@ namespace wmma = nvcuda::wmma;
 
 constexpr int kTileRows = 16;
 constexpr int kTileColumns = 16;
-constexpr int kLocalRingTileRows = 32;
-constexpr int kLocalRingTileColumns = 8;
-constexpr int kLocalRingCount = 8;
-constexpr int kLocalRingSteps = 16;
 constexpr int kTileValues = kTileRows * kTileColumns;
 constexpr int kThreads = 256;
 constexpr int kRowsPerBlock = 32;
@@ -36,34 +30,6 @@ constexpr bool kQvqDebugDisableVecStaging = false;
 constexpr int kPgc16LevelCount = 256;
 constexpr uint32_t kPgc16Multiplier = 40503u;
 constexpr uint32_t kPgc16Increment = 17011u;
-constexpr int kMaxCachedCudaDevices = 64;
-
-struct QvqCudaDeviceConfig {
-  int major;
-  int minor;
-  int sm_count;
-  int max_grid_y;
-};
-
-std::array<QvqCudaDeviceConfig, kMaxCachedCudaDevices> qvq_cuda_device_configs{};
-std::array<std::once_flag, kMaxCachedCudaDevices> qvq_cuda_device_config_once;
-
-const QvqCudaDeviceConfig& qvq_cuda_device_config(int device) {
-  TORCH_CHECK(
-      device >= 0 && device < kMaxCachedCudaDevices,
-      "CUDA device ordinal is outside the CUDA device config cache: ",
-      device);
-  std::call_once(qvq_cuda_device_config_once[device], [device]() {
-    cudaDeviceProp properties{};
-    C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, device));
-    qvq_cuda_device_configs[device] = {
-        properties.major,
-        properties.minor,
-        properties.multiProcessorCount,
-        properties.maxGridSize[1]};
-  });
-  return qvq_cuda_device_configs[device];
-}
 
 template <typename Scalar>
 struct ScalarTraits;
@@ -155,20 +121,6 @@ __device__ __forceinline__ uint32_t pgc16_v2_bank_mask_runtime(int transition_bi
   return masks[transition_bits - 2][bank & 3u];
 }
 
-template <int TransitionBits>
-__device__ __forceinline__ uint32_t pgc16_v2_bank_mask(uint32_t bank) {
-  constexpr uint32_t masks[6][4] = {
-      {0x0000u, 0xA5A5u, 0x5A5Au, 0x3C3Cu},
-      {0x0000u, 0xA5A5u, 0x9696u, 0x6969u},
-      {0x0000u, 0x5A5Au, 0x3C3Cu, 0xC3C3u},
-      {0x0000u, 0x9696u, 0x3C3Cu, 0xC3C3u},
-      {0x0000u, 0x6969u, 0x5A5Au, 0x3C3Cu},
-      {0x0000u, 0xC3C3u, 0x9696u, 0x5A5Au},
-  };
-  static_assert(TransitionBits >= 2 && TransitionBits <= 7);
-  return masks[TransitionBits - 2][bank & 3u];
-}
-
 __device__ __noinline__ uint32_t planar_transition_runtime(
     const uint32_t* words, int edge, int transition_bits) {
   const int block = edge >> 5;
@@ -204,74 +156,6 @@ __device__ __noinline__ uint32_t qvq_state_runtime(
     const int edge = (first + j) & edge_mask;
     state = ((state << transition_bits) |
              planar_transition_runtime(words, edge, transition_bits)) & 0xffffu;
-  }
-  return state;
-}
-
-template <int TransitionBits>
-__device__ __forceinline__ uint32_t qvq_local_ring_state(
-    const uint32_t* words, int ring, int pair_in_ring) {
-  constexpr int total_edges = kLocalRingSteps;
-  constexpr int edge_mask = total_edges - 1;
-  constexpr int edge_count = (15 + TransitionBits) / TransitionBits;
-  const int first = (pair_in_ring + total_edges - edge_count + 1) & edge_mask;
-  uint32_t state = 0;
-#pragma unroll
-  for (int j = 0; j < edge_count; ++j) {
-    const int edge = (first + j) & edge_mask;
-    state = ((state << TransitionBits) |
-             planar_transition<TransitionBits>(words, ring * total_edges + edge)) & 0xffffu;
-  }
-  return state;
-}
-
-// Keep the Blackwell W2 recurrence in a separate specialization. CUDA 13
-// otherwise reschedules the longer four-edge recurrence when direct
-// higher-rate paths share the primary template, cutting non-split throughput
-// by more than half despite identical resource counts.
-template <>
-__device__ __forceinline__ uint32_t qvq_local_ring_state<4>(
-    const uint32_t* words, int ring, int pair_in_ring) {
-  constexpr int total_edges = kLocalRingSteps;
-  constexpr int edge_mask = total_edges - 1;
-  constexpr int edge_count = (15 + 4) / 4;
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
-  constexpr unsigned kPairLeaderMask = 0x55555555u;
-  const uint32_t transition = planar_transition<4>(
-      words, ring * total_edges + pair_in_ring);
-  uint32_t state = 0;
-#pragma unroll
-  for (int j = 0; j < edge_count; ++j) {
-    const int source_pair =
-        (pair_in_ring + total_edges - edge_count + 1 + j) & edge_mask;
-    const uint32_t edge = __shfl_sync(kPairLeaderMask, transition, source_pair << 1);
-    state = ((state << 4) | edge) & 0xffffu;
-  }
-  return state;
-#else
-  const int first = (pair_in_ring + total_edges - edge_count + 1) & edge_mask;
-  uint32_t state = 0;
-#pragma unroll
-  for (int j = 0; j < edge_count; ++j) {
-    const int edge = (first + j) & edge_mask;
-    state = ((state << 4) |
-             planar_transition<4>(words, ring * total_edges + edge)) & 0xffffu;
-  }
-  return state;
-#endif
-}
-
-__device__ __noinline__ uint32_t qvq_local_ring_state_runtime(
-    const uint32_t* words, int ring, int pair_in_ring, int transition_bits) {
-  constexpr int total_edges = kLocalRingSteps;
-  constexpr int edge_mask = total_edges - 1;
-  const int edge_count = (15 + transition_bits) / transition_bits;
-  const int first = (pair_in_ring + total_edges - edge_count + 1) & edge_mask;
-  uint32_t state = 0;
-  for (int j = 0; j < edge_count; ++j) {
-    const int edge = (first + j) & edge_mask;
-    state = ((state << transition_bits) |
-             planar_transition_runtime(words, ring * total_edges + edge, transition_bits)) & 0xffffu;
   }
   return state;
 }
@@ -407,124 +291,6 @@ __device__ __forceinline__ float qvq_decode_weight(
 
   const uint32_t level_index = (col & 1) == 0 ? mixed >> 8 : mixed & 0xffu;
   return __half2float(cached_levels[level_index]);
-}
-
-// LR32 maps one warp to one output column of its logical K32 x N8 tile.  The
-// two lanes in each pair share the local-ring state and PGC16 lookup, while
-// the 8-bit selector contains one bank bit for each warp/ring.
-template <int TransitionBits>
-__device__ __forceinline__ float qvq_decode_local_ring_weight_fast(
-    const uint32_t* packed_words,
-    uint8_t packed_bank_id,
-    const half* cached_levels,
-    int ring,
-    int k_local,
-    int bank_alt_id) {
-  uint32_t level_pair = 0;
-#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 1200
-  // TB7 spills its unrolled mask lookup on Ada. Hopper has the same issue at
-  // TB6, while lower rates retain the direct lookup that is faster on SM89.
-  // Broadcasting the uniform per-ring value keeps the architecture/rate
-  // exceptions local to the decode without adding another kernel variant.
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900 && __CUDA_ARCH__ < 1000
-  constexpr bool kBroadcastBankMask = TransitionBits == 6 || TransitionBits == 7;
-#else
-  constexpr bool kBroadcastBankMask = TransitionBits == 7;
-#endif
-  uint32_t bank_mask = 0;
-  if constexpr (kBroadcastBankMask) {
-    if (k_local == 0) {
-      const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
-          static_cast<uint32_t>(bank_alt_id);
-      bank_mask = pgc16_v2_bank_mask<TransitionBits>(bank);
-    }
-    bank_mask = __shfl_sync(0xffffffffu, bank_mask, 0);
-  }
-  if ((k_local & 1) == 0) {
-    const uint32_t state = qvq_local_ring_state<TransitionBits>(packed_words, ring, k_local >> 1);
-    uint32_t mixed;
-    if constexpr (kBroadcastBankMask) {
-      mixed = pgc16_mix(state ^ bank_mask);
-    } else {
-      const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
-          static_cast<uint32_t>(bank_alt_id);
-      mixed = pgc16_mix(state ^ pgc16_v2_bank_mask_runtime(TransitionBits, bank));
-    }
-    level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
-        (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
-  }
-#else
-  // W2 has a dedicated broadcast specialization below. Higher Blackwell
-  // rates avoid the broadcast and use their shorter direct recurrences.
-  if ((k_local & 1) == 0) {
-    const uint32_t state = qvq_local_ring_state<TransitionBits>(packed_words, ring, k_local >> 1);
-    const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
-        static_cast<uint32_t>(bank_alt_id);
-    const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask_runtime(TransitionBits, bank));
-    level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
-        (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
-  }
-#endif
-  level_pair = __shfl_sync(0xffffffffu, level_pair, k_local & ~1);
-  const uint32_t level_bits = (k_local & 1) == 0 ? level_pair & 0xffffu : level_pair >> 16;
-  return __half2float(__ushort_as_half(static_cast<unsigned short>(level_bits)));
-}
-
-template <>
-__device__ __forceinline__ float qvq_decode_local_ring_weight_fast<4>(
-    const uint32_t* packed_words,
-    uint8_t packed_bank_id,
-    const half* cached_levels,
-    int ring,
-    int k_local,
-    int bank_alt_id) {
-  uint32_t level_pair = 0;
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
-  uint32_t bank_mask = 0;
-  if (k_local == 0) {
-    const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
-        static_cast<uint32_t>(bank_alt_id);
-    bank_mask = pgc16_v2_bank_mask<4>(bank);
-  }
-  bank_mask = __shfl_sync(0xffffffffu, bank_mask, 0);
-#endif
-  if ((k_local & 1) == 0) {
-    const uint32_t state = qvq_local_ring_state<4>(packed_words, ring, k_local >> 1);
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
-    const uint32_t mixed = pgc16_mix(state ^ bank_mask);
-#else
-    const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
-        static_cast<uint32_t>(bank_alt_id);
-    const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask_runtime(4, bank));
-#endif
-    level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
-        (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
-  }
-  level_pair = __shfl_sync(0xffffffffu, level_pair, k_local & ~1);
-  const uint32_t level_bits = (k_local & 1) == 0 ? level_pair & 0xffffu : level_pair >> 16;
-  return __half2float(__ushort_as_half(static_cast<unsigned short>(level_bits)));
-}
-
-__device__ __noinline__ float qvq_decode_local_ring_weight_runtime(
-    const uint32_t* packed_words,
-    uint8_t packed_bank_id,
-    const half* cached_levels,
-    int ring,
-    int k_local,
-    int transition_bits,
-    int bank_alt_id) {
-  uint32_t level_pair = 0;
-  if ((k_local & 1) == 0) {
-    const uint32_t state = qvq_local_ring_state_runtime(packed_words, ring, k_local >> 1, transition_bits);
-    const uint32_t bank = ((static_cast<uint32_t>(packed_bank_id) >> ring) & 1u) *
-        static_cast<uint32_t>(bank_alt_id);
-    const uint32_t mixed = pgc16_mix(state ^ pgc16_v2_bank_mask_runtime(transition_bits, bank));
-    level_pair = static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed >> 8])) |
-        (static_cast<uint32_t>(__half_as_ushort(cached_levels[mixed & 0xffu])) << 16);
-  }
-  level_pair = __shfl_sync(0xffffffffu, level_pair, k_local & ~1);
-  const uint32_t level_bits = (k_local & 1) == 0 ? level_pair & 0xffffu : level_pair >> 16;
-  return __half2float(__ushort_as_half(static_cast<unsigned short>(level_bits)));
 }
 
 // Decode / small-batch GEMV, specialized on the compile-time row count ROWS.
@@ -946,201 +712,6 @@ __global__ __launch_bounds__(kThreads) void qvq_gemv_splitk_kernel(
   }
 }
 
-// LR32 uses the serialized 256-weight payload as eight independent rings. A
-// warp owns one logical N8 column, and its 32 lanes own the K32 values. This
-// preserves the ring-local state order while making the reduction a single
-// warp shuffle instead of a cross-warp shared-memory reduction.
-template <
-    typename Scalar,
-    typename OutputScalar,
-    int ROWS,
-    int TransitionBits = 0,
-    bool SplitK = false,
-    int OutputTilesPerBlock = 1,
-    bool VectorStaging = true>
-__global__ __launch_bounds__(kThreads) void qvq_gemv_local_ring_kernel(
-    const Scalar* __restrict__ input,
-    const int32_t* __restrict__ trellis,
-    const uint8_t* __restrict__ bank_ids,
-    const half* __restrict__ levels,
-    OutputScalar* __restrict__ output,
-    float* __restrict__ partial_output,
-    int size_m,
-    int size_k,
-    int size_n,
-    int split_count,
-    int transition_bits,
-    int bank_alt_id) {
-  // ROWS=16 has enough shared-memory headroom to amortize each synchronization
-  // pair across twice as many K32 tiles without reducing register occupancy.
-  // Blackwell W2 also benefits at ROWS=8; higher rates, Ada small-row paths,
-  // and the launch-bound ROWS=1 path do better with the smaller shared-memory
-  // image. Keep ROWS=32 at eight tiles because its wider activation stripe
-  // would lower resident block count.
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1200
-  constexpr int kBatchTiles =
-      (TransitionBits == 4 || SplitK) && (ROWS == 8 || ROWS == 16) ? 16 : 8;
-#else
-  constexpr int kBatchTiles = ROWS == 16 ? 16 : 8;
-#endif
-  constexpr int kOutputTilesPerBlock = OutputTilesPerBlock;
-  constexpr int kMaxWords = 32;
-  constexpr int kWordsPerTile = 4 * TransitionBits;
-  constexpr int kInputVecsPerRow = kLocalRingTileRows * static_cast<int>(sizeof(Scalar)) / sizeof(uint4);
-
-  __shared__ half cached_levels[kPgc16LevelCount];
-  __shared__ __align__(16) uint32_t packed_words[kBatchTiles][kOutputTilesPerBlock][kMaxWords];
-  __shared__ uint8_t packed_bank_ids[kBatchTiles][kOutputTilesPerBlock];
-  __shared__ __align__(16) Scalar input_tile[kBatchTiles][ROWS * kLocalRingTileRows];
-
-  const int thread = static_cast<int>(threadIdx.x);
-  const int ring = thread >> 5;
-  const int k_local = thread & 31;
-  const int n_tile_base = static_cast<int>(blockIdx.x) * kOutputTilesPerBlock;
-  const int m0 = static_cast<int>(blockIdx.y) * ROWS;
-  const int block_rows = min(ROWS, size_m - m0);
-  const int n_tiles = size_n / kLocalRingTileColumns;
-  const int k_tiles = size_k / kLocalRingTileRows;
-
-  cached_levels[thread] = levels[thread];
-  __syncthreads();
-
-  float accumulator[ROWS][kOutputTilesPerBlock];
-#pragma unroll
-  for (int r = 0; r < ROWS; ++r) {
-    for (int sub = 0; sub < kOutputTilesPerBlock; ++sub) {
-      accumulator[r][sub] = 0.0f;
-    }
-  }
-
-  const int words_per_tile = TransitionBits != 0 ? kWordsPerTile : 4 * transition_bits;
-  auto stage_batch = [&](int kb, int tiles_here) {
-    if constexpr (TransitionBits != 0 && VectorStaging && !kQvqDebugDisableVecStaging) {
-      constexpr int words_per_vec = kWordsPerTile / 4;
-      const int vec_total = tiles_here * kOutputTilesPerBlock * words_per_vec;
-      uint4* words4 = reinterpret_cast<uint4*>(packed_words[0][0]);
-      const uint4* trellis4 = reinterpret_cast<const uint4*>(trellis);
-      for (int index = thread; index < vec_total; index += kThreads) {
-        const int tile_slot = index / words_per_vec;
-        const int w4 = index - tile_slot * words_per_vec;
-        const int u = tile_slot / kOutputTilesPerBlock;
-        const int sub = tile_slot % kOutputTilesPerBlock;
-        const int n_tile = n_tile_base + sub;
-        words4[tile_slot * (kMaxWords / 4) + w4] =
-            n_tile < n_tiles
-                ? trellis4[(static_cast<int64_t>(kb + u) * n_tiles + n_tile) * words_per_vec + w4]
-                : make_uint4(0u, 0u, 0u, 0u);
-      }
-    } else {
-      for (int index = thread; index < tiles_here * kOutputTilesPerBlock * words_per_tile; index += kThreads) {
-        const int tile_slot = index / words_per_tile;
-        const int w = index - tile_slot * words_per_tile;
-        const int u = tile_slot / kOutputTilesPerBlock;
-        const int sub = tile_slot % kOutputTilesPerBlock;
-        const int n_tile = n_tile_base + sub;
-        const int tile_index = (kb + u) * n_tiles + n_tile;
-        packed_words[u][sub][w] =
-            n_tile < n_tiles ? static_cast<uint32_t>(trellis[static_cast<int64_t>(tile_index) * words_per_tile + w])
-                             : 0u;
-      }
-    }
-    if (thread < tiles_here * kOutputTilesPerBlock) {
-      const int u = thread / kOutputTilesPerBlock;
-      const int sub = thread % kOutputTilesPerBlock;
-      const int n_tile = n_tile_base + sub;
-      const int tile_index = (kb + u) * n_tiles + n_tile;
-      packed_bank_ids[u][sub] = n_tile < n_tiles ? bank_ids[tile_index] : 0;
-    }
-
-    if constexpr (TransitionBits != 0 && VectorStaging && !kQvqDebugDisableVecStaging) {
-      const int vec_total = tiles_here * ROWS * kInputVecsPerRow;
-      uint4* input4 = reinterpret_cast<uint4*>(input_tile[0]);
-      const uint4* input4_base = reinterpret_cast<const uint4*>(input);
-      for (int index = thread; index < vec_total; index += kThreads) {
-        const int u = index / (ROWS * kInputVecsPerRow);
-        const int cell = index - u * (ROWS * kInputVecsPerRow);
-        const int row = cell / kInputVecsPerRow;
-        const int vec = cell - row * kInputVecsPerRow;
-        if (row < block_rows) {
-          input4[index] = input4_base[
-              ((static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kLocalRingTileRows) *
-                   static_cast<int>(sizeof(Scalar)) / 16) +
-              vec];
-        } else {
-          input4[index] = make_uint4(0u, 0u, 0u, 0u);
-        }
-      }
-    } else {
-      for (int index = thread; index < tiles_here * ROWS * kLocalRingTileRows; index += kThreads) {
-        const int u = index / (ROWS * kLocalRingTileRows);
-        const int cell = index - u * (ROWS * kLocalRingTileRows);
-        const int row = cell / kLocalRingTileRows;
-        const int k_local_tile = cell - row * kLocalRingTileRows;
-        input_tile[u][cell] = row < block_rows
-            ? input[static_cast<int64_t>(m0 + row) * size_k + (kb + u) * kLocalRingTileRows + k_local_tile]
-            : ScalarTraits<Scalar>::from_float(0.0f);
-      }
-    }
-  };
-
-  const int split = SplitK ? static_cast<int>(blockIdx.z) : 0;
-  // The host rejects split products above INT_MAX so this latency-sensitive
-  // partitioning stays in 32-bit registers.
-  const int k_tile_begin = SplitK ? (k_tiles * split) / split_count : 0;
-  const int k_tile_end = SplitK ? (k_tiles * (split + 1)) / split_count : k_tiles;
-  for (int kb = k_tile_begin; kb < k_tile_end; kb += kBatchTiles) {
-    const int tiles_here = min(kBatchTiles, k_tile_end - kb);
-    stage_batch(kb, tiles_here);
-    __syncthreads();
-
-#pragma unroll
-    for (int u = 0; u < kBatchTiles; ++u) {
-      if (u < tiles_here) {
-        for (int sub = 0; sub < kOutputTilesPerBlock; ++sub) {
-          if (n_tile_base + sub >= n_tiles) {
-            continue;
-          }
-          float weight;
-          if constexpr (TransitionBits != 0) {
-            weight = qvq_decode_local_ring_weight_fast<TransitionBits>(
-                packed_words[u][sub], packed_bank_ids[u][sub], cached_levels, ring, k_local, bank_alt_id);
-          } else {
-            weight = qvq_decode_local_ring_weight_runtime(
-                packed_words[u][sub], packed_bank_ids[u][sub], cached_levels, ring, k_local, transition_bits, bank_alt_id);
-          }
-#pragma unroll
-          for (int r = 0; r < ROWS; ++r) {
-            accumulator[r][sub] = fmaf(
-                ScalarTraits<Scalar>::to_float(input_tile[u][r * kLocalRingTileRows + k_local]),
-                weight,
-                accumulator[r][sub]);
-          }
-        }
-      }
-    }
-    __syncthreads();
-  }
-
-  for (int r = 0; r < block_rows; ++r) {
-    for (int sub = 0; sub < kOutputTilesPerBlock; ++sub) {
-      float total = accumulator[r][sub];
-#pragma unroll
-      for (int offset = 16; offset > 0; offset >>= 1) {
-        total += __shfl_down_sync(0xffffffffu, total, offset);
-      }
-      if (k_local == 0 && n_tile_base + sub < n_tiles) {
-        const int64_t output_index = static_cast<int64_t>(m0 + r) * size_n +
-            (n_tile_base + sub) * kLocalRingTileColumns + ring;
-        if constexpr (SplitK) {
-          partial_output[static_cast<int64_t>(split) * size_m * size_n + output_index] = total;
-        } else {
-          output[output_index] = ScalarTraits<OutputScalar>::from_float(total);
-        }
-      }
-    }
-  }
-}
-
 template <typename OutputScalar>
 __global__ void qvq_reduce_splitk_kernel(
     const float* __restrict__ partial_output,
@@ -1285,47 +856,6 @@ __global__ __launch_bounds__(kThreads) void qvq_gemm_wmma_kernel(
 // Round M up to the supported compile-time row specialization.
 constexpr int qvq_rows_for_m(int m) {
   return m <= 1 ? 1 : (m <= 8 ? 8 : (m <= 16 ? 16 : kRowsPerBlock));
-}
-
-int qvq_local_ring_split_count(
-    int size_m,
-    int size_k,
-    int size_n,
-    const QvqCudaDeviceConfig& device_config) {
-  const int rows = qvq_rows_for_m(size_m);
-  const int64_t base_blocks =
-      static_cast<int64_t>(size_n / kLocalRingTileColumns) * ((size_m + rows - 1) / rows);
-  const int k_tiles = size_k / kLocalRingTileRows;
-  const int64_t low_residency_blocks = std::max<int64_t>(32, device_config.sm_count / 2);
-  const int64_t saturated_blocks = static_cast<int64_t>(device_config.sm_count) * 3;
-  int split_count;
-  if (device_config.major >= 12) {
-    // Blackwell's one-row scheduler benefits from a few independent K waves
-    // even when N already exposes many resident blocks. For wider row
-    // specializations, keep the split count proportional to the available
-    // blocks and avoid the reduction overhead once N is saturated.
-    if (rows == 1) {
-      split_count = base_blocks < low_residency_blocks ? 4 : base_blocks < saturated_blocks ? 16 : 4;
-    } else if (base_blocks < low_residency_blocks) {
-      split_count = rows <= 8 ? 32 : 8;
-    } else if (base_blocks < saturated_blocks) {
-      split_count = 16;
-    } else {
-      split_count = 1;
-    }
-  } else if (base_blocks >= saturated_blocks) {
-    // Ada reaches full residency with one block per N8 tile. The larger
-    // K-width MLP shape is the exception for M=1, where four K waves hide
-    // the long local-ring recurrence.
-    split_count = rows == 1 && k_tiles >= 128 ? 4 : 1;
-  } else if (rows == 1) {
-    split_count = base_blocks < 64 ? 16 : 8;
-  } else if (base_blocks < low_residency_blocks) {
-    split_count = rows <= 8 ? 8 : 8;
-  } else {
-    split_count = 4;
-  }
-  return std::max(1, std::min(split_count, std::min(k_tiles, 64)));
 }
 
 // Transition widths that receive a fully specialized decode instantiation.
@@ -1595,293 +1125,6 @@ void launch_qvq_gemm_wmma_splitk(
       partial_ptr, output_ptr, static_cast<int>(output.size(0)), static_cast<int>(output.size(1)), split_count);
 }
 
-// LR32 specializes every legal rate (W1 through W3.5) so the planar edge
-// extraction and local-ring recurrence are compile-time unrolled. The host
-// dispatch still keeps the rate/type matrix explicit for predictable kernels.
-template <typename Scalar, typename OutputScalar, bool SplitK, int OutputTilesPerBlock, bool VectorStaging>
-void launch_qvq_local_ring_gemv_impl(
-    const at::Tensor& input,
-    const at::Tensor& trellis,
-    const at::Tensor& bank_ids,
-    const at::Tensor& levels,
-    at::Tensor* partial_output,
-    at::Tensor& output,
-    int transition_bits,
-    int split_count,
-    int bank_alt_id,
-    cudaStream_t stream) {
-  const int rows = qvq_rows_for_m(static_cast<int>(input.size(0)));
-  const dim3 grid(
-      static_cast<unsigned int>(
-          (output.size(1) / kLocalRingTileColumns + OutputTilesPerBlock - 1) / OutputTilesPerBlock),
-      static_cast<unsigned int>((input.size(0) + rows - 1) / rows),
-      static_cast<unsigned int>(SplitK ? split_count : 1));
-  const Scalar* input_ptr = reinterpret_cast<const Scalar*>(input.const_data_ptr());
-  const half* levels_ptr = reinterpret_cast<const half*>(levels.const_data_ptr());
-  OutputScalar* output_ptr = reinterpret_cast<OutputScalar*>(output.mutable_data_ptr());
-  float* partial_ptr = partial_output == nullptr ? nullptr : partial_output->mutable_data_ptr<float>();
-  const int32_t* trellis_ptr = trellis.const_data_ptr<int32_t>();
-  const uint8_t* bank_ids_ptr = bank_ids.const_data_ptr<uint8_t>();
-
-#define QVQ_LR_LAUNCH_TB(ROWS, TB)                                                                                 \
-  qvq_gemv_local_ring_kernel<Scalar, OutputScalar, ROWS, TB, SplitK, OutputTilesPerBlock, VectorStaging>          \
-      <<<grid, kThreads, 0, stream>>>(                                                                             \
-      input_ptr, trellis_ptr, bank_ids_ptr, levels_ptr, output_ptr, partial_ptr,                                  \
-      static_cast<int>(input.size(0)), static_cast<int>(input.size(1)), static_cast<int>(output.size(1)),          \
-      split_count, transition_bits, bank_alt_id)
-#define QVQ_LR_LAUNCH(ROWS) QVQ_LR_LAUNCH_TB(ROWS, 0)
-#define QVQ_LR_LAUNCH_ROWS(M)                                                                                      \
-  if (rows == 1) {                                                                                                 \
-    QVQ_LR_LAUNCH_TB(1, M);                                                                                        \
-  } else if (rows == 8) {                                                                                          \
-    QVQ_LR_LAUNCH_TB(8, M);                                                                                        \
-  } else if (rows == 16) {                                                                                         \
-    QVQ_LR_LAUNCH_TB(16, M);                                                                                       \
-  } else {                                                                                                         \
-    QVQ_LR_LAUNCH_TB(kRowsPerBlock, M);                                                                            \
-  }
-
-  switch (transition_bits) {
-    case 2:
-      QVQ_LR_LAUNCH_ROWS(2);
-      break;
-    case 3:
-      QVQ_LR_LAUNCH_ROWS(3);
-      break;
-    case 4:
-      QVQ_LR_LAUNCH_ROWS(4);
-      break;
-    case 5:
-      QVQ_LR_LAUNCH_ROWS(5);
-      break;
-    case 6:
-      QVQ_LR_LAUNCH_ROWS(6);
-      break;
-    case 7:
-      QVQ_LR_LAUNCH_ROWS(7);
-      break;
-    default:
-      TORCH_CHECK(false, "LR32 transition_bits must be in [2, 7]");
-  }
-#undef QVQ_LR_LAUNCH_ROWS
-#undef QVQ_LR_LAUNCH
-#undef QVQ_LR_LAUNCH_TB
-
-  if constexpr (SplitK) {
-    const int64_t output_values = output.numel();
-    const int reduction_blocks = static_cast<int>((output_values + kThreads - 1) / kThreads);
-    qvq_reduce_splitk_kernel<OutputScalar><<<reduction_blocks, kThreads, 0, stream>>>(
-        partial_ptr, output_ptr, static_cast<int>(output.size(0)), static_cast<int>(output.size(1)), split_count);
-  }
-}
-
-// Two adjacent N8 tiles amortize the LR32 input staging and launch overhead
-// for M=1. For larger row blocks the second accumulator tile increases
-// register pressure enough to regress throughput, so retain one tile/block.
-template <typename Scalar, typename OutputScalar, bool SplitK>
-void launch_qvq_local_ring_gemv(
-    const at::Tensor& input,
-    const at::Tensor& trellis,
-    const at::Tensor& bank_ids,
-    const at::Tensor& levels,
-    at::Tensor* partial_output,
-    at::Tensor& output,
-    int transition_bits,
-    int split_count,
-    int bank_alt_id,
-    cudaStream_t stream,
-    bool prefer_tb6_vector) {
-  // A 24-word TB=6 tile has a six-vector stride. On SM89/SM120 this access
-  // pattern defeats the coalescer for the wider row specializations; scalar
-  // staging is measurably faster and avoids the TB=6 occupancy cliff.
-  const bool vector_staging =
-      (transition_bits != 6 || prefer_tb6_vector) &&
-      qvq_vec_aligned(trellis.const_data_ptr(), input.const_data_ptr());
-  if (qvq_rows_for_m(static_cast<int>(input.size(0))) == 1 && vector_staging) {
-    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 2, true>(
-        input,
-        trellis,
-        bank_ids,
-        levels,
-        partial_output,
-        output,
-        transition_bits,
-        split_count,
-        bank_alt_id,
-        stream);
-  } else if (qvq_rows_for_m(static_cast<int>(input.size(0))) == 1) {
-    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 2, false>(
-        input,
-        trellis,
-        bank_ids,
-        levels,
-        partial_output,
-        output,
-        transition_bits,
-        split_count,
-        bank_alt_id,
-        stream);
-  } else if (vector_staging) {
-    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 1, true>(
-        input,
-        trellis,
-        bank_ids,
-        levels,
-        partial_output,
-        output,
-        transition_bits,
-        split_count,
-        bank_alt_id,
-        stream);
-  } else {
-    launch_qvq_local_ring_gemv_impl<Scalar, OutputScalar, SplitK, 1, false>(
-        input,
-        trellis,
-        bank_ids,
-        levels,
-        partial_output,
-        output,
-        transition_bits,
-        split_count,
-        bank_alt_id,
-        stream);
-  }
-}
-
-at::Tensor qvq_gemv_cuda_local_ring_impl(
-    const at::Tensor& input,
-    const at::Tensor& trellis,
-    const at::Tensor& levels,
-    int64_t transition_bits,
-    int64_t out_features,
-    bool output_fp32,
-    const at::Tensor& bank_ids,
-    int64_t bank_alt_id,
-    int64_t split_count_override) {
-  TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor");
-  TORCH_CHECK(trellis.is_cuda(), "trellis must be a CUDA tensor");
-  TORCH_CHECK(levels.is_cuda(), "PGC16 levels must be a CUDA tensor");
-  TORCH_CHECK(bank_ids.is_cuda(), "LR32 bank selectors must be a CUDA tensor");
-  TORCH_CHECK(input.dim() == 2 && trellis.dim() == 2 && levels.dim() == 1 && bank_ids.dim() == 1,
-              "LR32 GEMV expects rank-two input/trellis and rank-one levels/selectors");
-  TORCH_CHECK(transition_bits >= 2 && transition_bits <= 7,
-              "LR32 transition_bits must be in [2, 7] for W1 through W3.5");
-  TORCH_CHECK(input.scalar_type() == at::kHalf || input.scalar_type() == at::kBFloat16,
-              "LR32 input must have dtype float16 or bfloat16");
-  TORCH_CHECK(levels.scalar_type() == at::kHalf,
-              "PGC16 levels must preserve the canonical float16 bit patterns");
-  TORCH_CHECK(trellis.scalar_type() == at::kInt, "LR32 trellis must have dtype int32");
-  TORCH_CHECK(bank_ids.scalar_type() == at::kByte, "LR32 bank selectors must use uint8");
-  TORCH_CHECK(input.device() == trellis.device() && input.device() == levels.device() &&
-                  input.device() == bank_ids.device(),
-              "LR32 tensors must share one CUDA device");
-  TORCH_CHECK(input.is_contiguous() && trellis.is_contiguous() && levels.is_contiguous() && bank_ids.is_contiguous(),
-              "LR32 tensors must be contiguous");
-  TORCH_CHECK(bank_alt_id >= 1 && bank_alt_id <= 3, "LR32 alternative-bank ID must be in [1, 3]");
-
-  const int64_t size_m = input.size(0);
-  const int64_t size_k = input.size(1);
-  TORCH_CHECK(size_m >= 0, "input row count must be non-negative");
-  TORCH_CHECK(size_k > 0 && size_k % kLocalRingTileRows == 0,
-              "LR32 input width must be positive and divisible by 32");
-  TORCH_CHECK(out_features > 0 && out_features % kLocalRingTileColumns == 0,
-              "LR32 out_features must be positive and divisible by 8");
-  TORCH_CHECK(size_m <= std::numeric_limits<int>::max() && size_k <= std::numeric_limits<int>::max() &&
-                  out_features <= std::numeric_limits<int>::max(),
-              "LR32 dimensions exceed the int32 kernel limit");
-  TORCH_CHECK(levels.numel() == kPgc16LevelCount, "PGC16 levels must have shape (256)");
-  const int64_t k_tiles = size_k / kLocalRingTileRows;
-  const int64_t tile_count = (size_k / kLocalRingTileRows) * (out_features / kLocalRingTileColumns);
-  TORCH_CHECK(
-      tile_count <= std::numeric_limits<int>::max(),
-      "LR32 tile count exceeds the int32 kernel index limit");
-  TORCH_CHECK(split_count_override >= 0, "LR32 split_count must be non-negative");
-  const int64_t max_split_count = std::min<int64_t>(k_tiles, 64);
-  TORCH_CHECK(
-      split_count_override == 0 || split_count_override <= max_split_count,
-      "LR32 split_count must be in [1, min(K/32, 64)]");
-  TORCH_CHECK(
-      split_count_override == 0 ||
-          k_tiles <= std::numeric_limits<int>::max() / split_count_override,
-      "LR32 split_count overflows the int32 kernel partition limit");
-  TORCH_CHECK(trellis.sizes() == at::IntArrayRef({tile_count, 4 * transition_bits}),
-              "LR32 trellis shape must match K32, N8, and transition_bits");
-  TORCH_CHECK(bank_ids.numel() == tile_count,
-              "LR32 bank selectors must contain one packed byte per K32 x N8 trellis tile");
-
-  if (size_m == 0) {
-    return at::empty(
-        {0, out_features}, input.options().dtype(output_fp32 ? at::kFloat : input.scalar_type()));
-  }
-
-  const c10::cuda::CUDAGuard device_guard(input.device());
-  const QvqCudaDeviceConfig& device_config = qvq_cuda_device_config(input.get_device());
-  TORCH_CHECK(device_config.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
-  const int rows = qvq_rows_for_m(static_cast<int>(size_m));
-  const int64_t row_blocks = (size_m + rows - 1) / rows;
-  TORCH_CHECK(
-      row_blocks <= device_config.max_grid_y,
-      "LR32 input row count requires ",
-      row_blocks,
-      " CUDA grid-Y blocks, exceeding the device limit of ",
-      device_config.max_grid_y);
-
-  at::Tensor output = at::empty(
-      {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
-  const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(input.get_device());
-  const int automatic_split_count = qvq_local_ring_split_count(
-      static_cast<int>(size_m),
-      static_cast<int>(size_k),
-      static_cast<int>(out_features),
-      device_config);
-  const int split_count =
-      split_count_override == 0 ? automatic_split_count : static_cast<int>(split_count_override);
-  TORCH_CHECK(split_count >= 1 && split_count <= max_split_count,
-              "LR32 split_count must be in [1, min(K/32, 64)]");
-  TORCH_CHECK(
-      k_tiles <= std::numeric_limits<int>::max() / split_count,
-      "LR32 split_count overflows the int32 kernel partition limit");
-
-  if (split_count > 1) {
-    at::Tensor partial_output = at::empty({split_count, size_m, out_features}, input.options().dtype(at::kFloat));
-    if (input.scalar_type() == at::kHalf && output_fp32) {
-      launch_qvq_local_ring_gemv<half, float, true>(
-          input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream, device_config.major == 9);
-    } else if (input.scalar_type() == at::kHalf) {
-      launch_qvq_local_ring_gemv<half, half, true>(
-          input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream, device_config.major == 9);
-    } else if (output_fp32) {
-      launch_qvq_local_ring_gemv<nv_bfloat16, float, true>(
-          input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream, device_config.major == 9);
-    } else {
-      launch_qvq_local_ring_gemv<nv_bfloat16, nv_bfloat16, true>(
-          input, trellis, bank_ids, levels, &partial_output, output, static_cast<int>(transition_bits),
-          split_count, static_cast<int>(bank_alt_id), stream, device_config.major == 9);
-    }
-  } else if (input.scalar_type() == at::kHalf && output_fp32) {
-    launch_qvq_local_ring_gemv<half, float, false>(
-        input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream, device_config.major == 9);
-  } else if (input.scalar_type() == at::kHalf) {
-    launch_qvq_local_ring_gemv<half, half, false>(
-        input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream, device_config.major == 9);
-  } else if (output_fp32) {
-    launch_qvq_local_ring_gemv<nv_bfloat16, float, false>(
-        input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream, device_config.major == 9);
-  } else {
-    launch_qvq_local_ring_gemv<nv_bfloat16, nv_bfloat16, false>(
-        input, trellis, bank_ids, levels, nullptr, output, static_cast<int>(transition_bits), 1,
-        static_cast<int>(bank_alt_id), stream, device_config.major == 9);
-  }
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return output;
-}
-
 at::Tensor qvq_gemv_cuda_impl(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -1951,16 +1194,17 @@ at::Tensor qvq_gemv_cuda_impl(
   }
 
   const c10::cuda::CUDAGuard device_guard(input.device());
-  const QvqCudaDeviceConfig& device_config = qvq_cuda_device_config(input.get_device());
-  TORCH_CHECK(device_config.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
+  TORCH_CHECK(properties.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
 
   at::Tensor output = at::empty(
       {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
-  const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(input.get_device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const int64_t n_tiles = out_features / kTileColumns;
   const int64_t m_stripes = (size_m + kRowsPerBlock - 1) / kRowsPerBlock;
   const int64_t base_blocks = n_tiles * m_stripes;
-  const int64_t target_blocks = static_cast<int64_t>(device_config.sm_count) * 6;
+  const int64_t target_blocks = static_cast<int64_t>(properties.multiProcessorCount) * 6;
   const int64_t k_tiles = size_k / kTileRows;
   const int split_count = base_blocks >= 384 ? 1 : static_cast<int>(std::min(
       std::min((target_blocks + base_blocks - 1) / base_blocks, k_tiles), static_cast<int64_t>(64)));
@@ -2102,14 +1346,15 @@ at::Tensor qvq_gemv_cuda_v4(
   }
 
   const c10::cuda::CUDAGuard device_guard(input.device());
-  const QvqCudaDeviceConfig& device_config = qvq_cuda_device_config(input.get_device());
-  TORCH_CHECK(device_config.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
+  TORCH_CHECK(properties.major >= 8, "QVQ CUDA requires compute capability >= 8.0");
 
   at::Tensor output = at::empty(
       {size_m, out_features}, output_fp32 ? input.options().dtype(at::kFloat) : input.options());
-  const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(input.get_device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const int64_t base_blocks = (out_features / kTileColumns) * ((size_m + kRowsPerBlock - 1) / kRowsPerBlock);
-  const int64_t target_blocks = static_cast<int64_t>(device_config.sm_count) * 6;
+  const int64_t target_blocks = static_cast<int64_t>(properties.multiProcessorCount) * 6;
   const int64_t k_tiles = size_k / kTileRows;
   const int split_count = base_blocks >= 384 ? 1 : static_cast<int>(std::min(
       std::min((target_blocks + base_blocks - 1) / base_blocks, k_tiles), static_cast<int64_t>(64)));
@@ -2162,12 +1407,10 @@ at::Tensor qvq_gemv_cuda_v4(
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("gemv(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor? bank_ids=None, int bank_mode=0, int bank_alt_id=0) -> Tensor");
-  m.def("gemv_lr(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor bank_ids, int bank_alt_id, int split_count=0) -> Tensor");
   m.def("gemv_v4(Tensor input, Tensor trellis, Tensor levels, int transition_bits, int out_features, bool output_fp32, Tensor? bank_ids=None) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("gemv", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids, int64_t bank_mode, int64_t bank_alt_id) { return qvq_gemv_cuda_impl(input, trellis, levels, transition_bits, out_features, output_fp32, 2, bank_ids, bank_mode, bank_alt_id); });
-  m.impl("gemv_lr", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const at::Tensor& bank_ids, int64_t bank_alt_id, int64_t split_count) { return qvq_gemv_cuda_local_ring_impl(input, trellis, levels, transition_bits, out_features, output_fp32, bank_ids, bank_alt_id, split_count); });
   m.impl("gemv_v4", [](const at::Tensor& input, const at::Tensor& trellis, const at::Tensor& levels, int64_t transition_bits, int64_t out_features, bool output_fp32, const c10::optional<at::Tensor>& bank_ids) { return qvq_gemv_cuda_v4(input, trellis, levels, transition_bits, out_features, output_fp32, 4, bank_ids); });
 }
