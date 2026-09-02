@@ -254,3 +254,7 @@ device-fence/atomic completion protocol. Further recovery work should target
 a representation-level reduction inside the unchanged high stage, or a
 larger producer/consumer fusion where synchronization disappears naturally.
 Small arithmetic substitutions and wide DSM reductions remain low priority.
+
+Phase 13 instead attributed the dominant remaining MLP time to grouped
+gate/up P32 and promoted a lane-static W3 decode plan. See
+`docs/kernels/qvq_a41_r0_phase13_h100_w3_lane_plan.md`.

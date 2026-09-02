@@ -1,0 +1,97 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "635130adbdbfacc1827440830fb4c591d3a3156c",
+  "rows": [
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.03396928071975708,
+        "mean_ms": 0.033066743389765424,
+        "median_ms": 0.0331443202495575,
+        "min_ms": 0.03248768091201782,
+        "p95_ms": 0.033804159164428714
+      },
+      "bits": 3.0,
+      "child_n": [
+        8192,
+        8192
+      ],
+      "cuda_graph_stable": true,
+      "inner_max_abs_vs_dense": 1.0728836059570312e-05,
+      "k": 2048,
+      "logical_effective_tflops": 2.02474703040247,
+      "m": 1,
+      "recovered_bit_exact_vs_split1": true,
+      "recovered_changed_values_vs_split1": 0,
+      "recovered_max_abs_vs_split1": 0.0,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.0,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.03396928071975708,
+        "mean_ms": 0.033066743389765424,
+        "median_ms": 0.0331443202495575,
+        "min_ms": 0.03248768091201782,
+        "p95_ms": 0.033804159164428714
+      },
+      "transient_partial_bytes": 0,
+      "useful_thread_blocks": 256,
+      "variant": "n64_split1"
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.03396928071975708,
+        "mean_ms": 0.033066743389765424,
+        "median_ms": 0.0331443202495575,
+        "min_ms": 0.03248768091201782,
+        "p95_ms": 0.033804159164428714
+      },
+      "bits": 3.0,
+      "child_n": [
+        8192,
+        8192
+      ],
+      "cuda_graph_stable": true,
+      "inner_max_abs_vs_dense": 1.0728836059570312e-05,
+      "k": 2048,
+      "logical_effective_tflops": 1.9590580102939799,
+      "m": 1,
+      "recovered_bit_exact_vs_split1": true,
+      "recovered_changed_values_vs_split1": 0,
+      "recovered_max_abs_vs_split1": 0.0,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 0.9675569248295514,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.03429248094558716,
+        "mean_ms": 0.034255163701375324,
+        "median_ms": 0.03425567984580993,
+        "min_ms": 0.03422976016998291,
+        "p95_ms": 0.03427583932876587
+      },
+      "transient_partial_bytes": 0,
+      "useful_thread_blocks": 256,
+      "variant": "global_levels"
+    }
+  ],
+  "source_fingerprint": "df883e439b4d303ac549a5fac11ac2ae2320b792ecf69675d9c572a288fef9ea",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 150,
+    "warmup": 20
+  },
+  "workload": "Llama 3.2 1B grouped gate/up inner P32 plus exact paired recovery"
+}
