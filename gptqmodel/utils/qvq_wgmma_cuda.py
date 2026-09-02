@@ -112,6 +112,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m16_tma",
         "p32_window_m16_tma_ordered_split",
         "p32_window_m16_tma_grouped",
+        "p32_window_m16_tma_grouped_ordered_split",
     ),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_WGMMA_BUILD_ROOT",
@@ -503,6 +504,37 @@ def qvq_p32_window_wgmma_grouped_packed(
     )
 
 
+def qvq_p32_window_wgmma_grouped_ordered_packed(
+    input: torch.Tensor,
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Run a flattened grouped grid with child-local ordered split reduction."""
+
+    plan = payload.plan
+    if tuple(input.shape) != (16, plan.in_features):
+        raise ValueError("grouped Hopper P32 input does not match its M16 plan")
+    widths = [segment.out_features for segment in plan.segments]
+    output = _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma_grouped_ordered_split")(
+        input,
+        payload.trellis,
+        levels,
+        payload.bank_ids,
+        plan.transition_bits,
+        widths,
+        [segment.bank_alt_id for segment in plan.segments],
+        [segment.split_count for segment in plan.segments],
+    )
+    return tuple(
+        child.reshape(16, width)
+        for child, width in zip(
+            torch.split(output, [16 * width for width in widths]),
+            widths,
+            strict=True,
+        )
+    )
+
+
 def qvq_p32_window_wgmma_grouped(
     input: torch.Tensor,
     trellises: Sequence[torch.Tensor],
@@ -555,6 +587,7 @@ __all__ = [
     "qvq_h100_ordered_split_count",
     "qvq_p32_window_wgmma_group_plan",
     "qvq_p32_window_wgmma_grouped",
+    "qvq_p32_window_wgmma_grouped_ordered_packed",
     "qvq_p32_window_wgmma_grouped_packed",
     "qvq_p32_window_wgmma_m16_tma",
     "qvq_p32_window_wgmma_m16_tma_ordered_split",

@@ -20,8 +20,10 @@ from gptqmodel.utils import qvq_wgmma_cuda
 from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_group_plan,
     qvq_p32_window_wgmma_grouped,
+    qvq_p32_window_wgmma_grouped_ordered_packed,
     qvq_p32_window_wgmma_grouped_packed,
     qvq_p32_window_wgmma_m16_tma,
+    qvq_p32_window_wgmma_m16_tma_ordered_split,
     qvq_pack_p32_window_hopper_group,
 )
 
@@ -286,6 +288,142 @@ def test_grouped_hopper_is_bit_exact_to_plain_children_and_bounded_by_dense(
         torch.testing.assert_close(
             child[:logical_m], input[:logical_m].float() @ dense, rtol=0, atol=2e-3
         )
+
+
+@pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
+@pytest.mark.parametrize("logical_m", (1, 2, 4, 8, 16))
+def test_grouped_ordered_split_is_exact_to_ordered_children(bits, logical_m):
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    in_features = 512
+    widths = (512, 256, 256)
+    alt_ids = (3, 1, 2)
+    split_counts = (2, 2, 1)
+    generator = torch.Generator(device=device).manual_seed(
+        20261210 + int(bits * 10) + logical_m
+    )
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
+    input = torch.zeros((16, in_features), dtype=torch.float16, device=device)
+    input[:logical_m] = (
+        torch.randn((logical_m, in_features), generator=generator, device=device).half()
+        * 0.1
+    )
+    windows, selectors = _payloads(
+        bits=bits,
+        in_features=in_features,
+        widths=widths,
+        generator=generator,
+        device=device,
+    )
+    expected = tuple(
+        qvq_p32_window_wgmma_m16_tma_ordered_split(
+            input,
+            window,
+            levels,
+            child_selectors,
+            bits,
+            out_features=width,
+            bank_alt_id=alt_id,
+            split_count=split_count,
+        )
+        for window, child_selectors, width, alt_id, split_count in zip(
+            windows,
+            selectors,
+            widths,
+            alt_ids,
+            split_counts,
+            strict=True,
+        )
+    )
+    plan = qvq_p32_window_wgmma_group_plan(
+        input,
+        windows,
+        levels,
+        selectors,
+        bits,
+        out_features=widths,
+        bank_alt_ids=alt_ids,
+        split_counts=split_counts,
+    )
+    payload = qvq_pack_p32_window_hopper_group(windows, selectors, plan)
+
+    grouped = qvq_p32_window_wgmma_grouped_ordered_packed(input, payload, levels)
+    repeated = qvq_p32_window_wgmma_grouped_ordered_packed(input, payload, levels)
+
+    assert all(
+        torch.equal(child, plain)
+        for child, plain in zip(grouped, expected, strict=True)
+    )
+    assert all(
+        torch.equal(child, repeat)
+        for child, repeat in zip(grouped, repeated, strict=True)
+    )
+    for child, window, child_selectors, width, alt_id in zip(
+        grouped,
+        windows,
+        selectors,
+        widths,
+        alt_ids,
+        strict=True,
+    ):
+        dense = reconstruct_p32_window_inner_weight(
+            window,
+            bits=bits,
+            in_features=in_features,
+            out_features=width,
+            bank_ids=child_selectors,
+            bank_alt_id=torch.tensor(alt_id, dtype=torch.uint8, device=device),
+        )
+        torch.testing.assert_close(
+            child[:logical_m], input[:logical_m].float() @ dense, rtol=0, atol=2e-3
+        )
+
+
+def test_grouped_ordered_split_is_cuda_graph_stable_at_llama_qkv_shape():
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    bits = 3.0
+    in_features = 2048
+    widths = (2048, 512, 512)
+    alt_ids = (3, 1, 2)
+    split_counts = (8, 8, 8)
+    generator = torch.Generator(device=device).manual_seed(20261219)
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
+    input = torch.randn(
+        (16, in_features), generator=generator, device=device, dtype=torch.float16
+    )
+    windows, selectors = _payloads(
+        bits=bits,
+        in_features=in_features,
+        widths=widths,
+        generator=generator,
+        device=device,
+    )
+    plan = qvq_p32_window_wgmma_group_plan(
+        input,
+        windows,
+        levels,
+        selectors,
+        bits,
+        out_features=widths,
+        bank_alt_ids=alt_ids,
+        split_counts=split_counts,
+    )
+    payload = qvq_pack_p32_window_hopper_group(windows, selectors, plan)
+    expected = qvq_p32_window_wgmma_grouped_ordered_packed(input, payload, levels)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_p32_window_wgmma_grouped_ordered_packed(input, payload, levels)
+    graph.replay()
+    torch.cuda.synchronize(device)
+
+    assert all(
+        torch.equal(child, plain)
+        for child, plain in zip(captured, expected, strict=True)
+    )
 
 
 @pytest.mark.parametrize(

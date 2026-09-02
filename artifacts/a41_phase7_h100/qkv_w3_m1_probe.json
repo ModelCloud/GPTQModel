@@ -1,0 +1,615 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "fa087704356ef4cc5c1324f8f8cd7be8a1d215d5",
+  "kv_splits": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "m_values": [
+    1
+  ],
+  "q_splits": [
+    1,
+    2,
+    4,
+    8
+  ],
+  "rates": [
+    3.0
+  ],
+  "rows": [
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.506982986210919,
+      "m": 1,
+      "max_abs": 9.5367431640625e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 0.8521144751076841,
+      "split_counts": [
+        1,
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.02505280077457428,
+        "mean_ms": 0.024826133400201796,
+        "median_ms": 0.02481919974088669,
+        "min_ms": 0.02478239983320236,
+        "p95_ms": 0.024846400320529937
+      },
+      "transient_partial_bytes": 196608,
+      "useful_thread_blocks": 48
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.5038808270693259,
+      "m": 1,
+      "max_abs": 9.5367431640625e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 0.8469005038689345,
+      "split_counts": [
+        1,
+        2,
+        2
+      ],
+      "timing": {
+        "max_ms": 0.025198400020599365,
+        "mean_ms": 0.024980533172686895,
+        "median_ms": 0.024971999973058698,
+        "min_ms": 0.024953599274158477,
+        "p95_ms": 0.025006398558616638
+      },
+      "transient_partial_bytes": 262144,
+      "useful_thread_blocks": 64
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.5026730835154217,
+      "m": 1,
+      "max_abs": 9.5367431640625e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 0.8448705821703953,
+      "split_counts": [
+        1,
+        4,
+        4
+      ],
+      "timing": {
+        "max_ms": 0.025249600410461426,
+        "mean_ms": 0.02504031985998154,
+        "median_ms": 0.02503199875354767,
+        "min_ms": 0.02500480115413666,
+        "p95_ms": 0.025060799717903138
+      },
+      "transient_partial_bytes": 393216,
+      "useful_thread_blocks": 96
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.47307026204314157,
+      "m": 1,
+      "max_abs": 9.5367431640625e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 0.7951154752602314,
+      "split_counts": [
+        1,
+        8,
+        8
+      ],
+      "timing": {
+        "max_ms": 0.02698880136013031,
+        "mean_ms": 0.026644373238086702,
+        "median_ms": 0.026598399877548216,
+        "min_ms": 0.026476800441741943,
+        "p95_ms": 0.026815998554229736
+      },
+      "transient_partial_bytes": 655360,
+      "useful_thread_blocks": 160
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.5104381058312163,
+      "m": 1,
+      "max_abs": 8.58306884765625e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 0.8579216866350136,
+      "split_counts": [
+        2,
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.024859200417995452,
+        "mean_ms": 0.024655893395344415,
+        "median_ms": 0.02465120032429695,
+        "min_ms": 0.024619199335575104,
+        "p95_ms": 0.024691200256347655
+      },
+      "transient_partial_bytes": 327680,
+      "useful_thread_blocks": 80
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.7678875088305529,
+      "m": 1,
+      "max_abs": 5.245208740234375e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.2906312032662082,
+      "split_counts": [
+        2,
+        2,
+        2
+      ],
+      "timing": {
+        "max_ms": 0.01658560037612915,
+        "mean_ms": 0.01639573335647583,
+        "median_ms": 0.016386400163173675,
+        "min_ms": 0.016364799439907075,
+        "p95_ms": 0.016432000696659087
+      },
+      "transient_partial_bytes": 393216,
+      "useful_thread_blocks": 96
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.771049542517386,
+      "m": 1,
+      "max_abs": 4.76837158203125e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.295945808980033,
+      "split_counts": [
+        2,
+        4,
+        4
+      ],
+      "timing": {
+        "max_ms": 0.01656000018119812,
+        "mean_ms": 0.016328533341487247,
+        "median_ms": 0.01631920039653778,
+        "min_ms": 0.016279999911785126,
+        "p95_ms": 0.01634880006313324
+      },
+      "transient_partial_bytes": 524288,
+      "useful_thread_blocks": 128
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.6996414734391972,
+      "m": 1,
+      "max_abs": 4.76837158203125e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.1759262995369693,
+      "split_counts": [
+        2,
+        8,
+        8
+      ],
+      "timing": {
+        "max_ms": 0.018187199532985688,
+        "mean_ms": 0.017992533296346664,
+        "median_ms": 0.017984800040721893,
+        "min_ms": 0.017956799268722533,
+        "p95_ms": 0.01802079975605011
+      },
+      "transient_partial_bytes": 786432,
+      "useful_thread_blocks": 192
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.47167994663759666,
+      "m": 1,
+      "max_abs": 8.58306884765625e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 0.7927786949061523,
+      "split_counts": [
+        4,
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.026921600103378296,
+        "mean_ms": 0.02668373316526413,
+        "median_ms": 0.026676800847053525,
+        "min_ms": 0.026627200841903686,
+        "p95_ms": 0.026719999313354493
+      },
+      "transient_partial_bytes": 589824,
+      "useful_thread_blocks": 144
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.6930137309197306,
+      "m": 1,
+      "max_abs": 5.245208740234375e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.1647866844182588,
+      "split_counts": [
+        4,
+        2,
+        2
+      ],
+      "timing": {
+        "max_ms": 0.018328000605106354,
+        "mean_ms": 0.01815877338250478,
+        "median_ms": 0.01815680041909218,
+        "min_ms": 0.018067200481891633,
+        "p95_ms": 0.018241600692272188
+      },
+      "transient_partial_bytes": 655360,
+      "useful_thread_blocks": 160
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.8953515408911622,
+      "m": 1,
+      "max_abs": 2.384185791015625e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.5048670844072938,
+      "split_counts": [
+        4,
+        4,
+        4
+      ],
+      "timing": {
+        "max_ms": 0.014267200231552124,
+        "mean_ms": 0.014060426702102025,
+        "median_ms": 0.014053599536418916,
+        "min_ms": 0.013995200395584106,
+        "p95_ms": 0.014099200069904328
+      },
+      "transient_partial_bytes": 786432,
+      "useful_thread_blocks": 192
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.8878211857824198,
+      "m": 1,
+      "max_abs": 2.384185791015625e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.4922103981567003,
+      "split_counts": [
+        4,
+        8,
+        8
+      ],
+      "timing": {
+        "max_ms": 0.014368000626564025,
+        "mean_ms": 0.014176960041125616,
+        "median_ms": 0.01417279988527298,
+        "min_ms": 0.014132800698280334,
+        "p95_ms": 0.014207999408245086
+      },
+      "transient_partial_bytes": 1048576,
+      "useful_thread_blocks": 256
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.4577868524786756,
+      "m": 1,
+      "max_abs": 8.58306884765625e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 0.7694277995924277,
+      "split_counts": [
+        8,
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.027657601237297057,
+        "mean_ms": 0.027492533226807912,
+        "median_ms": 0.027486398816108704,
+        "min_ms": 0.02746239900588989,
+        "p95_ms": 0.02752000093460083
+      },
+      "transient_partial_bytes": 1114112,
+      "useful_thread_blocks": 272
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.6512085524293919,
+      "m": 1,
+      "max_abs": 5.245208740234375e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.0945223980517376,
+      "split_counts": [
+        8,
+        2,
+        2
+      ],
+      "timing": {
+        "max_ms": 0.019491200149059296,
+        "mean_ms": 0.019327200055122378,
+        "median_ms": 0.01932239979505539,
+        "min_ms": 0.019300800561904908,
+        "p95_ms": 0.01934559941291809
+      },
+      "transient_partial_bytes": 1179648,
+      "useful_thread_blocks": 288
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.8051517992732756,
+      "m": 1,
+      "max_abs": 2.1457672119140625e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.3532633667795821,
+      "split_counts": [
+        8,
+        4,
+        4
+      ],
+      "timing": {
+        "max_ms": 0.015830400586128234,
+        "mean_ms": 0.015634079972902934,
+        "median_ms": 0.015627999603748322,
+        "min_ms": 0.01557600051164627,
+        "p95_ms": 0.01568479984998703
+      },
+      "transient_partial_bytes": 1310720,
+      "useful_thread_blocks": 320
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.02144639939069748,
+        "mean_ms": 0.021159999916950865,
+        "median_ms": 0.02114879935979843,
+        "min_ms": 0.02112639993429184,
+        "p95_ms": 0.021172800660133363
+      },
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "cuda_graph_stable": true,
+      "k": 2048,
+      "logical_effective_tflops": 0.9244527728844768,
+      "m": 1,
+      "max_abs": 1.6689300537109375e-06,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.5537791420096643,
+      "split_counts": [
+        8,
+        8,
+        8
+      ],
+      "timing": {
+        "max_ms": 0.013833600282669067,
+        "mean_ms": 0.013618773370981217,
+        "median_ms": 0.01361120045185089,
+        "min_ms": 0.013579200208187103,
+        "p95_ms": 0.01363999992609024
+      },
+      "transient_partial_bytes": 1572864,
+      "useful_thread_blocks": 384
+    }
+  ],
+  "shape": "Llama 3.2 1B grouped query/key/value projections",
+  "source_fingerprint": "a1fc9da686460e93de24b94a496b993a84fe5b8a155e9ba4d4349315eef0402a",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 20,
+    "samples": 30,
+    "warmup": 10
+  }
+}
