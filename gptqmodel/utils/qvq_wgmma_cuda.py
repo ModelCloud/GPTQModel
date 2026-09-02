@@ -110,6 +110,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_w3_m16",
         "p32_window_w3_m16_tma",
         "p32_window_m16_tma",
+        "p32_window_m16_tma_ordered_split",
         "p32_window_m16_tma_grouped",
     ),
     sources=_source,
@@ -266,6 +267,38 @@ def qvq_p32_window_wgmma_m16_tma(
         split_count=int(split_count),
     )
     return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma")(
+        input,
+        trellis,
+        levels,
+        bank_ids,
+        transition_bits,
+        out_features,
+        bank_alt_id,
+        split_count,
+    )
+
+
+def qvq_p32_window_wgmma_m16_tma_ordered_split(
+    input: torch.Tensor,
+    trellis: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    bits: float,
+    *,
+    out_features: int,
+    bank_alt_id: int = 3,
+    split_count: int,
+) -> torch.Tensor:
+    """Run split-K through disjoint FP32 planes and an ordered reducer."""
+
+    transition_bits = _resolve_transition_bits(bits)
+    split_count = _resolve_hopper_split_count(
+        input=input,
+        transition_bits=transition_bits,
+        out_features=int(out_features),
+        split_count=int(split_count),
+    )
+    return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma_ordered_split")(
         input,
         trellis,
         levels,

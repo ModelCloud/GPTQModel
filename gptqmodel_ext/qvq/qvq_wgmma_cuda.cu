@@ -511,6 +511,7 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
 template <
     int TransitionBits,
     bool Grouped,
+    bool OrderedSplit,
     class InputTma,
     class TrellisTma,
     class BankTma>
@@ -747,7 +748,11 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
     const int64_t output_index =
         output_offset + static_cast<int64_t>(output_row) * size_n +
         n64_block * kOutputColumns + p32_column;
-    if (split_count > 1) {
+    if constexpr (OrderedSplit) {
+      partial_output[
+          static_cast<int64_t>(split) * kRows * size_n + output_index] =
+          accumulator(index);
+    } else if (split_count > 1) {
       atomicAdd(partial_output + output_index, accumulator(index));
     } else {
       partial_output[output_index] = accumulator(index);
@@ -771,6 +776,81 @@ __global__ void qvq_wgmma_reduce_split_kernel(
     value += partial_output[static_cast<int64_t>(split) * output_values + index];
   }
   output[index] = value;
+}
+
+template <int SplitCount>
+__global__ void qvq_wgmma_reduce_split_fixed_kernel(
+    const float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int output_values) {
+  const int vector_index = static_cast<int>(blockIdx.x) *
+          static_cast<int>(blockDim.x) +
+      static_cast<int>(threadIdx.x);
+  const int vector_count = output_values / 4;
+  if (vector_index >= vector_count) {
+    return;
+  }
+  float value0 = 0.0f;
+  float value1 = 0.0f;
+  float value2 = 0.0f;
+  float value3 = 0.0f;
+#pragma unroll
+  for (int split = 0; split < SplitCount; ++split) {
+    const auto value = reinterpret_cast<const float4*>(partial_output)[
+        static_cast<int64_t>(split) * vector_count + vector_index];
+    value0 += value.x;
+    value1 += value.y;
+    value2 += value.z;
+    value3 += value.w;
+  }
+  reinterpret_cast<float4*>(output)[vector_index] =
+      make_float4(value0, value1, value2, value3);
+}
+
+void qvq_wgmma_launch_ordered_split_reduction(
+    const at::Tensor& partial_output,
+    at::Tensor& output,
+    int split_count,
+    cudaStream_t stream) {
+  constexpr int kReductionThreads = 256;
+  const int output_values = static_cast<int>(output.numel());
+  const int vector_count = output_values / 4;
+  const int reduction_blocks =
+      (vector_count + kReductionThreads - 1) / kReductionThreads;
+#define QVQ_LAUNCH_FIXED_REDUCER(SPLIT_COUNT)                                      \
+  qvq_wgmma_reduce_split_fixed_kernel<SPLIT_COUNT>                                \
+      <<<reduction_blocks, kReductionThreads, 0, stream>>>(                        \
+          partial_output.data_ptr<float>(), output.data_ptr<float>(), output_values)
+  switch (split_count) {
+    case 2:
+      QVQ_LAUNCH_FIXED_REDUCER(2);
+      break;
+    case 4:
+      QVQ_LAUNCH_FIXED_REDUCER(4);
+      break;
+    case 8:
+      QVQ_LAUNCH_FIXED_REDUCER(8);
+      break;
+    case 16:
+      QVQ_LAUNCH_FIXED_REDUCER(16);
+      break;
+    case 32:
+      QVQ_LAUNCH_FIXED_REDUCER(32);
+      break;
+    default: {
+      const int scalar_reduction_blocks =
+          (output_values + kReductionThreads - 1) / kReductionThreads;
+      qvq_wgmma_reduce_split_kernel
+          <<<scalar_reduction_blocks, kReductionThreads, 0, stream>>>(
+              partial_output.data_ptr<float>(),
+              output.data_ptr<float>(),
+              output_values,
+              split_count);
+      break;
+    }
+  }
+#undef QVQ_LAUNCH_FIXED_REDUCER
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 at::Tensor qvq_p32_window_wgmma_w3_m16(
@@ -856,7 +936,7 @@ at::Tensor qvq_p32_window_wgmma_w3_m16(
   return output;
 }
 
-template <int TransitionBits>
+template <int TransitionBits, bool OrderedSplit = false>
 at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -948,11 +1028,15 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
   auto output = at::empty({kRows, size_n}, input.options().dtype(at::kFloat));
   auto partial_output = split_count == 1
       ? output
-      : at::zeros({kRows, size_n}, input.options().dtype(at::kFloat));
+      : OrderedSplit
+          ? at::empty(
+                {split_count, kRows, size_n},
+                input.options().dtype(at::kFloat))
+          : at::zeros({kRows, size_n}, input.options().dtype(at::kFloat));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns), 1, static_cast<unsigned>(split_count));
   HopperGroupedP32LaunchParams grouped_params{};
-  qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, false>
+  qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, false, OrderedSplit>
       <<<grid, kTmaThreads, 0, stream>>>(
       input_tma,
       trellis_tma,
@@ -966,7 +1050,12 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
       static_cast<int>(bank_alt_id));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  if (split_count > 1) {
+  if constexpr (OrderedSplit) {
+    if (split_count > 1) {
+      qvq_wgmma_launch_ordered_split_reduction(
+          partial_output, output, static_cast<int>(split_count), stream);
+    }
+  } else if (split_count > 1) {
     output = partial_output;
   }
   return output;
@@ -1008,6 +1097,35 @@ at::Tensor qvq_p32_window_wgmma_m16_tma(
           input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
     default:
       TORCH_CHECK(false, "QVQ P32 TMA WGMMA transition bits must be in [4, 7]");
+  }
+}
+
+at::Tensor qvq_p32_window_wgmma_m16_tma_ordered_split(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t transition_bits,
+    int64_t out_features,
+    int64_t bank_alt_id,
+    int64_t split_count) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_wgmma_m16_tma_impl<4, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    case 5:
+      return qvq_p32_window_wgmma_m16_tma_impl<5, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    case 6:
+      return qvq_p32_window_wgmma_m16_tma_impl<6, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    case 7:
+      return qvq_p32_window_wgmma_m16_tma_impl<7, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    default:
+      TORCH_CHECK(
+          false,
+          "ordered-split QVQ P32 TMA WGMMA transition bits must be in [4, 7]");
   }
 }
 
@@ -1162,7 +1280,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       static_cast<unsigned>(max_n64_blocks),
       static_cast<unsigned>(segment_count),
       static_cast<unsigned>(max_split_count));
-  qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, true>
+  qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, true, false>
       <<<grid, kTmaThreads, 0, stream>>>(
           input_tma,
           trellis_tma,
@@ -1213,6 +1331,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_w3_m16(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_w3_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
+  m.def("p32_window_m16_tma_ordered_split(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_m16_tma_grouped(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
 }
 
@@ -1220,5 +1339,6 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_w3_m16", qvq_p32_window_wgmma_w3_m16);
   m.impl("p32_window_w3_m16_tma", qvq_p32_window_wgmma_w3_m16_tma);
   m.impl("p32_window_m16_tma", qvq_p32_window_wgmma_m16_tma);
+  m.impl("p32_window_m16_tma_ordered_split", qvq_p32_window_wgmma_m16_tma_ordered_split);
   m.impl("p32_window_m16_tma_grouped", qvq_p32_window_wgmma_m16_tma_grouped);
 }
