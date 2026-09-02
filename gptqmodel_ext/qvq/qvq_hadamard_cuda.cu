@@ -49,6 +49,10 @@ constexpr int kHadamardPairMultiblockTile = 256;
 constexpr int kHadamardPairMultiblockTiles =
     kHadamardPairMultiblockN / kHadamardPairMultiblockTile;
 constexpr int kHadamardPairMultiblockHighThreads = 64;
+constexpr int kHadamardPairMultiblockHalf2LowValues =
+    kHadamardPairMultiblockTile / 2;
+constexpr int kHadamardPairMultiblockHalf2LowThreads =
+    kHadamardPairMultiblockTile;
 constexpr int kHadamardPairMultiblockHalf2HighThreads = 32;
 
 __device__ __forceinline__ float round_fp16_unless_overflow(float value) {
@@ -476,6 +480,92 @@ __global__ void qvq_swiglu_precondition_multiblock_low_kernel(
   workspace[offset] = buf[p(local)];
 }
 
+// Exact vectorized form of the first eight N=8192 butterfly stages. One
+// input thread first owns one column, preserving the original eight-warp
+// SiLU/setup parallelism. Adjacent lanes exchange their rounded input through
+// a fixed XOR shuffle. Even lanes retain packed values through the next four
+// within-warp stages. Only the final three cross-warp stages use shared
+// memory and block barriers. __lows2half2 retains the rounded low-lane sum
+// and difference:
+//   pair = [a, b]
+//   sum  = hadd2(pair, swap(pair)) = [rn(a+b), rn(b+a)]
+//   diff = hsub2(pair, swap(pair)) = [rn(a-b), rn(b-a)]
+//   next = lows2half2(sum, diff)    = [rn(a+b), rn(a-b)]
+// No butterfly is reassociated and every stage still rounds once to FP16.
+template <bool FuseSilu>
+__global__ void qvq_swiglu_precondition_multiblock_half2_low_kernel(
+    const half* __restrict__ gate_or_activated_gate,
+    const half* __restrict__ up,
+    const half* __restrict__ pre_scale,
+    half* __restrict__ workspace) {
+  __shared__ half2 buf[kHadamardPairMultiblockHalf2LowValues];
+  const int row = static_cast<int>(blockIdx.y);
+  const int tile = static_cast<int>(blockIdx.x);
+  const int local = static_cast<int>(threadIdx.x);
+  const int column = tile * kHadamardPairMultiblockTile + local;
+  const int64_t offset =
+      static_cast<int64_t>(row) * kHadamardPairMultiblockN + column;
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(kHadamardPairMultiblockN))));
+
+  const half activated_gate = FuseSilu
+      ? qvq_silu_fp16(gate_or_activated_gate[offset])
+      : gate_or_activated_gate[offset];
+  const half product_half = __float2half_rn(
+      __half2float(activated_gate) * __half2float(up[offset]));
+  float value = __half2float(product_half) * __half2float(pre_scale[column]);
+  value = round_fp16_unless_overflow(value);
+  const half initial = __float2half_rn(value / divisor);
+  const unsigned int peer_bits = __shfl_xor_sync(
+      0xffffffffu, static_cast<unsigned int>(__half_as_ushort(initial)), 1);
+  if ((local & 1) == 0) {
+    constexpr unsigned int kEvenLaneMask = 0x55555555u;
+    const int local_pair = local >> 1;
+    const half peer = __ushort_as_half(static_cast<unsigned short>(peer_bits));
+    const half2 pair = __halves2half2(initial, peer);
+    const half2 swapped = __lowhigh2highlow(pair);
+    const half2 sum = __hadd2(pair, swapped);
+    const half2 difference = __hsub2(pair, swapped);
+    half2 packed = __lows2half2(sum, difference);
+
+#pragma unroll
+    for (int bit = 1; bit < 16; bit <<= 1) {
+      union Half2Bits {
+        half2 value;
+        unsigned int bits;
+      } packed_bits, packed_peer;
+      packed_bits.value = packed;
+      packed_peer.bits = __shfl_xor_sync(
+          kEvenLaneMask, packed_bits.bits, bit * 2);
+      packed = (local_pair & bit) == 0
+          ? __hadd2(packed, packed_peer.value)
+          : __hsub2(packed_peer.value, packed);
+    }
+    buf[local_pair] = packed;
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 16; bit < kHadamardPairMultiblockHalf2LowValues; bit <<= 1) {
+    if (local < kHadamardPairMultiblockHalf2LowValues) {
+      const int peer = local ^ bit;
+      if (local < peer) {
+        const half2 a = buf[local];
+        const half2 b = buf[peer];
+        buf[local] = __hadd2(a, b);
+        buf[peer] = __hsub2(a, b);
+      }
+    }
+    __syncthreads();
+  }
+  if (local < kHadamardPairMultiblockHalf2LowValues) {
+    const int64_t pair_offset =
+        static_cast<int64_t>(row) * kHadamardPairMultiblockN +
+        tile * kHadamardPairMultiblockTile + local * 2;
+    *reinterpret_cast<half2*>(workspace + pair_offset) = buf[local];
+  }
+}
+
 __global__ void qvq_swiglu_precondition_multiblock_high_kernel(
     const half* __restrict__ workspace,
     half* __restrict__ output) {
@@ -856,7 +946,8 @@ at::Tensor qvq_swiglu_precondition_multiblock_cuda(
     const at::Tensor& up,
     const at::Tensor& pre_scale,
     bool half2_high,
-    bool fuse_silu) {
+    bool fuse_silu,
+    bool half2_low) {
   TORCH_CHECK(activated_gate.is_cuda() && up.is_cuda() && pre_scale.is_cuda(),
               "multiblock SwiGLU precondition tensors must be CUDA tensors");
   TORCH_CHECK(activated_gate.device() == up.device() && activated_gate.device() == pre_scale.device(),
@@ -889,7 +980,27 @@ at::Tensor qvq_swiglu_precondition_multiblock_cuda(
   at::Tensor workspace = at::empty_like(activated_gate);
   const int rows = static_cast<int>(rows64);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(activated_gate.get_device());
-  if (fuse_silu) {
+  if (half2_low && fuse_silu) {
+    qvq_swiglu_precondition_multiblock_half2_low_kernel<true><<<
+        dim3(kHadamardPairMultiblockTiles, rows),
+        kHadamardPairMultiblockHalf2LowThreads,
+        0,
+        stream>>>(
+        reinterpret_cast<const half*>(activated_gate.const_data_ptr()),
+        reinterpret_cast<const half*>(up.const_data_ptr()),
+        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+        reinterpret_cast<half*>(workspace.mutable_data_ptr()));
+  } else if (half2_low) {
+    qvq_swiglu_precondition_multiblock_half2_low_kernel<false><<<
+        dim3(kHadamardPairMultiblockTiles, rows),
+        kHadamardPairMultiblockHalf2LowThreads,
+        0,
+        stream>>>(
+        reinterpret_cast<const half*>(activated_gate.const_data_ptr()),
+        reinterpret_cast<const half*>(up.const_data_ptr()),
+        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+        reinterpret_cast<half*>(workspace.mutable_data_ptr()));
+  } else if (fuse_silu) {
     qvq_swiglu_precondition_multiblock_low_kernel<true><<<
         dim3(kHadamardPairMultiblockTiles, rows),
         kHadamardPairMultiblockTile,
@@ -963,7 +1074,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
-  m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False) -> Tensor");
+  m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False, bool half2_low=False) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {

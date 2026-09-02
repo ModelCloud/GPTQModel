@@ -672,8 +672,9 @@ def test_qvq_cuda_swiglu_precondition_is_bit_exact_and_repeatable(m, seed):
 @pytest.mark.parametrize("seed", (20260931, 20260932, 20260933))
 @pytest.mark.parametrize("half2_high", (False, True))
 @pytest.mark.parametrize("fuse_silu", (False, True))
+@pytest.mark.parametrize("half2_low", (False, True))
 def test_qvq_cuda_multiblock_swiglu_precondition_is_bit_exact_and_repeatable(
-    m, seed, half2_high, fuse_silu
+    m, seed, half2_high, fuse_silu, half2_low
 ):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("multiblock SwiGLU precondition requires Hopper")
@@ -699,14 +700,16 @@ def test_qvq_cuda_multiblock_swiglu_precondition_is_bit_exact_and_repeatable(
             pre_scale,
             half2_high=half2_high,
             fuse_silu=fuse_silu,
+            half2_low=half2_low,
         )
         assert torch.equal(actual, expected)
 
 
 @pytest.mark.parametrize("half2_high", (False, True))
 @pytest.mark.parametrize("fuse_silu", (False, True))
+@pytest.mark.parametrize("half2_low", (False, True))
 def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(
-    half2_high, fuse_silu
+    half2_high, fuse_silu, half2_low
 ):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("multiblock SwiGLU precondition requires Hopper")
@@ -722,6 +725,7 @@ def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(
         pre_scale,
         half2_high=half2_high,
         fuse_silu=fuse_silu,
+        half2_low=half2_low,
     )
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -731,6 +735,7 @@ def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(
             pre_scale,
             half2_high=half2_high,
             fuse_silu=fuse_silu,
+            half2_low=half2_low,
         )
     graph.replay()
     torch.cuda.synchronize()
@@ -743,6 +748,7 @@ def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(
             pre_scale[:4096],
             half2_high=half2_high,
             fuse_silu=fuse_silu,
+            half2_low=half2_low,
         )
     with pytest.raises(TypeError, match="fuse_silu"):
         qvq_cuda_swiglu_precondition_multiblock(
@@ -751,6 +757,16 @@ def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(
             pre_scale,
             half2_high=half2_high,
             fuse_silu=1,
+            half2_low=half2_low,
+        )
+    with pytest.raises(TypeError, match="half2_low"):
+        qvq_cuda_swiglu_precondition_multiblock(
+            gate,
+            up,
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=fuse_silu,
+            half2_low=1,
         )
 
 
@@ -776,6 +792,7 @@ def test_qvq_cuda_multiblock_fused_silu_covers_every_finite_fp16_value():
         pre_scale,
         half2_high=True,
         fuse_silu=True,
+        half2_low=True,
     )
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 

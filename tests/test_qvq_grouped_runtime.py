@@ -700,3 +700,4 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     assert gate_up_telemetry["h100_multiblock_precondition_launches"] >= 4
     assert gate_up_telemetry["h100_half2_precondition_high_launches"] >= 4
     assert gate_up_telemetry["h100_fused_silu_precondition_low_launches"] >= 4
+    assert gate_up_telemetry["h100_half2_precondition_low_launches"] >= 4

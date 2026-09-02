@@ -197,6 +197,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_multiblock_precondition_launches: int = 0
     h100_half2_precondition_high_launches: int = 0
     h100_fused_silu_precondition_low_launches: int = 0
+    h100_half2_precondition_low_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -222,6 +223,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_multiblock_precondition_launches": self.h100_multiblock_precondition_launches,
             "h100_half2_precondition_high_launches": self.h100_half2_precondition_high_launches,
             "h100_fused_silu_precondition_low_launches": self.h100_fused_silu_precondition_low_launches,
+            "h100_half2_precondition_low_launches": self.h100_half2_precondition_low_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -605,10 +607,12 @@ class QVQHopperGroupedRuntime:
                 down._cached_cast("SU", torch.float16),
                 half2_high=True,
                 fuse_silu=True,
+                half2_low=True,
             )
             self.telemetry.h100_multiblock_precondition_launches += 1
             self.telemetry.h100_half2_precondition_high_launches += 1
             self.telemetry.h100_fused_silu_precondition_low_launches += 1
+            self.telemetry.h100_half2_precondition_low_launches += 1
         else:
             activated_gate = self._mlp_act_fn(gate)
             if (
