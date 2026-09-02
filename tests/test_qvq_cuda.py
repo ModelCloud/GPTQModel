@@ -784,6 +784,73 @@ def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(
             fuse_silu=fuse_silu,
             half2_low=1,
         )
+    with pytest.raises(TypeError, match="pad_to_16"):
+        qvq_cuda_swiglu_precondition_multiblock(
+            gate,
+            up,
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=fuse_silu,
+            half2_low=half2_low,
+            pad_to_16=1,
+        )
+    with pytest.raises(ValueError, match="at most 16 rows"):
+        qvq_cuda_swiglu_precondition_multiblock(
+            gate.expand(17, -1).contiguous(),
+            up.expand(17, -1).contiguous(),
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=fuse_silu,
+            half2_low=half2_low,
+            pad_to_16=True,
+        )
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_multiblock_swiglu_precondition_direct_padding_is_exact_and_graph_stable(m):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("multiblock SwiGLU precondition requires Hopper")
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(20261700 + m)
+    gate = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
+    up = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
+    pre_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    expected = qvq_cuda_swiglu_precondition_multiblock(
+        gate,
+        up,
+        pre_scale,
+        half2_high=True,
+        fuse_silu=True,
+        half2_low=True,
+    )
+    actual = qvq_cuda_swiglu_precondition_multiblock(
+        gate,
+        up,
+        pre_scale,
+        half2_high=True,
+        fuse_silu=True,
+        half2_low=True,
+        pad_to_16=True,
+    )
+    assert actual.shape == (16, n)
+    assert torch.equal(actual[:m], expected)
+    assert torch.count_nonzero(actual[m:]).item() == 0
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_swiglu_precondition_multiblock(
+            gate,
+            up,
+            pre_scale,
+            half2_high=True,
+            fuse_silu=True,
+            half2_low=True,
+            pad_to_16=True,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured[:m], expected)
+    assert torch.count_nonzero(captured[m:]).item() == 0
 
 
 def test_qvq_cuda_multiblock_fused_silu_covers_every_finite_fp16_value():

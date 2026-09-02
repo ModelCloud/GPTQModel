@@ -199,6 +199,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_half2_precondition_high_launches: int = 0
     h100_fused_silu_precondition_low_launches: int = 0
     h100_half2_precondition_low_launches: int = 0
+    h100_direct_padded_precondition_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -226,6 +227,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_half2_precondition_high_launches": self.h100_half2_precondition_high_launches,
             "h100_fused_silu_precondition_low_launches": self.h100_fused_silu_precondition_low_launches,
             "h100_half2_precondition_low_launches": self.h100_half2_precondition_low_launches,
+            "h100_direct_padded_precondition_launches": self.h100_direct_padded_precondition_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -605,6 +607,7 @@ class QVQHopperGroupedRuntime:
             self._h100_multiblock_intermediate_enabled
             and self._mlp_activation_is_exact_silu
         ):
+            direct_pad = rows < 16
             transformed = qvq_cuda_swiglu_precondition_multiblock(
                 gate.reshape(rows, down.in_features),
                 up.reshape(rows, down.in_features),
@@ -612,11 +615,14 @@ class QVQHopperGroupedRuntime:
                 half2_high=True,
                 fuse_silu=True,
                 half2_low=True,
+                pad_to_16=direct_pad,
             )
             self.telemetry.h100_multiblock_precondition_launches += 1
             self.telemetry.h100_half2_precondition_high_launches += 1
             self.telemetry.h100_fused_silu_precondition_low_launches += 1
             self.telemetry.h100_half2_precondition_low_launches += 1
+            if direct_pad:
+                self.telemetry.h100_direct_padded_precondition_launches += 1
         else:
             activated_gate = self._mlp_act_fn(gate)
             if (
@@ -644,7 +650,7 @@ class QVQHopperGroupedRuntime:
                     down._cached_cast("SU", torch.float16),
                 )
         inner = down._inner_forward(transformed)
-        recovered = down._qvq_recover_inference_output(inner, torch.float16)
+        recovered = down._qvq_recover_inference_output(inner[:rows], torch.float16)
         return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
 
     def forward_mlp(self, x: torch.Tensor) -> torch.Tensor:

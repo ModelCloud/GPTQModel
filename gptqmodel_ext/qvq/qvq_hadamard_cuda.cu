@@ -624,12 +624,25 @@ __global__ void qvq_swiglu_precondition_multiblock_half2_low_kernel(
   }
 }
 
+template <bool PadTo16>
 __global__ void qvq_swiglu_precondition_multiblock_high_kernel(
     const half* __restrict__ workspace,
-    half* __restrict__ output) {
+    half* __restrict__ output,
+    int rows) {
   const int row = static_cast<int>(blockIdx.y);
   const int local = static_cast<int>(blockIdx.x) * kHadamardPairMultiblockHighThreads +
       static_cast<int>(threadIdx.x);
+  if constexpr (PadTo16) {
+    if (row >= rows) {
+#pragma unroll
+      for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+        const int column = tile * kHadamardPairMultiblockTile + local;
+        output[static_cast<int64_t>(row) * kHadamardPairMultiblockN + column] =
+            __float2half_rn(0.0f);
+      }
+      return;
+    }
+  }
   half values[kHadamardPairMultiblockTiles];
 #pragma unroll
   for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
@@ -666,14 +679,28 @@ __global__ void qvq_swiglu_precondition_multiblock_high_kernel(
 // add/sub. The experiment preserves four blocks per row while reducing each
 // block from two warps to one; CUDA-event timing decides whether the denser
 // instruction stream outweighs the lower warp count on H100.
+template <bool PadTo16>
 __global__ void qvq_swiglu_precondition_multiblock_half2_high_kernel(
     const half* __restrict__ workspace,
-    half* __restrict__ output) {
+    half* __restrict__ output,
+    int rows) {
   const int row = static_cast<int>(blockIdx.y);
   const int local_pair =
       static_cast<int>(blockIdx.x) * kHadamardPairMultiblockHalf2HighThreads +
       static_cast<int>(threadIdx.x);
   const int local = local_pair * 2;
+  if constexpr (PadTo16) {
+    if (row >= rows) {
+      const half2 zero = __float2half2_rn(0.0f);
+#pragma unroll
+      for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+        const int column = tile * kHadamardPairMultiblockTile + local;
+        *reinterpret_cast<half2*>(
+            output + static_cast<int64_t>(row) * kHadamardPairMultiblockN + column) = zero;
+      }
+      return;
+    }
+  }
   half2 values[kHadamardPairMultiblockTiles];
 #pragma unroll
   for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
@@ -1019,7 +1046,8 @@ at::Tensor qvq_swiglu_precondition_multiblock_cuda(
     const at::Tensor& pre_scale,
     bool half2_high,
     bool fuse_silu,
-    bool half2_low) {
+    bool half2_low,
+    bool pad_to_16) {
   TORCH_CHECK(activated_gate.is_cuda() && up.is_cuda() && pre_scale.is_cuda(),
               "multiblock SwiGLU precondition tensors must be CUDA tensors");
   TORCH_CHECK(activated_gate.device() == up.device() && activated_gate.device() == pre_scale.device(),
@@ -1039,7 +1067,11 @@ at::Tensor qvq_swiglu_precondition_multiblock_cuda(
   const int64_t rows64 = activated_gate.numel() / kHadamardPairMultiblockN;
   TORCH_CHECK(rows64 <= std::numeric_limits<int>::max(),
               "multiblock SwiGLU precondition row count exceeds launch limit");
-  at::Tensor output = at::empty_like(activated_gate);
+  TORCH_CHECK(!pad_to_16 || (activated_gate.dim() == 2 && rows64 > 0 && rows64 <= 16),
+              "padded multiblock SwiGLU precondition requires a nonempty 2D input with at most 16 rows");
+  at::Tensor output = pad_to_16
+      ? at::empty({16, kHadamardPairMultiblockN}, activated_gate.options())
+      : at::empty_like(activated_gate);
   if (rows64 == 0) {
     return output;
   }
@@ -1094,25 +1126,57 @@ at::Tensor qvq_swiglu_precondition_multiblock_cuda(
         reinterpret_cast<half*>(workspace.mutable_data_ptr()));
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  const int output_rows = pad_to_16 ? 16 : rows;
   if (half2_high) {
-    qvq_swiglu_precondition_multiblock_half2_high_kernel<<<
-        dim3(
-            kHadamardPairMultiblockTile /
-                (2 * kHadamardPairMultiblockHalf2HighThreads),
-            rows),
-        kHadamardPairMultiblockHalf2HighThreads,
-        0,
-        stream>>>(
-        reinterpret_cast<const half*>(workspace.const_data_ptr()),
-        reinterpret_cast<half*>(output.mutable_data_ptr()));
+    if (pad_to_16) {
+      qvq_swiglu_precondition_multiblock_half2_high_kernel<true><<<
+          dim3(
+              kHadamardPairMultiblockTile /
+                  (2 * kHadamardPairMultiblockHalf2HighThreads),
+              output_rows),
+          kHadamardPairMultiblockHalf2HighThreads,
+          0,
+          stream>>>(
+          reinterpret_cast<const half*>(workspace.const_data_ptr()),
+          reinterpret_cast<half*>(output.mutable_data_ptr()),
+          rows);
+    } else {
+      qvq_swiglu_precondition_multiblock_half2_high_kernel<false><<<
+          dim3(
+              kHadamardPairMultiblockTile /
+                  (2 * kHadamardPairMultiblockHalf2HighThreads),
+              output_rows),
+          kHadamardPairMultiblockHalf2HighThreads,
+          0,
+          stream>>>(
+          reinterpret_cast<const half*>(workspace.const_data_ptr()),
+          reinterpret_cast<half*>(output.mutable_data_ptr()),
+          rows);
+    }
   } else {
-    qvq_swiglu_precondition_multiblock_high_kernel<<<
-        dim3(kHadamardPairMultiblockTile / kHadamardPairMultiblockHighThreads, rows),
-        kHadamardPairMultiblockHighThreads,
-        0,
-        stream>>>(
-        reinterpret_cast<const half*>(workspace.const_data_ptr()),
-        reinterpret_cast<half*>(output.mutable_data_ptr()));
+    if (pad_to_16) {
+      qvq_swiglu_precondition_multiblock_high_kernel<true><<<
+          dim3(
+              kHadamardPairMultiblockTile / kHadamardPairMultiblockHighThreads,
+              output_rows),
+          kHadamardPairMultiblockHighThreads,
+          0,
+          stream>>>(
+          reinterpret_cast<const half*>(workspace.const_data_ptr()),
+          reinterpret_cast<half*>(output.mutable_data_ptr()),
+          rows);
+    } else {
+      qvq_swiglu_precondition_multiblock_high_kernel<false><<<
+          dim3(
+              kHadamardPairMultiblockTile / kHadamardPairMultiblockHighThreads,
+              output_rows),
+          kHadamardPairMultiblockHighThreads,
+          0,
+          stream>>>(
+          reinterpret_cast<const half*>(workspace.const_data_ptr()),
+          reinterpret_cast<half*>(output.mutable_data_ptr()),
+          rows);
+    }
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
@@ -1146,7 +1210,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode, bool warp_low=False) -> (Tensor, Tensor)");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
-  m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False, bool half2_low=False) -> Tensor");
+  m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False, bool half2_low=False, bool pad_to_16=False) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
