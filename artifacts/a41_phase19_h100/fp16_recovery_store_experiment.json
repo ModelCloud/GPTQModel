@@ -1,0 +1,131 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "25d4c13b39f94161758f66aa3135d08f5b062f26",
+  "rows": [
+    {
+      "better_than_separate_cast": true,
+      "bit_exact": true,
+      "direct_fp16_store": {
+        "max_ms": 0.007265920042991638,
+        "mean_ms": 0.007137516805529594,
+        "median_ms": 0.007137280106544495,
+        "min_ms": 0.007107200026512146,
+        "p95_ms": 0.00716159999370575
+      },
+      "intermediate_fp32_bytes_eliminated": 8192,
+      "m": 1,
+      "n": 2048,
+      "separate_cast": {
+        "max_ms": 0.008491520285606385,
+        "mean_ms": 0.008415881597995757,
+        "median_ms": 0.00841472029685974,
+        "min_ms": 0.00838912010192871,
+        "p95_ms": 0.00843392014503479
+      },
+      "speedup_vs_separate_cast": 1.1789813726301568
+    },
+    {
+      "better_than_separate_cast": true,
+      "bit_exact": true,
+      "direct_fp16_store": {
+        "max_ms": 0.0073043197393417355,
+        "mean_ms": 0.0072612480044364925,
+        "median_ms": 0.007260800004005432,
+        "min_ms": 0.007253119945526123,
+        "p95_ms": 0.007265920042991638
+      },
+      "intermediate_fp32_bytes_eliminated": 16384,
+      "m": 2,
+      "n": 2048,
+      "separate_cast": {
+        "max_ms": 0.008528640270233154,
+        "mean_ms": 0.008479913571476936,
+        "median_ms": 0.008479359745979308,
+        "min_ms": 0.008472959995269775,
+        "p95_ms": 0.00848576009273529
+      },
+      "speedup_vs_separate_cast": 1.1678272010386812
+    },
+    {
+      "better_than_separate_cast": true,
+      "bit_exact": true,
+      "direct_fp16_store": {
+        "max_ms": 0.007307519912719726,
+        "mean_ms": 0.00727115840613842,
+        "median_ms": 0.007271040081977844,
+        "min_ms": 0.007221119999885559,
+        "p95_ms": 0.007283200025558472
+      },
+      "intermediate_fp32_bytes_eliminated": 32768,
+      "m": 4,
+      "n": 2048,
+      "separate_cast": {
+        "max_ms": 0.008444799780845643,
+        "mean_ms": 0.00832934081852436,
+        "median_ms": 0.008328959941864014,
+        "min_ms": 0.008313599824905395,
+        "p95_ms": 0.008343039751052857
+      },
+      "speedup_vs_separate_cast": 1.1454977345687247
+    },
+    {
+      "better_than_separate_cast": true,
+      "bit_exact": true,
+      "direct_fp16_store": {
+        "max_ms": 0.007295359969139099,
+        "mean_ms": 0.0071801024079322815,
+        "median_ms": 0.007178879976272583,
+        "min_ms": 0.007148159742355347,
+        "p95_ms": 0.007198079824447632
+      },
+      "intermediate_fp32_bytes_eliminated": 65536,
+      "m": 8,
+      "n": 2048,
+      "separate_cast": {
+        "max_ms": 0.008683519959449769,
+        "mean_ms": 0.008618534371256828,
+        "median_ms": 0.008618239760398865,
+        "min_ms": 0.008612480163574219,
+        "p95_ms": 0.008623359799385071
+      },
+      "speedup_vs_separate_cast": 1.2004992128136438
+    },
+    {
+      "better_than_separate_cast": true,
+      "bit_exact": true,
+      "direct_fp16_store": {
+        "max_ms": 0.00748416006565094,
+        "mean_ms": 0.0072278175622224805,
+        "median_ms": 0.007226240038871765,
+        "min_ms": 0.007219840288162232,
+        "p95_ms": 0.007231360077857971
+      },
+      "intermediate_fp32_bytes_eliminated": 131072,
+      "m": 16,
+      "n": 2048,
+      "separate_cast": {
+        "max_ms": 0.008689280152320861,
+        "mean_ms": 0.00863490237593651,
+        "median_ms": 0.008637120127677918,
+        "min_ms": 0.00857472002506256,
+        "p95_ms": 0.00866432011127472
+      },
+      "speedup_vs_separate_cast": 1.1952440108848688
+    }
+  ],
+  "source_fingerprint": "9fe8c282b10ca81133a39651ef18ccac8dd908659b37e74397605b0eb32b1ef0",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 200,
+    "warmup": 30
+  },
+  "workload": "exact FP32 down recovery followed by final FP16 store"
+}

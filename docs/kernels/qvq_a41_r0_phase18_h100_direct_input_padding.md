@@ -192,8 +192,6 @@ Artifacts:
 
 ## Next experiment
 
-Both explicit M16 padding boundaries are now removed. Phase 19 should profile
-the complete production MLP graph again and rank its remaining nodes before
-changing math. The likely candidates are the grouped gate/up P32 plus paired
-recovery boundary and the final down recovery; another isolated padding or
-tiny-stage optimization is unlikely to explain the remaining Machete gap.
+Phase 19 re-profiles the full graph and fuses the final independent-recovery
+FP32-to-FP16 cast into the recovery kernel's store. See
+`docs/kernels/qvq_a41_r0_phase19_h100_fp16_recovery_store.md`.

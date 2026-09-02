@@ -458,10 +458,18 @@ def test_qvq_cuda_fp16_emulation_rescues_late_butterfly_and_sv_overflow():
     reference = matmul_hadU(x) * post_scale + bias
 
     actual = qvq_cuda_hadamard(x, post_scale=post_scale, bias=bias, scale_mode=4)
+    direct_fp16 = qvq_cuda_hadamard(
+        x,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=4,
+        output_fp16=True,
+    )
 
     assert not torch.isfinite(historical).all()
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, reference, rtol=2e-3, atol=16.0)
+    assert torch.equal(direct_fp16.view(torch.int16), actual.half().view(torch.int16))
 
 
 @pytest.mark.parametrize("scale_mode", (3, 4))
