@@ -377,7 +377,6 @@ class QVQOutputAlignmentAttachment:
             dual_v2 = runtime_config[5] if len(runtime_config) > 5 else False
             v2b4_p64 = runtime_config[6] if len(runtime_config) > 6 else False
             v2b2_p32 = runtime_config[7] if len(runtime_config) > 7 else False
-            v2b2_p32_lr = runtime_config[8] if len(runtime_config) > 8 else False
             trellis = module.state["trellis"].to(device=device)
             SU = module.state["SU"].to(device=device)
             SV = module.state["SV"].to(device=device)
@@ -399,7 +398,6 @@ class QVQOutputAlignmentAttachment:
             dual_v2=dual_v2,
             v2b4_p64=v2b4_p64,
             v2b2_p32=v2b2_p32,
-            v2b2_p32_lr=v2b2_p32_lr,
             bank_alt_id=bank_alt_id,
         )
         return _FixedTrellisAlignmentLinear(
@@ -429,7 +427,6 @@ class QVQOutputAlignmentAttachment:
             dual_v2 = runtime_config[5] if len(runtime_config) > 5 else False
             v2b4_p64 = runtime_config[6] if len(runtime_config) > 6 else False
             v2b2_p32 = runtime_config[7] if len(runtime_config) > 7 else False
-            v2b2_p32_lr = runtime_config[8] if len(runtime_config) > 8 else False
             trellis = module.state["trellis"].to(device=device)
             bank_ids = module.state.get("bank_ids")
             if bank_ids is not None:
@@ -464,7 +461,6 @@ class QVQOutputAlignmentAttachment:
             dual_v2=dual_v2,
             v2b4_p64=v2b4_p64,
             v2b2_p32=v2b2_p32,
-            v2b2_p32_lr=v2b2_p32_lr,
         )
         runtime.eval()
         runtime.post_init()
