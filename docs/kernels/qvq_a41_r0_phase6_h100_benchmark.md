@@ -106,3 +106,49 @@ W3, and W3.5 cases; Phase 6 ranges from 92.466 to 99.170 us.
 
 The clean baseline is
 `artifacts/a41_phase6_h100/origin_main_plain_mlp.json`.
+
+## Current-tip MLP refresh after Phase 7
+
+The complete MLP matrix was rerun at PR tip `2fd89223` after the Phase 7
+query/key/value integration.  Phase 7 does not change the MLP kernel; this is a
+cross-run stability check.  Every row executes two gate/up matrices
+`(M,2048,8192)` followed by one down matrix `(M,8192,2048)` and includes SiLU,
+all QVQ transforms, recovery, and runtime coordination.
+
+`vs last` compares with the committed Phase 6 production MLP artifact.  The
+strict boolean is `Yes` only when the new median is lower; any increase is
+reported as `No`, even when it is small enough to be ordinary run-to-run
+variation.
+
+| W | M | QVQ (us) | vs last | Better | Marlin W4 (us) | vs Marlin | Machete W4 (us) | vs Machete | Effective TFLOP/s |
+|---:|---:|---:|---:|:---:|---:|---:|---:|---:|---:|
+| 2 | 1 | 96.630 | 0.9964x | No | 29.588 | 0.306x | 51.626 | 0.534x | 1.042 |
+| 2 | 2 | 96.900 | 0.9951x | No | 31.871 | 0.329x | 51.473 | 0.531x | 2.078 |
+| 2 | 4 | 97.434 | 0.9965x | No | 31.819 | 0.327x | 51.261 | 0.526x | 4.133 |
+| 2 | 8 | 98.314 | 0.9960x | No | 29.706 | 0.302x | 51.252 | 0.521x | 8.191 |
+| 2 | 16 | 92.742 | 0.9970x | No | 33.020 | 0.356x | 51.220 | 0.552x | 17.367 |
+| 2.5 | 1 | 97.587 | 0.9949x | No | 29.588 | 0.303x | 51.626 | 0.529x | 1.032 |
+| 2.5 | 2 | 98.026 | 0.9955x | No | 31.871 | 0.325x | 51.473 | 0.525x | 2.054 |
+| 2.5 | 4 | 98.242 | 0.9981x | No | 31.819 | 0.324x | 51.261 | 0.522x | 4.099 |
+| 2.5 | 8 | 99.149 | 0.9974x | No | 29.706 | 0.300x | 51.252 | 0.517x | 8.122 |
+| 2.5 | 16 | 93.855 | 0.9956x | No | 33.020 | 0.352x | 51.220 | 0.546x | 17.161 |
+| 3 | 1 | 97.962 | 1.0007x | Yes | 29.588 | 0.302x | 51.626 | 0.527x | 1.028 |
+| 3 | 2 | 98.192 | 1.0016x | Yes | 31.871 | 0.325x | 51.473 | 0.524x | 2.050 |
+| 3 | 4 | 98.669 | 1.0002x | Yes | 31.819 | 0.322x | 51.261 | 0.520x | 4.081 |
+| 3 | 8 | 99.358 | 0.9981x | No | 29.706 | 0.299x | 51.252 | 0.516x | 8.105 |
+| 3 | 16 | 94.005 | 0.9960x | No | 33.020 | 0.351x | 51.220 | 0.545x | 17.133 |
+| 3.5 | 1 | 97.367 | 0.9979x | No | 29.588 | 0.304x | 51.626 | 0.530x | 1.034 |
+| 3.5 | 2 | 97.826 | 0.9963x | No | 31.871 | 0.326x | 51.473 | 0.526x | 2.058 |
+| 3.5 | 4 | 98.314 | 0.9936x | No | 31.819 | 0.324x | 51.261 | 0.521x | 4.096 |
+| 3.5 | 8 | 98.946 | 0.9971x | No | 29.706 | 0.300x | 51.252 | 0.518x | 8.139 |
+| 3.5 | 16 | 93.872 | 0.9948x | No | 33.020 | 0.352x | 51.220 | 0.546x | 17.158 |
+
+The current-tip geometric means are 1.458x versus ordinary per-child QVQ,
+0.321x versus Marlin W4, and 0.529x versus Machete W4.  Versus the last MLP
+run the ratio is 0.9969x, corresponding to a 0.31% latency regression.  Three
+cells improve and seventeen regress under the strict median comparison.  The
+cumulative geometric speedup versus the clean pre-PR `origin/main` artifact
+remains 11.908x.
+
+The refreshed raw record is
+`artifacts/a41_phase7_h100/production_mlp_refresh_vs_baselines.json`.
