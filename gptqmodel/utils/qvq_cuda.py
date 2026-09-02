@@ -682,6 +682,7 @@ def qvq_cuda_hadamard(
     bias: torch.Tensor | None = None,
     scale_mode: int = 0,
     pad_to_16: bool = False,
+    output_fp16: bool = False,
 ) -> torch.Tensor:
     """Apply the fast Walsh-Hadamard transform on the last dim in one fused launch.
 
@@ -717,10 +718,18 @@ def qvq_cuda_hadamard(
         raise ValueError(
             "padded QVQ CUDA Hadamard requires a nonempty 2D input with at most 16 rows"
         )
+    if not isinstance(output_fp16, bool):
+        raise TypeError("QVQ CUDA Hadamard output_fp16 must be a bool")
+    if output_fp16 and (
+        x.dtype != torch.float32 or scale_mode not in (3, 4) or pad_to_16
+    ):
+        raise ValueError(
+            "FP16 QVQ CUDA Hadamard output requires float32 x, scale mode 3/4, and no padding"
+        )
     if torch.cuda.get_device_capability(x.device) < (8, 0):
         raise RuntimeError("QVQ CUDA Hadamard requires a compute capability >= 8.0 device")
     return _qvq_cuda_hadamard_op()(
-        x, pre_scale, post_scale, bias, scale_mode, pad_to_16
+        x, pre_scale, post_scale, bias, scale_mode, pad_to_16, output_fp16
     )
 
 

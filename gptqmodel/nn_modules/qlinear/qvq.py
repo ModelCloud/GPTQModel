@@ -82,6 +82,7 @@ def _qvq_hadamard_fused(
     bias: torch.Tensor | None = None,
     scale_mode: int = 0,
     pad_to_16: bool = False,
+    output_fp16: bool = False,
 ) -> torch.Tensor:
     """One fused Hadamard launch (CUDA or CPU AVX-512); Python butterfly fallback otherwise.
 
@@ -137,9 +138,10 @@ def _qvq_hadamard_fused(
             bias=bias,
             scale_mode=mode,
             pad_to_16=pad_to_16,
+            output_fp16=output_fp16,
         )
-    if pad_to_16:
-        raise RuntimeError("direct padded QVQ Hadamard requires the native CUDA path")
+    if pad_to_16 or output_fp16:
+        raise RuntimeError("requested QVQ Hadamard output specialization requires the native CUDA path")
     if x.device.type == "cuda" and x.dtype == torch.float32 and scale_mode in (3, 4):
         return _qvq_fp16_emulated_hadamard_fallback(
             x,
@@ -1341,6 +1343,8 @@ class QVQLinear(BaseQuantLinear):
         self,
         output: torch.Tensor,
         compute_dtype: torch.dtype,
+        *,
+        output_fp16: bool = False,
     ) -> torch.Tensor:
         """Apply the exact child-local ``Hadamard -> SV -> bias`` epilogue."""
 
@@ -1356,6 +1360,7 @@ class QVQLinear(BaseQuantLinear):
                     and self.out_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
                     else 4 if output_dtype == torch.float32 else 0
                 ),
+                output_fp16=output_fp16,
             )
         output = output * self._cached_cast("SV", compute_dtype, output_dtype)
         cached_bias = self._cached_cast("bias", compute_dtype, output_dtype)

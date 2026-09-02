@@ -399,11 +399,13 @@ def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
     if category == "gate_up":
         assert telemetry[0]["paired_recovery_launches"] == 1
         assert telemetry[0]["independent_recovery_children"] == 0
+        assert telemetry[0]["h100_fp16_recovery_store_launches"] == 0
     else:
         assert telemetry[0]["paired_recovery_launches"] == 0
         assert telemetry[0]["independent_recovery_children"] == 3
         assert telemetry[0]["active_split_counts"] == (8, 8, 8)
         assert telemetry[0]["ordered_split_launches"] == 1
+        assert telemetry[0]["h100_fp16_recovery_store_launches"] == 2
 
 
 def test_unequal_gate_up_widths_retain_exact_independent_recovery():
@@ -695,6 +697,7 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     assert all(entry["grouped_launches"] >= 4 for entry in telemetry)
     assert all(entry["plain_fallbacks"] == 0 for entry in telemetry)
     assert all(entry["h100_direct_padded_input_launches"] >= 4 for entry in telemetry)
+    assert all(entry["h100_fp16_recovery_store_launches"] >= 4 for entry in telemetry)
     gate_up_telemetry = next(
         entry for entry in telemetry if entry["category"] == "gate_up"
     )

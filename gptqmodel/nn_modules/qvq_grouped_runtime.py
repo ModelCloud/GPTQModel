@@ -201,6 +201,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_half2_precondition_low_launches: int = 0
     h100_direct_padded_precondition_launches: int = 0
     h100_direct_padded_input_launches: int = 0
+    h100_fp16_recovery_store_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -230,6 +231,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_half2_precondition_low_launches": self.h100_half2_precondition_low_launches,
             "h100_direct_padded_precondition_launches": self.h100_direct_padded_precondition_launches,
             "h100_direct_padded_input_launches": self.h100_direct_padded_input_launches,
+            "h100_fp16_recovery_store_launches": self.h100_fp16_recovery_store_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -257,6 +259,7 @@ class QVQHopperGroupedRuntime:
         self._payload_source_key: tuple[Any, ...] | None = None
         self._h100_multiblock_intermediate_enabled = False
         self._h100_direct_padded_input_enabled = False
+        self._h100_fp16_recovery_store_enabled = False
         self._input: torch.Tensor | None = None
         self._input_version: int | None = None
         self._outputs: tuple[torch.Tensor, ...] | None = None
@@ -288,6 +291,7 @@ class QVQHopperGroupedRuntime:
         self._payload_source_key = None
         self._h100_multiblock_intermediate_enabled = False
         self._h100_direct_padded_input_enabled = False
+        self._h100_fp16_recovery_store_enabled = False
         self.telemetry.grouped_window_bytes = 0
         self.telemetry.grouped_selector_bytes = 0
         self.telemetry.child_window_bytes_avoided = 0
@@ -369,6 +373,10 @@ class QVQHopperGroupedRuntime:
             children[0].input_hadamard
             and children[0].in_features == 2048
             and properties.name == "NVIDIA H100"
+            and (properties.major, properties.minor) == (9, 0)
+        )
+        self._h100_fp16_recovery_store_enabled = (
+            properties.name == "NVIDIA H100"
             and (properties.major, properties.minor) == (9, 0)
         )
         measured_splits = None
@@ -554,7 +562,18 @@ class QVQHopperGroupedRuntime:
 
         outputs = []
         for child, inner in zip(children, inner_outputs, strict=True):
-            recovered = child._qvq_recover_inference_output(inner[:rows], torch.float16)
+            fp16_store = (
+                self._h100_fp16_recovery_store_enabled
+                and child.output_hadamard
+                and inner.dtype == torch.float32
+            )
+            recovered = child._qvq_recover_inference_output(
+                inner[:rows],
+                torch.float16,
+                output_fp16=fp16_store,
+            )
+            if fp16_store:
+                self.telemetry.h100_fp16_recovery_store_launches += 1
             outputs.append(
                 recovered.reshape(*x.shape[:-1], child.out_features).to(x.dtype)
             )
@@ -668,7 +687,18 @@ class QVQHopperGroupedRuntime:
                     down._cached_cast("SU", torch.float16),
                 )
         inner = down._inner_forward(transformed)
-        recovered = down._qvq_recover_inference_output(inner[:rows], torch.float16)
+        fp16_store = (
+            self._h100_fp16_recovery_store_enabled
+            and down.output_hadamard
+            and inner.dtype == torch.float32
+        )
+        recovered = down._qvq_recover_inference_output(
+            inner[:rows],
+            torch.float16,
+            output_fp16=fp16_store,
+        )
+        if fp16_store:
+            self.telemetry.h100_fp16_recovery_store_launches += 1
         return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
 
     def forward_mlp(self, x: torch.Tensor) -> torch.Tensor:

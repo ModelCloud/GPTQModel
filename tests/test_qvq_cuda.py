@@ -464,6 +464,72 @@ def test_qvq_cuda_fp16_emulation_rescues_late_butterfly_and_sv_overflow():
     torch.testing.assert_close(actual, reference, rtol=2e-3, atol=16.0)
 
 
+@pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_hadamard_fp16_final_store_is_bit_exact_and_graph_stable(
+    scale_mode, m
+):
+    n = 2048
+    generator = torch.Generator(device="cuda").manual_seed(
+        20261900 + 10 * scale_mode + m
+    )
+    x = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float32
+    )
+    post_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float32
+    )
+    bias = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float32
+    )
+    expected = qvq_cuda_hadamard(
+        x,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=scale_mode,
+    ).to(torch.float16)
+    actual = qvq_cuda_hadamard(
+        x,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=scale_mode,
+        output_fp16=True,
+    )
+    assert actual.dtype == torch.float16
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard(
+            x,
+            post_scale=post_scale,
+            bias=bias,
+            scale_mode=scale_mode,
+            output_fp16=True,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
+
+
+def test_qvq_cuda_hadamard_fp16_final_store_guards():
+    fp16 = torch.ones((1, 32), device="cuda", dtype=torch.float16)
+    fp32 = fp16.float()
+    with pytest.raises(TypeError, match="output_fp16"):
+        qvq_cuda_hadamard(fp32, scale_mode=4, output_fp16=1)
+    with pytest.raises(TypeError, match="require float32"):
+        qvq_cuda_hadamard(fp16, scale_mode=4, output_fp16=True)
+    with pytest.raises(ValueError, match="scale mode 3/4"):
+        qvq_cuda_hadamard(fp32, scale_mode=1, output_fp16=True)
+    with pytest.raises(ValueError, match="no padding"):
+        qvq_cuda_hadamard(
+            fp32,
+            scale_mode=4,
+            pad_to_16=True,
+            output_fp16=True,
+        )
+
+
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
 @pytest.mark.parametrize("seed", (20260901, 20260902, 20260903))
 def test_qvq_cuda_paired_output_recovery_is_bit_exact_and_repeatable(m, seed):
