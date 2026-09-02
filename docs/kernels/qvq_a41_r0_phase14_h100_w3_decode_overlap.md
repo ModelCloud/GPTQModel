@@ -175,3 +175,7 @@ three without causing register/occupancy damage. If it is neutral or worse,
 further pending-depth work should stop and the next phase should directly
 reduce shared level-table bank conflicts or delete a larger PGC representation
 cost.
+
+Phase 15 rejected depth four and promoted an exact lane-interleaved W3 level
+table that reduces measured shared-load conflicts by 43.8%. See
+`docs/kernels/qvq_a41_r0_phase15_h100_w3_lane_levels.md`.
