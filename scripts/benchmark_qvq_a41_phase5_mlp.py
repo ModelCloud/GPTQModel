@@ -275,8 +275,16 @@ def _run(args):
                     "speedup_vs_machete_w4": machete["median_ms"] / timing["median_ms"],
                     "better_than_previous_stage": timing["median_ms"]
                     < paired_recovery[m]["median_ms"],
+                    "plain_qvq_effective_tflops": logical_flops
+                    / (plain[m]["median_ms"] * 1e9),
+                    "paired_recovery_effective_tflops": logical_flops
+                    / (paired_recovery[m]["median_ms"] * 1e9),
                     "fused_mlp_effective_tflops": logical_flops
                     / (timing["median_ms"] * 1e9),
+                    "marlin_effective_tflops": logical_flops
+                    / (marlin["median_ms"] * 1e9),
+                    "machete_effective_tflops": logical_flops
+                    / (machete["median_ms"] * 1e9),
                 }
             )
             print(
