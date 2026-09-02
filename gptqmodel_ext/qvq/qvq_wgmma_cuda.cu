@@ -108,7 +108,11 @@ __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix_masked(
   // Every supported alternate-bank mask repeats one byte in both halves.
   // Therefore, for x = state ^ bank_mask:
   //   x ^ (x >> 8) == state ^ (state >> 8) ^ (bank_mask & 0xff00).
-  uint32_t mixed = state ^ (state >> 8) ^ bank_mask;
+  // The affine PGC step is reduced modulo 2^16, so bits above the low state
+  // word are irrelevant.  Extract just state byte 1 instead of first masking
+  // the raw circular-window funnel result and shifting that temporary again.
+  const uint32_t high_byte = __byte_perm(state, 0u, 0x4441u);
+  uint32_t mixed = state ^ high_byte ^ bank_mask;
   mixed = (mixed * kPgc16Multiplier + kPgc16Increment) & 0xffffu;
   return mixed ^ (mixed >> 7);
 }
@@ -198,8 +202,8 @@ __device__ __forceinline__ void qvq_p32_window_state_pair(
       (static_cast<uint64_t>(window_words[first_next_word]) << 32);
   const uint64_t second_window = static_cast<uint64_t>(window_words[second_word]) |
       (static_cast<uint64_t>(window_words[second_word + 1]) << 32);
-  first = static_cast<uint32_t>((first_window >> shift) & 0xffffu);
-  second = static_cast<uint32_t>((second_window >> shift) & 0xffffu);
+  first = static_cast<uint32_t>(first_window >> shift);
+  second = static_cast<uint32_t>(second_window >> shift);
 }
 
 // W3.5 is the only rate whose seven-bit windows cross enough word boundaries
@@ -251,8 +255,8 @@ __device__ __forceinline__ void qvq_p32_window_state_pair_planned(
       (static_cast<uint64_t>(window_words[first_next_word]) << 32);
   const uint64_t second_window = static_cast<uint64_t>(window_words[second_word]) |
       (static_cast<uint64_t>(window_words[second_word + 1]) << 32);
-  first = static_cast<uint32_t>((first_window >> shift) & 0xffffu);
-  second = static_cast<uint32_t>((second_window >> shift) & 0xffffu);
+  first = static_cast<uint32_t>(first_window >> shift);
+  second = static_cast<uint32_t>(second_window >> shift);
 }
 
 template <int TransitionBits, bool LevelsInShared, class FragmentA>
