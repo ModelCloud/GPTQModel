@@ -2025,6 +2025,18 @@ fetched main. The adjacent W2 full-Q split-10 and split-12 experiments both
 measured `0.107520 ms` against the split-16 control's `0.106496 ms` and were
 rejected; their diagnostics are `v19_m16_w2_fullq_resplit_s{10,12,16}_deep.json`.
 
+The twenty-eighth v19 progression completes the M16 linear-QKV retune for
+W2.5 and W3.5, making split 10 the measured plan for every supported rate on
+that exact geometry. The 100-warmup/4000-iteration screen improves W2.5 from
+`0.093184` to `0.092160 ms` and W3.5 from `0.094208` to `0.092160 ms`. In the
+candidate-first 200-warmup/8000-iteration reversal, split 10 reproduces
+`0.092160 ms` for both rates while the conservative split-16 control measures
+`0.093184 ms` for both: a **1.0111x** speedup (1.099% lower latency), with
+maximum absolute error below `3.63e-05`. Artifacts are
+`v19_m16_qkv_remaining_resplit_s{10_candidate,16_control}_deep.json` and the
+corresponding `s{10,16}_verify8000.json` pair. Affected-case log weighting now
+reaches **2.222% cumulative improvement** versus fetched main.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively

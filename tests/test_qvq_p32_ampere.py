@@ -156,7 +156,7 @@ def test_p32_ampere_dispatches_measured_m8_gate_plan_directly(monkeypatch):
     assert calls[0][-1] == 10
 
 
-@pytest.mark.parametrize("rate", (2, 3))
+@pytest.mark.parametrize("rate", (2, 2.5, 3, 3.5))
 def test_p32_ampere_dispatches_measured_m16_packed_qkv_plan_directly(
     monkeypatch, rate
 ):
