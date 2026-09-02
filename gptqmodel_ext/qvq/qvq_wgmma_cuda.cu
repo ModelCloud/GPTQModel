@@ -105,7 +105,9 @@ struct alignas(128) P32WgmmaTmaSharedStorageFor {
   // Reused by every decode lane and K16 tile; avoid dependent L1/global
   // lookups for the small, read-only PGC level table. W3 stores
   // levels[index][lane], assigning each lane pair its own two alternating
-  // shared banks. The extra shared footprint removes cross-pair conflicts.
+  // shared banks. Even lane slots hold the canonical view and odd slots hold
+  // the fixed high-byte permutation. The extra shared footprint removes
+  // cross-pair conflicts without retaining a separate W3 high table.
   static constexpr int kLevelEntries =
       TransitionBits == kW3TransitionBits ? 256 * 32 : 256;
   alignas(128) cute::ArrayEngine<Element, kLevelEntries> levels;
@@ -385,26 +387,24 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   if constexpr (LevelsInShared) {
     if constexpr (TransitionBits == kW3TransitionBits) {
       const uint32_t lane = static_cast<uint32_t>(threadIdx.x) & 31u;
-      uint32_t high00 = qvq_wgmma_high_byte(product00);
-      uint32_t high01 = qvq_wgmma_high_byte(product01);
-      uint32_t high10 = qvq_wgmma_high_byte(product10);
-      uint32_t high11 = qvq_wgmma_high_byte(product11);
-      high00 ^= high00 >> 7;
-      high01 ^= high01 >> 7;
-      high10 ^= high10 >> 7;
-      high11 ^= high11 >> 7;
-      fragment(0) = qvq_wgmma_load_level_shared_lane(levels_shared_base, high00, lane);
-      fragment(1) = qvq_wgmma_load_level_shared_lane(levels_shared_base, high01, lane);
+      const uint32_t low_lane = lane & ~1u;
+      const uint32_t high_lane = lane | 1u;
+      fragment(0) = qvq_wgmma_load_level_shared_lane(
+          levels_shared_base, qvq_wgmma_high_byte(product00), high_lane);
+      fragment(1) = qvq_wgmma_load_level_shared_lane(
+          levels_shared_base, qvq_wgmma_high_byte(product01), high_lane);
       fragment(2) = qvq_wgmma_load_level_shared_lane_byte_offset(
-          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product00), lane);
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product00), low_lane);
       fragment(3) = qvq_wgmma_load_level_shared_lane_byte_offset(
-          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product01), lane);
-      fragment(4) = qvq_wgmma_load_level_shared_lane(levels_shared_base, high10, lane);
-      fragment(5) = qvq_wgmma_load_level_shared_lane(levels_shared_base, high11, lane);
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product01), low_lane);
+      fragment(4) = qvq_wgmma_load_level_shared_lane(
+          levels_shared_base, qvq_wgmma_high_byte(product10), high_lane);
+      fragment(5) = qvq_wgmma_load_level_shared_lane(
+          levels_shared_base, qvq_wgmma_high_byte(product11), high_lane);
       fragment(6) = qvq_wgmma_load_level_shared_lane_byte_offset(
-          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product10), lane);
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product10), low_lane);
       fragment(7) = qvq_wgmma_load_level_shared_lane_byte_offset(
-          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product11), lane);
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product11), low_lane);
     } else {
       fragment(0) = qvq_wgmma_load_level_shared(
           levels_high_shared_base, qvq_wgmma_high_byte(product00));
@@ -715,9 +715,11 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
     auto* vectors = reinterpret_cast<uint4*>(shared.levels.begin());
     for (int entry = thread; entry < 256 * 4; entry += kTmaThreads) {
       const int index = entry >> 2;
-      const uint16_t bits = reinterpret_cast<const uint16_t*>(levels)[index];
-      const uint32_t pair = static_cast<uint32_t>(bits) |
-          (static_cast<uint32_t>(bits) << 16);
+      const auto* level_bits = reinterpret_cast<const uint16_t*>(levels);
+      const uint16_t low_bits = level_bits[index];
+      const uint16_t high_bits = level_bits[index ^ (index >> 7)];
+      const uint32_t pair = static_cast<uint32_t>(low_bits) |
+          (static_cast<uint32_t>(high_bits) << 16);
       const uint4 replicated = make_uint4(pair, pair, pair, pair);
       vectors[entry] = replicated;
     }
