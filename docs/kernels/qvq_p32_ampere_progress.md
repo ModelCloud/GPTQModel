@@ -2277,6 +2277,17 @@ log weighting reaches **3.961% improvement** versus fetched main; maximum
 absolute error remains below `3.25e-05`. Diagnostic artifacts are
 `v19_m8_fullq_wide_n128_split14_{deep,verify8000}.json`.
 
+The forty-fifth v19 progression applies N128 ownership to the measured M16
+attention-out tuple `(K,N)=(6144,5120)`. Against the narrow split-12 control
+medians of `0.061440 ms` at every rate, the 200-warmup/8000-iteration
+candidate measures `0.060416/0.061440/0.061440/0.061440 ms`: a **1.0042x**
+incremental speedup (0.419% lower latency) with no rate regression. Maximum
+absolute error remains below `4.01e-05`, and cumulative affected-case log
+weighting reaches **3.974% improvement** versus fetched main. The exact
+M16/K6144/N5120 plan is pinned at split 12. Artifacts are
+`v19_m16_attention_n64_control_deep.json` and
+`v19_m16_attention_wide_n128_candidate_{deep,verify8000}.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
