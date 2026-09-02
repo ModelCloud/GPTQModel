@@ -118,6 +118,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--m-values", nargs="+", type=int, default=[16])
     parser.add_argument("--warmup", type=int, default=12)
     parser.add_argument("--iterations", type=int, default=60)
+    parser.add_argument(
+        "--split", type=int, default=0,
+        help="Explicit K split count; 0 uses the production H200 shape policy.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if any(bits not in RATES for bits in args.bits):
@@ -126,6 +130,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--m-values supports 1, 2, 4, 8, and 16")
     if args.warmup <= 0 or args.iterations <= 0:
         parser.error("warmup and iterations must be positive")
+    if args.split < 0 or args.split > 64:
+        parser.error("split must be in [0, 64]")
     return args
 
 
@@ -176,10 +182,12 @@ def main() -> None:
                 if m < 16:
                     padded[:m].copy_(x)
                     return qvq_p32_window_wgmma_m16_tma(
-                        padded, window, levels, bank_ids, bits, out_features=shape.out_features
+                        padded, window, levels, bank_ids, bits, out_features=shape.out_features,
+                        split_count=args.split,
                     )[:m]
                 return qvq_p32_window_wgmma_m16_tma(
-                    x, window, levels, bank_ids, bits, out_features=shape.out_features
+                    x, window, levels, bank_ids, bits, out_features=shape.out_features,
+                    split_count=args.split,
                 )
 
             expected = x.float() @ dense
@@ -222,6 +230,7 @@ def main() -> None:
         "m_values": args.m_values,
         "warmup": args.warmup,
         "iterations": args.iterations,
+        "split": args.split,
         "rows": rows,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
