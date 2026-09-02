@@ -2054,6 +2054,14 @@ regressed at split 40, while split 56 regressed all four rates to
 respectively. Diagnostics use the `v19_m16_attention_resplit_` and
 `v19_m8_fullkv_resplit_` prefixes, including the W2 `verify8000` pair.
 
+The remaining post-transform full-KV wave checks were also rejected. M4
+split 48 regresses every rate versus split 64, from `0.030720-0.032768 ms`
+to `0.031744-0.035840 ms`. M16 split 24 and split 40 both regress every
+rate versus split 32: the retained plan measures `0.031744-0.032768 ms`,
+while the alternatives measure `0.033792-0.034816 ms`. Diagnostics are
+`v19_m4_fullkv_resplit_s{48_candidate,64_control}_deep.json` and
+`v19_m16_fullkv_resplit_s{24_candidate,32_control,40_candidate}_deep.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
