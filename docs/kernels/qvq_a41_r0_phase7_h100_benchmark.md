@@ -83,11 +83,14 @@ expected FP32 reduction parenthesization change.
 The raw probe is
 `artifacts/a41_phase7_h100/production_qkv_w3_m1_probe.json`.
 
-## Production query/key/value matrix
+## Production query/key/value matrix: legacy output-axis control
 
-This is the complete production projection path at all requested rates and
-rows.  `vs previous` compares against the committed Phase 4 grouped split-1
-artifact.  A ratio above one means QVQ is faster.
+This first complete projection matrix deliberately retained the legacy P0
+output-axis state on all three children.  It is a useful grouped-kernel
+control, but it is not the final A41 topology because the value projection
+still performs an output Hadamard.  `vs previous` compares against the
+committed Phase 4 grouped split-1 artifact.  A ratio above one means QVQ is
+faster.
 
 | W | M | K | Q/K/V N | QVQ (us) | vs previous | Better | Marlin W4 (us) | vs Marlin | Machete W4 (us) | vs Machete |
 |---:|---:|---:|:---|---:|---:|:---:|---:|---:|---:|---:|
@@ -130,3 +133,58 @@ ordered split-8 children plus the existing dense-inner accuracy gate.
 
 The raw record is
 `artifacts/a41_phase7_h100/production_qkv_vs_baselines.json`.
+
+## Corrected A41 production matrix
+
+The canonical A41 topology retains output Hadamards on query and key but folds
+the value output transform into its following consumer:
+
+\[
+H_{Q,out}=H_{K,out}=1,\qquad H_{V,out}=0.
+\]
+
+The table below reruns the entire matrix with that topology.  `vs last`
+compares against the immediately preceding legacy-output-axis control above,
+so the required regression flag is an apples-to-apples timing comparison on
+the same kernel, inputs, H100, and timing method.  It should not be interpreted
+as a decoder-only gain: it measures the A41 graph transformation that removes
+the unnecessary value output transform.
+
+| W | M | K | Q/K/V N | A41 QVQ (us) | vs last | Better | Marlin W4 (us) | vs Marlin | Machete W4 (us) | vs Machete |
+|---:|---:|---:|:---|---:|---:|:---:|---:|---:|---:|---:|
+| 2 | 1 | 2048 | 2048/512/512 | 34.453 | 1.052x | Yes | 50.027 | 1.452x | 35.392 | 1.027x |
+| 2 | 2 | 2048 | 2048/512/512 | 34.819 | 1.045x | Yes | 58.840 | 1.690x | 35.241 | 1.012x |
+| 2 | 4 | 2048 | 2048/512/512 | 35.035 | 1.046x | Yes | 59.326 | 1.693x | 35.466 | 1.012x |
+| 2 | 8 | 2048 | 2048/512/512 | 35.679 | 1.039x | Yes | 51.207 | 1.435x | 34.674 | 0.972x |
+| 2 | 16 | 2048 | 2048/512/512 | 33.444 | 1.046x | Yes | 55.192 | 1.650x | 35.015 | 1.047x |
+| 2.5 | 1 | 2048 | 2048/512/512 | 34.560 | 1.059x | Yes | 50.027 | 1.448x | 35.392 | 1.024x |
+| 2.5 | 2 | 2048 | 2048/512/512 | 34.790 | 1.051x | Yes | 58.840 | 1.691x | 35.241 | 1.013x |
+| 2.5 | 4 | 2048 | 2048/512/512 | 34.982 | 1.058x | Yes | 59.326 | 1.696x | 35.466 | 1.014x |
+| 2.5 | 8 | 2048 | 2048/512/512 | 35.707 | 1.039x | Yes | 51.207 | 1.434x | 34.674 | 0.971x |
+| 2.5 | 16 | 2048 | 2048/512/512 | 33.443 | 1.060x | Yes | 55.192 | 1.650x | 35.015 | 1.047x |
+| 3 | 1 | 2048 | 2048/512/512 | 34.678 | 1.062x | Yes | 50.027 | 1.443x | 35.392 | 1.021x |
+| 3 | 2 | 2048 | 2048/512/512 | 34.680 | 1.052x | Yes | 58.840 | 1.697x | 35.241 | 1.016x |
+| 3 | 4 | 2048 | 2048/512/512 | 35.240 | 1.043x | Yes | 59.326 | 1.683x | 35.466 | 1.006x |
+| 3 | 8 | 2048 | 2048/512/512 | 35.547 | 1.049x | Yes | 51.207 | 1.441x | 34.674 | 0.975x |
+| 3 | 16 | 2048 | 2048/512/512 | 33.707 | 1.043x | Yes | 55.192 | 1.637x | 35.015 | 1.039x |
+| 3.5 | 1 | 2048 | 2048/512/512 | 34.555 | 1.052x | Yes | 50.027 | 1.448x | 35.392 | 1.024x |
+| 3.5 | 2 | 2048 | 2048/512/512 | 34.577 | 1.056x | Yes | 58.840 | 1.702x | 35.241 | 1.019x |
+| 3.5 | 4 | 2048 | 2048/512/512 | 34.810 | 1.054x | Yes | 59.326 | 1.704x | 35.466 | 1.019x |
+| 3.5 | 8 | 2048 | 2048/512/512 | 35.440 | 1.035x | Yes | 51.207 | 1.445x | 34.674 | 0.978x |
+| 3.5 | 16 | 2048 | 2048/512/512 | 33.439 | 1.046x | Yes | 55.192 | 1.651x | 35.015 | 1.047x |
+
+| Geometric-mean comparison | A41 QVQ ratio |
+|:---|---:|
+| vs last benchmark | 1.049x |
+| vs ordinary per-child A41 QVQ | 2.758x |
+| vs Marlin W4 | 1.580x |
+| vs Machete W4 | 1.014x |
+
+All 20 cases are better than the last benchmark.  A41 QVQ beats Machete in 16
+of 20 cells and on the geometric mean.  The remaining losses are all at M8,
+where QVQ is 2.2-2.9% slower.  Combining the split-8 kernel gain with the A41
+axis correction gives approximately 1.265x over the Phase 4 grouped split-1
+control, or about 21.0% lower latency.
+
+The raw record is
+`artifacts/a41_phase7_h100/production_a41_qkv_vs_baselines.json`.
