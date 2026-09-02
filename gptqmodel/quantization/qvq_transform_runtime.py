@@ -11,6 +11,8 @@ reuses their complete input transform across every declared consumer.
 
 from __future__ import annotations
 
+import copy
+import json
 from dataclasses import dataclass
 
 import torch
@@ -20,6 +22,11 @@ from gptqmodel.quantization.qvq_transform_planner import (
     QVQTransformPlan,
     TransformPlacement,
 )
+
+
+QVQ_GROUPED_P32_RUNTIME_META_KEY = "qvq_grouped_p32_runtime"
+QVQ_GROUPED_P32_RUNTIME_SCHEMA = "qvq_grouped_p32_v1"
+QVQ_GROUPED_P32_PAYLOAD_LAYOUT = "canonical_per_module_p32"
 
 
 @dataclass(frozen=True)
@@ -182,12 +189,13 @@ class QVQSharedInputLinear(torch.nn.Module):
         return self.linear.forward_pretransformed(transformed, output_dtype=x.dtype)
 
 
-class QVQGroupedP32InputTransformState:
+class QVQGroupedP32InputTransformState(torch.nn.Module):
     """One shared input transform and one grouped CUDA P32 decode."""
 
     def __init__(
         self, group: QVQSharedInputTransformGroup, modules: dict[str, QVQLinear]
     ):
+        super().__init__()
         # Reuse the established shared-transform validation before imposing
         # the narrower grouped P32 contract.
         QVQSharedInputTransformState(group, modules)
@@ -300,13 +308,32 @@ class QVQGroupedP32InputTransformState:
                 f"grouped QVQ P32 basis {group.basis_id!r} has incompatible rates"
             )
         self.group = group
-        self.modules = tuple(modules[name] for name in group.module_names)
-        self.trellis = torch.cat(trellis_parts, dim=1).reshape(-1, words_per_tile)
-        self.bank_ids = torch.cat(selector_parts, dim=1).reshape(-1)
-        self.bank_alt_ids = torch.tensor(
-            alternative_ids,
-            dtype=torch.uint8,
-            device=reference.trellis.device,
+        # Keep child modules as ordinary Python references. Registering them
+        # here would create a second module-tree path and duplicate their
+        # canonical checkpoint keys.
+        object.__setattr__(
+            self,
+            "linears",
+            tuple(modules[name] for name in group.module_names),
+        )
+        self.register_buffer(
+            "trellis",
+            torch.cat(trellis_parts, dim=1).reshape(-1, words_per_tile),
+            persistent=False,
+        )
+        self.register_buffer(
+            "bank_ids",
+            torch.cat(selector_parts, dim=1).reshape(-1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "bank_alt_ids",
+            torch.tensor(
+                alternative_ids,
+                dtype=torch.uint8,
+                device=reference.trellis.device,
+            ),
+            persistent=False,
         )
         self.bank_alt_boundaries = tuple(output_tile_ends[:-1])
         self.output_widths = tuple(output_widths)
@@ -336,12 +363,45 @@ class QVQGroupedP32InputTransformState:
         if self.payloads_released:
             return
         words_per_tile = self.trellis.shape[1]
-        for module in self.modules:
+        for module in self.linears:
             module.trellis = module.trellis.new_empty((0, words_per_tile))
             module.bank_ids = module.bank_ids.new_empty((0,))
             module.bank_alt_id = module.bank_alt_id.new_empty((0,))
             module._qvq_cuda_bank_cache = None
         self.payloads_released = True
+
+    def canonical_child_payload(self, consumer_index: int) -> dict[str, torch.Tensor]:
+        """Reconstruct one child's canonical tensors from the grouped buffers."""
+
+        if isinstance(consumer_index, bool) or not isinstance(consumer_index, int):
+            raise TypeError("grouped QVQ P32 consumer index must be an integer")
+        if not 0 <= consumer_index < len(self.output_widths):
+            raise IndexError("grouped QVQ P32 consumer index is out of range")
+        k_tiles = self.linears[consumer_index].in_features // 16
+        words_per_tile = self.trellis.shape[1]
+        start = 0 if consumer_index == 0 else self.bank_alt_boundaries[consumer_index - 1]
+        end = (
+            self.out_features // 16
+            if consumer_index == len(self.output_widths) - 1
+            else self.bank_alt_boundaries[consumer_index]
+        )
+        trellis = (
+            self.trellis.view(k_tiles, self.out_features // 16, words_per_tile)
+            [:, start:end, :]
+            .contiguous()
+            .reshape(-1, words_per_tile)
+        )
+        bank_ids = (
+            self.bank_ids.view(k_tiles, self.out_features // 16)
+            [:, start:end]
+            .contiguous()
+            .reshape(-1)
+        )
+        return {
+            "trellis": trellis,
+            "bank_ids": bank_ids,
+            "bank_alt_id": self.bank_alt_ids[consumer_index : consumer_index + 1].contiguous(),
+        }
 
     def reset(self) -> None:
         self._source = None
@@ -363,7 +423,7 @@ class QVQGroupedP32InputTransformState:
                 "grouped QVQ P32 execution requires FP16 or BF16 transformed activations"
             )
         flat = transformed.reshape(-1, transformed.shape[-1]).contiguous()
-        reference = self.modules[0]
+        reference = self.linears[0]
         grouped_inner = qvq_cuda_gemv(
             flat,
             self.trellis,
@@ -386,7 +446,7 @@ class QVQGroupedP32InputTransformState:
                 piece.contiguous().reshape(*leading_shape, module.out_features),
                 output_dtype=output_dtype,
             )
-            for module, piece in zip(self.modules, pieces, strict=True)
+            for module, piece in zip(self.linears, pieces, strict=True)
         )
 
     def consume(
@@ -480,6 +540,7 @@ class QVQRefactoredP32Runtime:
 
     grouped_states: dict[str, QVQGroupedP32InputTransformState]
     plain_fallbacks: dict[str, str]
+    checkpoint_metadata_bytes: int = 0
 
 
 def shared_input_groups(
@@ -505,6 +566,130 @@ def shared_input_groups(
         QVQSharedInputTransformGroup(basis_id, tuple(module_names))
         for basis_id, module_names in grouped.items()
     )
+
+
+def qvq_grouped_p32_checkpoint_metadata(
+    plan: QVQTransformPlan,
+) -> dict[str, object]:
+    """Build the versioned load-time compiler manifest for a transform plan."""
+
+    groups = shared_input_groups(plan)
+    if not groups:
+        raise ValueError("grouped QVQ P32 checkpoint metadata requires at least one group")
+    return {
+        "schema": QVQ_GROUPED_P32_RUNTIME_SCHEMA,
+        "payload_layout": QVQ_GROUPED_P32_PAYLOAD_LAYOUT,
+        "groups": [
+            {
+                "basis_id": group.basis_id,
+                "module_names": list(group.module_names),
+            }
+            for group in groups
+        ],
+    }
+
+
+def _groups_from_qvq_grouped_p32_checkpoint_metadata(
+    metadata: object,
+) -> tuple[QVQSharedInputTransformGroup, ...]:
+    """Parse a grouped-P32 manifest without accepting ambiguous extensions."""
+
+    if not isinstance(metadata, dict):
+        raise TypeError("grouped QVQ P32 checkpoint metadata must be a dictionary")
+    expected_keys = {"schema", "payload_layout", "groups"}
+    if set(metadata) != expected_keys:
+        raise ValueError(
+            "grouped QVQ P32 checkpoint metadata must contain exactly "
+            f"{sorted(expected_keys)}"
+        )
+    if metadata["schema"] != QVQ_GROUPED_P32_RUNTIME_SCHEMA:
+        raise ValueError(
+            f"unsupported grouped QVQ P32 schema: {metadata['schema']!r}"
+        )
+    if metadata["payload_layout"] != QVQ_GROUPED_P32_PAYLOAD_LAYOUT:
+        raise ValueError(
+            "unsupported grouped QVQ P32 payload layout: "
+            f"{metadata['payload_layout']!r}"
+        )
+    raw_groups = metadata["groups"]
+    if not isinstance(raw_groups, list) or not raw_groups:
+        raise ValueError("grouped QVQ P32 metadata groups must be a non-empty list")
+
+    groups = []
+    basis_ids: set[str] = set()
+    module_names_seen: set[str] = set()
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, dict) or set(raw_group) != {
+            "basis_id",
+            "module_names",
+        }:
+            raise ValueError(
+                "each grouped QVQ P32 metadata group must contain exactly "
+                "['basis_id', 'module_names']"
+            )
+        basis_id = raw_group["basis_id"]
+        raw_module_names = raw_group["module_names"]
+        if not isinstance(basis_id, str) or not basis_id:
+            raise ValueError("grouped QVQ P32 basis IDs must be non-empty strings")
+        if basis_id in basis_ids:
+            raise ValueError(f"duplicate grouped QVQ P32 basis ID: {basis_id!r}")
+        if not isinstance(raw_module_names, list) or len(raw_module_names) not in (2, 3):
+            raise ValueError(
+                f"grouped QVQ P32 basis {basis_id!r} requires two or three modules"
+            )
+        if any(not isinstance(name, str) or not name for name in raw_module_names):
+            raise ValueError(
+                f"grouped QVQ P32 basis {basis_id!r} has an invalid module name"
+            )
+        module_names = tuple(raw_module_names)
+        duplicate_names = module_names_seen.intersection(module_names)
+        if len(set(module_names)) != len(module_names) or duplicate_names:
+            raise ValueError(
+                "grouped QVQ P32 module names must be unique across the manifest"
+            )
+        basis_ids.add(basis_id)
+        module_names_seen.update(module_names)
+        groups.append(QVQSharedInputTransformGroup(basis_id, module_names))
+    return tuple(groups)
+
+
+def qvq_grouped_p32_checkpoint_metadata_bytes(metadata: object) -> int:
+    """Return the compact UTF-8 storage cost after strict validation."""
+
+    groups = _groups_from_qvq_grouped_p32_checkpoint_metadata(metadata)
+    canonical = {
+        "schema": QVQ_GROUPED_P32_RUNTIME_SCHEMA,
+        "payload_layout": QVQ_GROUPED_P32_PAYLOAD_LAYOUT,
+        "groups": [
+            {"basis_id": group.basis_id, "module_names": list(group.module_names)}
+            for group in groups
+        ],
+    }
+    return len(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+
+
+def set_qvq_grouped_p32_checkpoint_metadata(
+    quantize_config: object,
+    plan: QVQTransformPlan,
+) -> dict[str, object]:
+    """Attach a canonical grouped-runtime manifest without changing payloads."""
+
+    metadata = qvq_grouped_p32_checkpoint_metadata(plan)
+    current_meta = getattr(quantize_config, "meta", None)
+    if current_meta is None:
+        meta = {}
+    elif isinstance(current_meta, dict):
+        meta = copy.deepcopy(current_meta)
+    else:
+        raise TypeError("QVQ quantization metadata must be a dictionary")
+    current = meta.get(QVQ_GROUPED_P32_RUNTIME_META_KEY)
+    if current is not None and current != metadata:
+        raise ValueError("refusing to replace conflicting grouped QVQ P32 metadata")
+    meta[QVQ_GROUPED_P32_RUNTIME_META_KEY] = metadata
+    setattr(quantize_config, "meta", meta)
+    return copy.deepcopy(metadata)
 
 
 def install_qvq_shared_input_transforms(
@@ -636,15 +821,114 @@ def install_qvq_refactored_p32_runtime(
     return QVQRefactoredP32Runtime(states, plain_fallbacks)
 
 
+def install_qvq_checkpointed_p32_runtime(
+    model: torch.nn.Module,
+    metadata: object,
+) -> QVQRefactoredP32Runtime:
+    """Compile canonical per-module tensors into transient grouped buffers.
+
+    The original ``QVQLinear`` modules remain at their canonical model paths.
+    Compatible CUDA groups delegate execution to a registered non-persistent
+    runtime state; incompatible groups retain ordinary per-module P32
+    execution.  State-dict serialization reconstructs each child's exact
+    canonical tensor slices and never writes the grouped layout.
+    """
+
+    if hasattr(model, "_qvq_grouped_p32_runtime_states"):
+        raise RuntimeError("grouped QVQ P32 checkpoint runtime is already installed")
+    groups = _groups_from_qvq_grouped_p32_checkpoint_metadata(metadata)
+    prepared: list[
+        tuple[
+            QVQSharedInputTransformGroup,
+            dict[str, QVQLinear],
+            QVQGroupedP32InputTransformState,
+        ]
+    ] = []
+    plain_fallbacks: dict[str, str] = {}
+    for group in groups:
+        modules = {}
+        for module_name in group.module_names:
+            try:
+                module = model.get_submodule(module_name)
+            except AttributeError as exc:
+                raise ValueError(
+                    f"grouped QVQ P32 checkpoint references missing module {module_name!r}"
+                ) from exc
+            if not isinstance(module, QVQLinear):
+                raise TypeError(
+                    f"grouped QVQ P32 checkpoint consumer {module_name!r} must be a "
+                    f"QVQLinear, got {type(module).__name__}"
+                )
+            modules[module_name] = module
+        try:
+            state = QVQGroupedP32InputTransformState(group, modules)
+        except (TypeError, ValueError) as exc:
+            plain_fallbacks[group.basis_id] = str(exc)
+            continue
+        prepared.append((group, modules, state))
+
+    states = {group.basis_id: state for group, _, state in prepared}
+    runtime_states = torch.nn.ModuleList(states.values())
+    runtime_states.eval()
+    setattr(model, "_qvq_grouped_p32_runtime_states", runtime_states)
+    for group, modules, state in prepared:
+        state.release_individual_payloads()
+        for consumer_index, module_name in enumerate(group.module_names):
+            object.__setattr__(
+                modules[module_name],
+                "_qvq_grouped_p32_delegate",
+                (state, consumer_index, module_name),
+            )
+
+    compiled = QVQRefactoredP32Runtime(
+        grouped_states=states,
+        plain_fallbacks=plain_fallbacks,
+        checkpoint_metadata_bytes=qvq_grouped_p32_checkpoint_metadata_bytes(metadata),
+    )
+    object.__setattr__(model, "_qvq_grouped_p32_runtime", compiled)
+    return compiled
+
+
+def install_qvq_grouped_p32_runtime_from_config(
+    model: torch.nn.Module,
+    quantize_config: object,
+) -> QVQRefactoredP32Runtime | None:
+    """Install the declared runtime, or leave an unmarked legacy model alone."""
+
+    meta = getattr(quantize_config, "meta", None)
+    if meta is None:
+        return None
+    if not isinstance(meta, dict):
+        raise TypeError("QVQ quantization metadata must be a dictionary")
+    metadata = meta.get(QVQ_GROUPED_P32_RUNTIME_META_KEY)
+    if metadata is None:
+        return None
+    checkpoint_format = getattr(quantize_config, "format", None)
+    checkpoint_format = getattr(checkpoint_format, "value", checkpoint_format)
+    if checkpoint_format != "qvq_v2b2_p32":
+        raise ValueError(
+            "grouped QVQ P32 checkpoint metadata requires format=qvq_v2b2_p32"
+        )
+    return install_qvq_checkpointed_p32_runtime(model, metadata)
+
+
 __all__ = [
+    "QVQ_GROUPED_P32_PAYLOAD_LAYOUT",
+    "QVQ_GROUPED_P32_RUNTIME_META_KEY",
+    "QVQ_GROUPED_P32_RUNTIME_SCHEMA",
     "QVQGroupedP32InputTransformState",
     "QVQGroupedP32Linear",
     "QVQRefactoredP32Runtime",
     "QVQSharedInputLinear",
     "QVQSharedInputTransformGroup",
     "QVQSharedInputTransformState",
+    "install_qvq_checkpointed_p32_runtime",
     "install_qvq_shared_input_transforms",
     "install_qvq_grouped_p32_input_transforms",
+    "install_qvq_grouped_p32_runtime_from_config",
     "install_qvq_refactored_p32_runtime",
+    "qvq_grouped_p32_checkpoint_metadata",
+    "qvq_grouped_p32_checkpoint_metadata_bytes",
+    "set_qvq_grouped_p32_checkpoint_metadata",
     "shared_input_groups",
 ]

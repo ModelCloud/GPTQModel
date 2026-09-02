@@ -47,9 +47,11 @@ from gptqmodel.quantization.qvq_transform_planner import (  # noqa: E402
     QVQTransformPlanner,
 )
 from gptqmodel.quantization.qvq_transform_runtime import (  # noqa: E402
+    install_qvq_checkpointed_p32_runtime,
     install_qvq_grouped_p32_input_transforms,
     install_qvq_refactored_p32_runtime,
     install_qvq_shared_input_transforms,
+    qvq_grouped_p32_checkpoint_metadata,
 )
 from gptqmodel.utils.qvq_cuda import prewarm_qvq_cuda  # noqa: E402
 from scripts.validate_qvq_rotation_full_model_mlx import (  # noqa: E402
@@ -706,7 +708,11 @@ def main():
     )
     parser.add_argument(
         "--runtime-oracle",
-        choices=("plain-refactored", "plain-refactored-corrected"),
+        choices=(
+            "plain-refactored",
+            "plain-refactored-corrected",
+            "plain-checkpointed",
+        ),
         help=(
             "fit one canonical A31-basis P32 payload and execute it as ordinary "
             "per-module P32 versus the fail-closed refactored grouped runtime"
@@ -724,6 +730,7 @@ def main():
     oracle_arms = {
         "plain-refactored": ("P0", "R0"),
         "plain-refactored-corrected": ("P0+C", "R0+C"),
+        "plain-checkpointed": ("P0", "C0"),
     }
     if args.runtime_oracle and tuple(args.arms) != oracle_arms[args.runtime_oracle]:
         parser.error(
@@ -1015,9 +1022,19 @@ def main():
             metadata=plan.metadata,
         )
         plain_fallbacks = {}
+        checkpoint_metadata_bytes = 0
         if args.runtime_oracle and arm_index == 0:
             shared_states = {}
             runtime_mode = "plain_per_module_p32"
+        elif args.runtime_oracle == "plain-checkpointed":
+            checkpoint_metadata = qvq_grouped_p32_checkpoint_metadata(runtime_plan)
+            compiled_runtime = install_qvq_checkpointed_p32_runtime(
+                model, checkpoint_metadata
+            )
+            shared_states = compiled_runtime.grouped_states
+            plain_fallbacks = compiled_runtime.plain_fallbacks
+            checkpoint_metadata_bytes = compiled_runtime.checkpoint_metadata_bytes
+            runtime_mode = "checkpointed_grouped_or_plain_p32"
         elif args.runtime_oracle:
             compiled_runtime = install_qvq_refactored_p32_runtime(model, runtime_plan)
             shared_states = compiled_runtime.grouped_states
@@ -1041,6 +1058,7 @@ def main():
             "plain_fallback_count": len(plain_fallbacks),
             "plain_fallbacks": plain_fallbacks,
             "grouped_metadata_bytes": grouped_metadata_bytes,
+            "checkpoint_metadata_bytes": checkpoint_metadata_bytes,
             "groups": {
                 basis_id: {
                     "module_names": list(state.group.module_names),
@@ -1069,7 +1087,8 @@ def main():
         qvq_storage_bits = sum(
             item["storage_bits"] for item in arm_payload["modules"]
         )
-        storage_bits = qvq_storage_bits + grouped_metadata_bytes * 8
+        transform_metadata_bytes = grouped_metadata_bytes + checkpoint_metadata_bytes
+        storage_bits = qvq_storage_bits + transform_metadata_bytes * 8
         weight_elements = sum(
             item["weight_elements"] for item in arm_payload["modules"]
         )
@@ -1077,7 +1096,8 @@ def main():
             {
                 "packed_modules": len(installed),
                 "qvq_payload_bpw": qvq_storage_bits / weight_elements,
-                "transform_metadata_bits": grouped_metadata_bytes * 8,
+                "transform_metadata_bits": transform_metadata_bytes * 8,
+                "weight_elements": weight_elements,
                 "effective_bpw": storage_bits / weight_elements,
                 "elapsed_seconds": time.perf_counter() - arm_started,
                 "status": "complete",

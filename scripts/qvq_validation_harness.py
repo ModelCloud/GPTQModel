@@ -89,6 +89,16 @@ PROFILES = {
         require_runtime_equivalence=True,
         correction_required=True,
     ),
+    "p0-c0-checkpoint-runtime": HarnessProfile(
+        name="p0-c0-checkpoint-runtime",
+        reference_arm="P0",
+        candidate_arm="C0",
+        reuse_identical_payloads=True,
+        expected_hadamards={"P0": 12, "C0": 9},
+        require_equal_ebpw=False,
+        runtime_oracle="plain-checkpointed",
+        require_runtime_equivalence=True,
+    ),
 }
 
 # Same-payload P0/R0 is a correctness oracle, not an accuracy comparison.
@@ -312,15 +322,31 @@ def _validate_runtime_oracle(
     candidate_runtime = arms[profile.candidate_arm].get("shared_input_runtime", {})
     _require(reference_runtime.get("mode") == "plain_per_module_p32", "P0 must use ordinary per-module P32")
     _require(int(reference_runtime.get("group_count", -1)) == 0, "P0 must not install shared/grouped runtime hooks")
-    _require(candidate_runtime.get("mode") == "refactored_grouped_or_plain_p32", "R0 must use the refactored runtime compiler")
-    _require(int(candidate_runtime.get("group_count", -1)) == 32, "R0 must compile all 32 sibling groups")
-    _require(int(candidate_runtime.get("plain_fallback_count", -1)) == 0, "canonical R0 unexpectedly fell back to plain P32")
+    expected_candidate_mode = {
+        "plain-refactored": "refactored_grouped_or_plain_p32",
+        "plain-refactored-corrected": "refactored_grouped_or_plain_p32",
+        "plain-checkpointed": "checkpointed_grouped_or_plain_p32",
+    }[profile.runtime_oracle]
+    _require(
+        candidate_runtime.get("mode") == expected_candidate_mode,
+        "runtime-oracle candidate used the wrong compiler path",
+    )
+    _require(int(candidate_runtime.get("group_count", -1)) == 32, "runtime candidate must compile all 32 sibling groups")
+    _require(int(candidate_runtime.get("plain_fallback_count", -1)) == 0, "canonical runtime candidate unexpectedly fell back to plain P32")
+    if profile.runtime_oracle == "plain-checkpointed":
+        _require(
+            int(candidate_runtime.get("checkpoint_metadata_bytes", 0)) > 0,
+            "checkpoint runtime must report its nonzero manifest storage",
+        )
 
     result = {
         "reference_runtime_mode": reference_runtime["mode"],
         "candidate_runtime_mode": candidate_runtime["mode"],
         "candidate_group_count": int(candidate_runtime["group_count"]),
         "candidate_plain_fallback_count": int(candidate_runtime["plain_fallback_count"]),
+        "candidate_checkpoint_metadata_bytes": int(
+            candidate_runtime.get("checkpoint_metadata_bytes", 0)
+        ),
     }
     if profile.require_runtime_equivalence:
         equivalence = oracle.get("packed_runtime_equivalence", {})
@@ -462,6 +488,23 @@ def validate_artifact(
         _require(
             abs(float(reference["effective_bpw"]) - float(candidate["effective_bpw"])) <= 1e-9,
             "profile requires identical effective BPW",
+        )
+    elif profile.runtime_oracle == "plain-checkpointed":
+        _require(
+            float(reference["qvq_payload_bpw"])
+            == float(candidate["qvq_payload_bpw"]),
+            "checkpoint runtime must preserve canonical QVQ payload BPW",
+        )
+        metadata_bits = int(candidate.get("transform_metadata_bits", 0))
+        weight_elements = int(candidate.get("weight_elements", 0))
+        _require(metadata_bits > 0, "checkpoint runtime metadata was not charged")
+        _require(weight_elements > 0, "checkpoint runtime weight count is missing")
+        expected_ebpw = float(candidate["qvq_payload_bpw"]) + (
+            metadata_bits / weight_elements
+        )
+        _require(
+            abs(float(candidate["effective_bpw"]) - expected_ebpw) <= 1e-12,
+            "checkpoint runtime effective BPW does not include its manifest",
         )
 
     runtime_oracle = None

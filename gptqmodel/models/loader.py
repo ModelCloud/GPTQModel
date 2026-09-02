@@ -1942,6 +1942,23 @@ def ModelLoader(cls):
 
         model.eval()
 
+        if qcfg.method == METHOD.QVQ and backend != BACKEND.MLX:
+            from ..quantization.qvq_transform_runtime import (
+                install_qvq_grouped_p32_runtime_from_config,
+            )
+
+            grouped_p32_runtime = install_qvq_grouped_p32_runtime_from_config(
+                model, qcfg
+            )
+            if grouped_p32_runtime is not None:
+                log.info(
+                    "Kernel: compiled %d grouped QVQ P32 bases with %d plain "
+                    "fallbacks from %d bytes of checkpoint metadata.",
+                    len(grouped_p32_runtime.grouped_states),
+                    len(grouped_p32_runtime.plain_fallbacks),
+                    grouped_p32_runtime.checkpoint_metadata_bytes,
+                )
+
         from ..nn_modules.qlinear.trilin import AwqTrilinLinear, TrilinLinear
 
         if (

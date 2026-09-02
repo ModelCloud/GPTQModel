@@ -128,7 +128,10 @@ def _arm(name: str, hadamards: int):
             "top1": 1.0,
         },
         "modules": modules,
+        "qvq_payload_bpw": 2.054419024,
         "effective_bpw": 2.054419024,
+        "transform_metadata_bits": 0,
+        "weight_elements": 1_000_000,
         "reconstructed_quality": _quality_block(),
         "packed_quality": _quality_block(),
         "decode_benchmark": _timing_block(),
@@ -148,11 +151,23 @@ def _artifact(profile_name: str, revision="deadbeef"):
             "group_count": 0,
             "plain_fallback_count": 0,
         }
+        checkpointed = profile.runtime_oracle == "plain-checkpointed"
         candidate["shared_input_runtime"] = {
-            "mode": "refactored_grouped_or_plain_p32",
+            "mode": (
+                "checkpointed_grouped_or_plain_p32"
+                if checkpointed
+                else "refactored_grouped_or_plain_p32"
+            ),
             "group_count": 32,
             "plain_fallback_count": 0,
+            "checkpoint_metadata_bytes": 4096 if checkpointed else 0,
         }
+        if checkpointed:
+            candidate["transform_metadata_bits"] = 4096 * 8
+            candidate["effective_bpw"] = candidate["qvq_payload_bpw"] + (
+                candidate["transform_metadata_bits"]
+                / candidate["weight_elements"]
+            )
     if profile.correction_required:
         for module in reference["modules"]:
             before = dict(module["tensor_sha256"])
@@ -303,6 +318,28 @@ def test_plain_refactored_oracle_rejects_packed_output_drift(tmp_path):
 
     with pytest.raises(RuntimeError, match="packed logits relative L2"):
         _validate(_write(tmp_path, payload), "p0-r0-runtime")
+
+
+def test_plain_checkpointed_oracle_charges_manifest_and_preserves_payload(tmp_path):
+    result = _validate(
+        _write(tmp_path, _artifact("p0-c0-checkpoint-runtime")),
+        "p0-c0-checkpoint-runtime",
+    )
+
+    assert result["payload_identity"] is True
+    assert result["runtime_oracle"]["candidate_group_count"] == 32
+    assert result["runtime_oracle"]["candidate_checkpoint_metadata_bytes"] == 4096
+    assert result["candidate_effective_bpw"] > result["reference_effective_bpw"]
+
+
+def test_plain_checkpointed_oracle_rejects_uncharged_manifest(tmp_path):
+    payload = _artifact("p0-c0-checkpoint-runtime")
+    payload["arms"]["C0"]["effective_bpw"] = payload["arms"]["C0"][
+        "qvq_payload_bpw"
+    ]
+
+    with pytest.raises(RuntimeError, match="does not include its manifest"):
+        _validate(_write(tmp_path, payload), "p0-c0-checkpoint-runtime")
 
 
 @pytest.mark.parametrize(

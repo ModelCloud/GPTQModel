@@ -413,6 +413,7 @@ class QVQLinear(BaseQuantLinear):
         """Exclude transient selector state from deepcopy/pickle."""
         state = super().__getstate__()
         state.pop("_qvq_cuda_bank_cache_lock", None)
+        state.pop("_qvq_grouped_p32_delegate", None)
         state["_qvq_cuda_bank_cache"] = None
         state["_qvq_cuda_window_cache"] = None
         return state
@@ -422,6 +423,15 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_cuda_bank_cache_lock = threading.Lock()
         self._qvq_cuda_bank_cache = None
         self._qvq_cuda_window_cache = None
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        super()._save_to_state_dict(destination, prefix, keep_vars)
+        delegate = getattr(self, "_qvq_grouped_p32_delegate", None)
+        if delegate is None:
+            return
+        state, consumer_index, _ = delegate
+        for name, tensor in state.canonical_child_payload(consumer_index).items():
+            destination[f"{prefix}{name}"] = tensor if keep_vars else tensor.detach()
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
@@ -1023,6 +1033,10 @@ class QVQLinear(BaseQuantLinear):
             )
         if x.numel() == 0:
             return x.new_empty((*x.shape[:-1], self.out_features))
+        delegate = getattr(self, "_qvq_grouped_p32_delegate", None)
+        if delegate is not None:
+            state, consumer_index, module_name = delegate
+            return state.consume(consumer_index, module_name, self, x)
         input_dtype = x.dtype
         compute_dtype = _qvq_compute_dtype(input_dtype, x.device.type)
         x_2d = x.reshape(-1, self.in_features).to(compute_dtype)

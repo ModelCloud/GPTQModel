@@ -713,6 +713,44 @@ flag, kernels, conversion guards, scripts, and tests. Post-merge validation is
 Ampere P32, P32-window, folded-axis, and transform-planner matrix. The rebuilt
 CUDA namespace exposes `gemv_grouped_p32` and does not expose `gemv_lr`.
 
+## Canonical grouped-P32 checkpoint contract
+
+Grouped execution now has a production checkpoint representation rather than
+requiring the experimental wrapper topology to remain in memory. The tensor
+payload on disk is still the ordinary per-module P32 representation:
+
+- every module retains its canonical `trellis`, `SU`, `SV`, `bank_ids`,
+  `bank_alt_id`, and bias keys;
+- a versioned `qvq_grouped_p32_runtime` manifest in quantization metadata
+  records only generic basis IDs and ordered module paths;
+- load-time compilation interleaves compatible siblings into non-persistent
+  CUDA buffers, then releases the redundant child trellis/selector storage;
+- the original `QVQLinear` objects remain at their model paths and delegate to
+  the grouped state, so the runtime has no projection-role conditions;
+- saving a compiled model reconstructs the exact canonical child slices and
+  emits no grouped runtime keys or duplicate tensor payload;
+- legacy checkpoints without the marker remain unchanged, while unknown
+  schemas, malformed groups, duplicate members, missing model paths, and a
+  non-P32 checkpoint format fail closed;
+- device, geometry, or module-local `SU` incompatibility retains semantically
+  correct plain P32 execution for that group.
+
+The manifest byte count is charged to transform metadata and effective BPW;
+it is not described as storage-neutral. A two-group, one-layer CUDA smoke used
+343 compact manifest bytes (`2,744` bits), moving effective BPW from
+`2.0544190242` to `2.0544641429` while preserving the canonical QVQ payload
+BPW exactly.
+
+The CUDA checkpoint round-trip test covers plain execution, compiled
+execution, `state_dict` serialization, fresh canonical loading, and a second
+load-time compilation. It includes distinct per-module fixed-trellis `SV`
+corrections. All tensor keys and values, packed outputs, and reloaded outputs
+are bit-exact. The one-layer engine smoke also produced zero logits relative
+L2, zero maximum logit delta, 100% exact logits/Top-1/5/10, two of two groups
+compiled, and zero fallback. It is a plumbing smoke, not promotion evidence;
+the deterministic `p0-c0-checkpoint-runtime` profile is the independent-seed
+full-16-layer gate.
+
 Further fusion opportunities remain even when a transform must remain:
 
 - batch/fuse Q and K output transforms when their chosen basis permits it;
@@ -808,6 +846,6 @@ A0 production control. The latest same-payload A31/A41 profile measures a
 9.71% B1 gain and a 0.52% B8 regression, so the incremental grouped-runtime
 claim remains workload- and run-sensitive. The next milestone is to repeat the
 production profile with an independent fitting seed, stabilize tail latency,
-productionize grouped checkpoint loading, add the plain-P32/refactored-P32
-same-payload oracle, and only then push toward the learned 5-H A33/A34
-topology.
+run the new canonical-checkpoint profile at full depth, and only then push
+toward the learned 5-H A33/A34 topology. Grouped checkpoint loading and the
+plain-P32/refactored-P32 same-payload oracle are now implemented.

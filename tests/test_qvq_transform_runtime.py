@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import io
+import json
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+from gptqmodel.quantization import QuantizeConfig
 from gptqmodel.quantization.qvq_transform_planner import (
     ModuleTransformDescriptor,
     ProjectionRole,
@@ -16,11 +20,19 @@ from gptqmodel.quantization.qvq_transform_planner import (
     TransformSpec,
 )
 from gptqmodel.quantization.qvq_transform_runtime import (
+    QVQ_GROUPED_P32_PAYLOAD_LAYOUT,
+    QVQ_GROUPED_P32_RUNTIME_META_KEY,
+    QVQ_GROUPED_P32_RUNTIME_SCHEMA,
     QVQGroupedP32Linear,
     QVQSharedInputLinear,
+    install_qvq_checkpointed_p32_runtime,
     install_qvq_grouped_p32_input_transforms,
+    install_qvq_grouped_p32_runtime_from_config,
     install_qvq_refactored_p32_runtime,
     install_qvq_shared_input_transforms,
+    qvq_grouped_p32_checkpoint_metadata,
+    qvq_grouped_p32_checkpoint_metadata_bytes,
+    set_qvq_grouped_p32_checkpoint_metadata,
 )
 from gptqmodel.utils.qvq_cuda import qvq_cuda_gemv
 
@@ -74,6 +86,120 @@ def _shared_plan(*names):
             for name in names
         ),
     )
+
+
+def test_qvq_grouped_p32_checkpoint_metadata_is_versioned_and_storage_counted():
+    plan = _shared_plan("first", "second")
+    metadata = qvq_grouped_p32_checkpoint_metadata(plan)
+    expected = {
+        "schema": QVQ_GROUPED_P32_RUNTIME_SCHEMA,
+        "payload_layout": QVQ_GROUPED_P32_PAYLOAD_LAYOUT,
+        "groups": [
+            {
+                "basis_id": "test.shared.input",
+                "module_names": ["first", "second"],
+            }
+        ],
+    }
+    assert metadata == expected
+    assert qvq_grouped_p32_checkpoint_metadata_bytes(metadata) == len(
+        json.dumps(expected, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
+
+    config = SimpleNamespace(meta={"existing": "preserved"})
+    returned = set_qvq_grouped_p32_checkpoint_metadata(config, plan)
+    assert returned == expected
+    assert config.meta == {
+        "existing": "preserved",
+        QVQ_GROUPED_P32_RUNTIME_META_KEY: expected,
+    }
+    returned["groups"][0]["module_names"].append("mutation")
+    assert config.meta[QVQ_GROUPED_P32_RUNTIME_META_KEY] == expected
+
+    qvq_config = QuantizeConfig(
+        method="qvq",
+        format="qvq_v2b2_p32",
+        bits=2,
+        offload_to_disk=False,
+    )
+    set_qvq_grouped_p32_checkpoint_metadata(qvq_config, plan)
+    reloaded = QuantizeConfig.from_quant_config(qvq_config.to_dict())
+    assert reloaded.meta[QVQ_GROUPED_P32_RUNTIME_META_KEY] == expected
+
+
+def test_qvq_grouped_p32_checkpoint_absence_preserves_legacy_runtime():
+    root = torch.nn.Module()
+    root.first = _packed_layer(seed=10, su=torch.ones(32))
+
+    assert (
+        install_qvq_grouped_p32_runtime_from_config(
+            root, SimpleNamespace(meta={"unrelated": True})
+        )
+        is None
+    )
+    assert isinstance(root.first, QVQLinear)
+    assert not hasattr(root, "_qvq_grouped_p32_runtime_states")
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda metadata: metadata.update(schema="future"),
+        lambda metadata: metadata.update(payload_layout="grouped_only"),
+        lambda metadata: metadata.update(extra=True),
+        lambda metadata: metadata["groups"].append(copy.deepcopy(metadata["groups"][0])),
+        lambda metadata: metadata["groups"][0].update(module_names=["first"]),
+        lambda metadata: metadata["groups"][0].update(module_names=["first", "first"]),
+    ),
+)
+def test_qvq_grouped_p32_checkpoint_metadata_fails_closed(mutate):
+    metadata = qvq_grouped_p32_checkpoint_metadata(
+        _shared_plan("first", "second")
+    )
+    mutate(metadata)
+
+    with pytest.raises((TypeError, ValueError)):
+        qvq_grouped_p32_checkpoint_metadata_bytes(metadata)
+
+
+def test_qvq_grouped_p32_checkpoint_rejects_model_manifest_mismatch():
+    root = torch.nn.Module()
+    root.first = _packed_layer(seed=20, su=torch.ones(32))
+    metadata = qvq_grouped_p32_checkpoint_metadata(
+        _shared_plan("first", "missing")
+    )
+
+    with pytest.raises(ValueError, match="missing module 'missing'"):
+        install_qvq_checkpointed_p32_runtime(root, metadata)
+
+
+def test_qvq_grouped_p32_checkpoint_cpu_fallback_keeps_canonical_payloads():
+    su = torch.ones(32)
+    root = torch.nn.Module()
+    root.first = _packed_layer(seed=30, su=su)
+    root.second = _packed_layer(seed=31, su=su)
+    expected_state = copy.deepcopy(root.state_dict())
+    config = SimpleNamespace(meta=None, format="qvq_v2b2_p32")
+    metadata = set_qvq_grouped_p32_checkpoint_metadata(
+        config, _shared_plan("first", "second")
+    )
+
+    compiled = install_qvq_grouped_p32_runtime_from_config(root, config)
+
+    assert compiled is not None
+    assert compiled.grouped_states == {}
+    assert set(compiled.plain_fallbacks) == {"test.shared.input"}
+    assert "requires CUDA-resident payloads" in compiled.plain_fallbacks[
+        "test.shared.input"
+    ]
+    assert compiled.checkpoint_metadata_bytes == qvq_grouped_p32_checkpoint_metadata_bytes(
+        metadata
+    )
+    assert isinstance(root.first, QVQLinear)
+    assert isinstance(root.second, QVQLinear)
+    assert root.state_dict().keys() == expected_state.keys()
+    for key, expected in expected_state.items():
+        torch.testing.assert_close(root.state_dict()[key], expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(
@@ -283,6 +409,86 @@ def test_qvq_refactored_runtime_groups_compatible_payloads():
     assert set(compiled.grouped_states) == {"test.shared.input"}
     torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
     torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 0),
+    reason="requires NVIDIA CUDA compute capability >= 8.0",
+)
+def test_qvq_checkpointed_p32_runtime_roundtrips_canonical_payload_exactly():
+    generator = torch.Generator().manual_seed(675)
+    su = torch.randint(0, 2, (32,), generator=generator).mul_(2).sub_(1).float()
+    root = torch.nn.Module()
+    root.first = _packed_layer(seed=676, su=su).half().cuda()
+    root.second = _packed_layer(seed=677, su=su).half().cuda()
+    root.first.bank_ids.fill_(0xAA)
+    root.second.bank_ids.fill_(0x55)
+    root.first.bank_alt_id.fill_(1)
+    root.second.bank_alt_id.fill_(3)
+    # Model the accepted fixed-trellis correction representation: local SV is
+    # allowed to differ while trellis, selectors, and SU remain frozen.
+    root.first.SV.mul_(0.9375)
+    root.second.SV.mul_(1.0625)
+    canonical_state = copy.deepcopy(root.state_dict())
+    plan = _shared_plan("first", "second")
+    config = SimpleNamespace(meta=None, format="qvq_v2b2_p32")
+    metadata = set_qvq_grouped_p32_checkpoint_metadata(config, plan)
+
+    with torch.inference_mode():
+        x = torch.randn((8, 32), generator=generator, dtype=torch.float16).cuda()
+        expected = (root.first(x), root.second(x))
+        compiled = install_qvq_grouped_p32_runtime_from_config(root, config)
+        actual = (root.first(x), root.second(x))
+
+    assert compiled is not None
+    assert compiled.plain_fallbacks == {}
+    assert set(compiled.grouped_states) == {"test.shared.input"}
+    assert isinstance(root.first, QVQLinear)
+    assert isinstance(root.second, QVQLinear)
+    assert root.first.trellis.numel() == 0
+    assert root.second.trellis.numel() == 0
+    state = compiled.grouped_states["test.shared.input"]
+    assert state.grouped_gemv_invocations == 1
+    assert state.metadata_overhead_bytes == 0
+    torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
+    torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
+
+    saved_state = root.state_dict()
+    assert saved_state.keys() == canonical_state.keys()
+    assert not any("_qvq_grouped_p32" in key for key in saved_state)
+    for key, expected_tensor in canonical_state.items():
+        torch.testing.assert_close(
+            saved_state[key], expected_tensor, rtol=0, atol=0
+        )
+
+    checkpoint = io.BytesIO()
+    torch.save(saved_state, checkpoint)
+    checkpoint.seek(0)
+    loaded_state = torch.load(checkpoint, weights_only=True)
+    reloaded = torch.nn.Module()
+    reloaded.first = _packed_layer(seed=678, su=su).half().cuda()
+    reloaded.second = _packed_layer(seed=679, su=su).half().cuda()
+    reloaded.load_state_dict(loaded_state, strict=True)
+    reloaded.eval()
+    reloaded_runtime = install_qvq_checkpointed_p32_runtime(
+        reloaded, copy.deepcopy(metadata)
+    )
+    with torch.inference_mode():
+        reloaded_actual = (reloaded.first(x), reloaded.second(x))
+
+    assert reloaded_runtime.plain_fallbacks == {}
+    assert reloaded_runtime.checkpoint_metadata_bytes == (
+        qvq_grouped_p32_checkpoint_metadata_bytes(metadata)
+    )
+    torch.testing.assert_close(reloaded_actual[0], expected[0], rtol=0, atol=0)
+    torch.testing.assert_close(reloaded_actual[1], expected[1], rtol=0, atol=0)
+    reserialized = reloaded.state_dict()
+    assert reserialized.keys() == canonical_state.keys()
+    for key, expected_tensor in canonical_state.items():
+        torch.testing.assert_close(
+            reserialized[key], expected_tensor, rtol=0, atol=0
+        )
 
 
 @pytest.mark.cuda
