@@ -2288,6 +2288,17 @@ M16/K6144/N5120 plan is pinned at split 12. Artifacts are
 `v19_m16_attention_n64_control_deep.json` and
 `v19_m16_attention_wide_n128_candidate_{deep,verify8000}.json`.
 
+Subsequent probes were rejected and left out of dispatch. The M8 full-KV
+N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
+split 36 and split 48 were slower than the retained split 40; M8 gate/up
+split 12 and linear-QKV split 12 regressed every rate. The M16 linear-Z
+N128 layout tied W2 but regressed the other three rates. Diagnostics are
+`v19_m8_fullkv_wide_n128_candidate_deep.json`,
+`v19_m8_down_wide_n128_split{36,48}_deep.json`,
+`v19_m8_gate_wide_n128_split12_deep.json`,
+`v19_m8_qkv_wide_n128_split12_deep.json`, and
+`v19_m16_linearz_wide_n128_candidate_deep.json`.
+
 The initial broad M1 reducer experiment was narrowed before acceptance. It
 improved attention-out and linear-Z, was neutral on long-K MLP-down, and
 regressed MLP-gate/up by about 0.9%; full-Q and linear-QKV were effectively
