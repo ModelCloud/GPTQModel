@@ -2957,6 +2957,23 @@ M1 MLP shapes. Diagnostics are `v21_m16_fullq_split8_1000.json`,
 `v21_m16_fullq_wordplan_1000.json`, and
 `v21_m1_rreg80_{1000,3000}.json`.
 
+The next probes were also rejected. A correctly scoped scalar bank-mask hoist
+for M16 full-Q W3.5 increased the matched 5,000-iteration median from
+`0.090112` to `0.091136 ms`; staging the 512-byte level table in shared
+memory tied W3.5 at `0.090112 ms` and showed no consistent W2-W3 benefit; and
+a fused adjacent-pair state extractor increased W3.5 to `0.091136 ms`.
+Enabling the in-process autotuner that is on by default for the three
+full-Q hard-coded routes selected noisier waves (including M16 split 10
+instead of the retained split 9) without improving the matched screen. A
+three-stage scalar M4 W3.5 probe regressed from `0.089088` to `0.092160 ms`.
+All were reverted. Diagnostics are
+`v21_m16_fullq_hoistw35_{control,candidate}_5000.json`,
+`v21_m16_fullq_litew35_candidate_5000.json`,
+`v21_m16_fullq_sharedlevels_{w35_candidate_5000,w234_candidate_3000}.json`,
+`v21_m16_fullq_quad64_w35_candidate_5000.json`,
+`v21_fullq_autotune_1000.json`, and
+`v21_m4_fullq_stage{2_control,3_w35}_5000.json`.
+
 ## Reproduction
 
 ```bash
