@@ -1,0 +1,71 @@
+{
+  "device": {
+    "name": "NVIDIA H100",
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348",
+    "compute_capability": "9.0",
+    "sm_count": 132
+  },
+  "workload": {
+    "m": 1,
+    "k": 2048,
+    "n_per_child": 8192,
+    "children": 2,
+    "split_count": 1
+  },
+  "rates": {
+    "2.5": {
+      "baseline": {
+        "report": "/root/qvq-profiler-artifacts/phase42-w25-depth3/w25_m1_depth3.ncu-rep",
+        "duration_us": 27.776,
+        "executed_instructions": 10793252,
+        "shared_load_instructions": 2228224,
+        "shared_load_bank_conflicts": 1051592,
+        "shared_load_wavefronts": 3345602,
+        "eligible_warps_per_cycle": 0.612460,
+        "long_scoreboard_stall_ratio": 1.363185,
+        "registers_per_thread": 59,
+        "shared_memory_bytes_per_block": 44800
+      },
+      "candidate": {
+        "report": "/root/qvq-profiler-artifacts/phase46-depth3-deferred-wait/w25_m1_deferred_wait.ncu-rep",
+        "duration_us": 26.624,
+        "executed_instructions": 10793246,
+        "shared_load_instructions": 2228224,
+        "shared_load_bank_conflicts": 1051076,
+        "shared_load_wavefronts": 3386816,
+        "eligible_warps_per_cycle": 0.621574,
+        "long_scoreboard_stall_ratio": 1.298213,
+        "wait_stall_ratio": 1.027091,
+        "registers_per_thread": 61,
+        "shared_memory_bytes_per_block": 44800
+      }
+    },
+    "3.0": {
+      "baseline": {
+        "report": "/root/qvq-profiler-artifacts/phase36-compact-w3-params/candidate_w3_m1.ncu-rep",
+        "duration_us": 28.000,
+        "executed_instructions": 10639754,
+        "eligible_warps_per_cycle": 0.587265,
+        "long_scoreboard_stall_ratio": 1.393759,
+        "wait_stall_ratio": 0.927660,
+        "registers_per_thread": 54,
+        "shared_memory_bytes_per_block": 46848
+      },
+      "candidate": {
+        "report": "/root/qvq-profiler-artifacts/phase46-depth3-deferred-wait/w3_m1_deferred_wait.ncu-rep",
+        "duration_us": 27.040,
+        "executed_instructions": 10639670,
+        "shared_load_instructions": 2228224,
+        "shared_load_bank_conflicts": 1051037,
+        "shared_load_wavefronts": 3382896,
+        "eligible_warps_per_cycle": 0.595862,
+        "long_scoreboard_stall_ratio": 1.374555,
+        "wait_stall_ratio": 0.998425,
+        "registers_per_thread": 57,
+        "shared_memory_bytes_per_block": 46848
+      }
+    }
+  },
+  "git_commit": "a4c4a899",
+  "decision": "promote_both_rates"
+}
