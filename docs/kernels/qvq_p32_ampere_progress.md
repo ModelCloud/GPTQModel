@@ -2910,6 +2910,41 @@ reducer's `0.032768/0.033792/0.034816/0.034816 ms`; it loses W2, W2.5, and
 W3.5. The 16-output reducer remains dispatched. Diagnostics are
 `v20_m16_fullkv_reduce32_{candidate,control}.json`.
 
+## v21 after merged PR #99
+
+The next optimization cycle started from freshly fetched `origin/main` at
+`631411ee3b07ed14c29fb21c0e959b0d811eb5cb` (the merge of PR #99). The fresh
+140-row Ampere baseline is `artifacts/a100_p32_window/v21_main_baseline_300.json`;
+its median-latency geometric mean is `0.0655313 ms` across M=1,2,4,8,16 and
+W2-W3.5. The full candidate screen is
+`artifacts/a100_p32_window/v21_candidate_full_300.json`.
+
+The first accepted v21 progression makes the split reducer compile-time for
+the two direct wide-Q waves that previously fell through the runtime loop:
+split 9 (M16 full-Q) and split 14 (M8 full-Q). The matched 3,000-iteration
+medians were exact and improved M8 W2/W2.5/W3 from
+`0.086016/0.090112/0.088064` to
+`0.084992/0.089088/0.087040 ms`; M16 W3/W3.5 improved from
+`0.090112/0.091136` to `0.089088/0.090112 ms`. Diagnostics are
+`v21_reducer_9_14_3000.json` and `v21_reducer_control_3000.json`.
+
+The same progression adds a three-stage scalar pipeline only for M1,
+K5120/N12288. Its matched 3,000-iteration medians were exact and improved
+W2/W2.5/W3 from `0.061440/0.068608/0.067584` to
+`0.060416/0.067584/0.066560 ms`, with W3.5 tied. Diagnostics are
+`v21_m1_fullq_stage3_3000.json` and `v21_m1_fullq_stage2_control_3000.json`.
+
+The following probes were rejected and reverted. M16 full-Q stage 2 and
+stage 4 regressed the three-stage control; a 64-thread Marlin-style CTA was
+50--65% slower and initially exposed an 8-byte bank-ID alignment hazard; a
+four-output vector reducer tied the scalar reducer; and a global
+`-maxrregcount=64` cap was mixed/one-tick-only. Broadening the M1 three-stage
+pipeline to N10240/N17408 regressed MLP-gate W3.5 to `0.092160 ms` (versus
+`0.090112 ms`). Diagnostics are `v21_m16_fullq_stage2_1000.json`,
+`v21_m16_fullq_cta64_safe_1000.json`, `v21_m16_fullq_vec4_1000.json`,
+`v21_m16_fullq_rreg64_{1000,3000}.json`, and
+`v21_m1_wide_stage3_1000.json`.
+
 ## Reproduction
 
 ```bash
