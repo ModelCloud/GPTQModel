@@ -2469,6 +2469,10 @@ Two scalar M1 W3.5 pair-wrap probes were rejected as well. Full-Q tied at
 Diagnostics are `v20_m1_fullq_w35_pairwrap_candidate.json` and
 `v20_m1_gate_w35_pairwrap_candidate.json`.
 
+Extending pair-wrap to the four-stage M1 long-K MLP-down W3.5 path tied its
+control at `0.095232 ms` in the 4,000-iteration screen. It was reverted and
+left out of dispatch (`v20_m1_down_w35_pairwrap_candidate.json`).
+
 Adding the W2 power-of-two wrap mask to the widened M16 attention-out and
 MLP-gate/up paths was rejected. Attention-out tied its fetched-main median at
 `0.060416 ms`, while gate/up regressed from `0.134144` to `0.135168 ms` in the
