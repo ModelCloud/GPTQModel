@@ -503,15 +503,9 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     uint32_t decoded_packed[4];
 #pragma unroll
     for (int pair = 0; pair < 4; ++pair) {
-      // Keep the pair construction in an independent register while the old
-      // WGMMA fragment is live.  Volatile inline PTX prevents ptxas from
-      // coalescing the packed destination with the reusable fragment and
-      // sinking the PRMT behind the dependency barrier.
-      asm volatile(
-          "mov.b32 %0, {%1, %2};"
-          : "=r"(decoded_packed[pair])
-          : "h"(decoded_fragment(2 * pair).storage),
-            "h"(decoded_fragment(2 * pair + 1).storage));
+      decoded_packed[pair] =
+          static_cast<uint32_t>(decoded_fragment(2 * pair).storage) |
+          (static_cast<uint32_t>(decoded_fragment(2 * pair + 1).storage) << 16);
     }
     if (wait_before_fragment_reuse) {
       cute::warpgroup_fence_operand(fragment);
