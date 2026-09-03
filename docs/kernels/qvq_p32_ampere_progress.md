@@ -2370,6 +2370,13 @@ the 128-thread control `0.061440/0.068608/0.067584/0.068608 ms` to
 regressed while only W2.5 improved. The source change was reverted; the
 diagnostic is `artifacts/a100_p32_window/v20_m1_fullq_wide32_256t_candidate.json`.
 
+The same 256-thread/32-tile geometry was screened on M1 MLP-gate/up
+`(K,N)=(5120,17408)`. It remained exact but regressed all four rates at the
+100-warmup/2000-iteration split-40 screen: the control was
+`0.079872/0.088064/0.089088/0.090112 ms`, while the candidate was
+`0.082944/0.089088/0.090112/0.094208 ms`. The source was reverted; see
+`artifacts/a100_p32_window/v20_m1_gate_wide32_256t_candidate.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
