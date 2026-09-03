@@ -22,6 +22,7 @@
 ## Latest News 🗞️🚀
 
 * 09/02/2026 7.4.0-dev `main`: ✨ Added `apertus1p5` and `apertus1p5_text` quantization.
+* 09/01/2026 7.4.0-dev `main`: ✨ Added `glm5_next` / GLM-5.3-Flash quantization support.
 * 08/31/2026 7.4.0-dev `main`: ✨ Added Qwen3.8-Flash-Next (`qwen4_exp`) quantization.
 * 08/26/2026 7.4.0-dev `main`: ✨ Added NVIDIA `LocateAnything-3B` quantization support.
 * 08/25/2026 7.4.0-dev `main`: ✨ Added Tencent `HunyuanOCR` quantization support.
@@ -268,7 +269,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | DeepSeek-V2/V3/V3.2/V4/R1     | ✅ | GPT-OSS                         | ✅ | LongCat Flash              | ✅ | OLMo2/3 / LLaDA2                | ✅ | Yi                     | ✅ |
 | DeepSeek-V2 Lite / VL / VL2 / OCR2 | ✅ | Granite / Granite MoE           | ✅ | LongLLaMA                  | ✅ | Ovis 1.6/2/2.5/2.6 MoE/2.6 Next | ✅ | Seed-OSS               | ✅ |
 | Dream                         | ✅ | GRIN-MoE                        | ✅ | Instella                   | ✅ | Phi 1-4                         | ✅ | Voxtral                | ✅ |
-| ERNIE 4.5 / MoE / VL MoE      | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V/V 4_6             | ✅ | PanGu-α                | ✅ |
+| ERNIE 4.5 / MoE / VL MoE      | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/5.3/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V/V 4_6             | ✅ | PanGu-α                | ✅ |
 | XVERSE                        | ✅ | Brumby                          | ✅ | Hymba                      | ✅ | Mistral                         | ✅ | Qwen 1/2/3/3.5         | ✅ |
 | MiniMax M2/M3                 | ✅ | AfMoE                           | ✅ | Bailing-MoE                | ✅ | LFM2 / LFM2-VL / LFM2-MoE       | ✅ | Marin                  | ✅ |
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2             | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview             | ✅ |

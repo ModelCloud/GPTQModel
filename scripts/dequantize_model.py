@@ -67,6 +67,11 @@ def _parse_args() -> argparse.Namespace:
         help="Device to stage tensors during dequantization (cpu, cuda, cuda:7, ...)",
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse valid output shards already present in the output directory",
+    )
+    parser.add_argument(
         "--env",
         action="append",
         metavar="KEY=VALUE",
@@ -106,7 +111,13 @@ def main() -> None:
     }
     print(f"[dequantize_model] parsed args: {debug_payload}")
 
-    dequantize_model(model_path, output_path, target_dtype=dtype, device=device)
+    dequantize_model(
+        model_path,
+        output_path,
+        target_dtype=dtype,
+        device=device,
+        resume=args.resume,
+    )
 
 
 if __name__ == "__main__":

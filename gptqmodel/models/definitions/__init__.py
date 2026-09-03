@@ -41,6 +41,7 @@ from .glm import GlmQModel
 from .glmasr import GlmASRGPTQ
 from .glm_ocr import GlmOCRGPTQ
 from .glm_moe_dsa import GlmMoeDsaQModel
+from .glm5_next import Glm5NextQModel
 from .gpt2 import GPT2QModel
 from .gpt_bigcode import GptBigCodeQModel
 from .gpt_neo import GptNeoQModel

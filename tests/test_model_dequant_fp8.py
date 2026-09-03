@@ -45,6 +45,17 @@ def test_finalize_for_save_keeps_non_4d_tensors_contiguous():
     assert out.is_contiguous()
 
 
+def test_finalize_for_save_converts_channels_last_to_default_contiguous():
+    tensor = torch.randn(2, 3, 4, 5).contiguous(memory_format=torch.channels_last)
+    assert not tensor.is_contiguous()
+
+    out = finalize_for_save(tensor, torch.bfloat16)
+
+    assert out.dtype is torch.bfloat16
+    assert out.device.type == "cpu"
+    assert out.is_contiguous()
+
+
 def test_ignored_layers_are_honored_by_non_fp8_converters(tmp_path):
     ignored_weight = torch.randn(2, 2, dtype=torch.bfloat16)
     shard_path = tmp_path / "ignored.safetensors"
@@ -173,8 +184,19 @@ def test_dequantize_model_fp8_allows_partial_edge_blocks(tmp_path):
         str(model_dir / shard_name),
     )
     _write_index(model_dir, shard_name, ["linear.weight", "linear.weight_scale_inv"])
+    aux_dir = model_dir / "aux"
+    aux_dir.mkdir()
+    (aux_dir / "metadata.json").write_text("{}", encoding="utf-8")
 
     dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
+    dequantize_model(
+        model_dir,
+        output_dir,
+        target_dtype=torch.bfloat16,
+        device="cpu",
+        resume=True,
+    )
+    assert (output_dir / "aux" / "metadata.json").read_text(encoding="utf-8") == "{}"
 
     with safe_open(output_dir / shard_name, framework="pt", device="cpu") as reader:
         weight_out = reader.get_tensor("linear.weight")

@@ -105,6 +105,7 @@ from .definitions.glm4_moe_lite import Glm4MoeLiteQModel  # noqa: E402
 from .definitions.glm4v import Glm4vGPTQ  # noqa: E402
 from .definitions.glm4v_moe import Glm4vMoeQModel, Glm4vMoeTextQModel  # noqa: E402
 from .definitions.glm_moe_dsa import GlmMoeDsaQModel  # noqa: E402
+from .definitions.glm5_next import Glm5NextQModel  # noqa: E402
 from .definitions.glm_ocr import GlmOCRGPTQ  # noqa: E402
 from .definitions.glmasr import GlmASRGPTQ  # noqa: E402
 from .definitions.gpt2 import GPT2QModel  # noqa: E402
@@ -243,6 +244,7 @@ MODEL_MAP = {
     "glm4_moe": GLM4MoEGPTQ,
     "glm4_moe_lite": Glm4MoeLiteQModel,
     "glm_moe_dsa": GlmMoeDsaQModel,
+    "glm5_next": Glm5NextQModel,
     "gpt_bigcode": GptBigCodeQModel,
     "codegen": CodeGenQModel,
     "cohere": LlamaQModel, # 100% llama clone
