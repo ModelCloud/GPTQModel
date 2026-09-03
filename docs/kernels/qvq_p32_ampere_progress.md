@@ -2469,6 +2469,12 @@ Two scalar M1 W3.5 pair-wrap probes were rejected as well. Full-Q tied at
 Diagnostics are `v20_m1_fullq_w35_pairwrap_candidate.json` and
 `v20_m1_gate_w35_pairwrap_candidate.json`.
 
+Adding the W2 power-of-two wrap mask to the widened M16 attention-out and
+MLP-gate/up paths was rejected. Attention-out tied its fetched-main median at
+`0.060416 ms`, while gate/up regressed from `0.134144` to `0.135168 ms` in the
+4,000-iteration screen. The existing generic W2 wrap remains; diagnostic:
+`v20_m16_w2_pow2_attention_gate_candidate.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
