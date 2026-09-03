@@ -2989,6 +2989,11 @@ overwrites the buffer) was also rejected: M16/W3.5 moved from the matched
 independent-thread-scheduling handoff contract. Diagnostic:
 `v21_m16_fullq_finalbarrier_candidate_5000.json`.
 
+Hoisting lane-invariant pair and shuffle coordinates out of the K-stage loop
+was neutral in the matched M16/W3.5 run (`0.090112 ms` control and
+candidate), so it was also reverted. Diagnostic:
+`v21_m16_fullq_lanehoist_w35_candidate_5000.json`.
+
 ## Reproduction
 
 ```bash
