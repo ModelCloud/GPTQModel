@@ -61,6 +61,8 @@ constexpr int kP32PairsPerTile = 128;
 constexpr int kP32N16TilesPerBlock = kOutputColumns / kP32TileColumns;
 constexpr int kP32K16TilesPerStage = kKPerStage / kP32TileRows;
 constexpr int kMaxGroupedP32Segments = 3;
+constexpr int kFixedGateUpK = 2048;
+constexpr int kFixedGateUpN = 8192;
 
 struct HopperGroupedP32LaunchParams {
   int segment_count;
@@ -572,6 +574,7 @@ template <
     int TransitionBits,
     bool Grouped,
     bool OrderedSplit,
+    bool FixedGateUp = false,
     class InputTma,
     class TrellisTma,
     class BankTma>
@@ -587,6 +590,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
     int launch_split_count,
     int launch_bank_alt_id) {
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
+  static_assert(!FixedGateUp || (Grouped && !OrderedSplit));
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
   using TrellisSmemLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
   using SharedStorage = P32WgmmaTmaSharedStorageFor<TransitionBits>;
@@ -606,7 +610,23 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   int bank_alt_id = launch_bank_alt_id;
   int64_t output_offset = 0;
   int64_t partial_output_offset = 0;
-  if constexpr (Grouped) {
+  if constexpr (FixedGateUp) {
+    // Measured Llama 3.2 1B gate/up plan: two independent equal-width
+    // children, split one. Keep child-local alternate banks but make the
+    // geometry and output offsets compile-time arithmetic.
+    constexpr int kN64Blocks = kFixedGateUpN / kOutputColumns;
+    constexpr int kN16Tiles = kFixedGateUpN / kP32TileColumns;
+    segment = static_cast<int>(blockIdx.y);
+    n64_block = static_cast<int>(blockIdx.x);
+    split = 0;
+    n64_block_global = segment * kN64Blocks + n64_block;
+    total_n_tiles = 2 * kN16Tiles;
+    size_n = kFixedGateUpN;
+    split_count = 1;
+    bank_alt_id = grouped_params.bank_alt_id[segment];
+    output_offset = static_cast<int64_t>(segment) * kRows * kFixedGateUpN;
+    partial_output_offset = 0;
+  } else if constexpr (Grouped) {
     if constexpr (OrderedSplit) {
       const int work_item = static_cast<int>(blockIdx.x);
       segment = 0;
@@ -1449,18 +1469,38 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
             static_cast<unsigned>(max_n64_blocks),
             static_cast<unsigned>(segment_count),
             static_cast<unsigned>(max_split_count));
-  qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, true, OrderedSplit>
-      <<<grid, kTmaThreads, 0, stream>>>(
-          input_tma,
-          trellis_tma,
-          bank_tma,
-          reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
-          partial_output.data_ptr<float>(),
-          grouped_params,
-          size_k,
-          static_cast<int>(total_n),
-          1,
-          0);
+  const bool use_fixed_gate_up =
+      !OrderedSplit && size_k == kFixedGateUpK && segment_count == 2 &&
+      out_features[0] == kFixedGateUpN && out_features[1] == kFixedGateUpN &&
+      split_counts[0] == 1 && split_counts[1] == 1 &&
+      TransitionBits == 4;
+  if (use_fixed_gate_up) {
+    qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, true, false, true>
+        <<<grid, kTmaThreads, 0, stream>>>(
+            input_tma,
+            trellis_tma,
+            bank_tma,
+            reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+            partial_output.data_ptr<float>(),
+            grouped_params,
+            kFixedGateUpK,
+            2 * kFixedGateUpN,
+            1,
+            0);
+  } else {
+    qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, true, OrderedSplit>
+        <<<grid, kTmaThreads, 0, stream>>>(
+            input_tma,
+            trellis_tma,
+            bank_tma,
+            reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+            partial_output.data_ptr<float>(),
+            grouped_params,
+            size_k,
+            static_cast<int>(total_n),
+            1,
+            0);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   if constexpr (OrderedSplit) {
     for (int segment = 0; segment < segment_count; ++segment) {
