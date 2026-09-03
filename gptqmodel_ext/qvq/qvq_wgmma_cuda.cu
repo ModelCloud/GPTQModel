@@ -109,24 +109,30 @@ struct alignas(128) P32WgmmaTmaSharedStorageFor {
       cute::cosize_v<P32TrellisTmaSmemLayoutFor<TransitionBits>>> trellis;
   alignas(128) cute::ArrayEngine<uint8_t, cute::cosize_v<P32BankTmaSmemLayout>> bank_ids;
   // Reused by every decode lane and K16 tile; avoid dependent L1/global
-  // lookups for the small, read-only PGC level table. W3 stores
+  // lookups for the small, read-only PGC level table. W2.5-W3.5 store
   // levels[index][lane], assigning each lane pair its own two alternating
   // shared banks. Even lane slots hold the canonical view and odd slots hold
   // the fixed high-byte permutation. The extra shared footprint removes
-  // cross-pair conflicts without retaining a separate W3 high table.
+  // cross-pair conflicts without retaining a separate high table.
   static constexpr int kLevelEntries =
-      TransitionBits == kW3TransitionBits ? 256 * 32 : 256;
+      TransitionBits >= 5 ? 256 * 32 : 256;
   alignas(128) cute::ArrayEngine<Element, kLevelEntries> levels;
   // The PGC high byte is b ^ (b >> 7).  Store that fixed permutation once so
   // the hot loop can index it directly with affine-product byte 1.
   static constexpr int kHighLevelEntries =
-      TransitionBits == kW3TransitionBits ? 1 : 256;
+      TransitionBits >= 5 ? 1 : 256;
   alignas(128) cute::ArrayEngine<Element, kHighLevelEntries> levels_high;
 };
 
 static_assert(
     sizeof(P32WgmmaTmaSharedStorageFor<kW3TransitionBits>) <= 48 * 1024,
     "W3 lane-interleaved levels must fit the default Hopper shared-memory limit");
+static_assert(
+    sizeof(P32WgmmaTmaSharedStorageFor<5>) <= 48 * 1024,
+    "W2.5 lane-interleaved levels must fit the default Hopper shared-memory limit");
+static_assert(
+    sizeof(P32WgmmaTmaSharedStorageFor<7>) <= 48 * 1024,
+    "W3.5 lane-interleaved levels must fit the default Hopper shared-memory limit");
 
 static_assert(cute::size(WgmmaTiledMma{}) == kThreads);
 
@@ -392,7 +398,7 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
   if constexpr (LevelsInShared) {
-    if constexpr (TransitionBits == kW3TransitionBits) {
+    if constexpr (TransitionBits >= 5) {
       const uint32_t lane = static_cast<uint32_t>(threadIdx.x) & 31u;
       const uint32_t low_lane = lane & ~1u;
       const uint32_t high_lane = lane | 1u;
@@ -737,7 +743,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       cute::group_modes<0, 2>(s_bank_ids),
       cute::group_modes<0, 2>(tiled_bank_ids));
 
-  if constexpr (TransitionBits == kW3TransitionBits) {
+  if constexpr (TransitionBits >= 5) {
     auto* vectors = reinterpret_cast<uint4*>(shared.levels.begin());
     for (int entry = thread; entry < 256 * 4; entry += kTmaThreads) {
       const int index = entry >> 2;
