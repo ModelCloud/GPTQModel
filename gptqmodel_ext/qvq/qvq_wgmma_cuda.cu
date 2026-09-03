@@ -104,12 +104,12 @@ struct alignas(128) P32WgmmaTmaSharedStorageFor {
   alignas(128) cute::ArrayEngine<uint8_t, cute::cosize_v<P32BankTmaSmemLayout>> bank_ids;
   // Reused by every decode lane and K16 tile; avoid dependent L1/global
   // lookups for the small, read-only PGC level table. W3 stores
-  // levels[index][lane][view], assigning every lane its own 32-bit shared
-  // word. View zero is canonical and view one is the fixed high-byte
-  // permutation. W3 opts into Hopper dynamic shared memory so this table can
-  // coexist with both TMA stages.
+  // levels[index][lane], assigning each lane pair its own two alternating
+  // shared banks. Even lane slots hold the canonical view and odd slots hold
+  // the fixed high-byte permutation. The extra shared footprint removes
+  // cross-pair conflicts without retaining a separate W3 high table.
   static constexpr int kLevelEntries =
-      TransitionBits == kW3TransitionBits ? 256 * 64 : 256;
+      TransitionBits == kW3TransitionBits ? 256 * 32 : 256;
   alignas(128) cute::ArrayEngine<Element, kLevelEntries> levels;
   // The PGC high byte is b ^ (b >> 7).  Store that fixed permutation once so
   // the hot loop can index it directly with affine-product byte 1.
@@ -119,8 +119,8 @@ struct alignas(128) P32WgmmaTmaSharedStorageFor {
 };
 
 static_assert(
-    sizeof(P32WgmmaTmaSharedStorageFor<kW3TransitionBits>) <= 64 * 1024,
-    "W3 lane-private levels must fit the selected Hopper shared-memory limit");
+    sizeof(P32WgmmaTmaSharedStorageFor<kW3TransitionBits>) <= 48 * 1024,
+    "W3 lane-interleaved levels must fit the default Hopper shared-memory limit");
 
 static_assert(cute::size(WgmmaTiledMma{}) == kThreads);
 
@@ -209,7 +209,7 @@ __device__ __forceinline__ Element qvq_wgmma_load_level_shared_lane(
     uint32_t levels_base,
     uint32_t index,
     uint32_t lane) {
-  const uint32_t address = levels_base + (index << 7) + (lane << 2) + 2;
+  const uint32_t address = levels_base + (index << 6) + (lane << 1);
   uint16_t bits;
   asm("ld.shared.u16 %0, [%1];" : "=h"(bits) : "r"(address));
   return Element::bitcast(bits);
@@ -219,7 +219,7 @@ __device__ __forceinline__ Element qvq_wgmma_load_level_shared_lane_byte_offset(
     uint32_t levels_base,
     uint32_t byte_offset,
     uint32_t lane) {
-  const uint32_t address = levels_base + (byte_offset << 6) + (lane << 2);
+  const uint32_t address = levels_base + (byte_offset << 5) + (lane << 1);
   uint16_t bits;
   asm("ld.shared.u16 %0, [%1];" : "=h"(bits) : "r"(address));
   return Element::bitcast(bits);
@@ -387,22 +387,24 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   if constexpr (LevelsInShared) {
     if constexpr (TransitionBits == kW3TransitionBits) {
       const uint32_t lane = static_cast<uint32_t>(threadIdx.x) & 31u;
+      const uint32_t low_lane = lane & ~1u;
+      const uint32_t high_lane = lane | 1u;
       fragment(0) = qvq_wgmma_load_level_shared_lane(
-          levels_shared_base, qvq_wgmma_high_byte(product00), lane);
+          levels_shared_base, qvq_wgmma_high_byte(product00), high_lane);
       fragment(1) = qvq_wgmma_load_level_shared_lane(
-          levels_shared_base, qvq_wgmma_high_byte(product01), lane);
+          levels_shared_base, qvq_wgmma_high_byte(product01), high_lane);
       fragment(2) = qvq_wgmma_load_level_shared_lane_byte_offset(
-          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product00), lane);
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product00), low_lane);
       fragment(3) = qvq_wgmma_load_level_shared_lane_byte_offset(
-          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product01), lane);
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product01), low_lane);
       fragment(4) = qvq_wgmma_load_level_shared_lane(
-          levels_shared_base, qvq_wgmma_high_byte(product10), lane);
+          levels_shared_base, qvq_wgmma_high_byte(product10), high_lane);
       fragment(5) = qvq_wgmma_load_level_shared_lane(
-          levels_shared_base, qvq_wgmma_high_byte(product11), lane);
+          levels_shared_base, qvq_wgmma_high_byte(product11), high_lane);
       fragment(6) = qvq_wgmma_load_level_shared_lane_byte_offset(
-          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product10), lane);
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product10), low_lane);
       fragment(7) = qvq_wgmma_load_level_shared_lane_byte_offset(
-          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product11), lane);
+          levels_shared_base, qvq_wgmma_pgc16_low_byte_offset(product11), low_lane);
     } else {
       fragment(0) = qvq_wgmma_load_level_shared(
           levels_high_shared_base, qvq_wgmma_high_byte(product00));
@@ -587,7 +589,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
   using TrellisSmemLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
   using SharedStorage = P32WgmmaTmaSharedStorageFor<TransitionBits>;
-  extern __shared__ __align__(128) char shared_buffer[];
+  __shared__ __align__(128) char shared_buffer[sizeof(SharedStorage)];
   auto& shared = *reinterpret_cast<SharedStorage*>(shared_buffer);
 
   const int thread = static_cast<int>(threadIdx.x);
@@ -711,8 +713,8 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
 
   if constexpr (TransitionBits == kW3TransitionBits) {
     auto* vectors = reinterpret_cast<uint4*>(shared.levels.begin());
-    for (int entry = thread; entry < 256 * 8; entry += kTmaThreads) {
-      const int index = entry >> 3;
+    for (int entry = thread; entry < 256 * 4; entry += kTmaThreads) {
+      const int index = entry >> 2;
       const auto* level_bits = reinterpret_cast<const uint16_t*>(levels);
       const uint16_t low_bits = level_bits[index];
       const uint16_t high_bits = level_bits[index ^ (index >> 7)];
@@ -1142,23 +1144,9 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
           : at::zeros({kRows, size_n}, input.options().dtype(at::kFloat));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns), 1, static_cast<unsigned>(split_count));
-  constexpr int kSharedMemoryBytes =
-      sizeof(P32WgmmaTmaSharedStorageFor<TransitionBits>);
-  if constexpr (kSharedMemoryBytes > 48 * 1024) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(
-        qvq_p32_window_wgmma_m16_tma_kernel<
-            TransitionBits,
-            false,
-            OrderedSplit,
-            decltype(input_tma),
-            decltype(trellis_tma),
-            decltype(bank_tma)>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        kSharedMemoryBytes));
-  }
   HopperGroupedP32LaunchParams grouped_params{};
   qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, false, OrderedSplit>
-      <<<grid, kTmaThreads, kSharedMemoryBytes, stream>>>(
+      <<<grid, kTmaThreads, 0, stream>>>(
       input_tma,
       trellis_tma,
       bank_tma,
@@ -1422,22 +1410,8 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
             static_cast<unsigned>(max_n64_blocks),
             static_cast<unsigned>(segment_count),
             static_cast<unsigned>(max_split_count));
-  constexpr int kSharedMemoryBytes =
-      sizeof(P32WgmmaTmaSharedStorageFor<TransitionBits>);
-  if constexpr (kSharedMemoryBytes > 48 * 1024) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(
-        qvq_p32_window_wgmma_m16_tma_kernel<
-            TransitionBits,
-            true,
-            OrderedSplit,
-            decltype(input_tma),
-            decltype(trellis_tma),
-            decltype(bank_tma)>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        kSharedMemoryBytes));
-  }
   qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, true, OrderedSplit>
-      <<<grid, kTmaThreads, kSharedMemoryBytes, stream>>>(
+      <<<grid, kTmaThreads, 0, stream>>>(
           input_tma,
           trellis_tma,
           bank_tma,
