@@ -831,10 +831,11 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
 
 #pragma unroll
     for (int k_block = 0; k_block < kP32K16TilesPerStage; ++k_block) {
-      // W3's conflict-heavy shared decode benefits from one more pending
-      // register-sourced WGMMA group. Other rates retain the measured depth-2
-      // schedule; ptxas removes their unreachable third fragment.
-      constexpr int kDecodeDepth = TransitionBits == kW3TransitionBits ? 3 : 2;
+      // W2.5 and W3 benefit from a third independent register-sourced
+      // fragment while the lane-pair table's second shared-load wavefront is
+      // serviced. W2 and W3.5 retain their measured depth-two schedule.
+      constexpr int kDecodeDepth =
+          TransitionBits == 5 || TransitionBits == kW3TransitionBits ? 3 : 2;
       auto& fragment_a = (k_block % kDecodeDepth) == 0 ? fragment_a0
           : (k_block % kDecodeDepth) == 1 ? fragment_a1
                                          : fragment_a2;
