@@ -1569,7 +1569,8 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       (TransitionBits == 4 || TransitionBits == kW3TransitionBits);
   const bool use_prefetch_gate_up =
       use_gate_up_geometry &&
-      (TransitionBits == 5 || TransitionBits == kW3TransitionBits);
+      (TransitionBits == 5 || TransitionBits == kW3TransitionBits ||
+       TransitionBits == 7);
   if (use_fixed_gate_up) {
     const HopperFixedGateUpLaunchParams fixed_params{
         {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
@@ -1578,7 +1579,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
         true,
         false,
         true,
-        TransitionBits == kW3TransitionBits>
+        true>
         <<<grid, kTmaThreads, 0, stream>>>(
             input_tma,
             trellis_tma,
