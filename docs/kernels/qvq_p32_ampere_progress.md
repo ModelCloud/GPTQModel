@@ -2699,6 +2699,13 @@ showed the same instability and the N=1024 full-KV route regressed by about
 `v20_bank_alt3_fast_m16_narrow_other_candidate.json`, and
 `v20_bank_alt3_fast_m16_narrow_other_control.json`.
 
+A packed two-state decode/selector-hoist probe was also rejected on widened
+M16 full-Q. Enabling `HoistBankMasks` for W3/W3.5 (W2 already uses it) stayed
+exact but lost one event tick at W2.5 and tied the other rates: the candidate
+medians were `0.096256/0.097280/0.097280/0.099328 ms` versus control
+`0.096256/0.096256/0.097280/0.099328 ms`. The mixed hoist policy was restored;
+diagnostics are `v20_m16_fullq_hoist_{candidate,control}.json`.
+
 ## Reproduction
 
 ```bash
