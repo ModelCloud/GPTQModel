@@ -415,7 +415,7 @@ def _resolve_split_count(
     if out_features == 17408 and input.shape == (16, 5120):
         return 10
     if out_features == 12288 and input.shape == (16, 5120):
-        return 10
+        return 9
     if out_features == 10240 and input.shape == (16, 5120):
         return 10
     if out_features == 1024 and input.shape == (16, 5120):
@@ -434,6 +434,8 @@ def _resolve_split_count(
         return 24
     if out_features == 5120 and input.shape == (16, 6144):
         return 12
+    if out_features == 6144 and input.shape == (16, 5120):
+        return 10
     if input.shape == (1, 6144) and out_features == 5120:
         return 48
     if input.shape == (2, 6144) and out_features == 5120:
@@ -535,17 +537,364 @@ def qvq_p32_window_ampere(
 ) -> torch.Tensor:
     """Run exact continuous-window P32 with FP16 WMMA and FP32 accumulation."""
 
-    transition_bits = _resolve_transition_bits(bits)
-    split_count = _resolve_split_count(
-        input,
-        trellis,
-        levels,
-        bank_ids,
-        transition_bits=transition_bits,
-        out_features=int(out_features),
-        bank_alt_id=int(bank_alt_id),
-        split_count=int(split_count),
-    )
+    try:
+        transition_bits = None if isinstance(bits, bool) else _P32_TRANSITION_BITS[bits]
+    except (KeyError, TypeError):
+        transition_bits = None
+    if transition_bits is None:
+        transition_bits = qvq_transition_bits(bits, vector_size=2)
+    if transition_bits not in (4, 5, 6, 7):
+        raise ValueError("QVQ P32 Ampere WMMA supports W2 through W3.5")
+    if (
+        split_count == 0
+        and input.shape[0] == 1
+        and input.shape[1] == 5120
+        and out_features in (1024, 12288)
+    ):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            56 if out_features == 1024 else 40,
+        )
+    if (
+        split_count == 0
+        and input.shape[0] in (2, 4)
+        and input.shape[1] == 5120
+        and out_features == 1024
+    ):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            64,
+        )
+    if split_count == 0 and out_features == 1024 and input.shape == (8, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            48,
+        )
+    if split_count == 0 and out_features == 17408 and input.shape == (8, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            10,
+        )
+    if split_count == 0 and out_features == 17408 and input.shape == (16, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            10,
+        )
+    if split_count == 0 and out_features == 12288 and input.shape == (16, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            9,
+        )
+    if (
+        split_count == 0
+        and transition_bits in (4, 5, 6, 7)
+        and out_features == 10240
+        and input.shape == (16, 5120)
+    ):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            10,
+        )
+    if split_count == 0 and out_features == 1024 and input.shape == (16, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            32,
+        )
+    if split_count == 0 and out_features == 5120 and input.shape == (8, 17408):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            40,
+        )
+    if split_count == 0 and out_features == 5120 and input.shape == (8, 6144):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            24,
+        )
+    if split_count == 0 and out_features == 6144 and input.shape == (8, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            40,
+        )
+    if split_count == 0 and out_features == 10240 and input.shape == (8, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            16,
+        )
+    if split_count == 0 and out_features == 12288 and input.shape == (8, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            14,
+        )
+    if split_count == 0 and out_features == 5120 and input.shape == (16, 17408):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            24,
+        )
+    if split_count == 0 and out_features == 5120 and input.shape == (16, 6144):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            12,
+        )
+    if split_count == 0 and out_features == 6144 and input.shape == (16, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            10,
+        )
+    if split_count == 0 and input.shape[0] == 1:
+        shape = (int(input.shape[1]), int(out_features))
+        measured_m1_projection_split = None
+        if shape == (6144, 5120):
+            measured_m1_projection_split = 48
+        if measured_m1_projection_split is not None:
+            return _p32_window_op()(
+                input,
+                trellis,
+                levels,
+                bank_ids,
+                transition_bits,
+                out_features,
+                bank_alt_id,
+                measured_m1_projection_split,
+            )
+    if (
+        split_count == 0
+        and input.shape == (2, 6144)
+        and out_features == 5120
+    ):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            64 if transition_bits == 7 else 48,
+        )
+    if (
+        split_count == 0
+        and input.shape == (4, 5120)
+        and out_features == 6144
+    ):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            40,
+        )
+    if split_count == 0:
+        # Environment configuration is process-level. Reading ``os.environ``
+        # on every cached launch costs more than the cache lookup itself, so
+        # refresh it only when the process-local plan cache is cleared.
+        autotune = _AUTOTUNE_ENABLED
+        autotune_key = None
+        if autotune:
+            autotune_key = _autotune_cache_key(
+                input,
+                transition_bits=transition_bits,
+                out_features=out_features,
+                bank_alt_id=bank_alt_id,
+            )
+            # A cache hit only reads one process-local dictionary entry. Keep
+            # that overwhelmingly common path out of the tuning lock; the
+            # cold helper acquires the lock and rechecks before benchmarking,
+            # so concurrent misses still tune exactly once.
+            cached = _AUTOTUNE_CACHE.get(autotune_key)
+            if cached is not None:
+                return _p32_window_op()(
+                    input,
+                    trellis,
+                    levels,
+                    bank_ids,
+                    transition_bits,
+                    out_features,
+                    bank_alt_id,
+                    cached,
+                )
+
+        if not input.is_cuda:
+            raise ValueError("QVQ P32 Ampere input must be CUDA")
+
+        if split_count == 0:
+            split_count = _auto_split_count(
+                in_features=int(input.shape[1]),
+                out_features=int(out_features),
+                k_tiles=int(input.shape[1]) // 16,
+                sm_count=_device_sm_count(input.device),
+            )
+        # The scalar M<=4 kernel groups sixteen N16 tiles per CTA.  Wide
+        # projections therefore need a fuller split wave than the WMMA
+        # shape table (which was tuned for four-warp/N64 CTAs) to keep all
+        # 124 Ampere SMs resident during the short decode.  The same policy
+        # applies to M=1, whose scalar route was tuned first.
+        if input.shape[0] <= 4 and input.shape[1] <= 6144:
+            # Attention-out has enough N64 CTAs that 24 slices beat the
+            # reduction overhead of a 32-way wave for the scalar M1-M4
+            # route. Other short-K projections retain the fuller 32-way wave.
+            shape = (int(input.shape[1]), int(out_features))
+            small_m_split = (
+                24
+                if shape == (6144, 5120)
+                else 32
+                if shape == (5120, 1024)
+                else 40
+                if input.shape[0] == 4
+                else 32
+            )
+            split_count = min(small_m_split, int(input.shape[1]) // 16)
+        elif input.shape[0] == 8 and input.shape[1] <= 6144:
+            # The WMMA partial-row path uses four N16 tiles per CTA.  The
+            # original shape table was tuned for M16 and leaves short-M8
+            # projections under-filled, especially the small-N KV and
+            # attention projections. Keep the measured split choices local
+            # to M8; M5-M7 retain the conservative generic table.
+            m8_split = {
+                1024: 48,
+                5120: 32,
+                6144: 32,
+                10240: 16,
+                12288: 16,
+                17408: 16,
+            }.get(int(out_features))
+            if m8_split is not None:
+                split_count = min(m8_split, int(input.shape[1]) // 16)
+        elif input.shape[0] == 16 and input.shape[1] <= 6144:
+            # The full-row WMMA path also benefits from a fuller wave on
+            # small-N projections. These choices are deliberately shape
+            # specific: the wide Q and MLP projections already have enough
+            # CTAs at their original measured splits.
+            m16_split = {
+                1024: 32,
+                5120: 12,
+                6144: 16,
+                10240: 16,
+                17408: 10,
+            }.get(int(out_features))
+            if m16_split is not None:
+                split_count = min(m16_split, int(input.shape[1]) // 16)
+        elif (int(input.shape[1]), int(out_features)) == (17408, 5120):
+            # MLP-down is the only measured long-K Qwen shape. Its original
+            # eight-way wave leaves too few CTAs per SM on the 124-SM A100;
+            # a wider wave reduces the per-CTA K span and the split reducer
+            # remains cheaper than the additional idle time. M1-M2 use the
+            # scalar route and continue to benefit from a wide wave (128 for
+            # M1, 96 for M2); M4+ retain the measured 32-way WMMA wave.
+            long_k_split = (
+                128 if input.shape[0] == 1 else 96 if input.shape[0] == 2 else 32
+            )
+            split_count = min(long_k_split, int(input.shape[1]) // 16)
+        if autotune and autotune_key is not None:
+            split_count = _autotune_split_count(
+                input,
+                trellis,
+                levels,
+                bank_ids,
+                transition_bits=transition_bits,
+                out_features=int(out_features),
+                bank_alt_id=int(bank_alt_id),
+                fallback=int(split_count),
+                cache_key=autotune_key,
+            )
     return _p32_window_op()(
         input,
         trellis,
