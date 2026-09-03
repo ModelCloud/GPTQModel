@@ -21,7 +21,7 @@ N = 8192
 
 def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("variant", choices=("phase64", "bounded"))
+    parser.add_argument("variant", choices=("phase64", "bounded", "packed"))
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--idle-samples", type=int, default=3)
     parser.add_argument("--idle-interval", type=float, default=0.5)
@@ -52,7 +52,7 @@ def _run(args: argparse.Namespace) -> None:
         (N,), generator=generator, device="cuda", dtype=torch.float16
     )
 
-    def call(bounded_rounding: bool):
+    def call(bounded_rounding: bool, packed_gate_up: bool = False):
         return qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
             input0,
             input1,
@@ -63,20 +63,23 @@ def _run(args: argparse.Namespace) -> None:
             pre_scale=pre_scale,
             pair_tiles=True,
             bounded_rounding=bounded_rounding,
+            packed_gate_up=packed_gate_up,
         )
 
     with torch.inference_mode():
         expected = call(False)
         actual = call(True)
+        packed = call(True, True)
         torch.cuda.synchronize()
-        if not torch.equal(actual, expected):
+        if not torch.equal(actual, expected) or not torch.equal(packed, expected):
             raise RuntimeError("profile controls are not bit-exact")
-        use_bounded = args.variant == "bounded"
+        use_bounded = args.variant != "phase64"
+        use_packed = args.variant == "packed"
         for _ in range(args.warmup):
-            profiled_output = call(use_bounded)
+            profiled_output = call(use_bounded, use_packed)
         torch.cuda.synchronize()
         torch.cuda.cudart().cudaProfilerStart()
-        profiled_output = call(use_bounded)
+        profiled_output = call(use_bounded, use_packed)
         torch.cuda.synchronize()
         torch.cuda.cudart().cudaProfilerStop()
     if not torch.equal(profiled_output, expected):

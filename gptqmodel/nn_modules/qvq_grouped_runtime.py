@@ -198,6 +198,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_fused_recovery_precondition_launches: int = 0
     h100_paired_recovery_tiles_launches: int = 0
     h100_bounded_recovery_rounding_launches: int = 0
+    h100_packed_gate_up_recovery_launches: int = 0
     h100_multiblock_precondition_launches: int = 0
     h100_half2_precondition_high_launches: int = 0
     h100_fused_silu_precondition_low_launches: int = 0
@@ -241,6 +242,9 @@ class QVQGroupedRuntimeTelemetry:
             "h100_bounded_recovery_rounding_launches": (
                 self.h100_bounded_recovery_rounding_launches
             ),
+            "h100_packed_gate_up_recovery_launches": (
+                self.h100_packed_gate_up_recovery_launches
+            ),
             "h100_multiblock_precondition_launches": self.h100_multiblock_precondition_launches,
             "h100_half2_precondition_high_launches": self.h100_half2_precondition_high_launches,
             "h100_fused_silu_precondition_low_launches": self.h100_fused_silu_precondition_low_launches,
@@ -283,6 +287,7 @@ class QVQHopperGroupedRuntime:
         self._h100_fp16_recovery_store_enabled = False
         self._h100_w25_n128_gate_up_enabled = False
         self._h100_bounded_recovery_rounding_enabled = False
+        self._h100_packed_gate_up_recovery_enabled = False
         self._input: torch.Tensor | None = None
         self._input_version: int | None = None
         self._outputs: tuple[torch.Tensor, ...] | None = None
@@ -318,6 +323,7 @@ class QVQHopperGroupedRuntime:
         self._h100_fp16_recovery_store_enabled = False
         self._h100_w25_n128_gate_up_enabled = False
         self._h100_bounded_recovery_rounding_enabled = False
+        self._h100_packed_gate_up_recovery_enabled = False
         self.telemetry.grouped_window_bytes = 0
         self.telemetry.grouped_selector_bytes = 0
         self.telemetry.child_window_bytes_avoided = 0
@@ -421,6 +427,9 @@ class QVQHopperGroupedRuntime:
             and (properties.major, properties.minor) == (9, 0)
         )
         self._h100_bounded_recovery_rounding_enabled = (
+            self._h100_multiblock_intermediate_enabled
+        )
+        self._h100_packed_gate_up_recovery_enabled = (
             self._h100_multiblock_intermediate_enabled
         )
         measured_splits = None
@@ -722,6 +731,11 @@ class QVQHopperGroupedRuntime:
                 bounded_rounding=(
                     self._h100_bounded_recovery_rounding_enabled and rows == 16
                 ),
+                packed_gate_up=(
+                    self._h100_bounded_recovery_rounding_enabled
+                    and self._h100_packed_gate_up_recovery_enabled
+                    and rows == 16
+                ),
             )
             self.telemetry.paired_recovery_launches += 1
             self.telemetry.h100_multiblock_recovery_launches += 1
@@ -731,6 +745,8 @@ class QVQHopperGroupedRuntime:
                 self.telemetry.h100_paired_recovery_tiles_launches += 1
             if self._h100_bounded_recovery_rounding_enabled and rows == 16:
                 self.telemetry.h100_bounded_recovery_rounding_launches += 1
+            if self._h100_packed_gate_up_recovery_enabled and rows == 16:
+                self.telemetry.h100_packed_gate_up_recovery_launches += 1
             self.telemetry.h100_multiblock_precondition_launches += 1
             self.telemetry.h100_half2_precondition_high_launches += 1
             self.telemetry.h100_fused_silu_precondition_low_launches += 1

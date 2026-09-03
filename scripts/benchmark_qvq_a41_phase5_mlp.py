@@ -48,6 +48,11 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--idle-interval", type=float, default=0.5)
     parser.add_argument("--idle-memory-mib", type=int, default=0)
     parser.add_argument(
+        "--packed-gate-up-bound",
+        action="store_true",
+        help="Compare packed gate/up recovery with same-binary Phase 67.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("artifacts/a41_phase5_h100/fused_mlp_vs_baselines.json"),
@@ -255,6 +260,7 @@ def _run(args):
         runtime = mlp._gptqmodel_qvq_fused_mlp_runtime
         phase64_control = {}
         runtime._h100_bounded_recovery_rounding_enabled = False
+        runtime._h100_packed_gate_up_recovery_enabled = False
         for m in args.m_values:
             control_timing, control_outputs = common._graph_timing(
                 torch,
@@ -269,6 +275,24 @@ def _run(args):
                 )
             phase64_control[m] = control_timing
         runtime._h100_bounded_recovery_rounding_enabled = True
+        runtime._h100_packed_gate_up_recovery_enabled = True
+        phase67_control = {}
+        if args.packed_gate_up_bound:
+            runtime._h100_packed_gate_up_recovery_enabled = False
+            for m in args.m_values:
+                control_timing, control_outputs = common._graph_timing(
+                    torch,
+                    lambda mlp=mlp, x=inputs[m]: (mlp(x),),
+                    warmup=args.warmup,
+                    samples=args.samples,
+                    replays_per_sample=args.replays_per_sample,
+                )
+                if not torch.equal(control_outputs[0], expected[m]):
+                    raise RuntimeError(
+                        f"same-binary Phase-67 control changed W{bits:g} M{m} MLP output"
+                    )
+                phase67_control[m] = control_timing
+            runtime._h100_packed_gate_up_recovery_enabled = True
         for m in args.m_values:
             timing, outputs = common._graph_timing(
                 torch,
@@ -298,6 +322,7 @@ def _run(args):
                     "paired_recovery_qvq": paired_recovery[m],
                     "fused_mlp_qvq": timing,
                     "same_binary_phase64_control": phase64_control[m],
+                    "same_binary_phase67_control": phase67_control.get(m),
                     "marlin_w4": marlin,
                     "machete_w4": machete,
                     "speedup_vs_plain": plain[m]["median_ms"] / timing["median_ms"],
@@ -309,10 +334,20 @@ def _run(args):
                     / timing["median_ms"],
                     "speedup_vs_same_binary_phase64": phase64_control[m]["median_ms"]
                     / timing["median_ms"],
+                    "speedup_vs_same_binary_phase67": (
+                        phase67_control[m]["median_ms"] / timing["median_ms"]
+                        if m in phase67_control
+                        else None
+                    ),
                     "better_than_previous_benchmark": timing["median_ms"]
                     < previous["median_ms"],
                     "better_than_same_binary_phase64": timing["median_ms"]
                     < phase64_control[m]["median_ms"],
+                    "better_than_same_binary_phase67": (
+                        timing["median_ms"] < phase67_control[m]["median_ms"]
+                        if m in phase67_control
+                        else None
+                    ),
                     "better_than_paired_recovery_stage": timing["median_ms"]
                     < paired_recovery[m]["median_ms"],
                     "plain_qvq_effective_tflops": logical_flops
@@ -330,6 +365,12 @@ def _run(args):
             print(
                 f"W{bits:g} M{m}: fused={timing['median_ms'] * 1000:.3f}us "
                 f"same_binary_phase64={phase64_control[m]['median_ms'] * 1000:.3f}us "
+                + (
+                    f"same_binary_phase67={phase67_control[m]['median_ms'] * 1000:.3f}us "
+                    if m in phase67_control
+                    else ""
+                )
+                +
                 f"paired={paired_recovery[m]['median_ms'] * 1000:.3f}us "
                 f"plain={plain[m]['median_ms'] * 1000:.3f}us "
                 f"marlin={marlin['median_ms'] * 1000:.3f}us "
@@ -342,6 +383,10 @@ def _run(args):
             or telemetry[0]["fused_mlp_fallbacks"]
             or not telemetry[0]["fused_mlp_launches"]
             or not telemetry[0]["h100_bounded_recovery_rounding_launches"]
+            or (
+                args.packed_gate_up_bound
+                and not telemetry[0]["h100_packed_gate_up_recovery_launches"]
+            )
             or (
                 16 in args.m_values
                 and not telemetry[0]["h100_paired_recovery_tiles_launches"]

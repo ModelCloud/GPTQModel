@@ -1052,6 +1052,7 @@ def qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
     pad_to_16: bool = False,
     pair_tiles: bool = False,
     bounded_rounding: bool = False,
+    packed_gate_up: bool = False,
 ) -> torch.Tensor:
     """Fuse exact paired recovery into exact SiLU/down preconditioning."""
 
@@ -1083,6 +1084,10 @@ def qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
         raise TypeError("fused QVQ recovery pair_tiles must be a bool")
     if not isinstance(bounded_rounding, bool):
         raise TypeError("fused QVQ recovery bounded_rounding must be a bool")
+    if not isinstance(packed_gate_up, bool):
+        raise TypeError("fused QVQ recovery packed_gate_up must be a bool")
+    if packed_gate_up and (not pair_tiles or not bounded_rounding):
+        raise ValueError("fused QVQ recovery packed_gate_up requires paired bounded rounding")
     for name, tensor in (
         ("post_scale0", post_scale0),
         ("post_scale1", post_scale1),
@@ -1116,6 +1121,7 @@ def qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
         pad_to_16,
         pair_tiles,
         bounded_rounding,
+        packed_gate_up,
     )
 
 

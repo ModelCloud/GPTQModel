@@ -1,0 +1,46 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "cd688034e6ab9aa473dd6e16049a79171c577573",
+  "rows": [
+    {
+      "better_than_phase67": true,
+      "bit_exact": true,
+      "candidate": {
+        "max_ms": 0.009475839734077453,
+        "mean_ms": 0.009419434638818105,
+        "median_ms": 0.009418879747390746,
+        "min_ms": 0.009402239918708801,
+        "p95_ms": 0.009427199959754945
+      },
+      "control": {
+        "max_ms": 0.00987392008304596,
+        "mean_ms": 0.009782988818486531,
+        "median_ms": 0.009778559803962708,
+        "min_ms": 0.009765759706497193,
+        "p95_ms": 0.009800959825515747
+      },
+      "m": 16,
+      "matrix_shape": [
+        16,
+        2048,
+        8192
+      ],
+      "speedup_vs_phase67": 1.0381871375597085
+    }
+  ],
+  "source_fingerprint": "057581dfcaac5496331e34df97cda325be88147e7b27b10ff4e357c045f5fe9d",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 300,
+    "warmup": 30
+  },
+  "variant": "packed_gate_up_recovery"
+}
