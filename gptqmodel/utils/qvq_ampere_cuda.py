@@ -401,7 +401,7 @@ def _resolve_split_count(
         and input.shape[1] == 5120
         and out_features in (1024, 12288)
     ):
-        return 64 if out_features == 1024 else 40
+        return 56 if out_features == 1024 else 40
     if (
         input.shape[0] in (2, 4)
         and input.shape[1] == 5120
@@ -410,6 +410,36 @@ def _resolve_split_count(
         return 64
     if out_features == 1024 and input.shape == (8, 5120):
         return 48
+    if out_features == 17408 and input.shape == (8, 5120):
+        return 10
+    if out_features == 17408 and input.shape == (16, 5120):
+        return 10
+    if out_features == 12288 and input.shape == (16, 5120):
+        return 10
+    if out_features == 10240 and input.shape == (16, 5120):
+        return 10
+    if out_features == 1024 and input.shape == (16, 5120):
+        return 32
+    if out_features == 5120 and input.shape == (8, 17408):
+        return 40
+    if out_features == 5120 and input.shape == (8, 6144):
+        return 24
+    if out_features == 6144 and input.shape == (8, 5120):
+        return 40
+    if out_features == 10240 and input.shape == (8, 5120):
+        return 16
+    if out_features == 12288 and input.shape == (8, 5120):
+        return 14
+    if out_features == 5120 and input.shape == (16, 17408):
+        return 24
+    if out_features == 5120 and input.shape == (16, 6144):
+        return 12
+    if input.shape == (1, 6144) and out_features == 5120:
+        return 48
+    if input.shape == (2, 6144) and out_features == 5120:
+        return 64 if transition_bits == 7 else 48
+    if input.shape == (4, 5120) and out_features == 6144:
+        return 40
 
     # Environment configuration is process-level. Reading ``os.environ`` on
     # every cached launch costs more than the cache lookup itself, so refresh

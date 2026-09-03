@@ -113,7 +113,30 @@ def test_p32_ampere_autotune_skips_cold_cuda_graph_capture(monkeypatch):
     )
 
 
-def test_p32_ampere_dispatches_measured_m8_kv_plan_directly(monkeypatch):
+@pytest.mark.parametrize(("size_m", "expected_split"), ((8, 48), (16, 32)))
+def test_p32_ampere_dispatches_measured_wmma_kv_plan_directly(
+    monkeypatch, size_m, expected_split
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((size_m, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=1024,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == expected_split
+
+
+def test_p32_ampere_dispatches_measured_m8_gate_plan_directly(monkeypatch):
     calls = []
     monkeypatch.setattr(
         qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
@@ -126,24 +149,245 @@ def test_p32_ampere_dispatches_measured_m8_kv_plan_directly(monkeypatch):
         input,
         input,
         3,
-        out_features=1024,
+        out_features=17408,
         bank_alt_id=3,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == 48
+    assert calls[0][-1] == 10
 
 
-@pytest.mark.parametrize(
-    ("out_features", "expected_split"), ((1024, 64), (12288, 40))
-)
-def test_p32_ampere_dispatches_measured_m1_plans_directly(
-    monkeypatch, out_features, expected_split
+def test_p32_ampere_dispatches_measured_m16_wide_gate_plan_directly(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((16, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=17408,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 10
+
+
+@pytest.mark.parametrize("rate", (2, 2.5, 3, 3.5))
+def test_p32_ampere_dispatches_measured_m16_packed_qkv_plan_directly(
+    monkeypatch, rate
 ):
     calls = []
     monkeypatch.setattr(
         qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
     )
-    input = torch.empty((1, 5120))
+    input = torch.empty((16, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        rate,
+        out_features=10240,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 10
+
+
+@pytest.mark.parametrize("rate", (2, 2.5, 3, 3.5))
+def test_p32_ampere_dispatches_measured_m16_wide_fullq_plan_directly(
+    monkeypatch, rate
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((16, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        rate,
+        out_features=12288,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 10
+
+
+def test_p32_ampere_dispatches_measured_m16_wide_long_k_plan_directly(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((16, 17408))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=5120,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 24
+
+
+def test_p32_ampere_dispatches_measured_m16_wide_attention_plan_directly(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((16, 6144))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=5120,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 12
+
+
+def test_p32_ampere_dispatches_measured_m8_wide_long_k_plan_directly(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((8, 17408))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=5120,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 40
+
+
+def test_p32_ampere_dispatches_measured_m8_wide_attention_plan_directly(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((8, 6144))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=5120,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 24
+
+
+def test_p32_ampere_dispatches_measured_m8_wide_linear_z_plan_directly(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((8, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=6144,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 40
+
+
+def test_p32_ampere_dispatches_measured_m8_wide_qkv_plan_directly(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((8, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=10240,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 16
+
+
+def test_p32_ampere_dispatches_measured_m8_wide_fullq_plan_directly(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((8, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=12288,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 14
+
+
+@pytest.mark.parametrize(
+    ("in_features", "out_features", "expected_split"),
+    ((5120, 1024, 56), (5120, 12288, 40), (6144, 5120, 48)),
+)
+def test_p32_ampere_dispatches_measured_m1_plans_directly(
+    monkeypatch, in_features, out_features, expected_split
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((1, in_features))
 
     qvq_ampere_cuda.qvq_p32_window_ampere(
         input,
@@ -179,6 +423,49 @@ def test_p32_ampere_dispatches_measured_small_m_kv_plans_directly(
     )
     assert len(calls) == 1
     assert calls[0][-1] == 64
+
+
+def test_p32_ampere_dispatches_measured_m4_linear_z_plan_directly(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((4, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=6144,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 40
+
+
+@pytest.mark.parametrize(("bits", "expected_split"), ((3, 48), (3.5, 64)))
+def test_p32_ampere_dispatches_measured_m2_attention_plan_directly(
+    monkeypatch, bits, expected_split
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((2, 6144))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        bits,
+        out_features=5120,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == expected_split
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
