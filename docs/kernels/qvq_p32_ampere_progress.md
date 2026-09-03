@@ -2615,11 +2615,11 @@ lower geomean latency than fetched main; maximum absolute error is
 three-K16 launcher. Artifact: `v20_m16_qkv_stage3_stridefix_split10_verify8000.json`.
 
 The twenty-second accepted v20 progression uses the same corrected stride for
-fixed-N M16 linear-Z. Split 12 is exact and measures
-`0.059392/0.059392/0.060416/0.060416 ms` at 8,000 iterations (about 3.7%
+fixed-N M16 linear-Z. Split 10 is exact and measures
+`0.058368/0.058368/0.059392/0.059392 ms` at 8,000 iterations (about 5.4%
 lower geomean latency than fetched main; maximum absolute error
-`3.62e-05`). The existing split-12 dispatch now uses stage 3. Artifact:
-`v20_m16_linearz_stage3_stridefix_split12_verify8000.json`.
+`3.62e-05`). The linear-Z dispatch now uses stage 3 with split 10. Artifact:
+`v20_m16_linearz_stage3_stridefix_split10_verify8000.json`.
 
 The corrected-stride full-KV probes were not accepted. M16 full-KV stage 3 at
 split 32 was neutral versus its two-stage control, while M8 full-KV stage 3 at
