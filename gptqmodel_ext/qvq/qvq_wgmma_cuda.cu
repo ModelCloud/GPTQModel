@@ -64,6 +64,10 @@ constexpr int kP32K16TilesPerStage = kKPerStage / kP32TileRows;
 constexpr int kMaxGroupedP32Segments = 3;
 constexpr int kFixedGateUpK = 2048;
 constexpr int kFixedGateUpN = 8192;
+// The W2.5 N128 block has two independent consumer warpgroups and needs only
+// three decoded A fragments in flight.  A matched H100 depth-2/3/4 sweep
+// selected depth three at every Llama 3.2 1B decode M.
+constexpr int kW25N128DecodeDepth = 3;
 
 struct HopperGroupedP32LaunchParams {
   int segment_count;
@@ -437,6 +441,7 @@ template <
     int TransitionBits,
     bool LevelsInShared,
     bool PrefetchDecodedLevels = false,
+    int ReuseWaitGroups = 3,
     class FragmentA>
 __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     FragmentA& fragment,
@@ -504,7 +509,7 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     }
     if (wait_before_fragment_reuse) {
       cute::warpgroup_fence_operand(fragment);
-      cute::warpgroup_wait<3>();
+      cute::warpgroup_wait<ReuseWaitGroups>();
     }
     auto packed_fragment = cute::recast<uint32_t>(fragment);
 #pragma unroll
@@ -943,8 +948,12 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
     for (int k_block = 0; k_block < kP32K16TilesPerStage; ++k_block) {
       // W2.5/W3 use the measured depth-four schedule now that the fragment
       // reuse wait occurs at the first overwrite. W2/W3.5 retain depth two.
-      constexpr int kDecodeDepth =
+      constexpr int kDefaultDecodeDepth =
           TransitionBits == 5 || TransitionBits == kW3TransitionBits ? 4 : 2;
+      constexpr int kDecodeDepth =
+          N64BlocksPerCta == 2 && TransitionBits == 5
+          ? kW25N128DecodeDepth
+          : kDefaultDecodeDepth;
       auto& fragment_a = (k_block % kDecodeDepth) == 0 ? fragment_a0
           : (k_block % kDecodeDepth) == 1 ? fragment_a1
           : (k_block % kDecodeDepth) == 2 ? fragment_a2
@@ -960,7 +969,8 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
       qvq_p32_window_decode_fragment<
           TransitionBits,
           true,
-          PrefetchDecodedLevels>(
+          PrefetchDecodedLevels,
+          kDecodeDepth - 1>(
           fragment_a,
           window_words,
           decode_plan,
