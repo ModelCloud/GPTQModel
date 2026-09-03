@@ -2437,6 +2437,20 @@ exact within the existing tolerances (maximum absolute errors were below
 `v20_m16_w3_pairwrap_down_control8000.json`, and
 `v20_m16_w3_pairwrap_wide_verify8000.json`.
 
+The sixth accepted v20 specialization carries the same pair-position wrap
+predicate through W3.5 (`TransitionBits==7`) for those four widened M16
+tuples. Stable 8,000-iteration controls were
+`0.104448/0.061440/0.138240/0.142336 ms` (full-Q, attention-out, gate/up,
+down), versus candidate medians
+`0.102400/0.060416/0.136192/0.137216 ms`: `1.96%/1.67%/1.48%/3.60%`
+lower latency and 2.23% geometric-mean improvement. The 4,000-iteration
+screen was directionally consistent, and all outputs stayed within the
+existing exactness tolerances (maximum absolute error `9.16e-05`). Artifacts
+are `v20_m16_w35_pairwrap_wide_candidate.json`,
+`v20_m16_w35_pairwrap_wide_control.json`,
+`v20_m16_w35_pairwrap_fullq_control8000.json`, and
+`v20_m16_w35_pairwrap_wide_verify8000.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
