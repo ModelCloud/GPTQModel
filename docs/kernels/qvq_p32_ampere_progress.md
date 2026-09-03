@@ -2687,6 +2687,18 @@ non-KV shapes lost one event tick, full-KV W2 and W3.5 regressed, and there
 was no clean winning subset. The restored matched diagnostics are
 `v19_wrap_m16_all_{control,candidate}.json`.
 
+The M16 bank-mask fast path was briefly broadened from widened kernels to the
+fixed-N linear-QKV (`N=10240`) and linear-Z (`N=6144`) routes. Both candidates
+were numerically exact, but the 8,000-iteration matched run was effectively
+tick-neutral: linear-QKV measured `0.092231 ms` versus `0.092160 ms`, and
+linear-Z `0.062408 ms` versus `0.062464 ms`. A 4,000-iteration screen also
+showed the same instability and the N=1024 full-KV route regressed by about
+9%. The source was restored to the widened-M16-only predicate; diagnostics are
+`v20_bank_alt3_fast_m16_fixed_large_verify8000.json`,
+`v20_bank_alt3_fast_m16_fixed_large_control8000.json`,
+`v20_bank_alt3_fast_m16_narrow_other_candidate.json`, and
+`v20_bank_alt3_fast_m16_narrow_other_control.json`.
+
 ## Reproduction
 
 ```bash
