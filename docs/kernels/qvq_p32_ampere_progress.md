@@ -2358,6 +2358,18 @@ also rejected on Ampere: M16 full-Q W2 regressed from `0.097280` to
 schedule is retained; the diagnostic is
 `v19_m16_decode_mad_candidate.json`.
 
+## v20: post-PR-93 continuation
+
+PR #93 was merged at `d66ea238`; the next optimization window starts from
+that exact `origin/main` tip. A first Marlin-inspired scalar CTA-width probe
+is rejected. M1 full-Q was changed from sixteen to 32 N16 tiles per CTA and
+launched with 256 threads so all tiles remained covered. The corrected probe
+was exact, but at split 40 its 100-warmup/2000-iteration medians changed from
+the 128-thread control `0.061440/0.068608/0.067584/0.068608 ms` to
+`0.063488/0.067584/0.067584/0.069632 ms` for W2/W2.5/W3/W3.5: W2 and W3.5
+regressed while only W2.5 improved. The source change was reverted; the
+diagnostic is `artifacts/a100_p32_window/v20_m1_fullq_wide32_256t_candidate.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
