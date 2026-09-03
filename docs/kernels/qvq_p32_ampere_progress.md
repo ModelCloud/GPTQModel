@@ -2994,6 +2994,11 @@ was neutral in the matched M16/W3.5 run (`0.090112 ms` control and
 candidate), so it was also reverted. Diagnostic:
 `v21_m16_fullq_lanehoist_w35_candidate_5000.json`.
 
+The Hopper-inspired byte-permute form of the PGC16 pre-mix was bit-identical
+but neutral on Ampere: M16/W3.5 measured `0.090112 ms`, the same as control,
+so the compiler's original shift/LOP3 form remains. Diagnostic:
+`v21_m16_fullq_pgc_byteperm_w35_candidate_5000.json`.
+
 ## Reproduction
 
 ```bash
