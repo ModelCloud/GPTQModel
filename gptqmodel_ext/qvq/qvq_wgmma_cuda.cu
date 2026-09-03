@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace {
@@ -1263,18 +1264,40 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns), 1, static_cast<unsigned>(split_count));
   HopperGroupedP32LaunchParams grouped_params{};
-  qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, false, OrderedSplit>
-      <<<grid, kTmaThreads, 0, stream>>>(
-      input_tma,
-      trellis_tma,
-      bank_tma,
-      reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
-      partial_output.data_ptr<float>(),
-      grouped_params,
-      size_k,
-      size_n,
-      static_cast<int>(split_count),
-      static_cast<int>(bank_alt_id));
+  const bool use_h100_llama_down_prefetch =
+      OrderedSplit && size_k == 8192 && size_n == 2048 && split_count == 16 &&
+      std::strcmp(properties.name, "NVIDIA H100") == 0;
+  if (use_h100_llama_down_prefetch) {
+    qvq_p32_window_wgmma_m16_tma_kernel<
+        TransitionBits,
+        false,
+        OrderedSplit,
+        false,
+        true><<<grid, kTmaThreads, 0, stream>>>(
+        input_tma,
+        trellis_tma,
+        bank_tma,
+        reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+        partial_output.data_ptr<float>(),
+        grouped_params,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else {
+    qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, false, OrderedSplit>
+        <<<grid, kTmaThreads, 0, stream>>>(
+        input_tma,
+        trellis_tma,
+        bank_tma,
+        reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+        partial_output.data_ptr<float>(),
+        grouped_params,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   if constexpr (ReturnPartials) {
