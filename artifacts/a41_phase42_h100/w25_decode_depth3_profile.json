@@ -1,0 +1,38 @@
+{
+  "candidate_commit": "92ad391a",
+  "device": {
+    "compute_capability": "9.0",
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "profiler": "Nsight Compute 2026.2.1",
+  "rows": [
+    {
+      "bits": 2.5,
+      "depth2": {
+        "duration_us": 28.640,
+        "eligible_warps_per_cycle": 0.58,
+        "executed_instructions": 10800426,
+        "long_scoreboard_per_issue_active": 1.36,
+        "registers_per_thread": 53,
+        "shared_load_bank_conflicts": 1051853,
+        "shared_load_instructions": 2228224,
+        "shared_load_wavefronts": 3337238,
+        "shared_memory_bytes_per_block": 44800
+      },
+      "depth3": {
+        "duration_us": 27.776,
+        "eligible_warps_per_cycle": 0.61,
+        "executed_instructions": 10793252,
+        "long_scoreboard_per_issue_active": 1.36,
+        "registers_per_thread": 59,
+        "shared_load_bank_conflicts": 1051592,
+        "shared_load_instructions": 2228224,
+        "shared_load_wavefronts": 3345602,
+        "shared_memory_bytes_per_block": 44800,
+        "wait_stalls_per_issue_active": 0.90
+      }
+    }
+  ]
+}
