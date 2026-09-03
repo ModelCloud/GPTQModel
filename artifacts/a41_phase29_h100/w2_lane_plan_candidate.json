@@ -1,0 +1,211 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "ace9b51209c4caf55af39d29a3496ae930477d37",
+  "rows": [
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.034505600929260256,
+        "mean_ms": 0.03360438406467438,
+        "median_ms": 0.033445119857788086,
+        "min_ms": 0.03308543920516968,
+        "p95_ms": 0.034442241191864016
+      },
+      "bits": 2.0,
+      "child_n": [
+        8192,
+        8192
+      ],
+      "cuda_graph_stable": true,
+      "inner_max_abs_vs_dense": 1.1205673217773438e-05,
+      "k": 2048,
+      "logical_effective_tflops": 2.0065368067255682,
+      "m": 1,
+      "recovered_bit_exact_vs_split1": true,
+      "recovered_changed_values_vs_split1": 0,
+      "recovered_max_abs_vs_split1": 0.0,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.0,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.034505600929260256,
+        "mean_ms": 0.03360438406467438,
+        "median_ms": 0.033445119857788086,
+        "min_ms": 0.03308543920516968,
+        "p95_ms": 0.034442241191864016
+      },
+      "transient_partial_bytes": 0,
+      "useful_thread_blocks": 256,
+      "variant": "n64_split1"
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.033386240005493166,
+        "mean_ms": 0.033316233670711515,
+        "median_ms": 0.033315520286560055,
+        "min_ms": 0.03326591968536377,
+        "p95_ms": 0.03335743904113769
+      },
+      "bits": 2.0,
+      "child_n": [
+        8192,
+        8192
+      ],
+      "cuda_graph_stable": true,
+      "inner_max_abs_vs_dense": 1.0967254638671875e-05,
+      "k": 2048,
+      "logical_effective_tflops": 4.028684734488307,
+      "m": 2,
+      "recovered_bit_exact_vs_split1": true,
+      "recovered_changed_values_vs_split1": 0,
+      "recovered_max_abs_vs_split1": 0.0,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.0,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.033386240005493166,
+        "mean_ms": 0.033316233670711515,
+        "median_ms": 0.033315520286560055,
+        "min_ms": 0.03326591968536377,
+        "p95_ms": 0.03335743904113769
+      },
+      "transient_partial_bytes": 0,
+      "useful_thread_blocks": 256,
+      "variant": "n64_split1"
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.03373759984970093,
+        "mean_ms": 0.03366798713207245,
+        "median_ms": 0.03366976022720337,
+        "min_ms": 0.033614718914031984,
+        "p95_ms": 0.033707520961761474
+      },
+      "bits": 2.0,
+      "child_n": [
+        8192,
+        8192
+      ],
+      "cuda_graph_stable": true,
+      "inner_max_abs_vs_dense": 1.0967254638671875e-05,
+      "k": 2048,
+      "logical_effective_tflops": 7.972597790676231,
+      "m": 4,
+      "recovered_bit_exact_vs_split1": true,
+      "recovered_changed_values_vs_split1": 0,
+      "recovered_max_abs_vs_split1": 0.0,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.0,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.03373759984970093,
+        "mean_ms": 0.03366798713207245,
+        "median_ms": 0.03366976022720337,
+        "min_ms": 0.033614718914031984,
+        "p95_ms": 0.033707520961761474
+      },
+      "transient_partial_bytes": 0,
+      "useful_thread_blocks": 256,
+      "variant": "n64_split1"
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.03404223918914795,
+        "mean_ms": 0.033981027257442474,
+        "median_ms": 0.03398112058639526,
+        "min_ms": 0.0339244794845581,
+        "p95_ms": 0.034014720916748044
+      },
+      "bits": 2.0,
+      "child_n": [
+        8192,
+        8192
+      ],
+      "cuda_graph_stable": true,
+      "inner_max_abs_vs_dense": 1.1920928955078125e-05,
+      "k": 2048,
+      "logical_effective_tflops": 15.799093812549033,
+      "m": 8,
+      "recovered_bit_exact_vs_split1": true,
+      "recovered_changed_values_vs_split1": 0,
+      "recovered_max_abs_vs_split1": 0.0,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.0,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.03404223918914795,
+        "mean_ms": 0.033981027257442474,
+        "median_ms": 0.03398112058639526,
+        "min_ms": 0.0339244794845581,
+        "p95_ms": 0.034014720916748044
+      },
+      "transient_partial_bytes": 0,
+      "useful_thread_blocks": 256,
+      "variant": "n64_split1"
+    },
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.03495359897613525,
+        "mean_ms": 0.034748940861225125,
+        "median_ms": 0.034746239185333254,
+        "min_ms": 0.03469311952590942,
+        "p95_ms": 0.034788479804992674
+      },
+      "bits": 2.0,
+      "child_n": [
+        8192,
+        8192
+      ],
+      "cuda_graph_stable": true,
+      "inner_max_abs_vs_dense": 1.3828277587890625e-05,
+      "k": 2048,
+      "logical_effective_tflops": 30.902389702458432,
+      "m": 16,
+      "recovered_bit_exact_vs_split1": true,
+      "recovered_changed_values_vs_split1": 0,
+      "recovered_max_abs_vs_split1": 0.0,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.0,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.03495359897613525,
+        "mean_ms": 0.034748940861225125,
+        "median_ms": 0.034746239185333254,
+        "min_ms": 0.03469311952590942,
+        "p95_ms": 0.034788479804992674
+      },
+      "transient_partial_bytes": 0,
+      "useful_thread_blocks": 256,
+      "variant": "n64_split1"
+    }
+  ],
+  "source_fingerprint": "b3c1a7aacf3630e947ac5d655d6a3fdbb6f84d3b04ab1b6861eaf805c4a9cdc2",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 200,
+    "warmup": 30
+  },
+  "workload": "Llama 3.2 1B grouped gate/up inner P32 plus exact paired recovery"
+}
