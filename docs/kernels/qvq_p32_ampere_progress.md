@@ -2519,7 +2519,17 @@ improvement), and the 8,000-iteration confirmation remained faster at
 `0.119808/0.119808/0.120832/0.122880 ms`. All outputs are exact within the
 existing tolerance (maximum absolute error `4.58e-05`). The stage-3 template
 is restricted to this gate/up dispatch; other routes retain their measured
-stage depth. Artifacts are `v20_m16_gate_stage3_{control,verify8000}.json`.
+
+The twelfth accepted v20 progression uses a three-K16 stage for widened M16
+attention-out `(K,N)=(6144,5120)`. Stage 2's matched medians were
+`0.059392/0.057344/0.057344/0.057344 ms`; stage 3 reduced them to
+`0.054272/0.052224/0.053248/0.053248 ms` (8.0% geometric-mean improvement).
+The 8,000-iteration confirmation reproduced those medians, with exact output
+and maximum absolute error `4.01e-05`. This stage depth is restricted to the
+M16 attention dispatch; all other kernels keep their existing specialization.
+Artifacts are `v20_m16_attention_stage3_{control,verify8000}.json`.
+
+Artifacts are `v20_m16_gate_stage3_{control,verify8000}.json`.
 
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
