@@ -2531,6 +2531,15 @@ Artifacts are `v20_m16_attention_stage3_{control,verify8000}.json`.
 
 Artifacts are `v20_m16_gate_stage3_{control,verify8000}.json`.
 
+The thirteenth accepted v20 progression applies the three-K16 stage to
+widened M16 long-K MLP-down `(K,N)=(17408,5120)`. Stage 2's matched medians
+were `0.132096/0.134144/0.133120/0.136192 ms`; stage 3 measured
+`0.124928/0.124928/0.125952/0.129024 ms` (5.74% geometric-mean improvement).
+The 8,000-iteration confirmation remained lower at
+`0.124928/0.124928/0.125952/0.130048 ms`, with exact output and maximum
+absolute error `9.54e-05`. The specialization is restricted to this M16
+long-K dispatch. Artifacts are `v20_m16_down_stage3_{control,verify8000}.json`.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
