@@ -2540,6 +2540,15 @@ The 8,000-iteration confirmation remained lower at
 absolute error `9.54e-05`. The specialization is restricted to this M16
 long-K dispatch. Artifacts are `v20_m16_down_stage3_{control,verify8000}.json`.
 
+The fourteenth accepted v20 progression extends the three-K16 stage to the
+M8 fixed-N full-Q `(K,N)=(5120,12288)` wide launcher. The matched stage-2
+medians were `0.089088/0.092160/0.090112/0.092160 ms`; stage 3 measured
+`0.086016/0.090112/0.088064/0.089088 ms` (2.90% geometric-mean improvement).
+The 8,000-iteration confirmation reproduced all four medians exactly, with
+maximum absolute error `3.24e-05`. Both the pair-wrapped and generic
+transition-width branches use the stage-3 template; other M8 shapes retain
+stage 2. Artifacts are `v20_m8_fullq_stage3_{control,verify8000}.json`.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
