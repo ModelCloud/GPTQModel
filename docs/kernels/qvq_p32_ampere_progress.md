@@ -2653,6 +2653,12 @@ about 3.1% lower than the prior stage-3 plan (about 8.2% lower than fetched
 main for this route), with maximum absolute error `3.62e-05`. Artifact:
 `v20_m16_linearz_stage3_pairwrap_stridefix_split10_verify8000.json`.
 
+A fixed-N M16 full-KV pair-wrap probe was rejected. Although the stage-2
+kernel remained exact, the 8,000-iteration split-32 confirmation regressed
+W2.5/W3 to `0.034816 ms` and did not beat the matched control consistently;
+the source was restored to the existing non-pair-wrapped plan. Diagnostic:
+`v20_m16_fullkv_pairwrap_split32_verify8000.json`.
+
 An earlier M8 full-KV small-N stage-3 probe was invalid because the non-wide
 WMMA load still used the two-tile shared-memory stride; it consequently failed
 random-bank correctness on W2 (`max_abs=37.29`) before timing. After the
