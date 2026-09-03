@@ -2602,6 +2602,11 @@ immediately on W2 (`max_abs=37.29`), before timing. The dispatch was restored
 to the two-K16 implementation; no candidate artifact is used for performance
 claims.
 
+The analogous fixed-N M16 linear-QKV stage-3 probe was also rejected on the
+same staging boundary. It compiled but failed random-bank correctness on W2
+(`max_abs=47.61`) before timing, so the dispatch was restored to stage 2. The
+stage-3 template remains restricted to widened N128 routes.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
