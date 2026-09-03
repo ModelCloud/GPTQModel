@@ -2421,6 +2421,22 @@ at split 10. It tied the 100-warmup/4000-iteration control at `0.092160 ms`
 with exact output, so the source was restored and the path remains unchanged;
 the diagnostic is `artifacts/a100_p32_window/v20_m16_qkv_w25_pairwrap_candidate.json`.
 
+The fifth accepted v20 specialization extends the direct pair-position wrap
+predicate to W3 (`TransitionBits==6`) in all four widened M16 tuples: full-Q
+`(5120,12288)`, attention-out `(6144,5120)`, MLP-gate/up `(5120,17408)`, and
+long-K MLP-down `(17408,5120)`. Matched split-10/12/24 controls at 4,000
+iterations measured `0.103424/0.061440/0.138240/0.141312 ms`, while the
+candidate measured `0.101376/0.059392/0.134144/0.135168 ms` (about
+`1.98%/3.33%/2.96%/4.35%` lower latency; 3.26% geometric-mean improvement).
+The 8,000-iteration candidate confirmation measured
+`0.100352/0.059392/0.134144/0.135168 ms`. Every case remained numerically
+exact within the existing tolerances (maximum absolute errors were below
+`1.0e-04`). Artifacts are
+`v20_m16_w3_pairwrap_wide_{control,screen}.json`,
+`v20_m16_w3_pairwrap_attention_control8000.json`,
+`v20_m16_w3_pairwrap_down_control8000.json`, and
+`v20_m16_w3_pairwrap_wide_verify8000.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
