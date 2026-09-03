@@ -368,7 +368,8 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     const Element* __restrict__ levels,
     uint32_t levels_shared_base,
     uint32_t levels_high_shared_base,
-    uint32_t alternate_bank_mask) {
+    uint32_t alternate_bank_mask,
+    bool wait_before_fragment_reuse = false) {
   uint32_t state00;
   uint32_t state01;
   uint32_t state10;
@@ -397,6 +398,14 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   uint32_t product01 = qvq_wgmma_pgc16_product_masked(state01, bank_mask0);
   uint32_t product10 = qvq_wgmma_pgc16_product_masked(state10, bank_mask1);
   uint32_t product11 = qvq_wgmma_pgc16_product_masked(state11, bank_mask1);
+
+  // State/window extraction and the PGC mapping do not touch the fragment
+  // selected for this K block. W3.5 can therefore defer its depth-two reuse
+  // wait until immediately before the first level load overwrites that
+  // fragment, overlapping independent decoder work with the prior WGMMA.
+  if (wait_before_fragment_reuse) {
+    cute::warpgroup_wait<1>();
+  }
 
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
@@ -840,8 +849,10 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
           : (k_block % kDecodeDepth) == 1 ? fragment_a1
                                          : fragment_a2;
       const uint32_t bank_id = s_bank_ids(bank_n16_offset + warp, k_block, read_stage);
-      if (k_block >= kDecodeDepth) {
-        cute::warpgroup_wait<kDecodeDepth - 1>();
+      if constexpr (TransitionBits != 7) {
+        if (k_block >= kDecodeDepth) {
+          cute::warpgroup_wait<kDecodeDepth - 1>();
+        }
       }
       const auto trellis_layout = TrellisSmemLayout{};
       const uint32_t* window_words = shared.trellis.begin() +
@@ -854,7 +865,8 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
           shared.levels.begin(),
           shared_levels_base,
           shared_levels_high_base,
-          alternate_bank_mask);
+          alternate_bank_mask,
+          TransitionBits == 7 && k_block >= kDecodeDepth);
       cute::warpgroup_fence_operand(fragment_a);
       cute::warpgroup_arrive();
       cute::gemm(
