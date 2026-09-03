@@ -2674,6 +2674,12 @@ selective-hoist plan (for example W2 moved from `0.119808` to `0.123904 ms`),
 so the source was restored without a follow-up 8k run. Diagnostic:
 `v20_m16_gate_stage3_hoistall_split10_probe.json`.
 
+The analogous all-rate bank-mask-hoist probe for M16 attention-out was also
+rejected. It stayed exact but regressed all four rates in the 4,000-iteration
+screen (for example W2 moved to `0.055296 ms` from the retained
+`0.054272 ms`), so the original selective policy remains. Diagnostic:
+`v20_m16_attention_stage3_hoistall_split12_probe.json`.
+
 A fixed-N M16 full-KV pair-wrap probe was rejected. Although the stage-2
 kernel remained exact, the 8,000-iteration split-32 confirmation regressed
 W2.5/W3 to `0.034816 ms` and did not beat the matched control consistently;
