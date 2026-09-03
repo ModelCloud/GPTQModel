@@ -2605,16 +2605,42 @@ error `4.58e-05`). The Python dispatch and direct-plan test now pin split 9;
 other M16 routes are unchanged. Artifacts are
 `v20_m16_fullq_stage3_split9_{candidate,verify8000}.json`.
 
-The M8 full-KV small-N route was not stage-3 safe. Expanding its active-row
-stage buffer to three K16 tiles compiled, but random-bank correctness failed
-immediately on W2 (`max_abs=37.29`), before timing. The dispatch was restored
-to the two-K16 implementation; no candidate artifact is used for performance
-claims.
+The twenty-first accepted v20 progression fixes the non-wide stage-stride used
+by the stage-3 WMMA path. The load address now uses the selected
+`StageKTiles` stride instead of the two-tile default, making fixed-N M16
+linear-QKV stage 3 exact. With split 10, the 8,000-iteration medians are
+`0.086016/0.086016/0.086016/0.087040 ms` for W2/W2.5/W3/W3.5, about 5.9%
+lower geomean latency than fetched main; maximum absolute error is
+`4.20e-05`. The existing M16 split-10 dispatch is now backed by the
+three-K16 launcher. Artifact: `v20_m16_qkv_stage3_stridefix_split10_verify8000.json`.
 
-The analogous fixed-N M16 linear-QKV stage-3 probe was also rejected on the
-same staging boundary. It compiled but failed random-bank correctness on W2
-(`max_abs=47.61`) before timing, so the dispatch was restored to stage 2. The
-stage-3 template remains restricted to widened N128 routes.
+The twenty-second accepted v20 progression uses the same corrected stride for
+fixed-N M16 linear-Z. Split 12 is exact and measures
+`0.059392/0.059392/0.060416/0.060416 ms` at 8,000 iterations (about 3.7%
+lower geomean latency than fetched main; maximum absolute error
+`3.62e-05`). The existing split-12 dispatch now uses stage 3. Artifact:
+`v20_m16_linearz_stage3_stridefix_split12_verify8000.json`.
+
+The corrected-stride full-KV probes were not accepted. M16 full-KV stage 3 at
+split 32 was neutral versus its two-stage control, while M8 full-KV stage 3 at
+split 48 won only W2 and regressed W3/W3.5 in the 8,000-iteration confirmation;
+both routes remain on stage 2. Neighboring M16 long-K down splits 20 and 28
+were also slower than the retained split 24. Diagnostics are
+`v20_m16_fullkv_stage3_stridefix_split32_probe.json`,
+`v20_m8_fullkv_stage3_stridefix_split48_verify8000.json`,
+`v20_m16_down_stage3_split{20,28}_screen.json`, and the existing split-24
+verification artifact.
+
+An earlier M8 full-KV small-N stage-3 probe was invalid because the non-wide
+WMMA load still used the two-tile shared-memory stride; it consequently failed
+random-bank correctness on W2 (`max_abs=37.29`) before timing. After the
+stride fix, the route became exact but the 8k result remained mixed as noted
+above, so dispatch stays on the two-K16 implementation.
+
+The earlier fixed-N M16 linear-QKV stage-3 probe had the same stride bug and
+failed random-bank correctness on W2 (`max_abs=47.61`) before timing. It is
+superseded by the corrected-stride result above; fixed-N stage 3 is enabled
+only for the explicitly validated M16 QKV and linear-Z routes.
 
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
