@@ -1,7 +1,7 @@
 # A41/R0 H100 implementation and optimization audit
 
 This audit closes the planned A41/R0 implementation sequence and the measured
-H100 optimization sequence through Phase 61. The accepted production source
+H100 optimization sequence through Phase 62. The accepted production source
 remains Phase 56. Phases 57 through 61 were exact experiments that did not meet
 the promotion gate; all candidate CUDA source was removed.
 
@@ -56,6 +56,7 @@ run W4 and are figurative kernel baselines for the W2--W3.5 QVQ paths.
 | 59 | global level table, W3.5 N128, pair packing, and spare-fragment prefetch | Rejected; either inexact, unchanged SASS, or slower |
 | 60 | padded and dynamically hashed shared level rows | Rejected; 11.9% and 21.1% slower geometrically |
 | 61 | minimally padded 17-word shared level rows | Rejected; complete W2.5 MLP roughly 10% slower |
+| 62 | paired-recovery high-stage CTA widths 32/128/256 | Rejected; clean complete-MLP confirmation found no winner |
 
 The post-Phase-56 experiments show that the remaining shared-load conflicts
 cannot be attacked profitably by adding a level-index-dependent consumer
