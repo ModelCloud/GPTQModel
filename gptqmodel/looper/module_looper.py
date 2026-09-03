@@ -36,7 +36,7 @@ from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
-from ..quantization.config import METHOD, VramStrategy
+from ..quantization.config import METHOD, QuantizeEmbed, QuantizeEmbedConfig, VramStrategy
 from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.ctx import ctx
 from ..utils.device_telemetry import emit_device_telemetry
@@ -57,7 +57,7 @@ from ..utils.model import (
     get_module,
     move_to,
     restore_moe_topk,
-    set_moe_topk, get_module_by_name_prefix,
+    set_moe_topk, get_module_by_name_prefix, untie_word_embeddings,
 )
 from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
@@ -166,11 +166,20 @@ class ModuleLooper():
     instance so tasks such as module reloading, forward passes, and finalisation
     reuse the same worker threads.
     """
-    def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
+    input_embeddings_name: Optional[str] = None
+    output_embeddings_name: Optional[str] = None
+
+    def __init__(
+        self,
+        model: BaseQModel,
+        processors: List[LoopProcessor],
+        embed_quant_config: Optional[QuantizeEmbedConfig] = None,
+    ):
         """Initialize loop state, device policy, and callback wiring."""
 
         self.processors = processors
         self.gptq_model = model
+        self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
 
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
@@ -326,6 +335,22 @@ class ModuleLooper():
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
+
+        if self.embed_quant_mode is not None:
+            self.gptq_model.model = untie_word_embeddings(self.gptq_model.model)
+
+        self.input_embeddings_module = self.gptq_model.get_input_embeddings()
+        self.output_embeddings_module = self.gptq_model.get_output_embeddings()
+        self.input_embeddings_name = (
+            self.gptq_model.get_input_embeddings_name()
+            if self.input_embeddings_module is not None
+            else None
+        )
+        self.output_embeddings_name = (
+            self.gptq_model.get_output_embeddings_name()
+            if self.output_embeddings_module is not None
+            else None
+        )
 
     def _emit_moe_parallel_quant_runtime(self) -> None:
         """Log the runtime knobs that decide whether MoE quant can fan out efficiently."""
@@ -1397,6 +1422,7 @@ class ModuleLooper():
             layers=layers,
             calibration_data=calibration_data,
             use_cache=use_cache,
+            embed_quant_mode=self.embed_quant_mode,
             layer_names=layer_names,
         )
 
@@ -1412,6 +1438,39 @@ class ModuleLooper():
 
         if fallback is None:
             fallback = getattr(self.gptq_model.quantize_config, "fallback", None)
+
+        if self.embed_quant_mode is not None:
+            requested_endpoints = []
+            if self.embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+                requested_endpoints.append(
+                    ("input", self.input_embeddings_name, self.input_embeddings_module)
+                )
+            if self.embed_quant_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH):
+                requested_endpoints.append(
+                    ("output", self.output_embeddings_name, self.output_embeddings_module)
+                )
+
+            default_config = {
+                "bits": 8,
+                "group_size": 32,
+                "sym": True,
+                "desc_act": False,
+                "mse": 2.4,
+            }
+            dynamic = self.gptq_model.quantize_config.dynamic or {}
+            missing_defaults = {}
+            for label, name, module in requested_endpoints:
+                if module is None or not name:
+                    raise ValueError(f"Could not resolve the {label} embedding module for requantization.")
+                if not isinstance(module, tuple(SUPPORTS_MODULE_TYPES)):
+                    raise NotImplementedError(
+                        f"{label.capitalize()} embedding type {type(module)} is not supported; "
+                        f"supported types are {SUPPORTS_MODULE_TYPES}."
+                    )
+                if self.gptq_model.quantize_config.dynamic_get(name, default=None) is None:
+                    missing_defaults[name] = dict(default_config)
+            if missing_defaults:
+                self.gptq_model.quantize_config.dynamic = {**missing_defaults, **dynamic}
 
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
@@ -1510,7 +1569,11 @@ class ModuleLooper():
             layer_modules = [sum(layer_modules, [])]
 
         layer_count = len(layers)
-        pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
+        quant_input_embeddings = self.embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+        quant_output_embeddings = self.embed_quant_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH)
+        extra_input_step = 1 if quant_input_embeddings else 0
+        extra_output_step = 1 if (quant_output_embeddings or self.gptq_model.quantize_config.lm_head) else 0
+        pb = (log.pb(layer_count + extra_input_step + extra_output_step)
                             .manual()
                             .set(left_steps_offset=1))
 
@@ -1542,6 +1605,7 @@ class ModuleLooper():
             layer_count=layer_count,
             region_timer=region_timer,
             finalize_progress_cls=FinalizeProgressInfo,
+            embed_quant_mode=self.embed_quant_mode,
             logger=log,
         )
 
@@ -1645,7 +1709,10 @@ class ModuleLooper():
                 capture_only_flags[n] = True  # forward-only modules should not be finalized
         skipped_modules = []
         for name in subset:
-            layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{name}"
+            if name in (self.input_embeddings_name, self.output_embeddings_name):
+                layer_name = name
+            else:
+                layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{name}"
 
             # gptq task is created and stored inside processor
             if not isinstance(subset[name], NamedModule):
