@@ -2416,6 +2416,11 @@ error is `3.43e-05`; the other three rates retain the generic/power-mask
 paths. Artifacts are `v20_m16_attention_w25_pairwrap_{candidate,control}.json`
 and `v20_m16_attention_w25_pairwrap_candidate_verify8000.json`.
 
+The same predicate was screened on M16 linear-QKV W2.5 `(K,N)=(5120,10240)`
+at split 10. It tied the 100-warmup/4000-iteration control at `0.092160 ms`
+with exact output, so the source was restored and the path remains unchanged;
+the diagnostic is `artifacts/a100_p32_window/v20_m16_qkv_w25_pairwrap_candidate.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
