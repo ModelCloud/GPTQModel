@@ -2407,6 +2407,15 @@ reproduces `0.135168 ms` at 8,000 iterations. Maximum absolute error is
 `v20_m16_down_w25_pairwrap_{candidate,control}.json` and
 `v20_m16_down_w25_pairwrap_candidate_verify8000.json`.
 
+The fourth accepted v20 specialization applies the pair-position wrap
+predicate to W2.5 in widened M16 attention-out `(K,N)=(6144,5120)`. The
+split-12 control measures `0.061440 ms`; the candidate measures `0.059392 ms`
+in the matched 100-warmup/4000-iteration run (1.0345x, 3.333% lower
+latency), and reproduces `0.059392 ms` at 8,000 iterations. Maximum absolute
+error is `3.43e-05`; the other three rates retain the generic/power-mask
+paths. Artifacts are `v20_m16_attention_w25_pairwrap_{candidate,control}.json`
+and `v20_m16_attention_w25_pairwrap_candidate_verify8000.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
