@@ -2473,6 +2473,9 @@ Artifacts are `v20_m8_ca8_control_w35_verify8000.json` and
 `v20_m8_ca8_candidate_w35_verify8000.json` (the 4,000-iteration screen is
 `v20_m8_ca8_candidate_w35.json`).
 
+The same M8 down CA8 copy at W3 tied the existing path at `0.120832 ms` and
+was not enabled; diagnostic: `v20_m8_down_ca8_w3_candidate.json`.
+
 A scalar M1 attention W3.5 probe that replaced its per-byte bank-ID staging
 with a 16-byte async copy regressed from the approximately `0.040960 ms`
 baseline to `0.045056 ms`; the source was restored. Diagnostic:
