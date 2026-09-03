@@ -1,0 +1,25 @@
+{
+  "production_commit": "54ab5754",
+  "candidate": "compact fixed W3.5 gate/up launch",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "baseline": {
+    "static_sass_instructions": 1936,
+    "registers_per_thread": 55,
+    "stack_bytes": 112,
+    "constant0_bytes": 1552,
+    "shared_bytes": 33408
+  },
+  "candidate": {
+    "static_sass_instructions": 1768,
+    "registers_per_thread": 48,
+    "stack_bytes": 8,
+    "constant0_bytes": 1448,
+    "shared_bytes": 33408
+  },
+  "geomean_speedup": 0.9751582094892759,
+  "decision": "rejected; source fully removed"
+}
