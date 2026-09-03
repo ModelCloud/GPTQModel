@@ -2480,7 +2480,8 @@ The W2.5 M8 long-K down CA8 probe was likewise neutral at `0.120832 ms` and
 was reverted (`v20_m8_down_ca8_w25_candidate.json`).
 
 The ninth accepted v20 progression specializes `alternate_bank_mask` for the
-common `bank_alt_id=3` in full-row widened M16 kernels only. Matched W2.5
+common `bank_alt_id=3` in full-row widened M16 kernels only, using the
+transition-specific constants for W2/W2.5/W3/W3.5. Matched W2.5
 8,000-iteration controls/candidates (full-Q, attention-out, gate/up, down)
 are `0.101376/0.059392/0.134144/0.135168` and
 `0.097280/0.057344/0.129024/0.133120 ms`, respectively: approximately
@@ -2492,6 +2493,12 @@ runtime mask path. Artifacts are
 `v20_bank_alt3_fast_all_m16_w25_verify8000.json`,
 `v20_bank_alt3_m16_narrow_verify8000.json`, and
 `v20_bank_alt3_fast_m1m8_w25.json`.
+
+The initial implementation incorrectly returned the W2.5 mask for every
+transition width; the 16-case benchmark caught W3 full-Q corruption
+(`max_abs=35.19`) before it was accepted. The fast path now selects the
+correct compile-time mask for each width; the corrected full M16 matrix is
+`v20_bank_alt3_maskfix_m16_all_rates.json`.
 
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this

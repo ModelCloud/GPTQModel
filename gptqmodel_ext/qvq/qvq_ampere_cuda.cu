@@ -66,7 +66,13 @@ __device__ __forceinline__ uint32_t alternate_bank_mask(int bank_alt_id) {
   static_assert(TransitionBits >= 4 && TransitionBits <= 7);
   if constexpr (FastBankAlt3) {
     if (bank_alt_id == 3) {
-      return 0xc3c3u;
+      if constexpr (TransitionBits == 4 || TransitionBits == 5) {
+        return 0xc3c3u;
+      } else if constexpr (TransitionBits == 6) {
+        return 0x3c3cu;
+      } else {
+        return 0x5a5au;
+      }
     }
   }
   if (bank_alt_id == 0) {
