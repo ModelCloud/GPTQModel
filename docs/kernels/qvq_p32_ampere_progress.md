@@ -2484,6 +2484,11 @@ existing runtime-loop reducer (`0.095232/0.100352/0.099328/0.102400 ms`), so
 the extra specialization was removed; diagnostic:
 `v20_m16_fullq_static_reduce5_candidate.json`.
 
+A warp-parallel five-way reducer (`reduce_split_warp_kernel<5,8>`) for the
+same M16 full-Q shape was likewise neutral across W2–W3.5, reproducing
+`0.095232/0.100352/0.099328/0.102400 ms`; it was reverted. Diagnostic:
+`v20_m16_fullq_warp_reduce5_candidate.json`.
+
 A follow-up W3/W3.5 pair-wrap probe on M16 linear-QKV `(K,N)=(5120,10240)`
 was rejected. The exact candidate measured `0.092160/0.093184 ms` for W3/W3.5
 in the 4,000-iteration screen, versus fetched-main medians near
