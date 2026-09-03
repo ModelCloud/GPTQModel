@@ -2586,6 +2586,16 @@ ordering and exact output (maximum absolute error `2.86e-05`). This stage
 depth is restricted to the fixed-N wide QKV branch. Artifacts are
 `v20_m8_qkv_stage3_{control,verify8000}.json`.
 
+The nineteenth accepted v20 progression applies the three-K16 stage to the
+M8 fixed-N long-K MLP-down `(K,N)=(17408,5120)` wide launcher. Stage 2's
+matched medians were `0.118784/0.120832/0.121856/0.122880 ms`; stage 3
+measured `0.114688/0.116736/0.117760/0.119808 ms` (about 3.2%
+geometric-mean improvement). The 8,000-iteration confirmation reproduced
+the same values with exact output and maximum absolute error `7.25e-05`.
+The existing W3.5-only CA8 bank-ID copy remains enabled inside the stage-3
+branch; other M8 routes retain stage 2. Artifacts are
+`v20_m8_down_stage3_{control,verify8000}.json`.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
