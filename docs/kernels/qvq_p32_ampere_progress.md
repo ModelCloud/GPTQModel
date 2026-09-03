@@ -2451,6 +2451,13 @@ are `v20_m16_w35_pairwrap_wide_candidate.json`,
 `v20_m16_w35_pairwrap_fullq_control8000.json`, and
 `v20_m16_w35_pairwrap_wide_verify8000.json`.
 
+A follow-up W3/W3.5 pair-wrap probe on M16 linear-QKV `(K,N)=(5120,10240)`
+was rejected. The exact candidate measured `0.092160/0.093184 ms` for W3/W3.5
+in the 4,000-iteration screen, versus fetched-main medians near
+`0.091136/0.092160 ms`; both rates regressed by about one event tick. The
+dispatch was restored; diagnostic artifact:
+`v20_m16_qkv_w35_pairwrap_candidate.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
