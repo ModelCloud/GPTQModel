@@ -2464,6 +2464,15 @@ maximum absolute error was `9.92e-05`. Artifacts are
 `v20_m16_ca8_control8000_all.json`, `v20_m16_ca8_w25_verify8000_all.json`,
 and `v20_m16_ca8_all_rates_screen.json`.
 
+The eighth accepted v20 progression enables the same 8-byte bank-ID copy only
+for the M8 long-K MLP-down tuple `(K,N)=(17408,5120)`; other M8 active-row
+wide routes remain on 4-byte copies because attention lost a tick and gate/up
+tied in the matched control. At W3.5 and 8,000 iterations, M8 down improves
+from `0.122880` to `0.121856 ms` (0.83% lower latency) with exact output.
+Artifacts are `v20_m8_ca8_control_w35_verify8000.json` and
+`v20_m8_ca8_candidate_w35_verify8000.json` (the 4,000-iteration screen is
+`v20_m8_ca8_candidate_w35.json`).
+
 A follow-up W3/W3.5 pair-wrap probe on M16 linear-QKV `(K,N)=(5120,10240)`
 was rejected. The exact candidate measured `0.092160/0.093184 ms` for W3/W3.5
 in the 4,000-iteration screen, versus fetched-main medians near
