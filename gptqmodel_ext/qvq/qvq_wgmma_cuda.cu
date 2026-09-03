@@ -1478,7 +1478,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       !OrderedSplit && size_k == kFixedGateUpK && segment_count == 2 &&
       out_features[0] == kFixedGateUpN && out_features[1] == kFixedGateUpN &&
       split_counts[0] == 1 && split_counts[1] == 1 &&
-      TransitionBits == 4;
+      (TransitionBits == 4 || TransitionBits == kW3TransitionBits);
   if (use_fixed_gate_up) {
     const HopperFixedGateUpLaunchParams fixed_params{
         {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
