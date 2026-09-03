@@ -2568,6 +2568,15 @@ with exact output and maximum absolute error `2.67e-05`. Both transition
 branches use stage 3; other M8 routes retain stage 2. Artifacts are
 `v20_m8_attention_stage3_{control,verify8000}.json`.
 
+The seventeenth accepted v20 progression applies the three-K16 stage to the
+M8 fixed-N linear-Z `(K,N)=(5120,6144)` wide launcher. Stage 2's matched
+medians were `0.052224/0.052224/0.052224/0.053248 ms`; stage 3 measured
+`0.050176/0.051200/0.051200/0.052224 ms` (about 2.5% geometric-mean
+improvement). The 8,000-iteration confirmation reproduced all four values,
+with exact output and maximum absolute error `1.72e-05`. This stage depth is
+restricted to the fixed-N wide branch. Artifact pair:
+`v20_m8_linearz_stage3_{control,verify8000}.json`.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
