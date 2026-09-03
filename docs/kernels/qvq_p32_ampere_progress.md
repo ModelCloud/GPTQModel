@@ -2358,6 +2358,394 @@ also rejected on Ampere: M16 full-Q W2 regressed from `0.097280` to
 schedule is retained; the diagnostic is
 `v19_m16_decode_mad_candidate.json`.
 
+## v20: post-PR-93 continuation
+
+PR #93 was merged at `d66ea238`; the next optimization window starts from
+that exact `origin/main` tip. A first Marlin-inspired scalar CTA-width probe
+is rejected. M1 full-Q was changed from sixteen to 32 N16 tiles per CTA and
+launched with 256 threads so all tiles remained covered. The corrected probe
+was exact, but at split 40 its 100-warmup/2000-iteration medians changed from
+the 128-thread control `0.061440/0.068608/0.067584/0.068608 ms` to
+`0.063488/0.067584/0.067584/0.069632 ms` for W2/W2.5/W3/W3.5: W2 and W3.5
+regressed while only W2.5 improved. The source change was reverted; the
+diagnostic is `artifacts/a100_p32_window/v20_m1_fullq_wide32_256t_candidate.json`.
+
+The same 256-thread/32-tile geometry was screened on M1 MLP-gate/up
+`(K,N)=(5120,17408)`. It remained exact but regressed all four rates at the
+100-warmup/2000-iteration split-40 screen: the control was
+`0.079872/0.088064/0.089088/0.090112 ms`, while the candidate was
+`0.082944/0.089088/0.090112/0.094208 ms`. The source was reverted; see
+`artifacts/a100_p32_window/v20_m1_gate_wide32_256t_candidate.json`.
+
+The first accepted v20 specialization applies the direct pair-position wrap
+predicate to W2.5 in the widened M16 full-Q tuple `(K,N)=(5120,12288)`. The
+predicate removes the generic next-word boundary compare while preserving the
+existing W2 power-of-two mask and the W3/W3.5 generic path. Against the
+split-10 control `0.103424 ms`, the candidate measures `0.101376 ms` in the
+matched 100-warmup/4000-iteration run (1.0202x, 1.984% lower latency), and
+the candidate-first 200-warmup/8000-iteration confirmation reproduces
+`0.101376 ms`. Maximum absolute error is `3.82e-05`; the all-rate candidate
+keeps W2/W3/W3.5 at their control medians. Artifacts are
+`v20_m16_fullq_w25_pairwrap_{candidate,control_retry4000}.json` and
+`v20_m16_fullq_w25_pairwrap_candidate_verify8000_b.json`.
+
+The second accepted v20 specialization applies the same pair-position wrap
+predicate to W2.5 in the widened M16 MLP-gate/up tuple `(K,N)=(5120,17408)`.
+The split-10 control measures `0.137216 ms` and the candidate
+`0.134144 ms` in the matched 100-warmup/4000-iteration run (1.0229x, 2.239%
+lower latency); the candidate reproduces `0.134144 ms` at 8,000 iterations.
+Maximum absolute error is `4.01e-05`. The W2/W3/W3.5 paths remain unchanged.
+Artifacts are `v20_m16_gate_w25_pairwrap_{candidate,control}.json` and
+`v20_m16_gate_w25_pairwrap_candidate_verify8000.json`.
+
+The third accepted v20 specialization applies the pair-position wrap
+predicate to W2.5 in widened M16 long-K MLP-down `(K,N)=(17408,5120)`. The
+split-24 control is `0.141312 ms`; the candidate is `0.136192 ms` in the
+matched 100-warmup/4000-iteration run (1.0376x, 3.624% lower latency), and
+reproduces `0.135168 ms` at 8,000 iterations. Maximum absolute error is
+`9.92e-05`; W2/W3/W3.5 remain on their existing paths. Artifacts are
+`v20_m16_down_w25_pairwrap_{candidate,control}.json` and
+`v20_m16_down_w25_pairwrap_candidate_verify8000.json`.
+
+The fourth accepted v20 specialization applies the pair-position wrap
+predicate to W2.5 in widened M16 attention-out `(K,N)=(6144,5120)`. The
+split-12 control measures `0.061440 ms`; the candidate measures `0.059392 ms`
+in the matched 100-warmup/4000-iteration run (1.0345x, 3.333% lower
+latency), and reproduces `0.059392 ms` at 8,000 iterations. Maximum absolute
+error is `3.43e-05`; the other three rates retain the generic/power-mask
+paths. Artifacts are `v20_m16_attention_w25_pairwrap_{candidate,control}.json`
+and `v20_m16_attention_w25_pairwrap_candidate_verify8000.json`.
+
+The same predicate was screened on M16 linear-QKV W2.5 `(K,N)=(5120,10240)`
+at split 10. It tied the 100-warmup/4000-iteration control at `0.092160 ms`
+with exact output, so the source was restored and the path remains unchanged;
+the diagnostic is `artifacts/a100_p32_window/v20_m16_qkv_w25_pairwrap_candidate.json`.
+
+The fifth accepted v20 specialization extends the direct pair-position wrap
+predicate to W3 (`TransitionBits==6`) in all four widened M16 tuples: full-Q
+`(5120,12288)`, attention-out `(6144,5120)`, MLP-gate/up `(5120,17408)`, and
+long-K MLP-down `(17408,5120)`. Matched split-10/12/24 controls at 4,000
+iterations measured `0.103424/0.061440/0.138240/0.141312 ms`, while the
+candidate measured `0.101376/0.059392/0.134144/0.135168 ms` (about
+`1.98%/3.33%/2.96%/4.35%` lower latency; 3.26% geometric-mean improvement).
+The 8,000-iteration candidate confirmation measured
+`0.100352/0.059392/0.134144/0.135168 ms`. Every case remained numerically
+exact within the existing tolerances (maximum absolute errors were below
+`1.0e-04`). Artifacts are
+`v20_m16_w3_pairwrap_wide_{control,screen}.json`,
+`v20_m16_w3_pairwrap_attention_control8000.json`,
+`v20_m16_w3_pairwrap_down_control8000.json`, and
+`v20_m16_w3_pairwrap_wide_verify8000.json`.
+
+The sixth accepted v20 specialization carries the same pair-position wrap
+predicate through W3.5 (`TransitionBits==7`) for those four widened M16
+tuples. Stable 8,000-iteration controls were
+`0.104448/0.061440/0.138240/0.142336 ms` (full-Q, attention-out, gate/up,
+down), versus candidate medians
+`0.102400/0.060416/0.136192/0.137216 ms`: `1.96%/1.67%/1.48%/3.60%`
+lower latency and 2.23% geometric-mean improvement. The 4,000-iteration
+screen was directionally consistent, and all outputs stayed within the
+existing exactness tolerances (maximum absolute error `9.16e-05`). Artifacts
+are `v20_m16_w35_pairwrap_wide_candidate.json`,
+`v20_m16_w35_pairwrap_wide_control.json`,
+`v20_m16_w35_pairwrap_fullq_control8000.json`, and
+`v20_m16_w35_pairwrap_wide_verify8000.json`.
+
+The seventh accepted v20 progression uses one 8-byte `cp.async.ca` for the
+eight bank IDs staged by each full-row widened M16 CTA, replacing two 4-byte
+copies. The shared bank-ID slab is explicitly 8-byte aligned; M8 active-row
+wide CTAs retain the original two-copy path. In matched W2.5 8,000-iteration
+runs, full-Q, attention-out, gate/up, and long-K down changed from
+`0.101376/0.059392/0.134144/0.135168 ms` to
+`0.100352/0.059392/0.133120/0.131072 ms` (about
+`1.01%/0%/0.76%/3.03%` lower latency; 1.22% geometric-mean improvement).
+The all-rate M16 screen was non-regressing and remained numerically exact;
+maximum absolute error was `9.92e-05`. Artifacts are
+`v20_m16_ca8_control8000_all.json`, `v20_m16_ca8_w25_verify8000_all.json`,
+and `v20_m16_ca8_all_rates_screen.json`.
+
+The eighth accepted v20 progression enables the same 8-byte bank-ID copy only
+for the M8 long-K MLP-down tuple `(K,N)=(17408,5120)`; other M8 active-row
+wide routes remain on 4-byte copies because attention lost a tick and gate/up
+tied in the matched control. At W3.5 and 8,000 iterations, M8 down improves
+from `0.122880` to `0.121856 ms` (0.83% lower latency) with exact output.
+Artifacts are `v20_m8_ca8_control_w35_verify8000.json` and
+`v20_m8_ca8_candidate_w35_verify8000.json` (the 4,000-iteration screen is
+`v20_m8_ca8_candidate_w35.json`).
+
+The same M8 down CA8 copy at W3 tied the existing path at `0.120832 ms` and
+was not enabled; diagnostic: `v20_m8_down_ca8_w3_candidate.json`.
+
+The W2.5 M8 long-K down CA8 probe was likewise neutral at `0.120832 ms` and
+was reverted (`v20_m8_down_ca8_w25_candidate.json`).
+
+The ninth accepted v20 progression specializes `alternate_bank_mask` for the
+common `bank_alt_id=3` in full-row widened M16 kernels only, using the
+transition-specific constants for W2/W2.5/W3/W3.5. Matched W2.5
+8,000-iteration controls/candidates (full-Q, attention-out, gate/up, down)
+are `0.101376/0.059392/0.134144/0.135168` and
+`0.097280/0.057344/0.129024/0.133120 ms`, respectively: approximately
+`4.04%/3.45%/3.82%/1.52%` lower latency and 3.32% geometric-mean gain, with
+exact outputs. A global version was rejected after representative M1/M8
+routes regressed, so scalar and active-row kernels retain the original
+runtime mask path. Artifacts are
+`v20_bank_alt3_control8000.json`,
+`v20_bank_alt3_fast_all_m16_w25_verify8000.json`,
+`v20_bank_alt3_m16_narrow_verify8000.json`, and
+`v20_bank_alt3_fast_m1m8_w25.json`.
+
+The initial implementation incorrectly returned the W2.5 mask for every
+transition width; the 16-case benchmark caught W3 full-Q corruption
+(`max_abs=35.19`) before it was accepted. The fast path now selects the
+correct compile-time mask for each width; the corrected full M16 matrix is
+`v20_bank_alt3_maskfix_m16_all_rates.json`.
+
+The tenth accepted v20 progression adds a three-K16 software stage to the
+widened M16 full-Q tuple `(K,N)=(5120,12288)`. It keeps the two shared stage
+buffers but processes three K tiles between handoffs, reducing pipeline
+barrier/commit overhead without changing MMA order. In matched 8,000-iteration
+runs, stage 2 measured `0.096256/0.096256/0.097280/0.099328 ms` and stage 3
+measured `0.092160/0.092160/0.093184/0.094208 ms` for W2/W2.5/W3/W3.5: all
+four rates improve, with a 4.69% geometric-mean reduction and exact output
+(maximum absolute error `4.01e-05`). The stage-3 template is restricted to
+this full-Q dispatch; all other routes retain the proven two-K16 stage.
+Artifacts are `v20_m16_fullq_stage3_{control8000,verify8000}.json`.
+
+The eleventh accepted v20 progression applies the same three-K16 stage to the
+widened M16 MLP-gate/up tuple `(K,N)=(5120,17408)`. The matched stage-2
+4,000-iteration medians were `0.131072/0.129024/0.129024/0.130048 ms`; stage
+3 measured `0.119808/0.119808/0.120832/0.121856 ms` (7.10% geometric-mean
+improvement), and the 8,000-iteration confirmation remained faster at
+`0.119808/0.119808/0.120832/0.122880 ms`. All outputs are exact within the
+existing tolerance (maximum absolute error `4.58e-05`). The stage-3 template
+is restricted to this gate/up dispatch; other routes retain their measured
+
+The twelfth accepted v20 progression uses a three-K16 stage for widened M16
+attention-out `(K,N)=(6144,5120)`. Stage 2's matched medians were
+`0.059392/0.057344/0.057344/0.057344 ms`; stage 3 reduced them to
+`0.054272/0.052224/0.053248/0.053248 ms` (8.0% geometric-mean improvement).
+The 8,000-iteration confirmation reproduced those medians, with exact output
+and maximum absolute error `4.01e-05`. This stage depth is restricted to the
+M16 attention dispatch; all other kernels keep their existing specialization.
+Artifacts are `v20_m16_attention_stage3_{control,verify8000}.json`.
+
+Artifacts are `v20_m16_gate_stage3_{control,verify8000}.json`.
+
+The thirteenth accepted v20 progression applies the three-K16 stage to
+widened M16 long-K MLP-down `(K,N)=(17408,5120)`. Stage 2's matched medians
+were `0.132096/0.134144/0.133120/0.136192 ms`; stage 3 measured
+`0.124928/0.124928/0.125952/0.129024 ms` (5.74% geometric-mean improvement).
+The 8,000-iteration confirmation remained lower at
+`0.124928/0.124928/0.125952/0.130048 ms`, with exact output and maximum
+absolute error `9.54e-05`. The specialization is restricted to this M16
+long-K dispatch. Artifacts are `v20_m16_down_stage3_{control,verify8000}.json`.
+
+The fourteenth accepted v20 progression extends the three-K16 stage to the
+M8 fixed-N full-Q `(K,N)=(5120,12288)` wide launcher. The matched stage-2
+medians were `0.089088/0.092160/0.090112/0.092160 ms`; stage 3 measured
+`0.086016/0.090112/0.088064/0.089088 ms` (2.90% geometric-mean improvement).
+The 8,000-iteration confirmation reproduced all four medians exactly, with
+maximum absolute error `3.24e-05`. Both the pair-wrapped and generic
+transition-width branches use the stage-3 template; other M8 shapes retain
+stage 2. Artifacts are `v20_m8_fullq_stage3_{control,verify8000}.json`.
+
+The fifteenth accepted v20 progression applies the three-K16 stage to the
+M8 fixed-N MLP-gate/up `(K,N)=(5120,17408)` wide launcher. Stage 2's matched
+medians were `0.116736/0.120832/0.119808/0.121856 ms`; stage 3 measured
+`0.113664/0.115712/0.115712/0.117760 ms` (3.4% geometric-mean improvement).
+The 8,000-iteration confirmation remained faster at
+`0.113664/0.115712/0.116736/0.118784 ms`, with exact output and maximum
+absolute error `4.20e-05`. Both gate/up transition branches use stage 3;
+other M8 routes retain stage 2. Artifacts are
+`v20_m8_gate_stage3_{control,verify8000}.json`.
+
+The sixteenth accepted v20 progression applies the three-K16 stage to the
+M8 fixed-N attention-out `(K,N)=(6144,5120)` wide launcher. Stage 2's matched
+medians were `0.052224/0.053248/0.053248/0.052224 ms`; stage 3 measured
+`0.052224/0.052224/0.051200/0.051200 ms` (about 1.9% geometric-mean
+improvement). The 8,000-iteration confirmation reproduced the same values,
+with exact output and maximum absolute error `2.67e-05`. Both transition
+branches use stage 3; other M8 routes retain stage 2. Artifacts are
+`v20_m8_attention_stage3_{control,verify8000}.json`.
+
+The seventeenth accepted v20 progression applies the three-K16 stage to the
+M8 fixed-N linear-Z `(K,N)=(5120,6144)` wide launcher. Stage 2's matched
+medians were `0.052224/0.052224/0.052224/0.053248 ms`; stage 3 measured
+`0.050176/0.051200/0.051200/0.052224 ms` (about 2.5% geometric-mean
+improvement). The 8,000-iteration confirmation reproduced all four values,
+with exact output and maximum absolute error `1.72e-05`. This stage depth is
+restricted to the fixed-N wide branch. Artifact pair:
+`v20_m8_linearz_stage3_{control,verify8000}.json`.
+
+The eighteenth accepted v20 progression applies the three-K16 stage to the
+M8 fixed-N linear-QKV `(K,N)=(5120,10240)` wide launcher. Stage 2's matched
+medians were `0.077824/0.078848/0.078848/0.080896 ms`; stage 3 measured
+`0.074752/0.075776/0.076800/0.077824 ms` (about 3.6% geometric-mean
+improvement). The 8,000-iteration confirmation reproduced the same rate-wise
+ordering and exact output (maximum absolute error `2.86e-05`). This stage
+depth is restricted to the fixed-N wide QKV branch. Artifacts are
+`v20_m8_qkv_stage3_{control,verify8000}.json`.
+
+The nineteenth accepted v20 progression applies the three-K16 stage to the
+M8 fixed-N long-K MLP-down `(K,N)=(17408,5120)` wide launcher. Stage 2's
+matched medians were `0.118784/0.120832/0.121856/0.122880 ms`; stage 3
+measured `0.114688/0.116736/0.117760/0.119808 ms` (about 3.2%
+geometric-mean improvement). The 8,000-iteration confirmation reproduced
+the same values with exact output and maximum absolute error `7.25e-05`.
+The existing W3.5-only CA8 bank-ID copy remains enabled inside the stage-3
+branch; other M8 routes retain stage 2. Artifacts are
+`v20_m8_down_stage3_{control,verify8000}.json`.
+
+The twentieth accepted v20 progression retunes the newly stage-3 M16 full-Q
+launcher from split 10 to split 9. The split-9 candidate is faster at every
+rate in both 4,000- and 8,000-iteration runs; the 8k medians are
+`0.091136/0.089088/0.090112/0.091136 ms` for W2/W2.5/W3/W3.5 (about 2.8%
+lower than the stage-3 split-10 geomean), with exact output (maximum absolute
+error `4.58e-05`). The Python dispatch and direct-plan test now pin split 9;
+other M16 routes are unchanged. Artifacts are
+`v20_m16_fullq_stage3_split9_{candidate,verify8000}.json`.
+
+The twenty-first accepted v20 progression fixes the non-wide stage-stride used
+by the stage-3 WMMA path. The load address now uses the selected
+`StageKTiles` stride instead of the two-tile default, making fixed-N M16
+linear-QKV stage 3 exact. With split 10, the 8,000-iteration medians are
+`0.086016/0.086016/0.086016/0.087040 ms` for W2/W2.5/W3/W3.5, about 5.9%
+lower geomean latency than fetched main; maximum absolute error is
+`4.20e-05`. The existing M16 split-10 dispatch is now backed by the
+three-K16 launcher. Artifact: `v20_m16_qkv_stage3_stridefix_split10_verify8000.json`.
+
+The twenty-second accepted v20 progression uses the same corrected stride for
+fixed-N M16 linear-Z. Split 10 is exact and measures
+`0.058368/0.058368/0.059392/0.059392 ms` at 8,000 iterations (about 5.4%
+lower geomean latency than fetched main; maximum absolute error
+`3.62e-05`). The linear-Z dispatch now uses stage 3 with split 10. Artifact:
+`v20_m16_linearz_stage3_stridefix_split10_verify8000.json`.
+
+The corrected-stride full-KV probes were not accepted. M16 full-KV stage 3 at
+split 32 was neutral versus its two-stage control, while M8 full-KV stage 3 at
+split 48 won only W2 and regressed W3/W3.5 in the 8,000-iteration confirmation;
+both routes remain on stage 2. Neighboring M16 long-K down splits 20 and 28
+were also slower than the retained split 24. Diagnostics are
+`v20_m16_fullkv_stage3_stridefix_split32_probe.json`,
+`v20_m8_fullkv_stage3_stridefix_split48_verify8000.json`,
+`v20_m16_down_stage3_split{20,28}_screen.json`, and the existing split-24
+verification artifact.
+
+The twenty-third accepted v20 progression enables the existing CA8 bank-ID
+copy for only the M16 long-K W3.5 specialization. At split 24, the 8,000-
+iteration median is `0.129024 ms` (exact maximum absolute error
+`8.39e-05`), one event tick below the stage-3 two-4-byte-copy control at
+`0.130048 ms`; W2/W2.5/W3 retain the prior copy path. Artifact:
+`v20_m16_down_stage3_ca8_w35_split24_verify8000.json`.
+
+The twenty-fourth accepted v20 progression adds the already validated
+pair-wrap predicate to fixed-N M16 linear-QKV stage 3. Split 10 remains the
+plan: W2 is unchanged, while the 8,000-iteration W2.5/W3/W3.5 medians improve
+to `0.082944/0.082944/0.084992 ms`; the full four-rate geomean is about 2.4%
+lower than the prior stage-3 plan (about 8.1% lower than fetched main for this
+route), with maximum absolute error `4.20e-05`. Artifact:
+`v20_m16_qkv_stage3_pairwrap_stridefix_split10_verify8000.json`.
+
+The twenty-fifth accepted v20 progression adds the pair-wrap predicate to
+fixed-N M16 linear-Z stage 3. Split 10 remains the plan: W2 is unchanged and
+W2.5/W3/W3.5 measure `0.056320/0.056320/0.057344 ms` at 8,000 iterations,
+about 3.1% lower than the prior stage-3 plan (about 8.2% lower than fetched
+main for this route), with maximum absolute error `3.62e-05`. Artifact:
+`v20_m16_linearz_stage3_pairwrap_stridefix_split10_verify8000.json`.
+
+The twenty-sixth accepted v20 progression hoists the bank-selector masks for
+all fixed-N M16 linear-QKV rates (the earlier stage-3 pair-wrap path hoisted
+W3 only). Split 10 remains exact; 8,000-iteration medians are
+`0.082944/0.082944/0.082944/0.083968 ms`, improving W2 and W3.5 and tying the
+other two rates versus the prior QKV plan. Maximum absolute error is
+`4.20e-05`. Artifact:
+`v20_m16_qkv_stage3_pairwrap_hoistall_split10_verify8000.json`.
+
+The twenty-seventh accepted v20 progression hoists bank-selector masks for all
+fixed-N M16 linear-Z stage-3 rates. Split 10 is exact and measures
+`0.056320/0.056320/0.056320/0.056320 ms` at 8,000 iterations, improving every
+rate versus the prior pair-wrap-only plan; maximum absolute error is
+`3.62e-05`. Artifact:
+`v20_m16_linearz_stage3_pairwrap_hoistall_split10_verify8000.json`.
+
+An all-rate bank-mask-hoist probe for the M16 gate/up stage-3 launcher was
+rejected. The 4,000-iteration screen regressed every rate versus the retained
+selective-hoist plan (for example W2 moved from `0.119808` to `0.123904 ms`),
+so the source was restored without a follow-up 8k run. Diagnostic:
+`v20_m16_gate_stage3_hoistall_split10_probe.json`.
+
+The analogous all-rate bank-mask-hoist probe for M16 attention-out was also
+rejected. It stayed exact but regressed all four rates in the 4,000-iteration
+screen (for example W2 moved to `0.055296 ms` from the retained
+`0.054272 ms`), so the original selective policy remains. Diagnostic:
+`v20_m16_attention_stage3_hoistall_split12_probe.json`.
+
+A fixed-N M16 full-KV pair-wrap probe was rejected. Although the stage-2
+kernel remained exact, the 8,000-iteration split-32 confirmation regressed
+W2.5/W3 to `0.034816 ms` and did not beat the matched control consistently;
+the source was restored to the existing non-pair-wrapped plan. Diagnostic:
+`v20_m16_fullkv_pairwrap_split32_verify8000.json`.
+
+An earlier M8 full-KV small-N stage-3 probe was invalid because the non-wide
+WMMA load still used the two-tile shared-memory stride; it consequently failed
+random-bank correctness on W2 (`max_abs=37.29`) before timing. After the
+stride fix, the route became exact but the 8k result remained mixed as noted
+above, so dispatch stays on the two-K16 implementation.
+
+The earlier fixed-N M16 linear-QKV stage-3 probe had the same stride bug and
+failed random-bank correctness on W2 (`max_abs=47.61`) before timing. It is
+superseded by the corrected-stride result above; fixed-N stage 3 is enabled
+only for the explicitly validated M16 QKV and linear-Z routes.
+
+An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
+at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
+toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
+unchanged.
+
+A scalar M1 attention W3.5 probe that replaced its per-byte bank-ID staging
+with a 16-byte async copy regressed from the approximately `0.040960 ms`
+baseline to `0.045056 ms`; the source was restored. Diagnostic:
+`v20_m1_attention_bankca16_candidate.json`.
+
+A shape-specific static `reduce_split_kernel<5>` dispatch for M16 full-Q was
+also rejected. Its all-rate 4,000-iteration medians were identical to the
+existing runtime-loop reducer (`0.095232/0.100352/0.099328/0.102400 ms`), so
+the extra specialization was removed; diagnostic:
+`v20_m16_fullq_static_reduce5_candidate.json`.
+
+A warp-parallel five-way reducer (`reduce_split_warp_kernel<5,8>`) for the
+same M16 full-Q shape was likewise neutral across W2–W3.5, reproducing
+`0.095232/0.100352/0.099328/0.102400 ms`; it was reverted. Diagnostic:
+`v20_m16_fullq_warp_reduce5_candidate.json`.
+
+A follow-up W3/W3.5 pair-wrap probe on M16 linear-QKV `(K,N)=(5120,10240)`
+was rejected. The exact candidate measured `0.092160/0.093184 ms` for W3/W3.5
+in the 4,000-iteration screen, versus fetched-main medians near
+`0.091136/0.092160 ms`; both rates regressed by about one event tick. The
+dispatch was restored; diagnostic artifact:
+`v20_m16_qkv_w35_pairwrap_candidate.json`.
+
+The analogous W3.5-only probe on M16 linear-Z `(K,N)=(5120,6144)` was also
+omitted: its exact candidate was `0.062464 ms`, tied to the fetched-main
+median at 4,000 iterations. The source was restored; see
+`v20_m16_linearz_w35_pairwrap_candidate.json`.
+
+Two scalar M1 W3.5 pair-wrap probes were rejected as well. Full-Q tied at
+`0.068608 ms`, and MLP-gate/up regressed from the fetched-main
+`0.090112 ms` median to `0.092160 ms`; both retained the original wrap path.
+Diagnostics are `v20_m1_fullq_w35_pairwrap_candidate.json` and
+`v20_m1_gate_w35_pairwrap_candidate.json`.
+
+Extending pair-wrap to the four-stage M1 long-K MLP-down W3.5 path tied its
+control at `0.095232 ms` in the 4,000-iteration screen. It was reverted and
+left out of dispatch (`v20_m1_down_w35_pairwrap_candidate.json`).
+
+Adding the W2 power-of-two wrap mask to the widened M16 attention-out and
+MLP-gate/up paths was rejected. Attention-out tied its fetched-main median at
+`0.060416 ms`, while gate/up regressed from `0.134144` to `0.135168 ms` in the
+4,000-iteration screen. The existing generic W2 wrap remains; diagnostic:
+`v20_m16_w2_pow2_attention_gate_candidate.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
@@ -2495,6 +2883,32 @@ The later all-shape M16 pair-wrap screen was rejected completely. Most
 non-KV shapes lost one event tick, full-KV W2 and W3.5 regressed, and there
 was no clean winning subset. The restored matched diagnostics are
 `v19_wrap_m16_all_{control,candidate}.json`.
+
+The M16 bank-mask fast path was briefly broadened from widened kernels to the
+fixed-N linear-QKV (`N=10240`) and linear-Z (`N=6144`) routes. Both candidates
+were numerically exact, but the 8,000-iteration matched run was effectively
+tick-neutral: linear-QKV measured `0.092231 ms` versus `0.092160 ms`, and
+linear-Z `0.062408 ms` versus `0.062464 ms`. A 4,000-iteration screen also
+showed the same instability and the N=1024 full-KV route regressed by about
+9%. The source was restored to the widened-M16-only predicate; diagnostics are
+`v20_bank_alt3_fast_m16_fixed_large_verify8000.json`,
+`v20_bank_alt3_fast_m16_fixed_large_control8000.json`,
+`v20_bank_alt3_fast_m16_narrow_other_candidate.json`, and
+`v20_bank_alt3_fast_m16_narrow_other_control.json`.
+
+A packed two-state decode/selector-hoist probe was also rejected on widened
+M16 full-Q. Enabling `HoistBankMasks` for W3/W3.5 (W2 already uses it) stayed
+exact but lost one event tick at W2.5 and tied the other rates: the candidate
+medians were `0.096256/0.097280/0.097280/0.099328 ms` versus control
+`0.096256/0.096256/0.097280/0.099328 ms`. The mixed hoist policy was restored;
+diagnostics are `v20_m16_fullq_hoist_{candidate,control}.json`.
+
+A 32-output-per-warp split reducer was rejected for M16 full-KV split 32. The
+one-lane-per-output geometry is exact, but its 4,000-iteration medians were
+`0.035840/0.034816/0.034816/0.035840 ms` versus the retained 16-output
+reducer's `0.032768/0.033792/0.034816/0.034816 ms`; it loses W2, W2.5, and
+W3.5. The 16-output reducer remains dispatched. Diagnostics are
+`v20_m16_fullkv_reduce32_{candidate,control}.json`.
 
 ## Reproduction
 

@@ -219,7 +219,7 @@ def test_p32_ampere_dispatches_measured_m16_wide_fullq_plan_directly(
         bank_alt_id=3,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == 10
+    assert calls[0][-1] == 9
 
 
 def test_p32_ampere_dispatches_measured_m16_wide_long_k_plan_directly(
@@ -264,6 +264,28 @@ def test_p32_ampere_dispatches_measured_m16_wide_attention_plan_directly(
     )
     assert len(calls) == 1
     assert calls[0][-1] == 12
+
+
+def test_p32_ampere_dispatches_measured_m16_linear_z_stage3_plan_directly(
+    monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((16, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=6144,
+        bank_alt_id=3,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 10
 
 
 def test_p32_ampere_dispatches_measured_m8_wide_long_k_plan_directly(
