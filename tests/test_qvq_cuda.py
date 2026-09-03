@@ -68,6 +68,7 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_yaqa_feedback_update_op,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
+    qvq_cuda_hadamard_input_fp16_padded_multiblock,
     qvq_cuda_hadamard_ordered_split16_fp32_to_fp16,
     qvq_cuda_hadamard_pair_fp32_to_fp16,
     qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock,
@@ -435,6 +436,65 @@ def test_qvq_cuda_hadamard_direct_padding_guards():
         qvq_cuda_hadamard(x.expand(17, -1).contiguous(), pad_to_16=True)
     with pytest.raises(ValueError, match="nonempty 2D"):
         qvq_cuda_hadamard(x.reshape(1, 1, 2048), pad_to_16=True)
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_hadamard_multiblock_input_is_exact_and_graph_stable(m):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 Phase-26 path")
+
+    generator = torch.Generator(device="cuda").manual_seed(20262600 + m)
+    x = torch.randn(
+        (m, 2048), generator=generator, device="cuda", dtype=torch.float16
+    )
+    pre_scale = torch.randn(
+        (2048,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    expected = qvq_cuda_hadamard(
+        x, pre_scale=pre_scale, scale_mode=2, pad_to_16=True
+    )
+    actual = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+        x, pre_scale=pre_scale
+    )
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+            x, pre_scale=pre_scale
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
+
+
+def test_qvq_cuda_hadamard_multiblock_input_rescues_prescale_overflow_on_stream():
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 Phase-26 path")
+
+    x = torch.zeros((1, 2048), device="cuda", dtype=torch.float16)
+    pre_scale = torch.ones((2048,), device="cuda", dtype=torch.float16)
+    x[0, :2] = 60000
+    pre_scale[:2] = 2
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        expected = qvq_cuda_hadamard(
+            x, pre_scale=pre_scale, scale_mode=2, pad_to_16=True
+        )
+        actual = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+            x, pre_scale=pre_scale
+        )
+    stream.synchronize()
+    assert torch.isfinite(actual).all()
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
 
 def test_qvq_cuda_float32_hadamard_preserves_postscale_and_bias_precision():

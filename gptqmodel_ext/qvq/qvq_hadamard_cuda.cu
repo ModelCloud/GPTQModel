@@ -59,10 +59,152 @@ constexpr int kHadamardOrderedSplitTile = 256;
 constexpr int kHadamardOrderedSplitTiles =
     kHadamardOrderedSplitN / kHadamardOrderedSplitTile;
 constexpr int kHadamardOrderedSplitHighThreads = 64;
+constexpr int kHadamardInputMultiblockN = 2048;
+constexpr int kHadamardInputMultiblockTile = 256;
+constexpr int kHadamardInputMultiblockTiles =
+    kHadamardInputMultiblockN / kHadamardInputMultiblockTile;
+constexpr int kHadamardInputMultiblockHalf2Values =
+    kHadamardInputMultiblockTile / 2;
+constexpr int kHadamardInputMultiblockLowThreads =
+    kHadamardInputMultiblockTile;
+constexpr int kHadamardInputMultiblockHighThreads = 32;
 
 __device__ __forceinline__ float round_fp16_unless_overflow(float value) {
   const float narrowed = __half2float(__float2half_rn(value));
   return isfinite(narrowed) ? narrowed : value;
+}
+
+// Exact multiblock form of the H100 A41/R0 shared N=2048 input transform.
+// The first eight ascending butterfly stages are independent inside each
+// contiguous 256-column tile.  The low grid therefore exposes eight CTAs per
+// logical row.  It retains the range-safe mode-2 order exactly:
+//
+//   half(x * SU), unless that narrowing overflows -> divide by half(sqrt(N))
+//   -> half -> butterfly bits 1..128, rounding to half after every stage.
+//
+// Adjacent scalar columns are packed only after their bit-1 sum/difference.
+// Bits 2..128 then use native half2 add/sub without reassociation.
+__global__ void qvq_hadamard_input_fp16_padded_multiblock_low_kernel(
+    const half* __restrict__ input,
+    const half* __restrict__ pre_scale,
+    half* __restrict__ workspace) {
+  __shared__ half2 buf[kHadamardInputMultiblockHalf2Values];
+  const int row = static_cast<int>(blockIdx.y);
+  const int tile = static_cast<int>(blockIdx.x);
+  const int local = static_cast<int>(threadIdx.x);
+  const int column = tile * kHadamardInputMultiblockTile + local;
+  const int64_t offset =
+      static_cast<int64_t>(row) * kHadamardInputMultiblockN + column;
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(kHadamardInputMultiblockN))));
+
+  float value = __half2float(input[offset]) * __half2float(pre_scale[column]);
+  value = round_fp16_unless_overflow(value);
+  const half initial = __float2half_rn(value / divisor);
+  const unsigned int peer_bits = __shfl_xor_sync(
+      0xffffffffu, static_cast<unsigned int>(__half_as_ushort(initial)), 1);
+  if ((local & 1) == 0) {
+    constexpr unsigned int kEvenLaneMask = 0x55555555u;
+    const int local_pair = local >> 1;
+    const half peer = __ushort_as_half(static_cast<unsigned short>(peer_bits));
+    const half2 pair = __halves2half2(initial, peer);
+    const half2 swapped = __lowhigh2highlow(pair);
+    const half2 sum = __hadd2(pair, swapped);
+    const half2 difference = __hsub2(pair, swapped);
+    half2 packed = __lows2half2(sum, difference);
+
+#pragma unroll
+    for (int bit = 1; bit < 16; bit <<= 1) {
+      union Half2Bits {
+        half2 value;
+        unsigned int bits;
+      } packed_bits, packed_peer;
+      packed_bits.value = packed;
+      packed_peer.bits = __shfl_xor_sync(
+          kEvenLaneMask, packed_bits.bits, bit * 2);
+      packed = (local_pair & bit) == 0
+          ? __hadd2(packed, packed_peer.value)
+          : __hsub2(packed_peer.value, packed);
+    }
+    buf[local_pair] = packed;
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 16; bit < kHadamardInputMultiblockHalf2Values; bit <<= 1) {
+    if (local < kHadamardInputMultiblockHalf2Values) {
+      const int peer = local ^ bit;
+      if (local < peer) {
+        const half2 a = buf[local];
+        const half2 b = buf[peer];
+        buf[local] = __hadd2(a, b);
+        buf[peer] = __hsub2(a, b);
+      }
+    }
+    __syncthreads();
+  }
+
+  if (local < kHadamardInputMultiblockHalf2Values) {
+    const int64_t pair_offset =
+        static_cast<int64_t>(row) * kHadamardInputMultiblockN +
+        tile * kHadamardInputMultiblockTile + local * 2;
+    *reinterpret_cast<half2*>(workspace + pair_offset) = buf[local];
+  }
+}
+
+// Each high-stage thread owns two adjacent within-tile columns across all
+// eight tiles.  The remaining tile-index stages correspond exactly to scalar
+// butterfly bits 256, 512, and 1024.  Valid rows are updated in place only
+// after all eight inputs are resident in registers; padded rows are written
+// as exact zero without reading uninitialized workspace.
+__global__ void qvq_hadamard_input_fp16_padded_multiblock_high_kernel(
+    half* workspace,
+    int logical_rows) {
+  const int row = static_cast<int>(blockIdx.y);
+  const int local_pair =
+      static_cast<int>(blockIdx.x) * kHadamardInputMultiblockHighThreads +
+      static_cast<int>(threadIdx.x);
+  const int local = local_pair * 2;
+  if (row >= logical_rows) {
+    const half2 zero = __float2half2_rn(0.0f);
+#pragma unroll
+    for (int tile = 0; tile < kHadamardInputMultiblockTiles; ++tile) {
+      const int column = tile * kHadamardInputMultiblockTile + local;
+      *reinterpret_cast<half2*>(
+          workspace + static_cast<int64_t>(row) * kHadamardInputMultiblockN +
+          column) = zero;
+    }
+    return;
+  }
+
+  half2 values[kHadamardInputMultiblockTiles];
+#pragma unroll
+  for (int tile = 0; tile < kHadamardInputMultiblockTiles; ++tile) {
+    const int column = tile * kHadamardInputMultiblockTile + local;
+    values[tile] = *reinterpret_cast<const half2*>(
+        workspace + static_cast<int64_t>(row) * kHadamardInputMultiblockN +
+        column);
+  }
+#pragma unroll
+  for (int bit = 1; bit < kHadamardInputMultiblockTiles; bit <<= 1) {
+#pragma unroll
+    for (int tile = 0; tile < kHadamardInputMultiblockTiles; ++tile) {
+      const int peer = tile ^ bit;
+      if (tile < peer) {
+        const half2 a = values[tile];
+        const half2 b = values[peer];
+        values[tile] = __hadd2(a, b);
+        values[peer] = __hsub2(a, b);
+      }
+    }
+  }
+#pragma unroll
+  for (int tile = 0; tile < kHadamardInputMultiblockTiles; ++tile) {
+    const int column = tile * kHadamardInputMultiblockTile + local;
+    *reinterpret_cast<half2*>(
+        workspace + static_cast<int64_t>(row) * kHadamardInputMultiblockN +
+        column) = values[tile];
+  }
 }
 
 // One block per row; the row lives in dynamic shared memory. log2n must be >= 1
@@ -1040,6 +1182,55 @@ at::Tensor qvq_hadamard_cuda(
   return output;
 }
 
+at::Tensor qvq_hadamard_input_fp16_padded_multiblock_cuda(
+    const at::Tensor& input,
+    const at::Tensor& pre_scale) {
+  TORCH_CHECK(input.is_cuda() && pre_scale.is_cuda(),
+              "multiblock input Hadamard tensors must be CUDA tensors");
+  TORCH_CHECK(input.device() == pre_scale.device(),
+              "multiblock input Hadamard tensors must share a device");
+  TORCH_CHECK(input.scalar_type() == at::kHalf &&
+                  pre_scale.scalar_type() == at::kHalf,
+              "multiblock input Hadamard tensors must be float16");
+  TORCH_CHECK(input.dim() == 2 && input.size(0) >= 1 && input.size(0) <= 16 &&
+                  input.size(1) == kHadamardInputMultiblockN,
+              "multiblock input Hadamard requires an Mx2048 input with M in [1, 16]");
+  TORCH_CHECK(input.is_contiguous() && pre_scale.is_contiguous(),
+              "multiblock input Hadamard tensors must be contiguous");
+  TORCH_CHECK(pre_scale.numel() == kHadamardInputMultiblockN,
+              "multiblock input Hadamard pre_scale must contain 2048 values");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
+  TORCH_CHECK(properties.major == 9,
+              "multiblock input Hadamard is an experimental Hopper-only operator");
+  const int rows = static_cast<int>(input.size(0));
+  at::Tensor output = at::empty(
+      {16, kHadamardInputMultiblockN}, input.options());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  qvq_hadamard_input_fp16_padded_multiblock_low_kernel<<<
+      dim3(kHadamardInputMultiblockTiles, rows),
+      kHadamardInputMultiblockLowThreads,
+      0,
+      stream>>>(
+      reinterpret_cast<const half*>(input.const_data_ptr()),
+      reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+      reinterpret_cast<half*>(output.mutable_data_ptr()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  qvq_hadamard_input_fp16_padded_multiblock_high_kernel<<<
+      dim3(
+          kHadamardInputMultiblockHalf2Values /
+              kHadamardInputMultiblockHighThreads,
+          16),
+      kHadamardInputMultiblockHighThreads,
+      0,
+      stream>>>(
+      reinterpret_cast<half*>(output.mutable_data_ptr()), rows);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
 std::tuple<at::Tensor, at::Tensor> qvq_hadamard_pair_fp32_to_fp16_cuda(
     const at::Tensor& input0,
     const at::Tensor& input1,
@@ -1519,6 +1710,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
     m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode, bool pad_to_16=False, bool output_fp16=False) -> Tensor");
 });
   m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
+  m.def("hadamard_input_fp16_padded_multiblock(Tensor input, Tensor pre_scale) -> Tensor");
   m.def("hadamard_ordered_split16_fp32_to_fp16(Tensor partial_input, Tensor post_scale, Tensor? bias, int scale_mode, int logical_rows, bool multiblock=False) -> Tensor");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode, bool warp_low=False) -> (Tensor, Tensor)");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
@@ -1528,6 +1720,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("hadamard", &qvq_hadamard_cuda);
   m.impl("hadamard_pair_fp32_to_fp16", &qvq_hadamard_pair_fp32_to_fp16_cuda);
+  m.impl("hadamard_input_fp16_padded_multiblock", &qvq_hadamard_input_fp16_padded_multiblock_cuda);
   m.impl("hadamard_ordered_split16_fp32_to_fp16", &qvq_hadamard_ordered_split16_fp32_to_fp16_cuda);
   m.impl("hadamard_pair_fp32_to_fp16_multiblock", &qvq_hadamard_pair_fp32_to_fp16_multiblock_cuda);
   m.impl("swiglu_precondition", &qvq_swiglu_precondition_cuda);

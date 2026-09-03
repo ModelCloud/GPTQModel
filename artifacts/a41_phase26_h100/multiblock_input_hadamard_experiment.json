@@ -1,0 +1,136 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "e405d99d545284c1230bfd729ebd95db514a115c",
+  "rows": [
+    {
+      "better_than_one_block": true,
+      "bit_exact": true,
+      "k": 2048,
+      "m": 1,
+      "multiblock": {
+        "max_ms": 0.05228096008300781,
+        "mean_ms": 0.005217491175234318,
+        "median_ms": 0.0034992000460624694,
+        "min_ms": 0.0034451198577880857,
+        "p95_ms": 0.0035513600707054137
+      },
+      "one_block": {
+        "max_ms": 0.02220544099807739,
+        "mean_ms": 0.009259075236320495,
+        "median_ms": 0.009193599820137024,
+        "min_ms": 0.009178879857063293,
+        "p95_ms": 0.00919871985912323
+      },
+      "persistent_bytes_added": 0,
+      "speedup_vs_one_block": 2.6273433067887244,
+      "transient_bytes_added": 0
+    },
+    {
+      "better_than_one_block": true,
+      "bit_exact": true,
+      "k": 2048,
+      "m": 2,
+      "multiblock": {
+        "max_ms": 0.05051136016845703,
+        "mean_ms": 0.005384422434866428,
+        "median_ms": 0.0036204800009727476,
+        "min_ms": 0.003600639998912811,
+        "p95_ms": 0.004028159976005554
+      },
+      "one_block": {
+        "max_ms": 0.008279039859771728,
+        "mean_ms": 0.00803987844288349,
+        "median_ms": 0.008039039969444274,
+        "min_ms": 0.008026880025863648,
+        "p95_ms": 0.00804416000843048
+      },
+      "persistent_bytes_added": 0,
+      "speedup_vs_one_block": 2.2204348504298745,
+      "transient_bytes_added": 0
+    },
+    {
+      "better_than_one_block": true,
+      "bit_exact": true,
+      "k": 2048,
+      "m": 4,
+      "multiblock": {
+        "max_ms": 0.057034878730773925,
+        "mean_ms": 0.005498710434138775,
+        "median_ms": 0.0035782399773597717,
+        "min_ms": 0.0035628798604011537,
+        "p95_ms": 0.013355519771575928
+      },
+      "one_block": {
+        "max_ms": 0.04996032238006592,
+        "mean_ms": 0.007685526365041733,
+        "median_ms": 0.007363839745521545,
+        "min_ms": 0.007351040244102478,
+        "p95_ms": 0.007368959784507752
+      },
+      "persistent_bytes_added": 0,
+      "speedup_vs_one_block": 2.05795021913399,
+      "transient_bytes_added": 0
+    },
+    {
+      "better_than_one_block": true,
+      "bit_exact": true,
+      "k": 2048,
+      "m": 8,
+      "multiblock": {
+        "max_ms": 0.05462592124938965,
+        "mean_ms": 0.005405820795893669,
+        "median_ms": 0.0037536001205444335,
+        "min_ms": 0.003718400001525879,
+        "p95_ms": 0.003794560134410858
+      },
+      "one_block": {
+        "max_ms": 0.03538944005966187,
+        "mean_ms": 0.007333411210775376,
+        "median_ms": 0.007192320227622986,
+        "min_ms": 0.007171840071678161,
+        "p95_ms": 0.007197440266609192
+      },
+      "persistent_bytes_added": 0,
+      "speedup_vs_one_block": 1.9161125310758436,
+      "transient_bytes_added": 0
+    },
+    {
+      "better_than_one_block": true,
+      "bit_exact": true,
+      "k": 2048,
+      "m": 16,
+      "multiblock": {
+        "max_ms": 0.05977791786193848,
+        "mean_ms": 0.005591468787193299,
+        "median_ms": 0.003692480027675629,
+        "min_ms": 0.0036665600538253783,
+        "p95_ms": 0.008683519959449769
+      },
+      "one_block": {
+        "max_ms": 0.04860608100891113,
+        "mean_ms": 0.007158742371201515,
+        "median_ms": 0.006949759721755981,
+        "min_ms": 0.006939520239830017,
+        "p95_ms": 0.006955519914627075
+      },
+      "persistent_bytes_added": 0,
+      "speedup_vs_one_block": 1.8821387440599835,
+      "transient_bytes_added": 0
+    }
+  ],
+  "source_fingerprint": "574494087966c557751ae043c059462a711e848e24aeccea6a11df0fdcad852b",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 200,
+    "warmup": 30
+  },
+  "workload": "exact Mx2048 SU/Hadamard transform into padded M16 storage"
+}

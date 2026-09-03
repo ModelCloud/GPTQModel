@@ -201,6 +201,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_half2_precondition_low_launches: int = 0
     h100_direct_padded_precondition_launches: int = 0
     h100_direct_padded_input_launches: int = 0
+    h100_multiblock_input_hadamard_launches: int = 0
     h100_fp16_recovery_store_launches: int = 0
     h100_fused_down_reduction_recovery_launches: int = 0
     h100_multiblock_down_recovery_launches: int = 0
@@ -233,6 +234,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_half2_precondition_low_launches": self.h100_half2_precondition_low_launches,
             "h100_direct_padded_precondition_launches": self.h100_direct_padded_precondition_launches,
             "h100_direct_padded_input_launches": self.h100_direct_padded_input_launches,
+            "h100_multiblock_input_hadamard_launches": self.h100_multiblock_input_hadamard_launches,
             "h100_fp16_recovery_store_launches": self.h100_fp16_recovery_store_launches,
             "h100_fused_down_reduction_recovery_launches": self.h100_fused_down_reduction_recovery_launches,
             "h100_multiblock_down_recovery_launches": self.h100_multiblock_down_recovery_launches,
@@ -263,6 +265,7 @@ class QVQHopperGroupedRuntime:
         self._payload_source_key: tuple[Any, ...] | None = None
         self._h100_multiblock_intermediate_enabled = False
         self._h100_direct_padded_input_enabled = False
+        self._h100_multiblock_input_hadamard_enabled = False
         self._h100_fp16_recovery_store_enabled = False
         self._input: torch.Tensor | None = None
         self._input_version: int | None = None
@@ -295,6 +298,7 @@ class QVQHopperGroupedRuntime:
         self._payload_source_key = None
         self._h100_multiblock_intermediate_enabled = False
         self._h100_direct_padded_input_enabled = False
+        self._h100_multiblock_input_hadamard_enabled = False
         self._h100_fp16_recovery_store_enabled = False
         self.telemetry.grouped_window_bytes = 0
         self.telemetry.grouped_selector_bytes = 0
@@ -378,6 +382,9 @@ class QVQHopperGroupedRuntime:
             and children[0].in_features == 2048
             and properties.name == "NVIDIA H100"
             and (properties.major, properties.minor) == (9, 0)
+        )
+        self._h100_multiblock_input_hadamard_enabled = (
+            self._h100_direct_padded_input_enabled
         )
         self._h100_fp16_recovery_store_enabled = (
             properties.name == "NVIDIA H100"
@@ -486,21 +493,34 @@ class QVQHopperGroupedRuntime:
         x_2d = x.reshape(rows, children[0].in_features).to(torch.float16)
         payload = self._ensure_payload()
         direct_pad = self._h100_direct_padded_input_enabled and rows < 16
-        transformed = children[0]._qvq_prepare_inference_input(
-            x_2d,
-            torch.float16,
-            pad_to_16=direct_pad,
-        )
-        if direct_pad:
-            padded = transformed
-            self.telemetry.h100_direct_padded_input_launches += 1
-        elif rows == 16:
-            padded = transformed.contiguous()
-        else:
-            padded = torch.zeros(
-                (16, children[0].in_features), device=x.device, dtype=torch.float16
+        if self._h100_multiblock_input_hadamard_enabled:
+            from ..utils.qvq_cuda import (
+                qvq_cuda_hadamard_input_fp16_padded_multiblock,
             )
-            padded[:rows].copy_(transformed)
+
+            padded = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+                x_2d,
+                pre_scale=children[0]._cached_cast("SU", torch.float16),
+            )
+            self.telemetry.h100_multiblock_input_hadamard_launches += 1
+            if direct_pad:
+                self.telemetry.h100_direct_padded_input_launches += 1
+        else:
+            transformed = children[0]._qvq_prepare_inference_input(
+                x_2d,
+                torch.float16,
+                pad_to_16=direct_pad,
+            )
+            if direct_pad:
+                padded = transformed
+                self.telemetry.h100_direct_padded_input_launches += 1
+            elif rows == 16:
+                padded = transformed.contiguous()
+            else:
+                padded = torch.zeros(
+                    (16, children[0].in_features), device=x.device, dtype=torch.float16
+                )
+                padded[:rows].copy_(transformed)
         from ..utils.qvq_cuda import _pgc16_levels
 
         grouped_inner = (

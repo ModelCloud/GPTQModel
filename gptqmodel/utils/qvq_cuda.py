@@ -70,6 +70,7 @@ def _validate_viterbi_distance_range(
         )
 _QVQ_CUDA_HADAMARD_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_OP: Callable | None = None
+_QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_OP: Callable | None = None
@@ -117,6 +118,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "viterbi_v2_segment_family_grid_trusted",
         "hadamard",
         "hadamard_pair_fp32_to_fp16",
+        "hadamard_input_fp16_padded_multiblock",
         "hadamard_ordered_split16_fp32_to_fp16",
         "hadamard_pair_fp32_to_fp16_multiblock",
         "swiglu_precondition",
@@ -261,6 +263,19 @@ def _qvq_cuda_hadamard_pair_op() -> Callable:
                     "qvq_cuda", "hadamard_pair_fp32_to_fp16"
                 )
     return _QVQ_CUDA_HADAMARD_PAIR_OP
+
+
+def _qvq_cuda_hadamard_input_multiblock_op() -> Callable:
+    """Resolve the experimental Hopper N=2048 multiblock input transform."""
+
+    global _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP
+    if _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP is None:
+                _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP = _extension_api().op(
+                    "qvq_cuda", "hadamard_input_fp16_padded_multiblock"
+                )
+    return _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP
 
 
 def _qvq_cuda_hadamard_ordered_split16_op() -> Callable:
@@ -746,6 +761,34 @@ def qvq_cuda_hadamard(
     return _qvq_cuda_hadamard_op()(
         x, pre_scale, post_scale, bias, scale_mode, pad_to_16, output_fp16
     )
+
+
+def qvq_cuda_hadamard_input_fp16_padded_multiblock(
+    x: torch.Tensor,
+    *,
+    pre_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Run the exact two-stage Hopper Mx2048 input transform into M16 storage.
+
+    This experimental operator has the same numerical contract as
+    ``qvq_cuda_hadamard(..., scale_mode=2, pad_to_16=True)``. It exists as a
+    separate entry point so H100 promotion is based on an explicit A/B rather
+    than silently changing the generic transform.
+    """
+
+    if x.device.type != "cuda" or pre_scale.device != x.device:
+        raise ValueError("multiblock QVQ input Hadamard tensors must share one CUDA device")
+    if x.dtype != torch.float16 or pre_scale.dtype != torch.float16:
+        raise TypeError("multiblock QVQ input Hadamard tensors must be float16")
+    if x.dim() != 2 or not 0 < x.shape[0] <= 16 or x.shape[1] != 2048:
+        raise ValueError("multiblock QVQ input Hadamard requires an Mx2048 input with M in [1, 16]")
+    if not x.is_contiguous() or not pre_scale.is_contiguous():
+        raise ValueError("multiblock QVQ input Hadamard tensors must be contiguous")
+    if pre_scale.numel() != 2048:
+        raise ValueError("multiblock QVQ input Hadamard pre_scale must contain 2048 values")
+    if torch.cuda.get_device_capability(x.device) < (9, 0):
+        raise RuntimeError("multiblock QVQ input Hadamard requires Hopper")
+    return _qvq_cuda_hadamard_input_multiblock_op()(x, pre_scale)
 
 
 def qvq_cuda_hadamard_pair_fp32_to_fp16(

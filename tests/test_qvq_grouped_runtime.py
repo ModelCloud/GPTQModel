@@ -697,6 +697,10 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     assert all(entry["grouped_launches"] >= 4 for entry in telemetry)
     assert all(entry["plain_fallbacks"] == 0 for entry in telemetry)
     assert all(entry["h100_direct_padded_input_launches"] >= 4 for entry in telemetry)
+    assert all(
+        entry["h100_multiblock_input_hadamard_launches"] >= 4
+        for entry in telemetry
+    )
     assert all(entry["h100_fp16_recovery_store_launches"] >= 4 for entry in telemetry)
     gate_up_telemetry = next(
         entry for entry in telemetry if entry["category"] == "gate_up"
