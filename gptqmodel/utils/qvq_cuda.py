@@ -73,6 +73,7 @@ _QVQ_CUDA_HADAMARD_PAIR_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP: Callable | None = None
+_QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_OP: Callable | None = None
@@ -121,6 +122,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "hadamard_input_fp16_padded_multiblock",
         "hadamard_ordered_split16_fp32_to_fp16",
         "hadamard_pair_fp32_to_fp16_multiblock",
+        "hadamard_pair_swiglu_precondition_multiblock",
         "swiglu_precondition",
         "swiglu_precondition_multiblock",
         "yaqa_feedback",
@@ -302,6 +304,21 @@ def _qvq_cuda_hadamard_pair_multiblock_op() -> Callable:
                     "qvq_cuda", "hadamard_pair_fp32_to_fp16_multiblock"
                 )
     return _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP
+
+
+def _qvq_cuda_hadamard_pair_swiglu_precondition_multiblock_op() -> Callable:
+    """Resolve the fused Hopper recovery-to-precondition experiment."""
+
+    global _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP
+    if _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP is None:
+                _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP = (
+                    _extension_api().op(
+                        "qvq_cuda", "hadamard_pair_swiglu_precondition_multiblock"
+                    )
+                )
+    return _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP
 
 
 def _qvq_cuda_swiglu_precondition_op() -> Callable:
@@ -1020,6 +1037,78 @@ def qvq_cuda_swiglu_precondition(
     if torch.cuda.get_device_capability(activated_gate.device) < (8, 0):
         raise RuntimeError("QVQ SwiGLU precondition requires compute capability >= 8.0")
     return _qvq_cuda_swiglu_precondition_op()(activated_gate, up, pre_scale)
+
+
+def qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+    input0: torch.Tensor,
+    input1: torch.Tensor,
+    *,
+    post_scale0: torch.Tensor,
+    post_scale1: torch.Tensor,
+    pre_scale: torch.Tensor,
+    bias0: torch.Tensor | None = None,
+    bias1: torch.Tensor | None = None,
+    scale_mode: int = 3,
+    pad_to_16: bool = False,
+) -> torch.Tensor:
+    """Fuse exact paired recovery into exact SiLU/down preconditioning."""
+
+    if input0.device.type != "cuda" or input1.device.type != "cuda":
+        raise ValueError("fused QVQ recovery inputs must be CUDA tensors")
+    if input0.device != input1.device or input0.device != pre_scale.device:
+        raise ValueError("fused QVQ recovery/precondition tensors must share a device")
+    if input0.dtype != torch.float32 or input1.dtype != torch.float32:
+        raise TypeError("fused QVQ recovery inputs must be float32")
+    if pre_scale.dtype != torch.float16:
+        raise TypeError("fused QVQ recovery pre_scale must be float16")
+    if (
+        input0.ndim != 2
+        or input0.shape != input1.shape
+        or input0.shape[-1] != 8192
+        or not input0.is_contiguous()
+        or not input1.is_contiguous()
+        or not pre_scale.is_contiguous()
+        or pre_scale.numel() != 8192
+    ):
+        raise ValueError("fused QVQ recovery/precondition requires contiguous 2D N=8192 tensors")
+    if not 0 < input0.shape[0] <= 16:
+        raise ValueError("fused QVQ recovery/precondition requires one through sixteen rows")
+    if scale_mode not in (3, 4):
+        raise ValueError("fused QVQ recovery scale_mode must be 3 or 4")
+    if not isinstance(pad_to_16, bool):
+        raise TypeError("fused QVQ recovery pad_to_16 must be a bool")
+    for name, tensor in (
+        ("post_scale0", post_scale0),
+        ("post_scale1", post_scale1),
+        ("bias0", bias0),
+        ("bias1", bias1),
+    ):
+        if tensor is None:
+            if name.startswith("post_scale"):
+                raise TypeError(f"{name} is required")
+            continue
+        if (
+            tensor.device != input0.device
+            or tensor.dtype != torch.float32
+            or not tensor.is_contiguous()
+            or tensor.numel() != 8192
+        ):
+            raise ValueError(
+                f"{name} must be contiguous CUDA float32[8192] on the input device"
+            )
+    if torch.cuda.get_device_capability(input0.device)[0] != 9:
+        raise RuntimeError("fused QVQ recovery/precondition requires Hopper")
+    return _qvq_cuda_hadamard_pair_swiglu_precondition_multiblock_op()(
+        input0,
+        input1,
+        post_scale0,
+        post_scale1,
+        bias0,
+        bias1,
+        pre_scale,
+        scale_mode,
+        pad_to_16,
+    )
 
 
 def qvq_cuda_swiglu_precondition_multiblock(

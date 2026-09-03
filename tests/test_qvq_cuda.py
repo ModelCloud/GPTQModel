@@ -72,6 +72,7 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_hadamard_ordered_split16_fp32_to_fp16,
     qvq_cuda_hadamard_pair_fp32_to_fp16,
     qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock,
+    qvq_cuda_hadamard_pair_swiglu_precondition_multiblock,
     qvq_cuda_supported,
     qvq_cuda_swiglu_precondition,
     qvq_cuda_swiglu_precondition_multiblock,
@@ -1181,6 +1182,71 @@ def test_qvq_cuda_multiblock_fused_silu_covers_every_finite_fp16_value():
         half2_low=True,
     )
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.parametrize("m", (1, 8, 16))
+@pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("pad_to_16", (False, True))
+def test_qvq_cuda_fused_recovery_to_precondition_is_bit_exact_and_graph_stable(
+    m, scale_mode, pad_to_16
+):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("fused recovery/precondition requires Hopper")
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(20262000 + m)
+    input0 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    input1 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    scale0 = torch.randn((n,), generator=generator, device="cuda")
+    scale1 = torch.randn((n,), generator=generator, device="cuda")
+    bias0 = torch.randn((n,), generator=generator, device="cuda")
+    pre_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    gate, up = qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        bias0=bias0,
+        scale_mode=scale_mode,
+        warp_low=True,
+    )
+    expected = qvq_cuda_swiglu_precondition_multiblock(
+        gate,
+        up,
+        pre_scale,
+        half2_high=True,
+        fuse_silu=True,
+        half2_low=True,
+        pad_to_16=pad_to_16,
+    )
+    actual = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        bias0=bias0,
+        pre_scale=pre_scale,
+        scale_mode=scale_mode,
+        pad_to_16=pad_to_16,
+    )
+    assert torch.equal(actual, expected)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+            input0,
+            input1,
+            post_scale0=scale0,
+            post_scale1=scale1,
+            bias0=bias0,
+            pre_scale=pre_scale,
+            scale_mode=scale_mode,
+            pad_to_16=pad_to_16,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured, expected)
 
 
 def test_qvq_cuda_swiglu_precondition_graph_stream_overflow_and_guards():

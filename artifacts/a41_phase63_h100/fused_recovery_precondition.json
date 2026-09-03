@@ -1,0 +1,155 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "3ab56bf7c744b6f65020f30aa97e464e0c54e658",
+  "rows": [
+    {
+      "better_than_control": true,
+      "bit_exact": true,
+      "candidate": {
+        "max_ms": 0.007633280158042908,
+        "mean_ms": 0.0075668736060460415,
+        "median_ms": 0.007566720247268677,
+        "min_ms": 0.00754688024520874,
+        "p95_ms": 0.007580159902572632
+      },
+      "candidate_launches": 3,
+      "control": {
+        "max_ms": 0.009856640100479127,
+        "mean_ms": 0.00983415680329005,
+        "median_ms": 0.009834240078926087,
+        "min_ms": 0.00981440007686615,
+        "p95_ms": 0.009845759868621826
+      },
+      "control_launches": 4,
+      "m": 1,
+      "matrix_shape": [
+        1,
+        2048,
+        8192
+      ],
+      "speedup_vs_control": 1.2996701024431168
+    },
+    {
+      "better_than_control": true,
+      "bit_exact": true,
+      "candidate": {
+        "max_ms": 0.00771776020526886,
+        "mean_ms": 0.00761472426255544,
+        "median_ms": 0.007614079713821411,
+        "min_ms": 0.007601919770240784,
+        "p95_ms": 0.007624959945678711
+      },
+      "candidate_launches": 3,
+      "control": {
+        "max_ms": 0.009970560073852539,
+        "mean_ms": 0.009886894951264063,
+        "median_ms": 0.009886720180511475,
+        "min_ms": 0.009859840273857117,
+        "p95_ms": 0.009901440143585205
+      },
+      "control_launches": 4,
+      "m": 2,
+      "matrix_shape": [
+        2,
+        2048,
+        8192
+      ],
+      "speedup_vs_control": 1.2984786805639383
+    },
+    {
+      "better_than_control": true,
+      "bit_exact": true,
+      "candidate": {
+        "max_ms": 0.007906559705734253,
+        "mean_ms": 0.007835735466082891,
+        "median_ms": 0.007836160063743592,
+        "min_ms": 0.007805439829826355,
+        "p95_ms": 0.007852799892425537
+      },
+      "candidate_launches": 3,
+      "control": {
+        "max_ms": 0.010334080457687378,
+        "mean_ms": 0.01029359358549118,
+        "median_ms": 0.010293440222740174,
+        "min_ms": 0.010271999835968017,
+        "p95_ms": 0.010309760570526122
+      },
+      "control_launches": 4,
+      "m": 4,
+      "matrix_shape": [
+        4,
+        2048,
+        8192
+      ],
+      "speedup_vs_control": 1.313582180431197
+    },
+    {
+      "better_than_control": true,
+      "bit_exact": true,
+      "candidate": {
+        "max_ms": 0.008649600148200988,
+        "mean_ms": 0.008605973360935847,
+        "median_ms": 0.008602240085601807,
+        "min_ms": 0.008563200235366821,
+        "p95_ms": 0.0086380797624588
+      },
+      "candidate_launches": 3,
+      "control": {
+        "max_ms": 0.010721919536590576,
+        "mean_ms": 0.010653235157330831,
+        "median_ms": 0.010652799606323243,
+        "min_ms": 0.010644479990005493,
+        "p95_ms": 0.010657279491424561
+      },
+      "control_launches": 4,
+      "m": 8,
+      "matrix_shape": [
+        8,
+        2048,
+        8192
+      ],
+      "speedup_vs_control": 1.2383750628110932
+    },
+    {
+      "better_than_control": true,
+      "bit_exact": true,
+      "candidate": {
+        "max_ms": 0.010600320100784301,
+        "mean_ms": 0.010557917896906535,
+        "median_ms": 0.010553279519081115,
+        "min_ms": 0.01051967978477478,
+        "p95_ms": 0.010590720176696777
+      },
+      "candidate_launches": 3,
+      "control": {
+        "max_ms": 0.011655679941177367,
+        "mean_ms": 0.011606547232468923,
+        "median_ms": 0.011608639955520628,
+        "min_ms": 0.011570559740066528,
+        "p95_ms": 0.011619839668273926
+      },
+      "control_launches": 4,
+      "m": 16,
+      "matrix_shape": [
+        16,
+        2048,
+        8192
+      ],
+      "speedup_vs_control": 1.1000030781456458
+    }
+  ],
+  "source_fingerprint": "fd3deac19d3d751af5094a19940f7ffbe7875231158d8ac9a564078a7e3db457",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 300,
+    "warmup": 30
+  }
+}

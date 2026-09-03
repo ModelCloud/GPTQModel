@@ -1,9 +1,9 @@
 # A41/R0 H100 implementation and optimization audit
 
 This audit closes the planned A41/R0 implementation sequence and the measured
-H100 optimization sequence through Phase 62. The accepted production source
-remains Phase 56. Phases 57 through 61 were exact experiments that did not meet
-the promotion gate; all candidate CUDA source was removed.
+H100 optimization sequence through Phase 63. The accepted production source
+is Phase 63. Phases 57 through 62 were exact experiments that did not meet the
+promotion gate; all candidate CUDA source from those phases was removed.
 
 ## Planned implementation phases
 
@@ -23,11 +23,13 @@ and bias.
 
 ## H100 production endpoint
 
-Phases 6 through 56 progressively addressed split-K occupancy, grouped QKV
+Phases 6 through 63 progressively addressed split-K occupancy, grouped QKV
 scheduling, exact multiblock transforms, packed FP16 transform arithmetic,
 launch/materialization boundaries, decoder scheduling, and the W2.5 N128
-dual-consumer path. The final accepted specialization uses three live decode
-fragments for the H100 W2.5 N128 gate/up kernel.
+dual-consumer path. The accepted decoder specialization uses three live decode
+fragments for the H100 W2.5 N128 gate/up kernel. Phase 63 additionally fuses
+paired recovery-high with exact SiLU/down preconditioning, removing one launch
+and both recovered gate/up tensors.
 
 The formal complete Llama 3.2 1B MLP benchmark covers
 
@@ -37,12 +39,13 @@ M\in\{1,2,4,8,16\},\qquad
 (K,N)_{down}=(8192,2048).
 \]
 
-Across W2, W2.5, W3, and W3.5, Phase 56 measures **45.955--50.118 us**.
-The all-rate geometric comparison is **1.0510x versus Machete W4** and
-**0.6411x versus Marlin W4**. Relative to the roughly 96 us Phase-5 endpoint,
-the accepted H100 path is approximately **2.12x faster**, or **52.7% lower
-latency**. The complete 20-cell M/K/N table and exact timing protocol are in
-[`qvq_a41_r0_phase56_h100_w25_n128_depth3.md`](qvq_a41_r0_phase56_h100_w25_n128_depth3.md).
+Across W2, W2.5, W3, and W3.5, Phase 63 measures **44.290--49.556 us**.
+The all-rate geometric comparison is **1.0750x versus Machete W4** and
+**0.6601x versus Marlin W4**. Phase 63 is **1.0310x** faster than Phase 56
+with 20/20 cell wins. Relative to the roughly 96 us Phase-5 endpoint, the
+accepted H100 path is approximately **2.18x faster**, or roughly **54% lower
+latency**. The complete table and exact timing protocol are in
+[`qvq_a41_r0_phase63_h100_fused_recovery_precondition.md`](qvq_a41_r0_phase63_h100_fused_recovery_precondition.md).
 
 These are latency ratios, not equal-bit-rate comparisons: Marlin and Machete
 run W4 and are figurative kernel baselines for the W2--W3.5 QVQ paths.
@@ -68,16 +71,19 @@ project rather than an unfinished A41/R0 phase.
 
 ## Correctness and profiling closure
 
-The final production source passed the H100-only completion suite:
+Phase 56 passed the H100-only completion suite:
 
 ```text
 1554 passed, 75 skipped in 503.03 s
 ```
 
-The suite includes the Torch oracle, Ampere grouping, grouped runtime,
-transform runtime, and CUDA lifecycle/math coverage. The grouped Hopper suite
-also passed all 69 cases. Skips are explicit unsupported/multi-device or
-environment-dependent cases; only the physical H100 was exposed to CUDA.
+That suite includes the Torch oracle, Ampere grouping, grouped runtime,
+transform runtime, and CUDA lifecycle/math coverage. Phase 63 additionally
+passes 12 focused fused-operator exactness/graph cases and the real Llama 3.2
+layer/logits/cache lifecycle test. Its formal 20-cell benchmark also checks
+exact equality with the unchanged plain QVQ result. Skips are explicit
+unsupported/multi-device or environment-dependent cases; only the physical
+H100 was exposed to CUDA.
 
 Performance timing used warmed CUDA Graph replay measured by CUDA events after
 three spaced 0% utilization / 0 MiB admission samples. Instruction and stall

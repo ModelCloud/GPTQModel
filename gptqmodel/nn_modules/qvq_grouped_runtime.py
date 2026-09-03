@@ -195,6 +195,7 @@ class QVQGroupedRuntimeTelemetry:
     paired_recovery_launches: int = 0
     h100_multiblock_recovery_launches: int = 0
     h100_warp_recovery_low_launches: int = 0
+    h100_fused_recovery_precondition_launches: int = 0
     h100_multiblock_precondition_launches: int = 0
     h100_half2_precondition_high_launches: int = 0
     h100_fused_silu_precondition_low_launches: int = 0
@@ -229,6 +230,9 @@ class QVQGroupedRuntimeTelemetry:
             "paired_recovery_launches": self.paired_recovery_launches,
             "h100_multiblock_recovery_launches": self.h100_multiblock_recovery_launches,
             "h100_warp_recovery_low_launches": self.h100_warp_recovery_low_launches,
+            "h100_fused_recovery_precondition_launches": (
+                self.h100_fused_recovery_precondition_launches
+            ),
             "h100_multiblock_precondition_launches": self.h100_multiblock_precondition_launches,
             "h100_half2_precondition_high_launches": self.h100_half2_precondition_high_launches,
             "h100_fused_silu_precondition_low_launches": self.h100_fused_silu_precondition_low_launches,
@@ -503,7 +507,9 @@ class QVQHopperGroupedRuntime:
         self._payload_source_key = source_key
         return payload
 
-    def _execute(self, x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def _execute(
+        self, x: torch.Tensor, *, recover: bool = True
+    ) -> tuple[torch.Tensor, ...]:
         children = self._children()
         rows = x.numel() // children[0].in_features
         x_2d = x.reshape(rows, children[0].in_features).to(torch.float16)
@@ -553,6 +559,8 @@ class QVQHopperGroupedRuntime:
             self.telemetry.ordered_split_launches += 1
         if self._h100_w25_n128_gate_up_enabled:
             self.telemetry.h100_w25_n128_gate_up_launches += 1
+        if not recover:
+            return tuple(inner[:rows] for inner in inner_outputs)
 
         # Gate and up have equal-width, independent output transforms.  One
         # grid schedules both row sets concurrently, applies each child's own
@@ -664,20 +672,9 @@ class QVQHopperGroupedRuntime:
 
     def _execute_mlp(self, x: torch.Tensor) -> torch.Tensor:
         down = self._mlp_down_ref()
-        gate, up = self._execute(x)
-        if (
-            not isinstance(gate, torch.Tensor)
-            or gate.shape != up.shape
-            or gate.dtype != torch.float16
-            or not gate.is_contiguous()
-            or not up.is_contiguous()
-        ):
-            raise _R0Fallback(
-                "fused MLP recovery must return contiguous FP16 gate/up geometry"
-            )
-
         from ..utils.qvq_cuda import (
             qvq_cuda_hadamard_ordered_split16_fp32_to_fp16,
+            qvq_cuda_hadamard_pair_swiglu_precondition_multiblock,
             qvq_cuda_swiglu_precondition,
             qvq_cuda_swiglu_precondition_multiblock,
         )
@@ -688,15 +685,31 @@ class QVQHopperGroupedRuntime:
             and self._mlp_activation_is_exact_silu
         ):
             direct_pad = rows < 16
-            transformed = qvq_cuda_swiglu_precondition_multiblock(
-                gate.reshape(rows, down.in_features),
-                up.reshape(rows, down.in_features),
-                down._cached_cast("SU", torch.float16),
-                half2_high=True,
-                fuse_silu=True,
-                half2_low=True,
+            children = self._children()
+            inner_gate, inner_up = self._execute(x, recover=False)
+            transformed = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+                inner_gate,
+                inner_up,
+                post_scale0=children[0]._cached_cast(
+                    "SV", torch.float16, torch.float32
+                ),
+                post_scale1=children[1]._cached_cast(
+                    "SV", torch.float16, torch.float32
+                ),
+                bias0=children[0]._cached_cast(
+                    "bias", torch.float16, torch.float32
+                ),
+                bias1=children[1]._cached_cast(
+                    "bias", torch.float16, torch.float32
+                ),
+                pre_scale=down._cached_cast("SU", torch.float16),
+                scale_mode=3,
                 pad_to_16=direct_pad,
             )
+            self.telemetry.paired_recovery_launches += 1
+            self.telemetry.h100_multiblock_recovery_launches += 1
+            self.telemetry.h100_warp_recovery_low_launches += 1
+            self.telemetry.h100_fused_recovery_precondition_launches += 1
             self.telemetry.h100_multiblock_precondition_launches += 1
             self.telemetry.h100_half2_precondition_high_launches += 1
             self.telemetry.h100_fused_silu_precondition_low_launches += 1
@@ -704,6 +717,17 @@ class QVQHopperGroupedRuntime:
             if direct_pad:
                 self.telemetry.h100_direct_padded_precondition_launches += 1
         else:
+            gate, up = self._execute(x)
+            if (
+                not isinstance(gate, torch.Tensor)
+                or gate.shape != up.shape
+                or gate.dtype != torch.float16
+                or not gate.is_contiguous()
+                or not up.is_contiguous()
+            ):
+                raise _R0Fallback(
+                    "fused MLP recovery must return contiguous FP16 gate/up geometry"
+                )
             activated_gate = self._mlp_act_fn(gate)
             if (
                 not isinstance(activated_gate, torch.Tensor)
