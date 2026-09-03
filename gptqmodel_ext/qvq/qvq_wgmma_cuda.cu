@@ -402,11 +402,12 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   // State/window extraction and the PGC mapping do not touch the fragment
   // selected for this K block. Defer the reuse wait until immediately before
   // the first level load overwrites that fragment, overlapping independent
-  // decoder work with prior WGMMAs. W2.5/W3 have three fragments and may
-  // retain two committed groups; W2/W3.5 have two and may retain one.
+  // decoder work with prior WGMMAs. W2.5/W3 use the measured depth-four
+  // schedule and may retain three committed groups before fragment reuse;
+  // W2/W3.5 retain their promoted depth-two schedule.
   if (wait_before_fragment_reuse) {
     if constexpr (TransitionBits == 5 || TransitionBits == kW3TransitionBits) {
-      cute::warpgroup_wait<2>();
+      cute::warpgroup_wait<3>();
     } else {
       cute::warpgroup_wait<1>();
     }
@@ -820,6 +821,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   auto fragment_a0 = cute::make_tensor<Element>(thread_coordinate_a.shape());
   auto fragment_a1 = cute::make_tensor<Element>(thread_coordinate_a.shape());
   auto fragment_a2 = cute::make_tensor<Element>(thread_coordinate_a.shape());
+  auto fragment_a3 = cute::make_tensor<Element>(thread_coordinate_a.shape());
   static_assert(cute::size(decltype(fragment_a0){}) == 8);
 
   auto coordinate_c = cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_16{}));
@@ -845,14 +847,14 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
 
 #pragma unroll
     for (int k_block = 0; k_block < kP32K16TilesPerStage; ++k_block) {
-      // W2.5 and W3 benefit from a third independent register-sourced
-      // fragment while the lane-pair table's second shared-load wavefront is
-      // serviced. W2 and W3.5 retain their measured depth-two schedule.
+      // W2.5/W3 use the measured depth-four schedule now that the fragment
+      // reuse wait occurs at the first overwrite. W2/W3.5 retain depth two.
       constexpr int kDecodeDepth =
-          TransitionBits == 5 || TransitionBits == kW3TransitionBits ? 3 : 2;
+          TransitionBits == 5 || TransitionBits == kW3TransitionBits ? 4 : 2;
       auto& fragment_a = (k_block % kDecodeDepth) == 0 ? fragment_a0
           : (k_block % kDecodeDepth) == 1 ? fragment_a1
-                                         : fragment_a2;
+          : (k_block % kDecodeDepth) == 2 ? fragment_a2
+                                         : fragment_a3;
       const uint32_t bank_id = s_bank_ids(bank_n16_offset + warp, k_block, read_stage);
       const auto trellis_layout = TrellisSmemLayout{};
       const uint32_t* window_words = shared.trellis.begin() +
