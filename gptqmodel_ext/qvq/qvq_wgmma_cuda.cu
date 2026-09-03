@@ -360,60 +360,16 @@ __device__ __forceinline__ void qvq_p32_window_state_pair_planned(
 }
 
 template <int TransitionBits, bool LevelsInShared, class FragmentA>
-__device__ __forceinline__ void qvq_p32_window_decode_fragment(
+__device__ __forceinline__ void qvq_p32_window_load_fragment_levels(
     FragmentA& fragment,
-    const uint32_t* __restrict__ window_words,
-    const QvqP32WindowLanePlan& plan,
-    uint8_t bank_id,
     const Element* __restrict__ levels,
     uint32_t levels_shared_base,
     uint32_t levels_high_shared_base,
-    uint32_t alternate_bank_mask,
-    bool wait_before_fragment_reuse = false) {
-  uint32_t state00;
-  uint32_t state01;
-  uint32_t state10;
-  uint32_t state11;
-  uint32_t bank_pair_bits;
-  if constexpr (TransitionBits >= 5) {
-    bank_pair_bits = static_cast<uint32_t>(bank_id) >> plan.bank_shift;
-    qvq_p32_window_state_pair_planned<TransitionBits>(
-        window_words, plan.first_word0, plan.first_next_word0, plan.shift0, state00, state10);
-    qvq_p32_window_state_pair_planned<TransitionBits>(
-        window_words, plan.first_word1, plan.first_next_word1, plan.shift1, state01, state11);
-  } else {
-    const int lane = static_cast<int>(threadIdx.x) & 31;
-    const int n_pair = lane >> 2;
-    const int k_pair0 = lane & 3;
-    const int pair00 = k_pair0 * 16 + n_pair;
-    const int pair01 = pair00 + 8;
-    bank_pair_bits = static_cast<uint32_t>(bank_id) >> k_pair0;
-    qvq_p32_window_state_pair<TransitionBits>(window_words, pair00, state00, state10);
-    qvq_p32_window_state_pair<TransitionBits>(window_words, pair01, state01, state11);
-  }
-  const uint32_t alternate_mix_mask = alternate_bank_mask & 0xff00u;
-  const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_mix_mask;
-  const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_mix_mask;
-  uint32_t product00 = qvq_wgmma_pgc16_product_masked(state00, bank_mask0);
-  uint32_t product01 = qvq_wgmma_pgc16_product_masked(state01, bank_mask0);
-  uint32_t product10 = qvq_wgmma_pgc16_product_masked(state10, bank_mask1);
-  uint32_t product11 = qvq_wgmma_pgc16_product_masked(state11, bank_mask1);
-
-  // State/window extraction and the PGC mapping do not touch the fragment
-  // selected for this K block. Defer the reuse wait until immediately before
-  // the first level load overwrites that fragment, overlapping independent
-  // decoder work with prior WGMMAs. W2.5/W3 use the measured depth-four
-  // schedule and may retain three committed groups before fragment reuse;
-  // W2/W3.5 retain their promoted depth-two schedule.
-  if (wait_before_fragment_reuse) {
-    if constexpr (TransitionBits == 5 || TransitionBits == kW3TransitionBits) {
-      cute::warpgroup_wait<3>();
-    } else {
-      cute::warpgroup_wait<1>();
-    }
-  }
-
-  // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
+    uint32_t product00,
+    uint32_t product01,
+    uint32_t product10,
+    uint32_t product11) {
+  // CuTe maps each lane to two A rows and two K pairs. Map those two rows to
   // adjacent P32 N values so each decoded state feeds both output columns.
   if constexpr (LevelsInShared) {
     if constexpr (TransitionBits >= 4) {
@@ -459,14 +415,93 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     const uint32_t mixed01 = qvq_wgmma_pgc16_finish(product01);
     const uint32_t mixed10 = qvq_wgmma_pgc16_finish(product10);
     const uint32_t mixed11 = qvq_wgmma_pgc16_finish(product11);
-    fragment(0) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, qvq_wgmma_high_byte(mixed00));
-    fragment(1) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, qvq_wgmma_high_byte(mixed01));
+    fragment(0) = qvq_wgmma_decode_level<TransitionBits, false>(
+        levels, 0, qvq_wgmma_high_byte(mixed00));
+    fragment(1) = qvq_wgmma_decode_level<TransitionBits, false>(
+        levels, 0, qvq_wgmma_high_byte(mixed01));
     fragment(2) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, mixed00 & 0xffu);
     fragment(3) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, mixed01 & 0xffu);
-    fragment(4) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, qvq_wgmma_high_byte(mixed10));
-    fragment(5) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, qvq_wgmma_high_byte(mixed11));
+    fragment(4) = qvq_wgmma_decode_level<TransitionBits, false>(
+        levels, 0, qvq_wgmma_high_byte(mixed10));
+    fragment(5) = qvq_wgmma_decode_level<TransitionBits, false>(
+        levels, 0, qvq_wgmma_high_byte(mixed11));
     fragment(6) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, mixed10 & 0xffu);
     fragment(7) = qvq_wgmma_decode_level<TransitionBits, false>(levels, 0, mixed11 & 0xffu);
+  }
+}
+
+template <int TransitionBits, bool LevelsInShared, class FragmentA>
+__device__ __forceinline__ void qvq_p32_window_decode_fragment(
+    FragmentA& fragment,
+    const uint32_t* __restrict__ window_words,
+    const QvqP32WindowLanePlan& plan,
+    uint8_t bank_id,
+    const Element* __restrict__ levels,
+    uint32_t levels_shared_base,
+    uint32_t levels_high_shared_base,
+    uint32_t alternate_bank_mask,
+    bool wait_before_fragment_reuse = false) {
+  uint32_t state00;
+  uint32_t state01;
+  uint32_t state10;
+  uint32_t state11;
+  uint32_t bank_pair_bits;
+  if constexpr (TransitionBits >= 5) {
+    bank_pair_bits = static_cast<uint32_t>(bank_id) >> plan.bank_shift;
+    qvq_p32_window_state_pair_planned<TransitionBits>(
+        window_words, plan.first_word0, plan.first_next_word0, plan.shift0, state00, state10);
+    qvq_p32_window_state_pair_planned<TransitionBits>(
+        window_words, plan.first_word1, plan.first_next_word1, plan.shift1, state01, state11);
+  } else {
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const int n_pair = lane >> 2;
+    const int k_pair0 = lane & 3;
+    const int pair00 = k_pair0 * 16 + n_pair;
+    const int pair01 = pair00 + 8;
+    bank_pair_bits = static_cast<uint32_t>(bank_id) >> k_pair0;
+    qvq_p32_window_state_pair<TransitionBits>(window_words, pair00, state00, state10);
+    qvq_p32_window_state_pair<TransitionBits>(window_words, pair01, state01, state11);
+  }
+  const uint32_t alternate_mix_mask = alternate_bank_mask & 0xff00u;
+  const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_mix_mask;
+  const uint32_t bank_mask1 = ((bank_pair_bits >> 4) & 1u) * alternate_mix_mask;
+  uint32_t product00 = qvq_wgmma_pgc16_product_masked(state00, bank_mask0);
+  uint32_t product01 = qvq_wgmma_pgc16_product_masked(state01, bank_mask0);
+  uint32_t product10 = qvq_wgmma_pgc16_product_masked(state10, bank_mask1);
+  uint32_t product11 = qvq_wgmma_pgc16_product_masked(state11, bank_mask1);
+
+  if constexpr (LevelsInShared &&
+                (TransitionBits == 5 || TransitionBits == kW3TransitionBits)) {
+    // Depth-four W2.5/W3 can profitably prefetch all eight levels into an
+    // independent register fragment while the old WGMMA source remains live.
+    auto decoded_fragment = cute::make_tensor<Element>(fragment.shape());
+    qvq_p32_window_load_fragment_levels<TransitionBits, LevelsInShared>(
+        decoded_fragment,
+        levels,
+        levels_shared_base,
+        levels_high_shared_base,
+        product00,
+        product01,
+        product10,
+        product11);
+    if (wait_before_fragment_reuse) {
+      cute::warpgroup_fence_operand(fragment);
+      cute::warpgroup_wait<3>();
+    }
+    cute::copy(decoded_fragment, fragment);
+  } else {
+    if (wait_before_fragment_reuse) {
+      cute::warpgroup_wait<1>();
+    }
+    qvq_p32_window_load_fragment_levels<TransitionBits, LevelsInShared>(
+        fragment,
+        levels,
+        levels_shared_base,
+        levels_high_shared_base,
+        product00,
+        product01,
+        product10,
+        product11);
   }
 }
 
