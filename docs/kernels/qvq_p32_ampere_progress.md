@@ -2983,6 +2983,12 @@ reducer at all four rates. Diagnostics are
 `v21_m1_fullq_warpreduce_candidate_5000.json` and
 `v21_m1_fullq_staticreduce_control_5000.json`.
 
+Skipping the final WMMA handoff barrier (safe-looking because no later stage
+overwrites the buffer) was also rejected: M16/W3.5 moved from the matched
+`0.090112` to `0.091136 ms`. The barrier remains unconditional for the
+independent-thread-scheduling handoff contract. Diagnostic:
+`v21_m16_fullq_finalbarrier_candidate_5000.json`.
+
 ## Reproduction
 
 ```bash
