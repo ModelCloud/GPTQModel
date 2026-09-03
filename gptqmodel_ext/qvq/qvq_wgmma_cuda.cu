@@ -75,6 +75,10 @@ struct HopperGroupedP32LaunchParams {
   int64_t partial_output_offset[kMaxGroupedP32Segments];
 };
 
+struct HopperFixedGateUpLaunchParams {
+  int bank_alt_id[2];
+};
+
 using WgmmaTmaSmemLayoutB = decltype(cute::tile_to_shape(
     WgmmaSmemLayoutAtomB{},
     cute::make_shape(cute::_16{}, cute::_256{}, cute::Int<kTmaStages>{})));
@@ -577,14 +581,15 @@ template <
     bool FixedGateUp = false,
     class InputTma,
     class TrellisTma,
-    class BankTma>
+    class BankTma,
+    class GroupedParams>
 __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kernel(
     CUTE_GRID_CONSTANT InputTma const input_tma,
     CUTE_GRID_CONSTANT TrellisTma const trellis_tma,
     CUTE_GRID_CONSTANT BankTma const bank_tma,
     const Element* __restrict__ levels,
     float* __restrict__ partial_output,
-    HopperGroupedP32LaunchParams grouped_params,
+    GroupedParams grouped_params,
     int size_k,
     int launch_size_n,
     int launch_split_count,
@@ -1475,6 +1480,8 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       split_counts[0] == 1 && split_counts[1] == 1 &&
       TransitionBits == 4;
   if (use_fixed_gate_up) {
+    const HopperFixedGateUpLaunchParams fixed_params{
+        {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
     qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, true, false, true>
         <<<grid, kTmaThreads, 0, stream>>>(
             input_tma,
@@ -1482,7 +1489,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
             bank_tma,
             reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
             partial_output.data_ptr<float>(),
-            grouped_params,
+            fixed_params,
             kFixedGateUpK,
             2 * kFixedGateUpN,
             1,
