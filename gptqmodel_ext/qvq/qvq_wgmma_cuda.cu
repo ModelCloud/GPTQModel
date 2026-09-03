@@ -291,9 +291,10 @@ __device__ __forceinline__ void qvq_p32_window_state_pair(
   second = static_cast<uint32_t>(second_window >> shift);
 }
 
-// W3 and W3.5 cross enough word boundaries for the lane geometry arithmetic
-// to remain visible in the hot loop.  Hoist the two word pairs and shifts once
-// per lane; lower rates retain the compact generic path that ptxas optimizes.
+// W2.5, W3, and W3.5 cross enough word boundaries for the lane geometry
+// arithmetic to remain visible in the hot loop. Hoist the two word pairs and
+// shifts once per lane; W2 retains the compact generic path that ptxas
+// optimizes.
 struct QvqP32WindowLanePlan {
   int first_word0;
   int first_next_word0;
@@ -358,7 +359,7 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   uint32_t state10;
   uint32_t state11;
   uint32_t bank_pair_bits;
-  if constexpr (TransitionBits == 7 || TransitionBits == kW3TransitionBits) {
+  if constexpr (TransitionBits >= 5) {
     bank_pair_bits = static_cast<uint32_t>(bank_id) >> plan.bank_shift;
     qvq_p32_window_state_pair_planned<TransitionBits>(
         window_words, plan.first_word0, plan.first_next_word0, plan.shift0, state00, state10);
