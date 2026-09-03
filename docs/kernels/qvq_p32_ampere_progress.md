@@ -2653,6 +2653,14 @@ about 3.1% lower than the prior stage-3 plan (about 8.2% lower than fetched
 main for this route), with maximum absolute error `3.62e-05`. Artifact:
 `v20_m16_linearz_stage3_pairwrap_stridefix_split10_verify8000.json`.
 
+The twenty-sixth accepted v20 progression hoists the bank-selector masks for
+all fixed-N M16 linear-QKV rates (the earlier stage-3 pair-wrap path hoisted
+W3 only). Split 10 remains exact; 8,000-iteration medians are
+`0.082944/0.082944/0.082944/0.083968 ms`, improving W2 and W3.5 and tying the
+other two rates versus the prior QKV plan. Maximum absolute error is
+`4.20e-05`. Artifact:
+`v20_m16_qkv_stage3_pairwrap_hoistall_split10_verify8000.json`.
+
 A fixed-N M16 full-KV pair-wrap probe was rejected. Although the stage-2
 kernel remained exact, the 8,000-iteration split-32 confirmation regressed
 W2.5/W3 to `0.034816 ms` and did not beat the matched control consistently;
