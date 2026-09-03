@@ -65,6 +65,7 @@ run W4 and are figurative kernel baselines for the W2--W3.5 QVQ paths.
 | 61 | minimally padded 17-word shared level rows | Rejected; complete W2.5 MLP roughly 10% slower |
 | 62 | paired-recovery high-stage CTA widths 32/128/256 | Rejected; clean complete-MLP confirmation found no winner |
 | 65 | adjacent-column `float2` recovery and packed-FP16 low transform | Rejected; 2.7--5.8% slower and 72 registers/thread |
+| 66 | four-output recovery-tree sharing at an M16 128-block grid | Rejected; 12.3--20.5% slower despite zero spills |
 
 The post-Phase-56 experiments show that the remaining shared-load conflicts
 cannot be attacked profitably by adding a level-index-dependent consumer
