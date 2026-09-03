@@ -2706,6 +2706,13 @@ medians were `0.096256/0.097280/0.097280/0.099328 ms` versus control
 `0.096256/0.096256/0.097280/0.099328 ms`. The mixed hoist policy was restored;
 diagnostics are `v20_m16_fullq_hoist_{candidate,control}.json`.
 
+A 32-output-per-warp split reducer was rejected for M16 full-KV split 32. The
+one-lane-per-output geometry is exact, but its 4,000-iteration medians were
+`0.035840/0.034816/0.034816/0.035840 ms` versus the retained 16-output
+reducer's `0.032768/0.033792/0.034816/0.034816 ms`; it loses W2, W2.5, and
+W3.5. The 16-output reducer remains dispatched. Diagnostics are
+`v20_m16_fullkv_reduce32_{candidate,control}.json`.
+
 ## Reproduction
 
 ```bash
