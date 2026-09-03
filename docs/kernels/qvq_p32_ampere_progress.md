@@ -2478,6 +2478,12 @@ with a 16-byte async copy regressed from the approximately `0.040960 ms`
 baseline to `0.045056 ms`; the source was restored. Diagnostic:
 `v20_m1_attention_bankca16_candidate.json`.
 
+A shape-specific static `reduce_split_kernel<5>` dispatch for M16 full-Q was
+also rejected. Its all-rate 4,000-iteration medians were identical to the
+existing runtime-loop reducer (`0.095232/0.100352/0.099328/0.102400 ms`), so
+the extra specialization was removed; diagnostic:
+`v20_m16_fullq_static_reduce5_candidate.json`.
+
 A follow-up W3/W3.5 pair-wrap probe on M16 linear-QKV `(K,N)=(5120,10240)`
 was rejected. The exact candidate measured `0.092160/0.093184 ms` for W3/W3.5
 in the 4,000-iteration screen, versus fetched-main medians near
