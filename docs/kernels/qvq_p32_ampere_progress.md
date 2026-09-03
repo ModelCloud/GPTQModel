@@ -2638,6 +2638,14 @@ iteration median is `0.129024 ms` (exact maximum absolute error
 `0.130048 ms`; W2/W2.5/W3 retain the prior copy path. Artifact:
 `v20_m16_down_stage3_ca8_w35_split24_verify8000.json`.
 
+The twenty-fourth accepted v20 progression adds the already validated
+pair-wrap predicate to fixed-N M16 linear-QKV stage 3. Split 10 remains the
+plan: W2 is unchanged, while the 8,000-iteration W2.5/W3/W3.5 medians improve
+to `0.082944/0.082944/0.084992 ms`; the full four-rate geomean is about 2.4%
+lower than the prior stage-3 plan (about 8.1% lower than fetched main for this
+route), with maximum absolute error `4.20e-05`. Artifact:
+`v20_m16_qkv_stage3_pairwrap_stridefix_split10_verify8000.json`.
+
 An earlier M8 full-KV small-N stage-3 probe was invalid because the non-wide
 WMMA load still used the two-tile shared-memory stride; it consequently failed
 random-bank correctness on W2 (`max_abs=37.29`) before timing. After the
