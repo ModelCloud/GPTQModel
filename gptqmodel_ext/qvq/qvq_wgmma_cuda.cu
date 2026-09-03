@@ -400,11 +400,16 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   uint32_t product11 = qvq_wgmma_pgc16_product_masked(state11, bank_mask1);
 
   // State/window extraction and the PGC mapping do not touch the fragment
-  // selected for this K block. Depth-two W2/W3.5 can therefore defer their
-  // reuse wait until immediately before the first level load overwrites that
-  // fragment, overlapping independent decoder work with the prior WGMMA.
+  // selected for this K block. Defer the reuse wait until immediately before
+  // the first level load overwrites that fragment, overlapping independent
+  // decoder work with prior WGMMAs. W2.5/W3 have three fragments and may
+  // retain two committed groups; W2/W3.5 have two and may retain one.
   if (wait_before_fragment_reuse) {
-    cute::warpgroup_wait<1>();
+    if constexpr (TransitionBits == 5 || TransitionBits == kW3TransitionBits) {
+      cute::warpgroup_wait<2>();
+    } else {
+      cute::warpgroup_wait<1>();
+    }
   }
 
   // CuTe maps each lane to two A rows and two K pairs.  Map those two rows to
@@ -849,11 +854,6 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
           : (k_block % kDecodeDepth) == 1 ? fragment_a1
                                          : fragment_a2;
       const uint32_t bank_id = s_bank_ids(bank_n16_offset + warp, k_block, read_stage);
-      if constexpr (TransitionBits != 4 && TransitionBits != 7) {
-        if (k_block >= kDecodeDepth) {
-          cute::warpgroup_wait<kDecodeDepth - 1>();
-        }
-      }
       const auto trellis_layout = TrellisSmemLayout{};
       const uint32_t* window_words = shared.trellis.begin() +
           trellis_layout(0, warp, k_block, read_stage);
@@ -866,8 +866,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
           shared_levels_base,
           shared_levels_high_base,
           alternate_bank_mask,
-          (TransitionBits == 4 || TransitionBits == 7) &&
-              k_block >= kDecodeDepth);
+          k_block >= kDecodeDepth);
       cute::warpgroup_fence_operand(fragment_a);
       cute::warpgroup_arrive();
       cute::gemm(
