@@ -1,0 +1,56 @@
+{
+  "device": {
+    "name": "NVIDIA H100",
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348",
+    "compute_capability": "9.0",
+    "sm_count": 132
+  },
+  "profiler": "Nsight Compute 2026.2.1",
+  "workload": "W3 M1 grouped gate/up, K=2048, N=(8192,8192), split=(1,1)",
+  "rows": [
+    {
+      "variant": "production_two_tma_stage_lane_pair_table",
+      "duration_us": 28.192,
+      "executed_warp_instructions": 10792258,
+      "shared_load_bank_conflicts": 1050805,
+      "shared_load_wavefronts": 3350926,
+      "eligible_warps_per_cycle": 0.587647,
+      "active_warps_pct": 15.018544,
+      "long_scoreboard_per_issue": 1.376897,
+      "wait_per_issue": 0.923855
+    },
+    {
+      "variant": "rejected_one_tma_stage_lane_private_table",
+      "duration_us": 29.44,
+      "executed_warp_instructions": 10634502,
+      "shared_load_bank_conflicts": 1352,
+      "shared_load_wavefronts": 2264558,
+      "eligible_warps_per_cycle": 0.54,
+      "active_warps_pct": 15.10,
+      "long_scoreboard_per_issue": 2.20,
+      "wait_per_issue": 0.99
+    },
+    {
+      "variant": "rejected_two_tma_stage_swizzled_lane_pair_table",
+      "duration_us": 35.94,
+      "executed_warp_instructions": 14462910,
+      "shared_load_bank_conflicts": 2645310,
+      "shared_load_wavefronts": 4945698,
+      "eligible_warps_per_cycle": 0.60,
+      "long_scoreboard_per_issue": 1.26,
+      "wait_per_issue": 0.77
+    },
+    {
+      "variant": "rejected_two_tma_stage_dynamic_lane_private_table",
+      "duration_us": 25.63,
+      "executed_warp_instructions": 10878738,
+      "shared_load_bank_conflicts": 3066,
+      "shared_load_wavefronts": 2263334,
+      "eligible_warps_per_cycle": 0.66,
+      "active_warps_pct": 14.89,
+      "long_scoreboard_per_issue": 1.32,
+      "wait_per_issue": 0.90
+    }
+  ],
+  "report_directory": "/root/qvq-profiler-artifacts/phase20-gateup"
+}
