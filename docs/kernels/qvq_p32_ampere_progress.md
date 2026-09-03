@@ -2473,6 +2473,11 @@ Artifacts are `v20_m8_ca8_control_w35_verify8000.json` and
 `v20_m8_ca8_candidate_w35_verify8000.json` (the 4,000-iteration screen is
 `v20_m8_ca8_candidate_w35.json`).
 
+A scalar M1 attention W3.5 probe that replaced its per-byte bank-ID staging
+with a 16-byte async copy regressed from the approximately `0.040960 ms`
+baseline to `0.045056 ms`; the source was restored. Diagnostic:
+`v20_m1_attention_bankca16_candidate.json`.
+
 A follow-up W3/W3.5 pair-wrap probe on M16 linear-QKV `(K,N)=(5120,10240)`
 was rejected. The exact candidate measured `0.092160/0.093184 ms` for W3/W3.5
 in the 4,000-iteration screen, versus fetched-main medians near
