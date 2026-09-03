@@ -2458,6 +2458,11 @@ in the 4,000-iteration screen, versus fetched-main medians near
 dispatch was restored; diagnostic artifact:
 `v20_m16_qkv_w35_pairwrap_candidate.json`.
 
+The analogous W3.5-only probe on M16 linear-Z `(K,N)=(5120,6144)` was also
+omitted: its exact candidate was `0.062464 ms`, tied to the fetched-main
+median at 4,000 iterations. The source was restored; see
+`v20_m16_linearz_w35_pairwrap_candidate.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
