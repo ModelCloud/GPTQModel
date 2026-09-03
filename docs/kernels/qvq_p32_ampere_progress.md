@@ -2596,6 +2596,12 @@ The existing W3.5-only CA8 bank-ID copy remains enabled inside the stage-3
 branch; other M8 routes retain stage 2. Artifacts are
 `v20_m8_down_stage3_{control,verify8000}.json`.
 
+The M8 full-KV small-N route was not stage-3 safe. Expanding its active-row
+stage buffer to three K16 tiles compiled, but random-bank correctness failed
+immediately on W2 (`max_abs=37.29`), before timing. The dispatch was restored
+to the two-K16 implementation; no candidate artifact is used for performance
+claims.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
