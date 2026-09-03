@@ -1,0 +1,44 @@
+{
+  "device": {
+    "name": "NVIDIA H100",
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348",
+    "compute_capability": "9.0",
+    "sm_count": 132
+  },
+  "workload": {
+    "bits": 3.5,
+    "m": 1,
+    "k": 2048,
+    "n_per_child": 8192,
+    "children": 2,
+    "split_count": 1
+  },
+  "baseline": {
+    "production_phase": 39,
+    "report": "/root/qvq-profiler-artifacts/phase39-fractional-decode/w35_m1_lane_pair.ncu-rep",
+    "duration_us": 27.424,
+    "executed_instructions": 10800468,
+    "shared_load_instructions": 2228224,
+    "shared_load_bank_conflicts": 1050858,
+    "shared_load_wavefronts": 3363274,
+    "eligible_warps_per_cycle": 0.592592,
+    "long_scoreboard_stall_ratio": 1.374238,
+    "registers_per_thread": 56,
+    "shared_memory_bytes_per_block": 48896
+  },
+  "candidate": {
+    "git_commit": "6a272904dd6a3a88792c0f83054ac539ba76da40",
+    "report": "/root/qvq-profiler-artifacts/phase44-w35-deferred-wait/w35_m1_deferred_wait.ncu-rep",
+    "duration_us": 26.976,
+    "executed_instructions": 10800390,
+    "shared_load_instructions": 2228224,
+    "shared_load_bank_conflicts": 1051001,
+    "shared_load_wavefronts": 3386057,
+    "eligible_warps_per_cycle": 0.608078,
+    "long_scoreboard_stall_ratio": 1.324380,
+    "wait_stall_ratio": 1.028618,
+    "registers_per_thread": 57,
+    "shared_memory_bytes_per_block": 48896
+  },
+  "decision": "promote"
+}
