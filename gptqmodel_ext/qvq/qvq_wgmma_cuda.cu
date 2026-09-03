@@ -487,11 +487,25 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
         product01,
         product10,
         product11);
+    // Materialize the four register pairs before waiting for the old WGMMA
+    // source.  A plain tensor copy leaves this packing on the post-DEPBAR
+    // critical path even though it depends only on the newly loaded levels.
+    uint32_t decoded_packed[4];
+#pragma unroll
+    for (int pair = 0; pair < 4; ++pair) {
+      decoded_packed[pair] =
+          static_cast<uint32_t>(decoded_fragment(2 * pair).storage) |
+          (static_cast<uint32_t>(decoded_fragment(2 * pair + 1).storage) << 16);
+    }
     if (wait_before_fragment_reuse) {
       cute::warpgroup_fence_operand(fragment);
       cute::warpgroup_wait<3>();
     }
-    cute::copy(decoded_fragment, fragment);
+    auto packed_fragment = cute::recast<uint32_t>(fragment);
+#pragma unroll
+    for (int pair = 0; pair < 4; ++pair) {
+      packed_fragment(pair) = decoded_packed[pair];
+    }
   } else {
     if (wait_before_fragment_reuse) {
       if constexpr (TransitionBits == 5 || TransitionBits == kW3TransitionBits) {
