@@ -540,13 +540,17 @@ def test_qvq_cuda_hadamard_fp16_final_store_guards():
 
 
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
-def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(m):
+@pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("bias_enabled", (False, True))
+def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(
+    m, scale_mode, bias_enabled
+):
     properties = torch.cuda.get_device_properties(0)
     if properties.name != "NVIDIA H100" or (
         properties.major,
         properties.minor,
     ) != (9, 0):
-        pytest.skip("requires the physical H100 Phase-23 path")
+        pytest.skip("requires the physical H100 Phase-25 path")
 
     generator = torch.Generator(device="cuda").manual_seed(20262300 + m)
     partials = (
@@ -561,8 +565,12 @@ def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(m):
     post_scale = torch.randn(
         (2048,), generator=generator, device="cuda", dtype=torch.float32
     )
-    bias = torch.randn(
-        (2048,), generator=generator, device="cuda", dtype=torch.float32
+    bias = (
+        torch.randn(
+            (2048,), generator=generator, device="cuda", dtype=torch.float32
+        )
+        if bias_enabled
+        else None
     )
     reduced = torch.zeros_like(partials[0])
     for split in range(16):
@@ -571,14 +579,14 @@ def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(m):
         reduced[:m],
         post_scale=post_scale,
         bias=bias,
-        scale_mode=3,
+        scale_mode=scale_mode,
         output_fp16=True,
     )
     actual = qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
         partials,
         post_scale=post_scale,
         bias=bias,
-        scale_mode=3,
+        scale_mode=scale_mode,
         logical_rows=m,
     )
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
@@ -586,7 +594,7 @@ def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(m):
         partials,
         post_scale=post_scale,
         bias=bias,
-        scale_mode=3,
+        scale_mode=scale_mode,
         logical_rows=m,
         multiblock=True,
     )
@@ -600,7 +608,7 @@ def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(m):
             partials,
             post_scale=post_scale,
             bias=bias,
-            scale_mode=3,
+            scale_mode=scale_mode,
             logical_rows=m,
             multiblock=True,
         )
@@ -613,10 +621,46 @@ def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(m):
             partials,
             post_scale=post_scale,
             bias=bias,
-            scale_mode=3,
+            scale_mode=scale_mode,
             logical_rows=m,
             multiblock=1,
         )
+
+
+def test_qvq_cuda_multiblock_ordered_split16_preserves_late_overflow_on_stream():
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 Phase-25 path")
+
+    partials = torch.zeros((16, 16, 2048), device="cuda", dtype=torch.float32)
+    partials[0, 0, 0] = 60000.0
+    partials[0, 0, 1] = 60000.0
+    post_scale = torch.full((2048,), 0.001, device="cuda", dtype=torch.float32)
+    reduced = torch.zeros_like(partials[0])
+    for split in range(16):
+        reduced = reduced + partials[split]
+    expected = qvq_cuda_hadamard(
+        reduced[:1],
+        post_scale=post_scale,
+        scale_mode=4,
+        output_fp16=True,
+    )
+
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        actual = qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+            partials,
+            post_scale=post_scale,
+            scale_mode=4,
+            logical_rows=1,
+            multiblock=True,
+        )
+    stream.synchronize()
+    assert torch.isfinite(actual).all()
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
 
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
