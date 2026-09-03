@@ -1,0 +1,38 @@
+{
+  "candidate_commit": "38b7e4e5",
+  "device": {
+    "name": "NVIDIA H100",
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348",
+    "compute_capability": "9.0",
+    "sm_count": 132
+  },
+  "rows": [
+    {"site": "qkv_split_8_8_8", "bits": 2.5, "m": 1, "depth3_us": 13.309, "depth4_us": 13.203},
+    {"site": "qkv_split_8_8_8", "bits": 2.5, "m": 2, "depth3_us": 13.235, "depth4_us": 13.167},
+    {"site": "qkv_split_8_8_8", "bits": 2.5, "m": 4, "depth3_us": 13.178, "depth4_us": 13.023},
+    {"site": "qkv_split_8_8_8", "bits": 2.5, "m": 8, "depth3_us": 13.185, "depth4_us": 13.014},
+    {"site": "qkv_split_8_8_8", "bits": 2.5, "m": 16, "depth3_us": 13.290, "depth4_us": 13.175},
+    {"site": "qkv_split_8_8_8", "bits": 3.0, "m": 1, "depth3_us": 12.967, "depth4_us": 12.952},
+    {"site": "qkv_split_8_8_8", "bits": 3.0, "m": 2, "depth3_us": 12.979, "depth4_us": 12.953},
+    {"site": "qkv_split_8_8_8", "bits": 3.0, "m": 4, "depth3_us": 12.940, "depth4_us": 12.840},
+    {"site": "qkv_split_8_8_8", "bits": 3.0, "m": 8, "depth3_us": 13.111, "depth4_us": 13.006},
+    {"site": "qkv_split_8_8_8", "bits": 3.0, "m": 16, "depth3_us": 12.874, "depth4_us": 12.771},
+    {"site": "down_split_16", "bits": 2.5, "m": 1, "depth3_us": 14.891, "depth4_us": 14.797},
+    {"site": "down_split_16", "bits": 2.5, "m": 2, "depth3_us": 14.958, "depth4_us": 14.834},
+    {"site": "down_split_16", "bits": 2.5, "m": 4, "depth3_us": 14.973, "depth4_us": 14.818},
+    {"site": "down_split_16", "bits": 2.5, "m": 8, "depth3_us": 14.935, "depth4_us": 14.751},
+    {"site": "down_split_16", "bits": 2.5, "m": 16, "depth3_us": 14.878, "depth4_us": 14.758},
+    {"site": "down_split_16", "bits": 3.0, "m": 1, "depth3_us": 15.011, "depth4_us": 14.867},
+    {"site": "down_split_16", "bits": 3.0, "m": 2, "depth3_us": 14.978, "depth4_us": 14.824},
+    {"site": "down_split_16", "bits": 3.0, "m": 4, "depth3_us": 14.874, "depth4_us": 14.769},
+    {"site": "down_split_16", "bits": 3.0, "m": 8, "depth3_us": 14.926, "depth4_us": 14.792},
+    {"site": "down_split_16", "bits": 3.0, "m": 16, "depth3_us": 15.039, "depth4_us": 14.898}
+  ],
+  "geomean_speedup": {
+    "qkv_w2.5": 1.009394,
+    "qkv_w3": 1.005415,
+    "down_w2.5": 1.009150,
+    "down_w3": 1.009129
+  },
+  "decision": "retain_depth4_for_w2.5_and_w3"
+}

@@ -1,0 +1,23 @@
+{
+  "device": {
+    "name": "NVIDIA H100",
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348",
+    "compute_capability": "9.0",
+    "sm_count": 132
+  },
+  "workload": "M1 grouped gate/up inner P32, K=2048, N=(8192,8192)",
+  "rates": {
+    "2.5": {
+      "depth3": {"duration_us": 26.624, "instructions": 10793246, "eligible_warps_per_cycle": 0.621574, "long_scoreboard": 1.298213, "registers_per_thread": 61, "shared_memory_bytes": 44800},
+      "depth4": {"duration_us": 26.304, "instructions": 10785072, "eligible_warps_per_cycle": 0.634880, "long_scoreboard": 1.332383, "registers_per_thread": 65, "shared_memory_bytes": 44800}
+    },
+    "3.0": {
+      "depth3": {"duration_us": 27.040, "instructions": 10639670, "eligible_warps_per_cycle": 0.595862, "long_scoreboard": 1.374555, "registers_per_thread": 57, "shared_memory_bytes": 46848},
+      "depth4": {"duration_us": 27.136, "instructions": 10631478, "eligible_warps_per_cycle": 0.593538, "long_scoreboard": 1.363883, "registers_per_thread": 59, "shared_memory_bytes": 46848}
+    }
+  },
+  "reports": {
+    "depth3": "/root/qvq-profiler-artifacts/phase46-depth3-deferred-wait/",
+    "depth4": "/root/qvq-profiler-artifacts/phase47-depth-resweep/"
+  }
+}
