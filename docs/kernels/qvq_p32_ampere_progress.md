@@ -2596,6 +2596,15 @@ The existing W3.5-only CA8 bank-ID copy remains enabled inside the stage-3
 branch; other M8 routes retain stage 2. Artifacts are
 `v20_m8_down_stage3_{control,verify8000}.json`.
 
+The twentieth accepted v20 progression retunes the newly stage-3 M16 full-Q
+launcher from split 10 to split 9. The split-9 candidate is faster at every
+rate in both 4,000- and 8,000-iteration runs; the 8k medians are
+`0.091136/0.089088/0.090112/0.091136 ms` for W2/W2.5/W3/W3.5 (about 2.8%
+lower than the stage-3 split-10 geomean), with exact output (maximum absolute
+error `4.58e-05`). The Python dispatch and direct-plan test now pin split 9;
+other M16 routes are unchanged. Artifacts are
+`v20_m16_fullq_stage3_split9_{candidate,verify8000}.json`.
+
 The M8 full-KV small-N route was not stage-3 safe. Expanding its active-row
 stage buffer to three K16 tiles compiled, but random-bank correctness failed
 immediately on W2 (`max_abs=37.29`), before timing. The dispatch was restored

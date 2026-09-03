@@ -219,7 +219,7 @@ def test_p32_ampere_dispatches_measured_m16_wide_fullq_plan_directly(
         bank_alt_id=3,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == 10
+    assert calls[0][-1] == 9
 
 
 def test_p32_ampere_dispatches_measured_m16_wide_long_k_plan_directly(
