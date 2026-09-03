@@ -2977,6 +2977,12 @@ Diagnostics are
 `v21_m4_fullq_stage{2_control,3_w35}_5000.json`, and
 `v21_m16_fullq_globallevels_w35_candidate_5000.json`.
 
+A warp-level M1 full-Q split reducer was also rejected: with split 40 its
+matched 5,000-iteration medians were identical to the existing static
+reducer at all four rates. Diagnostics are
+`v21_m1_fullq_warpreduce_candidate_5000.json` and
+`v21_m1_fullq_staticreduce_control_5000.json`.
+
 ## Reproduction
 
 ```bash
