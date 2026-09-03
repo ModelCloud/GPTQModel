@@ -2646,6 +2646,13 @@ lower than the prior stage-3 plan (about 8.1% lower than fetched main for this
 route), with maximum absolute error `4.20e-05`. Artifact:
 `v20_m16_qkv_stage3_pairwrap_stridefix_split10_verify8000.json`.
 
+The twenty-fifth accepted v20 progression adds the pair-wrap predicate to
+fixed-N M16 linear-Z stage 3. Split 10 remains the plan: W2 is unchanged and
+W2.5/W3/W3.5 measure `0.056320/0.056320/0.057344 ms` at 8,000 iterations,
+about 3.1% lower than the prior stage-3 plan (about 8.2% lower than fetched
+main for this route), with maximum absolute error `3.62e-05`. Artifact:
+`v20_m16_linearz_stage3_pairwrap_stridefix_split10_verify8000.json`.
+
 An earlier M8 full-KV small-N stage-3 probe was invalid because the non-wide
 WMMA load still used the two-tile shared-memory stride; it consequently failed
 random-bank correctness on W2 (`max_abs=37.29`) before timing. After the
