@@ -487,9 +487,11 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
         product01,
         product10,
         product11);
-    // Materialize the four register pairs before waiting for the old WGMMA
-    // source.  A plain tensor copy leaves this packing on the post-DEPBAR
-    // critical path even though it depends only on the newly loaded levels.
+    // Express the decoded values as the four register pairs consumed by
+    // WGMMA before waiting for the old source.  This lets ptxas retain the
+    // halfword loads while removing the generic tensor-copy plumbing; the
+    // final four PRMT writes may still follow DEPBAR because the destination
+    // fragment registers remain live until that barrier.
     uint32_t decoded_packed[4];
 #pragma unroll
     for (int pair = 0; pair < 4; ++pair) {
