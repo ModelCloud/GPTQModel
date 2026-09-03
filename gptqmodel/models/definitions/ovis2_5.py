@@ -9,7 +9,7 @@ import torch
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
@@ -103,7 +103,7 @@ class Ovis2_5QModel(BaseQModel):
 
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
             for sample in batch:
                 sample = self.replace_image_with_pil(sample)
                 input_ids, pixel_values, grid_thws = self.model.preprocess_inputs(

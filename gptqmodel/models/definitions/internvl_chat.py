@@ -14,7 +14,7 @@ from PIL import Image
 from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, GenerationConfig
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
@@ -384,7 +384,7 @@ class InternVLChatQModel(BaseQModel):
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         del batch_size, kwargs
         calib_data = []
-        for batch in batched(calibration_dataset, 1):
+        for batch in batched_conversations(calibration_dataset, 1):
             calib_data.append(self.prepare_inputs_for_conversation(batch[0]))
         return calib_data
 

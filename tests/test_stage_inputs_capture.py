@@ -153,6 +153,31 @@ class TestStageInputsCapture(unittest.TestCase):
         self.assertIn("model.layers.42", message)
         self.assertIn("legacy.path.layer_0", message)
 
+    def test_forward_device_prefers_materialized_embedding_device(self):
+        layer = FakeLayer()
+        capture, _, _, gptq_model = self._make_capture(layer)
+        embedding = nn.Embedding(8, 4)
+        gptq_model.get_input_embeddings.return_value = embedding
+
+        resolved = capture._resolve_forward_device(
+            {"input_ids": torch.tensor([[1, 2, 3]])},
+            fallback=torch.device("meta"),
+        )
+
+        self.assertEqual(resolved, embedding.weight.device)
+
+    def test_forward_device_uses_fallback_for_unmaterialized_embedding(self):
+        layer = FakeLayer()
+        capture, _, _, gptq_model = self._make_capture(layer)
+        gptq_model.get_input_embeddings.return_value = nn.Embedding(8, 4, device="meta")
+
+        resolved = capture._resolve_forward_device(
+            {"input_ids": torch.tensor([[1, 2, 3]])},
+            fallback=torch.device("cpu"),
+        )
+
+        self.assertEqual(resolved, torch.device("cpu"))
+
 
 if __name__ == "__main__":
     unittest.main()

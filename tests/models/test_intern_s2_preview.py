@@ -12,6 +12,68 @@ import torch
 from gptqmodel.models.definitions import intern_s2_preview
 
 
+def test_prepare_dataset_wraps_raw_text_as_chat_messages(monkeypatch):
+    calls = []
+
+    class FakeProcessor:
+        def apply_chat_template(self, conversations, **kwargs):
+            calls.append((conversations, kwargs))
+            return {
+                "input_ids": torch.tensor([[1, 2, 3]]),
+                "attention_mask": torch.tensor([[1, 1, 1]]),
+            }
+
+    instance = object.__new__(intern_s2_preview.InternS2PreviewQModel)
+    monkeypatch.setattr(instance, "load_processor", lambda: FakeProcessor())
+
+    prepared = instance.prepare_dataset(["first", "second"], batch_size=2)
+
+    assert len(prepared) == 1
+    assert calls == [
+        (
+            [
+                [{"role": "user", "content": [{"type": "text", "text": "first"}]}],
+                [{"role": "user", "content": [{"type": "text", "text": "second"}]}],
+            ],
+            {
+                "tokenize": True,
+                "add_generation_prompt": True,
+                "processor_kwargs": {"padding": True},
+                "return_dict": True,
+                "return_tensors": "pt",
+            },
+        )
+    ]
+
+
+def test_prepare_dataset_preserves_multimodal_conversations(monkeypatch):
+    calls = []
+
+    class FakeProcessor:
+        def apply_chat_template(self, conversations, **kwargs):
+            calls.append(conversations)
+            return {
+                "input_ids": torch.tensor([[1, 2, 3]]),
+                "attention_mask": torch.tensor([[1, 1, 1]]),
+            }
+
+    conversation = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": "image.jpg"},
+                {"type": "text", "text": "describe it"},
+            ],
+        }
+    ]
+    instance = object.__new__(intern_s2_preview.InternS2PreviewQModel)
+    monkeypatch.setattr(instance, "load_processor", lambda: FakeProcessor())
+
+    instance.prepare_dataset([conversation], batch_size=1)
+
+    assert calls == [[conversation]]
+
+
 def test_causal_mask_compat_drops_removed_cache_position(monkeypatch):
     module_name = "tests.fake_modeling_intern_s2_preview"
     modeling_module = types.ModuleType(module_name)
