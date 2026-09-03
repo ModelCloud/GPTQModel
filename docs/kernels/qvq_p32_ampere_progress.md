@@ -2945,6 +2945,18 @@ pipeline to N10240/N17408 regressed MLP-gate W3.5 to `0.092160 ms` (versus
 `v21_m16_fullq_rreg64_{1000,3000}.json`, and
 `v21_m1_wide_stage3_1000.json`.
 
+Additional follow-up probes were rejected. Explicit M16 full-Q split 8 was
+about 9--13% slower than split 9; three N16 tiles per warp was about 50%
+slower; explicit PTX for the PGC16 multiply/bit extract regressed W3.5; and
+both packed and four-register lane-plan hoists tied or regressed after
+register/instruction trade-offs. A global 80-register cap was mixed across
+M1 MLP shapes. Diagnostics are `v21_m16_fullq_split8_1000.json`,
+`v21_m16_fullq_triplewide_1000.json`, `v21_m16_fullq_pgc_ptx_1000.json`,
+`v21_m16_fullq_laneplan_1000.json`,
+`v21_m16_fullq_laneplan_packed_1000.json`,
+`v21_m16_fullq_wordplan_1000.json`, and
+`v21_m1_rreg80_{1000,3000}.json`.
+
 ## Reproduction
 
 ```bash
