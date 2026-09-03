@@ -3003,6 +3003,38 @@ but neutral on Ampere: M16/W3.5 measured `0.090112 ms`, the same as control,
 so the compiler's original shift/LOP3 form remains. Diagnostic:
 `v21_m16_fullq_pgc_byteperm_w35_candidate_5000.json`.
 
+## v22 after the next origin refresh
+
+The next cycle fetched `origin/main` again; it remains
+`631411ee3b07ed14c29fb21c0e959b0d811eb5cb`. The existing Ampere branch is
+still the open WIP PR #100, so this cycle does not claim a merged upstream
+baseline change.
+
+The M16 long-K MLP-down split sweep confirmed the retained split 24 policy:
+split 16 measured `0.141312/0.140288/0.142336/0.145408 ms`, split 24 measured
+`0.124928/0.124928/0.125952/0.129024 ms`, and split 32 measured
+`0.128000/0.128000/0.129024/0.131072 ms` for W2/W2.5/W3/W3.5. The split-24
+control remains the fastest; diagnostics are
+`v22_m16_mlpdown_split{16,24,32}_2000.json`.
+
+The following candidates were exact but did not improve a matched high-
+iteration control and were reverted: a native `__umul24` PGC16 multiply,
+static bank-alt-3 specialization, scalar M1 compile-time-K, a warp-parallel
+M16 MLP-down reducer, Hopper's `mad.lo.u16` PGC form, cache-at-all-levels
+activation copies, and a four-K16 M1 long-K static-N dispatch. Representative
+diagnostics are `v22_m16_fullq_umul24_candidate_{5000,w234_5000}.json`,
+`v22_m16_fullq_staticalt3_candidate_3000.json`,
+`v22_m1_fullq_statick_candidate_5000.json`,
+`v22_m16_mlpdown_warpreduce16_candidate_5000.json`,
+`v22_m16_fullq_pgc16u16_candidate_5000.json`,
+`v22_m16_fullq_input_ca16_candidate_5000.json`, and
+`v22_m1_mlpdown_staticn_stage4_candidate_5000.json`.
+
+The current full 140-row refresh remains the measured reference:
+`v21_current_full_300.json` has a `0.9954x` median-latency geometric mean
+versus `v21_main_baseline_300.json`, so no additional 10% Ampere progression
+is claimed from these probes.
+
 ## Reproduction
 
 ```bash
