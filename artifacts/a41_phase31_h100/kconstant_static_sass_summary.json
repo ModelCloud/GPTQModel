@@ -1,0 +1,34 @@
+{
+  "production_commit": "c2cb4c74",
+  "candidate_name": "FixedGateUp device-side K=2048 constant",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "kernel": "grouped W2 gate/up P32 TMA RS-WGMMA",
+  "m": 1,
+  "k": 2048,
+  "child_n": [8192, 8192],
+  "production": {
+    "extension_cache_key": "70d66fa6a178d20d",
+    "static_sass_instructions": 1760,
+    "registers_per_thread": 48,
+    "stack_bytes": 112,
+    "shared_bytes": 27264,
+    "local_bytes": 0
+  },
+  "candidate": {
+    "extension_cache_key": "28503730aea5c1e3",
+    "static_sass_instructions": 1800,
+    "registers_per_thread": 48,
+    "stack_bytes": 112,
+    "shared_bytes": 27264,
+    "local_bytes": 0
+  },
+  "tools": [
+    "CUDA cuobjdump --dump-sass",
+    "CUDA cuobjdump --dump-resource-usage"
+  ],
+  "decision": "rejected; source fully removed"
+}
