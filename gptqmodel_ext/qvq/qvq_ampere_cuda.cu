@@ -1979,7 +1979,7 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(bank_alt_id));
   } else if (size_m == kRows && size_k == 5120 && size_n == 6144) {
     p32_window_ampere_kernel<
-        TransitionBits, true, 0, 6144, false, false, 5120,
+        TransitionBits, true, 0, 6144, true, false, 5120,
         (TransitionBits == 5 || TransitionBits == 6 || TransitionBits == 7),
         TransitionBits == 4, false, false, 3><<<grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),

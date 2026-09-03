@@ -2661,6 +2661,13 @@ other two rates versus the prior QKV plan. Maximum absolute error is
 `4.20e-05`. Artifact:
 `v20_m16_qkv_stage3_pairwrap_hoistall_split10_verify8000.json`.
 
+The twenty-seventh accepted v20 progression hoists bank-selector masks for all
+fixed-N M16 linear-Z stage-3 rates. Split 10 is exact and measures
+`0.056320/0.056320/0.056320/0.056320 ms` at 8,000 iterations, improving every
+rate versus the prior pair-wrap-only plan; maximum absolute error is
+`3.62e-05`. Artifact:
+`v20_m16_linearz_stage3_pairwrap_hoistall_split10_verify8000.json`.
+
 A fixed-N M16 full-KV pair-wrap probe was rejected. Although the stage-2
 kernel remained exact, the 8,000-iteration split-32 confirmation regressed
 W2.5/W3 to `0.034816 ms` and did not beat the matched control consistently;
