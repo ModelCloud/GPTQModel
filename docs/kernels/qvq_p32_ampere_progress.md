@@ -2463,6 +2463,12 @@ omitted: its exact candidate was `0.062464 ms`, tied to the fetched-main
 median at 4,000 iterations. The source was restored; see
 `v20_m16_linearz_w35_pairwrap_candidate.json`.
 
+Two scalar M1 W3.5 pair-wrap probes were rejected as well. Full-Q tied at
+`0.068608 ms`, and MLP-gate/up regressed from the fetched-main
+`0.090112 ms` median to `0.092160 ms`; both retained the original wrap path.
+Diagnostics are `v20_m1_fullq_w35_pairwrap_candidate.json` and
+`v20_m1_gate_w35_pairwrap_candidate.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
