@@ -2631,6 +2631,13 @@ were also slower than the retained split 24. Diagnostics are
 `v20_m16_down_stage3_split{20,28}_screen.json`, and the existing split-24
 verification artifact.
 
+The twenty-third accepted v20 progression enables the existing CA8 bank-ID
+copy for only the M16 long-K W3.5 specialization. At split 24, the 8,000-
+iteration median is `0.129024 ms` (exact maximum absolute error
+`8.39e-05`), one event tick below the stage-3 two-4-byte-copy control at
+`0.130048 ms`; W2/W2.5/W3 retain the prior copy path. Artifact:
+`v20_m16_down_stage3_ca8_w35_split24_verify8000.json`.
+
 An earlier M8 full-KV small-N stage-3 probe was invalid because the non-wide
 WMMA load still used the two-tile shared-memory stride; it consequently failed
 random-bank correctness on W2 (`max_abs=37.29`) before timing. After the

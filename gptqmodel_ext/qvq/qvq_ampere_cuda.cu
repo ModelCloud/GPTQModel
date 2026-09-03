@@ -1934,7 +1934,7 @@ at::Tensor p32_window_ampere_impl(
     p32_window_ampere_kernel<
         TransitionBits, true, 0, 5120, true, false, 17408,
         (TransitionBits == 5 || TransitionBits == 6 || TransitionBits == 7),
-        TransitionBits == 4, true, false, 3>
+        TransitionBits == 4, true, (TransitionBits == 7), 3>
         <<<wide_grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
