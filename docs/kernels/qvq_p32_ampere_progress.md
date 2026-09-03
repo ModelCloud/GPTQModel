@@ -2549,6 +2549,16 @@ maximum absolute error `3.24e-05`. Both the pair-wrapped and generic
 transition-width branches use the stage-3 template; other M8 shapes retain
 stage 2. Artifacts are `v20_m8_fullq_stage3_{control,verify8000}.json`.
 
+The fifteenth accepted v20 progression applies the three-K16 stage to the
+M8 fixed-N MLP-gate/up `(K,N)=(5120,17408)` wide launcher. Stage 2's matched
+medians were `0.116736/0.120832/0.119808/0.121856 ms`; stage 3 measured
+`0.113664/0.115712/0.115712/0.117760 ms` (3.4% geometric-mean improvement).
+The 8,000-iteration confirmation remained faster at
+`0.113664/0.115712/0.116736/0.118784 ms`, with exact output and maximum
+absolute error `4.20e-05`. Both gate/up transition branches use stage 3;
+other M8 routes retain stage 2. Artifacts are
+`v20_m8_gate_stage3_{control,verify8000}.json`.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
