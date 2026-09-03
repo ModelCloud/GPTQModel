@@ -2918,6 +2918,10 @@ The next optimization cycle started from freshly fetched `origin/main` at
 its median-latency geometric mean is `0.0655313 ms` across M=1,2,4,8,16 and
 W2-W3.5. The full candidate screen is
 `artifacts/a100_p32_window/v21_candidate_full_300.json`.
+The current-tip refresh is `artifacts/a100_p32_window/v21_current_full_300.json`;
+against the fresh baseline its median-latency geometric mean is `0.9954x`
+(effectively unchanged at the 1.024-us CUDA-event tick), so no additional
+10% progression is claimed from this cycle.
 
 The first accepted v21 progression makes the split reducer compile-time for
 the two direct wide-Q waves that previously fell through the runtime loop:
