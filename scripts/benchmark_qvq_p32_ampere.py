@@ -14,6 +14,7 @@ import math
 import os
 import subprocess
 import sys
+import sysconfig
 from functools import partial
 from pathlib import Path
 
@@ -27,7 +28,7 @@ os.environ.setdefault("NINJAFLAGS", "-j8")
 os.environ.setdefault("CMAKE_BUILD_PARALLEL_LEVEL", "8")
 os.environ.setdefault("NVCC_THREADS", "2")
 
-from scripts import benchmark_qvq_cuda_lr as benchmark_utils
+from scripts import benchmark_qvq_cuda as benchmark_utils
 
 RATES = (2.0, 2.5, 3.0, 3.5)
 SHAPES = {
@@ -46,6 +47,23 @@ SOURCE_PATHS = (
     Path("scripts/benchmark_qvq_p32_ampere.py"),
     Path("tests/test_qvq_p32_ampere.py"),
 )
+
+
+def _cuda_library_include_paths() -> list[str]:
+    """Expose math-library headers required by ATen CUDAContext."""
+
+    # CUDA_HOME supplies the compiler/core headers.  Do not add the complete
+    # nvidia-cu13 wheel include directory: its cuda.h can be a different
+    # minor toolkit revision and makes nvcc reject the header set.  The
+    # profile environment provides a math-header-only shim instead.
+    purelib = Path(sysconfig.get_paths()["purelib"])
+    candidates = (
+        Path(os.environ["QVQ_CUDA_SHIM_INCLUDE"])
+        if os.environ.get("QVQ_CUDA_SHIM_INCLUDE")
+        else purelib / "cuda-shim-include",
+        Path("/root/qvq-cuda-library-headers"),
+    )
+    return [str(path) for path in candidates if (path / "cusparse.h").exists()]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -198,6 +216,7 @@ def _run(args: argparse.Namespace) -> dict:
         default_build_root=lambda: default_torch_ops_build_root("qvq_gemv_only"),
         display_name="QVQ planar GEMV benchmark baseline",
         extra_cflags=lambda: default_jit_cflags(enable_bf16=True),
+        extra_include_paths=_cuda_library_include_paths,
         extra_cuda_cflags=lambda: default_jit_cuda_cflags(
             enable_bf16=True,
             include_lineinfo=True,
@@ -298,10 +317,10 @@ def _run(args: argparse.Namespace) -> dict:
                         f"planar={planar_metrics}, ampere={ampere_metrics}"
                     )
                 _exclusive_recheck(hardware)
-                planar_timing = benchmark_utils._event_timing(
+                planar_timing = benchmark_utils._timings(
                     torch, planar_call, warmup=args.warmup, iterations=args.iterations
                 )
-                ampere_timing = benchmark_utils._event_timing(
+                ampere_timing = benchmark_utils._timings(
                     torch, ampere_call, warmup=args.warmup, iterations=args.iterations
                 )
                 autotune_split = args.split_count

@@ -343,7 +343,7 @@ def qvq_p32_window_ampere(
             transition_bits,
             out_features,
             bank_alt_id,
-            64 if out_features == 1024 else 40,
+            56 if out_features == 1024 else 40,
         )
     if (
         split_count == 0
@@ -371,6 +371,189 @@ def qvq_p32_window_ampere(
             out_features,
             bank_alt_id,
             48,
+        )
+    if split_count == 0 and out_features == 17408 and input.shape == (8, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            10,
+        )
+    if split_count == 0 and out_features == 17408 and input.shape == (16, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            10,
+        )
+    if split_count == 0 and out_features == 12288 and input.shape == (16, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            10,
+        )
+    if (
+        split_count == 0
+        and transition_bits in (4, 5, 6, 7)
+        and out_features == 10240
+        and input.shape == (16, 5120)
+    ):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            10,
+        )
+    if split_count == 0 and out_features == 1024 and input.shape == (16, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            32,
+        )
+    if split_count == 0 and out_features == 5120 and input.shape == (8, 17408):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            40,
+        )
+    if split_count == 0 and out_features == 5120 and input.shape == (8, 6144):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            24,
+        )
+    if split_count == 0 and out_features == 6144 and input.shape == (8, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            40,
+        )
+    if split_count == 0 and out_features == 10240 and input.shape == (8, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            16,
+        )
+    if split_count == 0 and out_features == 12288 and input.shape == (8, 5120):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            14,
+        )
+    if split_count == 0 and out_features == 5120 and input.shape == (16, 17408):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            24,
+        )
+    if split_count == 0 and out_features == 5120 and input.shape == (16, 6144):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            12,
+        )
+    if split_count == 0 and input.shape[0] == 1:
+        shape = (int(input.shape[1]), int(out_features))
+        measured_m1_projection_split = None
+        if shape == (6144, 5120):
+            measured_m1_projection_split = 48
+        if measured_m1_projection_split is not None:
+            return _p32_window_op()(
+                input,
+                trellis,
+                levels,
+                bank_ids,
+                transition_bits,
+                out_features,
+                bank_alt_id,
+                measured_m1_projection_split,
+            )
+    if (
+        split_count == 0
+        and input.shape == (2, 6144)
+        and out_features == 5120
+    ):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            64 if transition_bits == 7 else 48,
+        )
+    if (
+        split_count == 0
+        and input.shape == (4, 5120)
+        and out_features == 6144
+    ):
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            40,
         )
     if split_count == 0:
         # Environment configuration is process-level. Reading ``os.environ``
