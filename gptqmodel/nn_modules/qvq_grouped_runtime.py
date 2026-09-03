@@ -202,6 +202,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_direct_padded_precondition_launches: int = 0
     h100_direct_padded_input_launches: int = 0
     h100_fp16_recovery_store_launches: int = 0
+    h100_fused_down_reduction_recovery_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -232,6 +233,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_direct_padded_precondition_launches": self.h100_direct_padded_precondition_launches,
             "h100_direct_padded_input_launches": self.h100_direct_padded_input_launches,
             "h100_fp16_recovery_store_launches": self.h100_fp16_recovery_store_launches,
+            "h100_fused_down_reduction_recovery_launches": self.h100_fused_down_reduction_recovery_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -635,6 +637,7 @@ class QVQHopperGroupedRuntime:
             )
 
         from ..utils.qvq_cuda import (
+            qvq_cuda_hadamard_ordered_split16_fp32_to_fp16,
             qvq_cuda_swiglu_precondition,
             qvq_cuda_swiglu_precondition_multiblock,
         )
@@ -686,6 +689,29 @@ class QVQHopperGroupedRuntime:
                     up.reshape(rows, down.in_features),
                     down._cached_cast("SU", torch.float16),
                 )
+        fused_down_recovery = (
+            self._h100_multiblock_intermediate_enabled
+            and down.output_hadamard
+            and (down.in_features, down.out_features) == (8192, 2048)
+        )
+        if fused_down_recovery:
+            partials = down._inner_forward(
+                transformed,
+                return_ordered_partials=True,
+            )
+            recovered = qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+                partials,
+                post_scale=down._cached_cast(
+                    "SV", torch.float16, torch.float32
+                ),
+                bias=down._cached_cast("bias", torch.float16, torch.float32),
+                scale_mode=3,
+                logical_rows=rows,
+            )
+            self.telemetry.h100_fused_down_reduction_recovery_launches += 1
+            self.telemetry.h100_fp16_recovery_store_launches += 1
+            return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
+
         inner = down._inner_forward(transformed)
         fp16_store = (
             self._h100_fp16_recovery_store_enabled

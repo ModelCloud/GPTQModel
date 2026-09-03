@@ -68,6 +68,7 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_yaqa_feedback_update_op,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
+    qvq_cuda_hadamard_ordered_split16_fp32_to_fp16,
     qvq_cuda_hadamard_pair_fp32_to_fp16,
     qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock,
     qvq_cuda_supported,
@@ -536,6 +537,64 @@ def test_qvq_cuda_hadamard_fp16_final_store_guards():
             pad_to_16=True,
             output_fp16=True,
         )
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(m):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 Phase-23 path")
+
+    generator = torch.Generator(device="cuda").manual_seed(20262300 + m)
+    partials = (
+        torch.randn(
+            (16, 16, 2048),
+            generator=generator,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        * 0.02
+    )
+    post_scale = torch.randn(
+        (2048,), generator=generator, device="cuda", dtype=torch.float32
+    )
+    bias = torch.randn(
+        (2048,), generator=generator, device="cuda", dtype=torch.float32
+    )
+    reduced = torch.zeros_like(partials[0])
+    for split in range(16):
+        reduced = reduced + partials[split]
+    expected = qvq_cuda_hadamard(
+        reduced[:m],
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=3,
+        output_fp16=True,
+    )
+    actual = qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+        partials,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=3,
+        logical_rows=m,
+    )
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+            partials,
+            post_scale=post_scale,
+            bias=bias,
+            scale_mode=3,
+            logical_rows=m,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
 
 
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))

@@ -273,6 +273,77 @@ __global__ void __launch_bounds__(kHadamardThreads) qvq_hadamard_pair_fp32_to_fp
   }
 }
 
+// Llama 3.2 1B down projection specialization.  The Hopper tensor-core
+// kernel produces sixteen disjoint [16, 2048] FP32 split planes.  Folding the
+// deterministic left-to-right reduction into output recovery deletes the
+// standalone reducer launch and its intermediate [16, 2048] FP32 write/read.
+// The accumulation starts at +0 exactly like the fixed split reducer, and all
+// subsequent narrowing, butterfly, scale, bias, and final-store operations
+// retain qvq_hadamard_kernel<float, half>'s ordering.
+__global__ void __launch_bounds__(kHadamardThreads)
+qvq_hadamard_ordered_split16_fp32_to_fp16_kernel(
+    const float* __restrict__ partial_input,
+    half* __restrict__ output,
+    const float* __restrict__ post_scale,
+    const float* __restrict__ bias,
+    int n,
+    int logical_rows,
+    int scale_mode) {
+  extern __shared__ char smem_raw[];
+  float* buf = reinterpret_cast<float*>(smem_raw);
+  auto p = [](int i) { return i + (i >> 5); };
+  const int row = static_cast<int>(blockIdx.x);
+  half* out_row = output + static_cast<int64_t>(row) * n;
+
+  const bool normalize_first = scale_mode == 3;
+  const float divisor = __half2float(__float2half_rn(sqrtf(static_cast<float>(n))));
+  const float reciprocal = 1.0f / sqrtf(static_cast<float>(n));
+  constexpr int kSplitCount = 16;
+  constexpr int kPhysicalRows = 16;
+  const int64_t split_stride = static_cast<int64_t>(kPhysicalRows) * n;
+
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    float value = 0.0f;
+#pragma unroll
+    for (int split = 0; split < kSplitCount; ++split) {
+      value += partial_input[
+          static_cast<int64_t>(split) * split_stride +
+          static_cast<int64_t>(row) * n + i];
+    }
+    value = round_fp16_unless_overflow(value);
+    if (normalize_first) {
+      value = round_fp16_unless_overflow(value / divisor);
+    }
+    buf[p(i)] = value;
+  }
+  __syncthreads();
+
+  for (int bit = 1; bit < n; bit <<= 1) {
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+      const int j = i ^ bit;
+      if (i < j) {
+        const float a = buf[p(i)];
+        const float b = buf[p(j)];
+        buf[p(i)] = round_fp16_unless_overflow(a + b);
+        buf[p(j)] = round_fp16_unless_overflow(a - b);
+      }
+    }
+    __syncthreads();
+  }
+
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    float value = buf[p(i)];
+    if (!normalize_first) {
+      value = round_fp16_unless_overflow(value * reciprocal);
+    }
+    value = round_fp16_unless_overflow(value * post_scale[i]);
+    if (bias != nullptr) {
+      value = round_fp16_unless_overflow(value + bias[i]);
+    }
+    out_row[i] = __float2half_rn(value);
+  }
+}
+
 // Exact two-stage factorization of the N=8192 paired recovery transform.
 //
 // The ordinary kernel executes butterfly bits 1..4096 in ascending order in
@@ -932,6 +1003,65 @@ std::tuple<at::Tensor, at::Tensor> qvq_hadamard_pair_fp32_to_fp16_cuda(
   return {output0, output1};
 }
 
+at::Tensor qvq_hadamard_ordered_split16_fp32_to_fp16_cuda(
+    const at::Tensor& partial_input,
+    const at::Tensor& post_scale,
+    const c10::optional<at::Tensor>& bias,
+    int64_t scale_mode,
+    int64_t logical_rows) {
+  TORCH_CHECK(partial_input.is_cuda(), "ordered split recovery input must be CUDA");
+  TORCH_CHECK(partial_input.scalar_type() == at::kFloat,
+              "ordered split recovery input must be float32");
+  TORCH_CHECK(partial_input.is_contiguous(),
+              "ordered split recovery input must be contiguous");
+  TORCH_CHECK(partial_input.dim() == 3 && partial_input.size(0) == 16 &&
+                  partial_input.size(1) == 16 && partial_input.size(2) == 2048,
+              "ordered split recovery requires [16, 16, 2048] partials");
+  TORCH_CHECK(logical_rows >= 1 && logical_rows <= 16,
+              "ordered split recovery logical_rows must be in [1, 16]");
+  TORCH_CHECK(scale_mode == 3 || scale_mode == 4,
+              "ordered split recovery scale_mode must be 3 or 4");
+  TORCH_CHECK(post_scale.is_cuda() && post_scale.device() == partial_input.device() &&
+                  post_scale.scalar_type() == at::kFloat && post_scale.is_contiguous() &&
+                  post_scale.numel() == 2048,
+              "ordered split recovery post_scale must be contiguous CUDA float32[2048]");
+  if (bias.has_value()) {
+    TORCH_CHECK(bias->is_cuda() && bias->device() == partial_input.device() &&
+                    bias->scalar_type() == at::kFloat && bias->is_contiguous() &&
+                    bias->numel() == 2048,
+                "ordered split recovery bias must be contiguous CUDA float32[2048]");
+  }
+
+  const c10::cuda::CUDAGuard device_guard(partial_input.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, partial_input.get_device()));
+  TORCH_CHECK(properties.major == 9 && properties.minor == 0,
+              "ordered split recovery requires Hopper SM90");
+  constexpr int n = 2048;
+  const size_t smem_bytes = static_cast<size_t>(n + n / 32) * sizeof(float);
+  TORCH_CHECK(smem_bytes <= static_cast<size_t>(properties.sharedMemPerBlockOptin),
+              "ordered split recovery exceeds dynamic shared-memory capacity");
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      qvq_hadamard_ordered_split16_fp32_to_fp16_kernel,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(smem_bytes)));
+
+  at::Tensor output = at::empty(
+      {logical_rows, n}, partial_input.options().dtype(at::kHalf));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(partial_input.get_device());
+  qvq_hadamard_ordered_split16_fp32_to_fp16_kernel<<<
+      static_cast<unsigned int>(logical_rows), kHadamardThreads, smem_bytes, stream>>>(
+      partial_input.const_data_ptr<float>(),
+      reinterpret_cast<half*>(output.mutable_data_ptr()),
+      post_scale.const_data_ptr<float>(),
+      bias.has_value() ? bias->const_data_ptr<float>() : nullptr,
+      n,
+      static_cast<int>(logical_rows),
+      static_cast<int>(scale_mode));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
 std::tuple<at::Tensor, at::Tensor> qvq_hadamard_pair_fp32_to_fp16_multiblock_cuda(
     const at::Tensor& input0,
     const at::Tensor& input1,
@@ -1249,6 +1379,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
     m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode, bool pad_to_16=False, bool output_fp16=False) -> Tensor");
 });
   m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
+  m.def("hadamard_ordered_split16_fp32_to_fp16(Tensor partial_input, Tensor post_scale, Tensor? bias, int scale_mode, int logical_rows) -> Tensor");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode, bool warp_low=False) -> (Tensor, Tensor)");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
   m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False, bool half2_low=False, bool pad_to_16=False) -> Tensor");
@@ -1257,6 +1388,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("hadamard", &qvq_hadamard_cuda);
   m.impl("hadamard_pair_fp32_to_fp16", &qvq_hadamard_pair_fp32_to_fp16_cuda);
+  m.impl("hadamard_ordered_split16_fp32_to_fp16", &qvq_hadamard_ordered_split16_fp32_to_fp16_cuda);
   m.impl("hadamard_pair_fp32_to_fp16_multiblock", &qvq_hadamard_pair_fp32_to_fp16_multiblock_cuda);
   m.impl("swiglu_precondition", &qvq_swiglu_precondition_cuda);
   m.impl("swiglu_precondition_multiblock", &qvq_swiglu_precondition_multiblock_cuda);

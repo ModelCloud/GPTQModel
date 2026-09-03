@@ -792,7 +792,34 @@ class QVQLinear(BaseQuantLinear):
         inner = self.get_inner_weight_tensor(dtype=x.dtype)
         return x @ inner
 
-    def _inner_forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _inner_forward(
+        self,
+        x: torch.Tensor,
+        *,
+        return_ordered_partials: bool = False,
+    ) -> torch.Tensor:
+        if return_ordered_partials:
+            if (
+                x.device.type != "cuda"
+                or self.trellis_window != 16
+                or self.dual_v2
+                or not self.v2b2_p32
+                or self.vector_size != 2
+                or x.dtype != torch.float16
+                or not 0 < x.shape[0] <= 16
+                or (self.in_features, self.out_features) != (8192, 2048)
+            ):
+                raise RuntimeError(
+                    "ordered partial output requires the H100 Llama down P32 path"
+                )
+            properties = torch.cuda.get_device_properties(x.device)
+            if (
+                properties.name != "NVIDIA H100"
+                or (properties.major, properties.minor) != (9, 0)
+            ):
+                raise RuntimeError(
+                    "ordered partial output requires the measured physical H100"
+                )
         if self.bank_count in (2, 4) and (
             not self._bank_ids_loaded or self.bank_ids is None or self.bank_ids.device.type == "meta"
         ):
@@ -984,6 +1011,7 @@ class QVQLinear(BaseQuantLinear):
                     from ...utils.qvq_wgmma_cuda import (
                         qvq_h100_ordered_split_count,
                         qvq_p32_window_wgmma_m16_tma,
+                        qvq_p32_window_wgmma_m16_tma_ordered_partials,
                         qvq_p32_window_wgmma_m16_tma_ordered_split,
                     )
 
@@ -1007,11 +1035,18 @@ class QVQLinear(BaseQuantLinear):
                         out_features=self.out_features,
                         transition_bits=transition_bits,
                     )
-                    kernel = (
-                        qvq_p32_window_wgmma_m16_tma_ordered_split
-                        if ordered_split
-                        else qvq_p32_window_wgmma_m16_tma
-                    )
+                    if return_ordered_partials:
+                        if ordered_split != 16:
+                            raise RuntimeError(
+                                "ordered partial output requires the measured split-16 policy"
+                            )
+                        kernel = qvq_p32_window_wgmma_m16_tma_ordered_partials
+                    else:
+                        kernel = (
+                            qvq_p32_window_wgmma_m16_tma_ordered_split
+                            if ordered_split
+                            else qvq_p32_window_wgmma_m16_tma
+                        )
                     kernel_kwargs = {"split_count": ordered_split} if ordered_split else {}
                     output = kernel(
                         wgmma_input,
@@ -1023,7 +1058,7 @@ class QVQLinear(BaseQuantLinear):
                         bank_alt_id=cuda_bank_alt_id,
                         **kernel_kwargs,
                     )
-                    return output[: x.shape[0]]
+                    return output if return_ordered_partials else output[: x.shape[0]]
 
             return qvq_cuda_gemv(
                 x.contiguous(),
@@ -1447,7 +1482,14 @@ class QVQReferenceLinear(QVQLinear):
         # attribute solely to construct the reference oracle.
         QVQLinear.verify_supports_params()
 
-    def _inner_forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _inner_forward(
+        self,
+        x: torch.Tensor,
+        *,
+        return_ordered_partials: bool = False,
+    ) -> torch.Tensor:
+        if return_ordered_partials:
+            raise RuntimeError("reference QVQ execution does not expose split partials")
         return self._reference_inner_forward(x)
 
 

@@ -70,6 +70,7 @@ def _validate_viterbi_distance_range(
         )
 _QVQ_CUDA_HADAMARD_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_OP: Callable | None = None
+_QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = None
@@ -116,6 +117,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "viterbi_v2_segment_family_grid_trusted",
         "hadamard",
         "hadamard_pair_fp32_to_fp16",
+        "hadamard_ordered_split16_fp32_to_fp16",
         "hadamard_pair_fp32_to_fp16_multiblock",
         "swiglu_precondition",
         "swiglu_precondition_multiblock",
@@ -259,6 +261,19 @@ def _qvq_cuda_hadamard_pair_op() -> Callable:
                     "qvq_cuda", "hadamard_pair_fp32_to_fp16"
                 )
     return _QVQ_CUDA_HADAMARD_PAIR_OP
+
+
+def _qvq_cuda_hadamard_ordered_split16_op() -> Callable:
+    """Resolve the fused ordered split-16 down-recovery operator once."""
+
+    global _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP
+    if _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP is None:
+                _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP = _extension_api().op(
+                    "qvq_cuda", "hadamard_ordered_split16_fp32_to_fp16"
+                )
+    return _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP
 
 
 def _qvq_cuda_hadamard_pair_multiblock_op() -> Callable:
@@ -799,6 +814,50 @@ def qvq_cuda_hadamard_pair_fp32_to_fp16(
         bias0,
         bias1,
         scale_mode,
+    )
+
+
+def qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+    partial_input: torch.Tensor,
+    *,
+    post_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    scale_mode: int = 3,
+    logical_rows: int,
+) -> torch.Tensor:
+    """Reduce sixteen ordered down partials directly into exact FP16 recovery."""
+
+    if (
+        partial_input.device.type != "cuda"
+        or partial_input.dtype != torch.float32
+        or not partial_input.is_contiguous()
+        or tuple(partial_input.shape) != (16, 16, 2048)
+    ):
+        raise ValueError(
+            "ordered split recovery requires contiguous CUDA float32 [16, 16, 2048] partials"
+        )
+    if not 1 <= logical_rows <= 16:
+        raise ValueError("ordered split recovery logical_rows must be in [1, 16]")
+    if scale_mode not in (3, 4):
+        raise ValueError("ordered split recovery scale_mode must be 3 or 4")
+    for name, tensor in (("post_scale", post_scale), ("bias", bias)):
+        if tensor is None:
+            if name == "post_scale":
+                raise TypeError("post_scale is required")
+            continue
+        if (
+            tensor.device != partial_input.device
+            or tensor.dtype != torch.float32
+            or not tensor.is_contiguous()
+            or tensor.numel() != 2048
+        ):
+            raise ValueError(
+                f"{name} must be contiguous CUDA float32[2048] on the partial-input device"
+            )
+    if torch.cuda.get_device_capability(partial_input.device) != (9, 0):
+        raise RuntimeError("ordered split recovery requires Hopper SM90")
+    return _qvq_cuda_hadamard_ordered_split16_op()(
+        partial_input, post_scale, bias, scale_mode, logical_rows
     )
 
 

@@ -111,6 +111,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_w3_m16_tma",
         "p32_window_m16_tma",
         "p32_window_m16_tma_ordered_split",
+        "p32_window_m16_tma_ordered_partials",
         "p32_window_m16_tma_grouped",
         "p32_window_m16_tma_grouped_ordered_split",
     ),
@@ -351,6 +352,40 @@ def qvq_p32_window_wgmma_m16_tma_ordered_split(
         split_count=int(split_count),
     )
     return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma_ordered_split")(
+        input,
+        trellis,
+        levels,
+        bank_ids,
+        transition_bits,
+        out_features,
+        bank_alt_id,
+        split_count,
+    )
+
+
+def qvq_p32_window_wgmma_m16_tma_ordered_partials(
+    input: torch.Tensor,
+    trellis: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    bits: float,
+    *,
+    out_features: int,
+    bank_alt_id: int = 3,
+    split_count: int,
+) -> torch.Tensor:
+    """Return child-local ordered FP32 split planes without reducing them."""
+
+    transition_bits = _resolve_transition_bits(bits)
+    split_count = _resolve_hopper_split_count(
+        input=input,
+        transition_bits=transition_bits,
+        out_features=int(out_features),
+        split_count=int(split_count),
+    )
+    if split_count <= 1:
+        raise ValueError("ordered partial output requires split_count greater than one")
+    return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma_ordered_partials")(
         input,
         trellis,
         levels,

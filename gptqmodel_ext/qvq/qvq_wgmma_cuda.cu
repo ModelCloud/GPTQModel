@@ -1045,7 +1045,7 @@ at::Tensor qvq_p32_window_wgmma_w3_m16(
   return output;
 }
 
-template <int TransitionBits, bool OrderedSplit = false>
+template <int TransitionBits, bool OrderedSplit = false, bool ReturnPartials = false>
 at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -1134,7 +1134,13 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
       P32BankTmaSmemLayout{}(cute::_, cute::_, cute::_0{}),
       cute::make_shape(cute::_16{}, cute::_16{}));
 
-  auto output = at::empty({kRows, size_n}, input.options().dtype(at::kFloat));
+  static_assert(!ReturnPartials || OrderedSplit,
+                "returning split planes requires ordered split output");
+  TORCH_CHECK(!ReturnPartials || split_count > 1,
+              "ordered partial output requires split_count greater than one");
+  auto output = ReturnPartials
+      ? at::Tensor()
+      : at::empty({kRows, size_n}, input.options().dtype(at::kFloat));
   auto partial_output = split_count == 1
       ? output
       : OrderedSplit
@@ -1159,6 +1165,9 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
       static_cast<int>(bank_alt_id));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
+  if constexpr (ReturnPartials) {
+    return partial_output;
+  }
   if constexpr (OrderedSplit) {
     if (split_count > 1) {
       qvq_wgmma_launch_ordered_split_reduction(
@@ -1241,6 +1250,35 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_ordered_split(
       TORCH_CHECK(
           false,
           "ordered-split QVQ P32 TMA WGMMA transition bits must be in [4, 7]");
+  }
+}
+
+at::Tensor qvq_p32_window_wgmma_m16_tma_ordered_partials(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t transition_bits,
+    int64_t out_features,
+    int64_t bank_alt_id,
+    int64_t split_count) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_wgmma_m16_tma_impl<4, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    case 5:
+      return qvq_p32_window_wgmma_m16_tma_impl<5, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    case 6:
+      return qvq_p32_window_wgmma_m16_tma_impl<6, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    case 7:
+      return qvq_p32_window_wgmma_m16_tma_impl<7, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+    default:
+      TORCH_CHECK(
+          false,
+          "ordered-partial QVQ P32 TMA WGMMA transition bits must be in [4, 7]");
   }
 }
 
@@ -1505,6 +1543,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_w3_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_m16_tma_ordered_split(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
+  m.def("p32_window_m16_tma_ordered_partials(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_m16_tma_grouped(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m16_tma_grouped_ordered_split(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
 }
@@ -1514,6 +1553,7 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_w3_m16_tma", qvq_p32_window_wgmma_w3_m16_tma);
   m.impl("p32_window_m16_tma", qvq_p32_window_wgmma_m16_tma);
   m.impl("p32_window_m16_tma_ordered_split", qvq_p32_window_wgmma_m16_tma_ordered_split);
+  m.impl("p32_window_m16_tma_ordered_partials", qvq_p32_window_wgmma_m16_tma_ordered_partials);
   m.impl("p32_window_m16_tma_grouped", qvq_p32_window_wgmma_m16_tma_grouped);
   m.impl("p32_window_m16_tma_grouped_ordered_split", qvq_p32_window_wgmma_m16_tma_grouped_ordered_split);
 }
