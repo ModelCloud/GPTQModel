@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+from gptqmodel.models.definitions.apertus import Apertus1p5QModel
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
 from gptqmodel.models.definitions.base_qwen3_vl import BaseQwen3VLGPTQ
@@ -62,6 +63,19 @@ def format_qwen2_vl_dataset(image, assistant):
             "role": "user",
             "content": [
                 {"type": "image", "image": image},
+                {"type": "text", "text": "generate a caption for this image"},
+            ],
+        },
+        {"role": "assistant", "content": assistant},
+    ]
+
+
+def format_apertus_v15_dataset(image, assistant):
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "url": image},
                 {"type": "text", "text": "generate a caption for this image"},
             ],
         },
@@ -203,6 +217,9 @@ def prepare_hunyuan_ocr_dataset(n_sample: int = 20) -> list[list[dict]]:
 
 
 def get_calib_dataset(model):
+    if isinstance(model, Apertus1p5QModel):
+        return prepare_dataset(format_apertus_v15_dataset, n_sample=20)
+
     if isinstance(model, OvisQModel):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
 
