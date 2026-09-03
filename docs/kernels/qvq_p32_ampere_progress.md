@@ -2377,6 +2377,18 @@ The same 256-thread/32-tile geometry was screened on M1 MLP-gate/up
 `0.082944/0.089088/0.090112/0.094208 ms`. The source was reverted; see
 `artifacts/a100_p32_window/v20_m1_gate_wide32_256t_candidate.json`.
 
+The first accepted v20 specialization applies the direct pair-position wrap
+predicate to W2.5 in the widened M16 full-Q tuple `(K,N)=(5120,12288)`. The
+predicate removes the generic next-word boundary compare while preserving the
+existing W2 power-of-two mask and the W3/W3.5 generic path. Against the
+split-10 control `0.103424 ms`, the candidate measures `0.101376 ms` in the
+matched 100-warmup/4000-iteration run (1.0202x, 1.984% lower latency), and
+the candidate-first 200-warmup/8000-iteration confirmation reproduces
+`0.101376 ms`. Maximum absolute error is `3.82e-05`; the all-rate candidate
+keeps W2/W3/W3.5 at their control medians. Artifacts are
+`v20_m16_fullq_w25_pairwrap_{candidate,control_retry4000}.json` and
+`v20_m16_fullq_w25_pairwrap_candidate_verify8000_b.json`.
+
 Subsequent probes were rejected and left out of dispatch. The M8 full-KV
 N128 layout added one event tick at W2/W2.5/W3 and tied W3.5; M8 long-K
 split 36 and split 48 were slower than the retained split 40; M8 gate/up
