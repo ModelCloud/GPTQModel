@@ -1,0 +1,42 @@
+{
+  "device": {
+    "name": "NVIDIA H100",
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348",
+    "compute_capability": "9.0",
+    "sm_count": 132
+  },
+  "component_breakdown_before_candidate_us": {
+    "workload": "W2.5 M16 complete Llama 3.2 1B MLP, eager single replay",
+    "grouped_gate_up_p32": 22.751,
+    "down_p32_split16": 12.959,
+    "gate_up_recovery": 6.272,
+    "swiglu_down_precondition": 4.000,
+    "down_reduction_recovery": 3.936,
+    "input_transform": 2.880,
+    "summed_kernel_time": 52.798,
+    "trace": "/root/qvq-profiler-artifacts/phase54-full-mlp-breakdown/w25_m16_torch_trace.json"
+  },
+  "candidate_down_cuda_graph_us": {
+    "m_values": [1, 2, 4, 8, 16],
+    "w2": [14.266, 14.345, 14.268, 14.260, 14.258],
+    "w2.5": [14.408, 14.356, 14.317, 14.332, 14.422],
+    "w3": [14.564, 14.583, 14.566, 14.557, 14.555],
+    "w3.5": [14.598, 14.571, 14.567, 14.624, 14.630]
+  },
+  "ncu_candidate": {
+    "workload": "W2.5 M16 K8192 N2048 split16 ordered output",
+    "duration_us": 15.680,
+    "instructions": 5962574,
+    "shared_load_instructions": 1114112,
+    "shared_load_bank_conflicts": 539052,
+    "shared_load_wavefronts": 1710748,
+    "eligible_warps_per_cycle": 0.961659,
+    "long_scoreboard_cycles_per_instruction": 3.121378,
+    "wait_stall_ratio": 1.030474,
+    "registers_per_thread": 63,
+    "shared_memory_bytes": 44800,
+    "report": "/root/qvq-profiler-artifacts/phase54-down-prefetch/w25_m16_split16.ncu-rep"
+  },
+  "candidate_commit": "2045dd81",
+  "decision": "promote_only_for_physical_h100_k8192_n2048_ordered_split16"
+}
