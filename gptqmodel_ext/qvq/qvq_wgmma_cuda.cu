@@ -83,31 +83,33 @@ struct HopperFixedGateUpLaunchParams {
 using WgmmaTmaSmemLayoutB = decltype(cute::tile_to_shape(
     WgmmaSmemLayoutAtomB{},
     cute::make_shape(cute::_16{}, cute::_256{}, cute::Int<kTmaStages>{})));
-template <int TransitionBits>
+template <int TransitionBits, int N64BlocksPerCta = 1>
 using P32TrellisTmaSmemLayoutFor = decltype(cute::make_layout(
     cute::make_shape(
         cute::Int<4 * TransitionBits>{},
-        cute::Int<kP32N16TilesPerBlock>{},
+        cute::Int<kP32N16TilesPerBlock * N64BlocksPerCta>{},
         cute::Int<kP32K16TilesPerStage>{},
         cute::Int<kTmaStages>{}),
     cute::make_stride(
         cute::_1{},
         cute::Int<4 * TransitionBits>{},
-        cute::Int<4 * TransitionBits * kP32N16TilesPerBlock>{},
-        cute::Int<4 * TransitionBits * kP32N16TilesPerBlock * kP32K16TilesPerStage>{})));
+        cute::Int<4 * TransitionBits * kP32N16TilesPerBlock * N64BlocksPerCta>{},
+        cute::Int<4 * TransitionBits * kP32N16TilesPerBlock *
+                  N64BlocksPerCta * kP32K16TilesPerStage>{})));
 using P32BankTmaSmemLayout = decltype(cute::make_layout(
     cute::make_shape(cute::_16{}, cute::_16{}, cute::Int<kTmaStages>{}),
     cute::make_stride(cute::_1{}, cute::_16{}, cute::_256{})));
 using WgmmaTmaPipeline = cutlass::PipelineTmaAsync<kTmaStages>;
 using WgmmaTmaPipelineState = cutlass::PipelineState<kTmaStages>;
 
-template <int TransitionBits>
+template <int TransitionBits, int N64BlocksPerCta = 1>
 struct alignas(128) P32WgmmaTmaSharedStorageFor {
   typename WgmmaTmaPipeline::SharedStorage pipeline;
   alignas(128) cute::ArrayEngine<Element, cute::cosize_v<WgmmaTmaSmemLayoutB>> input;
   alignas(128) cute::ArrayEngine<
       uint32_t,
-      cute::cosize_v<P32TrellisTmaSmemLayoutFor<TransitionBits>>> trellis;
+      cute::cosize_v<P32TrellisTmaSmemLayoutFor<
+          TransitionBits, N64BlocksPerCta>>> trellis;
   alignas(128) cute::ArrayEngine<uint8_t, cute::cosize_v<P32BankTmaSmemLayout>> bank_ids;
   // Reused by every decode lane and K16 tile; avoid dependent L1/global
   // lookups for the small, read-only PGC level table. W2-W3.5 store
@@ -663,11 +665,14 @@ template <
     bool OrderedSplit,
     bool FixedGateUp = false,
     bool PrefetchDecodedLevels = false,
+    int N64BlocksPerCta = 1,
     class InputTma,
     class TrellisTma,
     class BankTma,
     class GroupedParams>
-__global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kernel(
+__global__ __launch_bounds__(
+    kTmaThreads + (N64BlocksPerCta - 1) * kThreads)
+void qvq_p32_window_wgmma_m16_tma_kernel(
     CUTE_GRID_CONSTANT InputTma const input_tma,
     CUTE_GRID_CONSTANT TrellisTma const trellis_tma,
     CUTE_GRID_CONSTANT BankTma const bank_tma,
@@ -680,15 +685,25 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
     int launch_bank_alt_id) {
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
   static_assert(!FixedGateUp || (Grouped && !OrderedSplit));
+  static_assert(N64BlocksPerCta == 1 || N64BlocksPerCta == 2);
+  static_assert(N64BlocksPerCta == 1 || FixedGateUp);
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
-  using TrellisSmemLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
-  using SharedStorage = P32WgmmaTmaSharedStorageFor<TransitionBits>;
-  __shared__ __align__(128) char shared_buffer[sizeof(SharedStorage)];
-  auto& shared = *reinterpret_cast<SharedStorage*>(shared_buffer);
+  using TrellisSmemLayout =
+      P32TrellisTmaSmemLayoutFor<TransitionBits, N64BlocksPerCta>;
+  using SharedStorage =
+      P32WgmmaTmaSharedStorageFor<TransitionBits, N64BlocksPerCta>;
+  extern __shared__ __align__(128) char dynamic_shared_buffer[];
+  __shared__ __align__(128) char static_shared_buffer[
+      N64BlocksPerCta == 1 ? sizeof(SharedStorage) : 1];
+  auto& shared = *reinterpret_cast<SharedStorage*>(
+      N64BlocksPerCta == 1 ? static_shared_buffer : dynamic_shared_buffer);
 
   const int thread = static_cast<int>(threadIdx.x);
-  const bool is_consumer = thread < kThreads;
+  constexpr int kConsumerThreads = kThreads * N64BlocksPerCta;
+  const bool is_consumer = thread < kConsumerThreads;
   const bool is_producer = !is_consumer;
+  const int consumer_group = is_consumer ? thread / kThreads : 0;
+  const int consumer_thread = thread - consumer_group * kThreads;
   int segment = static_cast<int>(blockIdx.y);
   int n64_block = static_cast<int>(blockIdx.x);
   int split = static_cast<int>(blockIdx.z);
@@ -699,6 +714,8 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   int bank_alt_id = launch_bank_alt_id;
   int64_t output_offset = 0;
   int64_t partial_output_offset = 0;
+  int trellis_block_global = n64_block_global;
+  int bank_n64_block_global = n64_block_global;
   if constexpr (FixedGateUp) {
     // Measured Llama 3.2 1B gate/up plan: two independent equal-width
     // children, split one. Keep child-local alternate banks but make the
@@ -706,9 +723,15 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
     constexpr int kN64Blocks = kFixedGateUpN / kOutputColumns;
     constexpr int kN16Tiles = kFixedGateUpN / kP32TileColumns;
     segment = static_cast<int>(blockIdx.y);
-    n64_block = static_cast<int>(blockIdx.x);
+    const int n64_block_base =
+        static_cast<int>(blockIdx.x) * N64BlocksPerCta;
+    n64_block = n64_block_base + consumer_group;
     split = 0;
     n64_block_global = segment * kN64Blocks + n64_block;
+    trellis_block_global =
+        segment * (kN64Blocks / N64BlocksPerCta) +
+        static_cast<int>(blockIdx.x);
+    bank_n64_block_global = segment * kN64Blocks + n64_block_base;
     total_n_tiles = 2 * kN16Tiles;
     size_n = kFixedGateUpN;
     split_count = 1;
@@ -750,6 +773,10 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
     output_offset = grouped_params.output_offset[segment];
     partial_output_offset = grouped_params.partial_output_offset[segment];
   }
+  if constexpr (N64BlocksPerCta == 1) {
+    trellis_block_global = n64_block_global;
+    bank_n64_block_global = n64_block_global;
+  }
   const int k_tiles = size_k / kP32TileRows;
   const int k_tile_begin = (k_tiles * split) / split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
@@ -762,11 +789,12 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   pipeline_params.role = is_producer
       ? WgmmaTmaPipeline::ThreadCategory::Producer
       : WgmmaTmaPipeline::ThreadCategory::Consumer;
-  pipeline_params.is_leader = thread == kThreads;
-  pipeline_params.num_consumers = kThreads;
+  pipeline_params.is_leader = thread == kConsumerThreads;
+  pipeline_params.num_consumers = kConsumerThreads;
   pipeline_params.transaction_bytes =
       kRows * kKPerStage * sizeof(Element) +
-      kWordsPerP32Tile * kP32N16TilesPerBlock * kP32K16TilesPerStage * sizeof(uint32_t) +
+      kWordsPerP32Tile * kP32N16TilesPerBlock * N64BlocksPerCta *
+          kP32K16TilesPerStage * sizeof(uint32_t) +
       16 * kP32K16TilesPerStage * sizeof(uint8_t);
   WgmmaTmaPipeline pipeline(
       shared.pipeline,
@@ -798,9 +826,9 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       p32_full_trellis,
       cute::make_shape(
           cute::Int<kWordsPerP32Tile>{},
-          cute::Int<kP32N16TilesPerBlock>{},
+          cute::Int<kP32N16TilesPerBlock * N64BlocksPerCta>{},
           cute::Int<kP32K16TilesPerStage>{}),
-      cute::make_coord(cute::_0{}, n64_block_global, cute::_));
+      cute::make_coord(cute::_0{}, trellis_block_global, cute::_));
   auto [tma_global_trellis, tma_shared_trellis] = cute::tma_partition(
       trellis_tma,
       cute::Int<0>{},
@@ -813,7 +841,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   auto tiled_bank_ids = cute::local_tile(
       full_bank_ids,
       cute::make_shape(cute::_16{}, cute::_16{}),
-      cute::make_coord(n64_block_global >> 2, cute::_));
+      cute::make_coord(bank_n64_block_global >> 2, cute::_));
   auto [tma_global_bank_ids, tma_shared_bank_ids] = cute::tma_partition(
       bank_tma,
       cute::Int<0>{},
@@ -823,7 +851,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
 
   if constexpr (TransitionBits >= 4) {
     auto* vectors = reinterpret_cast<uint4*>(shared.levels.begin());
-    for (int entry = thread; entry < 256 * 4; entry += kTmaThreads) {
+    for (int entry = thread; entry < 256 * 4; entry += blockDim.x) {
       const int index = entry >> 2;
       const auto* level_bits = reinterpret_cast<const uint16_t*>(levels);
       const uint16_t low_bits = level_bits[index];
@@ -834,7 +862,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       vectors[entry] = replicated;
     }
   } else {
-    for (int index = thread; index < 256; index += kTmaThreads) {
+    for (int index = thread; index < 256; index += blockDim.x) {
       shared.levels.begin()[index] = levels[index];
       shared.levels_high.begin()[index] = levels[index ^ (index >> 7)];
     }
@@ -871,7 +899,7 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   }
 
   WgmmaTiledMma tiled_mma;
-  auto thread_mma = tiled_mma.get_thread_slice(thread);
+  auto thread_mma = tiled_mma.get_thread_slice(consumer_thread);
   auto thread_shared_b = thread_mma.partition_B(s_input);
   auto fragment_b = thread_mma.make_fragment_B(thread_shared_b);
   static_assert(cute::size<2>(decltype(fragment_b){}) == 16);
@@ -890,8 +918,8 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
   cute::clear(accumulator);
   tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
 
-  const int warp = thread >> 5;
-  const int lane = thread & 31;
+  const int warp = consumer_thread >> 5;
+  const int lane = consumer_thread & 31;
   const int bank_n16_offset =
       (n64_block_global & 3) * kP32N16TilesPerBlock;
   const auto decode_plan = qvq_p32_window_lane_plan<TransitionBits>(lane);
@@ -918,7 +946,11 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       const uint32_t bank_id = s_bank_ids(bank_n16_offset + warp, k_block, read_stage);
       const auto trellis_layout = TrellisSmemLayout{};
       const uint32_t* window_words = shared.trellis.begin() +
-          trellis_layout(0, warp, k_block, read_stage);
+          trellis_layout(
+              0,
+              consumer_group * kP32N16TilesPerBlock + warp,
+              k_block,
+              read_stage);
       qvq_p32_window_decode_fragment<
           TransitionBits,
           true,
@@ -1521,6 +1553,8 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
   const int64_t expected_tiles = static_cast<int64_t>(k_tiles) * total_n_tiles;
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
   using TrellisSmemLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
+  using WideTrellisSmemLayout =
+      P32TrellisTmaSmemLayoutFor<TransitionBits, 2>;
   TORCH_CHECK(
       trellis.numel() == expected_tiles * kWordsPerP32Tile,
       "grouped QVQ P32 TMA WGMMA trellis size mismatch");
@@ -1563,6 +1597,14 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
           cute::Int<kWordsPerP32Tile>{},
           cute::Int<kP32N16TilesPerBlock>{},
           cute::Int<kP32K16TilesPerStage>{}));
+  auto wide_trellis_tma = cute::make_tma_atom(
+      cute::SM90_TMA_LOAD{},
+      trellis_tensor,
+      WideTrellisSmemLayout{}(cute::_, cute::_, cute::_, cute::_0{}),
+      cute::make_shape(
+          cute::Int<kWordsPerP32Tile>{},
+          cute::Int<2 * kP32N16TilesPerBlock>{},
+          cute::Int<kP32K16TilesPerStage>{}));
   auto bank_tma = cute::make_tma_atom(
       cute::SM90_TMA_LOAD{},
       bank_tensor,
@@ -1594,7 +1636,49 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       use_gate_up_geometry &&
       (TransitionBits == 5 || TransitionBits == kW3TransitionBits ||
        TransitionBits == 7);
-  if (use_fixed_gate_up) {
+  const bool use_wide_gate_up =
+      use_gate_up_geometry && TransitionBits == 5 &&
+      std::strcmp(properties.name, "NVIDIA H100") == 0;
+  if (use_wide_gate_up) {
+    const HopperFixedGateUpLaunchParams fixed_params{
+        {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
+    using WideSharedStorage =
+        P32WgmmaTmaSharedStorageFor<TransitionBits, 2>;
+    auto wide_kernel = qvq_p32_window_wgmma_m16_tma_kernel<
+        TransitionBits,
+        true,
+        false,
+        true,
+        true,
+        2,
+        decltype(input_tma),
+        decltype(wide_trellis_tma),
+        decltype(bank_tma),
+        HopperFixedGateUpLaunchParams>;
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        wide_kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(sizeof(WideSharedStorage))));
+    const dim3 wide_grid(
+        static_cast<unsigned>(max_n64_blocks / 2),
+        static_cast<unsigned>(segment_count),
+        1);
+    wide_kernel<<<
+        wide_grid,
+        kTmaThreads + kThreads,
+        sizeof(WideSharedStorage),
+        stream>>>(
+        input_tma,
+        wide_trellis_tma,
+        bank_tma,
+        reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+        partial_output.data_ptr<float>(),
+        fixed_params,
+        kFixedGateUpK,
+        2 * kFixedGateUpN,
+        1,
+        0);
+  } else if (use_fixed_gate_up) {
     const HopperFixedGateUpLaunchParams fixed_params{
         {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
     qvq_p32_window_wgmma_m16_tma_kernel<

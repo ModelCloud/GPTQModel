@@ -205,6 +205,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_fp16_recovery_store_launches: int = 0
     h100_fused_down_reduction_recovery_launches: int = 0
     h100_multiblock_down_recovery_launches: int = 0
+    h100_w25_n128_gate_up_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -238,6 +239,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_fp16_recovery_store_launches": self.h100_fp16_recovery_store_launches,
             "h100_fused_down_reduction_recovery_launches": self.h100_fused_down_reduction_recovery_launches,
             "h100_multiblock_down_recovery_launches": self.h100_multiblock_down_recovery_launches,
+            "h100_w25_n128_gate_up_launches": self.h100_w25_n128_gate_up_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -267,6 +269,7 @@ class QVQHopperGroupedRuntime:
         self._h100_direct_padded_input_enabled = False
         self._h100_multiblock_input_hadamard_enabled = False
         self._h100_fp16_recovery_store_enabled = False
+        self._h100_w25_n128_gate_up_enabled = False
         self._input: torch.Tensor | None = None
         self._input_version: int | None = None
         self._outputs: tuple[torch.Tensor, ...] | None = None
@@ -300,6 +303,7 @@ class QVQHopperGroupedRuntime:
         self._h100_direct_padded_input_enabled = False
         self._h100_multiblock_input_hadamard_enabled = False
         self._h100_fp16_recovery_store_enabled = False
+        self._h100_w25_n128_gate_up_enabled = False
         self.telemetry.grouped_window_bytes = 0
         self.telemetry.grouped_selector_bytes = 0
         self.telemetry.child_window_bytes_avoided = 0
@@ -388,6 +392,18 @@ class QVQHopperGroupedRuntime:
         )
         self._h100_fp16_recovery_store_enabled = (
             properties.name == "NVIDIA H100"
+            and (properties.major, properties.minor) == (9, 0)
+        )
+        self._h100_w25_n128_gate_up_enabled = (
+            self.category == "gate_up"
+            and len(children) == 2
+            and children[0].in_features == 2048
+            and all(child.out_features == 8192 for child in children)
+            and qvq_transition_bits(
+                children[0].bits, vector_size=children[0].vector_size
+            )
+            == 5
+            and properties.name == "NVIDIA H100"
             and (properties.major, properties.minor) == (9, 0)
         )
         measured_splits = None
@@ -535,6 +551,8 @@ class QVQHopperGroupedRuntime:
         )
         if grouped_inner is qvq_p32_window_wgmma_grouped_ordered_packed:
             self.telemetry.ordered_split_launches += 1
+        if self._h100_w25_n128_gate_up_enabled:
+            self.telemetry.h100_w25_n128_gate_up_launches += 1
 
         # Gate and up have equal-width, independent output transforms.  One
         # grid schedules both row sets concurrently, applies each child's own

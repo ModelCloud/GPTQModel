@@ -433,14 +433,14 @@ def test_grouped_ordered_split_is_cuda_graph_stable_at_llama_qkv_shape():
         ("gate_up", (8192, 8192), (1, 3)),
     ),
 )
+@pytest.mark.parametrize("bits", (2.5, 3.0))
 @pytest.mark.parametrize("logical_m", (1, 2, 4, 8, 16))
 def test_grouped_hopper_is_exact_at_llama32_1b_shapes(
-    group, widths, alt_ids, logical_m
+    group, widths, alt_ids, bits, logical_m
 ):
     device = _h100_device()
     if device is None:
         pytest.skip("requires the exclusive H100 validation device")
-    bits = 3
     in_features = 2048
     generator = torch.Generator(device=device).manual_seed(
         20261220 + logical_m + (0 if group == "qkv" else 100)
