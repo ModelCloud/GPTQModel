@@ -2500,6 +2500,17 @@ transition width; the 16-case benchmark caught W3 full-Q corruption
 correct compile-time mask for each width; the corrected full M16 matrix is
 `v20_bank_alt3_maskfix_m16_all_rates.json`.
 
+The tenth accepted v20 progression adds a three-K16 software stage to the
+widened M16 full-Q tuple `(K,N)=(5120,12288)`. It keeps the two shared stage
+buffers but processes three K tiles between handoffs, reducing pipeline
+barrier/commit overhead without changing MMA order. In matched 8,000-iteration
+runs, stage 2 measured `0.096256/0.096256/0.097280/0.099328 ms` and stage 3
+measured `0.092160/0.092160/0.093184/0.094208 ms` for W2/W2.5/W3/W3.5: all
+four rates improve, with a 4.69% geometric-mean reduction and exact output
+(maximum absolute error `4.01e-05`). The stage-3 template is restricted to
+this full-Q dispatch; all other routes retain the proven two-K16 stage.
+Artifacts are `v20_m16_fullq_stage3_{control8000,verify8000}.json`.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
