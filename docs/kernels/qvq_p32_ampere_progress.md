@@ -2559,6 +2559,15 @@ absolute error `4.20e-05`. Both gate/up transition branches use stage 3;
 other M8 routes retain stage 2. Artifacts are
 `v20_m8_gate_stage3_{control,verify8000}.json`.
 
+The sixteenth accepted v20 progression applies the three-K16 stage to the
+M8 fixed-N attention-out `(K,N)=(6144,5120)` wide launcher. Stage 2's matched
+medians were `0.052224/0.053248/0.053248/0.052224 ms`; stage 3 measured
+`0.052224/0.052224/0.051200/0.051200 ms` (about 1.9% geometric-mean
+improvement). The 8,000-iteration confirmation reproduced the same values,
+with exact output and maximum absolute error `2.67e-05`. Both transition
+branches use stage 3; other M8 routes retain stage 2. Artifacts are
+`v20_m8_attention_stage3_{control,verify8000}.json`.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
