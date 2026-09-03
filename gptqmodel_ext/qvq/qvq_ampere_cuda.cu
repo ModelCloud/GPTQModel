@@ -61,9 +61,14 @@ __device__ __forceinline__ uint32_t pgc16_mix(uint32_t state) {
   return mixed ^ (mixed >> 7);
 }
 
-template <int TransitionBits>
+template <int TransitionBits, bool FastBankAlt3 = false>
 __device__ __forceinline__ uint32_t alternate_bank_mask(int bank_alt_id) {
   static_assert(TransitionBits >= 4 && TransitionBits <= 7);
+  if constexpr (FastBankAlt3) {
+    if (bank_alt_id == 3) {
+      return 0xc3c3u;
+    }
+  }
   if (bank_alt_id == 0) {
     return 0u;
   }
@@ -395,7 +400,8 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   const int input_stride = StaticK > 0 ? StaticK : size_k;
   const int k_tile_begin = (k_tiles * split) / split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
-  const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(bank_alt_id);
+  const uint32_t alt_mask =
+      alternate_bank_mask<TransitionBits, FullRows && WideNTiles>(bank_alt_id);
 
   auto stage = [&](int k_tile_base, int destination) {
     auto* input_vectors = reinterpret_cast<uint4*>(input_tile[destination]);

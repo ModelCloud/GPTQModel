@@ -2479,6 +2479,20 @@ was not enabled; diagnostic: `v20_m8_down_ca8_w3_candidate.json`.
 The W2.5 M8 long-K down CA8 probe was likewise neutral at `0.120832 ms` and
 was reverted (`v20_m8_down_ca8_w25_candidate.json`).
 
+The ninth accepted v20 progression specializes `alternate_bank_mask` for the
+common `bank_alt_id=3` in full-row widened M16 kernels only. Matched W2.5
+8,000-iteration controls/candidates (full-Q, attention-out, gate/up, down)
+are `0.101376/0.059392/0.134144/0.135168` and
+`0.097280/0.057344/0.129024/0.133120 ms`, respectively: approximately
+`4.04%/3.45%/3.82%/1.52%` lower latency and 3.32% geometric-mean gain, with
+exact outputs. A global version was rejected after representative M1/M8
+routes regressed, so scalar and active-row kernels retain the original
+runtime mask path. Artifacts are
+`v20_bank_alt3_control8000.json`,
+`v20_bank_alt3_fast_all_m16_w25_verify8000.json`,
+`v20_bank_alt3_m16_narrow_verify8000.json`, and
+`v20_bank_alt3_fast_m1m8_w25.json`.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
