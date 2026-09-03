@@ -863,6 +863,43 @@ __device__ __forceinline__ float qvq_recovery_high_selected(
   return values[0];
 }
 
+// Produce the two outputs whose tile indices differ only in the final
+// 32-point Hadamard bit. They share the first four exact reduction stages:
+// 32 input loads and 30 rounded internal operations form the two remaining
+// subtrees, then one rounded sum and difference produce output_tile and
+// output_tile + 16. This is the same ascending tree as two independent
+// qvq_recovery_high_selected calls, but uses 32 rather than 64 loads and 32
+// rather than 62 rounded operations.
+__device__ __forceinline__ void qvq_recovery_high_pair_selected(
+    const float* __restrict__ workspace_row,
+    int local,
+    int output_tile,
+    float& output0,
+    float& output1) {
+  float values[kHadamardPairMultiblockTiles];
+#pragma unroll
+  for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+    values[tile] = workspace_row[tile * kHadamardPairMultiblockTile + local];
+  }
+  int active = kHadamardPairMultiblockTiles;
+#pragma unroll
+  for (int stage = 0; stage < 4; ++stage) {
+    active >>= 1;
+    const bool subtract = (output_tile & (1 << stage)) != 0;
+#pragma unroll
+    for (int index = 0; index < kHadamardPairMultiblockTiles / 2; ++index) {
+      if (index < active) {
+        const float a = values[index * 2];
+        const float b = values[index * 2 + 1];
+        values[index] = round_fp16_unless_overflow(
+            subtract ? a - b : a + b);
+      }
+    }
+  }
+  output0 = round_fp16_unless_overflow(values[0] + values[1]);
+  output1 = round_fp16_unless_overflow(values[0] - values[1]);
+}
+
 // Fuse the selected recovery-high outputs with the exact rounded FP16 SiLU,
 // product, down scale/divisor, and first eight down-input Hadamard stages.
 // The nonlinear FP16 boundary is still materialized in registers, but the
@@ -964,6 +1001,159 @@ __global__ void qvq_recovery_high_swiglu_precondition_half2_low_kernel(
     const int64_t pair_offset = row_offset +
         output_tile * kHadamardPairMultiblockTile + local * 2;
     *reinterpret_cast<half2*>(precondition_workspace + pair_offset) = buf[local];
+  }
+}
+
+// Phase-64 candidate: one CTA owns both high-transform output tiles that
+// differ only in the final tile-index bit. Besides sharing the selected
+// recovery tree, the CTA carries both recovered columns through the exact
+// FP16 recovery, SiLU/product/pre-scale boundary, and independent half2 low
+// transforms. The two shared arrays keep the transforms independent and
+// preserve every accepted Phase-63 rounding operation.
+__global__ void qvq_recovery_high_pair_swiglu_precondition_half2_low_kernel(
+    const float* __restrict__ recovery_workspace,
+    const float* __restrict__ post_scale0,
+    const float* __restrict__ post_scale1,
+    const float* __restrict__ bias0,
+    const float* __restrict__ bias1,
+    const half* __restrict__ pre_scale,
+    half* __restrict__ precondition_workspace,
+    int rows,
+    int scale_mode) {
+  __shared__ half2 buf[2][kHadamardPairMultiblockHalf2LowValues];
+  const int row = static_cast<int>(blockIdx.y);
+  const int output_tile0 = static_cast<int>(blockIdx.x);
+  const int output_tile1 = output_tile0 + kHadamardPairMultiblockTiles / 2;
+  const int local = static_cast<int>(threadIdx.x);
+  const int column0 = output_tile0 * kHadamardPairMultiblockTile + local;
+  const int column1 = output_tile1 * kHadamardPairMultiblockTile + local;
+  const int64_t row_offset =
+      static_cast<int64_t>(row) * kHadamardPairMultiblockN;
+  const float* gate_workspace = recovery_workspace + row_offset;
+  const float* up_workspace = recovery_workspace +
+      static_cast<int64_t>(rows + row) * kHadamardPairMultiblockN;
+
+  float gate_value0;
+  float gate_value1;
+  float up_value0;
+  float up_value1;
+  qvq_recovery_high_pair_selected(
+      gate_workspace, local, output_tile0, gate_value0, gate_value1);
+  qvq_recovery_high_pair_selected(
+      up_workspace, local, output_tile0, up_value0, up_value1);
+  const float reciprocal = 1.0f /
+      sqrtf(static_cast<float>(kHadamardPairMultiblockN));
+  if (scale_mode == 4) {
+    gate_value0 = round_fp16_unless_overflow(gate_value0 * reciprocal);
+    gate_value1 = round_fp16_unless_overflow(gate_value1 * reciprocal);
+    up_value0 = round_fp16_unless_overflow(up_value0 * reciprocal);
+    up_value1 = round_fp16_unless_overflow(up_value1 * reciprocal);
+  }
+  gate_value0 = round_fp16_unless_overflow(
+      gate_value0 * post_scale0[column0]);
+  gate_value1 = round_fp16_unless_overflow(
+      gate_value1 * post_scale0[column1]);
+  up_value0 = round_fp16_unless_overflow(
+      up_value0 * post_scale1[column0]);
+  up_value1 = round_fp16_unless_overflow(
+      up_value1 * post_scale1[column1]);
+  if (bias0 != nullptr) {
+    gate_value0 = round_fp16_unless_overflow(gate_value0 + bias0[column0]);
+    gate_value1 = round_fp16_unless_overflow(gate_value1 + bias0[column1]);
+  }
+  if (bias1 != nullptr) {
+    up_value0 = round_fp16_unless_overflow(up_value0 + bias1[column0]);
+    up_value1 = round_fp16_unless_overflow(up_value1 + bias1[column1]);
+  }
+  const half gate0 = __float2half_rn(gate_value0);
+  const half gate1 = __float2half_rn(gate_value1);
+  const half up0 = __float2half_rn(up_value0);
+  const half up1 = __float2half_rn(up_value1);
+  const half activated_gate0 = qvq_silu_fp16(gate0);
+  const half activated_gate1 = qvq_silu_fp16(gate1);
+  const half product_half0 = __float2half_rn(
+      __half2float(activated_gate0) * __half2float(up0));
+  const half product_half1 = __float2half_rn(
+      __half2float(activated_gate1) * __half2float(up1));
+  float seed0 = __half2float(product_half0) * __half2float(pre_scale[column0]);
+  float seed1 = __half2float(product_half1) * __half2float(pre_scale[column1]);
+  seed0 = round_fp16_unless_overflow(seed0);
+  seed1 = round_fp16_unless_overflow(seed1);
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(kHadamardPairMultiblockN))));
+  const half initial0 = __float2half_rn(seed0 / divisor);
+  const half initial1 = __float2half_rn(seed1 / divisor);
+
+  const unsigned int peer_bits0 = __shfl_xor_sync(
+      0xffffffffu, static_cast<unsigned int>(__half_as_ushort(initial0)), 1);
+  const unsigned int peer_bits1 = __shfl_xor_sync(
+      0xffffffffu, static_cast<unsigned int>(__half_as_ushort(initial1)), 1);
+  if ((local & 1) == 0) {
+    constexpr unsigned int kEvenLaneMask = 0x55555555u;
+    const int local_pair = local >> 1;
+    const half peer0 = __ushort_as_half(static_cast<unsigned short>(peer_bits0));
+    const half peer1 = __ushort_as_half(static_cast<unsigned short>(peer_bits1));
+    const half2 pair0 = __halves2half2(initial0, peer0);
+    const half2 pair1 = __halves2half2(initial1, peer1);
+    const half2 swapped0 = __lowhigh2highlow(pair0);
+    const half2 swapped1 = __lowhigh2highlow(pair1);
+    const half2 sum0 = __hadd2(pair0, swapped0);
+    const half2 sum1 = __hadd2(pair1, swapped1);
+    const half2 difference0 = __hsub2(pair0, swapped0);
+    const half2 difference1 = __hsub2(pair1, swapped1);
+    half2 packed0 = __lows2half2(sum0, difference0);
+    half2 packed1 = __lows2half2(sum1, difference1);
+
+#pragma unroll
+    for (int bit = 1; bit < 16; bit <<= 1) {
+      union Half2Bits {
+        half2 value;
+        unsigned int bits;
+      } packed_bits0, packed_bits1, packed_peer0, packed_peer1;
+      packed_bits0.value = packed0;
+      packed_bits1.value = packed1;
+      packed_peer0.bits = __shfl_xor_sync(
+          kEvenLaneMask, packed_bits0.bits, bit * 2);
+      packed_peer1.bits = __shfl_xor_sync(
+          kEvenLaneMask, packed_bits1.bits, bit * 2);
+      packed0 = (local_pair & bit) == 0
+          ? __hadd2(packed0, packed_peer0.value)
+          : __hsub2(packed_peer0.value, packed0);
+      packed1 = (local_pair & bit) == 0
+          ? __hadd2(packed1, packed_peer1.value)
+          : __hsub2(packed_peer1.value, packed1);
+    }
+    buf[0][local_pair] = packed0;
+    buf[1][local_pair] = packed1;
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 16; bit < kHadamardPairMultiblockHalf2LowValues; bit <<= 1) {
+    if (local < kHadamardPairMultiblockHalf2LowValues) {
+      const int peer = local ^ bit;
+      if (local < peer) {
+        const half2 a0 = buf[0][local];
+        const half2 b0 = buf[0][peer];
+        const half2 a1 = buf[1][local];
+        const half2 b1 = buf[1][peer];
+        buf[0][local] = __hadd2(a0, b0);
+        buf[0][peer] = __hsub2(a0, b0);
+        buf[1][local] = __hadd2(a1, b1);
+        buf[1][peer] = __hsub2(a1, b1);
+      }
+    }
+    __syncthreads();
+  }
+  if (local < kHadamardPairMultiblockHalf2LowValues) {
+    const int64_t pair_offset0 = row_offset +
+        output_tile0 * kHadamardPairMultiblockTile + local * 2;
+    const int64_t pair_offset1 = row_offset +
+        output_tile1 * kHadamardPairMultiblockTile + local * 2;
+    *reinterpret_cast<half2*>(precondition_workspace + pair_offset0) =
+        buf[0][local];
+    *reinterpret_cast<half2*>(precondition_workspace + pair_offset1) =
+        buf[1][local];
   }
 }
 
@@ -1637,7 +1827,8 @@ at::Tensor qvq_hadamard_pair_swiglu_precondition_multiblock_cuda(
     const c10::optional<at::Tensor>& bias1,
     const at::Tensor& pre_scale,
     int64_t scale_mode,
-    bool pad_to_16) {
+    bool pad_to_16,
+    bool pair_tiles) {
   TORCH_CHECK(input0.is_cuda() && input1.is_cuda() && pre_scale.is_cuda(),
               "fused recovery/precondition tensors must be CUDA tensors");
   TORCH_CHECK(input0.device() == input1.device() && input0.device() == pre_scale.device(),
@@ -1704,20 +1895,37 @@ at::Tensor qvq_hadamard_pair_swiglu_precondition_multiblock_cuda(
       static_cast<int>(scale_mode));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  qvq_recovery_high_swiglu_precondition_half2_low_kernel<<<
-      dim3(kHadamardPairMultiblockTiles, rows),
-      kHadamardPairMultiblockTile,
-      0,
-      stream>>>(
-      recovery_workspace.const_data_ptr<float>(),
-      post_scale0.const_data_ptr<float>(),
-      post_scale1.const_data_ptr<float>(),
-      bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
-      bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
-      reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
-      reinterpret_cast<half*>(precondition_workspace.mutable_data_ptr()),
-      rows,
-      static_cast<int>(scale_mode));
+  if (pair_tiles) {
+    qvq_recovery_high_pair_swiglu_precondition_half2_low_kernel<<<
+        dim3(kHadamardPairMultiblockTiles / 2, rows),
+        kHadamardPairMultiblockTile,
+        0,
+        stream>>>(
+        recovery_workspace.const_data_ptr<float>(),
+        post_scale0.const_data_ptr<float>(),
+        post_scale1.const_data_ptr<float>(),
+        bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
+        bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
+        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+        reinterpret_cast<half*>(precondition_workspace.mutable_data_ptr()),
+        rows,
+        static_cast<int>(scale_mode));
+  } else {
+    qvq_recovery_high_swiglu_precondition_half2_low_kernel<<<
+        dim3(kHadamardPairMultiblockTiles, rows),
+        kHadamardPairMultiblockTile,
+        0,
+        stream>>>(
+        recovery_workspace.const_data_ptr<float>(),
+        post_scale0.const_data_ptr<float>(),
+        post_scale1.const_data_ptr<float>(),
+        bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
+        bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
+        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+        reinterpret_cast<half*>(precondition_workspace.mutable_data_ptr()),
+        rows,
+        static_cast<int>(scale_mode));
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   const int output_rows = pad_to_16 ? 16 : rows;
@@ -1971,7 +2179,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("hadamard_input_fp16_padded_multiblock(Tensor input, Tensor pre_scale) -> Tensor");
   m.def("hadamard_ordered_split16_fp32_to_fp16(Tensor partial_input, Tensor post_scale, Tensor? bias, int scale_mode, int logical_rows, bool multiblock=False) -> Tensor");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode, bool warp_low=False) -> (Tensor, Tensor)");
-  m.def("hadamard_pair_swiglu_precondition_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, Tensor pre_scale, int scale_mode, bool pad_to_16=False) -> Tensor");
+  m.def("hadamard_pair_swiglu_precondition_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, Tensor pre_scale, int scale_mode, bool pad_to_16=False, bool pair_tiles=False) -> Tensor");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
   m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False, bool half2_low=False, bool pad_to_16=False) -> Tensor");
 }

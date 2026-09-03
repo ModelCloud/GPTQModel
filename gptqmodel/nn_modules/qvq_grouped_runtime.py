@@ -196,6 +196,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_multiblock_recovery_launches: int = 0
     h100_warp_recovery_low_launches: int = 0
     h100_fused_recovery_precondition_launches: int = 0
+    h100_paired_recovery_tiles_launches: int = 0
     h100_multiblock_precondition_launches: int = 0
     h100_half2_precondition_high_launches: int = 0
     h100_fused_silu_precondition_low_launches: int = 0
@@ -232,6 +233,9 @@ class QVQGroupedRuntimeTelemetry:
             "h100_warp_recovery_low_launches": self.h100_warp_recovery_low_launches,
             "h100_fused_recovery_precondition_launches": (
                 self.h100_fused_recovery_precondition_launches
+            ),
+            "h100_paired_recovery_tiles_launches": (
+                self.h100_paired_recovery_tiles_launches
             ),
             "h100_multiblock_precondition_launches": self.h100_multiblock_precondition_launches,
             "h100_half2_precondition_high_launches": self.h100_half2_precondition_high_launches,
@@ -705,11 +709,14 @@ class QVQHopperGroupedRuntime:
                 pre_scale=down._cached_cast("SU", torch.float16),
                 scale_mode=3,
                 pad_to_16=direct_pad,
+                pair_tiles=rows == 16,
             )
             self.telemetry.paired_recovery_launches += 1
             self.telemetry.h100_multiblock_recovery_launches += 1
             self.telemetry.h100_warp_recovery_low_launches += 1
             self.telemetry.h100_fused_recovery_precondition_launches += 1
+            if rows == 16:
+                self.telemetry.h100_paired_recovery_tiles_launches += 1
             self.telemetry.h100_multiblock_precondition_launches += 1
             self.telemetry.h100_half2_precondition_high_launches += 1
             self.telemetry.h100_fused_silu_precondition_low_launches += 1

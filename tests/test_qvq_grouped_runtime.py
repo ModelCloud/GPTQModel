@@ -671,11 +671,17 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     layer.mlp.up_proj = replacements["up_proj"]
     layer.mlp.down_proj = replacements["down_proj"]
 
-    input_ids = torch.tensor([[1, 7, 11, 19]], device=device)
+    # Sixteen prompt rows exercise the measured Phase-64 paired-recovery-tile
+    # policy; cached decoding then returns to the ordinary one-row path.
+    input_ids = torch.tensor(
+        [[1, 7, 11, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71]],
+        device=device,
+    )
+    generation_ids = input_ids[:, :4]
     with torch.inference_mode():
         expected_logits = model(input_ids=input_ids, use_cache=False).logits
         expected_tokens = model.generate(
-            input_ids=input_ids,
+            input_ids=generation_ids,
             max_new_tokens=3,
             do_sample=False,
             use_cache=True,
@@ -686,7 +692,7 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     with torch.inference_mode():
         actual_logits = model(input_ids=input_ids, use_cache=False).logits
         actual_tokens = model.generate(
-            input_ids=input_ids,
+            input_ids=generation_ids,
             max_new_tokens=3,
             do_sample=False,
             use_cache=True,
@@ -700,7 +706,9 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     assert {entry["category"] for entry in telemetry} == {"qkv", "gate_up"}
     assert all(entry["grouped_launches"] >= 4 for entry in telemetry)
     assert all(entry["plain_fallbacks"] == 0 for entry in telemetry)
-    assert all(entry["h100_direct_padded_input_launches"] >= 4 for entry in telemetry)
+    assert all(
+        entry["h100_direct_padded_input_launches"] >= 3 for entry in telemetry
+    )
     assert all(
         entry["h100_multiblock_input_hadamard_launches"] >= 4
         for entry in telemetry
@@ -714,10 +722,11 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     assert gate_up_telemetry["h100_multiblock_recovery_launches"] >= 4
     assert gate_up_telemetry["h100_warp_recovery_low_launches"] >= 4
     assert gate_up_telemetry["h100_fused_recovery_precondition_launches"] >= 4
+    assert gate_up_telemetry["h100_paired_recovery_tiles_launches"] >= 1
     assert gate_up_telemetry["h100_multiblock_precondition_launches"] >= 4
     assert gate_up_telemetry["h100_half2_precondition_high_launches"] >= 4
     assert gate_up_telemetry["h100_fused_silu_precondition_low_launches"] >= 4
     assert gate_up_telemetry["h100_half2_precondition_low_launches"] >= 4
-    assert gate_up_telemetry["h100_direct_padded_precondition_launches"] >= 4
+    assert gate_up_telemetry["h100_direct_padded_precondition_launches"] >= 3
     assert gate_up_telemetry["h100_fused_down_reduction_recovery_launches"] >= 4
     assert gate_up_telemetry["h100_multiblock_down_recovery_launches"] >= 4

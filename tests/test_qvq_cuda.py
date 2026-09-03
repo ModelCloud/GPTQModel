@@ -1187,8 +1187,9 @@ def test_qvq_cuda_multiblock_fused_silu_covers_every_finite_fp16_value():
 @pytest.mark.parametrize("m", (1, 8, 16))
 @pytest.mark.parametrize("scale_mode", (3, 4))
 @pytest.mark.parametrize("pad_to_16", (False, True))
+@pytest.mark.parametrize("pair_tiles", (False, True))
 def test_qvq_cuda_fused_recovery_to_precondition_is_bit_exact_and_graph_stable(
-    m, scale_mode, pad_to_16
+    m, scale_mode, pad_to_16, pair_tiles
 ):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("fused recovery/precondition requires Hopper")
@@ -1229,6 +1230,7 @@ def test_qvq_cuda_fused_recovery_to_precondition_is_bit_exact_and_graph_stable(
         pre_scale=pre_scale,
         scale_mode=scale_mode,
         pad_to_16=pad_to_16,
+        pair_tiles=pair_tiles,
     )
     assert torch.equal(actual, expected)
 
@@ -1243,6 +1245,7 @@ def test_qvq_cuda_fused_recovery_to_precondition_is_bit_exact_and_graph_stable(
             pre_scale=pre_scale,
             scale_mode=scale_mode,
             pad_to_16=pad_to_16,
+            pair_tiles=pair_tiles,
         )
     graph.replay()
     torch.cuda.synchronize()

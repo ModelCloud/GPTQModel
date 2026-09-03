@@ -318,6 +318,10 @@ def _run(args):
             len(telemetry) != 1
             or telemetry[0]["fused_mlp_fallbacks"]
             or not telemetry[0]["fused_mlp_launches"]
+            or (
+                16 in args.m_values
+                and not telemetry[0]["h100_paired_recovery_tiles_launches"]
+            )
         ):
             raise RuntimeError(f"unexpected fused MLP telemetry: {telemetry}")
         del mlp, expected, plain, paired_recovery
