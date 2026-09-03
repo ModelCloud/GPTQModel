@@ -1,0 +1,1381 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "baf71282f7341d5496d326a4d43627b637f151c6",
+  "rows": [
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": false,
+      "bits": 2.0,
+      "fused_mlp_effective_tflops": 1.8810788085752919,
+      "fused_mlp_qvq": {
+        "max_ms": 0.05400512218475342,
+        "mean_ms": 0.053612508749961846,
+        "median_ms": 0.053513598442077634,
+        "min_ms": 0.05345920085906983,
+        "p95_ms": 0.053903999328613283
+      },
+      "m": 1,
+      "machete_effective_tflops": 1.999890606399821,
+      "machete_w4": {
+        "max_ms": 0.0514899206161499,
+        "mean_ms": 0.050418761634826656,
+        "median_ms": 0.05033440113067627,
+        "min_ms": 0.04961984157562256,
+        "p95_ms": 0.05097407817840576
+      },
+      "marlin_effective_tflops": 3.4483934413034443,
+      "marlin_w4": {
+        "max_ms": 0.029895679950714113,
+        "mean_ms": 0.029380140769481658,
+        "median_ms": 0.029191360473632813,
+        "min_ms": 0.029032959938049316,
+        "p95_ms": 0.029854719638824464
+      },
+      "matrix_shapes": [
+        [
+          1,
+          2048,
+          8192
+        ],
+        [
+          1,
+          2048,
+          8192
+        ],
+        [
+          1,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 1.2721834279648276,
+      "paired_recovery_qvq": {
+        "max_ms": 0.07992127895355225,
+        "mean_ms": 0.07920888657569886,
+        "median_ms": 0.0791264009475708,
+        "min_ms": 0.07898303985595703,
+        "p95_ms": 0.07987199783325195
+      },
+      "plain_qvq": {
+        "max_ms": 0.14401535987854003,
+        "mean_ms": 0.14115363173484802,
+        "median_ms": 0.1408188772201538,
+        "min_ms": 0.1407686424255371,
+        "p95_ms": 0.14395456314086913
+      },
+      "plain_qvq_effective_tflops": 0.7148423420719706,
+      "speedup_vs_machete_w4": 0.9405908515974218,
+      "speedup_vs_marlin_w4": 0.5454942542357553,
+      "speedup_vs_paired_recovery": 1.4786223175258173,
+      "speedup_vs_plain": 2.631459690990023,
+      "speedup_vs_previous_benchmark": 0.9975124335994775
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": false,
+      "bits": 2.0,
+      "fused_mlp_effective_tflops": 3.7468992379294987,
+      "fused_mlp_qvq": {
+        "max_ms": 0.05381760120391846,
+        "mean_ms": 0.05373116464614868,
+        "median_ms": 0.05373152017593384,
+        "min_ms": 0.05367807865142822,
+        "p95_ms": 0.053753600120544434
+      },
+      "m": 2,
+      "machete_effective_tflops": 4.024522794916955,
+      "machete_w4": {
+        "max_ms": 0.05019775867462158,
+        "mean_ms": 0.050007145619392394,
+        "median_ms": 0.050024960041046146,
+        "min_ms": 0.04952256202697754,
+        "p95_ms": 0.0501094388961792
+      },
+      "marlin_effective_tflops": 6.4299574334914675,
+      "marlin_w4": {
+        "max_ms": 0.03140352010726929,
+        "mean_ms": 0.031312105548381805,
+        "median_ms": 0.03131071925163269,
+        "min_ms": 0.031198720932006836,
+        "p95_ms": 0.03136064052581787
+      },
+      "matrix_shapes": [
+        [
+          2,
+          2048,
+          8192
+        ],
+        [
+          2,
+          2048,
+          8192
+        ],
+        [
+          2,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 2.5380748228816854,
+      "paired_recovery_qvq": {
+        "max_ms": 0.07948544025421142,
+        "mean_ms": 0.07933064954280854,
+        "median_ms": 0.07932255983352662,
+        "min_ms": 0.0792300796508789,
+        "p95_ms": 0.07941440105438233
+      },
+      "plain_qvq": {
+        "max_ms": 0.14165247917175294,
+        "mean_ms": 0.14153017611503602,
+        "median_ms": 0.14153184413909914,
+        "min_ms": 0.1414579200744629,
+        "p95_ms": 0.14156415939331055
+      },
+      "plain_qvq_effective_tflops": 1.4224826449808277,
+      "speedup_vs_machete_w4": 0.9310170245928041,
+      "speedup_vs_marlin_w4": 0.5827253565339595,
+      "speedup_vs_paired_recovery": 1.4762761145376064,
+      "speedup_vs_plain": 2.6340562052902934,
+      "speedup_vs_previous_benchmark": 0.9985885646715726
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 2.0,
+      "fused_mlp_effective_tflops": 7.4203950631397575,
+      "fused_mlp_qvq": {
+        "max_ms": 0.054333438873291014,
+        "mean_ms": 0.054263040137290955,
+        "median_ms": 0.054263038635253905,
+        "min_ms": 0.05421120166778565,
+        "p95_ms": 0.05429183959960938
+      },
+      "m": 4,
+      "machete_effective_tflops": 7.960794997592864,
+      "machete_w4": {
+        "max_ms": 0.05075967788696289,
+        "mean_ms": 0.05055973110198974,
+        "median_ms": 0.05057951927185059,
+        "min_ms": 0.05007040023803711,
+        "p95_ms": 0.050668802261352536
+      },
+      "marlin_effective_tflops": 12.780108933923355,
+      "marlin_w4": {
+        "max_ms": 0.03159424066543579,
+        "mean_ms": 0.031506032037734985,
+        "median_ms": 0.031506240367889404,
+        "min_ms": 0.03143296003341675,
+        "p95_ms": 0.0315500807762146
+      },
+      "matrix_shapes": [
+        [
+          4,
+          2048,
+          8192
+        ],
+        [
+          4,
+          2048,
+          8192
+        ],
+        [
+          4,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 5.01293255751905,
+      "paired_recovery_qvq": {
+        "max_ms": 0.08045184135437011,
+        "mean_ms": 0.08032268810272218,
+        "median_ms": 0.08032288074493407,
+        "min_ms": 0.08022272109985351,
+        "p95_ms": 0.08039360046386719
+      },
+      "plain_qvq": {
+        "max_ms": 0.14217280387878417,
+        "mean_ms": 0.1421002465248108,
+        "median_ms": 0.14210047721862792,
+        "min_ms": 0.1420486354827881,
+        "p95_ms": 0.14212544441223143
+      },
+      "plain_qvq_effective_tflops": 2.833580800580283,
+      "speedup_vs_machete_w4": 0.9321173407157817,
+      "speedup_vs_marlin_w4": 0.5806206427116719,
+      "speedup_vs_paired_recovery": 1.4802503281257358,
+      "speedup_vs_plain": 2.6187342395954087,
+      "speedup_vs_previous_benchmark": 1.0011322710518935
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 2.0,
+      "fused_mlp_effective_tflops": 14.711006337653236,
+      "fused_mlp_qvq": {
+        "max_ms": 0.054803199768066406,
+        "mean_ms": 0.05474215354919434,
+        "median_ms": 0.05474175930023193,
+        "min_ms": 0.054688639640808105,
+        "p95_ms": 0.05477439880371094
+      },
+      "m": 8,
+      "machete_effective_tflops": 15.906796349795044,
+      "machete_w4": {
+        "max_ms": 0.05076416015625,
+        "mean_ms": 0.050605724668502806,
+        "median_ms": 0.05062655925750732,
+        "min_ms": 0.05000959873199463,
+        "p95_ms": 0.05070079803466797
+      },
+      "marlin_effective_tflops": 27.32682970746991,
+      "marlin_w4": {
+        "max_ms": 0.029533441066741942,
+        "mean_ms": 0.02944653115272522,
+        "median_ms": 0.02946943998336792,
+        "min_ms": 0.029325439929962158,
+        "p95_ms": 0.029516160488128662
+      },
+      "matrix_shapes": [
+        [
+          8,
+          2048,
+          8192
+        ],
+        [
+          8,
+          2048,
+          8192
+        ],
+        [
+          8,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 9.932440229735219,
+      "paired_recovery_qvq": {
+        "max_ms": 0.08120384216308593,
+        "mean_ms": 0.08106417622566223,
+        "median_ms": 0.08107840061187743,
+        "min_ms": 0.08095616340637207,
+        "p95_ms": 0.08116864204406739
+      },
+      "plain_qvq": {
+        "max_ms": 0.14284095764160157,
+        "mean_ms": 0.14276273903846742,
+        "median_ms": 0.1427622413635254,
+        "min_ms": 0.14272383689880372,
+        "p95_ms": 0.14278528213500977
+      },
+      "plain_qvq_effective_tflops": 5.640891879452863,
+      "speedup_vs_machete_w4": 0.9248252139622561,
+      "speedup_vs_marlin_w4": 0.5383356391916886,
+      "speedup_vs_paired_recovery": 1.4811069583496912,
+      "speedup_vs_plain": 2.60792205417703,
+      "speedup_vs_previous_benchmark": 1.0003098383744713
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 2.0,
+      "fused_mlp_effective_tflops": 28.739920844411667,
+      "fused_mlp_qvq": {
+        "max_ms": 0.056087679862976074,
+        "mean_ms": 0.05603217923641205,
+        "median_ms": 0.056040959358215334,
+        "min_ms": 0.05592703819274902,
+        "p95_ms": 0.056073598861694336
+      },
+      "m": 16,
+      "machete_effective_tflops": 31.710967426597765,
+      "machete_w4": {
+        "max_ms": 0.05091775894165039,
+        "mean_ms": 0.05076623351573944,
+        "median_ms": 0.05079040050506592,
+        "min_ms": 0.05028031826019287,
+        "p95_ms": 0.05086207866668701
+      },
+      "marlin_effective_tflops": 49.344752061707055,
+      "marlin_w4": {
+        "max_ms": 0.032761600017547604,
+        "mean_ms": 0.03263809924125671,
+        "median_ms": 0.03264000058174133,
+        "min_ms": 0.03256319999694824,
+        "p95_ms": 0.032690560817718504
+      },
+      "matrix_shapes": [
+        [
+          16,
+          2048,
+          8192
+        ],
+        [
+          16,
+          2048,
+          8192
+        ],
+        [
+          16,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 20.300585484920138,
+      "paired_recovery_qvq": {
+        "max_ms": 0.07944767951965331,
+        "mean_ms": 0.07934520018100738,
+        "median_ms": 0.07933824062347412,
+        "min_ms": 0.07919616222381592,
+        "p95_ms": 0.07942592144012452
+      },
+      "plain_qvq": {
+        "max_ms": 0.135415678024292,
+        "mean_ms": 0.13529638090133667,
+        "median_ms": 0.13529472351074218,
+        "min_ms": 0.1352620792388916,
+        "p95_ms": 0.13531904220581054
+      },
+      "plain_qvq_effective_tflops": 11.904475608556307,
+      "speedup_vs_machete_w4": 0.9063085480106131,
+      "speedup_vs_marlin_w4": 0.5824311531340062,
+      "speedup_vs_paired_recovery": 1.4157188158814686,
+      "speedup_vs_plain": 2.4142114100141403,
+      "speedup_vs_previous_benchmark": 1.001233424895732
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 2.5,
+      "fused_mlp_effective_tflops": 1.858573122242801,
+      "fused_mlp_qvq": {
+        "max_ms": 0.054965119361877444,
+        "mean_ms": 0.05435744969844818,
+        "median_ms": 0.054161601066589356,
+        "min_ms": 0.05401535987854004,
+        "p95_ms": 0.05485951900482178
+      },
+      "m": 1,
+      "machete_effective_tflops": 1.999890606399821,
+      "machete_w4": {
+        "max_ms": 0.0514899206161499,
+        "mean_ms": 0.050418761634826656,
+        "median_ms": 0.05033440113067627,
+        "min_ms": 0.04961984157562256,
+        "p95_ms": 0.05097407817840576
+      },
+      "marlin_effective_tflops": 3.4483934413034443,
+      "marlin_w4": {
+        "max_ms": 0.029895679950714113,
+        "mean_ms": 0.029380140769481658,
+        "median_ms": 0.029191360473632813,
+        "min_ms": 0.029032959938049316,
+        "p95_ms": 0.029854719638824464
+      },
+      "matrix_shapes": [
+        [
+          1,
+          2048,
+          8192
+        ],
+        [
+          1,
+          2048,
+          8192
+        ],
+        [
+          1,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 1.2645278339936137,
+      "paired_recovery_qvq": {
+        "max_ms": 0.08044927597045898,
+        "mean_ms": 0.07969584641456604,
+        "median_ms": 0.07960544109344483,
+        "min_ms": 0.07942399978637696,
+        "p95_ms": 0.08036352157592773
+      },
+      "plain_qvq": {
+        "max_ms": 0.14294783592224122,
+        "mean_ms": 0.14117916464805602,
+        "median_ms": 0.14089983940124512,
+        "min_ms": 0.14083776473999024,
+        "p95_ms": 0.14290495872497558
+      },
+      "plain_qvq_effective_tflops": 0.7144315879121609,
+      "speedup_vs_machete_w4": 0.9293373929029958,
+      "speedup_vs_marlin_w4": 0.53896782773728,
+      "speedup_vs_paired_recovery": 1.4697763641730859,
+      "speedup_vs_plain": 2.601471090708985,
+      "speedup_vs_previous_benchmark": 1.0061504540515918
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 2.5,
+      "fused_mlp_effective_tflops": 3.7083822472632186,
+      "fused_mlp_qvq": {
+        "max_ms": 0.05438464164733887,
+        "mean_ms": 0.05428738565444946,
+        "median_ms": 0.05428960084915161,
+        "min_ms": 0.05419007778167725,
+        "p95_ms": 0.05434751987457275
+      },
+      "m": 2,
+      "machete_effective_tflops": 4.024522794916955,
+      "machete_w4": {
+        "max_ms": 0.05019775867462158,
+        "mean_ms": 0.050007145619392394,
+        "median_ms": 0.050024960041046146,
+        "min_ms": 0.04952256202697754,
+        "p95_ms": 0.0501094388961792
+      },
+      "marlin_effective_tflops": 6.4299574334914675,
+      "marlin_w4": {
+        "max_ms": 0.03140352010726929,
+        "mean_ms": 0.031312105548381805,
+        "median_ms": 0.03131071925163269,
+        "min_ms": 0.031198720932006836,
+        "p95_ms": 0.03136064052581787
+      },
+      "matrix_shapes": [
+        [
+          2,
+          2048,
+          8192
+        ],
+        [
+          2,
+          2048,
+          8192
+        ],
+        [
+          2,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 2.514058334113276,
+      "paired_recovery_qvq": {
+        "max_ms": 0.08024959564208985,
+        "mean_ms": 0.08008721919059754,
+        "median_ms": 0.08008031845092772,
+        "min_ms": 0.07995776176452636,
+        "p95_ms": 0.08019136428833008
+      },
+      "plain_qvq": {
+        "max_ms": 0.14177791595458986,
+        "mean_ms": 0.14172575044631958,
+        "median_ms": 0.14172736167907715,
+        "min_ms": 0.14167743682861328,
+        "p95_ms": 0.1417535972595215
+      },
+      "plain_qvq_effective_tflops": 1.4205202835559545,
+      "speedup_vs_machete_w4": 0.9214464512281986,
+      "speedup_vs_marlin_w4": 0.5767351161529489,
+      "speedup_vs_paired_recovery": 1.475058154754865,
+      "speedup_vs_plain": 2.610580285400863,
+      "speedup_vs_previous_benchmark": 1.0071438706629643
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 2.5,
+      "fused_mlp_effective_tflops": 7.316199602385891,
+      "fused_mlp_qvq": {
+        "max_ms": 0.055162878036499025,
+        "mean_ms": 0.05502789120674133,
+        "median_ms": 0.05503583908081055,
+        "min_ms": 0.05486591815948486,
+        "p95_ms": 0.05511104106903076
+      },
+      "m": 4,
+      "machete_effective_tflops": 7.960794997592864,
+      "machete_w4": {
+        "max_ms": 0.05075967788696289,
+        "mean_ms": 0.05055973110198974,
+        "median_ms": 0.05057951927185059,
+        "min_ms": 0.05007040023803711,
+        "p95_ms": 0.050668802261352536
+      },
+      "marlin_effective_tflops": 12.780108933923355,
+      "marlin_w4": {
+        "max_ms": 0.03159424066543579,
+        "mean_ms": 0.031506032037734985,
+        "median_ms": 0.031506240367889404,
+        "min_ms": 0.03143296003341675,
+        "p95_ms": 0.0315500807762146
+      },
+      "matrix_shapes": [
+        [
+          4,
+          2048,
+          8192
+        ],
+        [
+          4,
+          2048,
+          8192
+        ],
+        [
+          4,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 4.971066235335408,
+      "paired_recovery_qvq": {
+        "max_ms": 0.0811257553100586,
+        "mean_ms": 0.08099067220687867,
+        "median_ms": 0.08099936008453369,
+        "min_ms": 0.0808614444732666,
+        "p95_ms": 0.08108672142028808
+      },
+      "plain_qvq": {
+        "max_ms": 0.14225728034973145,
+        "mean_ms": 0.1421689889907837,
+        "median_ms": 0.14216928005218504,
+        "min_ms": 0.14213120460510253,
+        "p95_ms": 0.14219200134277343
+      },
+      "plain_qvq_effective_tflops": 2.8322094889430476,
+      "speedup_vs_machete_w4": 0.9190287659207552,
+      "speedup_vs_marlin_w4": 0.5724677027568885,
+      "speedup_vs_paired_recovery": 1.4717566123703545,
+      "speedup_vs_plain": 2.583212728771777,
+      "speedup_vs_previous_benchmark": 1.0056341911159492
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 2.5,
+      "fused_mlp_effective_tflops": 14.515590091974932,
+      "fused_mlp_qvq": {
+        "max_ms": 0.05560448169708252,
+        "mean_ms": 0.05547784953117371,
+        "median_ms": 0.055478720664978026,
+        "min_ms": 0.055347838401794434,
+        "p95_ms": 0.055544319152832033
+      },
+      "m": 8,
+      "machete_effective_tflops": 15.906796349795044,
+      "machete_w4": {
+        "max_ms": 0.05076416015625,
+        "mean_ms": 0.050605724668502806,
+        "median_ms": 0.05062655925750732,
+        "min_ms": 0.05000959873199463,
+        "p95_ms": 0.05070079803466797
+      },
+      "marlin_effective_tflops": 27.32682970746991,
+      "marlin_w4": {
+        "max_ms": 0.029533441066741942,
+        "mean_ms": 0.02944653115272522,
+        "median_ms": 0.02946943998336792,
+        "min_ms": 0.029325439929962158,
+        "p95_ms": 0.029516160488128662
+      },
+      "matrix_shapes": [
+        [
+          8,
+          2048,
+          8192
+        ],
+        [
+          8,
+          2048,
+          8192
+        ],
+        [
+          8,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 9.83554863633012,
+      "paired_recovery_qvq": {
+        "max_ms": 0.08203392028808594,
+        "mean_ms": 0.08187259817123413,
+        "median_ms": 0.08187711715698243,
+        "min_ms": 0.08169343948364258,
+        "p95_ms": 0.08198783874511718
+      },
+      "plain_qvq": {
+        "max_ms": 0.14298175811767577,
+        "mean_ms": 0.14291376943588255,
+        "median_ms": 0.1429139232635498,
+        "min_ms": 0.14287487983703615,
+        "p95_ms": 0.14293760299682617
+      },
+      "plain_qvq_effective_tflops": 5.634904910663756,
+      "speedup_vs_machete_w4": 0.9125401352210034,
+      "speedup_vs_marlin_w4": 0.5311845628403441,
+      "speedup_vs_paired_recovery": 1.4758292220077973,
+      "speedup_vs_plain": 2.576013317368489,
+      "speedup_vs_previous_benchmark": 1.0093844885627352
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 2.5,
+      "fused_mlp_effective_tflops": 28.411561829600362,
+      "fused_mlp_qvq": {
+        "max_ms": 0.05680768013000488,
+        "mean_ms": 0.0566937438249588,
+        "median_ms": 0.056688637733459474,
+        "min_ms": 0.05658815860748291,
+        "p95_ms": 0.05676479816436768
+      },
+      "m": 16,
+      "machete_effective_tflops": 31.710967426597765,
+      "machete_w4": {
+        "max_ms": 0.05091775894165039,
+        "mean_ms": 0.05076623351573944,
+        "median_ms": 0.05079040050506592,
+        "min_ms": 0.05028031826019287,
+        "p95_ms": 0.05086207866668701
+      },
+      "marlin_effective_tflops": 49.344752061707055,
+      "marlin_w4": {
+        "max_ms": 0.032761600017547604,
+        "mean_ms": 0.03263809924125671,
+        "median_ms": 0.03264000058174133,
+        "min_ms": 0.03256319999694824,
+        "p95_ms": 0.032690560817718504
+      },
+      "matrix_shapes": [
+        [
+          16,
+          2048,
+          8192
+        ],
+        [
+          16,
+          2048,
+          8192
+        ],
+        [
+          16,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 20.121229692329127,
+      "paired_recovery_qvq": {
+        "max_ms": 0.08020159721374512,
+        "mean_ms": 0.08004481923580169,
+        "median_ms": 0.08004544258117675,
+        "min_ms": 0.07985087871551513,
+        "p95_ms": 0.08014016151428223
+      },
+      "plain_qvq": {
+        "max_ms": 0.13530559539794923,
+        "mean_ms": 0.13524680299758912,
+        "median_ms": 0.1352454376220703,
+        "min_ms": 0.13521599769592285,
+        "p95_ms": 0.1352723217010498
+      },
+      "plain_qvq_effective_tflops": 11.90881381522602,
+      "speedup_vs_machete_w4": 0.8959538019571738,
+      "speedup_vs_marlin_w4": 0.5757767673869528,
+      "speedup_vs_paired_recovery": 1.4120191590691786,
+      "speedup_vs_plain": 2.385759175550695,
+      "speedup_vs_previous_benchmark": 1.0061473012210402
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 3.0,
+      "fused_mlp_effective_tflops": 1.9525585071183225,
+      "fused_mlp_qvq": {
+        "max_ms": 0.05203519821166992,
+        "mean_ms": 0.05163889267444611,
+        "median_ms": 0.05155456066131592,
+        "min_ms": 0.05147327899932861,
+        "p95_ms": 0.051950078010559085
+      },
+      "m": 1,
+      "machete_effective_tflops": 1.999890606399821,
+      "machete_w4": {
+        "max_ms": 0.0514899206161499,
+        "mean_ms": 0.050418761634826656,
+        "median_ms": 0.05033440113067627,
+        "min_ms": 0.04961984157562256,
+        "p95_ms": 0.05097407817840576
+      },
+      "marlin_effective_tflops": 3.4483934413034443,
+      "marlin_w4": {
+        "max_ms": 0.029895679950714113,
+        "mean_ms": 0.029380140769481658,
+        "median_ms": 0.029191360473632813,
+        "min_ms": 0.029032959938049316,
+        "p95_ms": 0.029854719638824464
+      },
+      "matrix_shapes": [
+        [
+          1,
+          2048,
+          8192
+        ],
+        [
+          1,
+          2048,
+          8192
+        ],
+        [
+          1,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 1.3085772164712217,
+      "paired_recovery_qvq": {
+        "max_ms": 0.07769152164459228,
+        "mean_ms": 0.07709576323032379,
+        "median_ms": 0.07692575931549073,
+        "min_ms": 0.07683263778686523,
+        "p95_ms": 0.07765120029449463
+      },
+      "plain_qvq": {
+        "max_ms": 0.13787008285522462,
+        "mean_ms": 0.13779990363121034,
+        "median_ms": 0.13780096054077148,
+        "min_ms": 0.13774527549743654,
+        "p95_ms": 0.13782527923583984
+      },
+      "plain_qvq_effective_tflops": 0.7304977817641302,
+      "speedup_vs_machete_w4": 0.9763326558312581,
+      "speedup_vs_marlin_w4": 0.5662226600165098,
+      "speedup_vs_paired_recovery": 1.492123263756414,
+      "speedup_vs_plain": 2.6729150393899244,
+      "speedup_vs_previous_benchmark": 1.001514459929105
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 3.0,
+      "fused_mlp_effective_tflops": 3.902210507098486,
+      "fused_mlp_qvq": {
+        "max_ms": 0.051730561256408694,
+        "mean_ms": 0.05159164137840271,
+        "median_ms": 0.051592960357666015,
+        "min_ms": 0.051523838043212894,
+        "p95_ms": 0.05163455963134766
+      },
+      "m": 2,
+      "machete_effective_tflops": 4.024522794916955,
+      "machete_w4": {
+        "max_ms": 0.05019775867462158,
+        "mean_ms": 0.050007145619392394,
+        "median_ms": 0.050024960041046146,
+        "min_ms": 0.04952256202697754,
+        "p95_ms": 0.0501094388961792
+      },
+      "marlin_effective_tflops": 6.4299574334914675,
+      "marlin_w4": {
+        "max_ms": 0.03140352010726929,
+        "mean_ms": 0.031312105548381805,
+        "median_ms": 0.03131071925163269,
+        "min_ms": 0.031198720932006836,
+        "p95_ms": 0.03136064052581787
+      },
+      "matrix_shapes": [
+        [
+          2,
+          2048,
+          8192
+        ],
+        [
+          2,
+          2048,
+          8192
+        ],
+        [
+          2,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 2.602086927142448,
+      "paired_recovery_qvq": {
+        "max_ms": 0.0774675178527832,
+        "mean_ms": 0.07737071352005005,
+        "median_ms": 0.07737120151519775,
+        "min_ms": 0.0773036813735962,
+        "p95_ms": 0.07741504192352294
+      },
+      "plain_qvq": {
+        "max_ms": 0.1386246395111084,
+        "mean_ms": 0.1385430588722229,
+        "median_ms": 0.13854176044464112,
+        "min_ms": 0.13850367546081543,
+        "p95_ms": 0.13857279777526854
+      },
+      "plain_qvq_effective_tflops": 1.4531834398080037,
+      "speedup_vs_machete_w4": 0.9696082507041702,
+      "speedup_vs_marlin_w4": 0.6068796796030399,
+      "speedup_vs_paired_recovery": 1.4996464823655236,
+      "speedup_vs_plain": 2.6852841838151216,
+      "speedup_vs_previous_benchmark": 1.0045091289806085
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": false,
+      "bits": 3.0,
+      "fused_mlp_effective_tflops": 7.707094955761887,
+      "fused_mlp_qvq": {
+        "max_ms": 0.05236800193786621,
+        "mean_ms": 0.052244268822669984,
+        "median_ms": 0.05224448204040527,
+        "min_ms": 0.052172160148620604,
+        "p95_ms": 0.05228928089141846
+      },
+      "m": 4,
+      "machete_effective_tflops": 7.960794997592864,
+      "machete_w4": {
+        "max_ms": 0.05075967788696289,
+        "mean_ms": 0.05055973110198974,
+        "median_ms": 0.05057951927185059,
+        "min_ms": 0.05007040023803711,
+        "p95_ms": 0.050668802261352536
+      },
+      "marlin_effective_tflops": 12.780108933923355,
+      "marlin_w4": {
+        "max_ms": 0.03159424066543579,
+        "mean_ms": 0.031506032037734985,
+        "median_ms": 0.031506240367889404,
+        "min_ms": 0.03143296003341675,
+        "p95_ms": 0.0315500807762146
+      },
+      "matrix_shapes": [
+        [
+          4,
+          2048,
+          8192
+        ],
+        [
+          4,
+          2048,
+          8192
+        ],
+        [
+          4,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 5.158284092428835,
+      "paired_recovery_qvq": {
+        "max_ms": 0.07813888072967529,
+        "mean_ms": 0.07805997118949891,
+        "median_ms": 0.07805952072143554,
+        "min_ms": 0.07799359798431396,
+        "p95_ms": 0.07810624122619629
+      },
+      "plain_qvq": {
+        "max_ms": 0.13892928123474121,
+        "mean_ms": 0.13885771222114562,
+        "median_ms": 0.13885760307312012,
+        "min_ms": 0.13881152153015136,
+        "p95_ms": 0.13888447761535644
+      },
+      "plain_qvq_effective_tflops": 2.899756117696843,
+      "speedup_vs_machete_w4": 0.968131318303299,
+      "speedup_vs_marlin_w4": 0.603053932921047,
+      "speedup_vs_paired_recovery": 1.494119908415691,
+      "speedup_vs_plain": 2.657842467760122,
+      "speedup_vs_previous_benchmark": 1.0
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 3.0,
+      "fused_mlp_effective_tflops": 15.295304506085165,
+      "fused_mlp_qvq": {
+        "max_ms": 0.05278592109680176,
+        "mean_ms": 0.05265003519058228,
+        "median_ms": 0.052650561332702635,
+        "min_ms": 0.05256896018981934,
+        "p95_ms": 0.05268864154815674
+      },
+      "m": 8,
+      "machete_effective_tflops": 15.906796349795044,
+      "machete_w4": {
+        "max_ms": 0.05076416015625,
+        "mean_ms": 0.050605724668502806,
+        "median_ms": 0.05062655925750732,
+        "min_ms": 0.05000959873199463,
+        "p95_ms": 0.05070079803466797
+      },
+      "marlin_effective_tflops": 27.32682970746991,
+      "marlin_w4": {
+        "max_ms": 0.029533441066741942,
+        "mean_ms": 0.02944653115272522,
+        "median_ms": 0.02946943998336792,
+        "min_ms": 0.029325439929962158,
+        "p95_ms": 0.029516160488128662
+      },
+      "matrix_shapes": [
+        [
+          8,
+          2048,
+          8192
+        ],
+        [
+          8,
+          2048,
+          8192
+        ],
+        [
+          8,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 10.222695774243054,
+      "paired_recovery_qvq": {
+        "max_ms": 0.07887680053710938,
+        "mean_ms": 0.07877736313343048,
+        "median_ms": 0.07877632141113282,
+        "min_ms": 0.07871039867401124,
+        "p95_ms": 0.07882239818572997
+      },
+      "plain_qvq": {
+        "max_ms": 0.13947263717651368,
+        "mean_ms": 0.1394093246459961,
+        "median_ms": 0.13940831661224365,
+        "min_ms": 0.13936384201049803,
+        "p95_ms": 0.13943488121032716
+      },
+      "plain_qvq_effective_tflops": 5.776602053376156,
+      "speedup_vs_machete_w4": 0.9615578253305697,
+      "speedup_vs_marlin_w4": 0.5597174889959565,
+      "speedup_vs_paired_recovery": 1.4962104755795413,
+      "speedup_vs_plain": 2.64780304489657,
+      "speedup_vs_previous_benchmark": 1.0046555655812557
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 3.0,
+      "fused_mlp_effective_tflops": 29.931521088249053,
+      "fused_mlp_qvq": {
+        "max_ms": 0.053919358253479,
+        "mean_ms": 0.053812476754188536,
+        "median_ms": 0.053809919357299806,
+        "min_ms": 0.05373439788818359,
+        "p95_ms": 0.053856639862060546
+      },
+      "m": 16,
+      "machete_effective_tflops": 31.710967426597765,
+      "machete_w4": {
+        "max_ms": 0.05091775894165039,
+        "mean_ms": 0.05076623351573944,
+        "median_ms": 0.05079040050506592,
+        "min_ms": 0.05028031826019287,
+        "p95_ms": 0.05086207866668701
+      },
+      "marlin_effective_tflops": 49.344752061707055,
+      "marlin_w4": {
+        "max_ms": 0.032761600017547604,
+        "mean_ms": 0.03263809924125671,
+        "median_ms": 0.03264000058174133,
+        "min_ms": 0.03256319999694824,
+        "p95_ms": 0.032690560817718504
+      },
+      "matrix_shapes": [
+        [
+          16,
+          2048,
+          8192
+        ],
+        [
+          16,
+          2048,
+          8192
+        ],
+        [
+          16,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 20.953708785842817,
+      "paired_recovery_qvq": {
+        "max_ms": 0.07696640014648437,
+        "mean_ms": 0.07687179520130157,
+        "median_ms": 0.07686528205871582,
+        "min_ms": 0.07678080081939698,
+        "p95_ms": 0.07694464206695556
+      },
+      "plain_qvq": {
+        "max_ms": 0.13204031944274902,
+        "mean_ms": 0.13195818195343018,
+        "median_ms": 0.13195680141448973,
+        "min_ms": 0.13192640304565428,
+        "p95_ms": 0.1319808006286621
+      },
+      "plain_qvq_effective_tflops": 12.205606067556166,
+      "speedup_vs_machete_w4": 0.9438854603705281,
+      "speedup_vs_marlin_w4": 0.60657962270879,
+      "speedup_vs_paired_recovery": 1.4284593431245933,
+      "speedup_vs_plain": 2.452276513151633,
+      "speedup_vs_previous_benchmark": 1.0039249401715127
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 3.5,
+      "fused_mlp_effective_tflops": 1.853917970310367,
+      "fused_mlp_qvq": {
+        "max_ms": 0.05480703830718994,
+        "mean_ms": 0.0544157600402832,
+        "median_ms": 0.05429759979248047,
+        "min_ms": 0.0542303991317749,
+        "p95_ms": 0.05472064018249512
+      },
+      "m": 1,
+      "machete_effective_tflops": 1.999890606399821,
+      "machete_w4": {
+        "max_ms": 0.0514899206161499,
+        "mean_ms": 0.050418761634826656,
+        "median_ms": 0.05033440113067627,
+        "min_ms": 0.04961984157562256,
+        "p95_ms": 0.05097407817840576
+      },
+      "marlin_effective_tflops": 3.4483934413034443,
+      "marlin_w4": {
+        "max_ms": 0.029895679950714113,
+        "mean_ms": 0.029380140769481658,
+        "median_ms": 0.029191360473632813,
+        "min_ms": 0.029032959938049316,
+        "p95_ms": 0.029854719638824464
+      },
+      "matrix_shapes": [
+        [
+          1,
+          2048,
+          8192
+        ],
+        [
+          1,
+          2048,
+          8192
+        ],
+        [
+          1,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 1.2634460568030732,
+      "paired_recovery_qvq": {
+        "max_ms": 0.08049728393554688,
+        "mean_ms": 0.07982517437934876,
+        "median_ms": 0.07967360019683838,
+        "min_ms": 0.07961919784545898,
+        "p95_ms": 0.08041472434997558
+      },
+      "plain_qvq": {
+        "max_ms": 0.1419270420074463,
+        "mean_ms": 0.1418732419490814,
+        "median_ms": 0.14187456130981446,
+        "min_ms": 0.14183487892150878,
+        "p95_ms": 0.14189567565917968
+      },
+      "plain_qvq_effective_tflops": 0.7095232229841363,
+      "speedup_vs_machete_w4": 0.9270096896188575,
+      "speedup_vs_marlin_w4": 0.5376178797073724,
+      "speedup_vs_paired_recovery": 1.4673503156924472,
+      "speedup_vs_plain": 2.612906681916763,
+      "speedup_vs_previous_benchmark": 1.0055869694578885
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 3.5,
+      "fused_mlp_effective_tflops": 3.70486639459825,
+      "fused_mlp_qvq": {
+        "max_ms": 0.05442560195922851,
+        "mean_ms": 0.054341168165206906,
+        "median_ms": 0.054341120719909666,
+        "min_ms": 0.054284801483154295,
+        "p95_ms": 0.05436863899230957
+      },
+      "m": 2,
+      "machete_effective_tflops": 4.024522794916955,
+      "machete_w4": {
+        "max_ms": 0.05019775867462158,
+        "mean_ms": 0.050007145619392394,
+        "median_ms": 0.050024960041046146,
+        "min_ms": 0.04952256202697754,
+        "p95_ms": 0.0501094388961792
+      },
+      "marlin_effective_tflops": 6.4299574334914675,
+      "marlin_w4": {
+        "max_ms": 0.03140352010726929,
+        "mean_ms": 0.031312105548381805,
+        "median_ms": 0.03131071925163269,
+        "min_ms": 0.031198720932006836,
+        "p95_ms": 0.03136064052581787
+      },
+      "matrix_shapes": [
+        [
+          2,
+          2048,
+          8192
+        ],
+        [
+          2,
+          2048,
+          8192
+        ],
+        [
+          2,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 2.5032550548665293,
+      "paired_recovery_qvq": {
+        "max_ms": 0.08053695678710937,
+        "mean_ms": 0.08042573499679566,
+        "median_ms": 0.0804259204864502,
+        "min_ms": 0.08037823677062989,
+        "p95_ms": 0.08045439720153809
+      },
+      "plain_qvq": {
+        "max_ms": 0.14239744186401368,
+        "mean_ms": 0.14226958379745483,
+        "median_ms": 0.14226720333099366,
+        "min_ms": 0.14223039627075196,
+        "p95_ms": 0.14229567527770995
+      },
+      "plain_qvq_effective_tflops": 1.4151300319835551,
+      "speedup_vs_machete_w4": 0.9205728438853829,
+      "speedup_vs_marlin_w4": 0.5761883236272852,
+      "speedup_vs_paired_recovery": 1.4800195399169143,
+      "speedup_vs_plain": 2.618039551747216,
+      "speedup_vs_previous_benchmark": 1.0050289751134571
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 3.5,
+      "fused_mlp_effective_tflops": 7.31624207288533,
+      "fused_mlp_qvq": {
+        "max_ms": 0.055129599571228025,
+        "mean_ms": 0.055036096024513245,
+        "median_ms": 0.055035519599914554,
+        "min_ms": 0.05499839782714844,
+        "p95_ms": 0.05506624221801758
+      },
+      "m": 4,
+      "machete_effective_tflops": 7.960794997592864,
+      "machete_w4": {
+        "max_ms": 0.05075967788696289,
+        "mean_ms": 0.05055973110198974,
+        "median_ms": 0.05057951927185059,
+        "min_ms": 0.05007040023803711,
+        "p95_ms": 0.050668802261352536
+      },
+      "marlin_effective_tflops": 12.780108933923355,
+      "marlin_w4": {
+        "max_ms": 0.03159424066543579,
+        "mean_ms": 0.031506032037734985,
+        "median_ms": 0.031506240367889404,
+        "min_ms": 0.03143296003341675,
+        "p95_ms": 0.0315500807762146
+      },
+      "matrix_shapes": [
+        [
+          4,
+          2048,
+          8192
+        ],
+        [
+          4,
+          2048,
+          8192
+        ],
+        [
+          4,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 4.974702054731465,
+      "paired_recovery_qvq": {
+        "max_ms": 0.08101183891296387,
+        "mean_ms": 0.08094058551788329,
+        "median_ms": 0.08094016075134278,
+        "min_ms": 0.0809017562866211,
+        "p95_ms": 0.08097408294677734
+      },
+      "plain_qvq": {
+        "max_ms": 0.14325119972229003,
+        "mean_ms": 0.1431577154636383,
+        "median_ms": 0.14315680027008057,
+        "min_ms": 0.14311936378479004,
+        "p95_ms": 0.14318464279174806
+      },
+      "plain_qvq_effective_tflops": 2.812672421012148,
+      "speedup_vs_machete_w4": 0.9190341008778105,
+      "speedup_vs_marlin_w4": 0.5724710259288316,
+      "speedup_vs_paired_recovery": 1.4706894990679518,
+      "speedup_vs_plain": 2.6011710493654143,
+      "speedup_vs_previous_benchmark": 1.0007093356876773
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": false,
+      "bits": 3.5,
+      "fused_mlp_effective_tflops": 14.496860238821476,
+      "fused_mlp_qvq": {
+        "max_ms": 0.055649919509887694,
+        "mean_ms": 0.05555122239589691,
+        "median_ms": 0.05555039882659912,
+        "min_ms": 0.05551040172576904,
+        "p95_ms": 0.055579519271850585
+      },
+      "m": 8,
+      "machete_effective_tflops": 15.906796349795044,
+      "machete_w4": {
+        "max_ms": 0.05076416015625,
+        "mean_ms": 0.050605724668502806,
+        "median_ms": 0.05062655925750732,
+        "min_ms": 0.05000959873199463,
+        "p95_ms": 0.05070079803466797
+      },
+      "marlin_effective_tflops": 27.32682970746991,
+      "marlin_w4": {
+        "max_ms": 0.029533441066741942,
+        "mean_ms": 0.02944653115272522,
+        "median_ms": 0.02946943998336792,
+        "min_ms": 0.029325439929962158,
+        "p95_ms": 0.029516160488128662
+      },
+      "matrix_shapes": [
+        [
+          8,
+          2048,
+          8192
+        ],
+        [
+          8,
+          2048,
+          8192
+        ],
+        [
+          8,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 9.862954994144108,
+      "paired_recovery_qvq": {
+        "max_ms": 0.08175616264343262,
+        "mean_ms": 0.08165127382278442,
+        "median_ms": 0.08164960384368897,
+        "min_ms": 0.08159551620483399,
+        "p95_ms": 0.0816870403289795
+      },
+      "plain_qvq": {
+        "max_ms": 0.14381759643554687,
+        "mean_ms": 0.14371388130187987,
+        "median_ms": 0.14371296405792236,
+        "min_ms": 0.14367039680480956,
+        "p95_ms": 0.1437376022338867
+      },
+      "plain_qvq_effective_tflops": 5.603574968194433,
+      "speedup_vs_machete_w4": 0.9113626603390986,
+      "speedup_vs_marlin_w4": 0.5304991612275717,
+      "speedup_vs_paired_recovery": 1.4698293003900593,
+      "speedup_vs_plain": 2.587073488104436,
+      "speedup_vs_previous_benchmark": 0.9953973312590135
+    },
+    {
+      "better_than_paired_recovery_stage": true,
+      "better_than_previous_benchmark": true,
+      "bits": 3.5,
+      "fused_mlp_effective_tflops": 28.53801905836503,
+      "fused_mlp_qvq": {
+        "max_ms": 0.0565337610244751,
+        "mean_ms": 0.05643850889205933,
+        "median_ms": 0.056437439918518066,
+        "min_ms": 0.05638527870178223,
+        "p95_ms": 0.05647103786468506
+      },
+      "m": 16,
+      "machete_effective_tflops": 31.710967426597765,
+      "machete_w4": {
+        "max_ms": 0.05091775894165039,
+        "mean_ms": 0.05076623351573944,
+        "median_ms": 0.05079040050506592,
+        "min_ms": 0.05028031826019287,
+        "p95_ms": 0.05086207866668701
+      },
+      "marlin_effective_tflops": 49.344752061707055,
+      "marlin_w4": {
+        "max_ms": 0.032761600017547604,
+        "mean_ms": 0.03263809924125671,
+        "median_ms": 0.03264000058174133,
+        "min_ms": 0.03256319999694824,
+        "p95_ms": 0.032690560817718504
+      },
+      "matrix_shapes": [
+        [
+          16,
+          2048,
+          8192
+        ],
+        [
+          16,
+          2048,
+          8192
+        ],
+        [
+          16,
+          8192,
+          2048
+        ]
+      ],
+      "paired_recovery_effective_tflops": 20.11415422453472,
+      "paired_recovery_qvq": {
+        "max_ms": 0.08014528274536133,
+        "mean_ms": 0.08004253766536713,
+        "median_ms": 0.08007359981536866,
+        "min_ms": 0.07994431972503663,
+        "p95_ms": 0.08012864112854004
+      },
+      "plain_qvq": {
+        "max_ms": 0.13638784408569335,
+        "mean_ms": 0.13628774404525756,
+        "median_ms": 0.13628703594207764,
+        "min_ms": 0.1362547206878662,
+        "p95_ms": 0.13630975723266603
+      },
+      "plain_qvq_effective_tflops": 11.81779855190713,
+      "speedup_vs_machete_w4": 0.8999416093004023,
+      "speedup_vs_marlin_w4": 0.5783394964205597,
+      "speedup_vs_paired_recovery": 1.4188028360424472,
+      "speedup_vs_plain": 2.414833772383066,
+      "speedup_vs_previous_benchmark": 1.000544323661059
+    }
+  ],
+  "source_fingerprint": "773aa5dec90cf574914a0c265e9d6aa02016df2e763301a4b99cd8599e0bbef2",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 200,
+    "warmup": 30
+  },
+  "workload": "Llama 3.2 1B complete gate/up/SiLU/down MLP"
+}
