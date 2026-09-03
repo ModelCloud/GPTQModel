@@ -430,7 +430,11 @@ __device__ __forceinline__ void qvq_p32_window_load_fragment_levels(
   }
 }
 
-template <int TransitionBits, bool LevelsInShared, class FragmentA>
+template <
+    int TransitionBits,
+    bool LevelsInShared,
+    bool PrefetchDecodedLevels = false,
+    class FragmentA>
 __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     FragmentA& fragment,
     const uint32_t* __restrict__ window_words,
@@ -470,8 +474,7 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
   uint32_t product10 = qvq_wgmma_pgc16_product_masked(state10, bank_mask1);
   uint32_t product11 = qvq_wgmma_pgc16_product_masked(state11, bank_mask1);
 
-  if constexpr (LevelsInShared &&
-                (TransitionBits == 5 || TransitionBits == kW3TransitionBits)) {
+  if constexpr (LevelsInShared && PrefetchDecodedLevels) {
     // Depth-four W2.5/W3 can profitably prefetch all eight levels into an
     // independent register fragment while the old WGMMA source remains live.
     auto decoded_fragment = cute::make_tensor<Element>(fragment.shape());
@@ -491,7 +494,11 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     cute::copy(decoded_fragment, fragment);
   } else {
     if (wait_before_fragment_reuse) {
-      cute::warpgroup_wait<1>();
+      if constexpr (TransitionBits == 5 || TransitionBits == kW3TransitionBits) {
+        cute::warpgroup_wait<3>();
+      } else {
+        cute::warpgroup_wait<1>();
+      }
     }
     qvq_p32_window_load_fragment_levels<TransitionBits, LevelsInShared>(
         fragment,
@@ -638,6 +645,7 @@ template <
     bool Grouped,
     bool OrderedSplit,
     bool FixedGateUp = false,
+    bool PrefetchDecodedLevels = false,
     class InputTma,
     class TrellisTma,
     class BankTma,
@@ -894,7 +902,10 @@ __global__ __launch_bounds__(kTmaThreads) void qvq_p32_window_wgmma_m16_tma_kern
       const auto trellis_layout = TrellisSmemLayout{};
       const uint32_t* window_words = shared.trellis.begin() +
           trellis_layout(0, warp, k_block, read_stage);
-      qvq_p32_window_decode_fragment<TransitionBits, true>(
+      qvq_p32_window_decode_fragment<
+          TransitionBits,
+          true,
+          PrefetchDecodedLevels>(
           fragment_a,
           window_words,
           decode_plan,
@@ -1533,15 +1544,25 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
             static_cast<unsigned>(max_n64_blocks),
             static_cast<unsigned>(segment_count),
             static_cast<unsigned>(max_split_count));
-  const bool use_fixed_gate_up =
+  const bool use_gate_up_geometry =
       !OrderedSplit && size_k == kFixedGateUpK && segment_count == 2 &&
       out_features[0] == kFixedGateUpN && out_features[1] == kFixedGateUpN &&
-      split_counts[0] == 1 && split_counts[1] == 1 &&
+      split_counts[0] == 1 && split_counts[1] == 1;
+  const bool use_fixed_gate_up =
+      use_gate_up_geometry &&
       (TransitionBits == 4 || TransitionBits == kW3TransitionBits);
+  const bool use_prefetch_gate_up =
+      use_gate_up_geometry &&
+      (TransitionBits == 5 || TransitionBits == kW3TransitionBits);
   if (use_fixed_gate_up) {
     const HopperFixedGateUpLaunchParams fixed_params{
         {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
-    qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, true, false, true>
+    qvq_p32_window_wgmma_m16_tma_kernel<
+        TransitionBits,
+        true,
+        false,
+        true,
+        TransitionBits == kW3TransitionBits>
         <<<grid, kTmaThreads, 0, stream>>>(
             input_tma,
             trellis_tma,
@@ -1553,6 +1574,23 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
             2 * kFixedGateUpN,
             1,
             0);
+  } else if (use_prefetch_gate_up) {
+    qvq_p32_window_wgmma_m16_tma_kernel<
+        TransitionBits,
+        true,
+        false,
+        false,
+        true><<<grid, kTmaThreads, 0, stream>>>(
+        input_tma,
+        trellis_tma,
+        bank_tma,
+        reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+        partial_output.data_ptr<float>(),
+        grouped_params,
+        size_k,
+        static_cast<int>(total_n),
+        1,
+        0);
   } else {
     qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, true, OrderedSplit>
         <<<grid, kTmaThreads, 0, stream>>>(
