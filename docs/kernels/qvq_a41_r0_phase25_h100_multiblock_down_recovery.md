@@ -264,3 +264,46 @@ Artifacts:
 - `artifacts/a41_phase25_h100/multiblock_down_recovery_w3_probe.json`
 - `artifacts/a41_phase25_h100/multiblock_down_recovery_experiment.json`
 - `artifacts/a41_phase25_h100/production_mlp_multiblock_down_recovery_vs_phase23.json`
+
+## Post-merge `origin/main` validation
+
+Phase 25 was merged with `origin/main` and rebuilt at `2f59535b`. The H100
+production-source fingerprint remains
+`8d1f4f77d845211771f29d417239c8a931c7d5bff3e990aa05b57bbea721d08b`,
+exactly matching the pre-merge Phase-25 run. The merged-tip matrix used the
+same physical H100, 30 warmups, 200 samples, 50 CUDA Graph replays per sample,
+CUDA-event timing, and a strict zero-MiB idle gate.
+
+`vs Marlin` and `vs Machete` are baseline latency divided by QVQ latency, so
+values below 1 mean QVQ remains slower. `Better than last?` compares the
+median with the pre-merge Phase-25 artifact; `No` means a numerical
+regression, even when it is inside run-to-run noise.
+
+| W | M/K/N | QVQ us | Marlin W4 us | vs Marlin | Machete W4 us | vs Machete | Better than last? |
+|--:|:--|--:|--:|--:|--:|--:|:--:|
+| W2 | 1/2048/8192 x2; 1/8192/2048 | 59.130 | 29.177 | 0.493x | 50.236 | 0.850x | No |
+| W2 | 2/2048/8192 x2; 2/8192/2048 | 57.917 | 31.195 | 0.539x | 50.124 | 0.865x | Yes |
+| W2 | 4/2048/8192 x2; 4/8192/2048 | 57.927 | 31.404 | 0.542x | 50.409 | 0.870x | No |
+| W2 | 8/2048/8192 x2; 8/8192/2048 | 58.168 | 29.399 | 0.505x | 51.170 | 0.880x | Yes |
+| W2 | 16/2048/8192 x2; 16/8192/2048 | 59.026 | 32.622 | 0.553x | 51.347 | 0.870x | Yes |
+| W2.5 | 1/2048/8192 x2; 1/8192/2048 | 59.876 | 29.177 | 0.487x | 50.236 | 0.839x | Yes |
+| W2.5 | 2/2048/8192 x2; 2/8192/2048 | 58.964 | 31.195 | 0.529x | 50.124 | 0.850x | Yes |
+| W2.5 | 4/2048/8192 x2; 4/8192/2048 | 59.061 | 31.404 | 0.532x | 50.409 | 0.854x | No |
+| W2.5 | 8/2048/8192 x2; 8/8192/2048 | 59.272 | 29.399 | 0.496x | 51.170 | 0.863x | No |
+| W2.5 | 16/2048/8192 x2; 16/8192/2048 | 60.041 | 32.622 | 0.543x | 51.347 | 0.855x | No |
+| W3 | 1/2048/8192 x2; 1/8192/2048 | 57.190 | 29.177 | 0.510x | 50.236 | 0.878x | No |
+| W3 | 2/2048/8192 x2; 2/8192/2048 | 56.062 | 31.195 | 0.556x | 50.124 | 0.894x | Yes |
+| W3 | 4/2048/8192 x2; 4/8192/2048 | 55.776 | 31.404 | 0.563x | 50.409 | 0.904x | Yes |
+| W3 | 8/2048/8192 x2; 8/8192/2048 | 56.169 | 29.399 | 0.523x | 51.170 | 0.911x | Yes |
+| W3 | 16/2048/8192 x2; 16/8192/2048 | 57.020 | 32.622 | 0.572x | 51.347 | 0.900x | No |
+| W3.5 | 1/2048/8192 x2; 1/8192/2048 | 59.551 | 29.177 | 0.490x | 50.236 | 0.844x | Yes |
+| W3.5 | 2/2048/8192 x2; 2/8192/2048 | 58.826 | 31.195 | 0.530x | 50.124 | 0.852x | No |
+| W3.5 | 4/2048/8192 x2; 4/8192/2048 | 59.161 | 31.404 | 0.531x | 50.409 | 0.852x | No |
+| W3.5 | 8/2048/8192 x2; 8/8192/2048 | 59.325 | 29.399 | 0.496x | 51.170 | 0.863x | No |
+| W3.5 | 16/2048/8192 x2; 16/8192/2048 | 59.741 | 32.622 | 0.546x | 51.347 | 0.859x | Yes |
+
+The post-merge geomean is 0.9989x versus the prior run (0.11% slower), with
+10/20 cells improving. Since the executable H100 source fingerprint is
+identical and the range remains 55.776--60.041 us, this is recorded as
+cross-run variance, not a production regression. The merged-tip artifact is
+`artifacts/a41_phase25_h100/production_mlp_post_main_merge.json`.
