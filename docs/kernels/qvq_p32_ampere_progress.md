@@ -2577,6 +2577,15 @@ with exact output and maximum absolute error `1.72e-05`. This stage depth is
 restricted to the fixed-N wide branch. Artifact pair:
 `v20_m8_linearz_stage3_{control,verify8000}.json`.
 
+The eighteenth accepted v20 progression applies the three-K16 stage to the
+M8 fixed-N linear-QKV `(K,N)=(5120,10240)` wide launcher. Stage 2's matched
+medians were `0.077824/0.078848/0.078848/0.080896 ms`; stage 3 measured
+`0.074752/0.075776/0.076800/0.077824 ms` (about 3.6% geometric-mean
+improvement). The 8,000-iteration confirmation reproduced the same rate-wise
+ordering and exact output (maximum absolute error `2.86e-05`). This stage
+depth is restricted to the fixed-N wide QKV branch. Artifacts are
+`v20_m8_qkv_stage3_{control,verify8000}.json`.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
