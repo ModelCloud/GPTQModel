@@ -824,6 +824,7 @@ def qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
     bias: torch.Tensor | None = None,
     scale_mode: int = 3,
     logical_rows: int,
+    multiblock: bool = False,
 ) -> torch.Tensor:
     """Reduce sixteen ordered down partials directly into exact FP16 recovery."""
 
@@ -840,6 +841,8 @@ def qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
         raise ValueError("ordered split recovery logical_rows must be in [1, 16]")
     if scale_mode not in (3, 4):
         raise ValueError("ordered split recovery scale_mode must be 3 or 4")
+    if not isinstance(multiblock, bool):
+        raise TypeError("ordered split recovery multiblock must be a bool")
     for name, tensor in (("post_scale", post_scale), ("bias", bias)):
         if tensor is None:
             if name == "post_scale":
@@ -857,7 +860,7 @@ def qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
     if torch.cuda.get_device_capability(partial_input.device) != (9, 0):
         raise RuntimeError("ordered split recovery requires Hopper SM90")
     return _qvq_cuda_hadamard_ordered_split16_op()(
-        partial_input, post_scale, bias, scale_mode, logical_rows
+        partial_input, post_scale, bias, scale_mode, logical_rows, multiblock
     )
 
 

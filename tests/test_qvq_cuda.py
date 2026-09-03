@@ -582,6 +582,17 @@ def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(m):
         logical_rows=m,
     )
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+    actual_multiblock = qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+        partials,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=3,
+        logical_rows=m,
+        multiblock=True,
+    )
+    assert torch.equal(
+        actual_multiblock.view(torch.int16), expected.view(torch.int16)
+    )
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -591,10 +602,21 @@ def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(m):
             bias=bias,
             scale_mode=3,
             logical_rows=m,
+            multiblock=True,
         )
     graph.replay()
     torch.cuda.synchronize()
     assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
+
+    with pytest.raises(TypeError, match="multiblock"):
+        qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+            partials,
+            post_scale=post_scale,
+            bias=bias,
+            scale_mode=3,
+            logical_rows=m,
+            multiblock=1,
+        )
 
 
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))

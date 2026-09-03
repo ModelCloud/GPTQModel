@@ -203,6 +203,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_direct_padded_input_launches: int = 0
     h100_fp16_recovery_store_launches: int = 0
     h100_fused_down_reduction_recovery_launches: int = 0
+    h100_multiblock_down_recovery_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -234,6 +235,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_direct_padded_input_launches": self.h100_direct_padded_input_launches,
             "h100_fp16_recovery_store_launches": self.h100_fp16_recovery_store_launches,
             "h100_fused_down_reduction_recovery_launches": self.h100_fused_down_reduction_recovery_launches,
+            "h100_multiblock_down_recovery_launches": self.h100_multiblock_down_recovery_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -707,8 +709,10 @@ class QVQHopperGroupedRuntime:
                 bias=down._cached_cast("bias", torch.float16, torch.float32),
                 scale_mode=3,
                 logical_rows=rows,
+                multiblock=True,
             )
             self.telemetry.h100_fused_down_reduction_recovery_launches += 1
+            self.telemetry.h100_multiblock_down_recovery_launches += 1
             self.telemetry.h100_fp16_recovery_store_launches += 1
             return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
 

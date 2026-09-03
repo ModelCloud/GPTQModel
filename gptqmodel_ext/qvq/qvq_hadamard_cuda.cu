@@ -54,6 +54,11 @@ constexpr int kHadamardPairMultiblockHalf2LowValues =
 constexpr int kHadamardPairMultiblockHalf2LowThreads =
     kHadamardPairMultiblockTile;
 constexpr int kHadamardPairMultiblockHalf2HighThreads = 32;
+constexpr int kHadamardOrderedSplitN = 2048;
+constexpr int kHadamardOrderedSplitTile = 256;
+constexpr int kHadamardOrderedSplitTiles =
+    kHadamardOrderedSplitN / kHadamardOrderedSplitTile;
+constexpr int kHadamardOrderedSplitHighThreads = 64;
 
 __device__ __forceinline__ float round_fp16_unless_overflow(float value) {
   const float narrowed = __half2float(__float2half_rn(value));
@@ -341,6 +346,115 @@ qvq_hadamard_ordered_split16_fp32_to_fp16_kernel(
       value = round_fp16_unless_overflow(value + bias[i]);
     }
     out_row[i] = __float2half_rn(value);
+  }
+}
+
+// Exact two-stage factorization of the fused split-16 N=2048 down recovery.
+// The low kernel owns one contiguous 256-column tile per CTA. It preserves the
+// fixed reducer's +0, P0, ..., P15 order, performs the historical initial FP16
+// narrowing/normalization, and then executes butterfly bits 1..128. No value
+// outside the tile is needed before bit 256, so all eight tiles are independent.
+__global__ void qvq_hadamard_ordered_split16_fp32_to_fp16_multiblock_low_kernel(
+    const float* __restrict__ partial_input,
+    float* __restrict__ workspace,
+    int scale_mode) {
+  __shared__ float buf[
+      kHadamardOrderedSplitTile + kHadamardOrderedSplitTile / 32];
+  auto p = [](int i) { return i + (i >> 5); };
+  const int row = static_cast<int>(blockIdx.y);
+  const int tile = static_cast<int>(blockIdx.x);
+  const int local = static_cast<int>(threadIdx.x);
+  const int column = tile * kHadamardOrderedSplitTile + local;
+  constexpr int kSplitCount = 16;
+  constexpr int kPhysicalRows = 16;
+  constexpr int64_t kSplitStride =
+      static_cast<int64_t>(kPhysicalRows) * kHadamardOrderedSplitN;
+
+  float value = 0.0f;
+#pragma unroll
+  for (int split = 0; split < kSplitCount; ++split) {
+    value += partial_input[
+        static_cast<int64_t>(split) * kSplitStride +
+        static_cast<int64_t>(row) * kHadamardOrderedSplitN + column];
+  }
+  value = round_fp16_unless_overflow(value);
+  if (scale_mode == 3) {
+    const float divisor = __half2float(
+        __float2half_rn(sqrtf(static_cast<float>(kHadamardOrderedSplitN))));
+    value = round_fp16_unless_overflow(value / divisor);
+  }
+  buf[p(local)] = value;
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 1; bit < kHadamardOrderedSplitTile; bit <<= 1) {
+    const int peer = local ^ bit;
+    if (local < peer) {
+      const float a = buf[p(local)];
+      const float b = buf[p(peer)];
+      buf[p(local)] = round_fp16_unless_overflow(a + b);
+      buf[p(peer)] = round_fp16_unless_overflow(a - b);
+    }
+    __syncthreads();
+  }
+
+  workspace[
+      static_cast<int64_t>(row) * kHadamardOrderedSplitN + column] =
+      buf[p(local)];
+}
+
+// The high kernel keeps one within-tile column from all eight tiles in each
+// thread, then executes butterfly bits 256, 512, and 1024 in the original
+// ascending order. The FP32 workspace introduces no rounding boundary; scale,
+// bias, and the final FP16 store remain identical to the one-block reference.
+__global__ void qvq_hadamard_ordered_split16_fp32_to_fp16_multiblock_high_kernel(
+    const float* __restrict__ workspace,
+    half* __restrict__ output,
+    const float* __restrict__ post_scale,
+    const float* __restrict__ bias,
+    int scale_mode) {
+  const int row = static_cast<int>(blockIdx.y);
+  const int local = static_cast<int>(blockIdx.x) *
+          kHadamardOrderedSplitHighThreads +
+      static_cast<int>(threadIdx.x);
+  float values[kHadamardOrderedSplitTiles];
+
+#pragma unroll
+  for (int tile = 0; tile < kHadamardOrderedSplitTiles; ++tile) {
+    const int column = tile * kHadamardOrderedSplitTile + local;
+    values[tile] = workspace[
+        static_cast<int64_t>(row) * kHadamardOrderedSplitN + column];
+  }
+
+#pragma unroll
+  for (int bit = 1; bit < kHadamardOrderedSplitTiles; bit <<= 1) {
+#pragma unroll
+    for (int tile = 0; tile < kHadamardOrderedSplitTiles; ++tile) {
+      const int peer = tile ^ bit;
+      if (tile < peer) {
+        const float a = values[tile];
+        const float b = values[peer];
+        values[tile] = round_fp16_unless_overflow(a + b);
+        values[peer] = round_fp16_unless_overflow(a - b);
+      }
+    }
+  }
+
+  const float reciprocal =
+      1.0f / sqrtf(static_cast<float>(kHadamardOrderedSplitN));
+#pragma unroll
+  for (int tile = 0; tile < kHadamardOrderedSplitTiles; ++tile) {
+    const int column = tile * kHadamardOrderedSplitTile + local;
+    float value = values[tile];
+    if (scale_mode == 4) {
+      value = round_fp16_unless_overflow(value * reciprocal);
+    }
+    value = round_fp16_unless_overflow(value * post_scale[column]);
+    if (bias != nullptr) {
+      value = round_fp16_unless_overflow(value + bias[column]);
+    }
+    output[static_cast<int64_t>(row) * kHadamardOrderedSplitN + column] =
+        __float2half_rn(value);
   }
 }
 
@@ -1008,7 +1122,8 @@ at::Tensor qvq_hadamard_ordered_split16_fp32_to_fp16_cuda(
     const at::Tensor& post_scale,
     const c10::optional<at::Tensor>& bias,
     int64_t scale_mode,
-    int64_t logical_rows) {
+    int64_t logical_rows,
+    bool multiblock) {
   TORCH_CHECK(partial_input.is_cuda(), "ordered split recovery input must be CUDA");
   TORCH_CHECK(partial_input.scalar_type() == at::kFloat,
               "ordered split recovery input must be float32");
@@ -1037,7 +1152,35 @@ at::Tensor qvq_hadamard_ordered_split16_fp32_to_fp16_cuda(
   C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, partial_input.get_device()));
   TORCH_CHECK(properties.major == 9 && properties.minor == 0,
               "ordered split recovery requires Hopper SM90");
-  constexpr int n = 2048;
+  constexpr int n = kHadamardOrderedSplitN;
+  at::Tensor output = at::empty(
+      {logical_rows, n}, partial_input.options().dtype(at::kHalf));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(partial_input.get_device());
+  if (multiblock) {
+    at::Tensor workspace = at::empty(
+        {logical_rows, n}, partial_input.options().dtype(at::kFloat));
+    const dim3 low_grid(
+        kHadamardOrderedSplitTiles,
+        static_cast<unsigned int>(logical_rows));
+    qvq_hadamard_ordered_split16_fp32_to_fp16_multiblock_low_kernel<<<
+        low_grid, kHadamardOrderedSplitTile, 0, stream>>>(
+        partial_input.const_data_ptr<float>(),
+        workspace.mutable_data_ptr<float>(),
+        static_cast<int>(scale_mode));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    const dim3 high_grid(
+        kHadamardOrderedSplitTile / kHadamardOrderedSplitHighThreads,
+        static_cast<unsigned int>(logical_rows));
+    qvq_hadamard_ordered_split16_fp32_to_fp16_multiblock_high_kernel<<<
+        high_grid, kHadamardOrderedSplitHighThreads, 0, stream>>>(
+        workspace.const_data_ptr<float>(),
+        reinterpret_cast<half*>(output.mutable_data_ptr()),
+        post_scale.const_data_ptr<float>(),
+        bias.has_value() ? bias->const_data_ptr<float>() : nullptr,
+        static_cast<int>(scale_mode));
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+  }
   const size_t smem_bytes = static_cast<size_t>(n + n / 32) * sizeof(float);
   TORCH_CHECK(smem_bytes <= static_cast<size_t>(properties.sharedMemPerBlockOptin),
               "ordered split recovery exceeds dynamic shared-memory capacity");
@@ -1046,9 +1189,6 @@ at::Tensor qvq_hadamard_ordered_split16_fp32_to_fp16_cuda(
       cudaFuncAttributeMaxDynamicSharedMemorySize,
       static_cast<int>(smem_bytes)));
 
-  at::Tensor output = at::empty(
-      {logical_rows, n}, partial_input.options().dtype(at::kHalf));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(partial_input.get_device());
   qvq_hadamard_ordered_split16_fp32_to_fp16_kernel<<<
       static_cast<unsigned int>(logical_rows), kHadamardThreads, smem_bytes, stream>>>(
       partial_input.const_data_ptr<float>(),
@@ -1379,7 +1519,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
     m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode, bool pad_to_16=False, bool output_fp16=False) -> Tensor");
 });
   m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
-  m.def("hadamard_ordered_split16_fp32_to_fp16(Tensor partial_input, Tensor post_scale, Tensor? bias, int scale_mode, int logical_rows) -> Tensor");
+  m.def("hadamard_ordered_split16_fp32_to_fp16(Tensor partial_input, Tensor post_scale, Tensor? bias, int scale_mode, int logical_rows, bool multiblock=False) -> Tensor");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode, bool warp_low=False) -> (Tensor, Tensor)");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
   m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False, bool half2_low=False, bool pad_to_16=False) -> Tensor");
