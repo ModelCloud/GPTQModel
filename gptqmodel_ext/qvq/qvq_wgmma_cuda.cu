@@ -700,10 +700,16 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
 
   const int thread = static_cast<int>(threadIdx.x);
   constexpr int kConsumerThreads = kThreads * N64BlocksPerCta;
+  constexpr int kLaunchThreads =
+      kTmaThreads + (N64BlocksPerCta - 1) * kThreads;
   const bool is_consumer = thread < kConsumerThreads;
   const bool is_producer = !is_consumer;
-  const int consumer_group = is_consumer ? thread / kThreads : 0;
-  const int consumer_thread = thread - consumer_group * kThreads;
+  int consumer_group = 0;
+  int consumer_thread = thread;
+  if constexpr (N64BlocksPerCta == 2) {
+    consumer_group = is_consumer ? thread / kThreads : 0;
+    consumer_thread = thread - consumer_group * kThreads;
+  }
   int segment = static_cast<int>(blockIdx.y);
   int n64_block = static_cast<int>(blockIdx.x);
   int split = static_cast<int>(blockIdx.z);
@@ -851,7 +857,7 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
 
   if constexpr (TransitionBits >= 4) {
     auto* vectors = reinterpret_cast<uint4*>(shared.levels.begin());
-    for (int entry = thread; entry < 256 * 4; entry += blockDim.x) {
+    for (int entry = thread; entry < 256 * 4; entry += kLaunchThreads) {
       const int index = entry >> 2;
       const auto* level_bits = reinterpret_cast<const uint16_t*>(levels);
       const uint16_t low_bits = level_bits[index];
@@ -862,7 +868,7 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
       vectors[entry] = replicated;
     }
   } else {
-    for (int index = thread; index < 256; index += blockDim.x) {
+    for (int index = thread; index < 256; index += kLaunchThreads) {
       shared.levels.begin()[index] = levels[index];
       shared.levels_high.begin()[index] = levels[index ^ (index >> 7)];
     }
