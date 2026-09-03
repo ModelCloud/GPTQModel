@@ -2511,6 +2511,16 @@ four rates improve, with a 4.69% geometric-mean reduction and exact output
 this full-Q dispatch; all other routes retain the proven two-K16 stage.
 Artifacts are `v20_m16_fullq_stage3_{control8000,verify8000}.json`.
 
+The eleventh accepted v20 progression applies the same three-K16 stage to the
+widened M16 MLP-gate/up tuple `(K,N)=(5120,17408)`. The matched stage-2
+4,000-iteration medians were `0.131072/0.129024/0.129024/0.130048 ms`; stage
+3 measured `0.119808/0.119808/0.120832/0.121856 ms` (7.10% geometric-mean
+improvement), and the 8,000-iteration confirmation remained faster at
+`0.119808/0.119808/0.120832/0.122880 ms`. All outputs are exact within the
+existing tolerance (maximum absolute error `4.58e-05`). The stage-3 template
+is restricted to this gate/up dispatch; other routes retain their measured
+stage depth. Artifacts are `v20_m16_gate_stage3_{control,verify8000}.json`.
+
 An attempted `.cg` cache-policy variant of the 8-byte transaction was rejected
 at compile time: sm_80 `cp.async.cg` accepts only a 16-byte copy in this
 toolchain (`ptxas: unexpected value '8'`). The validated `.ca` transaction is
