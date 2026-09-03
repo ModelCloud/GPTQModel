@@ -900,10 +900,122 @@ __device__ __forceinline__ void qvq_recovery_high_pair_selected(
   output1 = round_fp16_unless_overflow(values[0] - values[1]);
 }
 
+__device__ __forceinline__ float qvq_round_fp16_known_finite(float value) {
+  return __half2float(__float2half_rn(value));
+}
+
+// A five-stage FP16 butterfly starting with sum(abs(input)) <= 64000 cannot
+// overflow FP16. The margin below 65504 covers worst-case upward rounding at
+// every stage. NaN and infinity propagate into abs_sum and fail the ordered
+// comparison, selecting the original overflow-preserving path. The common
+// bounded path therefore removes the repeated finite-test and select while
+// remaining byte-identical.
+__device__ __forceinline__ float qvq_recovery_high_selected_bounded(
+    const float* __restrict__ workspace_row,
+    int local,
+    int output_tile) {
+  float values[kHadamardPairMultiblockTiles];
+  float abs_sum = 0.0f;
+#pragma unroll
+  for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+    const float value =
+        workspace_row[tile * kHadamardPairMultiblockTile + local];
+    values[tile] = value;
+    abs_sum += fabsf(value);
+  }
+  int active = kHadamardPairMultiblockTiles;
+  if (abs_sum <= 64000.0f) {
+#pragma unroll
+    for (int stage = 0; stage < 5; ++stage) {
+      active >>= 1;
+      const bool subtract = (output_tile & (1 << stage)) != 0;
+#pragma unroll
+      for (int index = 0; index < kHadamardPairMultiblockTiles / 2; ++index) {
+        if (index < active) {
+          const float a = values[index * 2];
+          const float b = values[index * 2 + 1];
+          values[index] = qvq_round_fp16_known_finite(
+              subtract ? a - b : a + b);
+        }
+      }
+    }
+  } else {
+#pragma unroll
+    for (int stage = 0; stage < 5; ++stage) {
+      active >>= 1;
+      const bool subtract = (output_tile & (1 << stage)) != 0;
+#pragma unroll
+      for (int index = 0; index < kHadamardPairMultiblockTiles / 2; ++index) {
+        if (index < active) {
+          const float a = values[index * 2];
+          const float b = values[index * 2 + 1];
+          values[index] = round_fp16_unless_overflow(
+              subtract ? a - b : a + b);
+        }
+      }
+    }
+  }
+  return values[0];
+}
+
+__device__ __forceinline__ void qvq_recovery_high_pair_selected_bounded(
+    const float* __restrict__ workspace_row,
+    int local,
+    int output_tile,
+    float& output0,
+    float& output1) {
+  float values[kHadamardPairMultiblockTiles];
+  float abs_sum = 0.0f;
+#pragma unroll
+  for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+    const float value =
+        workspace_row[tile * kHadamardPairMultiblockTile + local];
+    values[tile] = value;
+    abs_sum += fabsf(value);
+  }
+  int active = kHadamardPairMultiblockTiles;
+  if (abs_sum <= 64000.0f) {
+#pragma unroll
+    for (int stage = 0; stage < 4; ++stage) {
+      active >>= 1;
+      const bool subtract = (output_tile & (1 << stage)) != 0;
+#pragma unroll
+      for (int index = 0; index < kHadamardPairMultiblockTiles / 2; ++index) {
+        if (index < active) {
+          const float a = values[index * 2];
+          const float b = values[index * 2 + 1];
+          values[index] = qvq_round_fp16_known_finite(
+              subtract ? a - b : a + b);
+        }
+      }
+    }
+    output0 = qvq_round_fp16_known_finite(values[0] + values[1]);
+    output1 = qvq_round_fp16_known_finite(values[0] - values[1]);
+  } else {
+#pragma unroll
+    for (int stage = 0; stage < 4; ++stage) {
+      active >>= 1;
+      const bool subtract = (output_tile & (1 << stage)) != 0;
+#pragma unroll
+      for (int index = 0; index < kHadamardPairMultiblockTiles / 2; ++index) {
+        if (index < active) {
+          const float a = values[index * 2];
+          const float b = values[index * 2 + 1];
+          values[index] = round_fp16_unless_overflow(
+              subtract ? a - b : a + b);
+        }
+      }
+    }
+    output0 = round_fp16_unless_overflow(values[0] + values[1]);
+    output1 = round_fp16_unless_overflow(values[0] - values[1]);
+  }
+}
+
 // Fuse the selected recovery-high outputs with the exact rounded FP16 SiLU,
 // product, down scale/divisor, and first eight down-input Hadamard stages.
 // The nonlinear FP16 boundary is still materialized in registers, but the
 // separate [gate, up] global tensors and one kernel boundary disappear.
+template <bool BoundedRounding>
 __global__ void qvq_recovery_high_swiglu_precondition_half2_low_kernel(
     const float* __restrict__ recovery_workspace,
     const float* __restrict__ post_scale0,
@@ -927,10 +1039,19 @@ __global__ void qvq_recovery_high_swiglu_precondition_half2_low_kernel(
 
   const float reciprocal = 1.0f /
       sqrtf(static_cast<float>(kHadamardPairMultiblockN));
-  float gate_value = qvq_recovery_high_selected(
-      gate_workspace, local, output_tile);
-  float up_value = qvq_recovery_high_selected(
-      up_workspace, local, output_tile);
+  float gate_value;
+  float up_value;
+  if constexpr (BoundedRounding) {
+    gate_value = qvq_recovery_high_selected_bounded(
+        gate_workspace, local, output_tile);
+    up_value = qvq_recovery_high_selected_bounded(
+        up_workspace, local, output_tile);
+  } else {
+    gate_value = qvq_recovery_high_selected(
+        gate_workspace, local, output_tile);
+    up_value = qvq_recovery_high_selected(
+        up_workspace, local, output_tile);
+  }
   if (scale_mode == 4) {
     gate_value = round_fp16_unless_overflow(gate_value * reciprocal);
     up_value = round_fp16_unless_overflow(up_value * reciprocal);
@@ -1010,6 +1131,7 @@ __global__ void qvq_recovery_high_swiglu_precondition_half2_low_kernel(
 // FP16 recovery, SiLU/product/pre-scale boundary, and independent half2 low
 // transforms. The two shared arrays keep the transforms independent and
 // preserve every accepted Phase-63 rounding operation.
+template <bool BoundedRounding>
 __global__ void qvq_recovery_high_pair_swiglu_precondition_half2_low_kernel(
     const float* __restrict__ recovery_workspace,
     const float* __restrict__ post_scale0,
@@ -1037,10 +1159,17 @@ __global__ void qvq_recovery_high_pair_swiglu_precondition_half2_low_kernel(
   float gate_value1;
   float up_value0;
   float up_value1;
-  qvq_recovery_high_pair_selected(
-      gate_workspace, local, output_tile0, gate_value0, gate_value1);
-  qvq_recovery_high_pair_selected(
-      up_workspace, local, output_tile0, up_value0, up_value1);
+  if constexpr (BoundedRounding) {
+    qvq_recovery_high_pair_selected_bounded(
+        gate_workspace, local, output_tile0, gate_value0, gate_value1);
+    qvq_recovery_high_pair_selected_bounded(
+        up_workspace, local, output_tile0, up_value0, up_value1);
+  } else {
+    qvq_recovery_high_pair_selected(
+        gate_workspace, local, output_tile0, gate_value0, gate_value1);
+    qvq_recovery_high_pair_selected(
+        up_workspace, local, output_tile0, up_value0, up_value1);
+  }
   const float reciprocal = 1.0f /
       sqrtf(static_cast<float>(kHadamardPairMultiblockN));
   if (scale_mode == 4) {
@@ -1828,7 +1957,8 @@ at::Tensor qvq_hadamard_pair_swiglu_precondition_multiblock_cuda(
     const at::Tensor& pre_scale,
     int64_t scale_mode,
     bool pad_to_16,
-    bool pair_tiles) {
+    bool pair_tiles,
+    bool bounded_rounding) {
   TORCH_CHECK(input0.is_cuda() && input1.is_cuda() && pre_scale.is_cuda(),
               "fused recovery/precondition tensors must be CUDA tensors");
   TORCH_CHECK(input0.device() == input1.device() && input0.device() == pre_scale.device(),
@@ -1896,35 +2026,69 @@ at::Tensor qvq_hadamard_pair_swiglu_precondition_multiblock_cuda(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   if (pair_tiles) {
-    qvq_recovery_high_pair_swiglu_precondition_half2_low_kernel<<<
-        dim3(kHadamardPairMultiblockTiles / 2, rows),
-        kHadamardPairMultiblockTile,
-        0,
-        stream>>>(
-        recovery_workspace.const_data_ptr<float>(),
-        post_scale0.const_data_ptr<float>(),
-        post_scale1.const_data_ptr<float>(),
-        bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
-        bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
-        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
-        reinterpret_cast<half*>(precondition_workspace.mutable_data_ptr()),
-        rows,
-        static_cast<int>(scale_mode));
+    if (bounded_rounding) {
+      qvq_recovery_high_pair_swiglu_precondition_half2_low_kernel<true><<<
+          dim3(kHadamardPairMultiblockTiles / 2, rows),
+          kHadamardPairMultiblockTile,
+          0,
+          stream>>>(
+          recovery_workspace.const_data_ptr<float>(),
+          post_scale0.const_data_ptr<float>(),
+          post_scale1.const_data_ptr<float>(),
+          bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
+          bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
+          reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+          reinterpret_cast<half*>(precondition_workspace.mutable_data_ptr()),
+          rows,
+          static_cast<int>(scale_mode));
+    } else {
+      qvq_recovery_high_pair_swiglu_precondition_half2_low_kernel<false><<<
+          dim3(kHadamardPairMultiblockTiles / 2, rows),
+          kHadamardPairMultiblockTile,
+          0,
+          stream>>>(
+          recovery_workspace.const_data_ptr<float>(),
+          post_scale0.const_data_ptr<float>(),
+          post_scale1.const_data_ptr<float>(),
+          bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
+          bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
+          reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+          reinterpret_cast<half*>(precondition_workspace.mutable_data_ptr()),
+          rows,
+          static_cast<int>(scale_mode));
+    }
   } else {
-    qvq_recovery_high_swiglu_precondition_half2_low_kernel<<<
-        dim3(kHadamardPairMultiblockTiles, rows),
-        kHadamardPairMultiblockTile,
-        0,
-        stream>>>(
-        recovery_workspace.const_data_ptr<float>(),
-        post_scale0.const_data_ptr<float>(),
-        post_scale1.const_data_ptr<float>(),
-        bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
-        bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
-        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
-        reinterpret_cast<half*>(precondition_workspace.mutable_data_ptr()),
-        rows,
-        static_cast<int>(scale_mode));
+    if (bounded_rounding) {
+      qvq_recovery_high_swiglu_precondition_half2_low_kernel<true><<<
+          dim3(kHadamardPairMultiblockTiles, rows),
+          kHadamardPairMultiblockTile,
+          0,
+          stream>>>(
+          recovery_workspace.const_data_ptr<float>(),
+          post_scale0.const_data_ptr<float>(),
+          post_scale1.const_data_ptr<float>(),
+          bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
+          bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
+          reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+          reinterpret_cast<half*>(precondition_workspace.mutable_data_ptr()),
+          rows,
+          static_cast<int>(scale_mode));
+    } else {
+      qvq_recovery_high_swiglu_precondition_half2_low_kernel<false><<<
+          dim3(kHadamardPairMultiblockTiles, rows),
+          kHadamardPairMultiblockTile,
+          0,
+          stream>>>(
+          recovery_workspace.const_data_ptr<float>(),
+          post_scale0.const_data_ptr<float>(),
+          post_scale1.const_data_ptr<float>(),
+          bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
+          bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
+          reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+          reinterpret_cast<half*>(precondition_workspace.mutable_data_ptr()),
+          rows,
+          static_cast<int>(scale_mode));
+    }
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
@@ -2179,7 +2343,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("hadamard_input_fp16_padded_multiblock(Tensor input, Tensor pre_scale) -> Tensor");
   m.def("hadamard_ordered_split16_fp32_to_fp16(Tensor partial_input, Tensor post_scale, Tensor? bias, int scale_mode, int logical_rows, bool multiblock=False) -> Tensor");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode, bool warp_low=False) -> (Tensor, Tensor)");
-  m.def("hadamard_pair_swiglu_precondition_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, Tensor pre_scale, int scale_mode, bool pad_to_16=False, bool pair_tiles=False) -> Tensor");
+  m.def("hadamard_pair_swiglu_precondition_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, Tensor pre_scale, int scale_mode, bool pad_to_16=False, bool pair_tiles=False, bool bounded_rounding=False) -> Tensor");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
   m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False, bool half2_low=False, bool pad_to_16=False) -> Tensor");
 }

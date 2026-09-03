@@ -723,6 +723,7 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     assert gate_up_telemetry["h100_warp_recovery_low_launches"] >= 4
     assert gate_up_telemetry["h100_fused_recovery_precondition_launches"] >= 4
     assert gate_up_telemetry["h100_paired_recovery_tiles_launches"] >= 1
+    assert gate_up_telemetry["h100_bounded_recovery_rounding_launches"] >= 1
     assert gate_up_telemetry["h100_multiblock_precondition_launches"] >= 4
     assert gate_up_telemetry["h100_half2_precondition_high_launches"] >= 4
     assert gate_up_telemetry["h100_fused_silu_precondition_low_launches"] >= 4

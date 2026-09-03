@@ -1,9 +1,10 @@
 # A41/R0 H100 implementation and optimization audit
 
 This audit closes the planned A41/R0 implementation sequence and the measured
-H100 optimization sequence through Phase 64. The accepted production source
-is Phase 64. Phases 57 through 62 were exact experiments that did not meet the
-promotion gate; all candidate CUDA source from those phases was removed.
+H100 optimization sequence through Phase 67. The accepted production source
+is Phase 67. Phases 57 through 62, 65, and 66 were exact experiments that did
+not meet the promotion gate; all candidate CUDA source from those phases was
+removed.
 
 ## Planned implementation phases
 
@@ -23,7 +24,7 @@ and bias.
 
 ## H100 production endpoint
 
-Phases 6 through 64 progressively addressed split-K occupancy, grouped QKV
+Phases 6 through 67 progressively addressed split-K occupancy, grouped QKV
 scheduling, exact multiblock transforms, packed FP16 transform arithmetic,
 launch/materialization boundaries, decoder scheduling, and the W2.5 N128
 dual-consumer path. The accepted decoder specialization uses three live decode
@@ -33,6 +34,11 @@ and both recovered gate/up tensors. Phase 64 additionally shares the first
 four exact recovery-high tree stages between output tiles that differ only in
 the final Hadamard bit. The paired kernel is selected only at M16, where the
 row grid has enough parallelism to make the reduced instruction count win.
+Phase 67 additionally proves once per paired recovery tree that all internal
+FP16 results are finite, then omits redundant per-node overflow tests. The
+original overflow-preserving tree remains the exact fallback. This is also
+M16-only: its same-binary complete-MLP result wins all four rates with a
+1.00168x geometric speedup, while M1--M8 retain Phase 64.
 
 The formal complete Llama 3.2 1B MLP benchmark covers
 
@@ -42,14 +48,14 @@ M\in\{1,2,4,8,16\},\qquad
 (K,N)_{down}=(8192,2048).
 \]
 
-Across W2, W2.5, W3, and W3.5, Phase 64 measures **44.209--48.619 us**.
-The all-rate geometric comparison is **1.0924x versus Machete W4** and
-**0.6626x versus Marlin W4**. The four changed M16 cells all win, with a
-**1.0187x** geometric speedup over Phase 63. Relative to the roughly 96 us
+Across W2, W2.5, W3, and W3.5, Phase 67 measures **44.310--48.465 us**.
+The all-rate geometric comparison is **1.0862x versus Machete W4** and
+**0.6643x versus Marlin W4**. The four changed M16 cells all win versus the
+same-binary Phase-64 control. Relative to the roughly 96 us
 Phase-5 endpoint, the
 accepted H100 path is approximately **2.18x faster**, or roughly **54% lower
 latency**. The complete table and exact timing protocol are in
-[`qvq_a41_r0_phase64_h100_paired_recovery_tiles.md`](qvq_a41_r0_phase64_h100_paired_recovery_tiles.md).
+[`qvq_a41_r0_phase67_h100_bounded_recovery_rounding.md`](qvq_a41_r0_phase67_h100_bounded_recovery_rounding.md).
 
 These are latency ratios, not equal-bit-rate comparisons: Marlin and Machete
 run W4 and are figurative kernel baselines for the W2--W3.5 QVQ paths.
@@ -84,11 +90,13 @@ Phase 56 passed the H100-only completion suite:
 ```
 
 That suite includes the Torch oracle, Ampere grouping, grouped runtime,
-transform runtime, and CUDA lifecycle/math coverage. Phase 64 additionally
-passes 24 focused control/candidate exactness/graph cases and the real Llama
+transform runtime, and CUDA lifecycle/math coverage. Phase 67 additionally
+passes 48 focused control/candidate exactness/graph cases, an explicit
+high-magnitude fallback case, and the real Llama
 3.2 layer/logits/cache lifecycle test at both M16 and decode row counts. Its
 formal 20-cell benchmark also checks
-exact equality with the unchanged plain QVQ result. Skips are explicit
+exact equality with the unchanged plain QVQ result. Nsight Compute measures
+3.84% fewer executed instructions in the changed M16 middle kernel. Skips are explicit
 unsupported/multi-device or environment-dependent cases; only the physical
 H100 was exposed to CUDA.
 

@@ -252,6 +252,23 @@ def _run(args):
             mlp, "_gptqmodel_qvq_fused_mlp_runtime"
         ):
             raise RuntimeError(f"failed to install fused MLP path: {counts}")
+        runtime = mlp._gptqmodel_qvq_fused_mlp_runtime
+        phase64_control = {}
+        runtime._h100_bounded_recovery_rounding_enabled = False
+        for m in args.m_values:
+            control_timing, control_outputs = common._graph_timing(
+                torch,
+                lambda mlp=mlp, x=inputs[m]: (mlp(x),),
+                warmup=args.warmup,
+                samples=args.samples,
+                replays_per_sample=args.replays_per_sample,
+            )
+            if not torch.equal(control_outputs[0], expected[m]):
+                raise RuntimeError(
+                    f"same-binary Phase-64 control changed W{bits:g} M{m} MLP output"
+                )
+            phase64_control[m] = control_timing
+        runtime._h100_bounded_recovery_rounding_enabled = True
         for m in args.m_values:
             timing, outputs = common._graph_timing(
                 torch,
@@ -280,6 +297,7 @@ def _run(args):
                     "plain_qvq": plain[m],
                     "paired_recovery_qvq": paired_recovery[m],
                     "fused_mlp_qvq": timing,
+                    "same_binary_phase64_control": phase64_control[m],
                     "marlin_w4": marlin,
                     "machete_w4": machete,
                     "speedup_vs_plain": plain[m]["median_ms"] / timing["median_ms"],
@@ -289,8 +307,12 @@ def _run(args):
                     "speedup_vs_machete_w4": machete["median_ms"] / timing["median_ms"],
                     "speedup_vs_previous_benchmark": previous["median_ms"]
                     / timing["median_ms"],
+                    "speedup_vs_same_binary_phase64": phase64_control[m]["median_ms"]
+                    / timing["median_ms"],
                     "better_than_previous_benchmark": timing["median_ms"]
                     < previous["median_ms"],
+                    "better_than_same_binary_phase64": timing["median_ms"]
+                    < phase64_control[m]["median_ms"],
                     "better_than_paired_recovery_stage": timing["median_ms"]
                     < paired_recovery[m]["median_ms"],
                     "plain_qvq_effective_tflops": logical_flops
@@ -307,6 +329,7 @@ def _run(args):
             )
             print(
                 f"W{bits:g} M{m}: fused={timing['median_ms'] * 1000:.3f}us "
+                f"same_binary_phase64={phase64_control[m]['median_ms'] * 1000:.3f}us "
                 f"paired={paired_recovery[m]['median_ms'] * 1000:.3f}us "
                 f"plain={plain[m]['median_ms'] * 1000:.3f}us "
                 f"marlin={marlin['median_ms'] * 1000:.3f}us "
@@ -318,6 +341,7 @@ def _run(args):
             len(telemetry) != 1
             or telemetry[0]["fused_mlp_fallbacks"]
             or not telemetry[0]["fused_mlp_launches"]
+            or not telemetry[0]["h100_bounded_recovery_rounding_launches"]
             or (
                 16 in args.m_values
                 and not telemetry[0]["h100_paired_recovery_tiles_launches"]
