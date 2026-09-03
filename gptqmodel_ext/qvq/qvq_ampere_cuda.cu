@@ -327,6 +327,15 @@ __device__ __forceinline__ void copy_async_ca_4(void* destination, const void* s
       : "r"(shared_address), "l"(source));
 }
 
+__device__ __forceinline__ void copy_async_ca_8(void* destination, const void* source) {
+  const uint32_t shared_address =
+      static_cast<uint32_t>(__cvta_generic_to_shared(destination));
+  asm volatile(
+      "cp.async.ca.shared.global [%0], [%1], 8;\n"
+      :
+      : "r"(shared_address), "l"(source));
+}
+
 __device__ __forceinline__ void copy_async_ca_16(void* destination, const void* source) {
   const uint32_t shared_address =
       static_cast<uint32_t>(__cvta_generic_to_shared(destination));
@@ -370,7 +379,7 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   constexpr int kBlockNTiles = kTilesPerBlock * kWarpNTiles;
   __shared__ __align__(32) half input_tile[2][kRows * kStageColumns];
   __shared__ __align__(16) uint32_t packed_words[2][kStageKTiles][kBlockNTiles][kWordsPerTile];
-  __shared__ __align__(4) uint8_t packed_bank_ids[2][kStageKTiles][kBlockNTiles];
+  __shared__ __align__(8) uint8_t packed_bank_ids[2][kStageKTiles][kBlockNTiles];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
@@ -446,7 +455,22 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
         destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
       }
     }
-    if constexpr (WideNTiles && StaticN > 0 && (FullRows || ActiveRows > 0)) {
+    if constexpr (WideNTiles && StaticN > 0 && FullRows) {
+      if (thread < kStageKTiles) {
+        const int stage_k_tile = thread;
+        const int k_tile = k_tile_base + stage_k_tile;
+        auto* destination_ids = reinterpret_cast<uint32_t*>(
+            packed_bank_ids[destination][stage_k_tile]);
+        if (k_tile < k_tiles) {
+          copy_async_ca_8(
+              destination_ids,
+              bank_ids + static_cast<int64_t>(k_tile) * n_tiles + n_tile_base);
+        } else {
+          destination_ids[0] = 0u;
+          destination_ids[1] = 0u;
+        }
+      }
+    } else if constexpr (WideNTiles && StaticN > 0 && ActiveRows > 0) {
       if (thread < kStageKTiles * 2) {
         const int stage_k_tile = thread >> 1;
         const int word = thread & 1;

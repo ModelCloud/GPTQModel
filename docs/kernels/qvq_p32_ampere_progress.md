@@ -2451,6 +2451,19 @@ are `v20_m16_w35_pairwrap_wide_candidate.json`,
 `v20_m16_w35_pairwrap_fullq_control8000.json`, and
 `v20_m16_w35_pairwrap_wide_verify8000.json`.
 
+The seventh accepted v20 progression uses one 8-byte `cp.async.ca` for the
+eight bank IDs staged by each full-row widened M16 CTA, replacing two 4-byte
+copies. The shared bank-ID slab is explicitly 8-byte aligned; M8 active-row
+wide CTAs retain the original two-copy path. In matched W2.5 8,000-iteration
+runs, full-Q, attention-out, gate/up, and long-K down changed from
+`0.101376/0.059392/0.134144/0.135168 ms` to
+`0.100352/0.059392/0.133120/0.131072 ms` (about
+`1.01%/0%/0.76%/3.03%` lower latency; 1.22% geometric-mean improvement).
+The all-rate M16 screen was non-regressing and remained numerically exact;
+maximum absolute error was `9.92e-05`. Artifacts are
+`v20_m16_ca8_control8000_all.json`, `v20_m16_ca8_w25_verify8000_all.json`,
+and `v20_m16_ca8_all_rates_screen.json`.
+
 A follow-up W3/W3.5 pair-wrap probe on M16 linear-QKV `(K,N)=(5120,10240)`
 was rejected. The exact candidate measured `0.092160/0.093184 ms` for W3/W3.5
 in the 4,000-iteration screen, versus fetched-main medians near
