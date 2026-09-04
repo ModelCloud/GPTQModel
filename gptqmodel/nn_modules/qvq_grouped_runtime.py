@@ -15,8 +15,11 @@ uses the unmodified child forward method.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
+from statistics import median
+from threading import RLock
 from types import MethodType
 from typing import Any
 from weakref import ref
@@ -54,6 +57,7 @@ _GATE_UP_CANDIDATES: tuple[tuple[str, ...], ...] = (
     ("w1", "w3"),
     ("gate", "up"),
 )
+_H100_LARGE_M_CHUNK_CANDIDATES = (512, 1024, 2048, 4096)
 
 
 class _R0Fallback(RuntimeError):
@@ -214,6 +218,9 @@ class QVQGroupedRuntimeTelemetry:
     h100_multiblock_down_recovery_launches: int = 0
     h100_w25_n128_gate_up_launches: int = 0
     h100_wide_reuse_gate_up_launches: int = 0
+    h100_large_m_chunk_autotunes: int = 0
+    h100_large_m_chunked_mlp_launches: int = 0
+    h100_large_m_chunk_rows: int = 0
     h100_folded_qwen_mlp_launches: int = 0
     h100_folded_qwen_fused_precondition_launches: int = 0
     h100_folded_qwen_fused_ordered_reduction_launches: int = 0
@@ -276,6 +283,9 @@ class QVQGroupedRuntimeTelemetry:
             "h100_multiblock_down_recovery_launches": self.h100_multiblock_down_recovery_launches,
             "h100_w25_n128_gate_up_launches": self.h100_w25_n128_gate_up_launches,
             "h100_wide_reuse_gate_up_launches": self.h100_wide_reuse_gate_up_launches,
+            "h100_large_m_chunk_autotunes": self.h100_large_m_chunk_autotunes,
+            "h100_large_m_chunked_mlp_launches": self.h100_large_m_chunked_mlp_launches,
+            "h100_large_m_chunk_rows": self.h100_large_m_chunk_rows,
             "h100_folded_qwen_mlp_launches": self.h100_folded_qwen_mlp_launches,
             "h100_folded_qwen_fused_precondition_launches": self.h100_folded_qwen_fused_precondition_launches,
             "h100_folded_qwen_fused_ordered_reduction_launches": self.h100_folded_qwen_fused_ordered_reduction_launches,
@@ -323,6 +333,8 @@ class QVQHopperGroupedRuntime:
         self._h100_w25_n128_gate_up_enabled = False
         self._h100_bounded_recovery_rounding_enabled = False
         self._h100_packed_gate_up_recovery_enabled = False
+        self._large_m_chunk_cache: dict[tuple[Any, ...], int] = {}
+        self._large_m_chunk_cache_lock = RLock()
         self._input: torch.Tensor | None = None
         self._input_version: int | None = None
         self._outputs: tuple[torch.Tensor, ...] | None = None
@@ -359,6 +371,8 @@ class QVQHopperGroupedRuntime:
         self._h100_w25_n128_gate_up_enabled = False
         self._h100_bounded_recovery_rounding_enabled = False
         self._h100_packed_gate_up_recovery_enabled = False
+        with self._large_m_chunk_cache_lock:
+            self._large_m_chunk_cache.clear()
         self.telemetry.grouped_window_bytes = 0
         self.telemetry.grouped_selector_bytes = 0
         self.telemetry.child_window_bytes_avoided = 0
@@ -387,7 +401,9 @@ class QVQHopperGroupedRuntime:
         ):
             self.invalidate()
 
-    def _runtime_eligible(self, x: torch.Tensor) -> str | None:
+    def _runtime_eligible(
+        self, x: torch.Tensor, *, maximum_rows: int | None = 4096
+    ) -> str | None:
         children = self._children()
         if not isinstance(x, torch.Tensor):
             return "input is not a tensor"
@@ -400,7 +416,7 @@ class QVQHopperGroupedRuntime:
         if x.shape[-1] != children[0].in_features or x.numel() == 0:
             return "input shape is unsupported"
         rows = x.numel() // children[0].in_features
-        if not 1 <= rows <= 4096:
+        if rows < 1 or (maximum_rows is not None and rows > maximum_rows):
             return "grouped Hopper execution currently requires one through 4096 rows"
         if any(child.trellis.device != x.device for child in children):
             return "activation and grouped payload devices differ"
@@ -848,9 +864,14 @@ class QVQHopperGroupedRuntime:
         self._mlp_activation_is_exact_silu = False
 
     def _mlp_rejection(self, x: torch.Tensor) -> str | None:
-        rejection = self._runtime_eligible(x)
+        rejection = self._runtime_eligible(x, maximum_rows=None)
         if rejection is not None:
             return rejection
+        rows = x.numel() // self._children()[0].in_features
+        if rows > 4096:
+            properties = torch.cuda.get_device_properties(x.device)
+            if properties.name != "NVIDIA H100":
+                return "MLP row multiplexing above 4096 is measured only on H100"
         down = None if self._mlp_down_ref is None else self._mlp_down_ref()
         if not isinstance(down, QVQLinear):
             return "fused MLP lost its QVQ down projection"
@@ -870,6 +891,133 @@ class QVQHopperGroupedRuntime:
             return "fused MLP activation is unavailable"
         return None
 
+    @staticmethod
+    def _large_m_chunk_autotune_enabled() -> bool:
+        return os.environ.get("QVQ_HOPPER_LARGE_M_AUTOTUNE", "1").lower() not in {
+            "0",
+            "false",
+            "off",
+            "no",
+            "",
+        }
+
+    @staticmethod
+    def _large_m_chunk_candidates() -> tuple[int, ...]:
+        configured = os.environ.get("QVQ_HOPPER_LARGE_M_CHUNK_CANDIDATES")
+        if configured is None:
+            return _H100_LARGE_M_CHUNK_CANDIDATES
+        candidates: list[int] = []
+        for token in configured.split(","):
+            try:
+                candidate = int(token.strip())
+            except ValueError:
+                continue
+            if (
+                candidate in _H100_LARGE_M_CHUNK_CANDIDATES
+                and candidate not in candidates
+            ):
+                candidates.append(candidate)
+        return tuple(candidates) or _H100_LARGE_M_CHUNK_CANDIDATES
+
+    def _large_m_chunk_cache_key(
+        self, x: torch.Tensor, rows: int
+    ) -> tuple[Any, ...]:
+        children = self._children()
+        down = self._mlp_down_ref()
+        row_bucket = 1 << (rows - 1).bit_length()
+        return (
+            x.get_device(),
+            x.dtype,
+            row_bucket,
+            children[0].in_features,
+            tuple(child.out_features for child in children),
+            down.out_features,
+            qvq_transition_bits(
+                children[0].bits, vector_size=children[0].vector_size
+            ),
+        )
+
+    def _execute_mlp_chunked(
+        self, x: torch.Tensor, chunk_rows: int
+    ) -> torch.Tensor:
+        children = self._children()
+        down = self._mlp_down_ref()
+        rows = x.numel() // children[0].in_features
+        x_2d = x.reshape(rows, children[0].in_features)
+        outputs = [
+            self._execute_mlp(x_2d[begin : min(begin + chunk_rows, rows)])
+            for begin in range(0, rows, chunk_rows)
+        ]
+        return torch.cat(outputs, dim=0).reshape(
+            *x.shape[:-1], down.out_features
+        )
+
+    def _autotune_large_m_chunk_rows(self, x: torch.Tensor, rows: int) -> int:
+        key = self._large_m_chunk_cache_key(x, rows)
+        with self._large_m_chunk_cache_lock:
+            cached = self._large_m_chunk_cache.get(key)
+            if cached is not None:
+                return cached
+
+            # Event creation and synchronization are illegal inside capture.
+            # A cold graph gets the conservative largest chunk without
+            # poisoning the cache; ordinary eager warmup can still tune later.
+            if (
+                torch.cuda.is_current_stream_capturing()
+                or not self._large_m_chunk_autotune_enabled()
+            ):
+                return 4096
+
+            candidates = self._large_m_chunk_candidates()
+            warmup = max(
+                0, int(os.environ.get("QVQ_HOPPER_LARGE_M_AUTOTUNE_WARMUP", "1"))
+            )
+            iterations = max(
+                1,
+                int(os.environ.get("QVQ_HOPPER_LARGE_M_AUTOTUNE_ITERATIONS", "5")),
+            )
+            repeats = max(
+                1, int(os.environ.get("QVQ_HOPPER_LARGE_M_AUTOTUNE_REPEATS", "3"))
+            )
+            stream = torch.cuda.current_stream(x.device)
+            best_chunk = 4096
+            best_ms = float("inf")
+            telemetry_before = self.telemetry.__dict__.copy()
+            for candidate in candidates:
+                try:
+                    for _ in range(warmup):
+                        output = self._execute_mlp_chunked(x, candidate)
+                        del output
+                    torch.cuda.synchronize(x.device)
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        captured = self._execute_mlp_chunked(x, candidate)
+                    for _ in range(warmup):
+                        graph.replay()
+                    torch.cuda.synchronize(x.device)
+                    samples = []
+                    for _ in range(repeats):
+                        start = torch.cuda.Event(enable_timing=True)
+                        end = torch.cuda.Event(enable_timing=True)
+                        start.record(stream)
+                        for _ in range(iterations):
+                            graph.replay()
+                        end.record(stream)
+                        end.synchronize()
+                        samples.append(start.elapsed_time(end) / iterations)
+                    elapsed_ms = median(samples)
+                    if elapsed_ms < best_ms:
+                        best_ms = elapsed_ms
+                        best_chunk = candidate
+                    del captured, graph
+                except (RuntimeError, ValueError):
+                    continue
+            for name, value in telemetry_before.items():
+                setattr(self.telemetry, name, value)
+            self.telemetry.h100_large_m_chunk_autotunes += 1
+            self._large_m_chunk_cache[key] = best_chunk
+            return best_chunk
+
     def _execute_mlp(self, x: torch.Tensor) -> torch.Tensor:
         down = self._mlp_down_ref()
         from ..utils.qvq_cuda import (
@@ -882,6 +1030,11 @@ class QVQHopperGroupedRuntime:
         )
 
         rows = x.numel() // self._children()[0].in_features
+        if rows > 4096:
+            chunk_rows = self._autotune_large_m_chunk_rows(x, rows)
+            self.telemetry.h100_large_m_chunked_mlp_launches += 1
+            self.telemetry.h100_large_m_chunk_rows = chunk_rows
+            return self._execute_mlp_chunked(x, chunk_rows)
         children = self._children()
         qwen_folded_intermediate = (
             self._mlp_activation_is_exact_silu

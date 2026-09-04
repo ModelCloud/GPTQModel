@@ -22,7 +22,7 @@ from scripts import benchmark_qvq_a41_phase4_production as common
 from scripts import benchmark_qvq_hopper_large_m as large_m
 
 RATES = (2.0, 2.5, 3.0, 3.5)
-M_VALUES = (32, 64, 128, 256, 512, 1024, 2048, 4096)
+M_VALUES = (32, 64, 128, 256, 512, 1024, 2048, 4096, 8192)
 HIDDEN = 2048
 INTERMEDIATE = 8192
 SOURCE_PATHS = (
@@ -59,8 +59,8 @@ def _args() -> argparse.Namespace:
     args = parser.parse_args()
     if any(rate not in RATES for rate in args.rates):
         parser.error("rates must be W2, W2.5, W3, or W3.5")
-    if any(m < 17 or m > 4096 for m in args.m_values):
-        parser.error("large-M MLP rows must be in [17, 4096]")
+    if any(m < 17 for m in args.m_values):
+        parser.error("large-M MLP rows must be at least 17")
     if min(args.warmup, args.samples, args.replays_per_sample) <= 0:
         parser.error("timing counts must be positive")
     return args
@@ -194,6 +194,7 @@ def _main(args: argparse.Namespace) -> None:
             timing, (actual,) = large_m._graph_timing(
                 torch, lambda mlp=mlp, x=x: (mlp(x),), args, device_info
             )
+            runtime_telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
             gate = qvq_dense_oracle_forward(mlp.gate_proj, x, device=device).half()
             up = qvq_dense_oracle_forward(mlp.up_proj, x, device=device).half()
             intermediate = torch.nn.functional.silu(gate) * up
@@ -231,6 +232,11 @@ def _main(args: argparse.Namespace) -> None:
                     else None
                 ),
                 "dense_oracle_error": error,
+                "selected_chunk_rows": (
+                    runtime_telemetry["h100_large_m_chunk_rows"]
+                    if m > 4096
+                    else None
+                ),
             }
             results.append(result)
             print(

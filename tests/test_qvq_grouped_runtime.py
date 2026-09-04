@@ -13,6 +13,7 @@ from torch import nn
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.nn_modules.qvq_grouped_runtime import (
+    QVQHopperGroupedRuntime,
     _is_exact_silu_activation,
     install_qvq_hopper_groups,
     qvq_grouped_runtime_telemetry,
@@ -125,6 +126,7 @@ def test_qwen38_h100_grouped_schedules_preserve_child_split_policies(
         (10240, 6144),
         (17408, 17408),
     )
+
     actual = tuple(
         qvq_h100_grouped_ordered_split_counts(
             device_name="NVIDIA H100 80GB HBM3",
@@ -145,6 +147,27 @@ def test_qwen38_h100_grouped_schedules_preserve_child_split_policies(
             transition_bits=transition_bits,
         )
         is None
+    )
+
+
+def test_h100_large_m_chunk_candidates_are_bounded_and_configurable(monkeypatch):
+    monkeypatch.delenv("QVQ_HOPPER_LARGE_M_CHUNK_CANDIDATES", raising=False)
+    assert QVQHopperGroupedRuntime._large_m_chunk_candidates() == (
+        512,
+        1024,
+        2048,
+        4096,
+    )
+    monkeypatch.setenv(
+        "QVQ_HOPPER_LARGE_M_CHUNK_CANDIDATES", "2048,invalid,4096,2048,8192"
+    )
+    assert QVQHopperGroupedRuntime._large_m_chunk_candidates() == (2048, 4096)
+    monkeypatch.setenv("QVQ_HOPPER_LARGE_M_CHUNK_CANDIDATES", "invalid,8192")
+    assert QVQHopperGroupedRuntime._large_m_chunk_candidates() == (
+        512,
+        1024,
+        2048,
+        4096,
     )
 
 
@@ -960,7 +983,9 @@ def test_fused_mlp_lifecycle_flag_fallback_and_uninstall_are_exact():
         assert torch.equal(mlp(x), expected)
 
 
-@pytest.mark.parametrize("logical_rows", (32, 64, 128, 256, 512, 1024, 2048, 4096))
+@pytest.mark.parametrize(
+    "logical_rows", (32, 64, 128, 256, 512, 1024, 2048, 4096, 4097)
+)
 def test_large_m_fused_mlp_uses_native_row_reuse_and_replays_cuda_graph(
     logical_rows,
 ):
@@ -989,27 +1014,49 @@ def test_large_m_fused_mlp_uses_native_row_reuse_and_replays_cuda_graph(
         torch.randn((logical_rows, 256), device=device, dtype=torch.float16) * 0.02
     )
     with torch.inference_mode():
-        plain = mlp(static_input).clone()
+        plain = mlp(static_input).clone() if logical_rows <= 4096 else None
     assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
 
     with torch.inference_mode():
-        eager = mlp(static_input)
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            captured = mlp(static_input)
+        if logical_rows > 4096:
+            # Warm the canonical payload and child kernel caches while leaving
+            # the >4096 chunk-plan cache cold. Capture cannot time candidates,
+            # so it must record the fixed 4096-row plan without caching it;
+            # the next eager call remains free to autotune the measured target.
+            mlp(static_input[:16])
+            with torch.cuda.graph(graph):
+                captured = mlp(static_input)
+            eager = mlp(static_input)
+        else:
+            eager = mlp(static_input)
+            with torch.cuda.graph(graph):
+                captured = mlp(static_input)
         graph.replay()
         torch.cuda.synchronize(device)
 
-    assert torch.equal(eager, plain)
+    if logical_rows <= 4096:
+        assert torch.equal(eager, plain)
     assert torch.equal(captured, eager)
+    if logical_rows > 4096:
+        runtime = mlp._gptqmodel_qvq_fused_mlp_runtime
+        with torch.inference_mode():
+            for chunk_rows in (512, 1024, 2048, 4096):
+                assert torch.equal(
+                    runtime._execute_mlp_chunked(static_input, chunk_rows), eager
+                )
     for _ in range(3):
         graph.replay()
     torch.cuda.synchronize(device)
     assert torch.equal(captured, eager)
     telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
-    assert telemetry["fused_mlp_launches"] == 2
+    assert telemetry["fused_mlp_launches"] == (3 if logical_rows > 4096 else 2)
     assert telemetry["fused_mlp_fallbacks"] == 0
     assert telemetry["plain_fallbacks"] == 0
+    if logical_rows > 4096:
+        assert telemetry["h100_large_m_chunk_autotunes"] == 1
+        assert telemetry["h100_large_m_chunked_mlp_launches"] == 2
+        assert telemetry["h100_large_m_chunk_rows"] in (512, 1024, 2048, 4096)
 
 
 def test_real_llama32_layer_logits_and_cached_generation_are_exact():
