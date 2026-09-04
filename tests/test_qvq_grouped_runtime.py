@@ -690,6 +690,7 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_replay_exact():
     assert telemetry["h100_folded_qwen_fused_precondition_launches"] == 2
     assert telemetry["h100_folded_qwen_fused_ordered_reduction_launches"] == 2
     assert telemetry["h100_qwen_w3_ordered_decode_prefetch_launches"] == 2
+    assert telemetry["h100_qwen_w3_down_decode_prefetch_launches"] == 2
     assert telemetry["h100_qwen_fixed_ordered_grid_launches"] == 2
     assert telemetry["h100_qwen_composite_down_recovery_launches"] == 2
     assert telemetry["h100_qwen_ordered_composite_down_recovery_launches"] == 2

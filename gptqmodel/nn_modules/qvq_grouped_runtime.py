@@ -215,6 +215,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_folded_qwen_fused_precondition_launches: int = 0
     h100_folded_qwen_fused_ordered_reduction_launches: int = 0
     h100_qwen_w3_ordered_decode_prefetch_launches: int = 0
+    h100_qwen_w3_down_decode_prefetch_launches: int = 0
     h100_qwen_fixed_ordered_grid_launches: int = 0
     h100_qwen_composite_down_recovery_launches: int = 0
     h100_qwen_ordered_composite_down_recovery_launches: int = 0
@@ -269,6 +270,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_folded_qwen_fused_precondition_launches": self.h100_folded_qwen_fused_precondition_launches,
             "h100_folded_qwen_fused_ordered_reduction_launches": self.h100_folded_qwen_fused_ordered_reduction_launches,
             "h100_qwen_w3_ordered_decode_prefetch_launches": self.h100_qwen_w3_ordered_decode_prefetch_launches,
+            "h100_qwen_w3_down_decode_prefetch_launches": self.h100_qwen_w3_down_decode_prefetch_launches,
             "h100_qwen_fixed_ordered_grid_launches": self.h100_qwen_fixed_ordered_grid_launches,
             "h100_qwen_composite_down_recovery_launches": self.h100_qwen_composite_down_recovery_launches,
             "h100_qwen_ordered_composite_down_recovery_launches": self.h100_qwen_ordered_composite_down_recovery_launches,
@@ -1002,6 +1004,7 @@ class QVQHopperGroupedRuntime:
             )
             self.telemetry.h100_qwen_composite_down_recovery_launches += 1
             self.telemetry.h100_qwen_ordered_composite_down_recovery_launches += 1
+            self.telemetry.h100_qwen_w3_down_decode_prefetch_launches += 1
             self.telemetry.h100_fp16_recovery_store_launches += 1
             return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
 
