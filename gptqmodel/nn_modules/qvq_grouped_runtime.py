@@ -35,6 +35,7 @@ from ..quantization.qvq import (
 from ..quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
 from ..utils.qvq_wgmma_cuda import (
     QVQHopperGroupedP32Payload,
+    qvq_fp16_to_fp8_e5m2_clamped,
     qvq_h100_grouped_ordered_split_counts,
     qvq_p32_window_wgmma_group_plan,
     qvq_p32_window_wgmma_grouped_ordered_packed,
@@ -62,6 +63,17 @@ _H100_LARGE_M_CHUNK_CANDIDATES = (512, 1024, 2048, 4096)
 
 class _R0Fallback(RuntimeError):
     """An expected exactness/dispatch rejection, not a kernel failure."""
+
+
+@dataclass(frozen=True)
+class _H100FP8PrefillPayload:
+    """Transient folded weight used only by the measured large-M QKV path."""
+
+    weight: torch.Tensor
+    weight_scale: torch.Tensor
+    input_scale: torch.Tensor
+    bias: torch.Tensor | None
+    source_key: tuple[Any, ...]
 
 
 def _is_exact_silu_activation(act_fn: Any) -> bool:
@@ -223,6 +235,8 @@ class QVQGroupedRuntimeTelemetry:
     h100_large_m_chunk_rows: int = 0
     h100_large_m_chunked_group_launches: int = 0
     h100_large_m_group_chunk_rows: int = 0
+    h100_fp8_prefill_launches: int = 0
+    h100_fp8_prefill_bytes: int = 0
     h100_folded_qwen_mlp_launches: int = 0
     h100_folded_qwen_fused_precondition_launches: int = 0
     h100_folded_qwen_fused_ordered_reduction_launches: int = 0
@@ -290,6 +304,8 @@ class QVQGroupedRuntimeTelemetry:
             "h100_large_m_chunk_rows": self.h100_large_m_chunk_rows,
             "h100_large_m_chunked_group_launches": self.h100_large_m_chunked_group_launches,
             "h100_large_m_group_chunk_rows": self.h100_large_m_group_chunk_rows,
+            "h100_fp8_prefill_launches": self.h100_fp8_prefill_launches,
+            "h100_fp8_prefill_bytes": self.h100_fp8_prefill_bytes,
             "h100_folded_qwen_mlp_launches": self.h100_folded_qwen_mlp_launches,
             "h100_folded_qwen_fused_precondition_launches": self.h100_folded_qwen_fused_precondition_launches,
             "h100_folded_qwen_fused_ordered_reduction_launches": self.h100_folded_qwen_fused_ordered_reduction_launches,
@@ -339,6 +355,7 @@ class QVQHopperGroupedRuntime:
         self._h100_packed_gate_up_recovery_enabled = False
         self._large_m_chunk_cache: dict[tuple[Any, ...], int] = {}
         self._large_m_chunk_cache_lock = RLock()
+        self._h100_fp8_prefill_payload: _H100FP8PrefillPayload | None = None
         self._input: torch.Tensor | None = None
         self._input_version: int | None = None
         self._outputs: tuple[torch.Tensor, ...] | None = None
@@ -377,10 +394,12 @@ class QVQHopperGroupedRuntime:
         self._h100_packed_gate_up_recovery_enabled = False
         with self._large_m_chunk_cache_lock:
             self._large_m_chunk_cache.clear()
+        self._h100_fp8_prefill_payload = None
         self.telemetry.grouped_window_bytes = 0
         self.telemetry.grouped_selector_bytes = 0
         self.telemetry.child_window_bytes_avoided = 0
         self.telemetry.active_split_counts = ()
+        self.telemetry.h100_fp8_prefill_bytes = 0
 
     def _fallback(
         self, member_index: int, x: torch.Tensor, reason: str
@@ -614,6 +633,15 @@ class QVQHopperGroupedRuntime:
             raise ValueError("ordered partial execution cannot recover child outputs")
         children = self._children()
         rows = x.numel() // children[0].in_features
+        if (
+            recover
+            and not return_ordered_partials
+            and self._h100_fp8_prefill_eligible(x, rows)
+        ):
+            prefill_payload = self._ensure_h100_fp8_prefill_payload()
+            if prefill_payload is not None:
+                self.telemetry.h100_fp8_prefill_launches += 1
+                return self._execute_h100_fp8_prefill(x, prefill_payload)
         if rows > 4096:
             if return_ordered_partials or not recover:
                 raise _R0Fallback(
@@ -919,6 +947,128 @@ class QVQHopperGroupedRuntime:
             "no",
             "",
         }
+
+    @staticmethod
+    def _h100_fp8_prefill_enabled() -> bool:
+        return os.environ.get("QVQ_HOPPER_FP8_PREFILL", "1").lower() not in {
+            "0",
+            "false",
+            "off",
+            "no",
+            "",
+        }
+
+    def _h100_fp8_prefill_eligible(self, x: torch.Tensor, rows: int) -> bool:
+        children = self._children()
+        if not self._h100_fp8_prefill_enabled() or rows < 8192:
+            return False
+        properties = torch.cuda.get_device_properties(x.device)
+        return (
+            self.category == "qkv"
+            and len(children) == 3
+            and children[0].in_features == 2048
+            and tuple(child.out_features for child in children)
+            == (2048, 512, 512)
+            and all(child.bias is None for child in children)
+            and properties.name == "NVIDIA H100"
+            and (properties.major, properties.minor) == (9, 0)
+            and hasattr(torch, "_scaled_mm")
+            and hasattr(torch, "float8_e4m3fn")
+            and hasattr(torch, "float8_e5m2")
+        )
+
+    def _h100_fp8_prefill_source_key(self) -> tuple[Any, ...]:
+        key = list(_source_key(self._children()))
+        for child in self._children():
+            for name in ("SV", "bias"):
+                tensor = getattr(child, name, None)
+                key.extend(
+                    (id(tensor), None if tensor is None else _tensor_version(tensor))
+                )
+        return tuple(key)
+
+    def _build_h100_fp8_prefill_payload(
+        self, source_key: tuple[Any, ...]
+    ) -> _H100FP8PrefillPayload:
+        from ..quantization.rotation.hadamard_utils import matmul_hadU
+
+        children = self._children()
+        folded_weights = []
+        for child in children:
+            weight = child.get_inner_weight_tensor(torch.float32)
+            if child.input_hadamard:
+                weight = matmul_hadU(weight.t()).t()
+            weight = weight * child.SU.float().unsqueeze(1)
+            if child.output_hadamard:
+                weight = matmul_hadU(weight)
+            weight = weight * child.SV.float().unsqueeze(0)
+            folded_weights.append(weight.half())
+        folded = torch.cat(folded_weights, dim=1)
+        scale = (folded.abs().amax() / 448.0).float()
+        scale = torch.where(scale > 0, scale, torch.ones_like(scale))
+        # cuBLASLt FP8 expects B in column-major order.  Quantize the
+        # transposed contiguous view, then transpose back without copying.
+        weight = (folded.t().contiguous() / scale).to(torch.float8_e4m3fn).t()
+        payload = _H100FP8PrefillPayload(
+            weight=weight,
+            weight_scale=scale,
+            input_scale=torch.ones((), device=weight.device, dtype=torch.float32),
+            bias=None,
+            source_key=source_key,
+        )
+        if source_key != self._h100_fp8_prefill_source_key():
+            raise RuntimeError("QVQ canonical state changed during FP8 prefill folding")
+        self.telemetry.h100_fp8_prefill_bytes = sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (
+                payload.weight,
+                payload.weight_scale,
+                payload.input_scale,
+            )
+        )
+        return payload
+
+    def _ensure_h100_fp8_prefill_payload(
+        self,
+    ) -> _H100FP8PrefillPayload | None:
+        source_key = self._h100_fp8_prefill_source_key()
+        cached = self._h100_fp8_prefill_payload
+        if cached is not None and cached.source_key == source_key:
+            return cached
+        if torch.cuda.is_current_stream_capturing():
+            # Cache construction reconstructs and folds the canonical weight.
+            # A cold capture keeps using exact row multiplexing; an eager
+            # warmup can build this measured prefill representation later.
+            return None
+        self._h100_fp8_prefill_payload = self._build_h100_fp8_prefill_payload(
+            source_key
+        )
+        return self._h100_fp8_prefill_payload
+
+    def _execute_h100_fp8_prefill(
+        self, x: torch.Tensor, payload: _H100FP8PrefillPayload
+    ) -> tuple[torch.Tensor, ...]:
+        children = self._children()
+        rows = x.numel() // children[0].in_features
+        x_fp8 = qvq_fp16_to_fp8_e5m2_clamped(
+            x.reshape(rows, children[0].in_features).contiguous()
+        )
+        output = torch._scaled_mm(
+            x_fp8,
+            payload.weight,
+            scale_a=payload.input_scale,
+            scale_b=payload.weight_scale,
+            bias=payload.bias,
+            out_dtype=torch.float16,
+            use_fast_accum=True,
+        )
+        widths = tuple(child.out_features for child in children)
+        return tuple(
+            child_output.reshape(*x.shape[:-1], width)
+            for child_output, width in zip(
+                torch.split(output, widths, dim=1), widths, strict=True
+            )
+        )
 
     @staticmethod
     def _large_m_chunk_candidates() -> tuple[int, ...]:

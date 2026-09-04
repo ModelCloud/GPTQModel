@@ -25,6 +25,7 @@ from gptqmodel.quantization.qvq import (
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.utils.qvq_wgmma_cuda import (
+    qvq_fp16_to_fp8_e5m2_clamped,
     qvq_h100_grouped_ordered_split_counts,
     qvq_p32_window_wgmma_m16_tma_ordered_split,
 )
@@ -169,6 +170,27 @@ def test_h100_large_m_chunk_candidates_are_bounded_and_configurable(monkeypatch)
         2048,
         4096,
     )
+
+
+def test_h100_fp8_prefill_conversion_saturates_and_replays_cuda_graph():
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    values = torch.tensor(
+        (-65504, -57344, -1, 0, 1, 57344, 65504),
+        device=device,
+        dtype=torch.float16,
+    )
+    expected = values.clamp(-57344, 57344).to(torch.float8_e5m2)
+    with torch.inference_mode():
+        eager = qvq_fp16_to_fp8_e5m2_clamped(values)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = qvq_fp16_to_fp8_e5m2_clamped(values)
+        graph.replay()
+        torch.cuda.synchronize(device)
+    assert torch.equal(eager.float(), expected.float())
+    assert torch.equal(captured.float(), expected.float())
 
 
 def test_r0_installs_only_bit_identical_input_transforms():
@@ -1130,6 +1152,73 @@ def test_h100_grouped_projection_above_4096_autotunes_and_replays_cuda_graph():
     assert telemetry["h100_large_m_chunk_autotunes"] == 1
     assert telemetry["h100_large_m_chunked_group_launches"] == 2
     assert telemetry["h100_large_m_group_chunk_rows"] in (512, 1024, 2048, 4096)
+    assert telemetry["plain_fallbacks"] == 0
+
+
+def test_h100_m8192_qkv_uses_folded_fp8_prefill_and_replays_cuda_graph():
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    from gptqmodel.nn_modules.qlinear.qvq import qvq_dense_oracle_forward
+
+    shared = torch.ones(2048, device=device)
+    widths = (2048, 512, 512)
+    children = tuple(
+        _child(
+            name,
+            in_features=2048,
+            out_features=width,
+            bits=3,
+            su=shared,
+            alt_id=index + 1,
+            seed=300 + index,
+            device=device,
+        )
+        for index, (name, width) in enumerate(
+            zip(("q_proj", "k_proj", "v_proj"), widths, strict=True)
+        )
+    )
+    children[2].output_hadamard = False
+    for child in children:
+        child.bias = None
+        child.SV.fill_(0.002)
+        child._dtype_cache_clear()
+    attention = _Attention(children)
+    static_input = (
+        torch.randn((8192, 2048), device=device, dtype=torch.float16) * 0.02
+    )
+    with torch.inference_mode():
+        expected = tuple(
+            qvq_dense_oracle_forward(child, static_input, device=device)
+            for child in children
+        )
+    assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
+
+    def execute_group():
+        return tuple(
+            getattr(attention, name)(static_input)
+            for name in ("q_proj", "k_proj", "v_proj")
+        )
+
+    with torch.inference_mode():
+        eager = execute_group()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = execute_group()
+        for _ in range(3):
+            graph.replay()
+        torch.cuda.synchronize(device)
+
+    for actual, reference in zip(eager, expected, strict=True):
+        torch.testing.assert_close(actual.float(), reference, rtol=0, atol=2e-3)
+    assert all(
+        torch.equal(actual, reference)
+        for actual, reference in zip(captured, eager, strict=True)
+    )
+    telemetry = qvq_grouped_runtime_telemetry(attention)[0]
+    assert telemetry["h100_fp8_prefill_launches"] == 2
+    assert 6 * 1024 * 1024 < telemetry["h100_fp8_prefill_bytes"] < 7 * 1024 * 1024
+    assert telemetry["h100_large_m_chunked_group_launches"] == 0
     assert telemetry["plain_fallbacks"] == 0
 
 

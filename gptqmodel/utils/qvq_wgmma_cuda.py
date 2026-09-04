@@ -107,6 +107,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_WGMMA_NAME,
     namespace=_QVQ_WGMMA_NAMESPACE,
     required_ops=(
+        "fp16_to_fp8_e5m2_clamped",
         "p32_window_w3_m16",
         "p32_window_w3_m16_tma",
         "p32_window_m16_tma",
@@ -133,6 +134,16 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
     requires_cuda=True,
     merge_visible_cuda_arch_override=False,
 )
+
+
+def qvq_fp16_to_fp8_e5m2_clamped(input: torch.Tensor) -> torch.Tensor:
+    """Convert finite FP16 values to E5M2 without overflowing to infinity."""
+
+    if input.device.type != "cuda" or input.dtype != torch.float16:
+        raise ValueError("Hopper FP8 prefill conversion requires FP16 CUDA input")
+    return _QVQ_WGMMA_EXTENSION.op("fp16_to_fp8_e5m2_clamped")(
+        input.contiguous()
+    )
 
 
 def _resolve_transition_bits(bits: float) -> int:
@@ -907,6 +918,7 @@ __all__ = [
     "QVQHopperGroupedP32Payload",
     "QVQHopperGroupedP32Plan",
     "QVQHopperP32SegmentPlan",
+    "qvq_fp16_to_fp8_e5m2_clamped",
     "qvq_h100_grouped_ordered_split_counts",
     "qvq_h100_large_m_ordered_split_count",
     "qvq_h100_ordered_split_count",

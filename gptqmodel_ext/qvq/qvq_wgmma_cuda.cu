@@ -5,8 +5,11 @@
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
+#include <cuda_fp8.h>
 #include <torch/library.h>
 #include <torch/types.h>
+
+#include <c10/util/Float8_e5m2.h>
 
 #include <cute/algorithm/gemm.hpp>
 #include <cute/tensor.hpp>
@@ -1315,6 +1318,45 @@ __global__ void qvq_wgmma_reduce_split_fixed_kernel(
       make_float4(value0, value1, value2, value3);
 }
 
+__global__ void qvq_fp16_to_fp8_e5m2_clamped_kernel(
+    const Element* __restrict__ input,
+    c10::Float8_e5m2* __restrict__ output,
+    int64_t value_count) {
+  const int64_t pair_index = static_cast<int64_t>(blockIdx.x) * blockDim.x +
+      static_cast<int64_t>(threadIdx.x);
+  const int64_t pair_count = value_count >> 1;
+  if (pair_index < pair_count) {
+    const auto value = reinterpret_cast<const __half2*>(input)[pair_index];
+    reinterpret_cast<__nv_fp8x2_storage_t*>(output)[pair_index] =
+        __nv_fp8x2_e5m2(value).__x;
+  }
+  if ((value_count & 1) && pair_index == pair_count) {
+    float value = static_cast<float>(input[value_count - 1]);
+    if (isfinite(value)) {
+      value = fminf(57344.0f, fmaxf(-57344.0f, value));
+    }
+    output[value_count - 1] = c10::Float8_e5m2(value);
+  }
+}
+
+at::Tensor qvq_fp16_to_fp8_e5m2_clamped(const at::Tensor& input) {
+  TORCH_CHECK(input.is_cuda(), "FP8 prefill conversion requires CUDA input");
+  TORCH_CHECK(input.scalar_type() == at::kHalf, "FP8 prefill conversion requires FP16 input");
+  TORCH_CHECK(input.is_contiguous(), "FP8 prefill conversion requires contiguous input");
+  auto output = at::empty(input.sizes(), input.options().dtype(at::kFloat8_e5m2));
+  const int64_t value_count = input.numel();
+  constexpr int kConvertThreads = 256;
+  const int64_t pair_count = (value_count + 1) / 2;
+  const int64_t blocks = (pair_count + kConvertThreads - 1) / kConvertThreads;
+  const auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  qvq_fp16_to_fp8_e5m2_clamped_kernel<<<blocks, kConvertThreads, 0, stream>>>(
+      reinterpret_cast<const Element*>(input.data_ptr<at::Half>()),
+      output.data_ptr<c10::Float8_e5m2>(),
+      value_count);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
 void qvq_wgmma_launch_ordered_split_reduction(
     const at::Tensor& partial_output,
     int64_t partial_output_offset,
@@ -2398,6 +2440,7 @@ at::Tensor qvq_p32_window_wgmma_m64_tma_grouped_ordered_reuse4(
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
+  m.def("fp16_to_fp8_e5m2_clamped(Tensor input) -> Tensor");
   m.def("p32_window_w3_m16(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_w3_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
@@ -2413,6 +2456,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
+  m.impl("fp16_to_fp8_e5m2_clamped", qvq_fp16_to_fp8_e5m2_clamped);
   m.impl("p32_window_w3_m16", qvq_p32_window_wgmma_w3_m16);
   m.impl("p32_window_w3_m16_tma", qvq_p32_window_wgmma_w3_m16_tma);
   m.impl("p32_window_m16_tma", qvq_p32_window_wgmma_m16_tma);

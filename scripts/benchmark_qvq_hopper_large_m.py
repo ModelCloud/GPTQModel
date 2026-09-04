@@ -56,6 +56,11 @@ def _args() -> argparse.Namespace:
         type=Path,
         default=Path("artifacts/qvq_hopper_large_m/llama_sites.json"),
     )
+    parser.add_argument(
+        "--previous",
+        type=Path,
+        help="Optional prior artifact used for strict Better-than-last comparison.",
+    )
     args = parser.parse_args()
     if any(rate not in RATES for rate in args.rates):
         parser.error("rates must be W2, W2.5, W3, or W3.5")
@@ -190,6 +195,13 @@ def _main(args: argparse.Namespace) -> None:
     device_info = common._assert_h100(torch)
     device = torch.device("cuda:0")
     source_fingerprint = _source_fingerprint()
+    previous_rows = {}
+    if args.previous is not None:
+        previous_payload = json.loads(args.previous.read_text())
+        previous_rows = {
+            (float(row["bits"]), row["group"], int(row["m"])): row
+            for row in previous_payload["rows"]
+        }
     inputs = {
         (group, m): (
             torch.randn(
@@ -283,6 +295,12 @@ def _main(args: argparse.Namespace) -> None:
                 marlin = comparator_timings[(group, m, "marlin")]
                 machete = comparator_timings[(group, m, "machete")]
                 logical_flops = 2 * m * common.K * sum(widths)
+                previous = previous_rows.get((float(bits), group, int(m)))
+                last_median_us = (
+                    plain[m]["median_us"]
+                    if previous is None
+                    else previous["qvq"]["median_us"]
+                )
                 row = {
                     "bits": bits,
                     "group": group,
@@ -297,11 +315,19 @@ def _main(args: argparse.Namespace) -> None:
                     "machete_w4": machete,
                     "speedup_vs_pre_pr_main": plain[m]["median_us"]
                     / timing["median_us"],
+                    "speedup_vs_last_benchmark": last_median_us
+                    / timing["median_us"],
                     "speedup_vs_marlin_w4": marlin["median_us"] / timing["median_us"],
                     "speedup_vs_machete_w4": machete["median_us"] / timing["median_us"],
                     "effective_tflops": logical_flops / (timing["median_us"] * 1e6),
                     "better_than_last_benchmark": timing["median_us"]
-                    < plain[m]["median_us"],
+                    < last_median_us,
+                    "execution_path": (
+                        "folded_fp8_prefill"
+                        if telemetry["h100_fp8_prefill_launches"]
+                        else "grouped_row_multiplexing"
+                    ),
+                    "fp8_prefill_bytes": telemetry["h100_fp8_prefill_bytes"],
                     "selected_chunk_rows": (
                         telemetry["h100_large_m_group_chunk_rows"]
                         if m > 4096
