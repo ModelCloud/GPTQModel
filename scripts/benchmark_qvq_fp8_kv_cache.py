@@ -374,10 +374,20 @@ def main(argv: list[str] | None = None) -> int:
     torch.cuda.empty_cache()
     model_memory = _memory_snapshot(torch, device)
 
+    @torch.inference_mode()
     def run_prefill():
         return model(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            use_cache=True,
+            logits_to_keep=1,
+        )
+
+    @torch.inference_mode()
+    def run_decode(next_token, cache):
+        return model(
+            input_ids=next_token,
+            past_key_values=cache,
             use_cache=True,
             logits_to_keep=1,
         )
@@ -439,12 +449,7 @@ def main(argv: list[str] | None = None) -> int:
         next_token = output.logits[:, -1:].argmax(dim=-1)
         del output
         for _ in range(args.decode_warmup):
-            output = model(
-                input_ids=next_token,
-                past_key_values=cache,
-                use_cache=True,
-                logits_to_keep=1,
-            )
+            output = run_decode(next_token, cache)
             cache = output.past_key_values
             next_token = output.logits[:, -1:].argmax(dim=-1)
             del output
@@ -458,12 +463,7 @@ def main(argv: list[str] | None = None) -> int:
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
-            output = model(
-                input_ids=next_token,
-                past_key_values=cache,
-                use_cache=True,
-                logits_to_keep=1,
-            )
+            output = run_decode(next_token, cache)
             end.record()
             decode_events.append((start, end))
             cache = output.past_key_values
@@ -500,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
             "measured_decode_tokens": args.decode_steps,
             "attention": args.attention,
             "dtype": "torch.bfloat16",
+            "inference_mode": True,
             "dataset": args.dataset,
             "dataset_row_start": args.dataset_row_start,
             "dataset_rows": args.dataset_rows,
