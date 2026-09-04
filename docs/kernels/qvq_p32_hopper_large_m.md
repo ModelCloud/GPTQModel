@@ -140,6 +140,41 @@ million to 100.96 million because one producer/pipeline serves two consumers.
 The complete MLP improved from 492.06 to 465.40 microseconds in the matched
 W3 M512 check.  M64 did not benefit, so the dispatch gate begins at M128.
 
+## Coalesced FP32 accumulator stores
+
+The RS-WGMMA accumulator layout assigns eight non-contiguous output values to
+each consumer thread.  A direct scalar store preserves the exact tensor but,
+for the N128 by M64 gate/up kernel, Nsight Compute measured 2,162,688 global
+sectors where 1,114,112 were ideal.  The 1,048,576 excess sectors came from
+the final FP32 accumulator stores rather than P32 weight traffic.
+
+After all WGMMA stages and pipeline releases complete, the promoted kernel
+reclaims the dead TMA input buffer.  Each independent N64 consumer scatters
+one 16 by 64 accumulator tile into a private 4 KiB FP32 shared-memory region:
+
+```text
+register accumulator coordinate (row, permuted column)
+    -> shared[row, canonical column]
+    -> aligned float4 global store
+```
+
+All 256 consumers first meet at one named barrier so neither consumer group
+can overwrite pipeline storage while the other still uses it.  The two
+consumer groups then use separate 128-thread named barriers around each
+shared transpose.  No arithmetic, accumulator ownership, output ordering, or
+rounding boundary changes.  The output is bit-exact to the direct-store
+kernel and is safe under CUDA Graph capture and replay.
+
+Matched W3 M512 Nsight Compute reduced global sectors to the ideal 1,114,112
+and eliminated all 1,048,576 excessive sectors.  Inner-kernel duration fell
+from 179.744 to 177.088 microseconds.  The transpose increases executed
+instructions from 100,962,957 to 102,828,993 and excessive shared wavefronts
+from 8,388,480 to 9,174,912, but eligible warps per scheduler rise from 1.491
+to 1.541 and the global-store improvement wins overall.  W2.5 does not
+benefit because its depth-three decoder schedule makes the added barriers
+more expensive, so W2.5 retains direct stores.  The measured coalesced path
+is limited to W2, W3, and W3.5 at the existing H100 N128 by M64 gate/up gate.
+
 ## Template and binary-size budget
 
 Transition widths W2, W2.5, W3, and W3.5 already instantiate the decoder.

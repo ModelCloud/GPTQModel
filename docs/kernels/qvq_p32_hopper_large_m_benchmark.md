@@ -272,6 +272,60 @@ mean.  The M128-and-larger gap therefore remains the next design target even
 after removing redundant transforms and increasing gate/up scheduler
 readiness.
 
+## Coalesced accumulator-store production result
+
+The H100 N128 by M64 gate/up kernel now transposes each final N64 by M16 FP32
+accumulator tile through reclaimed shared memory and issues aligned `float4`
+global stores for W2, W3, and W3.5.  W2.5 retains the previous direct stores
+because its measured geometric mean regressed by `0.54%` when the transpose
+was enabled.
+
+Across the 18 affected W2/W3/W3.5 cells at M128-M4096, every cell improves.
+Geometric-mean speedup over the preceding production artifact is `1.0169x`,
+with a `1.0049x` to `1.0300x` range.  Across the full 32-cell matrix,
+including unchanged M32/M64 and W2.5 paths, geometric-mean speedup is
+`1.0102x`.  Maximum dense-oracle error is `1.133e-6`; maximum mean absolute
+error is `1.585e-7`.
+
+| Rate | M; gate/up K,N; down K,N | QVQ us | vs Marlin W4 | vs Machete W4 | Better than last |
+| ---: | :--- | ---: | ---: | ---: | :---: |
+| W2 | 32; 2048,8192; 8192,2048 | 67.083 | 0.942x | 0.830x | Yes |
+| W2 | 64; 2048,8192; 8192,2048 | 82.717 | 1.131x | 0.756x | Yes |
+| W2 | 128; 2048,8192; 8192,2048 | 133.071 | 0.596x | 0.549x | Yes |
+| W2 | 256; 2048,8192; 8192,2048 | 238.818 | 0.401x | 0.349x | Yes |
+| W2 | 512; 2048,8192; 8192,2048 | 462.548 | 0.357x | 0.254x | Yes |
+| W2 | 1024; 2048,8192; 8192,2048 | 902.252 | 0.370x | 0.245x | Yes |
+| W2 | 2048; 2048,8192; 8192,2048 | 1754.747 | 0.398x | 0.256x | Yes |
+| W2 | 4096; 2048,8192; 8192,2048 | 3503.391 | 0.402x | 0.261x | Yes |
+| W2.5 | 32; 2048,8192; 8192,2048 | 74.384 | 0.850x | 0.749x | No |
+| W2.5 | 64; 2048,8192; 8192,2048 | 83.749 | 1.117x | 0.746x | Yes |
+| W2.5 | 128; 2048,8192; 8192,2048 | 133.417 | 0.595x | 0.548x | Yes |
+| W2.5 | 256; 2048,8192; 8192,2048 | 242.502 | 0.395x | 0.344x | No |
+| W2.5 | 512; 2048,8192; 8192,2048 | 465.763 | 0.355x | 0.253x | Yes |
+| W2.5 | 1024; 2048,8192; 8192,2048 | 917.515 | 0.364x | 0.241x | Yes |
+| W2.5 | 2048; 2048,8192; 8192,2048 | 1763.127 | 0.396x | 0.255x | Yes |
+| W2.5 | 4096; 2048,8192; 8192,2048 | 3528.274 | 0.399x | 0.259x | No |
+| W3 | 32; 2048,8192; 8192,2048 | 74.607 | 0.847x | 0.746x | No |
+| W3 | 64; 2048,8192; 8192,2048 | 84.814 | 1.103x | 0.737x | No |
+| W3 | 128; 2048,8192; 8192,2048 | 131.545 | 0.603x | 0.556x | Yes |
+| W3 | 256; 2048,8192; 8192,2048 | 240.707 | 0.398x | 0.346x | Yes |
+| W3 | 512; 2048,8192; 8192,2048 | 462.728 | 0.357x | 0.254x | Yes |
+| W3 | 1024; 2048,8192; 8192,2048 | 911.258 | 0.367x | 0.242x | Yes |
+| W3 | 2048; 2048,8192; 8192,2048 | 1758.878 | 0.397x | 0.255x | Yes |
+| W3 | 4096; 2048,8192; 8192,2048 | 3503.091 | 0.402x | 0.261x | Yes |
+| W3.5 | 32; 2048,8192; 8192,2048 | 74.389 | 0.850x | 0.748x | Yes |
+| W3.5 | 64; 2048,8192; 8192,2048 | 88.134 | 1.062x | 0.709x | Yes |
+| W3.5 | 128; 2048,8192; 8192,2048 | 134.142 | 0.592x | 0.545x | Yes |
+| W3.5 | 256; 2048,8192; 8192,2048 | 239.785 | 0.400x | 0.348x | Yes |
+| W3.5 | 512; 2048,8192; 8192,2048 | 476.671 | 0.346x | 0.247x | Yes |
+| W3.5 | 1024; 2048,8192; 8192,2048 | 940.895 | 0.355x | 0.235x | Yes |
+| W3.5 | 2048; 2048,8192; 8192,2048 | 1807.029 | 0.386x | 0.249x | Yes |
+| W3.5 | 4096; 2048,8192; 8192,2048 | 3605.106 | 0.391x | 0.254x | Yes |
+
+The `No` cells belong to paths whose executable kernel did not change and are
+retained as strict run-to-run telemetry.  The optimization's promotion gate
+is the 18 affected cells, all of which report `Yes`.
+
 ## Rejected reuse-8 experiment
 
 An exact M128 CTA stored eight input tiles and eight accumulator fragments
