@@ -3324,6 +3324,16 @@ Outputs remained exact (`max_abs <= 1.4e-5`).  Diagnostic:
 `artifacts/a100_p32_window/v42_candidate_m1_mlpgate_statick_8000.json`;
 control diagnostics are the v31 static-40 runs.
 
+## v44 rejected M16 linear-QKV wide-N WMMA probe
+
+The M16 linear-QKV route `(K,N)=(5120,10240)` currently uses one N16 tile per
+warp.  I screened the two-adjacent-tile `WideNTiles` configuration to apply
+Marlin-style output reuse, but the first correctness gate failed immediately:
+the M16 W2 result had `max_abs=43.72` and relative L2 error `1.20`, versus the
+planar reference.  The wide-N branch was reverted before any timing; no
+performance claim is made.  Diagnostic run:
+`artifacts/a100_p32_window/v44_candidate_m16_linearqkv_wide_8000.json`.
+
 ## Reproduction
 
 ```bash
