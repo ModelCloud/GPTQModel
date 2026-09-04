@@ -3246,6 +3246,22 @@ with `max_abs <= 9.6e-6`.  Diagnostics are
 `artifacts/a100_p32_window/v38_candidate_m2_mlpgate_static40_repeat8000.json`.
 This is shape-local progress; the full-matrix 10% target remains open.
 
+## v39 M4 full-Q static split specialization
+
+The M4 full-Q route `(K,N)=(5120,12288)` uses the four-tile scalar kernel;
+autotune selected split 40 for the measured W2.5/W3 cases.  A guarded
+compile-time split-40 launch is exact under the formal suite (56/56).  Two
+8,000-iteration runs measured dynamic medians
+`0.077824/0.086016/0.089088/0.087040 ms` and static medians
+`0.076800/0.086016/0.088064/0.088064 ms` and
+`0.076800/0.087040/0.088064/0.087040 ms` at W2/W2.5/W3/W3.5, respectively.
+The geometric mean moves `0.0848805→0.084603/0.084606 ms` (about 0.33%),
+with `max_abs <= 2.1e-5`.  Diagnostics are
+`artifacts/a100_p32_window/v39_candidate_m4_fullq_dynamic_8000.json`,
+`artifacts/a100_p32_window/v39_candidate_m4_fullq_static40_8000.json`, and
+`artifacts/a100_p32_window/v39_candidate_m4_fullq_static40_repeat8000.json`.
+This is shape-local progress; the full-matrix 10% target remains open.
+
 ## Reproduction
 
 ```bash

@@ -1980,6 +1980,23 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
+  } else if (size_m == 4 && size_k == 5120 && size_n == 12288 &&
+             split_count == 40 &&
+             launch_static_n_scalar_kernel<
+                 TransitionBits, 4, kM1Threads, kM1TilesPerBlock,
+                 kM4StageKTiles, 40>(
+                 input_ptr,
+                 trellis_ptr,
+                 levels_ptr,
+                 bank_ids_ptr,
+                 partial_output_ptr,
+                 output_ptr,
+                 size_k,
+                 size_n,
+                 static_cast<int>(split_count),
+                 static_cast<int>(bank_alt_id),
+                 grid,
+                 stream)) {
   } else if (size_m == 4 && use_small_m_scalar && use_four_tile_scalar_stage &&
              launch_static_n_scalar_kernel<TransitionBits, 4, kM1Threads, kM1TilesPerBlock, kM4StageKTiles>(
                  input_ptr,
