@@ -3452,6 +3452,212 @@ stopped before the remaining rates and the stage-4 dispatch was reverted; no
 performance claim is made.  The interrupted diagnostic did not produce a
 JSON artifact.
 
+## v57 M4 attention-out static split specialization
+
+After the v25 merge, `origin/main` advanced to `707bb39b`.  The M4
+attention-out route `(K,N)=(6144,5120)` autotunes to split 48 for W2.5-W3.5
+(W2 remains split 24).  A guarded scalar `StaticSplitCount=48` launch was
+exact across both 20,000-iteration runs.  Against the fresh main control,
+the affected rates measured `0.051200/0.051200/0.050176 ms` for W2.5/W3/W3.5;
+the static candidate measured `0.050176/0.051200/0.050176 ms` in both runs.
+Thus W2.5 improves one event tick and the other affected rates tie; W2 is
+not routed through the specialization.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m4_attention_static48_20000.json`
+and
+`artifacts/a100_p32_window/v26_candidate_m4_attention_static48_repeat20000.json`.
+
+## v58 M8 attention-out static split specialization
+
+The M8 attention-out route `(K,N)=(6144,5120)` uses the measured split-24
+wave for all four P32 rates.  A guarded WMMA `StaticSplitCount=24` launch was
+exact in two matched 20,000-iteration screens.  Fresh-main medians were
+`0.052224/0.052224/0.051200/0.051200 ms`; the static candidate measured
+`0.050176/0.050176/0.051200/0.051200 ms` for W2/W2.5/W3/W3.5 in both runs.
+This is a 2.04-us event-quantized improvement at W2 and W2.5 with no losses
+at the other rates.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m8_attention_static24_20000.json`
+and
+`artifacts/a100_p32_window/v26_candidate_m8_attention_static24_repeat20000.json`.
+
+## v59 M8 linear-Z static split specialization
+
+The M8 linear-Z route `(K,N)=(5120,6144)` uses the stable split-40 plan.  A
+guarded WMMA `StaticSplitCount=40` launch was exact in two matched 20,000-
+iteration candidate runs.  Fresh-main medians were
+`0.051200/0.051200/0.051200/0.052224 ms`; the candidate measured
+`0.050176/0.050176/0.051200/0.051200 ms` for W2/W2.5/W3/W3.5 in both runs.
+This is a repeatable one-event-tick improvement at W2, W2.5, and W3.5 with
+no loss at W3.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m8_linearz_static40_20000.json` and
+`artifacts/a100_p32_window/v26_candidate_m8_linearz_static40_repeat20000.json`.
+
+## v60 M8 MLP-down static split specialization
+
+The M8 MLP-down route `(K,N)=(17408,5120)` uses the stable split-40 plan.  A
+guarded WMMA `StaticSplitCount=40` launch was exact in two matched 20,000-
+iteration candidate runs.  Fresh-main medians were
+`0.115712/0.116736/0.118784/0.119808 ms`; the candidate measured
+`0.113664/0.116736/0.118784/0.119808 ms` for W2/W2.5/W3/W3.5 in the first
+run, and `0.113664/0.116736/0.118784/0.119808 ms` in the repeat.  This is a
+repeatable one-event-tick improvement at W2 with no losses at the other rates.
+Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m8_mlpdown_static40_20000.json` and
+`artifacts/a100_p32_window/v26_candidate_m8_mlpdown_static40_repeat20000.json`.
+
+## v61 M16 attention-out static split specialization
+
+The M16 attention-out route `(K,N)=(6144,5120)` uses the stable split-12 plan.
+A guarded WMMA `StaticSplitCount=12` launch was exact in two matched 20,000-
+iteration candidate runs.  Fresh-main medians were
+`0.054272/0.052224/0.053248/0.053248 ms`; the candidate measured
+`0.054272/0.052224/0.052224/0.053248 ms` in both runs for
+W2/W2.5/W3/W3.5.  This is a repeatable one-event-tick improvement at W3 with
+no losses at the other rates.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m16_attention_static12_20000.json`
+and `artifacts/a100_p32_window/v26_candidate_m16_attention_static12_repeat20000.json`.
+
+## v62 rejected M2 full-KV static-N probe
+
+The M2 full-KV route `(K,N)=(5120,1024)` was screened with a compile-time
+`StaticN=1024` and `StaticSplitCount=64` scalar launch.  It remained exact, but
+the matched 20,000-iteration medians regressed at W2.5/W3/W3.5: latest-main
+was `0.034816/0.033792/0.032768/0.034816 ms`, while the candidate was
+`0.034816/0.036864/0.035840/0.036864 ms`.  The source change was reverted;
+diagnostics are `artifacts/a100_p32_window/v26_candidate_m2_fullkv_staticn1024_20000.json`
+and `artifacts/a100_p32_window/v26_candidate_m2_fullkv_staticn1024_repeat20000.json`.
+
+## v63 large-M row-block capability (M=512/1024/2048/4096)
+
+The Ampere P32 entry point previously rejected `M>16`.  The new row-blocked
+launcher tiles each prefill batch into 16-row WMMA CTAs, uses one K wave, and
+writes directly into the global output layout.  The Python policy disables
+autotune for these large batches and selects split 1, avoiding a partial tensor
+that scales with M.  Correctness covers M=17 and M=32 across all four rates;
+the requested M=512/1024/2048/4096 sweep across all seven projection shapes
+also stayed within `max_abs <= 6.8e-4`.  The 50-iteration diagnostic is
+`artifacts/a100_p32_window/v27_candidate_large_m_all_shapes_50.json`.
+
+The fetched `origin/main` still rejects `M>16`, so no direct main-branch timing
+exists for these new shapes; the reported large-M speedups are against the
+planar oracle only until a comparable main implementation is available.
+
+## v64 rejected large-M wide-N Marlin-style probe
+
+Applying the two-N-tile-per-warp (`WideNTiles=true`) reuse path to the large-M
+launcher preserved correctness but regressed M512 full-KV from roughly 9.2x to
+6.8x Ampere/planar speedup.  The change was reverted; diagnostic:
+`artifacts/a100_p32_window/v27_candidate_m512_fullkv_wide_smoke.json`.
+
+## v65 large-M static shape and stage specialization
+
+The large-M row launcher now specializes the fixed Qwen projection shapes for
+`StaticN`, `StaticK`, and the measured K-stage count (2 stages for
+`(K,N)=(5120,1024)`, 3 for the other six shapes).  The specialization is
+exact across M=512/1024/2048/4096 and all seven projection shapes, with
+`max_abs <= 6.8e-4`.  Against the generic row launcher, the 112-case
+50-iteration sweep improved Ampere latency by a 1.121x geometric mean (12.2%);
+per-M geometric means were 1.127x, 1.134x, 1.115x, and 1.109x for
+M=512/1024/2048/4096.  M512 full-KV repeated at 0.344064 ms geometric mean
+over W2/W2.5/W3/W3.5 (the generic launcher was about 0.351 ms).  Diagnostics
+are `artifacts/a100_p32_window/v28_candidate_m512_fullkv_staticnk_50.json`,
+`artifacts/a100_p32_window/v28_candidate_m512_fullkv_staticnk_repeat100.json`,
+and `artifacts/a100_p32_window/v28_candidate_large_m_all_shapes_staticnk_50.json`.
+
+As in v63, `origin/main` rejects M>16, so these large-M comparisons are
+capability/planar-oracle measurements rather than direct main-branch deltas.
+
+## v66 inconclusive M16 full-KV explicit-stage probe
+
+The fixed M16 full-KV route `(K,N)=(5120,1024)` was screened with an explicit
+`StageKTiles=2` template argument.  This is the existing default
+(`kStageKTiles=2`), so it changes no generated schedule.  The 2,000-iteration
+run remained exact (`max_abs <= 1.6e-5`) and measured
+`0.035840/0.034816/0.034816/0.033792 ms`; the small W2 difference versus
+earlier runs is timing noise, not a retained optimization.
+Diagnostic: `artifacts/a100_p32_window/v30_candidate_m16_fullkv_stage2_2000.json`.
+
+## v67 rejected M1 full-KV pair-decode probe
+
+The M1 full-KV scalar route already uses a fixed `StaticN=1024` launch, but
+falls back to the conservative per-pair decode because its bank-ID layout is
+special.  Reusing the batched pair-decode path from wider N shapes remained
+exact (`max_abs <= 1.1e-5`) but regressed the 2,000-iteration medians at W2.5,
+W3, and W3.5 to `0.032768/0.033792/0.033792 ms` (W2 was `0.031744 ms`).
+The source change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v31_candidate_m1_fullkv_pairdecode_2000.json`.
+
+## v68 rejected small-N vectorized output stores
+
+The scalar M2/M4 full-KV paths were screened with `float2` stores for their
+fixed N=1024 output pairs (the existing fast store is intentionally limited
+to M1).  Outputs remained exact (`max_abs <= 9.6e-6`), but the 2,000-iteration
+Ampere medians regressed to about `0.033792 ms` for M2 and
+`0.032768--0.033792 ms` for M4 versus the retained dynamic stores.  The source
+change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v32_candidate_m24_fullkv_vector_store_2000.json`.
+
+## v69 neutral M16 full-KV bank-mask hoist
+
+The M16 full-KV WMMA route `(K,N)=(5120,1024)` was screened with
+`HoistBankMasks=true`, extending the optimization used by the M8 route.  The
+2,000-iteration run remained exact and measured
+`0.033792/0.032768/0.033792/0.033792 ms`, matching the retained schedule
+within event resolution.  The source probe was reverted as neutral.
+Diagnostic: `artifacts/a100_p32_window/v33_candidate_m16_fullkv_hoistmask_2000.json`.
+
+## v70 rejected M8 full-KV wide-N reuse
+
+The M8 full-KV `(K,N)=(5120,1024)` WMMA route was screened with the
+Marlin-style `WideNTiles=true` reuse path and a two-N-tile grid.  It remained
+exact (`max_abs <= 1.2e-5`), but the 2,000-iteration medians regressed at W2.5
+and W3 to `0.033792 ms` (W2/W3.5 were `0.032768/0.031744 ms`).  The source
+change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v34_candidate_m8_fullkv_widentiles_2000.json`.
+
+## v71 rejected M1 full-KV single-stage pipeline
+
+The M1 full-KV `(K,N)=(5120,1024)` scalar route was screened with one K tile
+per cp.async stage (the retained route uses two).  It remained exact
+(`max_abs <= 1.1e-5`) but increased the 2,000-iteration medians to
+`0.035840/0.036864/0.036864/0.035840 ms`; the two-stage route is faster at
+all four rates.  The source change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v35_candidate_m1_fullkv_stage1_2000.json`.
+
+## v72 large-M shared-ABI row grid with automatic fixed-N dispatch
+
+The framework-neutral `gptqmodel_ext/qvq/p32` ABI now launches all `M/16` row
+tiles in one two-dimensional grid and performs one global split reduction.
+The previous `origin/main` implementation launched and reduced each 16-row
+chunk independently.  For the six supported model widths, the large-M path
+automatically uses the existing compile-time fixed-N kernels; nonstandard
+widths retain the generic path.  The ABI still requires native reduction for
+`M>16`, and the canonical `[split,M,N]` partial layout is preserved.
+
+The implementation was checked against latest `origin/main` commit
+`4ef2089f` on A100 (SM80), with `K=5120`, transition bits 4, split 1, block
+variant, 128 threads, and one K tile per stage.  Ten warmups and 50 timed
+iterations covered every `M` in `512/1024/2048/4096` and every `N` in
+`1024/5120/6144/10240/12288/17408`.  Candidate output matched main bit-for-bit on
+a randomized `M=32,N=6144,split=8` comparison.  Candidate/main geometric
+mean speedups by N were 1.091x, 1.146x, 1.164x, 1.165x, 1.165x, and
+1.179x respectively (1.151x over all 24 cases).  Per-M geometric means were
+1.161x, 1.154x, 1.146x, and 1.144x for `M=512/1024/2048/4096`.
+
+This is a direct main-relative improvement for the expanded-M target; the
+smaller 1.090x full-KV result is retained without claiming a uniform 10%
+gain for every individual shape.  The matching diagnostics used
+`/tmp/bench_p32` against `/tmp/libqvq_p32_main.so` and the candidate shared
+library built from this source.
+
+## v73 all-rate validation for the expanded-M target
+
+The same 24-case sweep was repeated for transition bits 5, 6, and 7 (the
+W2.5/W3/W3.5 paths), in addition to the bits-4 results above.  Geometric-mean
+candidate/main speedups were 1.140x, 1.145x, and 1.134x respectively.  A
+randomized `M=32,N=6144,split=8` comparison remained bit-for-bit identical for
+all four transition-bit values, covering the global partial-layout and single
+reduction changes across every supported rate.
+
 ## Reproduction
 
 ```bash
