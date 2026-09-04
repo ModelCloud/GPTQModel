@@ -8,7 +8,8 @@ Perplexity is teacher-forced next-token perplexity. KLD is
 agreement; Top-5 and Top-10 are mean set overlap fractions. All metrics use
 the same shifted, non-padding next-token positions. Model compute defaults to
 BF16; W3.5A8 quantizes each targeted linear input to FP8 E4M3 and dequantizes
-back to that compute dtype at the kernel boundary.
+back to that compute dtype at the kernel boundary. Every arm enables its runtime
+KV cache, so W3.5A8 metrics also include its mandatory FP8 E4M3 K/V error.
 """
 
 from __future__ import annotations
@@ -37,12 +38,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+from gptqmodel.nn_modules.qvq_fp8_cache import QVQFP8DynamicCache
 from gptqmodel.quantization import FORMAT
-from scripts.qvq_evaluate import (
-    _model_logits,
-    _row_text,
-    validate_evaluation_is_held_out,
-)
+from scripts.qvq_evaluate import _row_text, validate_evaluation_is_held_out
 from scripts.qvq_quantize import DatasetSlice, load_dataset_slice
 
 _A8_CONTRACT = {
@@ -146,6 +144,19 @@ def _topk_overlap(
         .float()
         .mean(dim=-1)
     )
+
+
+def _output_logits(output) -> torch.Tensor:
+    logits = getattr(output, "logits", None)
+    if logits is None and isinstance(output, dict):
+        logits = output.get("logits")
+    if logits is None and isinstance(output, (tuple, list)) and output:
+        logits = output[0]
+    if not isinstance(logits, torch.Tensor):
+        raise TypeError(
+            f"Model forward did not return tensor logits (output type: {type(output).__name__})"
+        )
+    return logits
 
 
 class _ArmAccumulator:
@@ -316,6 +327,17 @@ def main(argv: list[str] | None = None) -> int:
         "qvq_w3.5_a8": _ArmAccumulator(),
     }
     forward_seconds = {name: 0.0 for name in accumulators}
+    a8_cache_validation = {
+        "rows_validated": 0,
+        "cache_class": QVQFP8DynamicCache.__name__,
+        "payload_dtypes": set(),
+        "scale_dtypes": set(),
+        "minimum_storage_ratio_vs_dense": 1.0,
+        "maximum_storage_ratio_vs_dense": 0.0,
+        "maximum_sequence_length": 0,
+        "all_payloads_fp8": True,
+        "no_full_precision_residual": True,
+    }
     started_all = time.perf_counter()
     for row_index, row in enumerate(dataset):
         text = _row_text(dict(row), tokenizer, args.text_column)
@@ -338,16 +360,50 @@ def main(argv: list[str] | None = None) -> int:
             ("qvq_w3.5_a8", a8),
         ):
             forward_started = time.perf_counter()
-            logits = _model_logits(model, encoded)
+            model_output = model(**encoded, use_cache=True)
+            logits = _output_logits(model_output)
             torch.cuda.synchronize(args.device)
             forward_seconds[name] += time.perf_counter() - forward_started
+            cache = getattr(model_output, "past_key_values", None)
+            if name == "qvq_w3.5_a8":
+                if not isinstance(cache, QVQFP8DynamicCache):
+                    raise RuntimeError(
+                        "W3.5A8 quality evaluation did not return QVQFP8DynamicCache"
+                    )
+                cache.assert_fp8_storage()
+                telemetry = cache.telemetry()
+                if (
+                    not telemetry["all_payloads_fp8"]
+                    or not telemetry["no_full_precision_residual"]
+                ):
+                    raise RuntimeError(
+                        "W3.5A8 quality evaluation retained non-FP8 K/V payloads"
+                    )
+                ratios = telemetry["storage_ratio_vs_dense"]
+                a8_cache_validation["rows_validated"] += 1
+                a8_cache_validation["payload_dtypes"].update(
+                    telemetry["payload_dtypes"]
+                )
+                a8_cache_validation["scale_dtypes"].update(telemetry["scale_dtypes"])
+                a8_cache_validation["minimum_storage_ratio_vs_dense"] = min(
+                    a8_cache_validation["minimum_storage_ratio_vs_dense"], ratios
+                )
+                a8_cache_validation["maximum_storage_ratio_vs_dense"] = max(
+                    a8_cache_validation["maximum_storage_ratio_vs_dense"], ratios
+                )
+                a8_cache_validation["maximum_sequence_length"] = max(
+                    a8_cache_validation["maximum_sequence_length"],
+                    *telemetry["sequence_lengths"],
+                )
+            elif isinstance(cache, QVQFP8DynamicCache):
+                raise RuntimeError(f"{name} unexpectedly used the QVQ FP8 cache")
             rows[name], arm_labels = _prediction_rows(
                 logits, encoded["input_ids"], attention_mask
             )
             labels = arm_labels if labels is None else labels
             if not torch.equal(labels, arm_labels):
                 raise RuntimeError("Evaluation labels differ between arms")
-            del logits
+            del logits, model_output, cache
 
         if labels is None or labels.numel() < 1:
             continue
@@ -384,6 +440,7 @@ def main(argv: list[str] | None = None) -> int:
         "schema": "qvq.activation-quality-comparison.v1",
         "metric_contract": {
             "positions": "teacher-forced shifted non-padding next-token positions",
+            "cache": "enabled for every arm; W3.5A8 requires exclusive FP8 E4M3 K/V payload storage",
             "perplexity": "exp(sum next-token NLL / valid next-token count)",
             "kld": "KL(dense || arm) in nats over the full vocabulary",
             "top1": "exact argmax agreement with dense",
@@ -401,6 +458,11 @@ def main(argv: list[str] | None = None) -> int:
             "dataset_sha256": _sha256(Path(args.dataset).expanduser()),
         },
         "results": results,
+        "a8_kv_cache_validation": {
+            **a8_cache_validation,
+            "payload_dtypes": sorted(a8_cache_validation["payload_dtypes"]),
+            "scale_dtypes": sorted(a8_cache_validation["scale_dtypes"]),
+        },
         "runtime": {
             "commit": subprocess.check_output(
                 ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
