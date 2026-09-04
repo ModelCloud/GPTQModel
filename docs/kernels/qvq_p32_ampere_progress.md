@@ -3658,6 +3658,92 @@ randomized `M=32,N=6144,split=8` comparison remained bit-for-bit identical for
 all four transition-bit values, covering the global partial-layout and single
 reduction changes across every supported rate.
 
+## v74 large-M two-row CTA reuse (WIP)
+
+The next probe reuses each packed trellis/bank-ID tile across two adjacent
+16-row groups in a 128-thread CTA.  The input staging tile and accumulator
+fragments are doubled, while the four-warp N layout and one native reduction
+are unchanged.  This removes the repeated trellis decode and global tile loads
+that dominate large M.  Fixed `K=5120` and fixed model N dispatches are used;
+the existing one-row path remains available for other thread counts and
+non-specialized shapes.
+
+The corrected probe matched the merged `origin/main` output bit-for-bit for
+transition bits 4, 5, 6, and 7 on randomized `M=32,N=6144,split=8` data.  On
+the A100, `K=5120`, block variant, native reduction, `threads=128`,
+`StageKTiles=1`, and ten warmups/50 timed iterations, the 24-case
+`M=512/1024/2048/4096` by `N=1024/5120/6144/10240/12288/17408` sweep gave a
+1.782x geometric-mean speedup versus the fetched `origin/main` shared-ABI
+baseline (minimum 1.373x, maximum 1.858x).  Per-N means were
+1.635x/1.785x/1.797x/1.824x/1.835x/1.835x; per-M means were
+1.697x/1.799x/1.804x/1.841x.  This exceeds the current 20% target on every
+reported aggregate, but still needs the post-commit NCU/SASS pass below.
+
+An initial build returned `-1` because the new stage-dispatch macro was defined
+but not invoked; that control-flow bug was fixed before collecting these
+numbers.  The first vector-store predicate was also narrowed to static-N
+launches so generic/non-specialized N remains boundary-safe.
+
+## v75 rejected Static-N/Static-K stride folding
+
+The post-commit SASS pass attempted to replace the m2 kernel's runtime
+`size_n/size_k` stride arguments with compile-time `StaticN/StaticK` values.
+The generated specialization remained exact for all four transition widths,
+but regressed the `N=1024,M=512` timing from about `0.265 ms` to `0.289 ms`
+and similarly slowed the first wide-N cases.  The change was reverted; the
+committed row-reuse path retains the compiler's existing SSA treatment of these
+values.  NCU for the retained commit reported no local/shared spills, so no
+register-pressure workaround was needed.
+
+## v76 large-M four-row CTA reuse
+
+The reuse kernel is now parameterized for four adjacent 16-row groups (64
+rows per CTA) when `threads=128` and `M` is divisible by 64.  This keeps one
+packed trellis tile live across four output groups.  The probe remained exact
+for transition bits 4--7 on the randomized split-8 comparison.  A100 resource
+usage for the fixed `N=1024,K=5120,StageKTiles=1` specialization is 96
+registers/thread, 4,616 B static shared memory, and no local-memory spill.
+
+The 24-case `M=512/1024/2048/4096` by six-N sweep measured 2.565x geometric
+mean versus fetched `origin/main` (minimum 1.458x, maximum 2.826x), and
+1.440x versus the preceding two-row reuse commit.  Per-N means were
+2.140x/2.528x/2.635x/2.702x/2.758x/2.773x.  This is the first probe to clear
+2.5x main-relative throughput; the additional grouping pass is still being
+screened for the requested 50% step over the prior commit.
+
+## v77 shape-aware eight-row reuse
+
+For fixed widths other than `N=1024`, stages 1--3 now reuse one packed tile
+across eight adjacent 16-row groups (128 rows per 128-thread CTA).  `N=1024`
+continues to use the four-row kernel because its smaller workload makes the
+larger accumulator footprint slower; stage 4 also remains on four-row reuse
+to stay below Ampere's static shared-memory limit.  The eight-row probe is
+exact for transition bits 4--7.  The fixed `N=5120,K=5120,StageKTiles=1`
+resource entry is 127 registers/thread, 8,712 B shared memory, and no local
+memory spill (the `N=1024` fallback uses the four-row entry at 96 registers
+and 4,616 B shared memory).
+
+The full 24-case stage-1 sweep measured 3.106x geometric mean versus fetched
+`origin/main` (minimum 1.458x, maximum 3.663x), or 1.211x over the preceding
+four-row commit.  The extra 50% step is therefore not uniform per commit, but
+the cumulative result is now over 3x main-relative throughput on this A100
+matrix.
+
+The post-commit NCU profile of the wide eight-row specialization measured
+59.12% memory throughput and 33.71% compute throughput, with 95.79M executed
+instructions and zero local/shared spill requests.  The accompanying SASS
+scan found the expected unrolled MMA/row-group body; remaining integer
+instructions are tile-address and circular-state indexing, so no additional
+algebraic reduction was retained after this commit.
+
+## v78 rejected sixteen-row-group reuse
+
+A stage-3-only attempt to reuse one packed tile across 16 adjacent row groups
+was rejected by `ptxas` before execution.  The doubled input staging tile
+requires `0xc618`--`0x10820` bytes of static shared memory across the generated
+rate/N variants, exceeding Ampere's `0xc000` per-block limit.  The probe
+produced no binary and made no source change to the retained dispatch.
+
 ## Reproduction
 
 ```bash
