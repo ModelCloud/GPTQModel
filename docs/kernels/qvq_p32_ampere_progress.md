@@ -3312,6 +3312,18 @@ Ampere suite remains 56/56 with `max_abs <= 1.4e-5`.  Diagnostics are
 `artifacts/a100_p32_window/v41_control_m1_fullq_static40_repeat8000.json`.
 This is shape-local progress; the full-matrix 10% target remains open.
 
+## v42 neutral M1 MLP gate/up compile-time-K probe
+
+I screened the same `StaticK=5120` scalar specialization on the M1 MLP
+gate/up route `(K,N)=(5120,17408)`, which already uses static split 40.  The
+8,000-iteration probe measured medians
+`0.079872/0.088064/0.087040/0.091136 ms`; the accepted static-split control
+was `0.079872/0.087040/0.088064/0.091136 ms`.  Their four-rate geometric
+means are identical (`0.0864272 ms`), so the source probe was reverted.
+Outputs remained exact (`max_abs <= 1.4e-5`).  Diagnostic:
+`artifacts/a100_p32_window/v42_candidate_m1_mlpgate_statick_8000.json`;
+control diagnostics are the v31 static-40 runs.
+
 ## Reproduction
 
 ```bash
