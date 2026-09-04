@@ -3202,6 +3202,17 @@ probe was reverted.  Diagnostics are
 `artifacts/a100_p32_window/v32_candidate_m2_fullkv_static64_20000.json`, and
 `artifacts/a100_p32_window/v32_candidate_m2_fullkv_static64_repeat20000.json`.
 
+## v33 rejected M2 attention static split probe
+
+The M2 attention-out route `(K,N)=(6144,5120)` uses split 48 for W2--W3
+(W3.5 uses 64).  A split-48 scalar specialization was mixed: dynamic
+8,000-iteration medians were `0.040960/0.044032/0.044032/0.044032 ms`, while
+the probe measured `0.041984/0.044032/0.043008/0.045056 ms`.  Since W2 and
+W3.5 regressed and there was no stable geometric-mean gain, the source probe
+was reverted.  Outputs remained exact (`max_abs <= 2.1e-5`).  Diagnostics are
+`artifacts/a100_p32_window/v33_candidate_m2_attention_dynamic_8000.json` and
+`artifacts/a100_p32_window/v33_candidate_m2_attention_static48_8000.json`.
+
 ## Reproduction
 
 ```bash
