@@ -942,12 +942,10 @@ def get_max_memory() -> str:
 
     stats_0 = torch.cuda.memory_stats(DEVICE_0)
     active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
-    stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
 
     if torch.cuda.device_count() > 1:
         stats_1 = torch.cuda.memory_stats(DEVICE_1)
         active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
-        stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
 
         max_memory = f"{active_0:.2f}MB, {active_1:.2f}MB"
     else:
