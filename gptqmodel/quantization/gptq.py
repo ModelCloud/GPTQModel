@@ -157,6 +157,9 @@ def get_number_of_rows_and_cols(layer: nn.Module):
     if isinstance(layer, NamedModule):
         layer = layer.module
 
+    if isinstance(layer, nn.Embedding):
+        return layer.weight.shape[1], layer.weight.shape[0]
+
     if isinstance(layer, transformers.Conv1D):
         # transformers.Conv1D: weight shape is (n_in, n_out)
         return layer.weight.shape[1], layer.weight.shape[0]
@@ -247,11 +250,14 @@ class GPTQ:
         self.expected_nsamples: Optional[float] = None
 
         self.H: Optional[torch.Tensor] = None
+        self._H_diag: Optional[torch.Tensor] = None
 
         # Store per-device Hessian contributions so multi-GPU calibration can
         # keep local accumulators and merge only once when quantization begins.
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
+        self._device_embedding_counts: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
+        self._hessian_total_samples: int = 0
         self._hessian_dirty: bool = False
 
         self._borrow_workspace_stats = {
@@ -287,7 +293,7 @@ class GPTQ:
 
     @staticmethod
     def validate_module(module):
-        assert isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d,
+        assert isinstance(module, (nn.Embedding, nn.Linear, nn.Conv1d, nn.Conv2d,
                                    transformers.Conv1D)), f"We supports only linear and convolutional layers. actual = `{module}`"
 
     # def has_hessian_issues(self) -> bool:
@@ -326,6 +332,9 @@ class GPTQ:
 
         clone = self.module.weight.data.to(copy=copy, device=device)
 
+        if isinstance(self.module, nn.Embedding):
+            clone = clone.t()
+
         if isinstance(self.module, _ConvNd):
             clone = clone.flatten(1)
 
@@ -354,6 +363,25 @@ class GPTQ:
         return tensor.narrow(tensor.dim() - 1, 0, trim).contiguous()
 
     def add_batch(self, inp: torch.Tensor, out: torch.Tensor, batch_index: Optional[int] = None):
+        if isinstance(self.module, nn.Embedding):
+            del out, batch_index
+            token_count, counts, device = self.process_batch(inp)
+            if token_count == 0 or counts is None:
+                return
+
+            dev = torch.device(device)
+            with self.lock:
+                self.fwd_counter += 1
+                existing = self._device_embedding_counts.get(dev)
+                if existing is None:
+                    self._device_embedding_counts[dev] = counts
+                else:
+                    existing.add_(counts)
+                self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + token_count
+                self.nsamples += token_count
+                self._hessian_dirty = True
+            return
+
         batch_token_size, xtx, device = self.process_batch(inp)
         if batch_token_size == 0 or xtx is None:
             return
@@ -512,6 +540,22 @@ class GPTQ:
         # print(f"self.module = {self.module} device = {self.module.target_device}")
         inp_device = get_device(inp)
 
+        if isinstance(self.module, nn.Embedding):
+            token_ids = inp.reshape(-1).to(torch.long)
+            token_count = token_ids.numel()
+            device = torch.device(inp_device)
+            if token_count == 0:
+                return 0, None, device
+
+            min_id, max_id = torch.aminmax(token_ids)
+            if min_id.item() < 0 or max_id.item() >= self.columns:
+                raise ValueError(
+                    f"Embedding calibration token IDs must be in [0, {self.columns}); "
+                    f"observed range [{min_id.item()}, {max_id.item()}]."
+                )
+            counts = torch.bincount(token_ids, minlength=self.columns).to(dtype=torch.float32)
+            return token_count, counts, device
+
         #inp = inp.to(device=self.module.target_device, dtype=torch.float32)
 
         # input reshaping
@@ -604,6 +648,9 @@ class GPTQ:
         if self._device_hessian_partials:
             partial_device = next(iter(self._device_hessian_partials.keys()))
             return torch.device(partial_device)
+        if self._device_embedding_counts:
+            partial_device = next(iter(self._device_embedding_counts.keys()))
+            return torch.device(partial_device)
 
         return torch.device("cpu")
 
@@ -611,6 +658,45 @@ class GPTQ:
         device = self._select_hessian_target_device(target_device)
 
         with self.lock:
+            if isinstance(self.module, nn.Embedding):
+                if not self._hessian_dirty and self._H_diag is not None:
+                    if self._H_diag.device != device:
+                        self._H_diag = self._H_diag.to(device=device)
+                    self.H = None
+                    self.nsamples = self._hessian_total_samples
+                    self._final_hessian_device_hint = device
+                    return
+
+                previous_samples = self._hessian_total_samples
+                new_samples = sum(self._device_sample_counts.values())
+                total_samples = previous_samples + new_samples
+
+                if self._H_diag is None or self._H_diag.shape != (self.columns,):
+                    diag = torch.zeros(self.columns, dtype=torch.float32, device=device)
+                    previous_samples = 0
+                else:
+                    diag = self._H_diag.to(device=device, dtype=torch.float32)
+
+                if total_samples == 0:
+                    diag.zero_()
+                else:
+                    if previous_samples:
+                        diag.mul_(float(previous_samples) / float(total_samples))
+                    else:
+                        diag.zero_()
+                    for counts in self._device_embedding_counts.values():
+                        diag.add_(counts.to(device=device, dtype=torch.float32), alpha=2.0 / float(total_samples))
+
+                self._H_diag = diag
+                self.H = None
+                self.nsamples = total_samples
+                self._hessian_total_samples = total_samples
+                self._hessian_dirty = False
+                self._final_hessian_device_hint = device
+                self._device_embedding_counts.clear()
+                self._device_sample_counts.clear()
+                return
+
             if not self._hessian_dirty and self.H is not None:
                 if self.H.device != device:
                     self.H = self.H.to(device=device)
@@ -676,6 +762,9 @@ class GPTQ:
 
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
         self.materialize_global_hessian(target_device=target_device)
+        if isinstance(self.module, nn.Embedding):
+            assert self._H_diag is not None
+            return self._H_diag
         if self.H is None:
             self.H = self.create_H(target_device)
         return self.H
@@ -959,10 +1048,112 @@ class GPTQ:
                     log.info(f"GPTQ: hessian_inverse end {self.name}")
 
     @torch.inference_mode()
+    def _quantize_embedding(self, blocksize=128):
+        """Quantize an embedding using its token-frequency diagonal Hessian."""
+
+        del blocksize
+        start = time.time()
+        target_device = getattr(self.module, "target_device", None)
+        if target_device is None:
+            target_device = self.module.weight.device
+        target_device = torch.device(target_device)
+
+        diag = self.finalize_hessian(target_device=target_device)
+        original_weight = self.clone_module(device=target_device)
+        weight = original_weight
+        inverse_permutation = None
+        group_permutation = None
+
+        if self.qcfg.static_groups:
+            pass
+        elif self.qcfg.desc_act:
+            permutation = torch.argsort(diag, descending=True)
+            inverse_permutation = torch.argsort(permutation)
+            weight = weight[:, permutation]
+        elif self.qcfg.act_group_aware:
+            local_perms, local_values = compute_local_perms(
+                diag, self.qcfg.group_size, return_values=True
+            )
+            group_permutation = compute_global_perm(
+                diag,
+                self.qcfg.group_size,
+                precomputed_values=local_values,
+            )
+            permutation = compose_final_perm(local_perms, group_permutation, self.qcfg.group_size)
+            permutation = extend_perm_with_tail(permutation, self.columns)
+            inverse_permutation = invert_perm(permutation)
+            weight = weight[:, permutation]
+
+        quantized = torch.empty_like(weight)
+        scales = []
+        zeros = []
+        group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
+
+        for start_col in range(0, self.columns, group_size):
+            end_col = min(start_col + group_size, self.columns)
+            block = weight[:, start_col:end_col]
+            self.quantizer.find_params(block, weight=True)
+            quantized[:, start_col:end_col] = self.quantizer.quantize(block)
+            scales.append(self.quantizer.scale)
+            zeros.append(self.quantizer.zero)
+
+        scale = torch.cat(scales, dim=1)
+        zero = torch.cat(zeros, dim=1)
+        base_group_index = torch.arange(self.columns, dtype=torch.int32, device=quantized.device) // group_size
+        if self.qcfg.desc_act and not self.qcfg.static_groups:
+            g_idx = base_group_index[inverse_permutation]
+        else:
+            g_idx = base_group_index
+
+        if inverse_permutation is not None:
+            quantized = quantized[:, inverse_permutation]
+
+        if group_permutation is not None:
+            full_group_count = self.columns // group_size
+            if full_group_count:
+                inverse_groups = invert_perm(group_permutation).to(device=scale.device)
+                full_scale = scale[:, :full_group_count].index_select(1, inverse_groups)
+                full_zero = zero[:, :full_group_count].index_select(1, inverse_groups.to(device=zero.device))
+                scale = torch.cat((full_scale, scale[:, full_group_count:]), dim=1)
+                zero = torch.cat((full_zero, zero[:, full_group_count:]), dim=1)
+
+        abs_max = max(diag.max().item(), 1.0)
+        floor = abs_max * 1e-6
+        effective_diag = torch.clamp(diag, min=floor) + self.qcfg.damp_percent * diag.mean()
+        column_error = (original_weight - quantized).square().sum(dim=0)
+        if self.nsamples:
+            avg_loss = (0.5 * torch.sum(effective_diag * column_error) / self.nsamples).item()
+        else:
+            avg_loss = 999999999
+
+        if self._tp_pad_cols:
+            quantized = quantized[:, :self._original_columns]
+            g_idx = g_idx[:self._original_columns]
+
+        quantized = quantized.t().reshape(self.module.weight.shape).to(self.module.weight.dtype)
+        quantized = quantized.to(device=self.module.weight.device, non_blocking=False)
+
+        self.H = None
+        self._device_hessian_partials.clear()
+        return (
+            quantized,
+            scale,
+            zero,
+            g_idx,
+            time.time() - start,
+            avg_loss,
+            self.qcfg.damp_percent,
+            self.nsamples,
+        )
+
+    @torch.inference_mode()
     def quantize(
             self,
             blocksize=128,
     ):
+        if isinstance(self.module, nn.Embedding):
+            return self._quantize_embedding(blocksize=blocksize)
+
         # self.H = self.H.to(device=CUDA_0)
         # log.info(f"Quantization `{self.name}` using samples: `{self.nsamples}`")
         start = time.time()
@@ -1448,6 +1639,9 @@ class GPTQ:
     def free(self):
         if hasattr(self, "H"):
             del self.H
+        if hasattr(self, "_H_diag"):
+            del self._H_diag
+        self._device_embedding_counts.clear()
         del self.quantizer
         if hasattr(self, "module_copy"):
             del self.module_copy

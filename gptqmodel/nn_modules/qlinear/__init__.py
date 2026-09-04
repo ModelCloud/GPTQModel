@@ -1502,6 +1502,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
             # W = linear.weight.data.clone()
             W = linear.weight.data
+            is_embedding = isinstance(linear, nn.Embedding)
             if isinstance(linear, _ConvNd):
                 W = W.flatten(1)
             if isinstance(linear, transformers.pytorch_utils.Conv1D):
@@ -1519,16 +1520,25 @@ class PackableQuantLinear(GPTQQuantLinear):
             # self.scales = scales.clone().to(dtype=t.float16)
             self.register_buffer("scales", scales.to(dtype=t.float16))
 
-            if linear.bias is not None:
+            if hasattr(linear, "bias") and linear.bias is not None:
                 # TODO why clone?
                 # self.bias = linear.bias.clone().to(dtype=t.float16)
                 self.register_buffer("bias", linear.bias.to(dtype=t.float16))
             elif not hasattr(self, "bias"):
                 self.bias = None
 
-            int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T)
+            if is_embedding:
+                # Embedding weights already use [token, feature] orientation;
+                # the GPTQ embedding result is transposed only for quantizing.
+                int_weight = t.round((W + scale_zeros[self.g_idx]) / scales[self.g_idx])
+            else:
+                int_weight = t.round((W + scale_zeros[self.g_idx].T) / scales[self.g_idx].T)
             int_weight.clamp_(0, self.maxq)
-            int_weight = int_weight.to(t.int32).T.contiguous()
+            int_weight = int_weight.to(t.int32)
+            if not is_embedding:
+                int_weight = int_weight.T.contiguous()
+            else:
+                int_weight = int_weight.contiguous()
             int_weight = int_weight.numpy().astype(self.pack_np_math_dtype)
 
             qweight = np.zeros((math.ceil(int_weight.shape[0] * self.bits / self.pack_dtype_bits), int_weight.shape[1]),

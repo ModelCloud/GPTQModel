@@ -380,6 +380,14 @@ def run_layer_stage(
     hook_skip_modules = _collect_hook_skip_modules(planning_layer_modules)
     quant_input_embeddings = embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
     quant_output_embeddings = embed_quant_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH)
+    requant_endpoint_names = {
+        name
+        for enabled, name in (
+            (quant_input_embeddings, looper.input_embeddings_name),
+            (quant_output_embeddings, looper.output_embeddings_name),
+        )
+        if enabled and name
+    }
     layer_index_offset = 1 if quant_input_embeddings else 0
     for layer_index in pb:
         # Iterate over every transformer layer (plus lm_head when enabled) as
@@ -446,7 +454,8 @@ def run_layer_stage(
                 layer_title,
             )
 
-        if not looper.gptq_model.should_quantize_layer(
+        should_quantize_layer = getattr(looper.gptq_model, "should_quantize_layer", None)
+        if callable(should_quantize_layer) and not should_quantize_layer(
             module,
             layer_name,
             layer_index,
@@ -777,28 +786,29 @@ def run_layer_stage(
                                 offload_path = getattr(quant_config, "offload_to_disk_path", None)
                                 if offload_path:
                                     module_full_name = getattr(module, "full_name", None)
-                                    target_module = (
-                                        looper.gptq_model.model.get_submodule(module_full_name)
-                                        if module_full_name
-                                        else module
-                                    )
-                                    offload_start = time.perf_counter() if region_timer is not None else None
-                                    with log_time_block(
-                                        "disk_offload",
-                                        logger=log,
-                                        module_name=resolved_label,
-                                    ):
-                                        offload_to_disk(
-                                            model=looper.gptq_model.model,
-                                            module=target_module,
-                                            disk_path=offload_path,
+                                    if module_full_name not in requant_endpoint_names:
+                                        target_module = (
+                                            looper.gptq_model.model.get_submodule(module_full_name)
+                                            if module_full_name
+                                            else module
                                         )
-                                    if region_timer is not None and offload_start is not None:
-                                        region_timer.record(
-                                            "submodule_finalize_offload",
-                                            time.perf_counter() - offload_start,
-                                            source=resolved_label,
-                                        )
+                                        offload_start = time.perf_counter() if region_timer is not None else None
+                                        with log_time_block(
+                                            "disk_offload",
+                                            logger=log,
+                                            module_name=resolved_label,
+                                        ):
+                                            offload_to_disk(
+                                                model=looper.gptq_model.model,
+                                                module=target_module,
+                                                disk_path=offload_path,
+                                            )
+                                        if region_timer is not None and offload_start is not None:
+                                            region_timer.record(
+                                                "submodule_finalize_offload",
+                                                time.perf_counter() - offload_start,
+                                                source=resolved_label,
+                                            )
                                 else:
                                     log.warning(
                                         "Skipping disk offload for %s: no offload path configured",

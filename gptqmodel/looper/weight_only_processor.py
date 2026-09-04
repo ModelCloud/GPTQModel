@@ -36,6 +36,7 @@ from ..quantization.config import (
 from ..quantization.rtn import RTN
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, pack_module
+from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..utils.module_locks import parent_module_lock
 
 
@@ -197,7 +198,9 @@ class WeightOnlyProcessor(LoopProcessor):
 
         qmodules = {
             name: submodule
-            for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items()
+            for name, submodule in find_modules(
+                model.model, [model.qlinear_kernel, TorchQuantEmbeddings]
+            ).items()
             if name == module.full_name
         }
 

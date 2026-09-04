@@ -224,6 +224,12 @@ def _tensor_matches_prefixes(tensor_name: str, prefixes: set[str]) -> bool:
     return tensor_name in prefixes or any(tensor_name.startswith(f"{prefix}.") for prefix in prefixes)
 
 
+def _module_name(model, target_module) -> Optional[str]:
+    if target_module is None:
+        return None
+    return next((name for name, module in model.named_modules() if module is target_module), None)
+
+
 def _save_embedding_replacement_safetensors(
     model,
     turtle_model,
@@ -248,6 +254,7 @@ def _save_embedding_replacement_safetensors(
     drop_by_shard: Dict[str, set[str]] = {}
     replacements_by_shard: Dict[str, Dict[str, torch.Tensor]] = {}
     removed_tensor_names: List[str] = []
+    matched_shards_by_prefix: Dict[str, List[str]] = {}
     for prefix in prefixes:
         checkpoint_prefixes = _checkpoint_prefixes_for_replacement(prefix, turtle_model)
         matched_shards = []
@@ -267,6 +274,32 @@ def _save_embedding_replacement_safetensors(
                     removed_tensor_names.append(runtime_name)
                 if runtime_shard not in matched_shards:
                     matched_shards.append(runtime_shard)
+        matched_shards_by_prefix[prefix] = matched_shards
+
+    config = getattr(model, "config", None)
+    tie_word_embeddings = bool(getattr(config, "tie_word_embeddings", False))
+    if not tie_word_embeddings:
+        source_config_path = os.path.join(turtle_model.model_local_path, "config.json")
+        if os.path.exists(source_config_path):
+            try:
+                with open(source_config_path, "r", encoding="utf-8") as handle:
+                    tie_word_embeddings = bool(json.load(handle).get("tie_word_embeddings", False))
+            except (OSError, TypeError, ValueError):
+                pass
+    input_prefix = _module_name(model, model.get_input_embeddings()) if hasattr(model, "get_input_embeddings") else None
+    output_prefix = _module_name(model, model.get_output_embeddings()) if hasattr(model, "get_output_embeddings") else None
+    tied_output_fallback = (
+        input_prefix
+        if tie_word_embeddings
+        and input_prefix in matched_shards_by_prefix
+        and output_prefix in matched_shards_by_prefix
+        else None
+    )
+
+    for prefix in prefixes:
+        matched_shards = matched_shards_by_prefix[prefix]
+        if not matched_shards and tied_output_fallback and prefix == output_prefix:
+            matched_shards = matched_shards_by_prefix[tied_output_fallback]
         if not matched_shards:
             raise ValueError(f"Could not find checkpoint tensor for embedding module `{prefix}`.")
         try:
@@ -747,6 +780,9 @@ def ModelWriter(cls):
         with open(config_path, "r", encoding="utf-8") as handle:
             model_config = json.load(handle)
         model_config["quantization_config"] = quantization_config
+        runtime_config = getattr(self.model, "config", None)
+        if runtime_config is not None and hasattr(runtime_config, "tie_word_embeddings"):
+            model_config["tie_word_embeddings"] = bool(runtime_config.tie_word_embeddings)
         with open(config_path, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(model_config, indent=2, sort_keys=True) + "\n")
 

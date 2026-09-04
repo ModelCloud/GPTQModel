@@ -45,7 +45,10 @@ class StageInputsCapture:
         self.logger = logger or setup_logger()
 
     def _materialize_modules_with_direct_meta_tensors(self, device: torch.device) -> None:
-        for module_name in self.gptq_model.get_modules_with_direct_meta_tensors(self.gptq_model.model):
+        get_modules = getattr(self.gptq_model, "get_modules_with_direct_meta_tensors", None)
+        if not callable(get_modules):
+            return
+        for module_name in get_modules(self.gptq_model.model):
             module = get_module(self.gptq_model.model, module_name)
             if isinstance(module, torch.nn.Module):
                 self.gptq_model.shell_direct_meta_materialize(
@@ -228,11 +231,18 @@ class StageInputsCapture:
                     return name
             return None
 
+        input_embeddings = self.gptq_model.get_input_embeddings()
+        input_embeddings_name = self.gptq_model.get_input_embeddings_name()
         ori_outside_layer_module_devices: Dict[str, torch.device] = {}
         for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
 
             if module is None:
+                continue
+            if (
+                embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+                and module_name == input_embeddings_name
+            ):
                 continue
 
             resolved_name = _resolve_module_name(module)
@@ -258,6 +268,12 @@ class StageInputsCapture:
                         if _has_vision_inputs(example)
                         else cur_layer_device
                     )
+                if (
+                    embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+                    and "input_ids" in example
+                    and input_embeddings is not None
+                ):
+                    data_device = get_device(input_embeddings)
                 example = self.gptq_model.move_input_capture_example(example, data_device)
                 if (
                     embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)

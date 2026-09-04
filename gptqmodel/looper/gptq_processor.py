@@ -17,6 +17,7 @@ from ..models import BaseQModel
 from ..models._const import CPU
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import GPTAQ, GPTQ, FOEM
 from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.fallback import normalize_fallback
@@ -203,6 +204,21 @@ class GPTQProcessor(LoopProcessor):
             keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
 
             if (
+                isinstance(getattr(g, "module", None), torch.nn.Embedding)
+                and torch.is_tensor(inp_tensor)
+                and torch.is_tensor(keep_mask)
+                and inp_tensor.dim() == 2
+                and keep_mask.ndim == 2
+                and keep_mask.shape == inp_tensor.shape
+            ):
+                keep_on_input = keep_mask.to(device=inp_tensor.device, dtype=torch.bool)
+                selected_ids = inp_tensor[keep_on_input].contiguous()
+                if torch.is_tensor(out) and out.shape[:2] == inp_tensor.shape:
+                    selected_out = out[keep_on_input].contiguous()
+                else:
+                    selected_out = out
+                g.add_batch(selected_ids.data, selected_out.data, batch_index=batch_idx)  # noqa: F821
+            elif (
                 torch.is_tensor(inp_tensor)
                 and torch.is_tensor(keep_mask)
                 and inp_tensor.dim() >= 3
@@ -481,7 +497,7 @@ class GPTQProcessor(LoopProcessor):
         # pack module
         qModules = {
             name: submodule
-            for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items()
+            for name, submodule in find_modules(model.model, [model.qlinear_kernel, TorchQuantEmbeddings]).items()
             if name == module.full_name
         }
         pack_start = time.perf_counter() if timer is not None else None

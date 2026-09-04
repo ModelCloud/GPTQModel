@@ -1144,6 +1144,19 @@ class BaseQModel(nn.Module):
         embed_quant_config = self._normalize_embed_quant_config(embed_quant_config, embed_quant_mode)
         if embed_quant_config is None:
             raise ValueError("`requantize()` requires `embed_quant_config` or `embed_quant_mode`.")
+
+        # Quantized checkpoint loading may use only a device map, leaving the
+        # quantization device unset. Requantization still needs a concrete
+        # device for kernel selection and calibration replay.
+        quantize_config = getattr(self, "quantize_config", None)
+        if quantize_config is not None and quantize_config.device is None:
+            input_endpoint = self.get_input_embeddings()
+            endpoint = input_endpoint if input_endpoint is not None else self.get_output_embeddings()
+            endpoint_device = get_device(endpoint) if endpoint is not None else get_device(self.model)
+            if endpoint_device.type == "meta":
+                endpoint_device = CPU
+            quantize_config.device = DEVICE(endpoint_device.type)
+
         result = self.quantize(
             calibration=calibration,
             calibration_concat_size=calibration_concat_size,

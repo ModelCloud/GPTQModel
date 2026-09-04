@@ -339,18 +339,34 @@ class ModuleLooper():
         if self.embed_quant_mode is not None:
             self.gptq_model.model = untie_word_embeddings(self.gptq_model.model)
 
-        self.input_embeddings_module = self.gptq_model.get_input_embeddings()
-        self.output_embeddings_module = self.gptq_model.get_output_embeddings()
-        self.input_embeddings_name = (
-            self.gptq_model.get_input_embeddings_name()
-            if self.input_embeddings_module is not None
-            else None
-        )
-        self.output_embeddings_name = (
-            self.gptq_model.get_output_embeddings_name()
-            if self.output_embeddings_module is not None
-            else None
-        )
+        # Endpoint discovery is only needed for the explicit embedding
+        # requantization flow. Keep the ordinary layer loop compatible with
+        # lightweight model doubles that implement the historical interface.
+        self.input_embeddings_module = None
+        self.output_embeddings_module = None
+        self.input_embeddings_name = None
+        self.output_embeddings_name = None
+        if self.embed_quant_mode is not None:
+            get_input_embeddings = getattr(self.gptq_model, "get_input_embeddings", None)
+            get_output_embeddings = getattr(self.gptq_model, "get_output_embeddings", None)
+            self.input_embeddings_module = (
+                get_input_embeddings() if callable(get_input_embeddings) else None
+            )
+            self.output_embeddings_module = (
+                get_output_embeddings() if callable(get_output_embeddings) else None
+            )
+            get_input_name = getattr(self.gptq_model, "get_input_embeddings_name", None)
+            get_output_name = getattr(self.gptq_model, "get_output_embeddings_name", None)
+            self.input_embeddings_name = (
+                get_input_name()
+                if self.input_embeddings_module is not None and callable(get_input_name)
+                else None
+            )
+            self.output_embeddings_name = (
+                get_output_name()
+                if self.output_embeddings_module is not None and callable(get_output_name)
+                else None
+            )
 
     def _emit_moe_parallel_quant_runtime(self) -> None:
         """Log the runtime knobs that decide whether MoE quant can fan out efficiently."""
@@ -1529,9 +1545,17 @@ class ModuleLooper():
 
         if self.gptq_model.quantize_config.offload_to_disk:
             log.info("Offloading base modules to disk...")
+            base_modules = self.gptq_model.get_base_modules(model=self.gptq_model.model)
+            if self.embed_quant_mode is not None:
+                endpoint_names = {
+                    name
+                    for name in (self.input_embeddings_name, self.output_embeddings_name)
+                    if name
+                }
+                base_modules = [name for name in base_modules if name not in endpoint_names]
             offload_to_disk(
                 model=self.gptq_model.model,
-                module=self.gptq_model.get_base_modules(model=self.gptq_model.model),
+                module=base_modules,
                 disk_path=self.gptq_model.quantize_config.offload_to_disk_path
             )
 
