@@ -74,7 +74,7 @@ def main() -> None:
     from gptqmodel.quantization.qvq import pack_qvq_binary_bank_ids
     from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
     from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
-    from gptqmodel.utils.qvq_amd import qvq_p32_amd_folded_shape_supported
+    from gptqmodel.utils.qvq_amd import qvq_p32_amd_folded_case_supported
 
     rows = []
     permitted_pids = set(hardware["process_ids"]) | set(
@@ -149,7 +149,7 @@ def main() -> None:
                 if output_hadamard:
                     reference = matmul_hadU(reference)
                 torch.cuda.synchronize()
-                folded_selected = qvq_p32_amd_folded_shape_supported(k, n)
+                folded_selected = qvq_p32_amd_folded_case_supported(m, k, n)
                 canonical_accuracy = _errors(actual, reference)
                 prior_regression = _errors(actual, expected_prior)
                 accuracy = canonical_accuracy if folded_selected else prior_regression

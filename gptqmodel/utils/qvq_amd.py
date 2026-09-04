@@ -25,8 +25,14 @@ _QWEN38_27B_FOLDED_SHAPES = frozenset(
         (5120, 1024),
         (5120, 10240),
         (5120, 6144),
+        (6144, 5120),
+        (5120, 17408),
     }
 )
+_QWEN38_27B_FOLDED_M_LIMITS = {
+    (6144, 5120): 32,
+    (5120, 17408): 512,
+}
 
 
 def qvq_p32_amd_supported(device: torch.device | str) -> bool:
@@ -46,6 +52,15 @@ def qvq_p32_amd_folded_shape_supported(in_features: int, out_features: int) -> b
     """Return whether the full-layer folded cache is measured for this geometry."""
 
     return (in_features, out_features) in _QWEN38_27B_FOLDED_SHAPES
+
+
+def qvq_p32_amd_folded_case_supported(m: int, in_features: int, out_features: int) -> bool:
+    """Return whether a measured geometry is accurate at this batch size."""
+
+    shape = (in_features, out_features)
+    if m <= 0 or shape not in _QWEN38_27B_FOLDED_SHAPES:
+        return False
+    return m <= _QWEN38_27B_FOLDED_M_LIMITS.get(shape, m)
 
 
 def qvq_p32_amd_folded_prefers_fp32_output(m: int, in_features: int, out_features: int) -> bool:
@@ -864,6 +879,7 @@ def qvq_p32_amd_folded(
 __all__ = [
     "qvq_p32_amd",
     "qvq_p32_amd_folded",
+    "qvq_p32_amd_folded_case_supported",
     "qvq_p32_amd_folded_prefers_fp32_output",
     "qvq_p32_amd_folded_shape_supported",
     "qvq_p32_amd_supported",

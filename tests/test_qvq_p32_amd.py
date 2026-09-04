@@ -25,6 +25,7 @@ from gptqmodel.utils.qvq_amd import (
     _use_gemv,
     qvq_p32_amd,
     qvq_p32_amd_folded,
+    qvq_p32_amd_folded_case_supported,
     qvq_p32_amd_folded_prefers_fp32_output,
     qvq_p32_amd_folded_shape_supported,
     qvq_p32_amd_supported,
@@ -101,10 +102,26 @@ def test_qvq_p32_amd_support_is_rocm_gfx950_only():
 
 
 def test_qvq_p32_amd_folded_shape_gate_is_fail_closed():
-    for shape in ((5120, 12288), (5120, 1024), (5120, 10240), (5120, 6144)):
+    for shape in (
+        (5120, 12288),
+        (5120, 1024),
+        (5120, 10240),
+        (5120, 6144),
+        (6144, 5120),
+        (5120, 17408),
+    ):
         assert qvq_p32_amd_folded_shape_supported(*shape)
-    for shape in ((6144, 5120), (5120, 17408), (17408, 5120), (256, 256)):
+    for shape in ((17408, 5120), (256, 256)):
         assert not qvq_p32_amd_folded_shape_supported(*shape)
+
+
+def test_qvq_p32_amd_folded_case_gate_enforces_accuracy_boundaries():
+    assert qvq_p32_amd_folded_case_supported(4096, 5120, 12288)
+    assert qvq_p32_amd_folded_case_supported(32, 6144, 5120)
+    assert not qvq_p32_amd_folded_case_supported(64, 6144, 5120)
+    assert qvq_p32_amd_folded_case_supported(512, 5120, 17408)
+    assert not qvq_p32_amd_folded_case_supported(1024, 5120, 17408)
+    assert not qvq_p32_amd_folded_case_supported(1, 17408, 5120)
 
 
 def test_qvq_p32_amd_folded_output_dtype_gate_covers_measured_regressions():

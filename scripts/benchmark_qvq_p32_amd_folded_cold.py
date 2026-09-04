@@ -55,7 +55,10 @@ def main() -> None:
     from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
     from gptqmodel.quantization.qvq import pack_qvq_binary_bank_ids
     from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
-    from gptqmodel.utils.qvq_amd import qvq_p32_amd_folded_shape_supported
+    from gptqmodel.utils.qvq_amd import (
+        qvq_p32_amd_folded_case_supported,
+        qvq_p32_amd_folded_shape_supported,
+    )
 
     baseline = json.loads(args.baseline.read_text())
     baseline_rows = {
@@ -67,6 +70,8 @@ def main() -> None:
     rows = []
     for shape, k, n in QWEN38_27B_SHAPES:
         if not qvq_p32_amd_folded_shape_supported(k, n):
+            continue
+        if not qvq_p32_amd_folded_case_supported(args.m, k, n):
             continue
         input_hadamard, output_hadamard = SHAPE_AXES[shape]
         generator = torch.Generator(device="cuda").manual_seed(20260904 + int(args.bits * 10) + k + n)

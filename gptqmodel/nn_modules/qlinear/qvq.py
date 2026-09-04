@@ -582,13 +582,15 @@ class QVQLinear(BaseQuantLinear):
             return None
         from ...utils.qvq_amd import (
             qvq_p32_amd_folded,
+            qvq_p32_amd_folded_case_supported,
             qvq_p32_amd_folded_prefers_fp32_output,
-            qvq_p32_amd_folded_shape_supported,
             qvq_p32_amd_supported,
         )
         from ...utils.qvq_cuda import _pgc16_levels
 
-        if not qvq_p32_amd_folded_shape_supported(self.in_features, self.out_features):
+        if not qvq_p32_amd_folded_case_supported(
+            x_2d.shape[0], self.in_features, self.out_features
+        ):
             return None
         cached = self._qvq_amd_folded_hot_cache
         if (
