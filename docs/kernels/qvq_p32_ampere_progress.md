@@ -3605,6 +3605,15 @@ The M16 full-KV WMMA route `(K,N)=(5120,1024)` was screened with
 within event resolution.  The source probe was reverted as neutral.
 Diagnostic: `artifacts/a100_p32_window/v33_candidate_m16_fullkv_hoistmask_2000.json`.
 
+## v70 rejected M8 full-KV wide-N reuse
+
+The M8 full-KV `(K,N)=(5120,1024)` WMMA route was screened with the
+Marlin-style `WideNTiles=true` reuse path and a two-N-tile grid.  It remained
+exact (`max_abs <= 1.2e-5`), but the 2,000-iteration medians regressed at W2.5
+and W3 to `0.033792 ms` (W2/W3.5 were `0.032768/0.031744 ms`).  The source
+change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v34_candidate_m8_fullkv_widentiles_2000.json`.
+
 ## Reproduction
 
 ```bash
