@@ -34,7 +34,7 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
-from ..models.base import CAPTURE_ONLY_FLAG, BaseQModel
+from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
 from ..quantization.config import METHOD, VramStrategy
 from ..utils.attn_mask import apply_keep_mask_bt
