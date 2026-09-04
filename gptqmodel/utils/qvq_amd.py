@@ -44,14 +44,21 @@ def _bank_mask(transition_bits: int, bank_alt_id: int) -> int:
     return masks[transition_bits][bank_alt_id]
 
 
-def _launch_config(m: int) -> tuple[int, int, int]:
+def _launch_config(m: int, n: int = 4096) -> tuple[int, int, int]:
     """Choose an MFMA tile without materializing a shape Cartesian product."""
 
     if m <= 16:
         return 16, 64, 8
     if m <= 64:
         return 32, 64, 8
+    if m >= 2048 and (n > 1024 or m >= 4096):
+        return 128, 128, 8
     return 128, 64, 8
+
+
+def _use_gemv(m: int, n: int) -> bool:
+    num_pid_n = triton.cdiv(n, 64)
+    return m == 1 or (m <= 4 and m * num_pid_n <= 256)
 
 
 def _integer_argument(name: str, value: int) -> int:
@@ -70,17 +77,23 @@ def _qvq_p32_gfx950_kernel(  # pragma: no cover - compiled and exercised on the 
     levels_ptr,
     bank_ids_ptr,
     output_ptr,
-    size_m,
+    size_m: tl.constexpr,
     size_k: tl.constexpr,
-    size_n,
+    size_n: tl.constexpr,
     transition_bits: tl.constexpr,
     words_per_tile: tl.constexpr,
     alternate_mask: tl.constexpr,
     block_m: tl.constexpr,
     block_n: tl.constexpr,
+    num_pid_n: tl.constexpr,
+    xcd_swizzle: tl.constexpr,
 ):
-    pid_m = tl.program_id(0)
-    pid_n = tl.program_id(1)
+    pid = tl.program_id(0)
+    if xcd_swizzle:
+        num_pid = tl.num_programs(0)
+        pid = (pid % 8) * (num_pid // 8) + pid // 8
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
     rows = pid_m * block_m + tl.arange(0, block_m)
     columns = pid_n * block_n + tl.arange(0, block_n)
     row_mask = rows < size_m
@@ -90,33 +103,108 @@ def _qvq_p32_gfx950_kernel(  # pragma: no cover - compiled and exercised on the 
 
     for k_tile in range(size_k // 16):
         local_k = tl.arange(0, 16)[:, None]
-        local_n = columns[None, :] & 15
-        local = local_k * 16 + local_n
-        pair = local >> 1
-        tile = k_tile * n_tiles + columns[None, :] // 16
+        pair_columns = pid_n * (block_n // 2) + tl.arange(0, block_n // 2)
+        pair_column_mask = pair_columns < size_n // 2
+        local_pair_n = pair_columns[None, :] & 7
+        pair = local_k * 8 + local_pair_n
+        tile = k_tile * n_tiles + pair_columns[None, :] // 8
         bit_position = (127 - pair) * transition_bits
         first_word = bit_position >> 5
         shift = bit_position & 31
         next_word = tl.where(first_word + 1 == words_per_tile, 0, first_word + 1)
         word_base = tile * words_per_tile
-        low = tl.load(trellis_ptr + word_base + first_word, mask=column_mask[None, :], other=0).to(tl.uint32)
-        high = tl.load(trellis_ptr + word_base + next_word, mask=column_mask[None, :], other=0).to(tl.uint32)
+        low = tl.load(
+            trellis_ptr + word_base + first_word,
+            mask=pair_column_mask[None, :],
+            other=0,
+        ).to(tl.uint32)
+        high = tl.load(
+            trellis_ptr + word_base + next_word,
+            mask=pair_column_mask[None, :],
+            other=0,
+        ).to(tl.uint32)
         state = tl.where(shift == 0, low, (low >> shift) | (high << ((32 - shift) & 31))) & 0xFFFF
 
-        packed_bank = tl.load(bank_ids_ptr + tile, mask=column_mask[None, :], other=0)
+        packed_bank = tl.load(bank_ids_ptr + tile, mask=pair_column_mask[None, :], other=0)
         selected = (packed_bank >> (pair >> 4)) & 1
         mixed = state ^ (selected * alternate_mask)
         mixed = mixed ^ (mixed >> 8)
         mixed = (mixed * 40503 + 17011) & 0xFFFF
         mixed = mixed ^ (mixed >> 7)
-        level_index = tl.where((local & 1) == 0, mixed >> 8, mixed & 0xFF)
-        weight = tl.load(levels_ptr + level_index).to(tl.float16)
+        even_weight = tl.load(levels_ptr + (mixed >> 8)).to(tl.float16)
+        odd_weight = tl.load(levels_ptr + (mixed & 0xFF)).to(tl.float16)
+        weight = tl.interleave(even_weight, odd_weight)
         input_offsets = rows[:, None] * size_k + k_tile * 16 + tl.arange(0, 16)[None, :]
         activation = tl.load(input_ptr + input_offsets, mask=row_mask[:, None], other=0.0)
         accumulator = tl.dot(activation, weight, accumulator)
 
     output_offsets = rows[:, None] * size_n + columns[None, :]
     tl.store(output_ptr + output_offsets, accumulator, mask=row_mask[:, None] & column_mask[None, :])
+
+
+@triton.jit
+def _qvq_p32_gemv_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
+    input_ptr,
+    trellis_ptr,
+    levels_ptr,
+    bank_ids_ptr,
+    output_ptr,
+    size_m: tl.constexpr,
+    size_k: tl.constexpr,
+    size_n: tl.constexpr,
+    transition_bits: tl.constexpr,
+    words_per_tile: tl.constexpr,
+    alternate_mask: tl.constexpr,
+    block_n: tl.constexpr,
+    num_pid_n: tl.constexpr,
+    xcd_swizzle: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    if xcd_swizzle:
+        num_pid = tl.num_programs(0)
+        pid = (pid % 8) * (num_pid // 8) + pid // 8
+    pid_m = pid // num_pid_n
+    pid_n = pid % num_pid_n
+    columns = pid_n * block_n + tl.arange(0, block_n)
+    column_mask = columns < size_n
+    accumulator = tl.zeros((block_n,), dtype=tl.float32)
+    n_tiles = size_n // 16
+
+    for k_tile in range(size_k // 16):
+        local_k = tl.arange(0, 16)[:, None]
+        pair_columns = pid_n * (block_n // 2) + tl.arange(0, block_n // 2)
+        pair_column_mask = pair_columns < size_n // 2
+        pair = local_k * 8 + (pair_columns[None, :] & 7)
+        tile = k_tile * n_tiles + pair_columns[None, :] // 8
+        bit_position = (127 - pair) * transition_bits
+        first_word = bit_position >> 5
+        shift = bit_position & 31
+        next_word = tl.where(first_word + 1 == words_per_tile, 0, first_word + 1)
+        word_base = tile * words_per_tile
+        low = tl.load(
+            trellis_ptr + word_base + first_word,
+            mask=pair_column_mask[None, :],
+            other=0,
+        ).to(tl.uint32)
+        high = tl.load(
+            trellis_ptr + word_base + next_word,
+            mask=pair_column_mask[None, :],
+            other=0,
+        ).to(tl.uint32)
+        state = tl.where(shift == 0, low, (low >> shift) | (high << ((32 - shift) & 31))) & 0xFFFF
+        packed_bank = tl.load(bank_ids_ptr + tile, mask=pair_column_mask[None, :], other=0)
+        selected = (packed_bank >> (pair >> 4)) & 1
+        mixed = state ^ (selected * alternate_mask)
+        mixed = mixed ^ (mixed >> 8)
+        mixed = (mixed * 40503 + 17011) & 0xFFFF
+        mixed = mixed ^ (mixed >> 7)
+        even_weight = tl.load(levels_ptr + (mixed >> 8)).to(tl.float16)
+        odd_weight = tl.load(levels_ptr + (mixed & 0xFF)).to(tl.float16)
+        weight = tl.interleave(even_weight, odd_weight)
+        activation = tl.load(input_ptr + pid_m * size_k + k_tile * 16 + tl.arange(0, 16))
+        accumulator += tl.sum(activation[:, None].to(tl.float32) * weight.to(tl.float32), axis=0)
+
+    tl.store(output_ptr + pid_m * size_n + columns, accumulator, mask=column_mask)
 
 
 def qvq_p32_amd(
@@ -170,10 +258,38 @@ def qvq_p32_amd(
     if tuple(bank_ids.shape) != (tile_count,):
         raise ValueError(f"AMD P32 selectors must have shape {(tile_count,)}")
 
-    block_m, block_n, num_warps = _launch_config(m)
+    block_m, block_n, num_warps = _launch_config(m, n)
     output_dtype = torch.float32 if output_fp32 else x.dtype
     output = torch.empty((m, n), device=x.device, dtype=output_dtype)
-    grid = (triton.cdiv(m, block_m), triton.cdiv(n, block_n))
+    if _use_gemv(m, n):
+        block_n = 64
+        num_pid_n = triton.cdiv(n, block_n)
+        grid = (m * num_pid_n,)
+        _qvq_p32_gemv_gfx950_kernel[grid](
+            x,
+            window,
+            levels,
+            bank_ids,
+            output,
+            size_m=m,
+            size_k=k,
+            size_n=n,
+            transition_bits=transition_bits,
+            words_per_tile=expected_window[1],
+            alternate_mask=_bank_mask(transition_bits, bank_alt_id),
+            block_n=block_n,
+            num_pid_n=num_pid_n,
+            xcd_swizzle=(m * num_pid_n) % 8 == 0,
+            num_warps=8,
+            num_stages=1,
+            waves_per_eu=0,
+        )
+        return output
+
+    num_pid_m = triton.cdiv(m, block_m)
+    num_pid_n = triton.cdiv(n, block_n)
+    num_pid = num_pid_m * num_pid_n
+    grid = (num_pid,)
     _qvq_p32_gfx950_kernel[grid](
         x,
         window,
@@ -188,7 +304,13 @@ def qvq_p32_amd(
         alternate_mask=_bank_mask(transition_bits, bank_alt_id),
         block_m=block_m,
         block_n=block_n,
+        num_pid_n=num_pid_n,
+        xcd_swizzle=num_pid % 8 == 0,
         num_warps=num_warps,
+        num_stages=3 if m <= 64 else 2,
+        waves_per_eu=0,
+        matrix_instr_nonkdim=16,
+        kpack=1,
     )
     return output
 

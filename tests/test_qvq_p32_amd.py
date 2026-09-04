@@ -19,7 +19,12 @@ from gptqmodel.quantization.qvq_codecs import (
     pgc16_levels_for_version,
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
-from gptqmodel.utils.qvq_amd import _launch_config, qvq_p32_amd, qvq_p32_amd_supported
+from gptqmodel.utils.qvq_amd import (
+    _launch_config,
+    _use_gemv,
+    qvq_p32_amd,
+    qvq_p32_amd_supported,
+)
 
 P32_RATES = (2.0, 2.5, 3.0, 3.5)
 REQUESTED_M = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
@@ -73,19 +78,36 @@ def test_qvq_p32_amd_support_is_rocm_gfx950_only():
 
 
 @pytest.mark.parametrize(
-    ("m", "expected"),
+    ("m", "n", "expected"),
     (
-        (1, (16, 64, 8)),
-        (16, (16, 64, 8)),
-        (32, (32, 64, 8)),
-        (64, (32, 64, 8)),
-        (128, (128, 64, 8)),
-        (256, (128, 64, 8)),
-        (4096, (128, 64, 8)),
+        (1, 4096, (16, 64, 8)),
+        (16, 4096, (16, 64, 8)),
+        (32, 4096, (32, 64, 8)),
+        (64, 4096, (32, 64, 8)),
+        (128, 4096, (128, 64, 8)),
+        (256, 4096, (128, 64, 8)),
+        (2048, 1024, (128, 64, 8)),
+        (2048, 4096, (128, 128, 8)),
+        (4096, 1024, (128, 128, 8)),
     ),
 )
-def test_qvq_p32_amd_launch_config_covers_requested_regimes(m, expected):
-    assert _launch_config(m) == expected
+def test_qvq_p32_amd_launch_config_covers_requested_regimes(m, n, expected):
+    assert _launch_config(m, n) == expected
+
+
+@pytest.mark.parametrize(
+    ("m", "n", "expected"),
+    (
+        (1, 17408, True),
+        (2, 6144, True),
+        (2, 12288, False),
+        (4, 4096, True),
+        (4, 5120, False),
+        (8, 1024, False),
+    ),
+)
+def test_qvq_p32_amd_gemv_dispatch_limits_program_count(m, n, expected):
+    assert _use_gemv(m, n) is expected
 
 
 @pytest.mark.cuda
