@@ -3586,6 +3586,16 @@ W3, and W3.5 to `0.032768/0.033792/0.033792 ms` (W2 was `0.031744 ms`).
 The source change was reverted.  Diagnostic:
 `artifacts/a100_p32_window/v31_candidate_m1_fullkv_pairdecode_2000.json`.
 
+## v68 rejected small-N vectorized output stores
+
+The scalar M2/M4 full-KV paths were screened with `float2` stores for their
+fixed N=1024 output pairs (the existing fast store is intentionally limited
+to M1).  Outputs remained exact (`max_abs <= 9.6e-6`), but the 2,000-iteration
+Ampere medians regressed to about `0.033792 ms` for M2 and
+`0.032768--0.033792 ms` for M4 versus the retained dynamic stores.  The source
+change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v32_candidate_m24_fullkv_vector_store_2000.json`.
+
 ## Reproduction
 
 ```bash
