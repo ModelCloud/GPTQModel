@@ -45,6 +45,13 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--idle-interval", type=float, default=0.2)
     parser.add_argument("--idle-memory-mib", type=int, default=0)
     parser.add_argument(
+        "--previous",
+        action="append",
+        type=Path,
+        default=[],
+        help="prior result artifact(s) used for the strict better/regression column",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("artifacts/qvq_hopper_large_m/full_mlp.json"),
@@ -140,6 +147,14 @@ def _main(args: argparse.Namespace) -> None:
     device_info = common._assert_h100(torch)
     device = torch.device("cuda:0")
     fingerprint = _fingerprint()
+    previous = {}
+    for path in args.previous:
+        payload = json.loads(path.read_text())
+        for row in payload.get("rows", ()):
+            key = (float(row["bits"]), int(row["m"]))
+            if key in previous:
+                raise RuntimeError(f"duplicate previous benchmark row for {key}")
+            previous[key] = row["qvq"]
     inputs = {
         m: (
             torch.randn(
@@ -206,8 +221,15 @@ def _main(args: argparse.Namespace) -> None:
                 "speedup_vs_marlin_w4": marlin["median_us"] / timing["median_us"],
                 "speedup_vs_machete_w4": machete["median_us"] / timing["median_us"],
                 "effective_tflops": logical_flops / (timing["median_us"] * 1e6),
-                "better_than_last_benchmark": timing["median_us"]
+                "better_than_plain_qvq": timing["median_us"]
                 < plain[m]["median_us"],
+                "previous_qvq": previous.get((float(bits), m)),
+                "better_than_last_benchmark": (
+                    timing["median_us"]
+                    < previous[(float(bits), m)]["median_us"]
+                    if (float(bits), m) in previous
+                    else None
+                ),
                 "dense_oracle_error": error,
             }
             results.append(result)
@@ -216,7 +238,14 @@ def _main(args: argparse.Namespace) -> None:
                 f"({m},{INTERMEDIATE},{HIDDEN}): qvq={timing['median_us']:.3f}us "
                 f"marlin={marlin['median_us']:.3f}us "
                 f"machete={machete['median_us']:.3f}us "
-                f"better={'Yes' if result['better_than_last_benchmark'] else 'No'}",
+                "better_last="
+                + (
+                    "N/A"
+                    if result["better_than_last_benchmark"] is None
+                    else "Yes"
+                    if result["better_than_last_benchmark"]
+                    else "No"
+                ),
                 flush=True,
             )
         telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
@@ -243,6 +272,7 @@ def _main(args: argparse.Namespace) -> None:
         },
         "workload": "complete Llama 3.2 1B gate/up/SiLU/product/down MLP",
         "comparison": "native grouped large-M QVQ versus ordinary QVQ and W4 baselines",
+        "previous_artifacts": [str(path) for path in args.previous],
         "rows": results,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

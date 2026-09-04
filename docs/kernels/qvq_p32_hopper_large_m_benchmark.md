@@ -5,7 +5,8 @@
 The benchmark uses the physical 132-SM NVIDIA H100 exclusively.  It rejects
 foreign compute processes, requires three consecutive zero-utilization
 samples before timing, captures the complete projection site in a CUDA Graph,
-and records replay latency with CUDA events.  Each row uses 20 warmups, 40
+and records replay latency with CUDA events.  The latest production matrix
+uses 20 warmups, 50
 samples, and 20 graph replays per sample.
 
 `vs Marlin` and `vs Machete` are latency speedup ratios against their W4
@@ -221,6 +222,55 @@ the reuse-4 row grid already exposes at least 256 down CTAs.
 The extended matrix improves ordinary QVQ by `1.076x` geometric mean, but is
 only `0.327x` Marlin and `0.220x` Machete.  This near-linear scaling identifies
 repeated P32 decode per M64 slab as the main redesign target.
+
+## Fused large-M transforms and N128 by M64 gate/up
+
+The current production result combines the exact large-M recovery/SwiGLU/down
+precondition pipeline with the H100 N128 by M64 gate/up inner tile at M128 and
+larger.  `Better than last` is loaded from the two preceding committed full-MLP
+artifacts, rather than inferred from ordinary QVQ.  All 32 cells improve, with
+a `1.185x` geometric-mean speedup.  Maximum dense-oracle error is
+`1.133e-6`, and maximum mean absolute error is `1.585e-7`.
+
+| Rate | M; gate/up K,N; down K,N | QVQ us | vs Marlin W4 | vs Machete W4 | Better than last |
+| ---: | :--- | ---: | ---: | ---: | :---: |
+| W2 | 32; 2048,8192; 8192,2048 | 67.209 | 0.937x | 0.832x | Yes |
+| W2 | 64; 2048,8192; 8192,2048 | 83.588 | 1.116x | 0.752x | Yes |
+| W2 | 128; 2048,8192; 8192,2048 | 135.817 | 0.581x | 0.542x | Yes |
+| W2 | 256; 2048,8192; 8192,2048 | 243.397 | 0.395x | 0.345x | Yes |
+| W2 | 512; 2048,8192; 8192,2048 | 464.810 | 0.356x | 0.252x | Yes |
+| W2 | 1024; 2048,8192; 8192,2048 | 915.433 | 0.365x | 0.237x | Yes |
+| W2 | 2048; 2048,8192; 8192,2048 | 1789.528 | 0.391x | 0.255x | Yes |
+| W2 | 4096; 2048,8192; 8192,2048 | 3577.019 | 0.394x | 0.257x | Yes |
+| W2.5 | 32; 2048,8192; 8192,2048 | 74.002 | 0.851x | 0.756x | Yes |
+| W2.5 | 64; 2048,8192; 8192,2048 | 84.010 | 1.110x | 0.749x | Yes |
+| W2.5 | 128; 2048,8192; 8192,2048 | 134.857 | 0.585x | 0.546x | Yes |
+| W2.5 | 256; 2048,8192; 8192,2048 | 241.913 | 0.397x | 0.347x | Yes |
+| W2.5 | 512; 2048,8192; 8192,2048 | 466.583 | 0.355x | 0.251x | Yes |
+| W2.5 | 1024; 2048,8192; 8192,2048 | 917.644 | 0.364x | 0.236x | Yes |
+| W2.5 | 2048; 2048,8192; 8192,2048 | 1764.969 | 0.396x | 0.259x | Yes |
+| W2.5 | 4096; 2048,8192; 8192,2048 | 3522.405 | 0.400x | 0.261x | Yes |
+| W3 | 32; 2048,8192; 8192,2048 | 74.576 | 0.844x | 0.750x | Yes |
+| W3 | 64; 2048,8192; 8192,2048 | 84.678 | 1.102x | 0.743x | Yes |
+| W3 | 128; 2048,8192; 8192,2048 | 133.317 | 0.592x | 0.552x | Yes |
+| W3 | 256; 2048,8192; 8192,2048 | 244.133 | 0.394x | 0.344x | Yes |
+| W3 | 512; 2048,8192; 8192,2048 | 466.763 | 0.354x | 0.251x | Yes |
+| W3 | 1024; 2048,8192; 8192,2048 | 920.114 | 0.363x | 0.236x | Yes |
+| W3 | 2048; 2048,8192; 8192,2048 | 1779.328 | 0.393x | 0.257x | Yes |
+| W3 | 4096; 2048,8192; 8192,2048 | 3532.299 | 0.399x | 0.260x | Yes |
+| W3.5 | 32; 2048,8192; 8192,2048 | 74.551 | 0.844x | 0.750x | Yes |
+| W3.5 | 64; 2048,8192; 8192,2048 | 88.252 | 1.057x | 0.713x | Yes |
+| W3.5 | 128; 2048,8192; 8192,2048 | 137.139 | 0.575x | 0.537x | Yes |
+| W3.5 | 256; 2048,8192; 8192,2048 | 246.972 | 0.389x | 0.340x | Yes |
+| W3.5 | 512; 2048,8192; 8192,2048 | 488.178 | 0.339x | 0.240x | Yes |
+| W3.5 | 1024; 2048,8192; 8192,2048 | 958.221 | 0.348x | 0.226x | Yes |
+| W3.5 | 2048; 2048,8192; 8192,2048 | 1845.829 | 0.379x | 0.247x | Yes |
+| W3.5 | 4096; 2048,8192; 8192,2048 | 3686.234 | 0.382x | 0.249x | Yes |
+
+The same matrix is only `0.505x` Marlin and `0.377x` Machete in geometric
+mean.  The M128-and-larger gap therefore remains the next design target even
+after removing redundant transforms and increasing gate/up scheduler
+readiness.
 
 ## Rejected reuse-8 experiment
 
