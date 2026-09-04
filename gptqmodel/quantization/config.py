@@ -2519,6 +2519,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         "to speed up quantization forwarding. This causes extra time spent (especially for MoE layers) and vram pressure, "
         "leading in some cases to slower forwarding or vram OOM"}
     )
+    validate_input_sources: bool = field(
+        default=False,
+        metadata={"help": "Validate that modules declared to share an input source receive identical activations"},
+    )
 
     # User-facing dense-pool strategy. The dense pool owns the serial path:
     # qkv, z, out_proj, norms, router, shared expert, and dense MLP modules.
@@ -2951,6 +2955,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "gc_mode": "gc_mode",
             "wait_for_submodule_finalizers": "wait_for_submodule_finalizers",
             "auto_forward_data_parallel": "auto_forward_data_parallel",
+            "validate_input_sources": "validate_input_sources",
             "dense_vram_strategy": "dense_vram_strategy",
             "dense_vram_strategy_devices": "dense_vram_strategy_devices",
             "moe_vram_strategy": "moe_vram_strategy",
@@ -3086,6 +3091,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         meta_payload["gc_mode"] = self.gc_mode.value if isinstance(self.gc_mode, GcMode) else self.gc_mode
         meta_payload["wait_for_submodule_finalizers"] = self.wait_for_submodule_finalizers
         meta_payload["auto_forward_data_parallel"] = self.auto_forward_data_parallel
+        meta_payload["validate_input_sources"] = self.validate_input_sources
         meta_payload["dense_vram_strategy"] = (
             self.dense_vram_strategy.value
             if isinstance(self.dense_vram_strategy, VramStrategy)
@@ -4067,6 +4073,7 @@ class GGUFConfig(PreProcessorConfig):
                 "gc_mode",
                 "wait_for_submodule_finalizers",
                 "auto_forward_data_parallel",
+                "validate_input_sources",
                 "dense_vram_strategy",
                 "dense_vram_strategy_devices",
                 "moe_vram_strategy",

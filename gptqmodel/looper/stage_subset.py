@@ -29,6 +29,10 @@ from .paroquant_processor import ParoQuantProcessor
 from .qqq_processor import QQQProcessor
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
+from ..looper.input_source_validator import (
+    InputSourceCapture,
+    validate_plan_input_sources,
+)
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
@@ -549,7 +553,16 @@ def build_subset_plan(
         "auto_forward_data_parallel",
         True,
     )
-    subset_forward_serial = subset_forward_serial or not auto_forward_data_parallel
+    validate_input_sources = getattr(
+        looper.gptq_model.quantize_config,
+        "validate_input_sources",
+        False,
+    )
+    subset_forward_serial = (
+        subset_forward_serial
+        or not auto_forward_data_parallel
+        or validate_input_sources
+    )
 
     # Forward progress is normalized here so the executor and any later replay
     # reuse the same batch and row accounting instead of recomputing it.
@@ -889,7 +902,20 @@ def _run_single_subset_pass(
         )
 
     forward_outputs = None
+    input_source_capture = None
     if execute_forward:
+        if (
+            getattr(looper.gptq_model.quantize_config, "validate_input_sources", False)
+            and any(len(group) >= 2 for group in plan.input_sources.values())
+        ):
+            capture_modules = [
+                named_module
+                for group in plan.input_sources.values()
+                if len(group) >= 2
+                for named_module in group
+            ]
+            input_source_capture = InputSourceCapture(capture_modules)
+            input_source_capture.__enter__()
         try:
             # MoE lifecycle hooks need to know which subset is currently active.
             # Replay-only passes can disable that when they only need outputs.
@@ -921,6 +947,8 @@ def _run_single_subset_pass(
                 preserve_module_devices=preserve_devices,
             )
         finally:
+            if input_source_capture is not None:
+                input_source_capture.__exit__(None, None, None)
             if forward_device_map and plan.restore_forward_device_overrides:
                 looper._restore_forward_device_overrides(
                     subset,
@@ -972,6 +1000,18 @@ def _run_single_subset_pass(
             if hasattr(subset[name], 'forward_hook'):
                 subset[name].forward_hook = None
                 subset[name].forward_hook_last = False
+
+    if input_source_capture is not None:
+        report = validate_plan_input_sources(plan, input_source_capture.captured)
+        logger.info(
+            "Input-source validation: layer=%s subset=%s/%s checked_sources=%s checked_modules=%s",
+            layer_index,
+            subset_index + 1,
+            subset_total,
+            report.checked_sources,
+            report.checked_modules,
+        )
+        report.raise_if_failed()
 
     forward_flush_device = _resolve_forward_flush_device(plan, cur_layer_device)
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
@@ -1269,7 +1309,7 @@ def run_subset_stage(
 
         # Create progress bar for MOE chunks
         moe_chunk_pb = logger.pb(range(len(plan.module_chunks))).manual()
-        moe_chunk_pb.title(f"MoE Chunk")
+        moe_chunk_pb.title("MoE Chunk")
 
         for chunk_idx in moe_chunk_pb:
             chunk_plan = plan.for_modules(plan.module_chunks[chunk_idx])
