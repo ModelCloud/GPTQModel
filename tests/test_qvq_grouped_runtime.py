@@ -616,6 +616,72 @@ def test_qwen38_full_attention_group_runs_measured_schedule_in_cuda_graph():
     assert telemetry["plain_fallbacks"] == 0
 
 
+@pytest.mark.parametrize(
+    ("bits", "expected_splits"),
+    ((2.0, (10, 20)), (2.5, (10, 20)), (3.0, (4, 20))),
+)
+def test_qwen38_linear_input_group_uses_fixed_grid_in_cuda_graph(
+    bits, expected_splits
+):
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+
+    names = ("in_proj_qkv", "in_proj_z")
+    widths = (10240, 6144)
+    shared = torch.ones(5120, device=device)
+    children = tuple(
+        _child(
+            name,
+            in_features=5120,
+            out_features=width,
+            bits=bits,
+            su=shared,
+            alt_id=index + 1,
+            seed=20260970 + index,
+            device=device,
+        )
+        for index, (name, width) in enumerate(zip(names, widths, strict=True))
+    )
+    parent = nn.Module()
+    for name, child in zip(names, children, strict=True):
+        setattr(parent, name, child)
+    with torch.no_grad():
+        for child in children:
+            child.SV.fill_(0.002)
+            child.bias.zero_()
+    static_input = torch.randn(
+        (8, 5120), device=device, dtype=torch.float16
+    ) * 0.02
+    with torch.inference_mode():
+        plain = tuple(child(static_input).clone() for child in children)
+    assert install_qvq_hopper_groups(
+        parent,
+        qkv_candidates=(names,),
+        qkv=True,
+        gate_up=False,
+    ) == {"qkv": 1}
+    with torch.inference_mode():
+        eager = tuple(getattr(parent, name)(static_input) for name in names)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = tuple(
+                getattr(parent, name)(static_input) for name in names
+            )
+        for _ in range(5):
+            graph.replay()
+        torch.cuda.synchronize(device)
+
+    for actual, replayed, reference in zip(eager, captured, plain, strict=True):
+        assert torch.equal(replayed, actual)
+        torch.testing.assert_close(actual, reference, rtol=0, atol=2e-3)
+    telemetry = qvq_grouped_runtime_telemetry(parent)[0]
+    assert telemetry["active_split_counts"] == expected_splits
+    assert telemetry["grouped_launches"] == 2
+    assert telemetry["h100_qwen_fixed_linear_grid_launches"] == 2
+    assert telemetry["plain_fallbacks"] == 0
+
+
 @pytest.mark.parametrize("bits", (2.0, 2.5, 3.0))
 def test_qwen38_folded_mlp_is_fused_and_cuda_graph_safe(bits):
     device = _h100_device()

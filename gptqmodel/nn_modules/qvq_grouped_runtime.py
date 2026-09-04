@@ -219,6 +219,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_qwen_w3_down_decode_prefetch_launches: int = 0
     h100_qwen_down_decode_prefetch_launches: int = 0
     h100_qwen_fixed_ordered_grid_launches: int = 0
+    h100_qwen_fixed_linear_grid_launches: int = 0
     h100_qwen_composite_down_recovery_launches: int = 0
     h100_qwen_ordered_composite_down_recovery_launches: int = 0
     h100_qwen_composite_input_launches: int = 0
@@ -276,6 +277,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_qwen_w3_down_decode_prefetch_launches": self.h100_qwen_w3_down_decode_prefetch_launches,
             "h100_qwen_down_decode_prefetch_launches": self.h100_qwen_down_decode_prefetch_launches,
             "h100_qwen_fixed_ordered_grid_launches": self.h100_qwen_fixed_ordered_grid_launches,
+            "h100_qwen_fixed_linear_grid_launches": self.h100_qwen_fixed_linear_grid_launches,
             "h100_qwen_composite_down_recovery_launches": self.h100_qwen_composite_down_recovery_launches,
             "h100_qwen_ordered_composite_down_recovery_launches": self.h100_qwen_ordered_composite_down_recovery_launches,
             "h100_qwen_composite_input_launches": self.h100_qwen_composite_input_launches,
@@ -655,6 +657,18 @@ class QVQHopperGroupedRuntime:
         )
         if grouped_inner is qvq_p32_window_wgmma_grouped_ordered_packed:
             self.telemetry.ordered_split_launches += 1
+            if (
+                self._h100_fp16_recovery_store_enabled
+                and self.category == "qkv"
+                and children[0].in_features == 5120
+                and tuple(child.out_features for child in children)
+                == (10240, 6144)
+                and qvq_transition_bits(
+                    children[0].bits, vector_size=children[0].vector_size
+                )
+                <= 6
+            ):
+                self.telemetry.h100_qwen_fixed_linear_grid_launches += 1
         if self._h100_w25_n128_gate_up_enabled:
             self.telemetry.h100_w25_n128_gate_up_launches += 1
         if not recover:

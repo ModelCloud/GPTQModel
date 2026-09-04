@@ -67,6 +67,8 @@ constexpr int kFixedGateUpN = 8192;
 constexpr int kFixedQwenGateUpK = 5120;
 constexpr int kFixedQwenGateUpN = 17408;
 constexpr int kFixedQwenGateUpSplit = 5;
+constexpr int kFixedQwenLinearQkvN = 10240;
+constexpr int kFixedQwenLinearZN = 6144;
 // The W2.5 N128 block has two independent consumer warpgroups and needs only
 // three decoded A fragments in flight.  A matched H100 depth-2/3/4 sweep
 // selected depth three at every Llama 3.2 1B decode M.
@@ -674,6 +676,7 @@ template <
     bool FixedGateUp = false,
     bool PrefetchDecodedLevels = false,
     int N64BlocksPerCta = 1,
+    bool FixedQwenLinear = false,
     class InputTma,
     class TrellisTma,
     class BankTma,
@@ -693,6 +696,7 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
     int launch_bank_alt_id) {
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
   static_assert(!FixedGateUp || Grouped);
+  static_assert(!FixedQwenLinear || (Grouped && OrderedSplit && !FixedGateUp));
   static_assert(N64BlocksPerCta == 1 || N64BlocksPerCta == 2);
   static_assert(N64BlocksPerCta == 1 || FixedGateUp);
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
@@ -759,6 +763,41 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
     partial_output_offset = OrderedSplit
         ? static_cast<int64_t>(segment) * kFixedSplit * kRows * kFixedN
         : 0;
+  } else if constexpr (FixedQwenLinear) {
+    // Qwen3.8 linear-attention input projections have two fixed unequal
+    // children.  Resolve the segment from one compile-time work boundary and
+    // divide by compile-time N64 counts instead of searching runtime segment
+    // descriptors and dividing by runtime widths in every thread.
+    constexpr int kQkvN64Blocks = kFixedQwenLinearQkvN / kOutputColumns;
+    constexpr int kZN64Blocks = kFixedQwenLinearZN / kOutputColumns;
+    constexpr int kQkvSplit = TransitionBits <= 5 ? 10 : 4;
+    constexpr int kZSplit = 20;
+    constexpr int kQkvWorkItems = kQkvN64Blocks * kQkvSplit;
+    const int work_item = static_cast<int>(blockIdx.x);
+    segment = work_item >= kQkvWorkItems ? 1 : 0;
+    const int segment_work_item =
+        segment == 0 ? work_item : work_item - kQkvWorkItems;
+    if (segment == 0) {
+      split = segment_work_item / kQkvN64Blocks;
+      n64_block = segment_work_item - split * kQkvN64Blocks;
+      size_n = kFixedQwenLinearQkvN;
+      split_count = kQkvSplit;
+      n64_block_global = n64_block;
+      output_offset = 0;
+      partial_output_offset = 0;
+    } else {
+      split = segment_work_item / kZN64Blocks;
+      n64_block = segment_work_item - split * kZN64Blocks;
+      size_n = kFixedQwenLinearZN;
+      split_count = kZSplit;
+      n64_block_global = kQkvN64Blocks + n64_block;
+      output_offset = static_cast<int64_t>(kRows) * kFixedQwenLinearQkvN;
+      partial_output_offset =
+          static_cast<int64_t>(kQkvSplit) * kRows * kFixedQwenLinearQkvN;
+    }
+    total_n_tiles =
+        (kFixedQwenLinearQkvN + kFixedQwenLinearZN) / kP32TileColumns;
+    bank_alt_id = grouped_params.bank_alt_id[segment];
   } else if constexpr (Grouped) {
     if constexpr (OrderedSplit) {
       const int work_item = static_cast<int>(blockIdx.x);
@@ -1683,6 +1722,15 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       split_counts[0] == split_counts[1] &&
       split_counts[0] == kFixedQwenGateUpSplit &&
       std::strcmp(properties.name, "NVIDIA H100") == 0;
+  const int qwen_linear_qkv_split = TransitionBits <= 5 ? 10 : 4;
+  const bool use_h100_qwen_linear_fixed =
+      OrderedSplit && size_k == 5120 && segment_count == 2 &&
+      out_features[0] == kFixedQwenLinearQkvN &&
+      out_features[1] == kFixedQwenLinearZN &&
+      split_counts[0] == qwen_linear_qkv_split &&
+      split_counts[1] == 20 &&
+      TransitionBits <= kW3TransitionBits &&
+      std::strcmp(properties.name, "NVIDIA H100") == 0;
   if (use_h100_qwen_ordered_fixed) {
     const HopperFixedGateUpLaunchParams fixed_params{
         {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
@@ -1707,6 +1755,25 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
             2 * kFixedQwenGateUpN,
             kFixedQwenGateUpSplit,
             0);
+  } else if (use_h100_qwen_linear_fixed) {
+    qvq_p32_window_wgmma_m16_tma_kernel<
+        TransitionBits,
+        true,
+        true,
+        false,
+        false,
+        1,
+        true><<<grid, kTmaThreads, 0, stream>>>(
+            input_tma,
+            trellis_tma,
+            bank_tma,
+            reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+            partial_output.data_ptr<float>(),
+            grouped_params,
+            size_k,
+            static_cast<int>(total_n),
+            1,
+            0);
   } else if (use_wide_gate_up) {
     const HopperFixedGateUpLaunchParams fixed_params{
         {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
@@ -1719,6 +1786,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
         true,
         true,
         2,
+        false,
         decltype(input_tma),
         decltype(wide_trellis_tma),
         decltype(bank_tma),
