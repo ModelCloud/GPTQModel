@@ -43,6 +43,8 @@ class Llama4QModel(BaseQModel):
 
 
 class Llama4TextQModel(Llama4QModel):
+    shared_input_verified_model_types = frozenset({"llama4_text"})
+
     loader = AutoModelForCausalLM
 
     pre_lm_head_norm_module = "model.norm"

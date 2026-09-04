@@ -248,6 +248,42 @@ class TestProcessorLeaderElection:
             "self_attn.v": "self_attn.q",
         }
 
+    def test_cross_subset_group_captures_per_subset_and_matches_plan_count(self):
+        """A `:in=` group split over two subset blocks (qwen3.5 `in_proj_qkv:0` / `in_proj_z:1`) is
+        not deduplicated: each block elects its own leader, every member captures, and the runtime
+        adoption count equals `SharedInputPlan.dedup_count` (which excludes cross-subset members)."""
+        proc = _processor()
+        tree = ["model", "layers", "#", {"attn": ("qkv:0:in=x", "z:1:in=x", "o:2", "a:3:in=y", "b:3:in=y")}]
+        layer_modules = [["attn.qkv"], ["attn.z"], ["attn.o"], ["attn.a", "attn.b"]]
+        plan = build_shared_input_plan(tree, layer_modules)
+        assert plan.group_for("attn.qkv").spans_subsets
+        assert plan.dedup_count == 1
+
+        model = _fake_model(plan, proc.qcfg)
+        names = ["attn.qkv", "attn.z", "attn.o", "attn.a", "attn.b"]
+        modules = _setup(proc, names)
+        batches = [torch.randn(2, 5, 8), torch.randn(1, 3, 8)]
+
+        for subset in layer_modules:
+            leaders = proc.begin_shared_input_capture(model, subset)
+            if subset == ["attn.a", "attn.b"]:
+                assert leaders == {"attn.b": "attn.a"}
+            else:
+                assert leaders == {}
+            _feed(proc, modules, subset, batches)
+            proc.end_shared_input_capture(subset)
+
+        tasks = {n: proc.tasks[n] for n in names}
+        # cross-subset members each collected their own Hessian (no adoption, no skipped capture)
+        for name in ("attn.qkv", "attn.z", "attn.o", "attn.a"):
+            assert tasks[name].fwd_counter == len(batches), name
+            tasks[name].materialize_global_hessian()
+        assert tasks["attn.b"].fwd_counter == len(batches)  # adopted from attn.a
+        torch.testing.assert_close(tasks["attn.qkv"].H, tasks["attn.z"].H)
+        assert tasks["attn.qkv"].H.data_ptr() != tasks["attn.z"].H.data_ptr()
+        torch.testing.assert_close(tasks["attn.a"].H, tasks["attn.b"].H)
+        assert proc.shared_input_dedup_count == plan.dedup_count == 1
+
     def test_members_without_task_are_ignored(self):
         proc = _processor()
         plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)

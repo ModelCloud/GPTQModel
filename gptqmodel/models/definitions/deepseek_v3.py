@@ -8,6 +8,8 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class DeepSeekV3QModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"deepseek_v3"})
+
     # deepseek_v3 requires custom model code
     require_trust_remote_code = True
 

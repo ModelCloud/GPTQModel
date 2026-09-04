@@ -18,6 +18,7 @@ from gptqmodel.models.definitions.deepseek_v3 import DeepSeekV3QModel
 from gptqmodel.models.definitions.glm4_moe import GLM4MoEGPTQ
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.models.definitions.qwen3_5_moe import Qwen3_5_MoeQModel
+from gptqmodel.models.definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel
 from gptqmodel.models.definitions.qwen3_moe import Qwen3MoeQModel
 from gptqmodel.models.shared_input import (
     SharedInputGroup,
@@ -35,6 +36,13 @@ QC = SimpleNamespace(dynamic=None)
 
 
 def _plan(model_cls, model_config=None):
+    """Plan for a definition with its `:in=` tags active (a verified `model_type` is injected)."""
+    if model_config is None:
+        model_config = SimpleNamespace()
+    if not hasattr(model_config, "model_type"):
+        verified = sorted(model_cls.__dict__.get("shared_input_verified_model_types", ()))
+        assert verified, f"{model_cls.__name__} has no shared_input_verified_model_types"
+        model_config.model_type = verified[0]
     return model_cls.shared_input_plan(model_config, QC)
 
 
@@ -139,8 +147,11 @@ class _Def(BaseQModel):
     dynamic_expert_index = None
 
 
-def _make_def(tree):
-    return type("TmpQModel", (_Def,), {"module_tree": tree})
+def _make_def(tree, verified=True):
+    attrs = {"module_tree": tree}
+    if verified:
+        attrs["shared_input_verified_model_types"] = frozenset({"tmp"})
+    return type("TmpQModel", (_Def,), attrs)
 
 
 class TestPlanDerivation:
@@ -208,6 +219,27 @@ class TestPlanDerivation:
         assert g.spans_subsets
         assert _groups(plan.for_subset(1)) == {"attn:in=x": ("attn.z",)}
         assert _groups(plan.for_subset(2)) == {"attn.o": ("attn.o",)}
+        # `followers` is the structural view; runtime dedup is per subset block, so a group with
+        # one member per block deduplicates nothing.
+        assert g.followers == ("attn.z",)
+        assert g.dedup_followers == ()
+        assert not g.dedups_at_runtime
+        assert g.members_in_subset(0) == ("attn.qkv",)
+        assert g.members_in_subset(1) == ("attn.z",)
+        assert plan.dedup_count == 0
+
+    def test_dedup_count_counts_same_subset_followers_only(self):
+        tree = ["model", "layers", "#", {"attn": ("a:0:in=x", "b:0:in=x", "c:1:in=x", "d:1:in=x", "e:2:in=x")}]
+        plan = _plan(_make_def(tree))
+        g = plan.group_for("attn.a")
+        assert g.modules == ("attn.a", "attn.b", "attn.c", "attn.d", "attn.e")
+        assert g.followers == ("attn.b", "attn.c", "attn.d", "attn.e")
+        # one leader per subset block (a, c, e); b and d are the only skipped captures
+        assert g.dedup_followers == ("attn.b", "attn.d")
+        assert g.dedups_at_runtime
+        assert plan.dedup_count == 2
+        assert plan.for_subset(1).dedup_count == 1
+        assert plan.for_subset(2).dedup_count == 0
 
     def test_same_subset_without_tag_never_shares(self):
         # Subset digits are execution order, not input identity: `q:0`/`k:0` stay apart.
@@ -341,7 +373,10 @@ class TestModelDefinitions:
         assert len(groups) == 2 + 2 * 3
 
     def test_unexpanded_template_plan_keeps_placeholder(self):
-        plan = _plan(Qwen3MoeQModel)
+        # No config -> no verified model_type -> `shared_input_plan` is singleton-only; build the
+        # template plan directly to inspect the unexpanded tags.
+        assert Qwen3MoeQModel.shared_input_plan(None, QC).shared_groups == ()
+        plan = build_shared_input_plan(Qwen3MoeQModel.module_tree, Qwen3MoeQModel.simple_layer_modules(None, QC))
         tmpl = f"mlp.experts.{EXPERT_INDEX_PLACEHOLDER}"
         assert plan.shares_input(f"{tmpl}.gate_proj", f"{tmpl}.up_proj")
 
@@ -363,22 +398,59 @@ class TestModelDefinitions:
         g = plan.group_for("mlp.shared_experts.gate_proj")
         assert g.modules == ("mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj")
         assert g.spans_subsets
+        assert g.dedup_followers == ()  # separate blocks -> no runtime dedup
         assert not plan.shares_input("mlp.shared_experts.gate_proj", "mlp.shared_experts.down_proj")
         assert plan.shares_input("mlp.experts.0.gate_proj", "mlp.experts.0.up_proj")
 
     def test_qwen3_5_moe_shared_expert_and_linear_attn(self):
-        plan = _plan(Qwen3_5_MoeQModel, SimpleNamespace(num_experts=2))
+        plan = _plan(Qwen3_5_MoeTextQModel, SimpleNamespace(num_experts=2))
         assert plan.shares_input("mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj")
         assert plan.shares_input("mlp.experts.0.gate_proj", "mlp.experts.0.up_proj")
         assert not plan.shares_input("mlp.shared_expert.gate_proj", "mlp.experts.0.gate_proj")
         assert plan.shares_input("linear_attn.in_proj_qkv", "linear_attn.in_proj_z")
-        assert plan.group_for("linear_attn.in_proj_qkv").spans_subsets
+        g = plan.group_for("linear_attn.in_proj_qkv")
+        # in_proj_qkv (:0) and in_proj_z (:1) sit in different subset blocks: the probe still
+        # verifies their shared input, but the looper captures one block at a time so nothing
+        # is deduplicated and the group does not count towards `dedup_count`.
+        assert g.spans_subsets
+        assert g.dedup_followers == ()
+        assert not g.dedups_at_runtime
+        assert plan.group_for("mlp.shared_expert.gate_proj").dedup_followers == ("mlp.shared_expert.up_proj",)
+
+    def test_unverified_vision_wrapper_stays_singleton(self):
+        # Qwen3_5_MoeQModel (image-text wrapper) carries the same `:in=` tags but no real-forward
+        # case verifies it, so its plan must not dedup anything.
+        cfg = SimpleNamespace(num_experts=2, model_type="qwen3_5_moe")
+        assert not Qwen3_5_MoeQModel.shared_input_verified(cfg)
+        plan = Qwen3_5_MoeQModel.shared_input_plan(cfg, QC)
+        assert plan.shared_groups == ()
+        assert plan.dedup_count == 0
+        assert "mlp.shared_expert.gate_proj" in plan.modules
+
+    def test_unverified_definition_ignores_tags(self):
+        tree = ["model", "layers", "#", {"self_attn": ("q:0:in=x", "k:0:in=x", "v:0:in=x", "o:1")}]
+        cfg = SimpleNamespace(model_type="tmp")
+        assert _groups(_make_def(tree).shared_input_plan(cfg, QC))["self_attn:in=x"] == (
+            "self_attn.q",
+            "self_attn.k",
+            "self_attn.v",
+        )
+        unverified = _make_def(tree, verified=False).shared_input_plan(cfg, QC)
+        assert unverified.shared_groups == ()
+        assert set(unverified.modules) == {"self_attn.q", "self_attn.k", "self_attn.v", "self_attn.o"}
+        assert build_shared_input_plan(tree, [["self_attn.q", "self_attn.k", "self_attn.v"]], explicit_tags=False).shared_groups == ()
+        # Wrong / missing model_type is never verified.
+        assert not _make_def(tree).shared_input_verified(SimpleNamespace(model_type="other"))
+        assert not _make_def(tree).shared_input_verified(None)
 
     @pytest.mark.parametrize("model_type", sorted(MODEL_MAP))
     def test_every_definition_yields_consistent_plan(self, model_type):
         model_cls = MODEL_MAP[model_type]
-        plan = model_cls.shared_input_plan(None, QC)
-        layer_modules = model_cls.simple_layer_modules(None, QC)
+        cfg = SimpleNamespace(model_type=model_type)
+        if isinstance(model_cls.dynamic_expert_index, str):
+            setattr(cfg, model_cls.dynamic_expert_index, 2)
+        plan = model_cls.shared_input_plan(cfg, QC)
+        layer_modules = model_cls.simple_layer_modules(cfg, QC)
         quantizable = []
         for block in layer_modules:
             for raw in block:

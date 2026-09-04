@@ -13,6 +13,8 @@ class Qwen3QModel(LlamaQModel):
     non-quantized so the layer walker captures the complete structure.
     """
 
+    shared_input_verified_model_types = frozenset({"qwen3"})
+
     module_tree = [
         "model",
         "layers",

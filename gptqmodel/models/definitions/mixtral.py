@@ -8,6 +8,8 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class MixtralQModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"mixtral"})
+
     pre_lm_head_norm_module = "model.norm"
 
     dynamic_expert_index = "num_local_experts"

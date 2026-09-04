@@ -194,6 +194,31 @@ class SharedInputGroup:
     def subset_index_of(self, module: str) -> int:
         return self.subset_indices[self.modules.index(module)]
 
+    def members_in_subset(self, subset_index: int) -> Tuple[str, ...]:
+        return tuple(m for m, s in zip(self.modules, self.subset_indices) if s == subset_index)
+
+    @property
+    def dedup_followers(self) -> Tuple[str, ...]:
+        """Members whose Hessian capture is skipped at runtime.
+
+        The looper captures one subset block at a time and elects the first member of each
+        block as that block's leader, so only members that share a subset block with an
+        earlier member of the same group are deduplicated. A group spread over several
+        subsets yields one leader per subset and no cross-subset sharing.
+        """
+        first_seen: set[int] = set()
+        followers: List[str] = []
+        for module, subset_index in zip(self.modules, self.subset_indices):
+            if subset_index in first_seen:
+                followers.append(module)
+            else:
+                first_seen.add(subset_index)
+        return tuple(followers)
+
+    @property
+    def dedups_at_runtime(self) -> bool:
+        return bool(self.dedup_followers)
+
 
 @dataclass(frozen=True)
 class SharedInputPlan:
@@ -225,8 +250,12 @@ class SharedInputPlan:
 
     @property
     def dedup_count(self) -> int:
-        """Number of Hessian collections that can be skipped by sharing."""
-        return sum(len(g.followers) for g in self.groups)
+        """Number of Hessian collections skipped at runtime (same-subset followers only).
+
+        Members of a group that sit in different subset blocks each capture their own
+        Hessian (see :attr:`SharedInputGroup.dedup_followers`), so they do not count.
+        """
+        return sum(len(g.dedup_followers) for g in self.groups)
 
     def group_for(self, module: str) -> Optional[SharedInputGroup]:
         return self._by_module.get(module)
@@ -311,6 +340,7 @@ def _strip_flags(name: str) -> str:
 def build_shared_input_plan(
     module_tree: Any,
     layer_modules: Sequence[Sequence[str]],
+    explicit_tags: bool = True,
 ) -> SharedInputPlan:
     """Derive the shared-input plan for expanded ``layer_modules`` (subset blocks).
 
@@ -318,6 +348,10 @@ def build_shared_input_plan(
     looper sees them (``BaseQModel.simple_layer_modules``). Entries flagged ``:!``/``:?``
     are ignored. Modules without an ``:in=<tag>`` become singleton groups keyed by their
     own path; tagged modules group under ``<parent>:in=<tag>``.
+
+    ``explicit_tags=False`` ignores every ``:in=`` tag and yields singletons only. Model
+    definitions use this for model types whose tags were not verified by a real forward
+    (``BaseQModel.shared_input_verified_model_types``).
     """
     specs = collect_leaf_specs(module_tree)
 
@@ -340,7 +374,7 @@ def build_shared_input_plan(
                 continue
 
             parent = name.rsplit(".", 1)[0] if "." in name else ""
-            if spec is not None and spec.input_tag is not None:
+            if explicit_tags and spec is not None and spec.input_tag is not None:
                 key = f"{parent}:{SHARED_INPUT_FLAG_PREFIX}{spec.input_tag}"
                 explicit = True
             else:

@@ -69,6 +69,12 @@ CASES = {
     "qwen2": (lambda: _cfg("Qwen2Config"), _DENSE_PAIRS),
     "qwen3": (lambda: _cfg("Qwen3Config"), _DENSE_PAIRS),
     "mistral": (lambda: _cfg("MistralConfig"), _DENSE_PAIRS),
+    "gemma": (lambda: _cfg("GemmaConfig", head_dim=16), _DENSE_PAIRS),
+    "granite": (lambda: _cfg("GraniteConfig"), _DENSE_PAIRS),
+    "olmo2": (lambda: _cfg("Olmo2Config"), _DENSE_PAIRS),
+    "stablelm": (lambda: _cfg("StableLmConfig"), _DENSE_PAIRS),
+    "cohere": (lambda: _cfg("CohereConfig"), _DENSE_PAIRS),
+    "cohere2": (lambda: _cfg("Cohere2Config", sliding_window=4), _DENSE_PAIRS),
     "gemma2": (lambda: _cfg("Gemma2Config", head_dim=16), _DENSE_PAIRS),
     "gemma3_text": (lambda: _cfg("Gemma3TextConfig", head_dim=16), _DENSE_PAIRS),
     "phi3": (
@@ -204,11 +210,67 @@ def _probe_layer(model, layer, plan):
     return probe_shared_inputs(layer, plan, lambda: model(input_ids, use_cache=False))
 
 
+def _verified_model_types():
+    """(model_type, definition class) pairs exercised by the real-forward cases above."""
+    covered = {}
+    for factory, _ in CASES.values():
+        cfg = factory()
+        covered[cfg.model_type] = MODEL_MAP[cfg.model_type]
+    return covered
+
+
+@pytest.mark.parametrize("model_type", sorted(MODEL_MAP))
+def test_only_real_forward_verified_definitions_dedup(model_type):
+    """`:in=` tags only become active groups for model types covered by a real forward case.
+
+    `module_tree` is inherited (e.g. every Llama clone), but `shared_input_verified_model_types`
+    is not: an unverified definition must yield singletons only, so it never skips Hessian capture.
+    """
+    model_cls = MODEL_MAP[model_type]
+    covered = _verified_model_types()
+    cfg = SimpleNamespace(model_type=model_type)
+    if isinstance(model_cls.dynamic_expert_index, str):
+        setattr(cfg, model_cls.dynamic_expert_index, 2)
+    plan = model_cls.shared_input_plan(cfg, QC)
+    verified = model_cls.shared_input_verified(cfg)
+
+    if model_type in covered:
+        assert covered[model_type] is model_cls
+        assert verified, f"{model_type}: add it to {model_cls.__name__}.shared_input_verified_model_types"
+    else:
+        assert not verified, f"{model_type} is marked verified but has no real-forward case"
+        assert plan.shared_groups == (), (model_type, plan.shared_groups)
+        assert plan.dedup_count == 0
+
+
+def test_verified_model_types_are_not_inherited():
+    class Unverified(MODEL_MAP["llama"]):
+        pass
+
+    cfg = SimpleNamespace(model_type="llama")
+    assert MODEL_MAP["llama"].shared_input_verified(cfg)
+    assert MODEL_MAP["llama"].shared_input_plan(cfg, QC).shared_groups
+
+    assert Unverified.module_tree is MODEL_MAP["llama"].module_tree
+    assert not Unverified.shared_input_verified(cfg)
+    plan = Unverified.shared_input_plan(cfg, QC)
+    assert plan.shared_groups == ()
+    assert set(plan.modules) == set(MODEL_MAP["llama"].shared_input_plan(cfg, QC).modules)
+
+    # A model_type mapped onto a verified class is not verified unless listed itself.
+    assert not MODEL_MAP["llama"].shared_input_verified(SimpleNamespace(model_type="stablelm_epoch"))
+    assert MODEL_MAP["llama"].shared_input_plan(SimpleNamespace(model_type="stablelm_epoch"), QC).shared_groups == ()
+    # No / unknown config -> conservative singletons.
+    assert MODEL_MAP["llama"].shared_input_plan(None, QC).shared_groups == ()
+
+
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_plan_matches_real_forward_inputs(name):
     cfg, qmodel_cls, model, layers, expected_pairs = _build(name)
+    assert qmodel_cls.shared_input_verified(cfg)
     template_plan = qmodel_cls.shared_input_plan(cfg, QC)
     assert template_plan.groups
+    assert template_plan.shared_groups
 
     for layer_index, layer in enumerate(layers):
         live = set(dict(layer.named_modules()))

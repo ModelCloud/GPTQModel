@@ -9,6 +9,8 @@ from ..base import BaseQModel
 
 
 class Qwen3MoeQModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"qwen3_moe"})
+
     require_monkeypatch = False
 
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here
