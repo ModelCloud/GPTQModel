@@ -690,17 +690,25 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
   constexpr int kAccumulatorValuesPerThread = cute::size(decltype(thread_coordinate_c){});
 
   for (int k_base = 0; k_base < size_k; k_base += 32) {
+    // Hopper's FP8 WGMMA layout keeps each aligned K16 half-row contiguous
+    // even where its row-level swizzle exchanges the two halves. Copy those
+    // 16-byte units directly instead of issuing one global/shared byte pair
+    // for every activation element.
+    constexpr int kVectorElements = sizeof(uint4) / sizeof(Fp8Element);
+    constexpr int kVectorsPerRow = 32 / kVectorElements;
     for (int index = thread;
-         index < RowTilesPerCta * kRows * 32;
+         index < RowTilesPerCta * kRows * kVectorsPerRow;
          index += kThreads) {
-      const int row_tile = index / (kRows * 32);
-      const int tile_index = index - row_tile * kRows * 32;
-      const int row = tile_index >> 5;
-      const int column = tile_index & 31;
-      shared_input[row_tile * kInputTileElements +
-                   Fp8WgmmaSmemLayoutB{}(row, column)] = input[
-          static_cast<int64_t>(row_base + row_tile * kRows + row) * size_k +
-          k_base + column];
+      const int row_tile = index / (kRows * kVectorsPerRow);
+      const int tile_index = index - row_tile * kRows * kVectorsPerRow;
+      const int row = tile_index / kVectorsPerRow;
+      const int column = (tile_index - row * kVectorsPerRow) * kVectorElements;
+      const int shared_offset = row_tile * kInputTileElements +
+          Fp8WgmmaSmemLayoutB{}(row, column);
+      *reinterpret_cast<uint4*>(shared_input + shared_offset) =
+          *reinterpret_cast<const uint4*>(input +
+              static_cast<int64_t>(row_base + row_tile * kRows + row) * size_k +
+              k_base + column);
     }
     __syncthreads();
 
