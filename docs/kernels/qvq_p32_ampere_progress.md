@@ -3191,6 +3191,17 @@ geometric mean improves `0.0869228→0.0864272 ms` (`1.0057x`, 0.57%), with
 `artifacts/a100_p32_window/v31_candidate_m1_mlpgate_static40_repeat8000.json`.
 This remains shape-local; the full-matrix 10% target is still open.
 
+## v32 neutral M2 full-KV static split probe
+
+The measured M2 full-KV route `(K,N)=(5120,1024)` dispatches split 64.  A
+compile-time split-64 scalar main-kernel specialization was screened against
+20,000-iteration runs, but the repeats moved individual rates in opposite
+directions and did not establish a stable geometric-mean gain.  The source
+probe was reverted.  Diagnostics are
+`artifacts/a100_p32_window/v32_candidate_m2_fullkv_dynamic_20000.json`,
+`artifacts/a100_p32_window/v32_candidate_m2_fullkv_static64_20000.json`, and
+`artifacts/a100_p32_window/v32_candidate_m2_fullkv_static64_repeat20000.json`.
+
 ## Reproduction
 
 ```bash
