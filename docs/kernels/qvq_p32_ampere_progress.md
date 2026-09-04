@@ -3360,6 +3360,16 @@ The formal Ampere suite remains 56/56.  Diagnostics are
 the v43 full sweep provides the dynamic control.  The full-matrix 10% target
 remains open.
 
+## v48 rejected M2 full-Q compile-time-K extension
+
+I extended the retained M2 full-Q split specialization with `StaticK=5120`.
+Although the first 8,000-iteration screen was exact and appeared one tick
+faster at W3.5, the matched repeat exposed a severe W3 outlier
+(`0.284672 ms` versus `0.072704 ms`), producing a 17.5x planar speedup rather
+than the normal ~35x.  The compile-time-K addition was therefore reverted;
+the stable split-only v47 path remains.  Diagnostic:
+`artifacts/a100_p32_window/v48_candidate_m2_fullq_static_splitk_repeat8000.json`.
+
 ## Reproduction
 
 ```bash
