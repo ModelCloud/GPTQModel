@@ -3090,6 +3090,22 @@ This is a shape-local progression, not a claim of a 10% full-matrix gain;
 the M16 decode-bound paths and the remaining M values still require a fresh
 full-matrix sweep before the target can be assessed.
 
+## v25 M1 long-K static split specialization
+
+The M1 long-K autotuner selects split 128 on the A100.  A compile-time
+`StaticSplitCount=128` specialization removes the per-CTA split-count
+divisions while preserving the runtime fallback for every other split plan.
+The change is exact under the formal suite (56/56 tests) and was repeated at
+8,000 iterations: Ampere medians moved from
+`0.082944/0.089088/0.091136/0.092160 ms` to
+`0.081920/0.088064/0.090112/0.092160 ms` for W2/W2.5/W3/W3.5.  This is a
+repeatable `1.0089x` (0.89%) improvement over the v24 staged candidate for
+the affected shape.  The static-split diagnostics are
+`artifacts/a100_p32_window/v24_candidate_splitstatic_m1_mlpdown_8000.json`
+and `artifacts/a100_p32_window/v24_candidate_splitstatic_m1_mlpdown_repeat8000.json`.
+The full-matrix 10% target remains open; no broad gain is claimed from this
+shape-local specialization alone.
+
 ## Reproduction
 
 ```bash

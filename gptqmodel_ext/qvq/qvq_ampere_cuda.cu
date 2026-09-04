@@ -861,7 +861,8 @@ template <
     int Threads = kM1Threads,
     int TilesPerBlock = kM1TilesPerBlock,
     int StageKTiles = kStageKTiles,
-    int StaticN = 0>
+    int StaticN = 0,
+    int StaticSplitCount = 0>
 __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -893,11 +894,14 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
   const int lane = thread & 31;
   constexpr int kStaticNTiles = StaticN > 0 ? StaticN / kTileColumns : 0;
   const int n_tiles = StaticN > 0 ? kStaticNTiles : size_n / kTileColumns;
+  constexpr int kEffectiveStaticSplitCount = StaticSplitCount > 0 ? StaticSplitCount : 0;
+  const int effective_split_count =
+      kEffectiveStaticSplitCount > 0 ? kEffectiveStaticSplitCount : split_count;
   const int block_n_tile_base = n_block * TilesPerBlock;
   const int n_tile_base = block_n_tile_base + warp * 4;
   const int k_tiles = size_k / kTileRows;
-  const int k_tile_begin = (k_tiles * split) / split_count;
-  const int k_tile_end = (k_tiles * (split + 1)) / split_count;
+  const int k_tile_begin = (k_tiles * split) / effective_split_count;
+  const int k_tile_end = (k_tiles * (split + 1)) / effective_split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(bank_alt_id);
   constexpr bool kUsePairWrapPredicate =
       (Rows == 2 &&
@@ -1355,11 +1359,11 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
     parity ^= 1;
   }
 
-  float* target = split_count == 1
+  float* target = effective_split_count == 1
       ? output + output_n_offset
       : partial_output + partial_segment_offset +
           static_cast<int64_t>(split) * Rows * size_n;
-  const int target_stride = split_count == 1 ? output_stride : size_n;
+  const int target_stride = effective_split_count == 1 ? output_stride : size_n;
   const int n_tile = n_tile_base + (lane >> 3);
   if ((StaticN > 0 || n_tile < n_tiles) && (lane & 7) < 8) {
     const int output_column = n_tile * kTileColumns + (lane & 7) * 2;
@@ -1381,7 +1385,8 @@ template <
     int Threads = kM1Threads,
     int TilesPerBlock = kM1TilesPerBlock,
     int StageKTiles = kStageKTiles,
-    int StaticN = 0>
+    int StaticN = 0,
+    int StaticSplitCount = 0>
 __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -1394,7 +1399,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     int split_count,
     int bank_alt_id) {
   p32_window_ampere_m1_kernel_body<
-      TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, StaticN>(
+      TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, StaticN,
+      StaticSplitCount>(
       input,
       trellis,
       levels,
@@ -1525,7 +1531,8 @@ template <
     int Rows,
     int Threads = kM1Threads,
     int TilesPerBlock = kM1TilesPerBlock,
-    int StageKTiles = kStageKTiles>
+    int StageKTiles = kStageKTiles,
+    int StaticSplitCount = 0>
 inline bool launch_static_n_scalar_kernel(
     const half* input,
     const uint32_t* trellis,
@@ -1541,7 +1548,7 @@ inline bool launch_static_n_scalar_kernel(
     const cudaStream_t stream) {
 #define QVQ_LAUNCH_STATIC_N(N)                                                        \
   case N:                                                                             \
-    p32_window_ampere_m1_kernel<TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, N> \
+    p32_window_ampere_m1_kernel<TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, N, StaticSplitCount> \
         <<<grid, Threads, 0, stream>>>(                                               \
             input, trellis, levels, bank_ids, partial_output, output, size_k, size_n, \
             split_count, bank_alt_id);                                                \
@@ -1763,9 +1770,10 @@ at::Tensor p32_window_ampere_impl(
           grid,
           stream)) {
   } else if (size_m == 1 && size_k == 17408 && size_n == 5120 &&
+      split_count == 128 &&
       launch_static_n_scalar_kernel<
           TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
-          kScalarTripleStageKTiles>(
+          kScalarTripleStageKTiles, 128>(
           input_ptr,
           trellis_ptr,
           levels_ptr,
