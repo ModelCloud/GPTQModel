@@ -3035,6 +3035,39 @@ The current full 140-row refresh remains the measured reference:
 versus `v21_main_baseline_300.json`, so no additional 10% Ampere progression
 is claimed from these probes.
 
+## v23 after the September origin refresh
+
+`git fetch origin main` confirms that `origin/main` is still
+`631411ee3b07ed14c29fb21c0e959b0d811eb5cb`; PR #100 remains the open WIP
+branch, so this cycle continues to use that exact fetched tip as its control.
+
+The accepted progression specializes the M1 long-K MLP-down shape
+`(K,N)=(17408,5120)` to the existing three-K16 scalar software stage. The
+matched 8,000-iteration CUDA-event runs are exact and measure
+`0.082944/0.089088/0.090112/0.092160 ms` for W2/W2.5/W3/W3.5, versus the
+two-stage control's `0.082944/0.093184/0.093184/0.095232 ms`. This is a
+`0.088508/0.091004 = 1.0282x` (2.82%) geomean reduction for the affected
+four-rate shape. The candidate and control are
+`artifacts/a100_p32_window/v23_m1_mlpdown_stage3_verify8000.json` and
+`artifacts/a100_p32_window/v23_m1_mlpdown_stage2_control8000.json`.
+The full formal suite remains the gate; `tests/test_qvq_p32_ampere.py` passes
+56/56 cases on the A100.
+
+The following v23 probes were rejected and restored: an eight-block
+`__launch_bounds__` register/occupancy cap (M16 full-Q W3.5 rose to
+`0.094208 ms`, about 4.5% slower), an eight-half-row activation shared-memory
+skew (exact but M16 full-Q W3.5 rose to `0.093184 ms`), and warp or 8-lane
+subgroup broadcasts of the shared bank selector (the full-warp version was
+not exact because a scalar warp owns four different tiles; the corrected
+subgroup version was exact but about 1.5% slower in the M1 full-Q probe).
+The diagnostics are `v23_m16_fullq_minblocks8_candidate.json`,
+`v23_m16_fullq_inputskew_candidate.json`,
+`v23_m16_fullq_bankbroadcast_candidate.json`, and
+`v23_m1_fullq_bankbroadcast_probe.json`. Nsight Compute confirms the retained
+M16 path is L1/TEX and decode-load bound (95% L1 hit, ~4.3 useful bytes per
+32-byte sector), so these probes do not justify claiming the requested 10%
+overall gain.
+
 ## Reproduction
 
 ```bash
