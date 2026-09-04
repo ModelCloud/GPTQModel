@@ -1181,24 +1181,33 @@ def qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
     post_scale: torch.Tensor,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Recover one H100 Qwen FP32 inner output through H20 x H256."""
+    """Recover one supported H100 Qwen composite FP32 inner output."""
 
+    supported = {5120: 40, 6144: 12, 10240: 40}
+    n = input.shape[1] if input.ndim == 2 else -1
     if (
         input.device.type != "cuda"
         or input.dtype != torch.float32
         or input.ndim != 2
         or not 0 < input.shape[0] <= 16
-        or input.shape[1] != 5120
+        or n not in supported
         or not input.is_contiguous()
     ):
-        raise ValueError("Qwen composite recovery input must be CUDA FP32 [1..16, 5120]")
+        raise ValueError(
+            "Qwen composite recovery input must be CUDA FP32 [1..16, N] "
+            "with N in {5120, 6144, 10240}"
+        )
+    base_width = supported[n]
     if (
         base.device != input.device
         or base.dtype != torch.float16
-        or base.numel() != 1600
+        or base.numel() != base_width * base_width
         or not base.is_contiguous()
     ):
-        raise ValueError("Qwen composite recovery base must be contiguous FP16 [40, 40]")
+        raise ValueError(
+            f"Qwen composite recovery base must be contiguous FP16 "
+            f"[{base_width}, {base_width}]"
+        )
     for name, tensor in (("post_scale", post_scale), ("bias", bias)):
         if tensor is None:
             if name == "post_scale":
@@ -1207,16 +1216,16 @@ def qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
         if (
             tensor.device != input.device
             or tensor.dtype != torch.float32
-            or tensor.numel() != 5120
+            or tensor.numel() != n
             or not tensor.is_contiguous()
         ):
-            raise ValueError(f"{name} must be contiguous CUDA FP32 [5120]")
+            raise ValueError(f"{name} must be contiguous CUDA FP32 [{n}]")
     properties = torch.cuda.get_device_properties(input.device)
     if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
         raise RuntimeError("Qwen composite recovery requires the measured physical H100")
     return _qvq_cuda_qwen_composite_recovery_fp32_to_fp16_op()(
         input,
-        base.reshape(40, 40),
+        base.reshape(base_width, base_width),
         post_scale,
         bias,
     )

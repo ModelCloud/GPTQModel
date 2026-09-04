@@ -679,6 +679,7 @@ def test_qwen38_linear_input_group_uses_fixed_grid_in_cuda_graph(
     assert telemetry["active_split_counts"] == expected_splits
     assert telemetry["grouped_launches"] == 2
     assert telemetry["h100_qwen_fixed_linear_grid_launches"] == 2
+    assert telemetry["h100_qwen_linear_composite_recovery_launches"] == 4
     assert telemetry["plain_fallbacks"] == 0
 
 

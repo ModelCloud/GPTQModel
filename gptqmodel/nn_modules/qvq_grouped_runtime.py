@@ -222,6 +222,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_qwen_fixed_linear_grid_launches: int = 0
     h100_qwen_composite_down_recovery_launches: int = 0
     h100_qwen_ordered_composite_down_recovery_launches: int = 0
+    h100_qwen_linear_composite_recovery_launches: int = 0
     h100_qwen_composite_input_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
@@ -280,6 +281,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_qwen_fixed_linear_grid_launches": self.h100_qwen_fixed_linear_grid_launches,
             "h100_qwen_composite_down_recovery_launches": self.h100_qwen_composite_down_recovery_launches,
             "h100_qwen_ordered_composite_down_recovery_launches": self.h100_qwen_ordered_composite_down_recovery_launches,
+            "h100_qwen_linear_composite_recovery_launches": self.h100_qwen_linear_composite_recovery_launches,
             "h100_qwen_composite_input_launches": self.h100_qwen_composite_input_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
@@ -724,6 +726,46 @@ class QVQHopperGroupedRuntime:
 
         outputs = []
         for child, inner in zip(children, inner_outputs, strict=True):
+            use_qwen_linear_composite_recovery = (
+                self._h100_fp16_recovery_store_enabled
+                and self.category == "qkv"
+                and children[0].in_features == 5120
+                and tuple(member.out_features for member in children)
+                == (10240, 6144)
+                and child.output_hadamard
+                and inner.dtype == torch.float32
+            )
+            if use_qwen_linear_composite_recovery:
+                from ..quantization.rotation.hadamard_utils import _get_hadK_on
+                from ..utils.qvq_cuda import (
+                    qvq_cuda_qwen_composite_recovery_fp32_to_fp16,
+                )
+
+                base, base_width = _get_hadK_on(
+                    child._cached_cast("SV", torch.float16), False
+                )
+                expected_base_width = 40 if child.out_features == 10240 else 12
+                if base is None or base_width != expected_base_width:
+                    raise _R0Fallback(
+                        f"Qwen {child.out_features} output requires its canonical "
+                        f"H{expected_base_width} base"
+                    )
+                recovered = qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
+                    inner[:rows].contiguous(),
+                    base=base,
+                    post_scale=child._cached_cast(
+                        "SV", torch.float16, torch.float32
+                    ),
+                    bias=child._cached_cast(
+                        "bias", torch.float16, torch.float32
+                    ),
+                )
+                self.telemetry.h100_qwen_linear_composite_recovery_launches += 1
+                self.telemetry.h100_fp16_recovery_store_launches += 1
+                outputs.append(
+                    recovered.reshape(*x.shape[:-1], child.out_features).to(x.dtype)
+                )
+                continue
             fp16_store = (
                 self._h100_fp16_recovery_store_enabled
                 and child.output_hadamard

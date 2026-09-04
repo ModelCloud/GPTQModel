@@ -1506,14 +1506,14 @@ def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
     assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
 
 
+@pytest.mark.parametrize("n", (5120, 6144, 10240))
 @pytest.mark.parametrize("m", (1, 16))
 @pytest.mark.parametrize("with_bias", (False, True))
-def test_qvq_cuda_qwen_composite_recovery_is_exact_and_graph_safe(m, with_bias):
+def test_qvq_cuda_qwen_composite_recovery_is_exact_and_graph_safe(n, m, with_bias):
     properties = torch.cuda.get_device_properties(0)
     if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
         pytest.skip("Qwen composite recovery requires the physical H100")
-    n = 5120
-    generator = torch.Generator(device="cuda").manual_seed(20260980 + m)
+    generator = torch.Generator(device="cuda").manual_seed(20260980 + n + m)
     input = torch.randn((m, n), generator=generator, device="cuda") * 0.25
     post_scale = torch.randn(
         (n,), generator=generator, device="cuda", dtype=torch.float16
@@ -1524,7 +1524,7 @@ def test_qvq_cuda_qwen_composite_recovery_is_exact_and_graph_safe(m, with_bias):
         else None
     )
     base, base_n = get_hadK(n)
-    assert base_n == 40 and base is not None
+    assert base_n == (12 if n == 6144 else 40) and base is not None
     base = base.to(device="cuda", dtype=torch.float16).contiguous()
 
     reference = matmul_hadU_stable(input.half()) * post_scale.half()
