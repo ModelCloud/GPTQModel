@@ -76,6 +76,7 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_hadamard_pair_fp32_to_fp16,
     qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock,
     qvq_cuda_hadamard_pair_swiglu_precondition_multiblock,
+    qvq_cuda_qwen_composite_recovery_fp32_to_fp16,
     qvq_cuda_supported,
     qvq_cuda_swiglu_precondition,
     qvq_cuda_swiglu_precondition_multiblock,
@@ -1499,6 +1500,81 @@ def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(m, with_bias)
     graph.replay()
     torch.cuda.synchronize()
     assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.parametrize("m", (1, 16))
+@pytest.mark.parametrize("with_bias", (False, True))
+def test_qvq_cuda_qwen_composite_recovery_is_exact_and_graph_safe(m, with_bias):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        pytest.skip("Qwen composite recovery requires the physical H100")
+    n = 5120
+    generator = torch.Generator(device="cuda").manual_seed(20260980 + m)
+    input = torch.randn((m, n), generator=generator, device="cuda") * 0.25
+    post_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    ).float()
+    bias = (
+        torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float()
+        if with_bias
+        else None
+    )
+    base, base_n = get_hadK(n)
+    assert base_n == 40 and base is not None
+    base = base.to(device="cuda", dtype=torch.float16).contiguous()
+
+    reference = matmul_hadU_stable(input.half()) * post_scale.half()
+    if bias is not None:
+        reference = reference + bias.half()
+    actual = qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
+        input,
+        base=base,
+        post_scale=post_scale,
+        bias=bias,
+    )
+    assert torch.equal(actual.view(torch.int16), reference.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
+            input,
+            base=base,
+            post_scale=post_scale,
+            bias=bias,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
+@pytest.mark.parametrize("values", ((70000.0, 70000.0), (70000.0, -70000.0)))
+def test_qvq_cuda_qwen_composite_recovery_preserves_overflow_rescue(values):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        pytest.skip("Qwen composite recovery requires the physical H100")
+    from gptqmodel.nn_modules.qlinear.qvq import (
+        _qvq_fp16_emulated_hadamard_fallback,
+    )
+
+    input = torch.zeros((1, 5120), device="cuda")
+    input[0, 0], input[0, 1] = values
+    post_scale = torch.full((5120,), 0.01, device="cuda")
+    base, base_n = get_hadK(5120)
+    assert base_n == 40 and base is not None
+    base = base.to(device="cuda", dtype=torch.float16).contiguous()
+    reference = _qvq_fp16_emulated_hadamard_fallback(
+        input,
+        post_scale=post_scale,
+        bias=None,
+        scale_mode=3,
+    ).half()
+    actual = qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
+        input,
+        base=base,
+        post_scale=post_scale,
+    )
+    assert torch.isfinite(actual).all()
+    assert torch.equal(actual.view(torch.int16), reference.view(torch.int16))
 
 
 @pytest.mark.parametrize("bits", QVQ_CUDA_BITS)
