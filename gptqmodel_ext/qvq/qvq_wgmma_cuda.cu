@@ -88,6 +88,12 @@ struct HopperGroupedP32LaunchParams {
   int64_t partial_output_offset[kMaxGroupedP32Segments];
 };
 
+struct HopperGroupedP32DecodeParams {
+  int segment_count;
+  int n64_end[kMaxGroupedP32Segments];
+  int bank_alt_id[kMaxGroupedP32Segments];
+};
+
 struct HopperFixedGateUpLaunchParams {
   int bank_alt_id[2];
 };
@@ -547,6 +553,113 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
         product10,
         product11);
   }
+}
+
+template <int TransitionBits>
+__global__ __launch_bounds__(kThreads) void qvq_p32_window_decode_fp16_kernel(
+    const uint32_t* __restrict__ trellis,
+    const uint8_t* __restrict__ bank_ids,
+    const Element* __restrict__ levels,
+    Element* __restrict__ output,
+    HopperGroupedP32DecodeParams grouped_params,
+    int size_k,
+    int size_n) {
+#if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  constexpr int kVectorsPerP32Tile = kWordsPerP32Tile / 4;
+  __shared__ __align__(16) uint32_t
+      packed_words[kP32K16TilesPerStage][kP32N16TilesPerBlock]
+                  [kWordsPerP32Tile];
+  __shared__ uint8_t
+      packed_bank_ids[kP32K16TilesPerStage][kP32N16TilesPerBlock];
+
+  const int thread = static_cast<int>(threadIdx.x);
+  const int warp = thread >> 5;
+  const int n64_block = static_cast<int>(blockIdx.x);
+  const int k256_stage = static_cast<int>(blockIdx.y);
+  const int n_tiles = size_n / kP32TileColumns;
+  const int n16_tile_base = n64_block * kP32N16TilesPerBlock;
+
+  auto* shared_vectors = reinterpret_cast<uint4*>(&packed_words[0][0][0]);
+  const auto* global_vectors = reinterpret_cast<const uint4*>(trellis);
+  constexpr int kVectorsPerBlock = kP32K16TilesPerStage *
+      kP32N16TilesPerBlock * kVectorsPerP32Tile;
+  for (int vector = thread; vector < kVectorsPerBlock; vector += kThreads) {
+    const int tile_local = vector / kVectorsPerP32Tile;
+    const int vector_in_tile = vector - tile_local * kVectorsPerP32Tile;
+    const int k16_local = tile_local / kP32N16TilesPerBlock;
+    const int n16_local =
+        tile_local - k16_local * kP32N16TilesPerBlock;
+    const int64_t global_tile =
+        static_cast<int64_t>(k256_stage * kP32K16TilesPerStage + k16_local) *
+            n_tiles +
+        n16_tile_base + n16_local;
+    shared_vectors[vector] =
+        global_vectors[global_tile * kVectorsPerP32Tile + vector_in_tile];
+  }
+  constexpr int kBankIdsPerBlock =
+      kP32K16TilesPerStage * kP32N16TilesPerBlock;
+  for (int index = thread; index < kBankIdsPerBlock; index += kThreads) {
+    const int k16_local = index / kP32N16TilesPerBlock;
+    const int n16_local = index - k16_local * kP32N16TilesPerBlock;
+    const int64_t global_tile =
+        static_cast<int64_t>(k256_stage * kP32K16TilesPerStage + k16_local) *
+            n_tiles +
+        n16_tile_base + n16_local;
+    packed_bank_ids[k16_local][n16_local] = bank_ids[global_tile];
+  }
+  __syncthreads();
+
+  int segment = 0;
+#pragma unroll
+  for (int candidate = 1; candidate < kMaxGroupedP32Segments; ++candidate) {
+    if (candidate < grouped_params.segment_count &&
+        n64_block >= grouped_params.n64_end[candidate - 1]) {
+      segment = candidate;
+    }
+  }
+  const uint32_t alternate_bank_mask =
+      qvq_wgmma_v2_alternate_bank_mask<TransitionBits>(
+          grouped_params.bank_alt_id[segment]);
+
+  WgmmaTiledMma tiled_mma;
+  auto thread_mma = tiled_mma.get_thread_slice(thread);
+  auto coordinate_a =
+      cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_16{}));
+  auto thread_coordinate_a = thread_mma.partition_A(coordinate_a);
+  auto fragment_a = cute::make_tensor<Element>(thread_coordinate_a.shape());
+  static_assert(cute::size(decltype(fragment_a){}) == 8);
+  const auto decode_plan =
+      qvq_p32_window_lane_plan<TransitionBits>(thread & 31);
+
+#pragma unroll
+  for (int k16_local = 0; k16_local < kP32K16TilesPerStage; ++k16_local) {
+    qvq_p32_window_decode_fragment<TransitionBits, false>(
+        fragment_a,
+        &packed_words[k16_local][warp][0],
+        decode_plan,
+        packed_bank_ids[k16_local][warp],
+        levels,
+        0,
+        0,
+        alternate_bank_mask);
+#pragma unroll
+    for (int index = 0; index < cute::size(decltype(fragment_a){}); ++index) {
+      const auto coordinate = thread_coordinate_a(index);
+      const int wgmma_column = static_cast<int>(cute::get<0>(coordinate));
+      const int k16_row = static_cast<int>(cute::get<1>(coordinate));
+      const int tile_column = wgmma_column & 15;
+      const int p32_column =
+          (wgmma_column & ~15) + ((tile_column & 7) << 1) +
+          (tile_column >> 3);
+      const int global_k =
+          k256_stage * kKPerStage + k16_local * kP32TileRows + k16_row;
+      const int64_t output_index = static_cast<int64_t>(global_k) * size_n +
+          n64_block * kOutputColumns + p32_column;
+      output[output_index] = fragment_a(index);
+    }
+  }
+#endif
 }
 
 __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
@@ -2497,6 +2610,124 @@ at::Tensor qvq_p32_window_wgmma_m64_tma_grouped_ordered_reuse4(
   }
 }
 
+template <int TransitionBits>
+at::Tensor qvq_p32_window_decode_grouped_fp16_impl(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids) {
+  TORCH_CHECK(trellis.is_cuda(), "grouped P32 FP16 decoder requires CUDA tensors");
+  c10::cuda::CUDAGuard device_guard(trellis.device());
+  TORCH_CHECK(
+      levels.device() == trellis.device() && bank_ids.device() == trellis.device(),
+      "grouped P32 FP16 decoder tensors must share one CUDA device");
+  TORCH_CHECK(
+      trellis.scalar_type() == at::kInt && levels.scalar_type() == at::kHalf &&
+          bank_ids.scalar_type() == at::kByte,
+      "grouped P32 FP16 decoder requires int32 trellis, FP16 levels, and uint8 bank IDs");
+  TORCH_CHECK(
+      trellis.is_contiguous() && levels.is_contiguous() && bank_ids.is_contiguous(),
+      "grouped P32 FP16 decoder tensors must be contiguous");
+  TORCH_CHECK(
+      in_features > 0 && in_features % kKPerStage == 0,
+      "grouped P32 FP16 decoder K must be a positive multiple of 256");
+  const int64_t segment_count = static_cast<int64_t>(out_features.size());
+  TORCH_CHECK(
+      segment_count >= 1 && segment_count <= kMaxGroupedP32Segments &&
+          static_cast<int64_t>(bank_alt_ids.size()) == segment_count,
+      "grouped P32 FP16 decoder requires one to three matching segments");
+  TORCH_CHECK(
+      levels.numel() == 256,
+      "grouped P32 FP16 decoder requires 256 PGC16 levels");
+
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, trellis.get_device()));
+  TORCH_CHECK(
+      properties.major == 9 && properties.minor == 0,
+      "grouped P32 FP16 decoder requires an SM90 H100/H200 device");
+
+  HopperGroupedP32DecodeParams grouped_params{};
+  grouped_params.segment_count = static_cast<int>(segment_count);
+  int64_t total_n = 0;
+  for (int segment = 0; segment < segment_count; ++segment) {
+    const int64_t width = out_features[segment];
+    const int64_t alt_id = bank_alt_ids[segment];
+    TORCH_CHECK(
+        width > 0 && width % kOutputColumns == 0,
+        "grouped P32 FP16 decoder widths must be positive multiples of 64");
+    TORCH_CHECK(
+        alt_id >= 0 && alt_id <= 3,
+        "grouped P32 FP16 decoder alternative bank IDs must be in [0, 3]");
+    total_n += width;
+    TORCH_CHECK(
+        total_n <= std::numeric_limits<int>::max(),
+        "grouped P32 FP16 decoder total N exceeds int32 range");
+    grouped_params.n64_end[segment] =
+        static_cast<int>(total_n / kOutputColumns);
+    grouped_params.bank_alt_id[segment] = static_cast<int>(alt_id);
+  }
+
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  const int64_t k_tiles = in_features / kP32TileRows;
+  const int64_t n_tiles = total_n / kP32TileColumns;
+  TORCH_CHECK(
+      trellis.numel() == k_tiles * n_tiles * kWordsPerP32Tile,
+      "grouped P32 FP16 decoder trellis size mismatch");
+  TORCH_CHECK(
+      bank_ids.numel() == k_tiles * n_tiles,
+      "grouped P32 FP16 decoder bank-ID size mismatch");
+
+  auto output =
+      at::empty({in_features, total_n}, levels.options().dtype(at::kHalf));
+  const cudaStream_t stream =
+      at::cuda::getCurrentCUDAStream(trellis.get_device());
+  const dim3 grid(
+      static_cast<unsigned>(total_n / kOutputColumns),
+      static_cast<unsigned>(in_features / kKPerStage),
+      1);
+  qvq_p32_window_decode_fp16_kernel<TransitionBits>
+      <<<grid, kThreads, 0, stream>>>(
+          reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+          bank_ids.data_ptr<uint8_t>(),
+          reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+          reinterpret_cast<Element*>(output.data_ptr<at::Half>()),
+          grouped_params,
+          static_cast<int>(in_features),
+          static_cast<int>(total_n));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+at::Tensor qvq_p32_window_decode_grouped_fp16(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t transition_bits,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_decode_grouped_fp16_impl<4>(
+          trellis, levels, bank_ids, in_features, out_features, bank_alt_ids);
+    case 5:
+      return qvq_p32_window_decode_grouped_fp16_impl<5>(
+          trellis, levels, bank_ids, in_features, out_features, bank_alt_ids);
+    case 6:
+      return qvq_p32_window_decode_grouped_fp16_impl<6>(
+          trellis, levels, bank_ids, in_features, out_features, bank_alt_ids);
+    case 7:
+      return qvq_p32_window_decode_grouped_fp16_impl<7>(
+          trellis, levels, bank_ids, in_features, out_features, bank_alt_ids);
+    default:
+      TORCH_CHECK(
+          false,
+          "grouped P32 FP16 decoder transition bits must be in [4, 7]");
+  }
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
@@ -2513,6 +2744,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_m32_tma_grouped_ordered_reuse2(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m64_tma_grouped_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m64_tma_grouped_ordered_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
+  m.def("p32_window_decode_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
@@ -2529,4 +2761,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_m32_tma_grouped_ordered_reuse2", qvq_p32_window_wgmma_m32_tma_grouped_ordered_reuse2);
   m.impl("p32_window_m64_tma_grouped_reuse4", qvq_p32_window_wgmma_m64_tma_grouped_reuse4);
   m.impl("p32_window_m64_tma_grouped_ordered_reuse4", qvq_p32_window_wgmma_m64_tma_grouped_ordered_reuse4);
+  m.impl("p32_window_decode_grouped_fp16", qvq_p32_window_decode_grouped_fp16);
 }

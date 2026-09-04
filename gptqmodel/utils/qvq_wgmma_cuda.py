@@ -120,6 +120,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m32_tma_grouped_ordered_reuse2",
         "p32_window_m64_tma_grouped_reuse4",
         "p32_window_m64_tma_grouped_ordered_reuse4",
+        "p32_window_decode_grouped_fp16",
     ),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_WGMMA_BUILD_ROOT",
@@ -821,6 +822,52 @@ def qvq_p32_window_wgmma_grouped_reuse4_packed(
     )
 
 
+def qvq_p32_window_decode_grouped_fp16_packed(
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+) -> torch.Tensor:
+    """Decode a grouped canonical P32 payload once into temporary FP16 KxN."""
+
+    plan = payload.plan
+    if levels.device.type != "cuda" or levels.dtype != torch.float16:
+        raise ValueError("grouped P32 FP16 decoding requires FP16 CUDA levels")
+    if (
+        payload.trellis.device != levels.device
+        or payload.bank_ids.device != levels.device
+    ):
+        raise ValueError("grouped P32 FP16 decode tensors must share one device")
+    return _QVQ_WGMMA_EXTENSION.op("p32_window_decode_grouped_fp16")(
+        payload.trellis,
+        levels.contiguous(),
+        payload.bank_ids,
+        plan.transition_bits,
+        plan.in_features,
+        [segment.out_features for segment in plan.segments],
+        [segment.bank_alt_id for segment in plan.segments],
+    )
+
+
+def qvq_p32_window_grouped_prefill_fp16_packed(
+    input: torch.Tensor,
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Decode P32 once, then run one grouped FP16-by-FP16 prefill GEMM."""
+
+    plan = payload.plan
+    if (
+        input.ndim != 2
+        or input.device.type != "cuda"
+        or input.dtype != torch.float16
+        or input.shape[1] != plan.in_features
+    ):
+        raise ValueError("grouped P32 FP16 prefill requires a matching FP16 CUDA matrix")
+    decoded = qvq_p32_window_decode_grouped_fp16_packed(payload, levels)
+    output = torch.mm(input.contiguous(), decoded, out_dtype=torch.float32)
+    widths = [segment.out_features for segment in plan.segments]
+    return tuple(torch.split(output, widths, dim=1))
+
+
 def qvq_p32_window_wgmma_single_large_m_packed(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -922,6 +969,8 @@ __all__ = [
     "qvq_h100_grouped_ordered_split_counts",
     "qvq_h100_large_m_ordered_split_count",
     "qvq_h100_ordered_split_count",
+    "qvq_p32_window_decode_grouped_fp16_packed",
+    "qvq_p32_window_grouped_prefill_fp16_packed",
     "qvq_p32_window_wgmma_group_plan",
     "qvq_p32_window_wgmma_grouped",
     "qvq_p32_window_wgmma_grouped_ordered_packed",

@@ -237,6 +237,8 @@ class QVQGroupedRuntimeTelemetry:
     h100_large_m_group_chunk_rows: int = 0
     h100_fp8_prefill_launches: int = 0
     h100_fp8_prefill_bytes: int = 0
+    h100_fp16_prefill_launches: int = 0
+    h100_fp16_prefill_temporary_bytes: int = 0
     h100_folded_qwen_mlp_launches: int = 0
     h100_folded_qwen_fused_precondition_launches: int = 0
     h100_folded_qwen_fused_ordered_reduction_launches: int = 0
@@ -306,6 +308,10 @@ class QVQGroupedRuntimeTelemetry:
             "h100_large_m_group_chunk_rows": self.h100_large_m_group_chunk_rows,
             "h100_fp8_prefill_launches": self.h100_fp8_prefill_launches,
             "h100_fp8_prefill_bytes": self.h100_fp8_prefill_bytes,
+            "h100_fp16_prefill_launches": self.h100_fp16_prefill_launches,
+            "h100_fp16_prefill_temporary_bytes": (
+                self.h100_fp16_prefill_temporary_bytes
+            ),
             "h100_folded_qwen_mlp_launches": self.h100_folded_qwen_mlp_launches,
             "h100_folded_qwen_fused_precondition_launches": self.h100_folded_qwen_fused_precondition_launches,
             "h100_folded_qwen_fused_ordered_reduction_launches": self.h100_folded_qwen_fused_ordered_reduction_launches,
@@ -400,6 +406,7 @@ class QVQHopperGroupedRuntime:
         self.telemetry.child_window_bytes_avoided = 0
         self.telemetry.active_split_counts = ()
         self.telemetry.h100_fp8_prefill_bytes = 0
+        self.telemetry.h100_fp16_prefill_temporary_bytes = 0
 
     def _fallback(
         self, member_index: int, x: torch.Tensor, reason: str
@@ -642,6 +649,13 @@ class QVQHopperGroupedRuntime:
             if prefill_payload is not None:
                 self.telemetry.h100_fp8_prefill_launches += 1
                 return self._execute_h100_fp8_prefill(x, prefill_payload)
+        if (
+            recover
+            and not return_ordered_partials
+            and self._h100_fp16_prefill_eligible(x, rows)
+        ):
+            self.telemetry.h100_fp16_prefill_launches += 1
+            return self._execute_h100_fp16_prefill(x)
         if rows > 4096:
             if return_ordered_partials or not recover:
                 raise _R0Fallback(
@@ -957,6 +971,93 @@ class QVQHopperGroupedRuntime:
             "no",
             "",
         }
+
+    @staticmethod
+    def _h100_fp16_prefill_enabled() -> bool:
+        return os.environ.get("QVQ_HOPPER_FP16_PREFILL", "0").lower() not in {
+            "0",
+            "false",
+            "off",
+            "no",
+            "",
+        }
+
+    def _h100_fp16_prefill_eligible(self, x: torch.Tensor, rows: int) -> bool:
+        children = self._children()
+        if not self._h100_fp16_prefill_enabled() or rows < 512:
+            return False
+        properties = torch.cuda.get_device_properties(x.device)
+        return (
+            self.category == "qkv"
+            and len(children) == 3
+            and children[0].in_features == 2048
+            and tuple(child.out_features for child in children)
+            == (2048, 512, 512)
+            and all(child.bias is None for child in children)
+            and properties.name == "NVIDIA H100"
+            and (properties.major, properties.minor) == (9, 0)
+        )
+
+    def _execute_h100_fp16_prefill(
+        self, x: torch.Tensor
+    ) -> tuple[torch.Tensor, ...]:
+        from ..utils.qvq_cuda import _pgc16_levels, qvq_cuda_hadamard
+        from ..utils.qvq_wgmma_cuda import (
+            qvq_p32_window_decode_grouped_fp16_packed,
+        )
+
+        children = self._children()
+        rows = x.numel() // children[0].in_features
+        x_2d = x.reshape(rows, children[0].in_features).to(torch.float16)
+        payload = self._ensure_payload()
+        decoded = qvq_p32_window_decode_grouped_fp16_packed(
+            payload,
+            _pgc16_levels(x.device, children[0].codebook_version),
+        )
+        folded_transposed = decoded.float().t().contiguous()
+        if children[0].input_hadamard:
+            folded_transposed = qvq_cuda_hadamard(
+                folded_transposed,
+                post_scale=children[0]._cached_cast(
+                    "SU", torch.float32, torch.float32
+                ),
+                scale_mode=1,
+            )
+        else:
+            folded_transposed = folded_transposed * children[0]._cached_cast(
+                "SU", torch.float32, torch.float32
+            )
+        folded = folded_transposed.t().contiguous()
+        folded_children = []
+        offset = 0
+        for child in children:
+            child_weight = folded[:, offset : offset + child.out_features].contiguous()
+            post_scale = child._cached_cast("SV", torch.float32, torch.float32)
+            if child.output_hadamard:
+                child_weight = qvq_cuda_hadamard(
+                    child_weight,
+                    post_scale=post_scale,
+                    scale_mode=1,
+                )
+            else:
+                child_weight = child_weight * post_scale
+            folded_children.append(child_weight)
+            offset += child.out_features
+        folded_weight = torch.cat(folded_children, dim=1).half()
+        output = torch.mm(x_2d.contiguous(), folded_weight, out_dtype=torch.float32)
+        inner_outputs = torch.split(
+            output, [child.out_features for child in children], dim=1
+        )
+        self.telemetry.h100_fp16_prefill_temporary_bytes = (
+            children[0].in_features
+            * sum(child.out_features for child in children)
+            * torch.float16.itemsize
+        )
+        outputs = tuple(
+            inner.reshape(*x.shape[:-1], child.out_features).to(x.dtype)
+            for child, inner in zip(children, inner_outputs, strict=True)
+        )
+        return outputs
 
     def _h100_fp8_prefill_eligible(self, x: torch.Tensor, rows: int) -> bool:
         children = self._children()

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Measure the H100 folded-prefill cache across prefill and decode lifecycle."""
+"""Measure exact, on-demand FP16, and cached FP8 P32 prefill on H100."""
 
 from __future__ import annotations
 
@@ -171,6 +171,7 @@ def _main(args: argparse.Namespace) -> None:
             return common._call_children(parent, names, inputs[m])
 
         os.environ["QVQ_HOPPER_FP8_PREFILL"] = "0"
+        os.environ["QVQ_HOPPER_FP16_PREFILL"] = "0"
         exact_prefill = {}
         for m in args.prefill_m_values:
             exact_prefill[m], snapshots = large_m._graph_timing(
@@ -190,8 +191,53 @@ def _main(args: argparse.Namespace) -> None:
             )
             del snapshots
 
-        os.environ["QVQ_HOPPER_FP8_PREFILL"] = "1"
+        os.environ["QVQ_HOPPER_FP16_PREFILL"] = "1"
         first_prefill_m = min(args.prefill_m_values)
+        fp16_call_memory = _cold_build(
+            torch,
+            lambda first_prefill_m=first_prefill_m: call(first_prefill_m),
+            device,
+        )
+        fp16_prefill = {}
+        fp16_prefill_errors = {}
+        for m in args.prefill_m_values:
+            launches_before = int(
+                qvq_grouped_runtime_telemetry(parent)[0][
+                    "h100_fp16_prefill_launches"
+                ]
+            )
+            fp16_prefill[m], actual = large_m._graph_timing(
+                torch,
+                lambda m=m: call(m),
+                args,
+                device_info,
+            )
+            expected = tuple(
+                qvq_dense_oracle_forward(child, inputs[m], device=device)
+                for child in children
+            )
+            fp16_prefill_errors[m] = large_m._errors(torch, actual, expected)
+            if fp16_prefill_errors[m]["max_abs"] > 2e-3:
+                raise RuntimeError(
+                    f"W{bits:g} M{m} FP16 prefill oracle failure: "
+                    f"{fp16_prefill_errors[m]}"
+                )
+            launches_after = int(
+                qvq_grouped_runtime_telemetry(parent)[0][
+                    "h100_fp16_prefill_launches"
+                ]
+            )
+            if launches_after <= launches_before:
+                raise RuntimeError(f"M{m} did not execute on-demand FP16 prefill")
+            del actual, expected
+        fp16_temporary_bytes = int(
+            qvq_grouped_runtime_telemetry(parent)[0][
+                "h100_fp16_prefill_temporary_bytes"
+            ]
+        )
+
+        os.environ["QVQ_HOPPER_FP16_PREFILL"] = "0"
+        os.environ["QVQ_HOPPER_FP8_PREFILL"] = "1"
         launches_before = int(
             qvq_grouped_runtime_telemetry(parent)[0]["h100_fp8_prefill_launches"]
         )
@@ -281,6 +327,33 @@ def _main(args: argparse.Namespace) -> None:
         for m in args.prefill_m_values:
             rows.append(
                 {
+                    "phase": "on_demand_fp16_prefill",
+                    "bits": bits,
+                    "m": m,
+                    "mkn": [m, common.K, sum(widths)],
+                    "qvq": fp16_prefill[m],
+                    "qvq_exact_row_multiplex": exact_prefill[m],
+                    "marlin_w4": comparators[("marlin", m)],
+                    "machete_w4": comparators[("machete", m)],
+                    "speedup_vs_exact_row_multiplex": _median_us(
+                        exact_prefill[m]
+                    )
+                    / _median_us(fp16_prefill[m]),
+                    "speedup_vs_marlin_w4": _median_us(
+                        comparators[("marlin", m)]
+                    )
+                    / _median_us(fp16_prefill[m]),
+                    "speedup_vs_machete_w4": _median_us(
+                        comparators[("machete", m)]
+                    )
+                    / _median_us(fp16_prefill[m]),
+                    "better_than_last_benchmark": _median_us(fp16_prefill[m])
+                    < _median_us(exact_prefill[m]),
+                    "dense_oracle_error": fp16_prefill_errors[m],
+                }
+            )
+            rows.append(
+                {
                     "phase": "warm_prefill",
                     "bits": bits,
                     "m": m,
@@ -316,6 +389,8 @@ def _main(args: argparse.Namespace) -> None:
                 ),
                 "cache_to_ideal_packed_source_ratio": cache_bytes
                 / (common.K * sum(widths) * bits / 8),
+                "on_demand_fp16_temporary_bytes": fp16_temporary_bytes,
+                "on_demand_fp16_call": fp16_call_memory,
                 "cold_build": cold,
             }
         )
@@ -325,6 +400,7 @@ def _main(args: argparse.Namespace) -> None:
         torch.cuda.empty_cache()
 
     os.environ.pop("QVQ_HOPPER_FP8_PREFILL", None)
+    os.environ.pop("QVQ_HOPPER_FP16_PREFILL", None)
     payload = {
         "git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True
@@ -357,4 +433,6 @@ def _main(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    _main(_args())
+    parsed_args = _args()
+    common._idle_h100_preflight(parsed_args)
+    _main(parsed_args)
