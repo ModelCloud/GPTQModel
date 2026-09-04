@@ -121,6 +121,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m64_tma_grouped_reuse4",
         "p32_window_m64_tma_grouped_ordered_reuse4",
         "p32_window_decode_grouped_fp16",
+        "p32_window_prepare_grouped_fp16",
     ),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_WGMMA_BUILD_ROOT",
@@ -868,6 +869,57 @@ def qvq_p32_window_grouped_prefill_fp16_packed(
     return tuple(torch.split(output, widths, dim=1))
 
 
+def qvq_p32_window_prepare_grouped_fp16_packed(
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+    input_scale: torch.Tensor,
+    output_scales: Sequence[torch.Tensor],
+    output_hadamards: Sequence[bool],
+) -> torch.Tensor:
+    """Decode and fold grouped P32 into one temporary effective FP16 weight."""
+
+    plan = payload.plan
+    if (
+        levels.device.type != "cuda"
+        or levels.dtype != torch.float16
+        or input_scale.device != levels.device
+        or input_scale.dtype != torch.float32
+        or input_scale.shape != (plan.in_features,)
+    ):
+        raise ValueError(
+            "grouped folded-FP16 preparation requires matching CUDA FP16 levels "
+            "and contiguous FP32 input scale [K]"
+        )
+    if len(output_scales) != len(plan.segments) or len(output_hadamards) != len(
+        plan.segments
+    ):
+        raise ValueError(
+            "grouped folded-FP16 preparation requires one output scale and "
+            "Hadamard flag per segment"
+        )
+    for scale, segment in zip(output_scales, plan.segments, strict=True):
+        if (
+            scale.device != levels.device
+            or scale.dtype != torch.float32
+            or scale.shape != (segment.out_features,)
+        ):
+            raise ValueError(
+                "grouped folded-FP16 output scales must be matching FP32 CUDA vectors"
+            )
+    return _QVQ_WGMMA_EXTENSION.op("p32_window_prepare_grouped_fp16")(
+        payload.trellis,
+        levels.contiguous(),
+        payload.bank_ids,
+        input_scale.contiguous(),
+        [scale.contiguous() for scale in output_scales],
+        plan.transition_bits,
+        plan.in_features,
+        [segment.out_features for segment in plan.segments],
+        [segment.bank_alt_id for segment in plan.segments],
+        [int(enabled) for enabled in output_hadamards],
+    )
+
+
 def qvq_p32_window_wgmma_single_large_m_packed(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -971,6 +1023,7 @@ __all__ = [
     "qvq_h100_ordered_split_count",
     "qvq_p32_window_decode_grouped_fp16_packed",
     "qvq_p32_window_grouped_prefill_fp16_packed",
+    "qvq_p32_window_prepare_grouped_fp16_packed",
     "qvq_p32_window_wgmma_group_plan",
     "qvq_p32_window_wgmma_grouped",
     "qvq_p32_window_wgmma_grouped_ordered_packed",

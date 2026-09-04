@@ -1222,7 +1222,10 @@ def test_h100_m8192_qkv_uses_folded_fp8_prefill_and_replays_cuda_graph():
     assert telemetry["plain_fallbacks"] == 0
 
 
-def test_h100_grouped_fp16_prefill_is_bounded_and_replays_cuda_graph(monkeypatch):
+@pytest.mark.parametrize("native", (False, True))
+def test_h100_grouped_fp16_prefill_is_bounded_and_replays_cuda_graph(
+    monkeypatch, native
+):
     device = _h100_device()
     if device is None:
         pytest.skip("requires the exclusive H100 validation device")
@@ -1230,6 +1233,7 @@ def test_h100_grouped_fp16_prefill_is_bounded_and_replays_cuda_graph(monkeypatch
 
     monkeypatch.setenv("QVQ_HOPPER_FP8_PREFILL", "0")
     monkeypatch.setenv("QVQ_HOPPER_FP16_PREFILL", "1")
+    monkeypatch.setenv("QVQ_HOPPER_FP16_PREFILL_NATIVE", str(int(native)))
     shared = torch.ones(2048, device=device)
     widths = (2048, 512, 512)
     children = tuple(
@@ -1287,6 +1291,10 @@ def test_h100_grouped_fp16_prefill_is_bounded_and_replays_cuda_graph(monkeypatch
     telemetry = qvq_grouped_runtime_telemetry(attention)[0]
     assert telemetry["h100_fp16_prefill_launches"] == 2
     assert telemetry["h100_fp16_prefill_temporary_bytes"] == 2048 * 3072 * 2
+    assert telemetry["h100_fp16_prefill_native_launches"] == 2 * int(native)
+    assert telemetry["h100_fp16_prefill_native_scratch_bytes"] == (
+        2048 * 3072 * 12 * int(native)
+    )
     assert telemetry["h100_fp8_prefill_launches"] == 0
     assert telemetry["h100_large_m_chunked_group_launches"] == 0
     assert telemetry["plain_fallbacks"] == 0

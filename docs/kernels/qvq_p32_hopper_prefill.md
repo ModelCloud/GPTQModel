@@ -188,6 +188,24 @@ CUDA-Graph-safe allocations.  Profile the decode, transpose, two Hadamard axes,
 scale, cast, and GEMM separately.  Promotion requires lower full-operation
 latency and allocator peak than Phase 1.
 
+The first native implementation uses four ordered CUDA stages:
+
+1. P32 decode writes FP16 directly as `[N,K]`, eliminating Phase 1's separate
+   half-to-float cast and initial transpose;
+2. one block per N column performs the normalized K-axis FP32 Hadamard and SU
+   scale with the same ascending butterfly order as Phase 1;
+3. a padded `32x32` shared-memory tile transposes the FP32 result to `[K,N]`;
+4. one segmented grid performs each child's optional normalized N-axis FP32
+   Hadamard, applies its own SV, and rounds directly to the final FP16 weight.
+
+The three child segments share a launch but retain separate output widths,
+scales, and output-H flags.  The implementation creates no concatenated scale
+tensor and adds no new transition-bit specialization: the existing four P32
+decoder specializations receive a runtime output-layout flag.  For Llama QKV,
+the explicit scratch contract is 72 MiB (one decoded FP16 plane, two FP32
+planes, and one final FP16 plane), compared with Phase 1's measured 240--272
+MiB allocator peak.
+
 ## Phase 3: on-chip FP16 decode and shared-source WGMMA
 
 Phase 3 removes the global FP16 temporary.  A producer warpgroup loads P32

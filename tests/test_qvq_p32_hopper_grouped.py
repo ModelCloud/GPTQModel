@@ -17,10 +17,12 @@ from gptqmodel.quantization.qvq_codecs import (
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.utils import qvq_wgmma_cuda
+from gptqmodel.utils.qvq_cuda import qvq_cuda_hadamard
 from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_h100_large_m_ordered_split_count,
     qvq_p32_window_decode_grouped_fp16_packed,
     qvq_p32_window_grouped_prefill_fp16_packed,
+    qvq_p32_window_prepare_grouped_fp16_packed,
     qvq_p32_window_wgmma_group_plan,
     qvq_p32_window_wgmma_grouped,
     qvq_p32_window_wgmma_grouped_ordered_packed,
@@ -312,6 +314,55 @@ def test_grouped_p32_fp16_prefill_decodes_once_and_is_graph_safe(bits):
     assert decoded.shape == (in_features, sum(widths))
     assert decoded.dtype == torch.float16
     assert torch.equal(decoded, torch.cat(dense_children, dim=1).half())
+
+    input_scale = torch.rand(
+        in_features, generator=generator, device=device, dtype=torch.float32
+    )
+    output_scales = tuple(
+        torch.rand(width, generator=generator, device=device, dtype=torch.float32)
+        for width in widths
+    )
+    output_hadamards = (True, True, False)
+    phase1_transposed = qvq_cuda_hadamard(
+        decoded.float().t().contiguous(),
+        post_scale=input_scale,
+        scale_mode=1,
+    )
+    phase1 = phase1_transposed.t().contiguous()
+    phase1_children = []
+    offset = 0
+    for width, scale, output_hadamard in zip(
+        widths, output_scales, output_hadamards, strict=True
+    ):
+        child = phase1[:, offset : offset + width].contiguous()
+        phase1_children.append(
+            qvq_cuda_hadamard(child, post_scale=scale, scale_mode=1)
+            if output_hadamard
+            else child * scale
+        )
+        offset += width
+    phase1_folded = torch.cat(phase1_children, dim=1).half()
+    phase2_folded = qvq_p32_window_prepare_grouped_fp16_packed(
+        payload,
+        levels,
+        input_scale,
+        output_scales,
+        output_hadamards,
+    )
+    assert torch.equal(phase2_folded, phase1_folded)
+
+    folded_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(folded_graph):
+        captured_folded = qvq_p32_window_prepare_grouped_fp16_packed(
+            payload,
+            levels,
+            input_scale,
+            output_scales,
+            output_hadamards,
+        )
+    folded_graph.replay()
+    torch.cuda.synchronize(device)
+    assert torch.equal(captured_folded, phase2_folded)
 
     expected = tuple(input.float() @ dense for dense in dense_children)
     actual = qvq_p32_window_grouped_prefill_fp16_packed(input, payload, levels)

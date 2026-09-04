@@ -4,6 +4,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cuda_fp8.h>
 #include <torch/library.h>
@@ -92,6 +93,14 @@ struct HopperGroupedP32DecodeParams {
   int segment_count;
   int n64_end[kMaxGroupedP32Segments];
   int bank_alt_id[kMaxGroupedP32Segments];
+};
+
+struct HopperGroupedP32FoldParams {
+  int segment_count;
+  int n_start[kMaxGroupedP32Segments];
+  int width[kMaxGroupedP32Segments];
+  int output_hadamard[kMaxGroupedP32Segments];
+  const float* output_scale[kMaxGroupedP32Segments];
 };
 
 struct HopperFixedGateUpLaunchParams {
@@ -563,7 +572,8 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_decode_fp16_kernel(
     Element* __restrict__ output,
     HopperGroupedP32DecodeParams grouped_params,
     int size_k,
-    int size_n) {
+    int size_n,
+    bool transpose_output) {
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
   constexpr int kVectorsPerP32Tile = kWordsPerP32Tile / 4;
@@ -654,12 +664,150 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_decode_fp16_kernel(
           (tile_column >> 3);
       const int global_k =
           k256_stage * kKPerStage + k16_local * kP32TileRows + k16_row;
-      const int64_t output_index = static_cast<int64_t>(global_k) * size_n +
-          n64_block * kOutputColumns + p32_column;
+      const int global_n = n64_block * kOutputColumns + p32_column;
+      const int64_t output_index = transpose_output
+          ? static_cast<int64_t>(global_n) * size_k + global_k
+          : static_cast<int64_t>(global_k) * size_n + global_n;
       output[output_index] = fragment_a(index);
     }
   }
 #endif
+}
+
+constexpr int kPrefillFoldThreads = 1024;
+constexpr int kPrefillTransposeTile = 32;
+constexpr int kPrefillTransposeRows = 8;
+
+// Phase-2 folded-FP16 preparation keeps the exact Phase-1 operation order:
+// normalized K-axis Hadamard, SU multiplication, normalized child-local
+// N-axis Hadamard, SV multiplication, then one FP16 rounding store.  The
+// decoder writes [N,K], so the first transform has contiguous rows and avoids
+// Phase 1's half->float cast plus transpose materialization.
+__global__ __launch_bounds__(kPrefillFoldThreads)
+void qvq_p32_prefill_fold_k_axis_kernel(
+    const __half* __restrict__ decoded_transposed,
+    float* __restrict__ transformed_transposed,
+    const float* __restrict__ input_scale,
+    int size_k) {
+  extern __shared__ float shared[];
+  const auto padded = [](int index) { return index + (index >> 5); };
+  const int row = static_cast<int>(blockIdx.x);
+  const int64_t row_offset = static_cast<int64_t>(row) * size_k;
+
+  for (int index = static_cast<int>(threadIdx.x); index < size_k;
+       index += static_cast<int>(blockDim.x)) {
+    shared[padded(index)] =
+        __half2float(decoded_transposed[row_offset + index]);
+  }
+  __syncthreads();
+
+  for (int bit = 1; bit < size_k; bit <<= 1) {
+    for (int index = static_cast<int>(threadIdx.x); index < size_k;
+         index += static_cast<int>(blockDim.x)) {
+      const int peer = index ^ bit;
+      if (index < peer) {
+        const float a = shared[padded(index)];
+        const float b = shared[padded(peer)];
+        shared[padded(index)] = a + b;
+        shared[padded(peer)] = a - b;
+      }
+    }
+    __syncthreads();
+  }
+
+  const float reciprocal = 1.0f / sqrtf(static_cast<float>(size_k));
+  for (int index = static_cast<int>(threadIdx.x); index < size_k;
+       index += static_cast<int>(blockDim.x)) {
+    float value = shared[padded(index)];
+    value *= reciprocal;
+    value *= input_scale[index];
+    transformed_transposed[row_offset + index] = value;
+  }
+}
+
+__global__ void qvq_p32_prefill_transpose_fp32_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int rows,
+    int columns) {
+  __shared__ float tile[kPrefillTransposeTile][kPrefillTransposeTile + 1];
+  int column = static_cast<int>(blockIdx.x) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.x);
+  int row = static_cast<int>(blockIdx.y) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.y);
+#pragma unroll
+  for (int offset = 0; offset < kPrefillTransposeTile;
+       offset += kPrefillTransposeRows) {
+    if (column < columns && row + offset < rows) {
+      tile[threadIdx.y + offset][threadIdx.x] =
+          input[static_cast<int64_t>(row + offset) * columns + column];
+    }
+  }
+  __syncthreads();
+
+  column = static_cast<int>(blockIdx.y) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.x);
+  row = static_cast<int>(blockIdx.x) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.y);
+#pragma unroll
+  for (int offset = 0; offset < kPrefillTransposeTile;
+       offset += kPrefillTransposeRows) {
+    if (column < rows && row + offset < columns) {
+      output[static_cast<int64_t>(row + offset) * rows + column] =
+          tile[threadIdx.x][threadIdx.y + offset];
+    }
+  }
+}
+
+__global__ __launch_bounds__(kPrefillFoldThreads)
+void qvq_p32_prefill_fold_n_axis_fp32_to_fp16_kernel(
+    const float* __restrict__ transformed,
+    __half* __restrict__ output,
+    HopperGroupedP32FoldParams params,
+    int size_n) {
+  extern __shared__ float shared[];
+  const auto padded = [](int index) { return index + (index >> 5); };
+  const int segment = static_cast<int>(blockIdx.x) % params.segment_count;
+  const int row = static_cast<int>(blockIdx.x) / params.segment_count;
+  const int width = params.width[segment];
+  const int start = params.n_start[segment];
+  const int64_t row_offset = static_cast<int64_t>(row) * size_n + start;
+
+  if (params.output_hadamard[segment]) {
+    for (int index = static_cast<int>(threadIdx.x); index < width;
+         index += static_cast<int>(blockDim.x)) {
+      shared[padded(index)] = transformed[row_offset + index];
+    }
+    __syncthreads();
+    for (int bit = 1; bit < width; bit <<= 1) {
+      for (int index = static_cast<int>(threadIdx.x); index < width;
+           index += static_cast<int>(blockDim.x)) {
+        const int peer = index ^ bit;
+        if (index < peer) {
+          const float a = shared[padded(index)];
+          const float b = shared[padded(peer)];
+          shared[padded(index)] = a + b;
+          shared[padded(peer)] = a - b;
+        }
+      }
+      __syncthreads();
+    }
+    const float reciprocal = 1.0f / sqrtf(static_cast<float>(width));
+    for (int index = static_cast<int>(threadIdx.x); index < width;
+         index += static_cast<int>(blockDim.x)) {
+      float value = shared[padded(index)];
+      value *= reciprocal;
+      value *= params.output_scale[segment][index];
+      output[row_offset + index] = __float2half_rn(value);
+    }
+  } else {
+    for (int index = static_cast<int>(threadIdx.x); index < width;
+         index += static_cast<int>(blockDim.x)) {
+      float value = transformed[row_offset + index];
+      value *= params.output_scale[segment][index];
+      output[row_offset + index] = __float2half_rn(value);
+    }
+  }
 }
 
 __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
@@ -2617,7 +2765,8 @@ at::Tensor qvq_p32_window_decode_grouped_fp16_impl(
     const at::Tensor& bank_ids,
     int64_t in_features,
     at::IntArrayRef out_features,
-    at::IntArrayRef bank_alt_ids) {
+    at::IntArrayRef bank_alt_ids,
+    bool transpose_output = false) {
   TORCH_CHECK(trellis.is_cuda(), "grouped P32 FP16 decoder requires CUDA tensors");
   c10::cuda::CUDAGuard device_guard(trellis.device());
   TORCH_CHECK(
@@ -2679,8 +2828,9 @@ at::Tensor qvq_p32_window_decode_grouped_fp16_impl(
       bank_ids.numel() == k_tiles * n_tiles,
       "grouped P32 FP16 decoder bank-ID size mismatch");
 
-  auto output =
-      at::empty({in_features, total_n}, levels.options().dtype(at::kHalf));
+  auto output = transpose_output
+      ? at::empty({total_n, in_features}, levels.options().dtype(at::kHalf))
+      : at::empty({in_features, total_n}, levels.options().dtype(at::kHalf));
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(trellis.get_device());
   const dim3 grid(
@@ -2695,7 +2845,8 @@ at::Tensor qvq_p32_window_decode_grouped_fp16_impl(
           reinterpret_cast<Element*>(output.data_ptr<at::Half>()),
           grouped_params,
           static_cast<int>(in_features),
-          static_cast<int>(total_n));
+          static_cast<int>(total_n),
+          transpose_output);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }
@@ -2728,6 +2879,169 @@ at::Tensor qvq_p32_window_decode_grouped_fp16(
   }
 }
 
+template <int TransitionBits>
+at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    const at::Tensor& input_scale,
+    at::TensorList output_scales,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef output_hadamards) {
+  TORCH_CHECK(
+      in_features >= 256 && in_features <= 16384 &&
+          (in_features & (in_features - 1)) == 0,
+      "grouped P32 folded-FP16 preparation requires power-of-two K in [256, 16384]");
+  const int64_t segment_count = static_cast<int64_t>(out_features.size());
+  TORCH_CHECK(
+      segment_count >= 1 && segment_count <= kMaxGroupedP32Segments &&
+          static_cast<int64_t>(bank_alt_ids.size()) == segment_count &&
+          static_cast<int64_t>(output_scales.size()) == segment_count &&
+          static_cast<int64_t>(output_hadamards.size()) == segment_count,
+      "grouped P32 folded-FP16 preparation requires one to three matching segments");
+  TORCH_CHECK(
+      input_scale.is_cuda() && input_scale.device() == trellis.device() &&
+          input_scale.scalar_type() == at::kFloat && input_scale.is_contiguous() &&
+          input_scale.numel() == in_features,
+      "grouped P32 folded-FP16 preparation requires contiguous FP32 input scale [K]");
+
+  HopperGroupedP32FoldParams fold_params{};
+  fold_params.segment_count = static_cast<int>(segment_count);
+  int64_t total_n = 0;
+  int64_t max_hadamard_width = 0;
+  for (int segment = 0; segment < segment_count; ++segment) {
+    const int64_t width = out_features[segment];
+    const int64_t output_hadamard = output_hadamards[segment];
+    const at::Tensor& output_scale = output_scales[segment];
+    TORCH_CHECK(
+        output_scale.is_cuda() && output_scale.device() == trellis.device() &&
+            output_scale.scalar_type() == at::kFloat &&
+            output_scale.is_contiguous() && output_scale.numel() == width,
+        "grouped P32 folded-FP16 preparation requires contiguous FP32 output scales [N]");
+    TORCH_CHECK(
+        output_hadamard == 0 || output_hadamard == 1,
+        "grouped P32 folded-FP16 output-H flags must be zero or one");
+    if (output_hadamard) {
+      TORCH_CHECK(
+          width >= 2 && width <= 16384 && (width & (width - 1)) == 0,
+          "grouped P32 folded-FP16 output Hadamard requires power-of-two child N");
+      max_hadamard_width = std::max(max_hadamard_width, width);
+    }
+    fold_params.n_start[segment] = static_cast<int>(total_n);
+    fold_params.width[segment] = static_cast<int>(width);
+    fold_params.output_hadamard[segment] = static_cast<int>(output_hadamard);
+    fold_params.output_scale[segment] = output_scale.data_ptr<float>();
+    total_n += width;
+    TORCH_CHECK(
+        total_n <= std::numeric_limits<int>::max(),
+        "grouped P32 folded-FP16 preparation total N exceeds int32 range");
+  }
+
+  auto decoded_transposed = qvq_p32_window_decode_grouped_fp16_impl<TransitionBits>(
+      trellis,
+      levels,
+      bank_ids,
+      in_features,
+      out_features,
+      bank_alt_ids,
+      true);
+  auto transformed_transposed = at::empty(
+      {total_n, in_features}, levels.options().dtype(at::kFloat));
+  auto transformed = at::empty(
+      {in_features, total_n}, levels.options().dtype(at::kFloat));
+  auto output = at::empty(
+      {in_features, total_n}, levels.options().dtype(at::kHalf));
+
+  const cudaStream_t stream =
+      at::cuda::getCurrentCUDAStream(trellis.get_device());
+  const size_t k_shared_bytes = static_cast<size_t>(
+      in_features + in_features / 32) * sizeof(float);
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      qvq_p32_prefill_fold_k_axis_kernel,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(k_shared_bytes)));
+  qvq_p32_prefill_fold_k_axis_kernel<<<
+      static_cast<unsigned>(total_n),
+      kPrefillFoldThreads,
+      k_shared_bytes,
+      stream>>>(
+          reinterpret_cast<const __half*>(decoded_transposed.const_data_ptr()),
+          transformed_transposed.data_ptr<float>(),
+          input_scale.data_ptr<float>(),
+          static_cast<int>(in_features));
+
+  const dim3 transpose_block(kPrefillTransposeTile, kPrefillTransposeRows, 1);
+  const dim3 transpose_grid(
+      static_cast<unsigned>(
+          (in_features + kPrefillTransposeTile - 1) / kPrefillTransposeTile),
+      static_cast<unsigned>(
+          (total_n + kPrefillTransposeTile - 1) / kPrefillTransposeTile),
+      1);
+  qvq_p32_prefill_transpose_fp32_kernel<<<
+      transpose_grid, transpose_block, 0, stream>>>(
+          transformed_transposed.data_ptr<float>(),
+          transformed.data_ptr<float>(),
+          static_cast<int>(total_n),
+          static_cast<int>(in_features));
+
+  const size_t n_shared_bytes = static_cast<size_t>(
+      max_hadamard_width + max_hadamard_width / 32) * sizeof(float);
+  if (n_shared_bytes > 0) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        qvq_p32_prefill_fold_n_axis_fp32_to_fp16_kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(n_shared_bytes)));
+  }
+  qvq_p32_prefill_fold_n_axis_fp32_to_fp16_kernel<<<
+      static_cast<unsigned>(in_features * segment_count),
+      kPrefillFoldThreads,
+      n_shared_bytes,
+      stream>>>(
+          transformed.data_ptr<float>(),
+          reinterpret_cast<__half*>(output.mutable_data_ptr()),
+          fold_params,
+          static_cast<int>(total_n));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+at::Tensor qvq_p32_window_prepare_grouped_fp16(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    const at::Tensor& input_scale,
+    at::TensorList output_scales,
+    int64_t transition_bits,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef output_hadamards) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_prepare_grouped_fp16_impl<4>(
+          trellis, levels, bank_ids, input_scale, output_scales, in_features,
+          out_features, bank_alt_ids, output_hadamards);
+    case 5:
+      return qvq_p32_window_prepare_grouped_fp16_impl<5>(
+          trellis, levels, bank_ids, input_scale, output_scales, in_features,
+          out_features, bank_alt_ids, output_hadamards);
+    case 6:
+      return qvq_p32_window_prepare_grouped_fp16_impl<6>(
+          trellis, levels, bank_ids, input_scale, output_scales, in_features,
+          out_features, bank_alt_ids, output_hadamards);
+    case 7:
+      return qvq_p32_window_prepare_grouped_fp16_impl<7>(
+          trellis, levels, bank_ids, input_scale, output_scales, in_features,
+          out_features, bank_alt_ids, output_hadamards);
+    default:
+      TORCH_CHECK(
+          false,
+          "grouped P32 folded-FP16 preparation transition bits must be in [4, 7]");
+  }
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
@@ -2745,6 +3059,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_m64_tma_grouped_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m64_tma_grouped_ordered_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_decode_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids) -> Tensor");
+  m.def("p32_window_prepare_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
@@ -2762,4 +3077,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_m64_tma_grouped_reuse4", qvq_p32_window_wgmma_m64_tma_grouped_reuse4);
   m.impl("p32_window_m64_tma_grouped_ordered_reuse4", qvq_p32_window_wgmma_m64_tma_grouped_ordered_reuse4);
   m.impl("p32_window_decode_grouped_fp16", qvq_p32_window_decode_grouped_fp16);
+  m.impl("p32_window_prepare_grouped_fp16", qvq_p32_window_prepare_grouped_fp16);
 }
