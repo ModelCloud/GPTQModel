@@ -3213,6 +3213,17 @@ was reverted.  Outputs remained exact (`max_abs <= 2.1e-5`).  Diagnostics are
 `artifacts/a100_p32_window/v33_candidate_m2_attention_dynamic_8000.json` and
 `artifacts/a100_p32_window/v33_candidate_m2_attention_static48_8000.json`.
 
+## v34 neutral M4 full-KV static split probe
+
+The M4 full-KV scalar route uses split 64.  A compile-time split-64
+specialization was screened with 20,000-iteration runs, but repeats swung
+from apparent one-tick gains to neutral (`0.034816 ms` at every rate), so no
+stable improvement was established at this short latency.  The source probe
+was reverted; outputs remained exact.  Diagnostics are
+`artifacts/a100_p32_window/v34_candidate_m4_fullkv_dynamic_20000.json`,
+`artifacts/a100_p32_window/v34_candidate_m4_fullkv_static64_20000.json`, and
+`artifacts/a100_p32_window/v34_candidate_m4_fullkv_static64_repeat20000.json`.
+
 ## Reproduction
 
 ```bash
