@@ -217,6 +217,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_qwen_w3_ordered_decode_prefetch_launches: int = 0
     h100_qwen_ordered_decode_prefetch_launches: int = 0
     h100_qwen_w3_down_decode_prefetch_launches: int = 0
+    h100_qwen_down_decode_prefetch_launches: int = 0
     h100_qwen_fixed_ordered_grid_launches: int = 0
     h100_qwen_composite_down_recovery_launches: int = 0
     h100_qwen_ordered_composite_down_recovery_launches: int = 0
@@ -273,6 +274,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_qwen_w3_ordered_decode_prefetch_launches": self.h100_qwen_w3_ordered_decode_prefetch_launches,
             "h100_qwen_ordered_decode_prefetch_launches": self.h100_qwen_ordered_decode_prefetch_launches,
             "h100_qwen_w3_down_decode_prefetch_launches": self.h100_qwen_w3_down_decode_prefetch_launches,
+            "h100_qwen_down_decode_prefetch_launches": self.h100_qwen_down_decode_prefetch_launches,
             "h100_qwen_fixed_ordered_grid_launches": self.h100_qwen_fixed_ordered_grid_launches,
             "h100_qwen_composite_down_recovery_launches": self.h100_qwen_composite_down_recovery_launches,
             "h100_qwen_ordered_composite_down_recovery_launches": self.h100_qwen_ordered_composite_down_recovery_launches,
@@ -1007,11 +1009,18 @@ class QVQHopperGroupedRuntime:
             )
             self.telemetry.h100_qwen_composite_down_recovery_launches += 1
             self.telemetry.h100_qwen_ordered_composite_down_recovery_launches += 1
+            self.telemetry.h100_qwen_down_decode_prefetch_launches += 1
             self.telemetry.h100_qwen_w3_down_decode_prefetch_launches += 1
             self.telemetry.h100_fp16_recovery_store_launches += 1
             return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
 
         inner = down._inner_forward(transformed)
+        if (
+            self._h100_fp16_recovery_store_enabled
+            and (down.in_features, down.out_features) == (17408, 5120)
+            and qwen_transition_bits in (4, 5)
+        ):
+            self.telemetry.h100_qwen_down_decode_prefetch_launches += 1
         use_qwen_composite_recovery = (
             self._h100_fp16_recovery_store_enabled
             and down.output_hadamard

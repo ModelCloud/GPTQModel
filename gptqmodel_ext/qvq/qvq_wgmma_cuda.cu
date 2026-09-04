@@ -1326,10 +1326,15 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
       OrderedSplit && size_k == 8192 && size_n == 2048 && split_count == 16 &&
       std::strcmp(properties.name, "NVIDIA H100") == 0;
   const bool use_h100_qwen_down_prefetch =
-      OrderedSplit && TransitionBits == kW3TransitionBits &&
       size_k == 17408 && size_n == 5120 && split_count == 17 &&
+      OrderedSplit && TransitionBits == kW3TransitionBits &&
       std::strcmp(properties.name, "NVIDIA H100") == 0;
-  if (use_h100_llama_down_prefetch || use_h100_qwen_down_prefetch) {
+  const bool use_h100_qwen_atomic_down_prefetch =
+      !OrderedSplit && TransitionBits <= 5 &&
+      size_k == 17408 && size_n == 5120 && split_count == 34 &&
+      std::strcmp(properties.name, "NVIDIA H100") == 0;
+  if (use_h100_llama_down_prefetch || use_h100_qwen_down_prefetch ||
+      use_h100_qwen_atomic_down_prefetch) {
     qvq_p32_window_wgmma_m16_tma_kernel<
         TransitionBits,
         false,

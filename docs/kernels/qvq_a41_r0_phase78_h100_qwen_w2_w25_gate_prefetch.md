@@ -49,7 +49,9 @@ The ten affected cells improve **1.00636x geometrically**.  W2 improves
 at most `1.533e-8` and maximum absolute error is `4.838e-8` against the
 same-payload dense-P32 Torch oracle.
 
-The Qwen full-MLP graph test now runs W2, W2.5, and W3 and requires exact
-CUDA Graph replay plus the expected rate-generic and W3-only telemetry.
+The Qwen full-MLP graph test now runs W2, W2.5, and W3.  It requires exact
+replay for the deterministic W3 ordered-down path and finite, dense-oracle-
+bounded replay for the pre-existing W2/W2.5 atomic-down paths, plus the
+expected rate-generic and W3-only telemetry.
 The distilled benchmark is
 `artifacts/a41_phase78_h100/qwen38_27b_w2_w25_gate_prefetch.json`.
