@@ -196,9 +196,10 @@ or V prefix is constructed. Telemetry counts both FP8 GEMM sites,
 dequantized elements, and dense-prefix materializations; acceptance requires
 the latter two to remain zero.
 
-The current correctness path performs one cuBLASLt launch per query head and
-uses a dynamic concatenating cache. Grouped-head launches and a static/paged
-FP8 allocation remain performance TODOs.
+The current correctness path groups all query heads that share one GQA KV head,
+reducing each layer from 32 to 8 QK/PV cuBLASLt launch pairs for Llama-3.2-1B.
+A single batched launch across all KV heads and a static/paged FP8 allocation
+remain performance TODOs.
 
 Gate: cache payload stays E4M3 end to end, no BF16 residual cache exists, and
 Nsight/kernel telemetry proves the attention consumer reads FP8 payloads.

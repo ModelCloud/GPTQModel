@@ -71,7 +71,7 @@ def _attention_mask_slice(
     if attention_mask.ndim == 3:
         return attention_mask[batch, :query_tokens, :key_tokens]
     if attention_mask.ndim == 2:
-        return attention_mask[batch, :key_tokens].unsqueeze(0)
+        return attention_mask[batch, :key_tokens].unsqueeze(0).expand(query_tokens, -1)
     raise ValueError(
         f"QVQ FP8 attention requires a 2D--4D attention mask, got {attention_mask.ndim}D."
     )
@@ -136,11 +136,12 @@ def qvq_fp8_attention_forward(
     for batch in range(batch_size):
         batch_outputs: list[torch.Tensor] = []
         batch_weights: list[torch.Tensor] = []
-        for head in range(query_heads):
-            kv_head = head // groups
-            query_head = query[batch, head]
+        for kv_head in range(kv_heads):
+            first_head = kv_head * groups
+            query_group = query[batch, first_head : first_head + groups]
+            query_matrix = query_group.reshape(groups * query_tokens, -1)
             query_fp8, query_scale = quantize_qvq_fp8_activation(
-                query_head,
+                query_matrix,
                 format=QVQ_FP8_ACTIVATION_FORMAT,
                 scale_method="dynamic_per_token",
                 validate=False,
@@ -159,20 +160,25 @@ def qvq_fp8_attention_forward(
             )[:, :key_tokens]
             logits = raw_logits * query_scale.float() * key_scale.T.float()
             logits.mul_(scaling)
-            mask = _attention_mask_slice(
-                attention_mask,
-                batch=batch,
-                head=head,
-                query_tokens=query_tokens,
-                key_tokens=key_tokens,
-            )
-            if mask is not None:
-                logits.add_(mask.float())
+            if attention_mask is not None:
+                group_masks = [
+                    _attention_mask_slice(
+                        attention_mask,
+                        batch=batch,
+                        head=head,
+                        query_tokens=query_tokens,
+                        key_tokens=key_tokens,
+                    )
+                    for head in range(first_head, first_head + groups)
+                ]
+                logits.add_(torch.stack(group_masks).reshape_as(logits).float())
             probabilities = torch.softmax(logits, dim=-1, dtype=torch.float32)
             probabilities = F.dropout(
                 probabilities, p=dropout, training=module.training
             )
-            batch_weights.append(probabilities.to(query.dtype))
+            batch_weights.append(
+                probabilities.reshape(groups, query_tokens, key_tokens).to(query.dtype)
+            )
 
             # Absorb each V row's dynamic scale into the probability column.
             # The second native E4M3 GEMM can then consume the cached V payload
@@ -203,13 +209,17 @@ def qvq_fp8_attention_forward(
                 out_dtype=torch.float32,
                 use_fast_accum=False,
             )
-            batch_outputs.append((raw_output * probability_scale.float()).to(query.dtype))
-        outputs.append(torch.stack(batch_outputs, dim=0))
-        weights.append(torch.stack(batch_weights, dim=0))
+            batch_outputs.append(
+                (raw_output * probability_scale.float())
+                .reshape(groups, query_tokens, -1)
+                .to(query.dtype)
+            )
+        outputs.append(torch.cat(batch_outputs, dim=0))
+        weights.append(torch.cat(batch_weights, dim=0))
 
     key.layer.native_attention_calls += 1
-    key.layer.native_qk_fp8_mm_calls += batch_size * query_heads
-    key.layer.native_pv_fp8_mm_calls += batch_size * query_heads
+    key.layer.native_qk_fp8_mm_calls += batch_size * kv_heads
+    key.layer.native_pv_fp8_mm_calls += batch_size * kv_heads
     key.layer.native_attention_query_tokens += batch_size * query_heads * query_tokens
     output = torch.stack(outputs, dim=0).transpose(1, 2).contiguous()
     return output, torch.stack(weights, dim=0)

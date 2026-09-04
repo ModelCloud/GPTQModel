@@ -224,8 +224,8 @@ def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(
     telemetry = cache.telemetry()
     assert telemetry["native_fp8_attention"] is True
     assert telemetry["native_attention_calls"] == 1
-    assert telemetry["native_qk_fp8_mm_calls"] == 4
-    assert telemetry["native_pv_fp8_mm_calls"] == 4
+    assert telemetry["native_qk_fp8_mm_calls"] == 1
+    assert telemetry["native_pv_fp8_mm_calls"] == 1
     assert telemetry["dequantized_elements"] == 0
     assert telemetry["dense_kv_prefix_materializations"] == 0
 
