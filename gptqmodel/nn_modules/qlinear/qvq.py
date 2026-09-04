@@ -27,6 +27,7 @@ from ...quantization.qvq import (
 from ...quantization.qvq_activation import (
     dequantize_qvq_fp8_activation,
     fake_quantize_qvq_fp8_activation,
+    quantize_qvq_fp8_activation,
 )
 from ...quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
 from ...quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
@@ -1171,16 +1172,28 @@ class QVQLinear(BaseQuantLinear):
         config = self.activation_quantization
         if config is None:
             return x_2d.to(compute_dtype), None, 0
-        quantized, scale, dequantized = fake_quantize_qvq_fp8_activation(
-            x_2d,
-            format=config.format,
-            scale_method=config.scale_method,
-            straight_through=straight_through,
-            # Avoid a device-to-host synchronization in the inference hot path.
-            # Calibration validates finite source activations before installing
-            # a checkpoint; runtime non-finites retain ordinary propagation.
-            validate=straight_through or x_2d.device.type == "cpu",
-        )
+        validate = straight_through or x_2d.device.type == "cpu"
+        if straight_through:
+            quantized, scale, dequantized = fake_quantize_qvq_fp8_activation(
+                x_2d,
+                format=config.format,
+                scale_method=config.scale_method,
+                straight_through=True,
+                validate=validate,
+            )
+        else:
+            # The native fused Hadamard consumes FP8 + row scale directly.
+            # Do not eagerly allocate and populate a dequantized tensor that
+            # this path immediately discards.
+            quantized, scale = quantize_qvq_fp8_activation(
+                x_2d,
+                format=config.format,
+                scale_method=config.scale_method,
+                # Avoid a device-to-host synchronization in the inference hot
+                # path. Runtime non-finites retain ordinary propagation.
+                validate=validate,
+            )
+            dequantized = None
         native_fp8_transform = (
             not straight_through
             and self.input_hadamard
@@ -1191,6 +1204,12 @@ class QVQLinear(BaseQuantLinear):
         if native_fp8_transform:
             input_rounding_mode = 1 if x_2d.dtype == torch.bfloat16 else 0
             return quantized, scale, input_rounding_mode
+        if dequantized is None:
+            dequantized = dequantize_qvq_fp8_activation(
+                quantized,
+                scale,
+                dtype=x_2d.dtype,
+            )
         return dequantized.to(compute_dtype), None, 0
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

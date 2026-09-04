@@ -41,6 +41,7 @@ def _child(
     device: torch.device | str = "cpu",
     input_hadamard: bool = True,
     output_hadamard: bool = True,
+    activation_quantization: dict | bool | None = None,
 ) -> QVQLinear:
     device = torch.device(device)
     generator = torch.Generator(device=device).manual_seed(seed)
@@ -82,6 +83,7 @@ def _child(
         v2b2_p32=True,
         input_hadamard=input_hadamard,
         output_hadamard=output_hadamard,
+        activation_quantization=activation_quantization,
     ).eval()
 
 
@@ -95,6 +97,15 @@ class _MLP(nn.Module):
     def __init__(self, children: tuple[QVQLinear, QVQLinear]):
         super().__init__()
         self.gate_proj, self.up_proj = children
+
+
+def _h200_device() -> torch.device | None:
+    if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
+        return None
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) == (9, 0) and "H200" in properties.name:
+        return torch.device("cuda", 0)
+    return None
 
 
 def test_exact_silu_activation_recognition_is_narrow():
@@ -192,6 +203,81 @@ def test_r0_accepts_child_local_output_axes_but_rejects_mixed_input_axes():
     rejected_children[1].input_hadamard = False
     rejected = _Attention(rejected_children)
     assert install_qvq_hopper_groups(rejected, gate_up=False) == {"qkv": 0}
+
+
+def test_r0_accepts_shared_a8_contract_and_rejects_mixed_activation_state():
+    shared = torch.ones(256)
+    accepted = _Attention(
+        tuple(
+            _child(
+                name,
+                su=shared,
+                alt_id=index + 1,
+                seed=90 + index,
+                activation_quantization=True,
+            )
+            for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+        )
+    )
+    assert install_qvq_hopper_groups(accepted, gate_up=False) == {"qkv": 1}
+    assert uninstall_qvq_hopper_groups(accepted) == 1
+
+    rejected_children = tuple(
+        _child(
+            name,
+            su=shared,
+            alt_id=index + 1,
+            seed=95 + index,
+            activation_quantization=True,
+        )
+        for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+    )
+    rejected_children[1].activation_quantization = None
+    assert install_qvq_hopper_groups(
+        _Attention(rejected_children), gate_up=False
+    ) == {"qkv": 0}
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("logical_m", (1, 2, 4, 8, 16))
+def test_h200_grouped_a8_quantizes_shared_input_once_and_matches_children(
+    logical_m, dtype
+):
+    device = _h200_device()
+    if device is None:
+        pytest.skip("requires the exclusive H200 validation device")
+    shared = torch.randn(256, device=device)
+    children = tuple(
+        _child(
+            name,
+            su=shared,
+            alt_id=index + 1,
+            seed=105 + index,
+            device=device,
+            activation_quantization=True,
+        )
+        for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+    )
+    attention = _Attention(children)
+    x = (torch.randn((logical_m, 256), device=device) * 0.02).to(dtype)
+
+    with torch.inference_mode():
+        expected = tuple(child(x).clone() for child in children)
+    assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
+    with torch.inference_mode():
+        actual = tuple(
+            getattr(attention, name)(x)
+            for name in ("q_proj", "k_proj", "v_proj")
+        )
+
+    assert all(
+        torch.equal(output, reference)
+        for output, reference in zip(actual, expected, strict=True)
+    )
+    telemetry = qvq_grouped_runtime_telemetry(attention)[0]
+    assert telemetry["grouped_launches"] == 1
+    assert telemetry["grouped_a8_launches"] == 1
+    assert telemetry["shared_fp8_quantizations"] == 1
 
 
 def test_sibling_lifecycle_fires_once_and_never_returns_stale_output(monkeypatch):

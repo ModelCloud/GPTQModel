@@ -33,6 +33,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prefill-warmup", type=int, default=2)
     parser.add_argument("--prefill-repeats", type=int, default=5)
     parser.add_argument("--attention", choices=("sdpa", "eager"), default="sdpa")
+    parser.add_argument(
+        "--fuse-qvq-groups",
+        action="store_true",
+        help="Install storage-neutral grouped QKV/gate-up P32 execution before measurement.",
+    )
     parser.add_argument("--expected-gpu-uuid", required=True)
     parser.add_argument("--idle-samples", type=int, default=3)
     parser.add_argument("--idle-memory-mib", type=int, default=16)
@@ -369,6 +374,14 @@ def main(argv: list[str] | None = None) -> int:
             local_files_only=True,
         )
         model = loaded.model.eval()
+    fusion_counts = None
+    if args.fuse_qvq_groups:
+        if args.arm == "dense":
+            raise ValueError("--fuse-qvq-groups is valid only for quantized arms.")
+        fusion_counts = loaded.fuse(
+            free_original_weights=False,
+            gate_up_activation=False,
+        )
     torch.cuda.synchronize(device)
     load_seconds = time.perf_counter() - load_started
     torch.cuda.empty_cache()
@@ -484,6 +497,13 @@ def main(argv: list[str] | None = None) -> int:
         after_decode = _memory_snapshot(torch, device)
     sampled_peak_process_memory_mib = sampler.peak_process_memory_mib
     sampled_peak_count = sampler.samples
+    grouped_runtime = []
+    if args.arm != "dense":
+        from gptqmodel.nn_modules.qvq_grouped_runtime import (
+            qvq_grouped_runtime_telemetry,
+        )
+
+        grouped_runtime = qvq_grouped_runtime_telemetry(model)
 
     driver = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"], text=True
@@ -538,6 +558,11 @@ def main(argv: list[str] | None = None) -> int:
         "kv_cache": {
             "after_prefill": cache_after_prefill,
             "after_decode": cache_after_decode,
+        },
+        "qvq_grouped_runtime": {
+            "requested": args.fuse_qvq_groups,
+            "installed": fusion_counts,
+            "groups": grouped_runtime,
         },
         "runtime": {
             "command": [sys.executable, *sys.argv],
