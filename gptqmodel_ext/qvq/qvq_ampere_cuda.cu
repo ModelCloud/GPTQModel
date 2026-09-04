@@ -2458,6 +2458,29 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
+  } else if (size_m == kRows && size_k == 6144 && size_n == 5120 &&
+             split_count == 12) {
+    const dim3 wide_grid(
+        static_cast<unsigned>((n_tiles + 2 * kTilesPerBlock - 1) /
+                              (2 * kTilesPerBlock)),
+        1,
+        static_cast<unsigned>(split_count));
+    p32_window_ampere_kernel<
+        TransitionBits, true, 0, 5120, false, false, 6144,
+        (TransitionBits == 5 || TransitionBits == 6 || TransitionBits == 7),
+        false, true, false, 3, 12>
+        <<<wide_grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
   } else if (size_m == kRows && size_k == 6144 && size_n == 5120) {
     const dim3 wide_grid(
         static_cast<unsigned>((n_tiles + 2 * kTilesPerBlock - 1) /

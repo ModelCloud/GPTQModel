@@ -3504,6 +3504,18 @@ Diagnostics are
 `artifacts/a100_p32_window/v26_candidate_m8_mlpdown_static40_20000.json` and
 `artifacts/a100_p32_window/v26_candidate_m8_mlpdown_static40_repeat20000.json`.
 
+## v61 M16 attention-out static split specialization
+
+The M16 attention-out route `(K,N)=(6144,5120)` uses the stable split-12 plan.
+A guarded WMMA `StaticSplitCount=12` launch was exact in two matched 20,000-
+iteration candidate runs.  Fresh-main medians were
+`0.054272/0.052224/0.053248/0.053248 ms`; the candidate measured
+`0.054272/0.052224/0.052224/0.053248 ms` in both runs for
+W2/W2.5/W3/W3.5.  This is a repeatable one-event-tick improvement at W3 with
+no losses at the other rates.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m16_attention_static12_20000.json`
+and `artifacts/a100_p32_window/v26_candidate_m16_attention_static12_repeat20000.json`.
+
 ## Reproduction
 
 ```bash
