@@ -213,6 +213,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_fused_down_reduction_recovery_launches: int = 0
     h100_multiblock_down_recovery_launches: int = 0
     h100_w25_n128_gate_up_launches: int = 0
+    h100_wide_reuse_gate_up_launches: int = 0
     h100_folded_qwen_mlp_launches: int = 0
     h100_folded_qwen_fused_precondition_launches: int = 0
     h100_folded_qwen_fused_ordered_reduction_launches: int = 0
@@ -274,6 +275,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_fused_down_reduction_recovery_launches": self.h100_fused_down_reduction_recovery_launches,
             "h100_multiblock_down_recovery_launches": self.h100_multiblock_down_recovery_launches,
             "h100_w25_n128_gate_up_launches": self.h100_w25_n128_gate_up_launches,
+            "h100_wide_reuse_gate_up_launches": self.h100_wide_reuse_gate_up_launches,
             "h100_folded_qwen_mlp_launches": self.h100_folded_qwen_mlp_launches,
             "h100_folded_qwen_fused_precondition_launches": self.h100_folded_qwen_fused_precondition_launches,
             "h100_folded_qwen_fused_ordered_reduction_launches": self.h100_folded_qwen_fused_ordered_reduction_launches,
@@ -678,6 +680,14 @@ class QVQHopperGroupedRuntime:
             payload,
             _pgc16_levels(x.device, children[0].codebook_version),
         )
+        if (
+            grouped_inner is qvq_p32_window_wgmma_grouped_reuse4_packed
+            and padded.shape[0] >= 128
+            and self._h100_multiblock_intermediate_enabled
+            and children[0].in_features == 2048
+            and all(segment.split_count == 1 for segment in payload.plan.segments)
+        ):
+            self.telemetry.h100_wide_reuse_gate_up_launches += 1
         if grouped_inner in (
             qvq_p32_window_wgmma_grouped_ordered_packed,
             qvq_p32_window_wgmma_grouped_reuse2_packed,

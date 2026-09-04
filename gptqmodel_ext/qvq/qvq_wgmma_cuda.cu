@@ -708,7 +708,6 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   static_assert(N64BlocksPerCta == 1 || FixedGateUp);
   static_assert(
       RowTilesPerCta == 1 || RowTilesPerCta == 2 || RowTilesPerCta == 4);
-  static_assert(RowTilesPerCta == 1 || N64BlocksPerCta == 1);
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
   using TrellisSmemLayout =
       P32TrellisTmaSmemLayoutFor<TransitionBits, N64BlocksPerCta>;
@@ -1886,41 +1885,91 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       TransitionBits <= kW3TransitionBits &&
       std::strcmp(properties.name, "NVIDIA H100") == 0;
   if constexpr (RowTilesPerCta > 1) {
-    using ReuseSharedStorage =
-        P32WgmmaTmaSharedStorageFor<TransitionBits, 1, RowTilesPerCta>;
-    auto reuse_kernel = qvq_p32_window_wgmma_m16_tma_kernel<
-        TransitionBits,
-        true,
-        OrderedSplit,
-        false,
-        true,
-        1,
-        false,
-        RowTilesPerCta,
-        decltype(input_tma),
-        decltype(trellis_tma),
-        decltype(bank_tma),
-        HopperGroupedP32LaunchParams>;
-    C10_CUDA_CHECK(cudaFuncSetAttribute(
-        reuse_kernel,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        static_cast<int>(sizeof(ReuseSharedStorage))));
-    reuse_kernel<<<
-        grid,
-        kTmaThreads,
-        sizeof(ReuseSharedStorage),
-        stream>>>(
-        input_tma,
-        trellis_tma,
-        bank_tma,
-        reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
-        partial_output.data_ptr<float>(),
-        grouped_params,
-        size_m,
-        size_k,
-        static_cast<int>(total_n),
-        1,
-        0);
+    // At M>=128 the physical H100 benefits from two independent N64
+    // consumers sharing the same four staged M16 input tiles.  M64 retains
+    // the narrower CTA: its shorter grid does not amortize the larger block.
+    const bool use_h100_wide_reuse_gate_up =
+        use_gate_up_geometry && size_m >= 128 &&
+        std::strcmp(properties.name, "NVIDIA H100") == 0;
+    if (use_h100_wide_reuse_gate_up) {
+      const HopperFixedGateUpLaunchParams fixed_params{
+          {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
+      using WideReuseSharedStorage =
+          P32WgmmaTmaSharedStorageFor<TransitionBits, 2, RowTilesPerCta>;
+      auto wide_reuse_kernel = qvq_p32_window_wgmma_m16_tma_kernel<
+          TransitionBits,
+          true,
+          OrderedSplit,
+          true,
+          true,
+          2,
+          false,
+          RowTilesPerCta,
+          decltype(input_tma),
+          decltype(wide_trellis_tma),
+          decltype(bank_tma),
+          HopperFixedGateUpLaunchParams>;
+      C10_CUDA_CHECK(cudaFuncSetAttribute(
+          wide_reuse_kernel,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          static_cast<int>(sizeof(WideReuseSharedStorage))));
+      const dim3 wide_reuse_grid(
+          static_cast<unsigned>(max_n64_blocks / 2),
+          static_cast<unsigned>(segment_count * row_ctas),
+          1);
+      wide_reuse_kernel<<<
+          wide_reuse_grid,
+          kTmaThreads + kThreads,
+          sizeof(WideReuseSharedStorage),
+          stream>>>(
+          input_tma,
+          wide_trellis_tma,
+          bank_tma,
+          reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+          partial_output.data_ptr<float>(),
+          fixed_params,
+          size_m,
+          kFixedGateUpK,
+          2 * kFixedGateUpN,
+          1,
+          0);
+    } else {
+      using ReuseSharedStorage =
+          P32WgmmaTmaSharedStorageFor<TransitionBits, 1, RowTilesPerCta>;
+      auto reuse_kernel = qvq_p32_window_wgmma_m16_tma_kernel<
+          TransitionBits,
+          true,
+          OrderedSplit,
+          false,
+          true,
+          1,
+          false,
+          RowTilesPerCta,
+          decltype(input_tma),
+          decltype(trellis_tma),
+          decltype(bank_tma),
+          HopperGroupedP32LaunchParams>;
+      C10_CUDA_CHECK(cudaFuncSetAttribute(
+          reuse_kernel,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          static_cast<int>(sizeof(ReuseSharedStorage))));
+      reuse_kernel<<<
+          grid,
+          kTmaThreads,
+          sizeof(ReuseSharedStorage),
+          stream>>>(
+          input_tma,
+          trellis_tma,
+          bank_tma,
+          reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+          partial_output.data_ptr<float>(),
+          grouped_params,
+          size_m,
+          size_k,
+          static_cast<int>(total_n),
+          1,
+          0);
+    }
   } else if (use_h100_qwen_ordered_fixed) {
     const HopperFixedGateUpLaunchParams fixed_params{
         {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};

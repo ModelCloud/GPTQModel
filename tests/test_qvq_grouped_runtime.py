@@ -860,6 +860,53 @@ def test_warmed_gate_up_paired_recovery_is_cuda_graph_capturable():
     assert telemetry["independent_recovery_children"] == 0
 
 
+def test_h100_large_m_wide_gate_up_runtime_is_exact_graph_safe_and_observable():
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    shared = torch.ones(2048, device=device)
+    children = tuple(
+        _child(
+            name,
+            in_features=2048,
+            out_features=8192,
+            bits=3,
+            su=shared,
+            alt_id=alt_id,
+            seed=260 + index,
+            device=device,
+        )
+        for index, (name, alt_id) in enumerate(
+            (("gate_proj", 1), ("up_proj", 3))
+        )
+    )
+    mlp = _MLP(children)
+    static_input = torch.randn((128, 2048), device=device, dtype=torch.float16) * 0.02
+    with torch.inference_mode():
+        expected = (mlp.gate_proj(static_input), mlp.up_proj(static_input))
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+
+    with torch.inference_mode():
+        eager = (mlp.gate_proj(static_input), mlp.up_proj(static_input))
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = (mlp.gate_proj(static_input), mlp.up_proj(static_input))
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    assert all(
+        torch.equal(output, reference)
+        for output, reference in zip(eager, expected, strict=True)
+    )
+    assert all(
+        torch.equal(output, reference)
+        for output, reference in zip(captured, expected, strict=True)
+    )
+    telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
+    assert telemetry["h100_wide_reuse_gate_up_launches"] == 2
+    assert telemetry["plain_fallbacks"] == 0
+
+
 def test_fused_mlp_lifecycle_flag_fallback_and_uninstall_are_exact():
     device = _h100_device()
     if device is None:

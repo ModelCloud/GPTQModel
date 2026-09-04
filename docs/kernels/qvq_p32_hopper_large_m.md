@@ -107,6 +107,39 @@ larger CTA is not assumed to be faster: register pressure, shared-memory use,
 WGMMA dependency depth, and reduced occupancy are measured on the physical
 H100.
 
+## H100 N128 by M64 gate/up tile
+
+Profiling the promoted four-row reuse kernel at W3, M512 showed that decode
+reuse was still correct but the single consumer warpgroup left too few
+independent warps ready to issue.  The N64 by M64 CTA used 160 threads, 93
+registers per thread, 94.98 KiB dynamic shared memory, and achieved only 15.05%
+occupancy with 0.80 eligible warps per scheduler.  It also staged the same
+input tile independently for adjacent N64 output blocks.
+
+The promoted H100 gate/up tile for M at least 128 combines two adjacent N64
+blocks while retaining four M16 row tiles:
+
+```text
+one producer warp
+  + two independent 128-thread WGMMA consumer warpgroups
+  + one shared set of four M16 input tiles
+  = one N128 by M64 CTA
+```
+
+Each consumer keeps its own P32 words, bank selector, decoded register
+fragment, and FP32 accumulator.  Only the input TMA stages and pipeline are
+shared.  Therefore the transformation does not combine child projections,
+change P32 decode, or alter accumulation order.  The grid has half as many
+CTAs and exactly the same output ownership as two N64 by M64 CTAs.
+
+Matched Nsight Compute at W3 M512 measured the inner gate/up kernel falling
+from 208.06 to 179.74 microseconds.  Achieved occupancy increased from 15.05%
+to 26.36%, active warps per scheduler from 2.41 to 4.22, and eligible warps
+per scheduler from 0.80 to 1.49.  Executed instructions also fell from 105.87
+million to 100.96 million because one producer/pipeline serves two consumers.
+The complete MLP improved from 492.06 to 465.40 microseconds in the matched
+W3 M512 check.  M64 did not benefit, so the dispatch gate begins at M128.
+
 ## Template and binary-size budget
 
 Transition widths W2, W2.5, W3, and W3.5 already instantiate the decoder.
