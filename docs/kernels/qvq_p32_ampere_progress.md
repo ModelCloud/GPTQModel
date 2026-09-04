@@ -3401,6 +3401,17 @@ and `artifacts/a100_p32_window/v51_candidate_m4_linearqkv_static40_repeat8000.js
 the v43 full sweep provides the dynamic control.  The full-matrix 10% target
 remains open.
 
+## v52 rejected M8 full-Q WMMA static split probe
+
+The M8 full-Q wide WMMA route already uses the validated split-14 reducer, so
+I screened a matching compile-time split-14 main-kernel specialization.  The
+probe was exact (`max_abs <= 3.3e-5`) but regressed W3 and W3.5 by one CUDA
+event tick: medians were
+`0.084992/0.089088/0.087040/0.088064 ms`, versus the dynamic
+`0.086016/0.089088/0.086016/0.087040 ms`.  The WMMA template and dispatch
+changes were reverted; diagnostic:
+`artifacts/a100_p32_window/v52_candidate_m8_fullq_static_split14_8000.json`.
+
 ## Reproduction
 
 ```bash
