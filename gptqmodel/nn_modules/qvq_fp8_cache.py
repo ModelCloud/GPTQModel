@@ -22,6 +22,8 @@ from ..quantization.qvq_activation import (
     quantize_qvq_fp8_activation,
 )
 
+_QVQ_FP8_PREFILL_QUERY_CHUNK = 2048
+
 
 def _activation_config(
     value: QVQActivationConfig | dict[str, Any],
@@ -177,7 +179,12 @@ def _qvq_fp8_grouped_attention(
     )
     if normalized_mask is not None:
         logits.add_(normalized_mask.float())
-    probabilities = torch.softmax(logits, dim=-1, dtype=torch.float32)
+    # Keep the attention-score workspace single-buffered.  ``logits`` is
+    # already FP32 and is dead after softmax, so an out= softmax avoids a
+    # second [B, H, M, K] allocation during prefill.
+    probabilities = torch.softmax(
+        logits, dim=-1, dtype=torch.float32, out=logits
+    )
     probabilities = F.dropout(probabilities, p=dropout, training=training)
     weights = (
         probabilities.reshape(batch_size, query_heads, query_tokens, key_tokens).to(
@@ -191,7 +198,8 @@ def _qvq_fp8_grouped_attention(
     value_scale = value.scales[..., :key_tokens, 0].reshape(
         gemm_groups, 1, key_tokens
     )
-    scaled_probabilities = probability_matrix * value_scale.float()
+    scaled_probabilities = probability_matrix
+    scaled_probabilities.mul_(value_scale.float())
     probability_fp8, probability_scale = quantize_qvq_fp8_activation(
         scaled_probabilities,
         format=QVQ_FP8_ACTIVATION_FORMAT,
@@ -300,6 +308,9 @@ def qvq_fp8_attention_forward(
     padded_keys = ((key_tokens + 15) // 16) * 16
     causal_mask = _causal_mask(query_tokens, key_tokens, query.device)
     one = torch.ones((), dtype=torch.float32, device=query.device)
+    query_chunks = (
+        query_tokens + _QVQ_FP8_PREFILL_QUERY_CHUNK - 1
+    ) // _QVQ_FP8_PREFILL_QUERY_CHUNK
     outputs: list[torch.Tensor] = []
     weights: list[torch.Tensor] = []
 
@@ -309,90 +320,114 @@ def qvq_fp8_attention_forward(
         for kv_head in range(kv_heads):
             first_head = kv_head * groups
             query_group = query[batch, first_head : first_head + groups]
-            query_matrix = query_group.reshape(groups * query_tokens, -1)
-            query_fp8, query_scale = quantize_qvq_fp8_activation(
-                query_matrix,
-                format=QVQ_FP8_ACTIVATION_FORMAT,
-                scale_method="dynamic_per_token",
-                validate=False,
-            )
             key_fp8 = key.payload[batch, kv_head, :padded_keys]
             key_scale = key.scales[batch, kv_head, :key_tokens]
-            raw_logits = torch._scaled_mm(
-                query_fp8,
-                key_fp8.T,
-                one,
-                one,
-                out_dtype=torch.float32,
-                use_fast_accum=False,
-            )[:, :key_tokens]
-            logits = raw_logits * query_scale.float() * key_scale.T.float()
-            logits.mul_(scaling)
-            logits.reshape(groups, query_tokens, key_tokens).masked_fill_(
-                causal_mask, float("-inf")
-            )
-            if attention_mask is not None:
-                group_masks = [
-                    _attention_mask_slice(
-                        attention_mask,
-                        batch=batch,
-                        head=head,
-                        query_tokens=query_tokens,
-                        key_tokens=key_tokens,
+            value_fp8 = value.payload[batch, kv_head, :padded_keys]
+            chunk_outputs: list[torch.Tensor] = []
+            chunk_weights: list[torch.Tensor] = []
+            for query_start in range(0, query_tokens, _QVQ_FP8_PREFILL_QUERY_CHUNK):
+                query_end = min(
+                    query_start + _QVQ_FP8_PREFILL_QUERY_CHUNK, query_tokens
+                )
+                chunk_tokens = query_end - query_start
+                query_matrix = query_group[:, query_start:query_end].reshape(
+                    groups * chunk_tokens, -1
+                )
+                query_fp8, query_scale = quantize_qvq_fp8_activation(
+                    query_matrix,
+                    format=QVQ_FP8_ACTIVATION_FORMAT,
+                    scale_method="dynamic_per_token",
+                    validate=False,
+                )
+                raw_logits = torch._scaled_mm(
+                    query_fp8,
+                    key_fp8.T,
+                    one,
+                    one,
+                    out_dtype=torch.float32,
+                    use_fast_accum=False,
+                )[:, :key_tokens]
+                logits = raw_logits
+                logits.mul_(query_scale.float())
+                logits.mul_(key_scale.T.float())
+                logits.mul_(scaling)
+                logits = logits.reshape(groups, chunk_tokens, key_tokens)
+                logits.masked_fill_(
+                    causal_mask[query_start:query_end], float("-inf")
+                )
+                if attention_mask is not None:
+                    group_masks = [
+                        _attention_mask_slice(
+                            attention_mask,
+                            batch=batch,
+                            head=head,
+                            query_tokens=query_tokens,
+                            key_tokens=key_tokens,
+                        )[query_start:query_end]
+                        for head in range(first_head, first_head + groups)
+                    ]
+                    logits.add_(torch.stack(group_masks).float())
+                # Reuse the FP32 score allocation for softmax.  This removes
+                # one full query-chunk score buffer from peak prefill memory.
+                probabilities = torch.softmax(
+                    logits, dim=-1, dtype=torch.float32, out=logits
+                )
+                probabilities = F.dropout(
+                    probabilities, p=dropout, training=module.training
+                )
+                if output_attentions:
+                    chunk_weights.append(probabilities.to(query.dtype))
+
+                # Absorb each V row's dynamic scale into the probability
+                # column. Q chunking bounds all FP32 score temporaries while
+                # preserving native E4M3 QK and PV GEMMs and opaque FP8 K/V.
+                probability_matrix = probabilities.reshape(
+                    groups * chunk_tokens, key_tokens
+                )
+                scaled_probabilities = probability_matrix
+                scaled_probabilities.mul_(
+                    value.scales[batch, kv_head, :key_tokens, 0]
+                    .float()
+                    .unsqueeze(0)
+                )
+                probability_fp8, probability_scale = quantize_qvq_fp8_activation(
+                    scaled_probabilities,
+                    format=QVQ_FP8_ACTIVATION_FORMAT,
+                    scale_method="dynamic_per_token",
+                    validate=False,
+                )
+                if padded_keys != key_tokens:
+                    probability_fp8 = F.pad(
+                        probability_fp8, (0, padded_keys - key_tokens)
                     )
-                    for head in range(first_head, first_head + groups)
-                ]
-                logits.add_(torch.stack(group_masks).reshape_as(logits).float())
-            probabilities = torch.softmax(logits, dim=-1, dtype=torch.float32)
-            probabilities = F.dropout(
-                probabilities, p=dropout, training=module.training
+                raw_output = torch._scaled_mm(
+                    probability_fp8,
+                    value_fp8,
+                    one,
+                    one,
+                    out_dtype=torch.float32,
+                    use_fast_accum=False,
+                )
+                chunk_outputs.append(
+                    (raw_output * probability_scale.float())
+                    .reshape(groups, chunk_tokens, -1)
+                    .to(query.dtype)
+                )
+            batch_outputs.append(
+                torch.cat(chunk_outputs, dim=1)
             )
             if output_attentions:
-                batch_weights.append(
-                    probabilities.reshape(groups, query_tokens, key_tokens).to(
-                        query.dtype
-                    )
-                )
-
-            # Absorb each V row's dynamic scale into the probability column.
-            # The second native E4M3 GEMM can then consume the cached V payload
-            # directly without ever constructing a BF16/FP16 V prefix.
-            scaled_probabilities = probabilities * value.scales[
-                batch, kv_head, :key_tokens, 0
-            ].float().unsqueeze(0)
-            probability_fp8, probability_scale = quantize_qvq_fp8_activation(
-                scaled_probabilities,
-                format=QVQ_FP8_ACTIVATION_FORMAT,
-                scale_method="dynamic_per_token",
-                validate=False,
-            )
-            value_fp8 = value.payload[batch, kv_head, :padded_keys]
-            if padded_keys != key_tokens:
-                probability_fp8 = F.pad(
-                    probability_fp8, (0, padded_keys - key_tokens)
-                )
-            raw_output = torch._scaled_mm(
-                probability_fp8,
-                value_fp8,
-                one,
-                one,
-                out_dtype=torch.float32,
-                use_fast_accum=False,
-            )
-            batch_outputs.append(
-                (raw_output * probability_scale.float())
-                .reshape(groups, query_tokens, -1)
-                .to(query.dtype)
-            )
+                batch_weights.append(torch.cat(chunk_weights, dim=1))
         outputs.append(torch.cat(batch_outputs, dim=0))
         if output_attentions:
             weights.append(torch.cat(batch_weights, dim=0))
 
     key.layer.native_attention_calls += 1
-    key.layer.native_qk_fp8_mm_calls += batch_size * kv_heads
-    key.layer.native_pv_fp8_mm_calls += batch_size * kv_heads
-    key.layer.native_qk_fp8_launches += batch_size * kv_heads
-    key.layer.native_pv_fp8_launches += batch_size * kv_heads
+    native_prefill_gemms = batch_size * kv_heads * query_chunks
+    key.layer.native_qk_fp8_mm_calls += native_prefill_gemms
+    key.layer.native_pv_fp8_mm_calls += native_prefill_gemms
+    key.layer.native_qk_fp8_launches += native_prefill_gemms
+    key.layer.native_pv_fp8_launches += native_prefill_gemms
     key.layer.native_attention_query_tokens += batch_size * query_heads * query_tokens
     output = torch.stack(outputs, dim=0).transpose(1, 2).contiguous()
     return output, torch.stack(weights, dim=0) if output_attentions else None

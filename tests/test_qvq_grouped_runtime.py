@@ -302,9 +302,11 @@ def test_h200_grouped_a8_executes_true_fp8_children_and_matches_independent_outp
     )
     telemetry = qvq_grouped_runtime_telemetry(attention)[0]
     assert telemetry["grouped_launches"] == 1
-    assert telemetry["grouped_a8_launches"] == 0
-    assert telemetry["shared_fp8_quantizations"] == 0
+    assert telemetry["grouped_a8_launches"] == 1
+    assert telemetry["shared_fp8_quantizations"] == 1
     assert telemetry["fp8_independent_child_launches"] == 3
+    assert telemetry["payload_builds"] == 0
+    assert telemetry["grouped_window_bytes"] == 0
     for child in children:
         fp8_telemetry = child.qvq_fp8_kernel_telemetry()
         assert fp8_telemetry["executed"] == 2

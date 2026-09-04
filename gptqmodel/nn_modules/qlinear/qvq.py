@@ -92,6 +92,7 @@ def _qvq_hadamard_fused(
     scale_mode: int = 0,
     pad_to_16: bool = False,
     output_fp16: bool = False,
+    output_bf16: bool = False,
 ) -> torch.Tensor:
     """One fused Hadamard launch (CUDA or CPU AVX-512); Python butterfly fallback otherwise.
 
@@ -172,13 +173,14 @@ def _qvq_hadamard_fused(
             scale_mode=mode,
             pad_to_16=pad_to_16,
             output_fp16=output_fp16,
+            output_bf16=output_bf16,
         )
     if input_scale is not None:
         source_dtype = torch.bfloat16 if input_rounding_mode == 1 else torch.float16
         x = dequantize_qvq_fp8_activation(x, input_scale, dtype=source_dtype)
         if pre_scale is not None:
             x = x.to(pre_scale.dtype)
-    if pad_to_16 or output_fp16:
+    if pad_to_16 or output_fp16 or output_bf16:
         raise RuntimeError(
             "requested QVQ Hadamard output specialization requires the native CUDA path"
         )
@@ -1582,8 +1584,26 @@ class QVQLinear(BaseQuantLinear):
         # completed linear result to the model dtype. This removes the
         # factorization-only FP16 overflow without host synchronization or a
         # duplicate BF16 path during CUDA-graph capture.
-        output = self._forward_compute_dtype(x_2d, compute_dtype)
-        if input_dtype == torch.bfloat16 and x.device.type == "cuda":
+        output = self._forward_compute_dtype(
+            x_2d, compute_dtype, output_dtype=input_dtype
+        )
+        # P32-operand A8 bounds the post-Hadamard input with an explicit FP8
+        # row scale, accumulates in FP32, and uses the range-safe FP32 output
+        # recovery.  Its result therefore does not need the legacy BF16 retry
+        # probe.  Besides being redundant, ``isfinite().all()`` synchronizes
+        # the host after every ungrouped projection (notably O and down) and
+        # serializes both prefill and decode.
+        range_safe_p32_fp8 = (
+            not self.training
+            and self.activation_quantization is not None
+            and self.activation_quantization.target == "p32_operand"
+            and self.activation_quantization.kernel_mode == "require"
+        )
+        if (
+            input_dtype == torch.bfloat16
+            and x.device.type == "cuda"
+            and not range_safe_p32_fp8
+        ):
             if torch.cuda.is_current_stream_capturing():
                 rescued = self._forward_compute_dtype(
                     x.reshape(-1, self.in_features).to(torch.bfloat16),
@@ -1702,6 +1722,77 @@ class QVQLinear(BaseQuantLinear):
             target_dtype
         )
 
+    def forward_prequantized_fp8(
+        self,
+        quantized: torch.Tensor,
+        scale: torch.Tensor,
+        *,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Consume one shared, already-quantized P32 activation operand.
+
+        Grouped QKV and gate/up projections have a proven-identical SU/Hadamard
+        transform.  Their dynamic per-row E4M3 conversion is therefore also
+        identical and may be performed once without changing checkpoint or
+        arithmetic semantics.
+        """
+
+        config = self.activation_quantization
+        if config is None or config.target != "p32_operand":
+            raise RuntimeError(
+                "prequantized QVQ input requires target=p32_operand"
+            )
+        if self.training:
+            raise RuntimeError("prequantized QVQ inference is unavailable in training mode")
+        if quantized.shape[-1] != self.in_features:
+            raise ValueError(
+                f"QVQ expected prequantized input width {self.in_features}, "
+                f"got {quantized.shape[-1]}"
+            )
+        compute_dtype = _qvq_compute_dtype(output_dtype, quantized.device.type)
+        quantized_2d = quantized.reshape(-1, self.in_features)
+        scale_2d = scale.reshape(-1, 1)
+        reason = (
+            "kernel_disabled"
+            if config.kernel_mode == "disable"
+            else self._fp8_kernel_ineligible_reason(quantized_2d)
+        )
+        if config.kernel_mode != "disable":
+            self._record_fp8_kernel("requested")
+        if reason is None:
+            self._record_fp8_kernel("eligible")
+            try:
+                output = self._inner_forward_fp8(quantized_2d, scale_2d)
+            except RuntimeError:
+                if config.kernel_mode == "require":
+                    self._record_fp8_kernel("rejected", "launch_error")
+                    raise
+                reason = "launch_error"
+            else:
+                self._record_fp8_kernel("executed")
+                recovered = self._recover_output_compute_dtype(
+                    output, compute_dtype, target_dtype=output_dtype
+                )
+                return recovered.reshape(
+                    *quantized.shape[:-1], self.out_features
+                ).to(output_dtype)
+        elif config.kernel_mode == "require":
+            self._record_fp8_kernel("rejected", reason)
+            raise RuntimeError(
+                f"required QVQ P32 FP8 WGMMA path is ineligible: {reason}"
+            )
+        self._record_fp8_kernel("fallback", reason)
+        transformed = dequantize_qvq_fp8_activation(
+            quantized_2d,
+            scale_2d,
+            dtype=compute_dtype,
+        )
+        output = self._inner_forward(transformed)
+        recovered = self._recover_output_compute_dtype(output, compute_dtype)
+        return recovered.reshape(*quantized.shape[:-1], self.out_features).to(
+            output_dtype
+        )
+
     def recover_output(
         self,
         inner_output: torch.Tensor,
@@ -1736,7 +1827,11 @@ class QVQLinear(BaseQuantLinear):
         )
 
     def _forward_compute_dtype(
-        self, x_2d: torch.Tensor, compute_dtype: torch.dtype
+        self,
+        x_2d: torch.Tensor,
+        compute_dtype: torch.dtype,
+        *,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(
             x_2d,
@@ -1804,7 +1899,7 @@ class QVQLinear(BaseQuantLinear):
             else:
                 transformed = x_2d * self._cached_cast("SU", compute_dtype)
             return self._forward_pretransformed_compute_dtype(
-                transformed, compute_dtype
+                transformed, compute_dtype, output_dtype=output_dtype
             )
         return output
 
@@ -1812,6 +1907,8 @@ class QVQLinear(BaseQuantLinear):
         self,
         transformed: torch.Tensor,
         compute_dtype: torch.dtype,
+        *,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         config = self.activation_quantization
         if config is not None and config.target == "p32_operand":
@@ -1837,7 +1934,9 @@ class QVQLinear(BaseQuantLinear):
                     reason = "launch_error"
                 else:
                     self._record_fp8_kernel("executed")
-                    return self._recover_output_compute_dtype(output, compute_dtype)
+                    return self._recover_output_compute_dtype(
+                        output, compute_dtype, target_dtype=output_dtype
+                    )
             elif config.kernel_mode == "require":
                 self._record_fp8_kernel("rejected", reason)
                 raise RuntimeError(f"required QVQ P32 FP8 WGMMA path is ineligible: {reason}")
@@ -1854,6 +1953,8 @@ class QVQLinear(BaseQuantLinear):
         self,
         output: torch.Tensor,
         compute_dtype: torch.dtype,
+        *,
+        target_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         output_dtype = output.dtype
         if self.output_hadamard:
@@ -1868,6 +1969,10 @@ class QVQLinear(BaseQuantLinear):
                     else 4
                     if output_dtype == torch.float32
                     else 0
+                ),
+                output_bf16=(
+                    target_dtype == torch.bfloat16
+                    and output_dtype == torch.float32
                 ),
             )
         output = output * self._cached_cast("SV", compute_dtype, output_dtype)

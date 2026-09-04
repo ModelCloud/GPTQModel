@@ -198,6 +198,7 @@ at::Tensor qvq_hadamard_cpu(
     int64_t scale_mode,
     bool pad_to_16,
     bool output_fp16,
+    bool output_bf16,
     const c10::optional<at::Tensor>& input_scale,
     int64_t input_rounding_mode) {
   TORCH_CHECK(input.device().is_cpu(), "qvq_hadamard_cpu: input must be a CPU tensor");
@@ -207,6 +208,7 @@ at::Tensor qvq_hadamard_cpu(
   TORCH_CHECK(scale_mode >= 0 && scale_mode <= 4, "qvq_hadamard_cpu: scale_mode must be in [0, 4]");
   TORCH_CHECK(!pad_to_16, "qvq_hadamard_cpu: padded M16 output is CUDA-only");
   TORCH_CHECK(!output_fp16, "qvq_hadamard_cpu: FP16 output is CUDA-only");
+  TORCH_CHECK(!output_bf16, "qvq_hadamard_cpu: BF16 output is CUDA-only");
   TORCH_CHECK(!input_scale.has_value() || !input_scale->defined(),
               "qvq_hadamard_cpu: scaled FP8 input is CUDA-only");
   TORCH_CHECK(input_rounding_mode == 0,
@@ -295,7 +297,7 @@ void qvq_def_shared_schema(DefFn&& def_fn) {
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   qvq_def_shared_schema([&] {
-    m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode, bool pad_to_16=False, bool output_fp16=False, Tensor? input_scale=None, int input_rounding_mode=0) -> Tensor");
+    m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode, bool pad_to_16=False, bool output_fp16=False, bool output_bf16=False, Tensor? input_scale=None, int input_rounding_mode=0) -> Tensor");
 });
 }
 

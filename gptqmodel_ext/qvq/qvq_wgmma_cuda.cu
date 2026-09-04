@@ -591,12 +591,12 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
     int bank_alt_id) {
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
   static_assert(
-      RowTilesPerCta == 1 || RowTilesPerCta == 2 || RowTilesPerCta == 4);
+      RowTilesPerCta == 1 || RowTilesPerCta == 2 || RowTilesPerCta == 4 ||
+      RowTilesPerCta == 8);
   constexpr int kInputTileElements = cute::cosize_v<Fp8WgmmaSmemLayoutB>;
-  // Keep four addressable tiles for the explicitly named CUTE tensor views.
-  // The inactive views are compile-time dead for the M16/M32 variants, and
-  // 3 KiB total shared memory is too small to affect Hopper occupancy.
-  __shared__ __align__(128) Fp8Element shared_input[4 * kInputTileElements];
+  // Keep eight addressable tiles for the explicitly named CUTE tensor views.
+  // Inactive views are compile-time dead for the narrower variants.
+  __shared__ __align__(128) Fp8Element shared_input[8 * kInputTileElements];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int n64_block = static_cast<int>(blockIdx.x);
@@ -617,6 +617,18 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
   auto sB3 = cute::make_tensor(
       cute::make_smem_ptr(shared_input + 3 * kInputTileElements),
       Fp8WgmmaSmemLayoutB{});
+  auto sB4 = cute::make_tensor(
+      cute::make_smem_ptr(shared_input + 4 * kInputTileElements),
+      Fp8WgmmaSmemLayoutB{});
+  auto sB5 = cute::make_tensor(
+      cute::make_smem_ptr(shared_input + 5 * kInputTileElements),
+      Fp8WgmmaSmemLayoutB{});
+  auto sB6 = cute::make_tensor(
+      cute::make_smem_ptr(shared_input + 6 * kInputTileElements),
+      Fp8WgmmaSmemLayoutB{});
+  auto sB7 = cute::make_tensor(
+      cute::make_smem_ptr(shared_input + 7 * kInputTileElements),
+      Fp8WgmmaSmemLayoutB{});
   Fp8WgmmaTiledMma tiled_mma;
   auto thread_mma = tiled_mma.get_thread_slice(thread);
   auto thread_shared_b = thread_mma.partition_B(sB);
@@ -624,6 +636,10 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
   auto fragment_b1 = thread_mma.make_fragment_B(thread_mma.partition_B(sB1));
   auto fragment_b2 = thread_mma.make_fragment_B(thread_mma.partition_B(sB2));
   auto fragment_b3 = thread_mma.make_fragment_B(thread_mma.partition_B(sB3));
+  auto fragment_b4 = thread_mma.make_fragment_B(thread_mma.partition_B(sB4));
+  auto fragment_b5 = thread_mma.make_fragment_B(thread_mma.partition_B(sB5));
+  auto fragment_b6 = thread_mma.make_fragment_B(thread_mma.partition_B(sB6));
+  auto fragment_b7 = thread_mma.make_fragment_B(thread_mma.partition_B(sB7));
 
   auto coordinate_a = cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_32{}));
   auto thread_coordinate_a = thread_mma.partition_A(coordinate_a);
@@ -636,18 +652,34 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
   auto accumulator1 = cute::make_tensor<float>(thread_coordinate_c.shape());
   auto accumulator2 = cute::make_tensor<float>(thread_coordinate_c.shape());
   auto accumulator3 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto accumulator4 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto accumulator5 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto accumulator6 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto accumulator7 = cute::make_tensor<float>(thread_coordinate_c.shape());
   auto scaled_accumulator = cute::make_tensor<float>(thread_coordinate_c.shape());
   auto scaled_accumulator1 = cute::make_tensor<float>(thread_coordinate_c.shape());
   auto scaled_accumulator2 = cute::make_tensor<float>(thread_coordinate_c.shape());
   auto scaled_accumulator3 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto scaled_accumulator4 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto scaled_accumulator5 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto scaled_accumulator6 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto scaled_accumulator7 = cute::make_tensor<float>(thread_coordinate_c.shape());
   cute::clear(accumulator);
   cute::clear(accumulator1);
   cute::clear(accumulator2);
   cute::clear(accumulator3);
+  cute::clear(accumulator4);
+  cute::clear(accumulator5);
+  cute::clear(accumulator6);
+  cute::clear(accumulator7);
   cute::clear(scaled_accumulator);
   cute::clear(scaled_accumulator1);
   cute::clear(scaled_accumulator2);
   cute::clear(scaled_accumulator3);
+  cute::clear(scaled_accumulator4);
+  cute::clear(scaled_accumulator5);
+  cute::clear(scaled_accumulator6);
+  cute::clear(scaled_accumulator7);
   tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
   constexpr int kAccumulatorValuesPerThread = cute::size(decltype(thread_coordinate_c){});
 
@@ -698,6 +730,14 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
       cute::warpgroup_fence_operand(accumulator2);
       cute::warpgroup_fence_operand(accumulator3);
     }
+    if constexpr (RowTilesPerCta == 8) {
+      cute::warpgroup_fence_operand(accumulator2);
+      cute::warpgroup_fence_operand(accumulator3);
+      cute::warpgroup_fence_operand(accumulator4);
+      cute::warpgroup_fence_operand(accumulator5);
+      cute::warpgroup_fence_operand(accumulator6);
+      cute::warpgroup_fence_operand(accumulator7);
+    }
     cute::warpgroup_arrive();
     cute::gemm(
         tiled_mma,
@@ -723,6 +763,38 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
           fragment_b3(cute::_, cute::_, cute::_0{}),
           accumulator3);
     }
+    if constexpr (RowTilesPerCta == 8) {
+      cute::gemm(
+          tiled_mma,
+          fragment_a(cute::_, cute::_, cute::_0{}),
+          fragment_b2(cute::_, cute::_, cute::_0{}),
+          accumulator2);
+      cute::gemm(
+          tiled_mma,
+          fragment_a(cute::_, cute::_, cute::_0{}),
+          fragment_b3(cute::_, cute::_, cute::_0{}),
+          accumulator3);
+      cute::gemm(
+          tiled_mma,
+          fragment_a(cute::_, cute::_, cute::_0{}),
+          fragment_b4(cute::_, cute::_, cute::_0{}),
+          accumulator4);
+      cute::gemm(
+          tiled_mma,
+          fragment_a(cute::_, cute::_, cute::_0{}),
+          fragment_b5(cute::_, cute::_, cute::_0{}),
+          accumulator5);
+      cute::gemm(
+          tiled_mma,
+          fragment_a(cute::_, cute::_, cute::_0{}),
+          fragment_b6(cute::_, cute::_, cute::_0{}),
+          accumulator6);
+      cute::gemm(
+          tiled_mma,
+          fragment_a(cute::_, cute::_, cute::_0{}),
+          fragment_b7(cute::_, cute::_, cute::_0{}),
+          accumulator7);
+    }
     tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
     cute::warpgroup_commit_batch();
     cute::warpgroup_wait<0>();
@@ -733,6 +805,14 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
     if constexpr (RowTilesPerCta == 4) {
       cute::warpgroup_fence_operand(accumulator2);
       cute::warpgroup_fence_operand(accumulator3);
+    }
+    if constexpr (RowTilesPerCta == 8) {
+      cute::warpgroup_fence_operand(accumulator2);
+      cute::warpgroup_fence_operand(accumulator3);
+      cute::warpgroup_fence_operand(accumulator4);
+      cute::warpgroup_fence_operand(accumulator5);
+      cute::warpgroup_fence_operand(accumulator6);
+      cute::warpgroup_fence_operand(accumulator7);
     }
 #pragma unroll
     for (int index = 0; index < kAccumulatorValuesPerThread; ++index) {
@@ -750,11 +830,29 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
         scaled_accumulator3(index) += accumulator3(index) *
             input_scale[row_base + 3 * kRows + output_row] * level_scale;
       }
+      if constexpr (RowTilesPerCta == 8) {
+        scaled_accumulator2(index) += accumulator2(index) *
+            input_scale[row_base + 2 * kRows + output_row] * level_scale;
+        scaled_accumulator3(index) += accumulator3(index) *
+            input_scale[row_base + 3 * kRows + output_row] * level_scale;
+        scaled_accumulator4(index) += accumulator4(index) *
+            input_scale[row_base + 4 * kRows + output_row] * level_scale;
+        scaled_accumulator5(index) += accumulator5(index) *
+            input_scale[row_base + 5 * kRows + output_row] * level_scale;
+        scaled_accumulator6(index) += accumulator6(index) *
+            input_scale[row_base + 6 * kRows + output_row] * level_scale;
+        scaled_accumulator7(index) += accumulator7(index) *
+            input_scale[row_base + 7 * kRows + output_row] * level_scale;
+      }
     }
     cute::clear(accumulator);
     cute::clear(accumulator1);
     cute::clear(accumulator2);
     cute::clear(accumulator3);
+    cute::clear(accumulator4);
+    cute::clear(accumulator5);
+    cute::clear(accumulator6);
+    cute::clear(accumulator7);
     tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
     __syncthreads();
   }
@@ -776,6 +874,20 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
              logical_n] = scaled_accumulator2(index);
       output[static_cast<int64_t>(row_base + 3 * kRows + output_row) * size_n +
              logical_n] = scaled_accumulator3(index);
+    }
+    if constexpr (RowTilesPerCta == 8) {
+      output[static_cast<int64_t>(row_base + 2 * kRows + output_row) * size_n +
+             logical_n] = scaled_accumulator2(index);
+      output[static_cast<int64_t>(row_base + 3 * kRows + output_row) * size_n +
+             logical_n] = scaled_accumulator3(index);
+      output[static_cast<int64_t>(row_base + 4 * kRows + output_row) * size_n +
+             logical_n] = scaled_accumulator4(index);
+      output[static_cast<int64_t>(row_base + 5 * kRows + output_row) * size_n +
+             logical_n] = scaled_accumulator5(index);
+      output[static_cast<int64_t>(row_base + 6 * kRows + output_row) * size_n +
+             logical_n] = scaled_accumulator6(index);
+      output[static_cast<int64_t>(row_base + 7 * kRows + output_row) * size_n +
+             logical_n] = scaled_accumulator7(index);
     }
   }
 #endif
@@ -2521,9 +2633,12 @@ at::Tensor qvq_p32_window_wgmma_fp8_m16_impl(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   // Two independent M16 CTAs are measurably faster than reuse-2 at M32 on
   // H200 because they provide a second wave across wide-N projections.  Once
-  // M reaches 64, reuse amortizes P32 decoding and wins; retain reuse-2 for
-  // larger shapes that are divisible by 32 but not 64.
-  const int row_tiles_per_cta = size_m >= 4 * kRows && size_m % (4 * kRows) == 0
+  // M reaches 64, reuse amortizes P32 decoding and wins; reuse-8 crosses over
+  // at M256 on H200.  Retain reuse-2 for larger shapes divisible by 32 but
+  // not 64.
+  const int row_tiles_per_cta = size_m >= 16 * kRows && size_m % (8 * kRows) == 0
+      ? 8
+      : size_m >= 4 * kRows && size_m % (4 * kRows) == 0
       ? 4
       : size_m > 2 * kRows && size_m % (2 * kRows) == 0 ? 2 : 1;
   const dim3 grid(
@@ -2542,7 +2657,9 @@ at::Tensor qvq_p32_window_wgmma_fp8_m16_impl(
           size_k,                                                                \
           size_n,                                                                \
           static_cast<int>(bank_alt_id))
-  if (row_tiles_per_cta == 4) {
+  if (row_tiles_per_cta == 8) {
+    QVQ_LAUNCH_FP8_ROW_REUSE(8);
+  } else if (row_tiles_per_cta == 4) {
     QVQ_LAUNCH_FP8_ROW_REUSE(4);
   } else if (row_tiles_per_cta == 2) {
     QVQ_LAUNCH_FP8_ROW_REUSE(2);

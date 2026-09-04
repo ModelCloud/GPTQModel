@@ -85,6 +85,29 @@ def test_qvq_fp8_activation_aliases_and_straight_through_gradient():
     assert torch.equal(source.grad, torch.ones_like(source))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16, torch.float32))
+@pytest.mark.parametrize("shape", ((17, 64), (257, 2048)))
+def test_hopper_fused_fp8_row_quantization_is_bit_exact(dtype, shape):
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) < (8, 9):
+        pytest.skip("fused E4M3 row quantization requires SM89 or newer")
+    generator = torch.Generator(device="cuda").manual_seed(20260904 + shape[0])
+    source = torch.randn(shape, generator=generator, device="cuda", dtype=dtype)
+    source[0].zero_()
+    working = source.float()
+    peak = working.abs().amax(dim=-1, keepdim=True)
+    expected_scale = torch.where(peak > 0, peak / 448.0, torch.ones_like(peak))
+    expected = torch.clamp(working / expected_scale, -448.0, 448.0).to(
+        torch.float8_e4m3fn
+    )
+
+    actual, scale = quantize_qvq_fp8_activation(source, validate=False)
+
+    assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+    assert torch.equal(scale.view(torch.int32), expected_scale.view(torch.int32))
+
+
 class _TinyCacheConfig:
     num_hidden_layers = 2
     is_encoder_decoder = False
@@ -299,6 +322,61 @@ def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(
     assert telemetry["allocations"] == 1
     assert telemetry["reallocations"] == 0
     assert layer.values.stride(-2) == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_h200_fp8_attention_chunks_large_prefill_without_dense_kv(monkeypatch):
+    capability = torch.cuda.get_device_capability()
+    if capability[0] != 9:
+        pytest.skip("Hopper is required")
+
+    import gptqmodel.nn_modules.qvq_fp8_cache as fp8_cache
+
+    monkeypatch.setattr(fp8_cache, "_QVQ_FP8_PREFILL_QUERY_CHUNK", 16)
+    torch.manual_seed(23)
+    cache = QVQFP8DynamicCache(_TinyCacheConfig(), QVQActivationConfig())
+    query = torch.randn(1, 8, 33, 64, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(1, 2, 33, 64, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(1, 2, 33, 64, device="cuda", dtype=torch.bfloat16)
+    key_view, value_view = cache.update(key, value, 0)
+
+    output, weights = qvq_fp8_attention_forward(
+        SimpleNamespace(num_key_value_groups=4, training=False),
+        query,
+        key_view,
+        value_view,
+        None,
+        scaling=0.125,
+        output_attentions=True,
+    )
+
+    layer = cache.layers[0]
+    dense_key = (
+        layer.keys[..., :33, :].float() * layer.key_scales[..., :33, :]
+    ).repeat_interleave(4, dim=1)
+    dense_value = (
+        layer.values[..., :33, :].float() * layer.value_scales[..., :33, :]
+    ).repeat_interleave(4, dim=1)
+    causal_mask = torch.full((33, 33), float("-inf"), device="cuda")
+    causal_mask = torch.triu(causal_mask, diagonal=1)
+    reference_weights = torch.softmax(
+        query.float() @ dense_key.transpose(2, 3) * 0.125 + causal_mask,
+        dim=-1,
+    )
+    reference = (reference_weights @ dense_value).transpose(1, 2)
+
+    assert output.shape == (1, 33, 8, 64)
+    assert weights.shape == (1, 8, 33, 33)
+    error = output.float() - reference
+    assert error.square().mean().item() < 3e-4
+    assert error.abs().max().item() < 0.15
+
+    telemetry = cache.telemetry()
+    expected_launches = 2 * 3
+    assert telemetry["native_qk_fp8_launches"] == expected_launches
+    assert telemetry["native_pv_fp8_launches"] == expected_launches
+    assert telemetry["dequantized_elements"] == 0
+    assert telemetry["dense_kv_prefix_materializations"] == 0
 
 
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))

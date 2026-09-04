@@ -76,9 +76,9 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_hadamard_pair_fp32_to_fp16,
     qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock,
     qvq_cuda_hadamard_pair_swiglu_precondition_multiblock,
-    qvq_cuda_qwen_composite_recovery_fp32_to_fp16,
-    qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16,
     qvq_cuda_qwen_composite_input_fp16_padded,
+    qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16,
+    qvq_cuda_qwen_composite_recovery_fp32_to_fp16,
     qvq_cuda_supported,
     qvq_cuda_swiglu_precondition,
     qvq_cuda_swiglu_precondition_multiblock,
@@ -604,6 +604,30 @@ def test_qvq_cuda_hadamard_fp16_final_store_guards():
             pad_to_16=True,
             output_fp16=True,
         )
+
+
+@pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("m", (1, 16, 256))
+def test_qvq_cuda_hadamard_bf16_final_store_is_bit_exact(scale_mode, m):
+    n = 2048
+    generator = torch.Generator(device="cuda").manual_seed(
+        20260904 + 10 * scale_mode + m
+    )
+    x = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float32)
+    post_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float32)
+    bias = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float32)
+    expected = qvq_cuda_hadamard(
+        x, post_scale=post_scale, bias=bias, scale_mode=scale_mode
+    ).to(torch.bfloat16)
+    actual = qvq_cuda_hadamard(
+        x,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=scale_mode,
+        output_bf16=True,
+    )
+    assert actual.dtype == torch.bfloat16
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
 
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))

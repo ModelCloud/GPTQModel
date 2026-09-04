@@ -29,6 +29,7 @@ from ..quantization.qvq import (
     repack_p32_planar_to_window,
     unpack_qvq_binary_bank_ids,
 )
+from ..quantization.qvq_activation import quantize_qvq_fp8_activation
 from ..quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
 from ..utils.qvq_wgmma_cuda import (
     QVQHopperGroupedP32Payload,
@@ -626,7 +627,6 @@ class QVQHopperGroupedRuntime:
             if rows <= 32
             else ((rows + 63) // 64) * 64
         )
-        payload = self._ensure_payload()
         direct_pad = self._h100_direct_padded_input_enabled and rows < 16
         use_qwen_composite_input = (
             self._h100_fp16_recovery_store_enabled
@@ -688,14 +688,23 @@ class QVQHopperGroupedRuntime:
             ):
                 if return_ordered_partials or not recover:
                     raise _R0Fallback("P32 FP8 grouped split-partial execution is not implemented")
-                # The first correctness phase keeps the proven shared SU/H
-                # transform but lets each child invoke the truthful native
-                # E4M3 P32 dispatch. A future grouped K32 kernel can share the
-                # final operand quantization without changing this contract.
+                config = children[0].activation_quantization
+                quantized, scale = quantize_qvq_fp8_activation(
+                    transformed[:rows],
+                    format=config.format,
+                    scale_method=config.scale_method,
+                    validate=False,
+                )
                 outputs = tuple(
-                    child.forward_pretransformed(transformed[:rows], output_dtype=x.dtype)
+                    child.forward_prequantized_fp8(
+                        quantized,
+                        scale,
+                        output_dtype=x.dtype,
+                    )
                     for child in children
                 )
+                self.telemetry.grouped_a8_launches += 1
+                self.telemetry.shared_fp8_quantizations += 1
                 self.telemetry.fp8_independent_child_launches += len(children)
                 return outputs
             if direct_pad:
@@ -710,6 +719,7 @@ class QVQHopperGroupedRuntime:
                     dtype=torch.float16,
                 )
                 padded[:rows].copy_(transformed)
+        payload = self._ensure_payload()
         from ..utils.qvq_cuda import _pgc16_levels
 
         if return_ordered_partials:

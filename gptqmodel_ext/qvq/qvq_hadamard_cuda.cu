@@ -46,6 +46,7 @@ struct QvqHadamardTraits<float> {
 };
 
 constexpr int kHadamardThreads = 1024;
+constexpr int kFp8QuantizeThreads = 256;
 constexpr int kHadamardPairMultiblockN = 8192;
 constexpr int kHadamardPairMultiblockTile = 256;
 constexpr int kHadamardPairMultiblockTiles =
@@ -72,6 +73,47 @@ constexpr int kHadamardInputMultiblockLowThreads =
 constexpr int kHadamardInputMultiblockHighThreads = 32;
 constexpr int kQwenCompositeN = 5120;
 constexpr int kQwenCompositeBase = 40;
+
+template <typename Scalar>
+__global__ void qvq_quantize_fp8_per_row_kernel(
+    const Scalar* __restrict__ input,
+    __nv_fp8_e4m3* __restrict__ output,
+    float* __restrict__ scales,
+    int columns) {
+  __shared__ float maxima[kFp8QuantizeThreads];
+  const int row = static_cast<int>(blockIdx.x);
+  const Scalar* input_row = input + static_cast<int64_t>(row) * columns;
+  __nv_fp8_e4m3* output_row = output + static_cast<int64_t>(row) * columns;
+  float peak = 0.0f;
+  for (int column = threadIdx.x; column < columns; column += blockDim.x) {
+    peak = fmaxf(
+        peak,
+        fabsf(QvqHadamardTraits<Scalar>::to_float(input_row[column])));
+  }
+  maxima[threadIdx.x] = peak;
+  __syncthreads();
+  for (int stride = kFp8QuantizeThreads / 2; stride > 0; stride >>= 1) {
+    if (threadIdx.x < stride) {
+      maxima[threadIdx.x] = fmaxf(maxima[threadIdx.x], maxima[threadIdx.x + stride]);
+    }
+    __syncthreads();
+  }
+  // PyTorch strength-reduces the scalar 448 divisor to this FP32 reciprocal.
+  // Preserve that exact SSA operation: an IEEE FDIV differs by one scale ULP
+  // for common peaks and can move values across an E4M3 rounding boundary.
+  const float scale = maxima[0] > 0.0f
+      ? maxima[0] * 0x1.24924ap-9f
+      : 1.0f;
+  if (threadIdx.x == 0) {
+    scales[row] = scale;
+  }
+  for (int column = threadIdx.x; column < columns; column += blockDim.x) {
+    float value = QvqHadamardTraits<Scalar>::to_float(input_row[column]) / scale;
+    // F2FP.SATFINITE.E4M3 performs the same finite saturation as the
+    // reference clamp; avoid two redundant FMNMX instructions per element.
+    output_row[column] = __nv_fp8_e4m3(value);
+  }
+}
 constexpr int kQwenCompositeLowN = kQwenCompositeN / kQwenCompositeBase;
 
 __device__ __forceinline__ float round_fp16_unless_overflow(float value) {
@@ -2034,6 +2076,48 @@ __global__ void qvq_swiglu_precondition_multiblock_half2_high_kernel(
   }
 }
 
+std::tuple<at::Tensor, at::Tensor> qvq_quantize_fp8_per_row_cuda(
+    const at::Tensor& input) {
+  TORCH_CHECK(input.is_cuda(), "FP8 row quantization requires a CUDA tensor");
+  TORCH_CHECK(input.dim() >= 1 && input.size(-1) > 0,
+              "FP8 row quantization requires a nonempty last dimension");
+  TORCH_CHECK(input.is_contiguous(), "FP8 row quantization requires contiguous input");
+  TORCH_CHECK(input.scalar_type() == at::kHalf ||
+                  input.scalar_type() == at::kBFloat16 ||
+                  input.scalar_type() == at::kFloat,
+              "FP8 row quantization supports FP16, BF16, or FP32 input");
+  const int64_t columns64 = input.size(-1);
+  const int64_t rows64 = input.numel() / columns64;
+  TORCH_CHECK(columns64 <= std::numeric_limits<int>::max() &&
+                  rows64 <= std::numeric_limits<int>::max(),
+              "FP8 row quantization dimensions exceed int32");
+  auto output = at::empty(input.sizes(), input.options().dtype(at::kFloat8_e4m3fn));
+  auto scale_sizes = input.sizes().vec();
+  scale_sizes.back() = 1;
+  auto scales = at::empty(scale_sizes, input.options().dtype(at::kFloat));
+  if (rows64 == 0) {
+    return {output, scales};
+  }
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  const dim3 grid(static_cast<unsigned int>(rows64));
+#define QVQ_LAUNCH_FP8_QUANTIZE(SCALAR)                                         \
+  qvq_quantize_fp8_per_row_kernel<SCALAR><<<grid, kFp8QuantizeThreads, 0, stream>>>( \
+      reinterpret_cast<const SCALAR*>(input.const_data_ptr()),                  \
+      reinterpret_cast<__nv_fp8_e4m3*>(output.mutable_data_ptr()),              \
+      scales.mutable_data_ptr<float>(), static_cast<int>(columns64))
+  if (input.scalar_type() == at::kHalf) {
+    QVQ_LAUNCH_FP8_QUANTIZE(half);
+  } else if (input.scalar_type() == at::kBFloat16) {
+    QVQ_LAUNCH_FP8_QUANTIZE(nv_bfloat16);
+  } else {
+    QVQ_LAUNCH_FP8_QUANTIZE(float);
+  }
+#undef QVQ_LAUNCH_FP8_QUANTIZE
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {output, scales};
+}
+
 at::Tensor qvq_hadamard_cuda(
     const at::Tensor& input,
     const c10::optional<at::Tensor>& pre_scale,
@@ -2042,6 +2126,7 @@ at::Tensor qvq_hadamard_cuda(
     int64_t scale_mode,
     bool pad_to_16,
     bool output_fp16,
+    bool output_bf16,
     const c10::optional<at::Tensor>& input_scale,
     int64_t input_rounding_mode) {
   TORCH_CHECK(input.is_cuda(), "input must be a CUDA tensor");
@@ -2067,15 +2152,19 @@ at::Tensor qvq_hadamard_cuda(
   TORCH_CHECK(rows <= std::numeric_limits<int>::max(), "row count exceeds int32 kernel limit");
   TORCH_CHECK(!pad_to_16 || (input.dim() == 2 && rows > 0 && rows <= 16),
               "padded Hadamard requires a nonempty 2D input with at most 16 rows");
-  TORCH_CHECK(!output_fp16 || (input.scalar_type() == at::kFloat && scale_mode >= 3 && !pad_to_16),
-              "FP16 Hadamard output requires FP32 input, scale mode 3/4, and no M16 padding");
+  TORCH_CHECK(!(output_fp16 && output_bf16),
+              "Hadamard output cannot request both FP16 and BF16");
+  TORCH_CHECK(!(output_fp16 || output_bf16) ||
+                  (input.scalar_type() == at::kFloat && scale_mode >= 3 && !pad_to_16),
+              "narrow Hadamard output requires FP32 input, scale mode 3/4, and no M16 padding");
 
   if (scaled_fp8) {
     TORCH_CHECK(input.scalar_type() == at::kFloat8_e4m3fn,
                 "input_scale requires float8_e4m3fn input");
     TORCH_CHECK((scale_mode == 1 || scale_mode == 2) && pre_scale.has_value() && pre_scale->defined() &&
-                    !post_scale.has_value() && !bias.has_value() && !output_fp16,
-                "scaled float8_e4m3fn requires mode 1/2, pre_scale, and no post_scale, bias, or output_fp16");
+                    !post_scale.has_value() && !bias.has_value() &&
+                    !output_fp16 && !output_bf16,
+                "scaled float8_e4m3fn requires mode 1/2, pre_scale, and no post_scale, bias, or narrow output");
     TORCH_CHECK(input_scale->is_cuda() && input_scale->device() == input.device() &&
                     input_scale->scalar_type() == at::kFloat && input_scale->is_contiguous() &&
                     input_scale->numel() == rows,
@@ -2108,6 +2197,10 @@ at::Tensor qvq_hadamard_cuda(
   if (rows == 0) {
     return scaled_fp8
         ? at::empty(input.sizes(), input.options().dtype(at::kHalf))
+        : output_fp16
+        ? at::empty(input.sizes(), input.options().dtype(at::kHalf))
+        : output_bf16
+        ? at::empty(input.sizes(), input.options().dtype(at::kBFloat16))
         : at::empty_like(input);
   }
 
@@ -2126,6 +2219,8 @@ at::Tensor qvq_hadamard_cuda(
           : at::empty(input.sizes(), input.options().dtype(at::kHalf)))
       : output_fp16
       ? at::empty(input.sizes(), input.options().dtype(at::kHalf))
+      : output_bf16
+      ? at::empty(input.sizes(), input.options().dtype(at::kBFloat16))
       : (pad_to_16 ? at::empty({16, n64}, input.options()) : at::empty_like(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   const dim3 grid(static_cast<unsigned int>(rows));
@@ -2184,6 +2279,10 @@ at::Tensor qvq_hadamard_cuda(
       C10_CUDA_CHECK(cudaFuncSetAttribute(
           qvq_hadamard_kernel<float, half, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
       QVQ_HADAMARD_LAUNCH(float, half, false)
+    } else if (output_bf16) {
+      C10_CUDA_CHECK(cudaFuncSetAttribute(
+          qvq_hadamard_kernel<float, nv_bfloat16, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(smem_bytes)));
+      QVQ_HADAMARD_LAUNCH(float, nv_bfloat16, false)
     } else {
       QVQ_HADAMARD_LAUNCH(float, float, false)
     }
@@ -3365,8 +3464,9 @@ void qvq_def_shared_schema(DefFn&& def_fn) {
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
+  m.def("quantize_fp8_per_row(Tensor input) -> (Tensor, Tensor)");
   qvq_def_shared_schema([&] {
-    m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode, bool pad_to_16=False, bool output_fp16=False, Tensor? input_scale=None, int input_rounding_mode=0) -> Tensor");
+    m.def("hadamard(Tensor input, Tensor? pre_scale, Tensor? post_scale, Tensor? bias, int scale_mode, bool pad_to_16=False, bool output_fp16=False, bool output_bf16=False, Tensor? input_scale=None, int input_rounding_mode=0) -> Tensor");
 });
   m.def("hadamard_pair_fp32_to_fp16(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode) -> (Tensor, Tensor)");
   m.def("hadamard_input_fp16_padded_multiblock(Tensor input, Tensor pre_scale) -> Tensor");
@@ -3384,6 +3484,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("hadamard", &qvq_hadamard_cuda);
+  m.impl("quantize_fp8_per_row", &qvq_quantize_fp8_per_row_cuda);
   m.impl("hadamard_pair_fp32_to_fp16", &qvq_hadamard_pair_fp32_to_fp16_cuda);
   m.impl("hadamard_input_fp16_padded_multiblock", &qvq_hadamard_input_fp16_padded_multiblock_cuda);
   m.impl("hadamard_ordered_split16_fp32_to_fp16", &qvq_hadamard_ordered_split16_fp32_to_fp16_cuda);

@@ -85,6 +85,19 @@ def quantize_qvq_fp8_activation(
     if validate and not bool(torch.isfinite(activation).all()):
         raise ValueError("QVQ A8 activation quantization requires finite values.")
 
+    if (
+        activation.device.type == "cuda"
+        and activation.dtype in (torch.float16, torch.bfloat16, torch.float32)
+        and activation.is_contiguous()
+        and torch.cuda.get_device_capability(activation.device) >= (8, 9)
+    ):
+        # One row-local CUDA kernel replaces the reference chain of FP32 cast,
+        # abs, reduction, where/divide, clamp, and E4M3 conversion.  The scale
+        # and saturation contract is bit-exact with the operations below.
+        from ..utils.qvq_cuda import qvq_cuda_quantize_fp8_per_row
+
+        return qvq_cuda_quantize_fp8_per_row(activation)
+
     fp8_dtype = getattr(torch, format)
     fp8_max = float(torch.finfo(fp8_dtype).max)
     working = activation.to(torch.float32)
