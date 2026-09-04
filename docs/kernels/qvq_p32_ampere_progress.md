@@ -3491,6 +3491,19 @@ no loss at W3.  Diagnostics are
 `artifacts/a100_p32_window/v26_candidate_m8_linearz_static40_20000.json` and
 `artifacts/a100_p32_window/v26_candidate_m8_linearz_static40_repeat20000.json`.
 
+## v60 M8 MLP-down static split specialization
+
+The M8 MLP-down route `(K,N)=(17408,5120)` uses the stable split-40 plan.  A
+guarded WMMA `StaticSplitCount=40` launch was exact in two matched 20,000-
+iteration candidate runs.  Fresh-main medians were
+`0.115712/0.116736/0.118784/0.119808 ms`; the candidate measured
+`0.113664/0.116736/0.118784/0.119808 ms` for W2/W2.5/W3/W3.5 in the first
+run, and `0.113664/0.116736/0.118784/0.119808 ms` in the repeat.  This is a
+repeatable one-event-tick improvement at W2 with no losses at the other rates.
+Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m8_mlpdown_static40_20000.json` and
+`artifacts/a100_p32_window/v26_candidate_m8_mlpdown_static40_repeat20000.json`.
+
 ## Reproduction
 
 ```bash
