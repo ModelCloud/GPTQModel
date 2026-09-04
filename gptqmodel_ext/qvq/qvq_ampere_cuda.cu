@@ -862,7 +862,11 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
 // row grid.  Keeping the row tile in the existing kernel body preserves the
 // exact decode and accumulation order while avoiding one host launch per row
 // chunk for prefill workloads.
-template <int TransitionBits>
+template <
+    int TransitionBits,
+    int StaticN = 0,
+    int StaticK = 0,
+    int StageKTiles = kStageKTiles>
 __global__ __launch_bounds__(kThreads) void p32_window_ampere_large_m_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -884,7 +888,9 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_large_m_kernel(
   const int n_block = static_cast<int>(blockIdx.x);
   const int split = static_cast<int>(blockIdx.z);
 #define QVQ_LARGE_M_BODY(FULL_ROWS) \
-  p32_window_ampere_kernel_body<TransitionBits, FULL_ROWS>( \
+  p32_window_ampere_kernel_body< \
+      TransitionBits, FULL_ROWS, 0, StaticN, false, false, StaticK, false, \
+      false, false, false, StageKTiles>( \
       input + static_cast<int64_t>(row_offset) * size_k, \
       trellis, \
       levels, \
@@ -1827,19 +1833,55 @@ at::Tensor p32_window_ampere_impl(
         static_cast<unsigned>((n_tiles + kTilesPerBlock - 1) / kTilesPerBlock),
         static_cast<unsigned>((size_m + kRows - 1) / kRows),
         static_cast<unsigned>(split_count));
-    p32_window_ampere_large_m_kernel<TransitionBits>
-        <<<large_grid, kThreads, 0, stream>>>(
-        input_ptr,
-        trellis_ptr,
-        levels_ptr,
-        bank_ids_ptr,
-        partial_output_ptr,
-        output_ptr,
-        size_m,
-        size_k,
-        size_n,
-        static_cast<int>(split_count),
-        static_cast<int>(bank_alt_id));
+    if (size_k == 5120 && size_n == 1024) {
+      p32_window_ampere_large_m_kernel<TransitionBits, 1024, 5120, 2>
+          <<<large_grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, partial_output_ptr,
+          output_ptr, size_m, size_k, size_n, static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id));
+    } else if (size_k == 5120 && size_n == 12288) {
+      p32_window_ampere_large_m_kernel<TransitionBits, 12288, 5120, 3>
+          <<<large_grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, partial_output_ptr,
+          output_ptr, size_m, size_k, size_n, static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id));
+    } else if (size_k == 6144 && size_n == 5120) {
+      p32_window_ampere_large_m_kernel<TransitionBits, 5120, 6144, 3>
+          <<<large_grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, partial_output_ptr,
+          output_ptr, size_m, size_k, size_n, static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id));
+    } else if (size_k == 5120 && size_n == 10240) {
+      p32_window_ampere_large_m_kernel<TransitionBits, 10240, 5120, 3>
+          <<<large_grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, partial_output_ptr,
+          output_ptr, size_m, size_k, size_n, static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id));
+    } else if (size_k == 5120 && size_n == 6144) {
+      p32_window_ampere_large_m_kernel<TransitionBits, 6144, 5120, 3>
+          <<<large_grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, partial_output_ptr,
+          output_ptr, size_m, size_k, size_n, static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id));
+    } else if (size_k == 5120 && size_n == 17408) {
+      p32_window_ampere_large_m_kernel<TransitionBits, 17408, 5120, 3>
+          <<<large_grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, partial_output_ptr,
+          output_ptr, size_m, size_k, size_n, static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id));
+    } else if (size_k == 17408 && size_n == 5120) {
+      p32_window_ampere_large_m_kernel<TransitionBits, 5120, 17408, 3>
+          <<<large_grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, partial_output_ptr,
+          output_ptr, size_m, size_k, size_n, static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id));
+    } else {
+      p32_window_ampere_large_m_kernel<TransitionBits>
+          <<<large_grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, partial_output_ptr,
+          output_ptr, size_m, size_k, size_n, static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id));
+    }
   } else if (size_m == 1 && size_k == 5120 && size_n == 12288 &&
       split_count == 40 &&
       launch_static_n_scalar_kernel<
