@@ -3412,6 +3412,15 @@ event tick: medians were
 changes were reverted; diagnostic:
 `artifacts/a100_p32_window/v52_candidate_m8_fullq_static_split14_8000.json`.
 
+## v53 rejected M1 full-KV compile-time-K probe
+
+The accepted M1 full-KV scalar route `(K,N)=(5120,1024)` already uses static
+split 56 and a matching reducer.  Adding `StaticK=5120` preserved exactness,
+but the 20,000-iteration probe measured
+`0.034816/0.033792/0.035840/0.033792 ms`; this was slower than the retained
+static-split path at W2 and W3.  The source addition was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v53_candidate_m1_fullkv_statick_20000.json`.
+
 ## Reproduction
 
 ```bash
