@@ -408,3 +408,85 @@ speedup is `22.41-22.91x`.  Relative to the first folded-FP8 implementation,
 the promoted eight-value conversion adds another `1.085-1.094x`.  All four
 rates beat both W4 comparators and remain below the unchanged `2e-3`
 dense-P32 maximum-error gate.
+
+## Prefill-to-decode cache lifecycle
+
+The lifecycle benchmark requires every prefill M to be at least 8192 and
+asserts that each prefill advances the folded-FP8 launch counter.  It first
+times the cache-disabled exact P32 path, enables and constructs the cache at
+M8192, reuses that same payload at M8192 and M16384, and finally measures
+decode M1-M16.  Every decode measurement asserts that the FP8-prefill launch
+counter remains unchanged.  Thus a decode row cannot be mislabeled as a
+cached-prefill execution.
+
+Warm-prefill results:
+
+| Rate | M x K x N | QVQ us | vs Marlin W4 | vs Machete W4 | Better than exact P32 |
+| ---: | ---: | ---: | ---: | ---: | :---: |
+| W2 | 8192 x 2048 x 3072 | 101.814 | 3.017x | 2.256x | Yes |
+| W2 | 16384 x 2048 x 3072 | 202.384 | 3.073x | 2.351x | Yes |
+| W2.5 | 8192 x 2048 x 3072 | 102.022 | 3.011x | 2.251x | Yes |
+| W2.5 | 16384 x 2048 x 3072 | 202.384 | 3.073x | 2.351x | Yes |
+| W3 | 8192 x 2048 x 3072 | 101.821 | 3.017x | 2.255x | Yes |
+| W3 | 16384 x 2048 x 3072 | 202.416 | 3.073x | 2.350x | Yes |
+| W3.5 | 8192 x 2048 x 3072 | 102.029 | 3.011x | 2.251x | Yes |
+| W3.5 | 16384 x 2048 x 3072 | 203.421 | 3.057x | 2.339x | Yes |
+
+Speedup versus cache-disabled exact row multiplexing is `22.14-22.76x` at
+M8192 and `22.30-22.83x` at M16384.  Maximum dense-P32-oracle error is
+`6.66e-4` at M8192 and `6.22e-4` at M16384.
+
+Decode after the cache has been created:
+
+| Rate | M x K x N | QVQ us | vs Marlin W4 | vs Machete W4 | Better than before cache |
+| ---: | ---: | ---: | ---: | ---: | :---: |
+| W2 | 1 x 2048 x 3072 | 27.536 | 1.799x | 1.271x | Yes |
+| W2 | 2 x 2048 x 3072 | 27.702 | 2.105x | 1.269x | No |
+| W2 | 4 x 2048 x 3072 | 27.968 | 2.121x | 1.247x | Yes |
+| W2 | 8 x 2048 x 3072 | 28.477 | 1.792x | 1.225x | No |
+| W2 | 16 x 2048 x 3072 | 28.611 | 1.906x | 1.221x | No |
+| W2.5 | 1 x 2048 x 3072 | 27.507 | 1.800x | 1.272x | No |
+| W2.5 | 2 x 2048 x 3072 | 27.744 | 2.102x | 1.267x | No |
+| W2.5 | 4 x 2048 x 3072 | 27.728 | 2.140x | 1.258x | Yes |
+| W2.5 | 8 x 2048 x 3072 | 28.192 | 1.811x | 1.238x | Yes |
+| W2.5 | 16 x 2048 x 3072 | 28.432 | 1.918x | 1.229x | Yes |
+| W3 | 1 x 2048 x 3072 | 27.382 | 1.809x | 1.278x | No |
+| W3 | 2 x 2048 x 3072 | 27.747 | 2.102x | 1.267x | No |
+| W3 | 4 x 2048 x 3072 | 27.786 | 2.135x | 1.255x | No |
+| W3 | 8 x 2048 x 3072 | 28.160 | 1.813x | 1.239x | No |
+| W3 | 16 x 2048 x 3072 | 28.416 | 1.919x | 1.229x | No |
+| W3.5 | 1 x 2048 x 3072 | 27.494 | 1.801x | 1.273x | Yes |
+| W3.5 | 2 x 2048 x 3072 | 27.702 | 2.105x | 1.269x | Yes |
+| W3.5 | 4 x 2048 x 3072 | 27.939 | 2.123x | 1.248x | No |
+| W3.5 | 8 x 2048 x 3072 | 28.173 | 1.812x | 1.239x | Yes |
+| W3.5 | 16 x 2048 x 3072 | 28.461 | 1.916x | 1.227x | Yes |
+
+The strict cell count is 9 improvements and 11 regressions, but the geometric
+mean of before/after-cache decode ratios is `0.9995x`; the complete spread is
+`0.9906-1.0070x`.  This is run-to-run variation around an unchanged exact
+decode path, not a systematic decode gain or loss.
+
+### VRAM and construction cost
+
+| Quantity | Measured value |
+| :--- | ---: |
+| Persistent FP8 cache per QKV group | 6.000 MiB |
+| Persistent cache for 16 Llama layers | 96.000 MiB |
+| Fraction of this 97,871-MiB H100 | 0.0986% |
+| Warm per-layer construction | 8.50-8.96 ms |
+| Per-layer construction peak allocation | about 802 MiB |
+| First-process initialization plus W2 construction | 74.75 ms, 38.0 MiB live |
+
+The construction peak is temporary and is reused as layers are folded; it is
+not 802 MiB times sixteen.  Including fifteen already-built 6-MiB caches, the
+last sequential layer build stays below roughly 892 MiB, or 0.91% of this
+H100.  Persistent storage is model-wide and does not grow with M, number of
+requests, or decode steps.
+
+The cache is nevertheless large relative to the compressed QKV source: 4.0x
+the ideal W2 bitstream, 3.2x W2.5, 2.67x W3, and 2.29x W3.5.  The first request
+also pays construction.  At M8192 the 8.5-9.0-ms cold call breaks even around
+the fourth total prefill, after approximately three reuse calls save about
+2.2 ms each.  At M16384 it breaks even around the second total prefill.  The
+cache is therefore appropriate for a reused serving model with large
+prefills, not a one-shot request or a memory-constrained deployment.
