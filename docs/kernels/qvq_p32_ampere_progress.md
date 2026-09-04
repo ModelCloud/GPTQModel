@@ -3442,6 +3442,16 @@ W2 tick was outweighed by regressions at the other rates, so the template
 extension and dispatch were reverted.  Diagnostic:
 `artifacts/a100_p32_window/v25_candidate_m16_mlpdown_static24_20000.json`.
 
+## v56 rejected M16 long-K four-stage probe
+
+As a barrier-cost follow-up, I screened a four-K16 stage on the same M16
+long-K MLP-down WMMA route.  It remained exact, but the first two matched
+rates regressed sharply: W2 moved from the retained `0.124928 ms` control to
+`0.145408 ms`, and W2.5 from `0.124928 ms` to `0.143360 ms`.  The run was
+stopped before the remaining rates and the stage-4 dispatch was reverted; no
+performance claim is made.  The interrupted diagnostic did not produce a
+JSON artifact.
+
 ## Reproduction
 
 ```bash
