@@ -3177,6 +3177,20 @@ preserved (`max_abs <= 1.4e-5`), but the source probe was reverted.  The
 diagnostics are `artifacts/a100_p32_window/v30_candidate_m1_linearz_dynamic_8000.json`
 and `artifacts/a100_p32_window/v30_candidate_m1_linearz_static40_8000.json`.
 
+## v31 M1 MLP gate/up static split specialization
+
+The M1 MLP gate/up route `(K,N)=(5120,17408)` autotunes to split 40 on all
+rates.  A guarded compile-time split-40 main-kernel launch is exact under the
+formal suite (56/56) and reproduced over two 8,000-iteration runs.  Dynamic
+medians were `0.079872/0.088064/0.088064/0.092160 ms`; static medians were
+`0.079872/0.087040/0.088064/0.091136 ms` at W2/W2.5/W3/W3.5.  The four-rate
+geometric mean improves `0.0869228→0.0864272 ms` (`1.0057x`, 0.57%), with
+`max_abs <= 1.4e-5`.  Diagnostics are
+`artifacts/a100_p32_window/v31_candidate_m1_mlpgate_dynamic_8000.json`,
+`artifacts/a100_p32_window/v31_candidate_m1_mlpgate_static40_8000.json`, and
+`artifacts/a100_p32_window/v31_candidate_m1_mlpgate_static40_repeat8000.json`.
+This remains shape-local; the full-matrix 10% target is still open.
+
 ## Reproduction
 
 ```bash
