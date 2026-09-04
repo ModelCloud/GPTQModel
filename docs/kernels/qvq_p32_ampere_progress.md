@@ -3736,6 +3736,14 @@ scan found the expected unrolled MMA/row-group body; remaining integer
 instructions are tile-address and circular-state indexing, so no additional
 algebraic reduction was retained after this commit.
 
+## v78 rejected sixteen-row-group reuse
+
+A stage-3-only attempt to reuse one packed tile across 16 adjacent row groups
+was rejected by `ptxas` before execution.  The doubled input staging tile
+requires `0xc618`--`0x10820` bytes of static shared memory across the generated
+rate/N variants, exceeding Ampere's `0xc000` per-block limit.  The probe
+produced no binary and made no source change to the retained dispatch.
+
 ## Reproduction
 
 ```bash
