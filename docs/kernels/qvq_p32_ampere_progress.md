@@ -3387,6 +3387,20 @@ and `artifacts/a100_p32_window/v50_candidate_m2_linearqkv_static40_20000.json`;
 the v43 full sweep provides the dynamic control.  The full-matrix 10% target
 remains open.
 
+## v51 M4 linear-QKV static split specialization
+
+The M4 linear-QKV route `(K,N)=(5120,10240)` consistently selects split 40.
+A guarded static-split-40 scalar launch was exact in two runs.  The 20,000-
+iteration medians were `0.065536/0.072704/0.074752/0.074752 ms`; the 8,000-
+iteration repeat was `0.065536/0.072704/0.074752/0.073728 ms`, versus the v43
+dynamic sweep's `0.066560/0.073728/0.075776/0.073728 ms`.  The long run moves
+the four-rate geometric mean `0.0723607→0.0718325 ms` (0.73% shape-local),
+with `max_abs <= 1.8e-5`.  The formal Ampere suite remains 56/56.  Diagnostics
+are `artifacts/a100_p32_window/v51_candidate_m4_linearqkv_static40_20000.json`
+and `artifacts/a100_p32_window/v51_candidate_m4_linearqkv_static40_repeat8000.json`;
+the v43 full sweep provides the dynamic control.  The full-matrix 10% target
+remains open.
+
 ## Reproduction
 
 ```bash
