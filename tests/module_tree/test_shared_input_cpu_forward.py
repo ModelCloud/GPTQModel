@@ -55,16 +55,22 @@ def _linear_attn_cfg(name):
 
 
 # name -> (config factory, expected shared (leader, follower) pairs that must be verified in layer 0)
+_DENSE_PAIRS = [
+    ("self_attn.q_proj", "self_attn.k_proj"),
+    ("self_attn.q_proj", "self_attn.v_proj"),
+    ("mlp.gate_proj", "mlp.up_proj"),
+]
+
 CASES = {
     "llama": (
         lambda: _cfg("LlamaConfig"),
-        [("self_attn.q_proj", "self_attn.v_proj"), ("mlp.gate_proj", "mlp.up_proj")],
+        _DENSE_PAIRS,
     ),
-    "qwen2": (lambda: _cfg("Qwen2Config"), [("self_attn.q_proj", "self_attn.k_proj")]),
-    "qwen3": (lambda: _cfg("Qwen3Config"), [("self_attn.q_proj", "self_attn.k_proj")]),
-    "mistral": (lambda: _cfg("MistralConfig"), [("mlp.gate_proj", "mlp.up_proj")]),
-    "gemma2": (lambda: _cfg("Gemma2Config", head_dim=16), [("self_attn.q_proj", "self_attn.v_proj")]),
-    "gemma3_text": (lambda: _cfg("Gemma3TextConfig", head_dim=16), [("mlp.gate_proj", "mlp.up_proj")]),
+    "qwen2": (lambda: _cfg("Qwen2Config"), _DENSE_PAIRS),
+    "qwen3": (lambda: _cfg("Qwen3Config"), _DENSE_PAIRS),
+    "mistral": (lambda: _cfg("MistralConfig"), _DENSE_PAIRS),
+    "gemma2": (lambda: _cfg("Gemma2Config", head_dim=16), _DENSE_PAIRS),
+    "gemma3_text": (lambda: _cfg("Gemma3TextConfig", head_dim=16), _DENSE_PAIRS),
     "phi3": (
         lambda: _cfg("Phi3Config", pad_token_id=0, eos_token_id=1, bos_token_id=2),
         [],
@@ -106,7 +112,12 @@ CASES = {
             n_group=1,
             topk_group=1,
         ),
-        [("self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa")],
+        [
+            ("self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"),
+            ("mlp.gate_proj", "mlp.up_proj"),
+            ("mlp.experts.0.gate_proj", "mlp.experts.0.up_proj"),
+            ("mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"),
+        ],
     ),
     "glm4_moe": (
         lambda: _cfg(
@@ -120,15 +131,31 @@ CASES = {
             n_group=1,
             topk_group=1,
         ),
-        [("self_attn.q_proj", "self_attn.v_proj")],
+        [
+            ("self_attn.q_proj", "self_attn.v_proj"),
+            ("mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj"),
+            ("mlp.experts.0.gate_proj", "mlp.experts.0.up_proj"),
+        ],
     ),
     "qwen3_5_moe": (
         lambda: _linear_attn_cfg("Qwen3_5MoeTextConfig"),
-        [("mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj")],
+        [
+            ("mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"),
+            ("linear_attn.in_proj_qkv", "linear_attn.in_proj_z"),
+            ("self_attn.q_proj", "self_attn.v_proj"),
+        ],
+    ),
+    "qwen3_5_text": (
+        lambda: _linear_attn_cfg("Qwen3_5TextConfig"),
+        [
+            ("mlp.gate_proj", "mlp.up_proj"),
+            ("linear_attn.in_proj_qkv", "linear_attn.in_proj_z"),
+            ("self_attn.q_proj", "self_attn.v_proj"),
+        ],
     ),
     "qwen3_next": (
         lambda: _linear_attn_cfg("Qwen3NextConfig"),
-        [("mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj")],
+        [("mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj"), ("self_attn.q_proj", "self_attn.v_proj")],
     ),
     "gpt_oss": (
         lambda: _cfg(
@@ -189,7 +216,12 @@ def test_plan_matches_real_forward_inputs(name):
         report = _probe_layer(model, layer, plan)
 
         assert report.ok, f"{name} layer {layer_index}:\n{report.describe()}"
+        assert report.fully_verified and not report.has_errors
+        assert report.undeclared == (), f"{name} layer {layer_index}: {report.undeclared}"
         assert report.missing_modules == ()
+        # Dedup is opt-in only: every multi-module group must come from an explicit `:in=` tag.
+        for group in plan.shared_groups:
+            assert group.explicit, (name, group)
         assert report.unverified == (), f"{name} layer {layer_index}: {report.unverified}"
         for module in plan.modules:
             assert report.call_counts[module] >= 1, (name, layer_index, module)
@@ -220,22 +252,41 @@ def test_plan_covers_every_quantizable_linear(name):
 def test_probe_detects_wrong_tag_on_real_model():
     """Removing the MLA `:in=` split would wrongly group q_b_proj with kv_b_proj; the probe must catch it."""
     cfg, qmodel_cls, model, layers, _ = _build("deepseek_v3")
-    untagged_tree = [
+    bad_tree = [
         "model",
         "layers",
         "#",
         {
-            "self_attn": ("q_proj:0", "q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:1", "kv_b_proj:1", "o_proj:2"),
+            "self_attn": (
+                "q_a_proj:0:in=h",
+                "kv_a_proj_with_mqa:0:in=h",
+                "q_b_proj:1:in=latent",
+                "kv_b_proj:1:in=latent",
+                "o_proj:2",
+            ),
         },
     ]
     layer_modules = [["self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa"], ["self_attn.q_b_proj", "self_attn.kv_b_proj"]]
-    bad_plan = build_shared_input_plan(untagged_tree, layer_modules)
+    bad_plan = build_shared_input_plan(bad_tree, layer_modules)
     assert bad_plan.shares_input("self_attn.q_b_proj", "self_attn.kv_b_proj")
 
     report = _probe_layer(model, layers[0], bad_plan)
     assert not report.ok
+    assert report.has_errors
     assert {(m.leader, m.module) for m in report.mismatches} == {("self_attn.q_b_proj", "self_attn.kv_b_proj")}
-    assert "self_attn:0" in report.verified
+    assert "self_attn:in=h" in report.verified
+
+
+def test_probe_flags_missing_opt_in_on_real_model():
+    """An untagged q/k/v triple is safe (singletons) but the probe reports the missed dedup as `undeclared`."""
+    cfg, qmodel_cls, model, layers, _ = _build("llama")
+    tree = ["model", "layers", "#", {"self_attn": ("q_proj:0", "k_proj:0", "v_proj:0")}]
+    plan = build_shared_input_plan(tree, [["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]])
+    assert plan.shared_groups == ()
+    report = _probe_layer(model, layers[0], plan)
+    assert report.mismatches == ()
+    assert len(report.undeclared) == 3
+    assert report.has_errors and not report.ok
 
 
 def test_probe_reports_undeclared_sharing_on_real_model():
@@ -265,7 +316,10 @@ def test_moe_unrouted_expert_is_reported_unverified():
     plan = qmodel_cls.shared_input_plan(cfg, QC).filter_modules(dict(layer.named_modules()))
     input_ids = torch.randint(0, VOCAB, (1, 1))
     report = probe_shared_inputs(layer, plan, lambda: model(input_ids, use_cache=False))
-    assert report.ok
+    # Nothing contradicted the plan, but idle experts were not exercised -> strict `ok` is False.
+    assert not report.has_errors
+    assert not report.fully_verified
+    assert not report.ok
     routed = [m for m in plan.modules if m.startswith("mlp.experts.") and report.call_counts[m]]
     assert len(routed) == 3  # exactly one expert (gate/up/down) ran for the single token
     assert len(report.unverified) == 3 * 2  # 3 idle experts x (gate/up group, down group)

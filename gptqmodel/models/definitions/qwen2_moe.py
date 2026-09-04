@@ -29,14 +29,14 @@ class Qwen2MoeQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe:?": {
                 "gate": ("gate:!",),
                 "shared_expert_gate": ("shared_expert_gate:!",),
-                "shared_expert:0": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_expert:0": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
                 "experts:0": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                    "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
                 },
             },
         }

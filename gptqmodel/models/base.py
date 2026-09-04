@@ -766,8 +766,8 @@ class BaseQModel(nn.Module):
         Group the quantizable modules of one decoder layer by shared input tensor.
 
         Modules in the same group consume identical activations, so Hessian (X^T X)
-        collection only needs to run for the group leader. Grouping defaults to
-        (parent module, subset tag) and can be overridden per leaf with `:in=<tag>`.
+        collection only needs to run for the group leader. Every module is a singleton
+        unless sibling leaves opt in with the same `:in=<tag>` flag.
         """
         layer_modules = cls.simple_layer_modules(model_config, quantize_config, is_awq_quantize=is_awq_quantize)
         return build_shared_input_plan(cls.module_tree, layer_modules)

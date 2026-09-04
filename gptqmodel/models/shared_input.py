@@ -12,16 +12,22 @@ the Hessian once per group (the ``leader``) and share it with the ``followers``.
 
 Grouping rules (per decoder layer, relative module paths):
 
-* Default: quantizable modules that live under the same immediate parent module and land
-  in the same expanded subset block (``simple_layer_modules`` index, which already folds in
-  ``:<digit>`` tags and nested-dict group offsets) are assumed to share their input.
-* Explicit: a ``:in=<tag>`` flag on a ``module_tree`` leaf overrides the default. Leaves
-  under the same parent with the same tag share an input; leaves with different tags never
-  do, even when they sit in the same subset.  Tags may span subsets (e.g. Qwen3.5
-  ``linear_attn.in_proj_qkv:0:in=x`` and ``linear_attn.in_proj_z:1:in=x``).
+* Default: every quantizable module is a singleton group. Subset digits (``:0``) describe
+  quantization/execution order, not tensor identity, so they are never used to infer sharing.
+* Explicit opt-in: leaves under the same immediate parent that carry the same ``:in=<tag>``
+  flag share an input. Leaves with different tags (or no tag) never share, even when they sit
+  in the same subset. Tags may span subsets (e.g. Qwen3.5 ``linear_attn.in_proj_qkv:0:in=x``
+  and ``linear_attn.in_proj_z:1:in=x``). Tags are scoped to the parent, so ``in=x`` on
+  ``self_attn.*`` and ``mlp.*`` yields two independent groups.
 * MoE expert placeholders (``experts.#``) expand per expert; each expert is its own parent,
   so routed experts never share with each other.
 * Non-quantized (``:!``) and capture-only (``:?``) leaves never join a group.
+* A leaf that appears in several ``module_tree`` variants must carry identical metadata;
+  conflicting ``:in=``/``:!``/``:?``/subset flags raise :class:`ValueError`.
+
+Only definitions whose groups were verified against a real forward pass (see
+:func:`probe_shared_inputs` and ``tests/module_tree/test_shared_input_cpu_forward.py``)
+should carry ``:in=`` tags: a wrong tag silently reuses the wrong Hessian.
 
 All structures are immutable and the derivation is a pure function of the definition plus
 ``model_config``/``quantize_config``; it is safe to call concurrently (GIL=0).
@@ -88,22 +94,26 @@ class LeafSpec:
 def collect_leaf_specs(module_tree: Any) -> Dict[str, LeafSpec]:
     """Walk every ``module_tree`` variant and return ``{template_path: LeafSpec}``.
 
-    The first definition of a template wins so variant trees cannot silently
-    re-tag a shared leaf.
+    A template repeated across variants must resolve to an identical :class:`LeafSpec`;
+    otherwise a :class:`ValueError` is raised so a variant cannot silently re-tag a leaf.
     """
     specs: Dict[str, LeafSpec] = {}
 
     def record(template: str, flags: List[str]) -> None:
-        if template in specs:
-            return
         subset_tag = next((int(f) for f in flags if f.isdigit()), 0)
         quantize = not any(f in ("!", "?") for f in flags)
-        specs[template] = LeafSpec(
+        new = LeafSpec(
             template=template,
             subset_tag=subset_tag,
             input_tag=parse_shared_input_tag(flags),
             quantize=quantize,
         )
+        old = specs.get(template)
+        if old is not None and old != new:
+            raise ValueError(
+                f"conflicting module_tree metadata for `{template}` across variants: {old} vs {new}"
+            )
+        specs.setdefault(template, new)
 
     def walk(parent: str, node: Any) -> None:
         if isinstance(node, (tuple, list)):
@@ -225,6 +235,10 @@ class SharedInputPlan:
         group = self._by_module.get(module)
         return module if group is None else group.leader
 
+    def is_explicit(self, module: str) -> bool:
+        group = self._by_module.get(module)
+        return group is not None and group.explicit
+
     def followers_of(self, module: str) -> Tuple[str, ...]:
         group = self._by_module.get(module)
         if group is None or group.leader != module:
@@ -302,7 +316,8 @@ def build_shared_input_plan(
 
     ``layer_modules`` must already be expert-expanded and filtered the same way the
     looper sees them (``BaseQModel.simple_layer_modules``). Entries flagged ``:!``/``:?``
-    are ignored.
+    are ignored. Modules without an ``:in=<tag>`` become singleton groups keyed by their
+    own path; tagged modules group under ``<parent>:in=<tag>``.
     """
     specs = collect_leaf_specs(module_tree)
 
@@ -329,7 +344,7 @@ def build_shared_input_plan(
                 key = f"{parent}:{SHARED_INPUT_FLAG_PREFIX}{spec.input_tag}"
                 explicit = True
             else:
-                key = f"{parent}:{subset_index}"
+                key = name
                 explicit = False
 
             if key not in members:
@@ -376,8 +391,22 @@ class SharedInputProbeReport:
     call_counts: Dict[str, int]
 
     @property
+    def has_errors(self) -> bool:
+        """A declared group received different inputs, or undeclared modules received identical ones."""
+        return bool(self.mismatches or self.undeclared)
+
+    @property
+    def fully_verified(self) -> bool:
+        """No errors *and* every planned module exists and every group was exercised."""
+        return not self.has_errors and not self.missing_modules and not self.unverified
+
+    @property
     def ok(self) -> bool:
-        return not self.mismatches and not self.undeclared
+        """Strict gate: alias of :attr:`fully_verified`.
+
+        Use :attr:`has_errors` when unexercised groups are expected (e.g. un-routed MoE experts).
+        """
+        return self.fully_verified
 
     def describe(self) -> str:
         lines = [
@@ -425,7 +454,7 @@ def probe_shared_inputs(
     * ``mismatches``: modules in a group whose captured inputs differ from the leader.
     * ``unverified``: groups whose modules were never invoked (e.g. un-routed experts).
     * ``undeclared``: same-subset, same-parent module pairs in *different* groups whose
-      inputs were byte-identical (a missed dedup opportunity or a wrong ``:in=`` tag).
+      inputs were byte-identical (a missed ``:in=`` opt-in or a wrong tag).
     * ``missing_modules``: planned modules absent from ``layer``.
     """
     live = dict(layer.named_modules())

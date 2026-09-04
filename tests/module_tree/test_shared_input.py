@@ -144,14 +144,34 @@ def _make_def(tree):
 
 
 class TestPlanDerivation:
-    def test_default_groups_by_parent_and_subset(self):
+    def test_untagged_modules_are_singletons(self):
+        tree = ["model", "layers", "#", {"self_attn": ("q:0", "k:0", "v:0", "o:1"), "mlp": ("g:0", "u:0", "d:1")}]
+        plan = _plan(_make_def(tree))
+        assert _groups(plan) == {
+            "self_attn.q": ("self_attn.q",),
+            "self_attn.k": ("self_attn.k",),
+            "self_attn.v": ("self_attn.v",),
+            "self_attn.o": ("self_attn.o",),
+            "mlp.g": ("mlp.g",),
+            "mlp.u": ("mlp.u",),
+            "mlp.d": ("mlp.d",),
+        }
+        assert plan.dedup_count == 0
+        assert plan.shared_groups == ()
+        assert not any(g.explicit for g in plan.groups)
+        assert not plan.shares_input("self_attn.q", "self_attn.k")
+
+    def test_explicit_tags_group_llama(self):
         plan = _plan(LlamaQModel)
         assert _groups(plan) == {
-            "self_attn:0": ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
-            "self_attn:1": ("self_attn.o_proj",),
-            "mlp:2": ("mlp.gate_proj", "mlp.up_proj"),
-            "mlp:3": ("mlp.down_proj",),
+            "self_attn:in=x": ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
+            "self_attn.o_proj": ("self_attn.o_proj",),
+            "mlp:in=x": ("mlp.gate_proj", "mlp.up_proj"),
+            "mlp.down_proj": ("mlp.down_proj",),
         }
+        assert plan.is_explicit("self_attn.q_proj")
+        assert not plan.is_explicit("self_attn.o_proj")
+        assert not plan.is_explicit("nope")
         assert plan.leaders == ("self_attn.q_proj", "self_attn.o_proj", "mlp.gate_proj", "mlp.down_proj")
         assert plan.dedup_count == 3
         assert plan.leader_for("self_attn.v_proj") == "self_attn.q_proj"
@@ -172,7 +192,7 @@ class TestPlanDerivation:
         tree = ["model", "layers", "#", {"self_attn": ("a:0", "b:0:in=x", "c:0:in=y", "d:0:in=x")}]
         plan = _plan(_make_def(tree))
         assert _groups(plan) == {
-            "self_attn:0": ("self_attn.a",),
+            "self_attn.a": ("self_attn.a",),
             "self_attn:in=x": ("self_attn.b", "self_attn.d"),
             "self_attn:in=y": ("self_attn.c",),
         }
@@ -187,14 +207,44 @@ class TestPlanDerivation:
         assert g.subset_indices == (0, 1)
         assert g.spans_subsets
         assert _groups(plan.for_subset(1)) == {"attn:in=x": ("attn.z",)}
-        assert _groups(plan.for_subset(2)) == {"attn:2": ("attn.o",)}
+        assert _groups(plan.for_subset(2)) == {"attn.o": ("attn.o",)}
 
-    def test_default_grouping_follows_expanded_subset_block_not_leaf_digit(self):
-        # OPT-style: `"fc1": ("fc1",), "fc2": ("fc2",)` both carry digit 0 but land in
-        # separate subset blocks, so they must not be assumed to share an input.
-        tree = ["model", "layers", "#", {"attn": ("q:0", "o:1"), "fc1": ("fc1",), "fc2": ("fc2",)}]
+    def test_same_subset_without_tag_never_shares(self):
+        # Subset digits are execution order, not input identity: `q:0`/`k:0` stay apart.
+        tree = ["model", "layers", "#", {"attn": ("q:0", "k:0", "o:1"), "fc1": ("fc1",), "fc2": ("fc2",)}]
         plan = _plan(_make_def(tree))
-        assert _groups(plan) == {"attn:0": ("attn.q",), "attn:1": ("attn.o",), ":2": ("fc1",), ":3": ("fc2",)}
+        assert _groups(plan) == {
+            "attn.q": ("attn.q",),
+            "attn.k": ("attn.k",),
+            "attn.o": ("attn.o",),
+            "fc1": ("fc1",),
+            "fc2": ("fc2",),
+        }
+
+    def test_conflicting_metadata_across_variants_raises(self):
+        tree = [
+            ["model", "layers", "#", {"attn": ("q:0:in=x", "k:0:in=x", "o:1")}],
+            ["model", "language_model", "layers", "#", {"attn": ("q:0:in=x", "k:0:in=y", "o:1")}],
+        ]
+        with pytest.raises(ValueError, match=r"conflicting module_tree metadata for `attn\.k`"):
+            collect_leaf_specs(tree)
+
+    @pytest.mark.parametrize("variant", ["q:0:!", "q:1:in=x", "q:0:?", "q:0"])
+    def test_conflicting_quantize_or_subset_flags_raise(self, variant):
+        tree = [["model", "layers", "#", {"attn": ("q:0:in=x",)}], ["model", "layers", "#", {"attn": (variant,)}]]
+        with pytest.raises(ValueError, match="attn.q"):
+            collect_leaf_specs(tree)
+
+    def test_identical_metadata_across_variants_is_allowed(self):
+        tree = [
+            ["model", "layers", "#", {"attn": ("q:0:in=x", "k:0:in=x")}],
+            ["model", "layers", "#", {"attn": ("q:0:in=x", "k:0:in=x", "o:1")}],
+        ]
+        specs = collect_leaf_specs(tree)
+        assert specs["attn.q"].input_tag == "x"
+        assert specs["attn.o"].subset_tag == 1
+        plan = _plan(_make_def(tree))
+        assert plan.shares_input("attn.q", "attn.k")
 
     def test_dict_key_digit_offsets_split_children(self):
         tree = [
@@ -212,15 +262,16 @@ class TestPlanDerivation:
             "model",
             "layers",
             "#",
-            {"attn": ("norm:0:!", "q:0", "k:0", "probe:0:?")},
+            {"attn": ("norm:0:!:in=x", "q:0:in=x", "k:0:in=x", "probe:0:?:in=x")},
         ]
         plan = _plan(_make_def(tree))
-        assert _groups(plan) == {"attn:0": ("attn.q", "attn.k")}
+        assert _groups(plan) == {"attn:in=x": ("attn.q", "attn.k")}
 
     def test_different_parents_never_share(self):
-        tree = ["model", "layers", "#", {"a": ("x:0",), "b": ("x:0",)}]
+        tree = ["model", "layers", "#", {"a": ("x:0:in=t", "y:0:in=t"), "b": ("x:0:in=t",)}]
         plan = _plan(_make_def(tree))
-        assert _groups(plan) == {"a:0": ("a.x",), "b:1": ("b.x",)}
+        assert _groups(plan) == {"a:in=t": ("a.x", "a.y"), "b:in=t": ("b.x",)}
+        assert not plan.shares_input("a.x", "b.x")
 
     def test_in_tag_does_not_change_layer_modules(self):
         plain = _make_def(["model", "layers", "#", {"attn": ("q:0", "k:0", "v:0", "o:1")}])
@@ -230,9 +281,9 @@ class TestPlanDerivation:
         assert _groups(_plan(plain)) != _groups(_plan(tagged))
 
     def test_build_from_raw_layer_modules_ignores_flagged_entries(self):
-        tree = ["model", "layers", "#", {"attn": ("q:0", "k:0", "n:0:!")}]
+        tree = ["model", "layers", "#", {"attn": ("q:0:in=x", "k:0:in=x", "n:0:!")}]
         plan = build_shared_input_plan(tree, [["attn.q", "attn.k", "attn.n:!"]])
-        assert _groups(plan) == {"attn:0": ("attn.q", "attn.k")}
+        assert _groups(plan) == {"attn:in=x": ("attn.q", "attn.k")}
 
     def test_duplicate_module_names_across_blocks_counted_once(self):
         tree = ["model", "layers", "#", {"attn": ("q:0", "k:0")}]
@@ -240,7 +291,7 @@ class TestPlanDerivation:
         assert plan.modules == ("attn.q", "attn.k")
 
     def test_plan_rejects_module_in_two_groups(self):
-        g = SharedInputGroup(key="a:0", parent="a", modules=("a.x",), subset_indices=(0,))
+        g = SharedInputGroup(key="a.x", parent="a", modules=("a.x",), subset_indices=(0,))
         with pytest.raises(ValueError):
             SharedInputPlan(groups=(g, g))
 
@@ -250,8 +301,8 @@ class TestPlanDerivation:
         assert plan.group_for("model.layers.3.self_attn.k_proj").parent == "model.layers.3.self_attn"
         filtered = plan.filter_modules({"model.layers.3.self_attn.k_proj", "model.layers.3.mlp.down_proj"})
         assert _groups(filtered) == {
-            "model.layers.3.self_attn:0": ("model.layers.3.self_attn.k_proj",),
-            "model.layers.3.mlp:3": ("model.layers.3.mlp.down_proj",),
+            "model.layers.3.self_attn:in=x": ("model.layers.3.self_attn.k_proj",),
+            "model.layers.3.mlp.down_proj": ("model.layers.3.mlp.down_proj",),
         }
         assert plan.with_prefix("") is plan
 
@@ -297,19 +348,21 @@ class TestModelDefinitions:
     def test_deepseek_v3_mla_explicit_tags(self):
         plan = _plan(DeepSeekV3QModel, SimpleNamespace(n_routed_experts=2))
         groups = _groups(plan)
-        assert groups["self_attn:0"] == ("self_attn.q_proj", "self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa")
+        assert groups["self_attn:in=h"] == ("self_attn.q_a_proj", "self_attn.kv_a_proj_with_mqa")
+        assert groups["self_attn.q_proj"] == ("self_attn.q_proj",)
         assert groups["self_attn:in=q_a"] == ("self_attn.q_b_proj",)
         assert groups["self_attn:in=kv_a"] == ("self_attn.kv_b_proj",)
         assert not plan.shares_input("self_attn.q_b_proj", "self_attn.kv_b_proj")
         assert plan.shares_input("mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj")
         assert not plan.shares_input("mlp.shared_experts.gate_proj", "mlp.shared_experts.down_proj")
 
-    def test_glm4_moe_nested_shared_experts_follow_subset_blocks(self):
-        # `"shared_experts": {"gate_proj": ("gate_proj:0",), ...}` places each child in its own
-        # subset block, so the conservative default keeps them apart.
+    def test_glm4_moe_nested_shared_experts_tag_spans_subset_blocks(self):
+        # `"shared_experts": {"gate_proj": ("gate_proj:0:in=x",), "up_proj": (...)}` places each
+        # child in its own subset block; the explicit tag still groups them.
         plan = _plan(GLM4MoEGPTQ, SimpleNamespace(n_routed_experts=2))
         g = plan.group_for("mlp.shared_experts.gate_proj")
-        assert g.modules == ("mlp.shared_experts.gate_proj",)
+        assert g.modules == ("mlp.shared_experts.gate_proj", "mlp.shared_experts.up_proj")
+        assert g.spans_subsets
         assert not plan.shares_input("mlp.shared_experts.gate_proj", "mlp.shared_experts.down_proj")
         assert plan.shares_input("mlp.experts.0.gate_proj", "mlp.experts.0.up_proj")
 
@@ -318,7 +371,8 @@ class TestModelDefinitions:
         assert plan.shares_input("mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj")
         assert plan.shares_input("mlp.experts.0.gate_proj", "mlp.experts.0.up_proj")
         assert not plan.shares_input("mlp.shared_expert.gate_proj", "mlp.experts.0.gate_proj")
-        assert "linear_attn.in_proj_qkvz" in plan.modules or "linear_attn.in_proj_qkv" in plan.modules
+        assert plan.shares_input("linear_attn.in_proj_qkv", "linear_attn.in_proj_z")
+        assert plan.group_for("linear_attn.in_proj_qkv").spans_subsets
 
     @pytest.mark.parametrize("model_type", sorted(MODEL_MAP))
     def test_every_definition_yields_consistent_plan(self, model_type):
@@ -341,8 +395,9 @@ class TestModelDefinitions:
             if g.explicit:
                 assert ":in=" in g.key
             else:
-                # Default groups never mix subset blocks; only explicit tags may span them.
-                assert len(set(g.subset_indices)) == 1, g
+                # Untagged modules are always singletons; only explicit tags may dedup.
+                assert g.modules == (g.key,), g
+                assert not g.is_shared
 
 
 # --------------------------------------------------------------------------- #
@@ -391,6 +446,8 @@ class TestProbe:
         )
         report = self._run(plan)
         assert report.ok
+        assert report.fully_verified
+        assert not report.has_errors
         assert report.verified == ("attn:0", "attn:1")
         assert report.unverified == ()
         assert report.missing_modules == ()
@@ -400,6 +457,8 @@ class TestProbe:
         plan = SharedInputPlan(groups=(_group("attn:0", "attn", ["attn.q", "attn.o"], [0, 0]),))
         report = self._run(plan)
         assert not report.ok
+        assert report.has_errors
+        assert not report.fully_verified
         assert len(report.mismatches) == 1
         m = report.mismatches[0]
         assert (m.leader, m.module) == ("attn.q", "attn.o")
@@ -446,6 +505,7 @@ class TestProbe:
         )
         report = self._run(plan)
         assert not report.ok
+        assert report.has_errors
         assert report.undeclared == (("attn.q", "attn.k"),)
         assert "UNDECLARED" in report.describe()
 
@@ -478,11 +538,38 @@ class TestProbe:
             )
         )
         report = probe_shared_inputs(layer, plan, lambda: layer(torch.randn(2, 8)))
-        assert report.ok
+        # No contradiction observed, but the plan is not proven: `ok` must be strict.
+        assert not report.has_errors
+        assert not report.fully_verified
+        assert not report.ok
         assert report.verified == ("u",)
         assert report.unverified == ("i",)
         assert report.missing_modules == ("ghost",)
         assert report.call_counts["idle"] == 0
+
+    def test_missing_module_alone_fails_strict_ok(self):
+        layer = _Layer()
+        plan = SharedInputPlan(groups=(_group("attn:0", "attn", ["attn.q", "attn.k"], [0, 0]), _group("x", "attn", ["attn.ghost"], [1])))
+        report = self._run(plan, layer=layer)
+        assert report.verified == ("attn:0",)
+        assert report.missing_modules == ("attn.ghost",)
+        assert not report.has_errors and not report.ok
+
+    def test_uncalled_group_alone_fails_strict_ok(self):
+        class L(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.used = nn.Linear(8, 8)
+                self.idle = nn.Linear(8, 8)
+
+            def forward(self, x):
+                return self.used(x)
+
+        layer = L()
+        plan = SharedInputPlan(groups=(_group("u", "", ["used"], [0]), _group("i", "", ["idle"], [1])))
+        report = probe_shared_inputs(layer, plan, lambda: layer(torch.randn(2, 8)))
+        assert report.unverified == ("i",)
+        assert not report.has_errors and not report.ok
 
     def test_partial_group_call_uses_called_module_as_reference(self):
         class L(nn.Module):

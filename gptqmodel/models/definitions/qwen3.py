@@ -22,12 +22,12 @@ class Qwen3QModel(LlamaQModel):
             "self_attn": (
                 "q_norm:!",
                 "k_norm:!",
-                "q_proj:0",
-                "k_proj:0",
-                "v_proj:0",
+                "q_proj:0:in=x",
+                "k_proj:0:in=x",
+                "v_proj:0:in=x",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+            "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
         },
     ]
