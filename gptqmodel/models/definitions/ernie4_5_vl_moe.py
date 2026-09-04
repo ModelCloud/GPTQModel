@@ -53,13 +53,13 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
                 "text_moe": {
                     "gate": ("gate:!",),
                     "experts": {
-                        "#": ("gate_proj:0", "upe_proj:0", "down_proj:1"),
+                        "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                     },
                 },
                 "vision_moe": {
                     "gate": ("gate:!",),
                     "experts": {
-                        "#": ("gate_proj:0", "upe_proj:0", "down_proj:1"),
+                        "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                     },
                 }
             },

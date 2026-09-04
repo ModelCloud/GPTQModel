@@ -35,7 +35,7 @@ class Ernie4_5_MoeQModel(BaseQModel):
                     "down_proj": ("down_proj:1",),
                 },
                 "experts": {
-                    "#": ("gate_proj:0", "upe_proj:0", "down_proj:1"),
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },
         }
