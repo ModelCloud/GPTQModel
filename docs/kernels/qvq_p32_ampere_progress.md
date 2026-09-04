@@ -3614,6 +3614,15 @@ and W3 to `0.033792 ms` (W2/W3.5 were `0.032768/0.031744 ms`).  The source
 change was reverted.  Diagnostic:
 `artifacts/a100_p32_window/v34_candidate_m8_fullkv_widentiles_2000.json`.
 
+## v71 rejected M1 full-KV single-stage pipeline
+
+The M1 full-KV `(K,N)=(5120,1024)` scalar route was screened with one K tile
+per cp.async stage (the retained route uses two).  It remained exact
+(`max_abs <= 1.1e-5`) but increased the 2,000-iteration medians to
+`0.035840/0.036864/0.036864/0.035840 ms`; the two-stage route is faster at
+all four rates.  The source change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v35_candidate_m1_fullkv_stage1_2000.json`.
+
 ## Reproduction
 
 ```bash
