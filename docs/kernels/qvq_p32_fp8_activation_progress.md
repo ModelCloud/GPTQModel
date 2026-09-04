@@ -269,7 +269,7 @@ whole-workload peaks; driver peak is sampled per-process NVML usage.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | dense BF16 | 183,811 | 22.28 / 23.06 | 31.68 | 31.39 / 32.23 | 2.710 / 2.795 | 3,558 | 2.303 | 130.50 |
 | W3.5A16 | 37,435 | 109.42 / 131.48 | 20.69 | 48.02 / 49.05 | 2.052 / 2.225 | 2,976 | 0.900 | 130.50 |
-| W3.5A8 | 8,871 | 461.75 / 462.73 | 34.44 | 29.02 / 29.07 | 1.799 / 1.994 | 2,724 | 0.900 | 72.25 |
+| W3.5A8 | 9,926 | 412.66 / 413.51 | 35.98 | 27.67 / 28.75 | 1.799 / 1.994 | 2,724 | 0.900 | 72.25 |
 
 The static A8 cache reserved 4,352 token slots for the 4,176-token logical
 sequence and still used 44.64% fewer retained bytes than the BF16 cache,
@@ -284,10 +284,11 @@ dense K/V prefix materializations.
 Relative to the earlier correctness baseline, M-grid launch collapsing raised
 A8 prefill from 803 to 3,993 tok/s (4.97x), decoded-weight row reuse raised it
 to 6,667 tok/s, and the FP8-specific allocation/launch reductions raised it to
-8,871 tok/s. This is 2.222x over the 3,993 target baseline and 11.05x over the
-803 tok/s correctness baseline. A8 decode rose from 11.28 to 34.44 tok/s and is
-now 1.09x dense decode. Matching dense prefill still requires another 20.72x;
-A16 requires 4.91x.
+8,871 tok/s. Paired P32 state decode and simplified bank mixing then raised the
+final result to 9,926 tok/s. This is 2.486x over the 3,993 target baseline and
+12.36x over the 803 tok/s correctness baseline. A8 decode rose from 11.28 to
+35.98 tok/s and is now 1.14x dense decode. Matching dense prefill still requires
+another 18.52x; A16 requires 3.77x.
 
 ### Phase 7 — FP8 decoded-weight row reuse (complete)
 
@@ -338,7 +339,7 @@ pinned H200:
 
 | kernel | duration | registers/thread | achieved / theoretical occupancy | compute | DRAM |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| W3.5 P32 E4M3 reuse-8, M4096 K2048 N8192 | 969.41 us | 168 | 16.76% / 18.75% | 65.68% | 0.41% |
+| W3.5 P32 E4M3 reuse-8, M4096 K2048 N2048 | 969.41 us | 168 | 16.76% / 18.75% | 65.68% | 0.41% |
 | fused E4M3 row quantizer, M4096 K2048 FP16 | 23.71 us | 20 | 90.20% / 100% | 48.26% | 14.81% |
 
 The P32 SASS contains eight E4M3 WGMMA instructions, 64 FP32 multiplies, and 64
@@ -356,3 +357,49 @@ to 23.71 us. The remaining reciprocal/refinement sequence implements the
 data-dependent `value / row_scale`; replacing the scale calculation with IEEE
 division was also rejected because it changes some E4M3 bytes by one rounding
 boundary.
+
+### Phase 9 — paired FP8 P32 state and bank algebra (complete)
+
+The E4M3 WGMMA A-fragment maps every adjacent even/odd output-column pair to
+the high/low bytes of one PGC state. The former generic coordinate loop decoded
+and mixed that state twice. Commit `fecd88f6` replaces it with the explicit
+Hopper lane geometry: eight unique states populate all sixteen fragment bytes,
+while tile and bank metadata are resolved once per canonical K16 half. Commit
+`9f7e93c5` then shares the two bank masks for each lane-local K4 group and uses
+the already-proven masked affine PGC algebra.
+
+The apples-to-apples H200 NCU sequence at M4096, K2048, N2048 is:
+
+| revision | duration | registers/thread | achieved / theoretical occupancy | DRAM | spills |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `a8120b94` | 969.41 us | 168 | 16.76% / 18.75% | 0.41% | 0 |
+| paired state decode | 766.30 us | 168 | 16.54% / 18.75% | 0.51% | 0 |
+| paired bank/PGC algebra | 757.54 us | 168 | 16.64% / 18.75% | 0.50% | 0 |
+
+The two accepted passes provide a cumulative 1.280x microkernel speedup without
+changing the eight E4M3 WGMMAs, 64 FP32 multiplies, or 64 FP32 fused
+multiply-adds. Static hot-body instruction counts changed as follows:
+
+| instruction | `a8120b94` | `9f7e93c5` | reduction |
+| --- | ---: | ---: | ---: |
+| LDG | 149 | 73 | 51.0% |
+| IMAD | 556 | 219 | 60.6% |
+| LOP3 | 323 | 92 | 71.5% |
+| SHF | 256 | 93 | 63.7% |
+| PRMT | 63 | 35 | 44.4% |
+| SEL | 49 | 4 | 91.8% |
+
+Post-commit NCU/SASS was collected after each GPU-instruction-changing commit.
+Both reports retain 168 registers per thread and zero local/shared spills. A
+subsequent base-bit-position hoist was rejected: it only traded eight IMAD and
+three IADD3 operations for three additional SHF and one LEA, with no measured
+duration improvement.
+
+At the full Llama-3.2-1B W3.5A8 boundary, the same exclusive H200 run improved
+prefill from 8,870.56 to 9,925.82 tok/s (1.119x) and decode from 34.44 to
+35.98 tok/s (1.045x). Peak allocation/reservation stayed exactly 1.799/1.994
+GiB and sampled NVML peak stayed 2,724 MiB. The 72.25 MiB cache remained E4M3,
+all 9,856 requested P32 calls executed natively, all 1,536 QK and 1,536 PV
+launches used the FP8 attention backend, and there were no P32 fallbacks, KV
+dequantizations, or dense-prefix materializations. The machine-readable result
+is `clean-9f7e93c5-w35-a8-4096.json`.
