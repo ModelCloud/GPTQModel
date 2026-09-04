@@ -1318,6 +1318,26 @@ __global__ void qvq_wgmma_reduce_split_fixed_kernel(
       make_float4(value0, value1, value2, value3);
 }
 
+__global__ void qvq_fp16_to_fp8_e5m2_clamped_vector8_kernel(
+    const Element* __restrict__ input,
+    c10::Float8_e5m2* __restrict__ output,
+    int vector_count) {
+  const int vector_index = static_cast<int>(blockIdx.x) * blockDim.x +
+      static_cast<int>(threadIdx.x);
+  if (vector_index >= vector_count) {
+    return;
+  }
+  const auto* input2 = reinterpret_cast<const __half2*>(input);
+  const int pair_index = vector_index << 2;
+  const __half2 value0 = input2[pair_index];
+  const __half2 value1 = input2[pair_index + 1];
+  const __half2 value2 = input2[pair_index + 2];
+  const __half2 value3 = input2[pair_index + 3];
+  const auto packed0 = __nv_fp8x4_e5m2(value0, value1).__x;
+  const auto packed1 = __nv_fp8x4_e5m2(value2, value3).__x;
+  reinterpret_cast<uint2*>(output)[vector_index] = make_uint2(packed0, packed1);
+}
+
 __global__ void qvq_fp16_to_fp8_e5m2_clamped_vector4_kernel(
     const Element* __restrict__ input,
     c10::Float8_e5m2* __restrict__ output,
@@ -1366,7 +1386,17 @@ at::Tensor qvq_fp16_to_fp8_e5m2_clamped(const at::Tensor& input) {
   const int64_t pair_count = (value_count + 1) / 2;
   const int64_t blocks = (pair_count + kConvertThreads - 1) / kConvertThreads;
   const auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
-  if ((value_count & 3) == 0 &&
+  if ((value_count & 7) == 0 &&
+      value_count / 8 <= std::numeric_limits<int>::max()) {
+    const int vector_count = static_cast<int>(value_count / 8);
+    const int vector_blocks =
+        (vector_count + kConvertThreads - 1) / kConvertThreads;
+    qvq_fp16_to_fp8_e5m2_clamped_vector8_kernel
+        <<<vector_blocks, kConvertThreads, 0, stream>>>(
+            reinterpret_cast<const Element*>(input.data_ptr<at::Half>()),
+            output.data_ptr<c10::Float8_e5m2>(),
+            vector_count);
+  } else if ((value_count & 3) == 0 &&
       value_count / 4 <= std::numeric_limits<int>::max()) {
     const int vector_count = static_cast<int>(value_count / 4);
     const int vector_blocks =
