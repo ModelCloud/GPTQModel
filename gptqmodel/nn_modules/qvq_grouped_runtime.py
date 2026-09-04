@@ -873,7 +873,16 @@ class QVQHopperGroupedRuntime:
 
         rows = x.numel() // self._children()[0].in_features
         children = self._children()
-        if rows > 16:
+        qwen_folded_intermediate = (
+            self._mlp_activation_is_exact_silu
+            and not children[0].output_hadamard
+            and not children[1].output_hadamard
+            and not down.input_hadamard
+        )
+        if rows > 16 and (
+            qwen_folded_intermediate
+            or not self._h100_multiblock_intermediate_enabled
+        ):
             # Large-M uses the exact generic module boundaries while sharing
             # gate/up input preparation and P32 decode. The ordinary down
             # module now owns the same M32/M64 row-reuse dispatch, so this
@@ -883,12 +892,6 @@ class QVQHopperGroupedRuntime:
             gate, up = self._execute(x)
             activated_gate = self._mlp_act_fn(gate)
             return down(activated_gate * up)
-        qwen_folded_intermediate = (
-            self._mlp_activation_is_exact_silu
-            and not children[0].output_hadamard
-            and not children[1].output_hadamard
-            and not down.input_hadamard
-        )
         if qwen_folded_intermediate:
             # Qwen3.8-27B has a 17*1024 intermediate width, for which no exact
             # composite Hadamard base exists.  Its model definition therefore
@@ -1049,7 +1052,8 @@ class QVQHopperGroupedRuntime:
                     down._cached_cast("SU", torch.float16),
                 )
         fused_down_recovery = (
-            self._h100_multiblock_intermediate_enabled
+            rows <= 16
+            and self._h100_multiblock_intermediate_enabled
             and down.output_hadamard
             and (down.in_features, down.out_features) == (8192, 2048)
         )
@@ -1077,7 +1081,8 @@ class QVQHopperGroupedRuntime:
             down.bits, vector_size=down.vector_size
         )
         use_qwen_ordered_composite_recovery = (
-            self._h100_fp16_recovery_store_enabled
+            rows <= 16
+            and self._h100_fp16_recovery_store_enabled
             and down.output_hadamard
             and (down.in_features, down.out_features) == (17408, 5120)
             and qwen_transition_bits == 6
