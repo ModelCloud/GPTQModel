@@ -861,7 +861,9 @@ template <
     int Threads = kM1Threads,
     int TilesPerBlock = kM1TilesPerBlock,
     int StageKTiles = kStageKTiles,
-    int StaticN = 0>
+    int StaticN = 0,
+    int StaticSplitCount = 0,
+    int StaticK = 0>
 __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -893,11 +895,16 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
   const int lane = thread & 31;
   constexpr int kStaticNTiles = StaticN > 0 ? StaticN / kTileColumns : 0;
   const int n_tiles = StaticN > 0 ? kStaticNTiles : size_n / kTileColumns;
+  constexpr int kEffectiveStaticSplitCount = StaticSplitCount > 0 ? StaticSplitCount : 0;
+  const int effective_split_count =
+      kEffectiveStaticSplitCount > 0 ? kEffectiveStaticSplitCount : split_count;
   const int block_n_tile_base = n_block * TilesPerBlock;
   const int n_tile_base = block_n_tile_base + warp * 4;
-  const int k_tiles = size_k / kTileRows;
-  const int k_tile_begin = (k_tiles * split) / split_count;
-  const int k_tile_end = (k_tiles * (split + 1)) / split_count;
+  constexpr int kStaticKTiles = StaticK > 0 ? StaticK / kTileRows : 0;
+  const int k_tiles = StaticK > 0 ? kStaticKTiles : size_k / kTileRows;
+  const int input_stride = StaticK > 0 ? StaticK : size_k;
+  const int k_tile_begin = (k_tiles * split) / effective_split_count;
+  const int k_tile_end = (k_tiles * (split + 1)) / effective_split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(bank_alt_id);
   constexpr bool kUsePairWrapPredicate =
       (Rows == 2 &&
@@ -932,8 +939,8 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
       const int row = index / kInputVectorsPerRow;
       const int vector = index - row * kInputVectorsPerRow;
       const int source_column = k_tile_base * kTileRows + vector * 8;
-      if (source_column < size_k) {
-        const half* source = input + static_cast<int64_t>(row) * size_k + source_column;
+      if (source_column < input_stride) {
+        const half* source = input + static_cast<int64_t>(row) * input_stride + source_column;
         __pipeline_memcpy_async(
             input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
       } else {
@@ -1355,11 +1362,11 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
     parity ^= 1;
   }
 
-  float* target = split_count == 1
+  float* target = effective_split_count == 1
       ? output + output_n_offset
       : partial_output + partial_segment_offset +
           static_cast<int64_t>(split) * Rows * size_n;
-  const int target_stride = split_count == 1 ? output_stride : size_n;
+  const int target_stride = effective_split_count == 1 ? output_stride : size_n;
   const int n_tile = n_tile_base + (lane >> 3);
   if ((StaticN > 0 || n_tile < n_tiles) && (lane & 7) < 8) {
     const int output_column = n_tile * kTileColumns + (lane & 7) * 2;
@@ -1381,7 +1388,9 @@ template <
     int Threads = kM1Threads,
     int TilesPerBlock = kM1TilesPerBlock,
     int StageKTiles = kStageKTiles,
-    int StaticN = 0>
+    int StaticN = 0,
+    int StaticSplitCount = 0,
+    int StaticK = 0>
 __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -1394,7 +1403,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     int split_count,
     int bank_alt_id) {
   p32_window_ampere_m1_kernel_body<
-      TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, StaticN>(
+      TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, StaticN,
+      StaticSplitCount, StaticK>(
       input,
       trellis,
       levels,
@@ -1525,7 +1535,9 @@ template <
     int Rows,
     int Threads = kM1Threads,
     int TilesPerBlock = kM1TilesPerBlock,
-    int StageKTiles = kStageKTiles>
+    int StageKTiles = kStageKTiles,
+    int StaticSplitCount = 0,
+    int StaticK = 0>
 inline bool launch_static_n_scalar_kernel(
     const half* input,
     const uint32_t* trellis,
@@ -1541,7 +1553,7 @@ inline bool launch_static_n_scalar_kernel(
     const cudaStream_t stream) {
 #define QVQ_LAUNCH_STATIC_N(N)                                                        \
   case N:                                                                             \
-    p32_window_ampere_m1_kernel<TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, N> \
+    p32_window_ampere_m1_kernel<TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, N, StaticSplitCount, StaticK> \
         <<<grid, Threads, 0, stream>>>(                                               \
             input, trellis, levels, bank_ids, partial_output, output, size_k, size_n, \
             split_count, bank_alt_id);                                                \
@@ -1747,9 +1759,77 @@ at::Tensor p32_window_ampere_impl(
   auto* partial_output_ptr = partial_output.data_ptr<float>();
   auto* output_ptr = output.data_ptr<float>();
   if (size_m == 1 && size_k == 5120 && size_n == 12288 &&
+      split_count == 40 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
+          kScalarTripleStageKTiles, 40, 5120>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
+  } else if (size_m == 1 && size_k == 5120 && size_n == 12288 &&
       launch_static_n_scalar_kernel<
           TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
           kScalarTripleStageKTiles>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
+  } else if (size_m == 1 && size_k == 17408 && size_n == 5120 &&
+      split_count == 128 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
+          kScalarTripleStageKTiles, 128>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
+  } else if (size_m == 1 && size_k == 5120 && size_n == 1024 &&
+      split_count == 56 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
+          kStageKTiles, 56>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
+  } else if (size_m == 1 && size_k == 5120 && size_n == 17408 &&
+      split_count == 40 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
+          kStageKTiles, 40>(
           input_ptr,
           trellis_ptr,
           levels_ptr,
@@ -1804,6 +1884,59 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
+  } else if (size_m == 2 && size_k == 5120 && size_n == 12288 &&
+             ((TransitionBits <= 5 && split_count == 64) ||
+              (TransitionBits >= 6 && split_count == 40)) &&
+             launch_static_n_scalar_kernel<
+                 TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
+                 kScalarTripleStageKTiles,
+                 TransitionBits <= 5 ? 64 : 40>(
+                 input_ptr,
+                 trellis_ptr,
+                 levels_ptr,
+                 bank_ids_ptr,
+                 partial_output_ptr,
+                 output_ptr,
+                 size_k,
+                 size_n,
+                 static_cast<int>(split_count),
+                 static_cast<int>(bank_alt_id),
+                 grid,
+                 stream)) {
+  } else if (size_m == 2 && size_k == 5120 && size_n == 10240 &&
+             split_count == 40 &&
+             launch_static_n_scalar_kernel<
+                 TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
+                 kScalarTripleStageKTiles, 40>(
+                 input_ptr,
+                 trellis_ptr,
+                 levels_ptr,
+                 bank_ids_ptr,
+                 partial_output_ptr,
+                 output_ptr,
+                 size_k,
+                 size_n,
+                 static_cast<int>(split_count),
+                 static_cast<int>(bank_alt_id),
+                 grid,
+                 stream)) {
+  } else if (size_m == 2 && size_k == 5120 && size_n == 17408 &&
+             split_count == 40 &&
+             launch_static_n_scalar_kernel<
+                 TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
+                 kScalarTripleStageKTiles, 40>(
+                 input_ptr,
+                 trellis_ptr,
+                 levels_ptr,
+                 bank_ids_ptr,
+                 partial_output_ptr,
+                 output_ptr,
+                 size_k,
+                 size_n,
+                 static_cast<int>(split_count),
+                 static_cast<int>(bank_alt_id),
+                 grid,
+                 stream)) {
   } else if (size_m == 2 && use_small_m_scalar && use_four_tile_scalar_stage &&
              launch_static_n_scalar_kernel<
                  TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
@@ -1888,6 +2021,40 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
+  } else if (size_m == 4 && size_k == 5120 && size_n == 12288 &&
+             split_count == 40 &&
+             launch_static_n_scalar_kernel<
+                 TransitionBits, 4, kM1Threads, kM1TilesPerBlock,
+                 kM4StageKTiles, 40>(
+                 input_ptr,
+                 trellis_ptr,
+                 levels_ptr,
+                 bank_ids_ptr,
+                 partial_output_ptr,
+                 output_ptr,
+                 size_k,
+                 size_n,
+                 static_cast<int>(split_count),
+                 static_cast<int>(bank_alt_id),
+                 grid,
+                 stream)) {
+  } else if (size_m == 4 && size_k == 5120 && size_n == 10240 &&
+             split_count == 40 &&
+             launch_static_n_scalar_kernel<
+                 TransitionBits, 4, kM1Threads, kM1TilesPerBlock,
+                 kM4StageKTiles, 40>(
+                 input_ptr,
+                 trellis_ptr,
+                 levels_ptr,
+                 bank_ids_ptr,
+                 partial_output_ptr,
+                 output_ptr,
+                 size_k,
+                 size_n,
+                 static_cast<int>(split_count),
+                 static_cast<int>(bank_alt_id),
+                 grid,
+                 stream)) {
   } else if (size_m == 4 && use_small_m_scalar && use_four_tile_scalar_stage &&
              launch_static_n_scalar_kernel<TransitionBits, 4, kM1Threads, kM1TilesPerBlock, kM4StageKTiles>(
                  input_ptr,
@@ -2521,6 +2688,17 @@ at::Tensor p32_window_ampere_impl(
         C10_CUDA_KERNEL_LAUNCH_CHECK();
         return output;
       }
+    }
+    if (size_m == 1 && size_k == 5120 && size_n == 1024 &&
+        split_count == 56) {
+      reduce_split_kernel<56>
+          <<<blocks, kReductionThreads, 0, stream>>>(
+              partial_output.data_ptr<float>(),
+              output.data_ptr<float>(),
+              output_values,
+              56);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      return output;
     }
 #define QVQ_LAUNCH_STATIC_REDUCER(SPLITS)                                    \
   reduce_split_kernel<SPLITS><<<blocks, kReductionThreads, 0, stream>>>(     \

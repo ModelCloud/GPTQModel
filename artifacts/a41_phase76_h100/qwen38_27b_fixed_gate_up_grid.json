@@ -1,0 +1,47 @@
+{
+  "change": "compile-time rectangular Qwen grouped gate/up grid",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "executable_parent_commit": "6ce6db4b96135ccd3d421ac5158942efc05472e6",
+  "geomean_phase75_over_new": 1.035327931791316,
+  "hf_model": "Qwen/Qwen3.8-27B",
+  "hf_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "max_abs_error": 4.837841061089421e-08,
+  "max_mean_abs_error": 1.544431142974645e-08,
+  "ncu_w3_m1": {
+    "phase75_duration_us": 99.904,
+    "phase75_instructions": 59754794,
+    "phase75_registers_per_thread": 73,
+    "phase76_duration_us": 97.12,
+    "phase76_instructions": 57845250,
+    "phase76_registers_per_thread": 71
+  },
+  "phase": 76,
+  "rows": [
+    {"bits": 2.0, "m": 1, "median_us": 185.67679977416992, "phase75_over_new": 1.0342351976477782, "better_than_phase75": true},
+    {"bits": 2.0, "m": 2, "median_us": 186.91840171813965, "phase75_over_new": 1.0350236088778133, "better_than_phase75": true},
+    {"bits": 2.0, "m": 4, "median_us": 187.53664016723633, "phase75_over_new": 1.035748304463164, "better_than_phase75": true},
+    {"bits": 2.0, "m": 8, "median_us": 187.349760055542, "phase75_over_new": 1.040935003840235, "better_than_phase75": true},
+    {"bits": 2.0, "m": 16, "median_us": 186.7360019683838, "phase75_over_new": 1.0444987588536152, "better_than_phase75": true},
+    {"bits": 2.5, "m": 1, "median_us": 184.54815864562988, "phase75_over_new": 1.0385346179150192, "better_than_phase75": true},
+    {"bits": 2.5, "m": 2, "median_us": 186.0051155090332, "phase75_over_new": 1.0384215586738912, "better_than_phase75": true},
+    {"bits": 2.5, "m": 4, "median_us": 186.52031898498535, "phase75_over_new": 1.0380480997115555, "better_than_phase75": true},
+    {"bits": 2.5, "m": 8, "median_us": 187.05920219421387, "phase75_over_new": 1.0392810439469297, "better_than_phase75": true},
+    {"bits": 2.5, "m": 16, "median_us": 187.5379180908203, "phase75_over_new": 1.0421279838509685, "better_than_phase75": true},
+    {"bits": 3.0, "m": 1, "median_us": 187.1487979888916, "phase75_over_new": 1.0291511287679448, "better_than_phase75": true},
+    {"bits": 3.0, "m": 2, "median_us": 189.34191703796387, "phase75_over_new": 1.0256400167819502, "better_than_phase75": true},
+    {"bits": 3.0, "m": 4, "median_us": 189.67519760131836, "phase75_over_new": 1.0259997138178765, "better_than_phase75": true},
+    {"bits": 3.0, "m": 8, "median_us": 189.7276782989502, "phase75_over_new": 1.030412636615706, "better_than_phase75": true},
+    {"bits": 3.0, "m": 16, "median_us": 190.19392204284668, "phase75_over_new": 1.0320657894199884, "better_than_phase75": true}
+  ],
+  "timing": {
+    "kind": "CUDA Graph replay with CUDA events",
+    "replays_per_sample": 50,
+    "samples": 60,
+    "warmup": 20
+  },
+  "wins": 15
+}

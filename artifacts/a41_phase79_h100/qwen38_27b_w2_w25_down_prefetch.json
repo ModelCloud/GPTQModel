@@ -1,0 +1,34 @@
+{
+  "change": "Enable register-prefetched decoded levels for the exact H100 Qwen3.8-27B W2/W2.5 split-34 atomic down kernel.",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "executable_parent_commit": "76e0371f1f77ef6aff849e33659205d45d557402",
+  "geomean_phase78_over_new": 1.0086410623552837,
+  "hf_model": "Qwen/Qwen3.8-27B",
+  "hf_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "max_abs_error": 4.837841061089421e-08,
+  "max_mean_abs_error": 1.5325747426686577e-08,
+  "phase": 79,
+  "rows": [
+    {"better_than_phase78": true, "bits": 2.0, "m": 1, "median_us": 181.85568809509277, "phase78_over_new": 1.009853924319172},
+    {"better_than_phase78": true, "bits": 2.0, "m": 2, "median_us": 183.1875228881836, "phase78_over_new": 1.0098504295262685},
+    {"better_than_phase78": true, "bits": 2.0, "m": 4, "median_us": 183.73791694641113, "phase78_over_new": 1.0127607679246635},
+    {"better_than_phase78": true, "bits": 2.0, "m": 8, "median_us": 183.6736011505127, "phase78_over_new": 1.0100404614370215},
+    {"better_than_phase78": true, "bits": 2.0, "m": 16, "median_us": 184.03743743896484, "phase78_over_new": 1.0098554109282525},
+    {"better_than_phase78": true, "bits": 2.5, "m": 1, "median_us": 183.0188751220703, "phase78_over_new": 1.0054936918084176},
+    {"better_than_phase78": true, "bits": 2.5, "m": 2, "median_us": 184.0880012512207, "phase78_over_new": 1.007693716000797},
+    {"better_than_phase78": true, "bits": 2.5, "m": 4, "median_us": 184.48415756225586, "phase78_over_new": 1.0077309565900832},
+    {"better_than_phase78": true, "bits": 2.5, "m": 8, "median_us": 184.8256015777588, "phase78_over_new": 1.0071695745318368},
+    {"better_than_phase78": true, "bits": 2.5, "m": 16, "median_us": 185.30816078186035, "phase78_over_new": 1.0059835924806426}
+  ],
+  "timing": {
+    "kind": "warmed CUDA Graph replay timed with H100 CUDA events",
+    "replays_per_sample": 50,
+    "samples": 60,
+    "warmup": 20
+  },
+  "wins": "10/10 W2/W2.5 complete-MLP cells"
+}

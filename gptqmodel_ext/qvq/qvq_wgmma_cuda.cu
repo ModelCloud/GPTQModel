@@ -64,6 +64,11 @@ constexpr int kP32K16TilesPerStage = kKPerStage / kP32TileRows;
 constexpr int kMaxGroupedP32Segments = 3;
 constexpr int kFixedGateUpK = 2048;
 constexpr int kFixedGateUpN = 8192;
+constexpr int kFixedQwenGateUpK = 5120;
+constexpr int kFixedQwenGateUpN = 17408;
+constexpr int kFixedQwenGateUpSplit = 5;
+constexpr int kFixedQwenLinearQkvN = 10240;
+constexpr int kFixedQwenLinearZN = 6144;
 // The W2.5 N128 block has two independent consumer warpgroups and needs only
 // three decoded A fragments in flight.  A matched H100 depth-2/3/4 sweep
 // selected depth three at every Llama 3.2 1B decode M.
@@ -671,6 +676,7 @@ template <
     bool FixedGateUp = false,
     bool PrefetchDecodedLevels = false,
     int N64BlocksPerCta = 1,
+    bool FixedQwenLinear = false,
     class InputTma,
     class TrellisTma,
     class BankTma,
@@ -689,7 +695,8 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
     int launch_split_count,
     int launch_bank_alt_id) {
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
-  static_assert(!FixedGateUp || (Grouped && !OrderedSplit));
+  static_assert(!FixedGateUp || Grouped);
+  static_assert(!FixedQwenLinear || (Grouped && OrderedSplit && !FixedGateUp));
   static_assert(N64BlocksPerCta == 1 || N64BlocksPerCta == 2);
   static_assert(N64BlocksPerCta == 1 || FixedGateUp);
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
@@ -728,27 +735,69 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   int trellis_block_global = n64_block_global;
   int bank_n64_block_global = n64_block_global;
   if constexpr (FixedGateUp) {
-    // Measured Llama 3.2 1B gate/up plan: two independent equal-width
-    // children, split one. Keep child-local alternate banks but make the
-    // geometry and output offsets compile-time arithmetic.
-    constexpr int kN64Blocks = kFixedGateUpN / kOutputColumns;
-    constexpr int kN16Tiles = kFixedGateUpN / kP32TileColumns;
+    // Equal-width grouped gate/up plans can use their rectangular CUDA grid
+    // directly.  Avoid the generic flattened-work segment search and integer
+    // division in every thread while retaining child-local banks and ordered
+    // partial planes.
+    constexpr int kFixedN =
+        OrderedSplit ? kFixedQwenGateUpN : kFixedGateUpN;
+    constexpr int kFixedSplit =
+        OrderedSplit ? kFixedQwenGateUpSplit : 1;
+    constexpr int kN64Blocks = kFixedN / kOutputColumns;
+    constexpr int kN16Tiles = kFixedN / kP32TileColumns;
     segment = static_cast<int>(blockIdx.y);
     const int n64_block_base =
         static_cast<int>(blockIdx.x) * N64BlocksPerCta;
     n64_block = n64_block_base + consumer_group;
-    split = 0;
+    split = OrderedSplit ? static_cast<int>(blockIdx.z) : 0;
     n64_block_global = segment * kN64Blocks + n64_block;
     trellis_block_global =
         segment * (kN64Blocks / N64BlocksPerCta) +
         static_cast<int>(blockIdx.x);
     bank_n64_block_global = segment * kN64Blocks + n64_block_base;
     total_n_tiles = 2 * kN16Tiles;
-    size_n = kFixedGateUpN;
-    split_count = 1;
+    size_n = kFixedN;
+    split_count = kFixedSplit;
     bank_alt_id = grouped_params.bank_alt_id[segment];
-    output_offset = static_cast<int64_t>(segment) * kRows * kFixedGateUpN;
-    partial_output_offset = 0;
+    output_offset = static_cast<int64_t>(segment) * kRows * kFixedN;
+    partial_output_offset = OrderedSplit
+        ? static_cast<int64_t>(segment) * kFixedSplit * kRows * kFixedN
+        : 0;
+  } else if constexpr (FixedQwenLinear) {
+    // Qwen3.8 linear-attention input projections have two fixed unequal
+    // children.  Resolve the segment from one compile-time work boundary and
+    // divide by compile-time N64 counts instead of searching runtime segment
+    // descriptors and dividing by runtime widths in every thread.
+    constexpr int kQkvN64Blocks = kFixedQwenLinearQkvN / kOutputColumns;
+    constexpr int kZN64Blocks = kFixedQwenLinearZN / kOutputColumns;
+    constexpr int kQkvSplit = TransitionBits <= 5 ? 10 : 4;
+    constexpr int kZSplit = 20;
+    constexpr int kQkvWorkItems = kQkvN64Blocks * kQkvSplit;
+    const int work_item = static_cast<int>(blockIdx.x);
+    segment = work_item >= kQkvWorkItems ? 1 : 0;
+    const int segment_work_item =
+        segment == 0 ? work_item : work_item - kQkvWorkItems;
+    if (segment == 0) {
+      split = segment_work_item / kQkvN64Blocks;
+      n64_block = segment_work_item - split * kQkvN64Blocks;
+      size_n = kFixedQwenLinearQkvN;
+      split_count = kQkvSplit;
+      n64_block_global = n64_block;
+      output_offset = 0;
+      partial_output_offset = 0;
+    } else {
+      split = segment_work_item / kZN64Blocks;
+      n64_block = segment_work_item - split * kZN64Blocks;
+      size_n = kFixedQwenLinearZN;
+      split_count = kZSplit;
+      n64_block_global = kQkvN64Blocks + n64_block;
+      output_offset = static_cast<int64_t>(kRows) * kFixedQwenLinearQkvN;
+      partial_output_offset =
+          static_cast<int64_t>(kQkvSplit) * kRows * kFixedQwenLinearQkvN;
+    }
+    total_n_tiles =
+        (kFixedQwenLinearQkvN + kFixedQwenLinearZN) / kP32TileColumns;
+    bank_alt_id = grouped_params.bank_alt_id[segment];
   } else if constexpr (Grouped) {
     if constexpr (OrderedSplit) {
       const int work_item = static_cast<int>(blockIdx.x);
@@ -1315,7 +1364,16 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
   const bool use_h100_llama_down_prefetch =
       OrderedSplit && size_k == 8192 && size_n == 2048 && split_count == 16 &&
       std::strcmp(properties.name, "NVIDIA H100") == 0;
-  if (use_h100_llama_down_prefetch) {
+  const bool use_h100_qwen_down_prefetch =
+      size_k == 17408 && size_n == 5120 && split_count == 17 &&
+      OrderedSplit && TransitionBits == kW3TransitionBits &&
+      std::strcmp(properties.name, "NVIDIA H100") == 0;
+  const bool use_h100_qwen_atomic_down_prefetch =
+      !OrderedSplit && TransitionBits <= 5 &&
+      size_k == 17408 && size_n == 5120 && split_count == 34 &&
+      std::strcmp(properties.name, "NVIDIA H100") == 0;
+  if (use_h100_llama_down_prefetch || use_h100_qwen_down_prefetch ||
+      use_h100_qwen_atomic_down_prefetch) {
     qvq_p32_window_wgmma_m16_tma_kernel<
         TransitionBits,
         false,
@@ -1465,7 +1523,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_ordered_partials(
   }
 }
 
-template <int TransitionBits, bool OrderedSplit = false>
+template <int TransitionBits, bool OrderedSplit = false, bool ReturnPartials = false>
 at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -1474,6 +1532,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
     at::IntArrayRef split_counts) {
+  static_assert(!ReturnPartials || OrderedSplit);
   TORCH_CHECK(input.is_cuda(), "grouped QVQ P32 TMA WGMMA input must be CUDA");
   c10::cuda::CUDAGuard device_guard(input.device());
   TORCH_CHECK(
@@ -1627,9 +1686,11 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       P32BankTmaSmemLayout{}(cute::_, cute::_, cute::_0{}),
       cute::make_shape(cute::_16{}, cute::_16{}));
 
-  auto output = OrderedSplit || max_split_count == 1
-      ? at::empty({kRows * total_n}, input.options().dtype(at::kFloat))
-      : at::zeros({kRows * total_n}, input.options().dtype(at::kFloat));
+  auto output = ReturnPartials
+      ? at::empty({0}, input.options().dtype(at::kFloat))
+      : OrderedSplit || max_split_count == 1
+          ? at::empty({kRows * total_n}, input.options().dtype(at::kFloat))
+          : at::zeros({kRows * total_n}, input.options().dtype(at::kFloat));
   auto partial_output = OrderedSplit
       ? at::empty({total_partial_values}, input.options().dtype(at::kFloat))
       : output;
@@ -1655,7 +1716,65 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
   const bool use_wide_gate_up =
       use_gate_up_geometry && TransitionBits == 5 &&
       std::strcmp(properties.name, "NVIDIA H100") == 0;
-  if (use_wide_gate_up) {
+  const bool use_h100_qwen_ordered_fixed =
+      OrderedSplit && size_k == 5120 && segment_count == 2 &&
+      out_features[0] == 17408 && out_features[1] == 17408 &&
+      split_counts[0] == split_counts[1] &&
+      split_counts[0] == kFixedQwenGateUpSplit &&
+      std::strcmp(properties.name, "NVIDIA H100") == 0;
+  const int qwen_linear_qkv_split = TransitionBits <= 5 ? 10 : 4;
+  const bool use_h100_qwen_linear_fixed =
+      OrderedSplit && size_k == 5120 && segment_count == 2 &&
+      out_features[0] == kFixedQwenLinearQkvN &&
+      out_features[1] == kFixedQwenLinearZN &&
+      split_counts[0] == qwen_linear_qkv_split &&
+      split_counts[1] == 20 &&
+      TransitionBits <= kW3TransitionBits &&
+      std::strcmp(properties.name, "NVIDIA H100") == 0;
+  if (use_h100_qwen_ordered_fixed) {
+    const HopperFixedGateUpLaunchParams fixed_params{
+        {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
+    const dim3 qwen_grid(
+        static_cast<unsigned>(kFixedQwenGateUpN / kOutputColumns),
+        2,
+        kFixedQwenGateUpSplit);
+    qvq_p32_window_wgmma_m16_tma_kernel<
+        TransitionBits,
+        true,
+        true,
+        true,
+        TransitionBits <= kW3TransitionBits>
+        <<<qwen_grid, kTmaThreads, 0, stream>>>(
+            input_tma,
+            trellis_tma,
+            bank_tma,
+            reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+            partial_output.data_ptr<float>(),
+            fixed_params,
+            kFixedQwenGateUpK,
+            2 * kFixedQwenGateUpN,
+            kFixedQwenGateUpSplit,
+            0);
+  } else if (use_h100_qwen_linear_fixed) {
+    qvq_p32_window_wgmma_m16_tma_kernel<
+        TransitionBits,
+        true,
+        true,
+        false,
+        TransitionBits != 5,
+        1,
+        true><<<grid, kTmaThreads, 0, stream>>>(
+            input_tma,
+            trellis_tma,
+            bank_tma,
+            reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+            partial_output.data_ptr<float>(),
+            grouped_params,
+            size_k,
+            static_cast<int>(total_n),
+            1,
+            0);
+  } else if (use_wide_gate_up) {
     const HopperFixedGateUpLaunchParams fixed_params{
         {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
     using WideSharedStorage =
@@ -1667,6 +1786,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
         true,
         true,
         2,
+        false,
         decltype(input_tma),
         decltype(wide_trellis_tma),
         decltype(bank_tma),
@@ -1746,7 +1866,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
             0);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  if constexpr (OrderedSplit) {
+  if constexpr (OrderedSplit && !ReturnPartials) {
     for (int segment = 0; segment < segment_count; ++segment) {
       const int output_values =
           kRows * static_cast<int>(out_features[segment]);
@@ -1760,7 +1880,11 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
           stream);
     }
   }
-  return output;
+  if constexpr (ReturnPartials) {
+    return partial_output;
+  } else {
+    return output;
+  }
 }
 
 at::Tensor qvq_p32_window_wgmma_m16_tma_grouped(
@@ -1821,6 +1945,35 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_ordered_split(
   }
 }
 
+at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_ordered_partials(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t transition_bits,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef split_counts) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<4, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 5:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<5, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 6:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<6, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 7:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<7, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    default:
+      TORCH_CHECK(
+          false,
+          "ordered-partial grouped QVQ P32 TMA WGMMA transition bits must be in [4, 7]");
+  }
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
@@ -1831,6 +1984,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_m16_tma_ordered_partials(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_m16_tma_grouped(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m16_tma_grouped_ordered_split(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
+  m.def("p32_window_m16_tma_grouped_ordered_partials(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
@@ -1841,4 +1995,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_m16_tma_ordered_partials", qvq_p32_window_wgmma_m16_tma_ordered_partials);
   m.impl("p32_window_m16_tma_grouped", qvq_p32_window_wgmma_m16_tma_grouped);
   m.impl("p32_window_m16_tma_grouped_ordered_split", qvq_p32_window_wgmma_m16_tma_grouped_ordered_split);
+  m.impl("p32_window_m16_tma_grouped_ordered_partials", qvq_p32_window_wgmma_m16_tma_grouped_ordered_partials);
 }

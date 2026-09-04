@@ -842,8 +842,18 @@ class QVQLinear(BaseQuantLinear):
         x: torch.Tensor,
         *,
         return_ordered_partials: bool = False,
+        ordered_split_count: int | None = None,
     ) -> torch.Tensor:
+        if ordered_split_count is not None and not return_ordered_partials:
+            raise ValueError("an explicit ordered split requires partial output")
         if return_ordered_partials:
+            supported_ordered_shape = (
+                (self.in_features, self.out_features) == (8192, 2048)
+                and ordered_split_count is None
+            ) or (
+                (self.in_features, self.out_features) == (17408, 5120)
+                and ordered_split_count in (17, 34)
+            )
             if (
                 x.device.type != "cuda"
                 or self.trellis_window != 16
@@ -852,10 +862,10 @@ class QVQLinear(BaseQuantLinear):
                 or self.vector_size != 2
                 or x.dtype != torch.float16
                 or not 0 < x.shape[0] <= 16
-                or (self.in_features, self.out_features) != (8192, 2048)
+                or not supported_ordered_shape
             ):
                 raise RuntimeError(
-                    "ordered partial output requires the H100 Llama down P32 path"
+                    "ordered partial output requires a measured H100 down P32 path"
                 )
             properties = torch.cuda.get_device_properties(x.device)
             if (
@@ -1080,10 +1090,12 @@ class QVQLinear(BaseQuantLinear):
                         out_features=self.out_features,
                         transition_bits=transition_bits,
                     )
+                    if ordered_split_count is not None:
+                        ordered_split = int(ordered_split_count)
                     if return_ordered_partials:
-                        if ordered_split != 16:
+                        if ordered_split <= 1:
                             raise RuntimeError(
-                                "ordered partial output requires the measured split-16 policy"
+                                "ordered partial output requires a measured split policy"
                             )
                         kernel = qvq_p32_window_wgmma_m16_tma_ordered_partials
                     else:
@@ -1587,8 +1599,9 @@ class QVQReferenceLinear(QVQLinear):
         x: torch.Tensor,
         *,
         return_ordered_partials: bool = False,
+        ordered_split_count: int | None = None,
     ) -> torch.Tensor:
-        if return_ordered_partials:
+        if return_ordered_partials or ordered_split_count is not None:
             raise RuntimeError("reference QVQ execution does not expose split partials")
         return self._reference_inner_forward(x)
 
