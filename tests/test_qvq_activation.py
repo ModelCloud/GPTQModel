@@ -224,7 +224,7 @@ def test_h200_fp8_replay_reencodes_from_immutable_dense_teacher_and_executes_nat
             torch.randn(linear.bias.shape, generator=generator, device=device, dtype=torch.float16) * 0.01
         )
     calibration_input = torch.randn(
-        (64, 32),
+        (16, 32),
         generator=generator,
         device=device,
         dtype=torch.float16,
@@ -257,7 +257,7 @@ def test_h200_fp8_replay_reencodes_from_immutable_dense_teacher_and_executes_nat
         rounding="block_ldlq",
         activation_quantization={
             "kernel_mode": "require",
-            "replay_max_rows": 64,
+            "replay_max_rows": 16,
             "replay_validation_fraction": 0.125,
         },
         offload_to_disk=False,
@@ -285,9 +285,10 @@ def test_h200_fp8_replay_reencodes_from_immutable_dense_teacher_and_executes_nat
     stats = task_entry["fp8_replay_stats"]
     assert stats["schema"] == "qvq.fp8-target-replay.v1"
     assert stats["source"] == "immutable_original_dense_weight"
-    assert stats["rows"] == 64
-    assert stats["train_rows"] == 56
-    assert stats["validation_rows"] == 8
+    assert stats["rows"] == 16
+    assert stats["train_rows"] == 14
+    assert stats["validation_rows"] == 2
+    assert stats["ridge_prior"] == "immutable_original_dense_inner_target"
     assert stats["native_first_executed"] == 1
     assert stats["native_second_executed"] == 1
     assert selected.telemetry["fp8_target_replay"] == stats

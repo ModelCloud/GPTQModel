@@ -162,10 +162,11 @@ weights:
    matching inner target `T`, then accumulate normalized `G = Z^T Z` and
    `C = Z^T T` in FP32. A `G`-only objective cannot compensate the activation
    error between the native teacher input and deployed `Z`.
-5. Solve `(G + lambda I) W* = C`, freeze the first pass's SU/SV coordinate
-   system, and perform exactly one new P32 encode of `W*`. The encoder still
-   receives the immutable original dense weight for reconstruction/proxy
-   authority; reconstructed P32 weights are never recursively quantized.
+5. Solve `(G + lambda I) W* = C + lambda W0`, where `W0` is the immutable
+   original dense weight mapped into the frozen first-pass SU/SV inner basis.
+   This prior-centered ridge preserves null-space directions when replay rows
+   are fewer than K. Perform exactly one new P32 encode of `W*`; reconstructed
+   P32 weights are never recursively quantized.
 6. Run both serialized candidates through `kernel_mode=require` on disjoint
    held-out native teacher rows. Select the re-encode only when its full module
    output MSE is no worse. Persist row counts, G/C shapes, damping, both losses,

@@ -54,7 +54,11 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qvq import QVQLinear
 from ..quantization.config import FORMAT, METHOD, GPTQConfig, HessianConfig, QVQConfig
 from ..quantization.gptq import GPTQ
-from ..quantization.qvq import QVQQuantizationTelemetry, quantize_qvq_linear
+from ..quantization.qvq import (
+    QVQQuantizationTelemetry,
+    quantize_qvq_linear,
+    rht_preprocess_weight,
+)
 from ..quantization.qvq_activation import (
     dequantize_qvq_fp8_activation,
     fake_quantize_qvq_fp8_activation,
@@ -2142,7 +2146,22 @@ class QVQProcessor(LoopProcessor):
             cholesky, info = torch.linalg.cholesky_ex(solve_hessian)
             if int(info.max().item()) != 0:
                 raise RuntimeError("QVQ FP8 replay G matrix is not positive definite after damping.")
-            deployed_target = torch.cholesky_solve(deployed_cross, cholesky)
+            fixed_scale = first_result.SV.to(torch.float32).abs().mean()
+            fixed_sv_sign = first_result.SV.to(torch.float32) / fixed_scale
+            native_inner_prior = rht_preprocess_weight(
+                canonical_weight,
+                first_result.SU,
+                fixed_sv_sign,
+                input_hadamard=first_result.input_hadamard,
+                output_hadamard=first_result.output_hadamard,
+            ) / fixed_scale
+            # Calibration rows can be fewer than K. Centering ridge on the
+            # immutable dense target preserves unconstrained/null-space
+            # directions instead of shrinking them toward zero.
+            deployed_target = torch.cholesky_solve(
+                deployed_cross + damping * native_inner_prior,
+                cholesky,
+            )
             if not bool(torch.isfinite(deployed_target).all()):
                 raise RuntimeError("QVQ FP8 replay G/C solve produced non-finite weights.")
 
@@ -2198,6 +2217,7 @@ class QVQProcessor(LoopProcessor):
             "g_shape": list(deployed_hessian.shape),
             "c_shape": list(deployed_cross.shape),
             "damping": float(damping.item()),
+            "ridge_prior": "immutable_original_dense_inner_target",
             "first_validation_mse": first_mse,
             "second_validation_mse": second_mse,
             "selected": reencode_selected,
