@@ -75,6 +75,7 @@ _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP: Callable | None = None
+_QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_ORDERED_FP32_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_OP: Callable | None = None
@@ -125,6 +126,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "hadamard_pair_fp32_to_fp16_multiblock",
         "hadamard_pair_swiglu_precondition_multiblock",
         "folded_swiglu_precondition_fp32",
+        "folded_swiglu_precondition_ordered_fp32",
         "swiglu_precondition",
         "swiglu_precondition_multiblock",
         "yaqa_feedback",
@@ -334,6 +336,21 @@ def _qvq_cuda_folded_swiglu_precondition_fp32_op() -> Callable:
                     _extension_api().op("qvq_cuda", "folded_swiglu_precondition_fp32")
                 )
     return _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP
+
+
+def _qvq_cuda_folded_swiglu_precondition_ordered_fp32_op() -> Callable:
+    """Resolve the fused ordered-reduction folded-intermediate operator."""
+
+    global _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_ORDERED_FP32_OP
+    if _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_ORDERED_FP32_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_ORDERED_FP32_OP is None:
+                _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_ORDERED_FP32_OP = (
+                    _extension_api().op(
+                        "qvq_cuda", "folded_swiglu_precondition_ordered_fp32"
+                    )
+                )
+    return _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_ORDERED_FP32_OP
 
 
 def _qvq_cuda_swiglu_precondition_op() -> Callable:
@@ -1008,6 +1025,64 @@ def qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
         bias1,
         scale_mode,
         warp_low,
+    )
+
+
+def qvq_cuda_folded_swiglu_precondition_ordered_fp32(
+    partials: torch.Tensor,
+    *,
+    gate_scale: torch.Tensor,
+    up_scale: torch.Tensor,
+    down_scale: torch.Tensor,
+    split_count: int,
+    logical_rows: int,
+    gate_bias: torch.Tensor | None = None,
+    up_bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Fuse two child-major ordered reductions through the padded down input."""
+
+    if partials.device.type != "cuda" or partials.dtype != torch.float32:
+        raise TypeError("ordered folded QVQ SwiGLU partials must be CUDA float32")
+    if not partials.is_contiguous():
+        raise ValueError("ordered folded QVQ SwiGLU partials must be contiguous")
+    if split_count != 10:
+        raise ValueError("ordered folded QVQ SwiGLU currently requires split count ten")
+    if not 0 < logical_rows <= 16:
+        raise ValueError("ordered folded QVQ SwiGLU logical rows must be in [1, 16]")
+    n = gate_scale.numel()
+    if partials.numel() != 2 * split_count * 16 * n:
+        raise ValueError("ordered folded QVQ SwiGLU partial layout is invalid")
+    for name, tensor, dtype in (
+        ("gate_scale", gate_scale, torch.float32),
+        ("up_scale", up_scale, torch.float32),
+        ("down_scale", down_scale, torch.float16),
+        ("gate_bias", gate_bias, torch.float32),
+        ("up_bias", up_bias, torch.float32),
+    ):
+        if tensor is None:
+            if name.endswith("_scale"):
+                raise TypeError(f"{name} is required")
+            continue
+        if (
+            tensor.device != partials.device
+            or tensor.dtype != dtype
+            or not tensor.is_contiguous()
+            or tensor.numel() != n
+        ):
+            raise ValueError(
+                f"{name} must be contiguous {dtype} with one value per column"
+            )
+    if torch.cuda.get_device_capability(partials.device)[0] != 9:
+        raise RuntimeError("ordered folded QVQ SwiGLU precondition requires Hopper")
+    return _qvq_cuda_folded_swiglu_precondition_ordered_fp32_op()(
+        partials,
+        gate_scale,
+        up_scale,
+        gate_bias,
+        up_bias,
+        down_scale,
+        split_count,
+        logical_rows,
     )
 
 

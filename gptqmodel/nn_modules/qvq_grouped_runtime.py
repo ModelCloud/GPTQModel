@@ -35,6 +35,7 @@ from ..utils.qvq_wgmma_cuda import (
     qvq_h100_grouped_ordered_split_counts,
     qvq_p32_window_wgmma_group_plan,
     qvq_p32_window_wgmma_grouped_ordered_packed,
+    qvq_p32_window_wgmma_grouped_ordered_partials_packed,
     qvq_p32_window_wgmma_grouped_packed,
 )
 from .qlinear.qvq import QVQLinear
@@ -212,6 +213,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_w25_n128_gate_up_launches: int = 0
     h100_folded_qwen_mlp_launches: int = 0
     h100_folded_qwen_fused_precondition_launches: int = 0
+    h100_folded_qwen_fused_ordered_reduction_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -260,6 +262,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_w25_n128_gate_up_launches": self.h100_w25_n128_gate_up_launches,
             "h100_folded_qwen_mlp_launches": self.h100_folded_qwen_mlp_launches,
             "h100_folded_qwen_fused_precondition_launches": self.h100_folded_qwen_fused_precondition_launches,
+            "h100_folded_qwen_fused_ordered_reduction_launches": self.h100_folded_qwen_fused_ordered_reduction_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -549,8 +552,14 @@ class QVQHopperGroupedRuntime:
         return payload
 
     def _execute(
-        self, x: torch.Tensor, *, recover: bool = True
-    ) -> tuple[torch.Tensor, ...]:
+        self,
+        x: torch.Tensor,
+        *,
+        recover: bool = True,
+        return_ordered_partials: bool = False,
+    ) -> tuple[torch.Tensor, ...] | torch.Tensor:
+        if return_ordered_partials and recover:
+            raise ValueError("ordered partial execution cannot recover child outputs")
         children = self._children()
         rows = x.numel() // children[0].in_features
         x_2d = x.reshape(rows, children[0].in_features).to(torch.float16)
@@ -585,6 +594,15 @@ class QVQHopperGroupedRuntime:
                 )
                 padded[:rows].copy_(transformed)
         from ..utils.qvq_cuda import _pgc16_levels
+
+        if return_ordered_partials:
+            partials = qvq_p32_window_wgmma_grouped_ordered_partials_packed(
+                padded,
+                payload,
+                _pgc16_levels(x.device, children[0].codebook_version),
+            )
+            self.telemetry.ordered_split_launches += 1
+            return partials
 
         grouped_inner = (
             qvq_p32_window_wgmma_grouped_ordered_packed
@@ -717,6 +735,7 @@ class QVQHopperGroupedRuntime:
         down = self._mlp_down_ref()
         from ..utils.qvq_cuda import (
             qvq_cuda_folded_swiglu_precondition_fp32,
+            qvq_cuda_folded_swiglu_precondition_ordered_fp32,
             qvq_cuda_hadamard_ordered_split16_fp32_to_fp16,
             qvq_cuda_hadamard_pair_swiglu_precondition_multiblock,
             qvq_cuda_swiglu_precondition,
@@ -739,7 +758,7 @@ class QVQHopperGroupedRuntime:
             # FP32 child, round it to the model FP16 dtype, execute SiLU and
             # product, then apply down.SU.  No transform is commuted through
             # the nonlinearity, and every operation is CUDA Graph capturable.
-            inner_gate, inner_up = self._execute(x, recover=False)
+            payload = self._ensure_payload()
             use_h100_folded_fusion = (
                 self._h100_fp16_recovery_store_enabled
                 and x.dtype == torch.float16
@@ -747,7 +766,30 @@ class QVQHopperGroupedRuntime:
                 and down.in_features == 17408
                 and down.out_features == 5120
             )
-            if use_h100_folded_fusion:
+            use_ordered_reduction_fusion = (
+                use_h100_folded_fusion
+                and all(segment.split_count == 10 for segment in payload.plan.segments)
+            )
+            if use_ordered_reduction_fusion:
+                partials = self._execute(
+                    x,
+                    recover=False,
+                    return_ordered_partials=True,
+                )
+                transformed = qvq_cuda_folded_swiglu_precondition_ordered_fp32(
+                    partials,
+                    gate_scale=children[0]._cached_cast("SV", torch.float16, torch.float32),
+                    up_scale=children[1]._cached_cast("SV", torch.float16, torch.float32),
+                    gate_bias=children[0]._cached_cast("bias", torch.float16, torch.float32),
+                    up_bias=children[1]._cached_cast("bias", torch.float16, torch.float32),
+                    down_scale=down._cached_cast("SU", torch.float16),
+                    split_count=10,
+                    logical_rows=rows,
+                )
+                self.telemetry.h100_folded_qwen_fused_precondition_launches += 1
+                self.telemetry.h100_folded_qwen_fused_ordered_reduction_launches += 1
+            elif use_h100_folded_fusion:
+                inner_gate, inner_up = self._execute(x, recover=False)
                 transformed = qvq_cuda_folded_swiglu_precondition_fp32(
                     inner_gate,
                     inner_up,
@@ -759,6 +801,7 @@ class QVQHopperGroupedRuntime:
                 )
                 self.telemetry.h100_folded_qwen_fused_precondition_launches += 1
             else:
+                inner_gate, inner_up = self._execute(x, recover=False)
                 gate = children[0]._qvq_recover_inference_output(
                     inner_gate, torch.float16
                 ).reshape(rows, down.in_features).to(x.dtype)

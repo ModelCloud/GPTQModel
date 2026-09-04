@@ -1465,7 +1465,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_ordered_partials(
   }
 }
 
-template <int TransitionBits, bool OrderedSplit = false>
+template <int TransitionBits, bool OrderedSplit = false, bool ReturnPartials = false>
 at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -1474,6 +1474,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
     at::IntArrayRef split_counts) {
+  static_assert(!ReturnPartials || OrderedSplit);
   TORCH_CHECK(input.is_cuda(), "grouped QVQ P32 TMA WGMMA input must be CUDA");
   c10::cuda::CUDAGuard device_guard(input.device());
   TORCH_CHECK(
@@ -1627,9 +1628,11 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       P32BankTmaSmemLayout{}(cute::_, cute::_, cute::_0{}),
       cute::make_shape(cute::_16{}, cute::_16{}));
 
-  auto output = OrderedSplit || max_split_count == 1
-      ? at::empty({kRows * total_n}, input.options().dtype(at::kFloat))
-      : at::zeros({kRows * total_n}, input.options().dtype(at::kFloat));
+  auto output = ReturnPartials
+      ? at::empty({0}, input.options().dtype(at::kFloat))
+      : OrderedSplit || max_split_count == 1
+          ? at::empty({kRows * total_n}, input.options().dtype(at::kFloat))
+          : at::zeros({kRows * total_n}, input.options().dtype(at::kFloat));
   auto partial_output = OrderedSplit
       ? at::empty({total_partial_values}, input.options().dtype(at::kFloat))
       : output;
@@ -1746,7 +1749,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
             0);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  if constexpr (OrderedSplit) {
+  if constexpr (OrderedSplit && !ReturnPartials) {
     for (int segment = 0; segment < segment_count; ++segment) {
       const int output_values =
           kRows * static_cast<int>(out_features[segment]);
@@ -1760,7 +1763,11 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
           stream);
     }
   }
-  return output;
+  if constexpr (ReturnPartials) {
+    return partial_output;
+  } else {
+    return output;
+  }
 }
 
 at::Tensor qvq_p32_window_wgmma_m16_tma_grouped(
@@ -1821,6 +1828,35 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_ordered_split(
   }
 }
 
+at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_ordered_partials(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t transition_bits,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef split_counts) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<4, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 5:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<5, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 6:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<6, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 7:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<7, true, true>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    default:
+      TORCH_CHECK(
+          false,
+          "ordered-partial grouped QVQ P32 TMA WGMMA transition bits must be in [4, 7]");
+  }
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
@@ -1831,6 +1867,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_m16_tma_ordered_partials(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_m16_tma_grouped(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m16_tma_grouped_ordered_split(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
+  m.def("p32_window_m16_tma_grouped_ordered_partials(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
@@ -1841,4 +1878,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_m16_tma_ordered_partials", qvq_p32_window_wgmma_m16_tma_ordered_partials);
   m.impl("p32_window_m16_tma_grouped", qvq_p32_window_wgmma_m16_tma_grouped);
   m.impl("p32_window_m16_tma_grouped_ordered_split", qvq_p32_window_wgmma_m16_tma_grouped_ordered_split);
+  m.impl("p32_window_m16_tma_grouped_ordered_partials", qvq_p32_window_wgmma_m16_tma_grouped_ordered_partials);
 }
