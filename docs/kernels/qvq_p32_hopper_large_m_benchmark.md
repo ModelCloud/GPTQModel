@@ -98,3 +98,47 @@ The candidate is bit-exact to the ordinary row grid and tiled-M16 reference
 for W2, W2.5, W3, and W3.5 at M32, M64, M128, and M256.  CUDA Graph replay is
 also exact.  The first W3 timing promotes reuse-2; the full-rate matrix remains
 the next benchmark gate.
+
+## Promoted reuse-2 matrix
+
+All 32 complete-site cells improve over the prior row grid.  Geometric mean
+speedup is `1.213x`, with individual improvements from `1.123x` through
+`1.444x`.
+
+| Rate | Site | M x K x aggregate N | QVQ us | vs prior row grid | vs Marlin W4 | vs Machete W4 | Better than last |
+| ---: | :--- | ---: | ---: | ---: | ---: | ---: | :---: |
+| W2 | QKV | 32 x 2048 x 3072 | 35.215 | 1.154x | 2.637x | 1.063x | Yes |
+| W2 | QKV | 64 x 2048 x 3072 | 43.543 | 1.139x | 3.208x | 0.879x | Yes |
+| W2 | QKV | 128 x 2048 x 3072 | 57.935 | 1.198x | 2.084x | 0.704x | Yes |
+| W2 | QKV | 256 x 2048 x 3072 | 93.960 | 1.246x | 1.206x | 0.488x | Yes |
+| W2 | gate/up | 32 x 2048 x 16384 | 49.995 | 1.255x | 0.518x | 0.633x | Yes |
+| W2 | gate/up | 64 x 2048 x 16384 | 71.574 | 1.322x | 0.541x | 0.490x | Yes |
+| W2 | gate/up | 128 x 2048 x 16384 | 120.841 | 1.413x | 0.318x | 0.303x | Yes |
+| W2 | gate/up | 256 x 2048 x 16384 | 224.937 | 1.444x | 0.238x | 0.192x | Yes |
+| W2.5 | QKV | 32 x 2048 x 3072 | 35.898 | 1.127x | 2.587x | 1.042x | Yes |
+| W2.5 | QKV | 64 x 2048 x 3072 | 44.240 | 1.128x | 3.158x | 0.866x | Yes |
+| W2.5 | QKV | 128 x 2048 x 3072 | 60.842 | 1.142x | 1.984x | 0.670x | Yes |
+| W2.5 | QKV | 256 x 2048 x 3072 | 100.795 | 1.169x | 1.124x | 0.455x | Yes |
+| W2.5 | gate/up | 32 x 2048 x 16384 | 54.982 | 1.137x | 0.471x | 0.576x | Yes |
+| W2.5 | gate/up | 64 x 2048 x 16384 | 81.991 | 1.158x | 0.472x | 0.428x | Yes |
+| W2.5 | gate/up | 128 x 2048 x 16384 | 133.172 | 1.288x | 0.289x | 0.275x | Yes |
+| W2.5 | gate/up | 256 x 2048 x 16384 | 251.038 | 1.304x | 0.213x | 0.172x | Yes |
+| W3 | QKV | 32 x 2048 x 3072 | 35.660 | 1.123x | 2.604x | 1.049x | Yes |
+| W3 | QKV | 64 x 2048 x 3072 | 44.134 | 1.125x | 3.165x | 0.868x | Yes |
+| W3 | QKV | 128 x 2048 x 3072 | 60.508 | 1.150x | 1.995x | 0.674x | Yes |
+| W3 | QKV | 256 x 2048 x 3072 | 101.191 | 1.171x | 1.120x | 0.453x | Yes |
+| W3 | gate/up | 32 x 2048 x 16384 | 55.234 | 1.153x | 0.469x | 0.573x | Yes |
+| W3 | gate/up | 64 x 2048 x 16384 | 82.964 | 1.158x | 0.466x | 0.423x | Yes |
+| W3 | gate/up | 128 x 2048 x 16384 | 133.443 | 1.323x | 0.288x | 0.275x | Yes |
+| W3 | gate/up | 256 x 2048 x 16384 | 251.850 | 1.310x | 0.213x | 0.171x | Yes |
+| W3.5 | QKV | 32 x 2048 x 3072 | 35.629 | 1.136x | 2.607x | 1.050x | Yes |
+| W3.5 | QKV | 64 x 2048 x 3072 | 44.021 | 1.136x | 3.173x | 0.870x | Yes |
+| W3.5 | QKV | 128 x 2048 x 3072 | 61.188 | 1.162x | 1.973x | 0.667x | Yes |
+| W3.5 | QKV | 256 x 2048 x 3072 | 100.030 | 1.204x | 1.133x | 0.459x | Yes |
+| W3.5 | gate/up | 32 x 2048 x 16384 | 54.035 | 1.207x | 0.479x | 0.586x | Yes |
+| W3.5 | gate/up | 64 x 2048 x 16384 | 81.626 | 1.219x | 0.474x | 0.430x | Yes |
+| W3.5 | gate/up | 128 x 2048 x 16384 | 130.856 | 1.378x | 0.294x | 0.280x | Yes |
+| W3.5 | gate/up | 256 x 2048 x 16384 | 248.102 | 1.353x | 0.216x | 0.174x | Yes |
+
+Across this matrix, mean absolute error remains below `1.91e-6` and maximum
+absolute error remains below `1.75e-5` versus the dense P32 Torch oracle.
