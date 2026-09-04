@@ -3452,6 +3452,20 @@ stopped before the remaining rates and the stage-4 dispatch was reverted; no
 performance claim is made.  The interrupted diagnostic did not produce a
 JSON artifact.
 
+## v57 M4 attention-out static split specialization
+
+After the v25 merge, `origin/main` advanced to `707bb39b`.  The M4
+attention-out route `(K,N)=(6144,5120)` autotunes to split 48 for W2.5-W3.5
+(W2 remains split 24).  A guarded scalar `StaticSplitCount=48` launch was
+exact across both 20,000-iteration runs.  Against the fresh main control,
+the affected rates measured `0.051200/0.051200/0.050176 ms` for W2.5/W3/W3.5;
+the static candidate measured `0.050176/0.051200/0.050176 ms` in both runs.
+Thus W2.5 improves one event tick and the other affected rates tie; W2 is
+not routed through the specialization.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m4_attention_static48_20000.json`
+and
+`artifacts/a100_p32_window/v26_candidate_m4_attention_static48_repeat20000.json`.
+
 ## Reproduction
 
 ```bash
