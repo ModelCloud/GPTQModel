@@ -3566,13 +3566,14 @@ and `artifacts/a100_p32_window/v28_candidate_large_m_all_shapes_staticnk_50.json
 As in v63, `origin/main` rejects M>16, so these large-M comparisons are
 capability/planar-oracle measurements rather than direct main-branch deltas.
 
-## v66 rejected M16 full-KV two-stage probe
+## v66 inconclusive M16 full-KV explicit-stage probe
 
-The fixed M16 full-KV route `(K,N)=(5120,1024)` was screened with
-`StageKTiles=2` instead of the retained four-stage WMMA schedule.  It remained
-exact (`max_abs <= 1.6e-5`), but the 2,000-iteration candidate medians were
-`0.035840/0.034816/0.034816/0.033792 ms`; the retained route is faster at W2
-(`0.033792 ms`) and ties the other rates.  The dispatch was reverted.
+The fixed M16 full-KV route `(K,N)=(5120,1024)` was screened with an explicit
+`StageKTiles=2` template argument.  This is the existing default
+(`kStageKTiles=2`), so it changes no generated schedule.  The 2,000-iteration
+run remained exact (`max_abs <= 1.6e-5`) and measured
+`0.035840/0.034816/0.034816/0.033792 ms`; the small W2 difference versus
+earlier runs is timing noise, not a retained optimization.
 Diagnostic: `artifacts/a100_p32_window/v30_candidate_m16_fullkv_stage2_2000.json`.
 
 ## Reproduction
