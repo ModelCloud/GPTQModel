@@ -206,6 +206,51 @@ the explicit scratch contract is 72 MiB (one decoded FP16 plane, two FP32
 planes, and one final FP16 plane), compared with Phase 1's measured 240--272
 MiB allocator peak.
 
+### Physical-H100 Phase-2 result
+
+The formal run used 20 warmups, 31 CUDA-event samples, and 10 CUDA Graph
+replays per sample.  `Better than last` compares native Phase 2 with Phase 1
+at the same rate and M.
+
+| Rate | M x K x aggregate N | Phase-2 us | vs Phase 1 | vs Marlin W4 | vs Machete W4 | Better than last | Max error |
+| ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: |
+| W2 | 8192 x 2048 x 3072 | 504.749 | 1.162x | 0.605x | 0.456x | Yes | 4.469e-6 |
+| W2.5 | 8192 x 2048 x 3072 | 506.512 | 1.164x | 0.603x | 0.454x | Yes | 4.450e-6 |
+| W3 | 8192 x 2048 x 3072 | 503.002 | 1.171x | 0.608x | 0.457x | Yes | 4.520e-6 |
+| W3.5 | 8192 x 2048 x 3072 | 500.902 | 1.172x | 0.610x | 0.459x | Yes | 4.035e-6 |
+| W2 | 16384 x 2048 x 3072 | 743.024 | 1.116x | 0.854x | 0.651x | Yes | 4.654e-6 |
+| W2.5 | 16384 x 2048 x 3072 | 739.818 | 1.118x | 0.857x | 0.653x | Yes | 4.443e-6 |
+| W3 | 16384 x 2048 x 3072 | 743.027 | 1.112x | 0.854x | 0.651x | Yes | 4.678e-6 |
+| W3.5 | 16384 x 2048 x 3072 | 743.706 | 1.111x | 0.853x | 0.650x | Yes | 4.562e-6 |
+
+The full-call allocator probe measured a 156--156.5 MiB incremental peak and
+zero retained bytes, down from Phase 1's 240--272 MiB peak.  The native folded
+weight is bit-exact to Phase 1 for every rate, and the complete operation stays
+well inside the dense-P32 error gate.
+
+### Phase-2 Nsight Compute and SASS result
+
+The committed W3/M8192 CUDA Graph was profiled using Nsight Compute with each
+new native stage selected by kernel-name filtering.  Times include profiling
+overhead consistently within this matched capture and are used for attribution,
+not as replacements for the CUDA-event table above.
+
+| Stage | NCU time | Executed warp instructions | DRAM throughput | SM throughput | Eligible warps/cycle |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| transposed P32 decode | 23.968 us | 2,482,176 | 4.28% | 11.46% | 0.156 |
+| K-axis Hadamard + SU | 83.808 us | 69,009,408 | 7.07% | 79.07% | 4.995 |
+| FP32 tiled transpose | 15.584 us | 6,881,280 | 76.22% | 43.03% | 1.583 |
+| segmented N-axis Hadamard + SV + FP16 store | 139.072 us | 81,788,928 | 16.86% | 56.30% | 2.593 |
+
+The source-correlated SASS shows the transform stages are dominated by generic
+butterfly control and synchronization rather than memory bandwidth.  The
+K-axis stage executes about 8.45M branches, 4.23M barrier synchronizations,
+4.03M shared stores, 4.03M shared loads, and 3.83M FP32 additions.  The N-axis
+stage executes about 9.34M branches and 5.11M barrier synchronizations.  The
+next direct-FP16 kernel should use compile-time tile geometry and on-chip
+producer/consumer staging so this generic full-matrix preparation disappears,
+rather than spending another phase tuning these temporary kernels in isolation.
+
 ## Phase 3: on-chip FP16 decode and shared-source WGMMA
 
 Phase 3 removes the global FP16 temporary.  A producer warpgroup loads P32
