@@ -396,6 +396,12 @@ def _resolve_split_count(
         raise ValueError("QVQ P32 Ampere split_count must be non-negative")
     if split_count:
         return int(split_count)
+    # Prefill batches are tiled in 16-row WMMA CTAs by the native Ampere
+    # launcher.  Once there are more than one row tile, a single K wave keeps
+    # enough independent CTAs resident and avoids materializing a split-K
+    # partial tensor proportional to M.
+    if input.shape[0] > 16:
+        return 1
     if (
         input.shape[0] == 1
         and input.shape[1] == 5120
@@ -786,7 +792,7 @@ def qvq_p32_window_ampere(
         # Environment configuration is process-level. Reading ``os.environ``
         # on every cached launch costs more than the cache lookup itself, so
         # refresh it only when the process-local plan cache is cleared.
-        autotune = _AUTOTUNE_ENABLED
+        autotune = _AUTOTUNE_ENABLED and input.shape[0] <= 16
         autotune_key = None
         if autotune:
             autotune_key = _autotune_cache_key(
@@ -822,6 +828,10 @@ def qvq_p32_window_ampere(
                 k_tiles=int(input.shape[1]) // 16,
                 sm_count=_device_sm_count(input.device),
             )
+        if input.shape[0] > 16:
+            # Row-blocked prefill has ample independent CTAs; keep one K wave
+            # so the partial tensor does not scale with the large M dimension.
+            split_count = 1
         # The scalar M<=4 kernel groups sixteen N16 tiles per CTA.  Wide
         # projections therefore need a fuller split wave than the WMMA
         # shape table (which was tuned for four-warp/N64 CTAs) to keep all

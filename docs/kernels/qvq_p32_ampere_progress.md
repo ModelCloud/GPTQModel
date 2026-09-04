@@ -3452,6 +3452,102 @@ stopped before the remaining rates and the stage-4 dispatch was reverted; no
 performance claim is made.  The interrupted diagnostic did not produce a
 JSON artifact.
 
+## v57 M4 attention-out static split specialization
+
+After the v25 merge, `origin/main` advanced to `707bb39b`.  The M4
+attention-out route `(K,N)=(6144,5120)` autotunes to split 48 for W2.5-W3.5
+(W2 remains split 24).  A guarded scalar `StaticSplitCount=48` launch was
+exact across both 20,000-iteration runs.  Against the fresh main control,
+the affected rates measured `0.051200/0.051200/0.050176 ms` for W2.5/W3/W3.5;
+the static candidate measured `0.050176/0.051200/0.050176 ms` in both runs.
+Thus W2.5 improves one event tick and the other affected rates tie; W2 is
+not routed through the specialization.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m4_attention_static48_20000.json`
+and
+`artifacts/a100_p32_window/v26_candidate_m4_attention_static48_repeat20000.json`.
+
+## v58 M8 attention-out static split specialization
+
+The M8 attention-out route `(K,N)=(6144,5120)` uses the measured split-24
+wave for all four P32 rates.  A guarded WMMA `StaticSplitCount=24` launch was
+exact in two matched 20,000-iteration screens.  Fresh-main medians were
+`0.052224/0.052224/0.051200/0.051200 ms`; the static candidate measured
+`0.050176/0.050176/0.051200/0.051200 ms` for W2/W2.5/W3/W3.5 in both runs.
+This is a 2.04-us event-quantized improvement at W2 and W2.5 with no losses
+at the other rates.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m8_attention_static24_20000.json`
+and
+`artifacts/a100_p32_window/v26_candidate_m8_attention_static24_repeat20000.json`.
+
+## v59 M8 linear-Z static split specialization
+
+The M8 linear-Z route `(K,N)=(5120,6144)` uses the stable split-40 plan.  A
+guarded WMMA `StaticSplitCount=40` launch was exact in two matched 20,000-
+iteration candidate runs.  Fresh-main medians were
+`0.051200/0.051200/0.051200/0.052224 ms`; the candidate measured
+`0.050176/0.050176/0.051200/0.051200 ms` for W2/W2.5/W3/W3.5 in both runs.
+This is a repeatable one-event-tick improvement at W2, W2.5, and W3.5 with
+no loss at W3.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m8_linearz_static40_20000.json` and
+`artifacts/a100_p32_window/v26_candidate_m8_linearz_static40_repeat20000.json`.
+
+## v60 M8 MLP-down static split specialization
+
+The M8 MLP-down route `(K,N)=(17408,5120)` uses the stable split-40 plan.  A
+guarded WMMA `StaticSplitCount=40` launch was exact in two matched 20,000-
+iteration candidate runs.  Fresh-main medians were
+`0.115712/0.116736/0.118784/0.119808 ms`; the candidate measured
+`0.113664/0.116736/0.118784/0.119808 ms` for W2/W2.5/W3/W3.5 in the first
+run, and `0.113664/0.116736/0.118784/0.119808 ms` in the repeat.  This is a
+repeatable one-event-tick improvement at W2 with no losses at the other rates.
+Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m8_mlpdown_static40_20000.json` and
+`artifacts/a100_p32_window/v26_candidate_m8_mlpdown_static40_repeat20000.json`.
+
+## v61 M16 attention-out static split specialization
+
+The M16 attention-out route `(K,N)=(6144,5120)` uses the stable split-12 plan.
+A guarded WMMA `StaticSplitCount=12` launch was exact in two matched 20,000-
+iteration candidate runs.  Fresh-main medians were
+`0.054272/0.052224/0.053248/0.053248 ms`; the candidate measured
+`0.054272/0.052224/0.052224/0.053248 ms` in both runs for
+W2/W2.5/W3/W3.5.  This is a repeatable one-event-tick improvement at W3 with
+no losses at the other rates.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m16_attention_static12_20000.json`
+and `artifacts/a100_p32_window/v26_candidate_m16_attention_static12_repeat20000.json`.
+
+## v62 rejected M2 full-KV static-N probe
+
+The M2 full-KV route `(K,N)=(5120,1024)` was screened with a compile-time
+`StaticN=1024` and `StaticSplitCount=64` scalar launch.  It remained exact, but
+the matched 20,000-iteration medians regressed at W2.5/W3/W3.5: latest-main
+was `0.034816/0.033792/0.032768/0.034816 ms`, while the candidate was
+`0.034816/0.036864/0.035840/0.036864 ms`.  The source change was reverted;
+diagnostics are `artifacts/a100_p32_window/v26_candidate_m2_fullkv_staticn1024_20000.json`
+and `artifacts/a100_p32_window/v26_candidate_m2_fullkv_staticn1024_repeat20000.json`.
+
+## v63 large-M row-block capability (M=512/1024/2048/4096)
+
+The Ampere P32 entry point previously rejected `M>16`.  The new row-blocked
+launcher tiles each prefill batch into 16-row WMMA CTAs, uses one K wave, and
+writes directly into the global output layout.  The Python policy disables
+autotune for these large batches and selects split 1, avoiding a partial tensor
+that scales with M.  Correctness covers M=17 and M=32 across all four rates;
+the requested M=512/1024/2048/4096 sweep across all seven projection shapes
+also stayed within `max_abs <= 6.8e-4`.  The 50-iteration diagnostic is
+`artifacts/a100_p32_window/v27_candidate_large_m_all_shapes_50.json`.
+
+The fetched `origin/main` still rejects `M>16`, so no direct main-branch timing
+exists for these new shapes; the reported large-M speedups are against the
+planar oracle only until a comparable main implementation is available.
+
+## v64 rejected large-M wide-N Marlin-style probe
+
+Applying the two-N-tile-per-warp (`WideNTiles=true`) reuse path to the large-M
+launcher preserved correctness but regressed M512 full-KV from roughly 9.2x to
+6.8x Ampere/planar speedup.  The change was reverted; diagnostic:
+`artifacts/a100_p32_window/v27_candidate_m512_fullkv_wide_smoke.json`.
+
 ## Reproduction
 
 ```bash
