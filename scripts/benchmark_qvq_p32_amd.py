@@ -23,6 +23,33 @@ REQUESTED_M = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
 P32_RATES = (2.0, 2.5, 3.0, 3.5)
 
 
+def _target_process_ids(system: object, physical_gpu: int) -> list[int]:
+    """Return KFD processes with resident VRAM on the requested physical GPU."""
+
+    if not isinstance(system, dict):
+        raise TypeError(f"rocm-smi did not report KFD process data: {system!r}")
+    process_ids = []
+    for key, value in system.items():
+        if not isinstance(key, str) or not key.startswith("PID"):
+            continue
+        pid_text = key.removeprefix("PID")
+        if not pid_text.isdigit() or not isinstance(value, str):
+            raise TypeError(f"rocm-smi reported malformed KFD process data: {key!r}={value!r}")
+        fields = [field.strip() for field in value.split(",")]
+        if len(fields) != 5:
+            raise ValueError(f"rocm-smi reported malformed KFD process fields: {key!r}={value!r}")
+        try:
+            gpu_ids = {int(gpu) for gpu in fields[1].split()}
+            vram_used_bytes = int(fields[2])
+        except ValueError as exc:
+            raise ValueError(
+                f"rocm-smi reported non-integer KFD process fields: {key!r}={value!r}"
+            ) from exc
+        if physical_gpu in gpu_ids and vram_used_bytes > 0:
+            process_ids.append(int(pid_text))
+    return sorted(process_ids)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--physical-gpu", type=int, default=0)
@@ -79,26 +106,31 @@ def _rocm_snapshot(physical_gpu: int) -> dict[str, object]:
         "--showdriverversion",
         "--json",
     ]
-    payload = json.loads(subprocess.check_output(command, text=True))
-    card = payload.get(f"card{physical_gpu}")
-    if not isinstance(card, dict):
-        raise TypeError(f"rocm-smi did not report physical GPU {physical_gpu}: {payload}")
-    system = payload.get("system", {})
-    process_ids = sorted(
-        int(key.removeprefix("PID"))
-        for key in system
-        if isinstance(key, str) and key.startswith("PID") and key.removeprefix("PID").isdigit()
-    )
-    return {
-        "physical_gpu": physical_gpu,
-        "pci_bus_id": card.get("PCI Bus", "unknown"),
-        "unique_id": card.get("Unique ID", "unknown"),
-        "driver": system.get("Driver version", "unknown"),
-        "utilization_percent": int(card["GPU use (%)"]),
-        "vram_total_bytes": int(card["VRAM Total Memory (B)"]),
-        "vram_used_bytes": int(card["VRAM Total Used Memory (B)"]),
-        "process_ids": process_ids,
-    }
+    for attempt in range(5):
+        payload = json.loads(subprocess.check_output(command, text=True))
+        card = payload.get(f"card{physical_gpu}")
+        if not isinstance(card, dict):
+            raise TypeError(f"rocm-smi did not report physical GPU {physical_gpu}: {payload}")
+        system = payload.get("system", {})
+        try:
+            process_ids = _target_process_ids(system, physical_gpu)
+        except ValueError as exc:
+            transient = "unknown, unknown, unknown, unknown" in str(exc)
+            if not transient or attempt == 4:
+                raise
+            time.sleep(0.05)
+            continue
+        return {
+            "physical_gpu": physical_gpu,
+            "pci_bus_id": card.get("PCI Bus", "unknown"),
+            "unique_id": card.get("Unique ID", "unknown"),
+            "driver": system.get("Driver version", "unknown"),
+            "utilization_percent": int(card["GPU use (%)"]),
+            "vram_total_bytes": int(card["VRAM Total Memory (B)"]),
+            "vram_used_bytes": int(card["VRAM Total Used Memory (B)"]),
+            "process_ids": process_ids,
+        }
+    raise AssertionError("unreachable")
 
 
 def _idle_preflight(args: argparse.Namespace) -> tuple[dict[str, object], bool]:

@@ -25,9 +25,28 @@ from gptqmodel.utils.qvq_amd import (
     qvq_p32_amd,
     qvq_p32_amd_supported,
 )
+from scripts.benchmark_qvq_p32_amd import _target_process_ids
 
 P32_RATES = (2.0, 2.5, 3.0, 3.5)
 REQUESTED_M = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
+
+
+def test_qvq_p32_amd_benchmark_filters_rocm_processes_to_target_gpu():
+    system = {
+        "Driver version": "7.1.3",
+        "PID101": "candidate, 0, 4096, 0, 0",
+        "PID102": "other-gpu, 1, 8192, 0, 0",
+        "PID103": "stale, 0, 0, 0, 0",
+        "PID104": "multi-gpu, 0 1, 16384, 0, 0",
+    }
+
+    assert _target_process_ids(system, 0) == [101, 104]
+    assert _target_process_ids(system, 1) == [102, 104]
+
+
+def test_qvq_p32_amd_benchmark_rejects_malformed_rocm_process_data():
+    with pytest.raises(ValueError, match="malformed KFD process fields"):
+        _target_process_ids({"PID101": "missing-fields"}, 0)
 
 
 def _gfx950_available() -> bool:

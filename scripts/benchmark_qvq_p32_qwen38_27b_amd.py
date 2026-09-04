@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -45,11 +46,22 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--idle-samples", type=int, default=3)
     parser.add_argument("--idle-interval", type=float, default=1.0)
     parser.add_argument("--idle-memory-tolerance-mib", type=int, default=8)
+    parser.add_argument(
+        "--shape-cooldown",
+        type=float,
+        default=3.0,
+        help="Seconds to wait for ROCm to release the previous shape's allocations.",
+    )
     parser.add_argument("--allow-busy", action="store_true")
     parser.add_argument(
         "--aggregate-only",
         action="store_true",
         help="Rebuild the aggregate from existing per-shape JSON files.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Reuse existing per-shape files only when they are marked benchmark-valid.",
     )
     parser.add_argument(
         "--output",
@@ -61,6 +73,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--rates supports only W2, W2.5, W3, and W3.5")
     if any(m not in REQUESTED_M for m in args.m_values):
         parser.error(f"--m-values must be drawn from {REQUESTED_M}")
+    if args.shape_cooldown < 0:
+        parser.error("--shape-cooldown must be nonnegative")
     return args
 
 
@@ -77,7 +91,7 @@ def main() -> None:
     components = []
     rows = []
 
-    for name, k, n in QWEN38_27B_SHAPES:
+    for shape_index, (name, k, n) in enumerate(QWEN38_27B_SHAPES):
         output = component_dir / f"{name}.json"
         command = [
             sys.executable,
@@ -111,7 +125,12 @@ def main() -> None:
         ]
         if args.allow_busy:
             command.append("--allow-busy")
-        if not args.aggregate_only:
+        reusable = False
+        if args.resume and output.is_file():
+            reusable = bool(json.loads(output.read_text()).get("benchmark_valid"))
+        if not args.aggregate_only and not reusable:
+            if shape_index and args.shape_cooldown:
+                time.sleep(args.shape_cooldown)
             print(f"running Qwen3.8-27B {name}: K={k} N={n}", flush=True)
             subprocess.run(
                 command,
@@ -119,6 +138,8 @@ def main() -> None:
                 env={**os.environ, "PYTHONPATH": str(repo_root)},
                 check=True,
             )
+        elif reusable:
+            print(f"reusing valid Qwen3.8-27B {name}: K={k} N={n}", flush=True)
         elif not output.is_file():
             raise FileNotFoundError(f"component benchmark not found: {output}")
         component = json.loads(output.read_text())
