@@ -285,6 +285,60 @@ def _main(args: argparse.Namespace) -> None:
 
         os.environ["QVQ_HOPPER_FP16_PREFILL"] = "0"
         os.environ["QVQ_HOPPER_FP16_PREFILL_NATIVE"] = "0"
+        os.environ["QVQ_HOPPER_FP8_PREFILL"] = "0"
+        os.environ["QVQ_HOPPER_FP8_PREFILL_ON_DEMAND"] = "1"
+        ondemand_m_values = tuple(m for m in args.prefill_m_values if m >= 16384)
+        ondemand_fp8_call_memory = None
+        ondemand_fp8 = {}
+        ondemand_fp8_errors = {}
+        ondemand_fp8_retained_bytes = 0
+        ondemand_fp8_scratch_bytes = 0
+        if ondemand_m_values:
+            first_ondemand_m = min(ondemand_m_values)
+            ondemand_fp8_call_memory = _cold_build(
+                torch,
+                lambda first_ondemand_m=first_ondemand_m: call(first_ondemand_m),
+                device,
+            )
+            for m in ondemand_m_values:
+                launches_before = int(
+                    qvq_grouped_runtime_telemetry(parent)[0][
+                        "h100_fp8_ondemand_launches"
+                    ]
+                )
+                ondemand_fp8[m], actual = large_m._graph_timing(
+                    torch,
+                    lambda m=m: call(m),
+                    args,
+                    device_info,
+                )
+                expected = tuple(
+                    qvq_dense_oracle_forward(child, inputs[m], device=device)
+                    for child in children
+                )
+                ondemand_fp8_errors[m] = large_m._errors(torch, actual, expected)
+                if ondemand_fp8_errors[m]["max_abs"] > 2e-3:
+                    raise RuntimeError(
+                        f"W{bits:g} M{m} on-demand FP8 oracle failure: "
+                        f"{ondemand_fp8_errors[m]}"
+                    )
+                launches_after = int(
+                    qvq_grouped_runtime_telemetry(parent)[0][
+                        "h100_fp8_ondemand_launches"
+                    ]
+                )
+                if launches_after <= launches_before:
+                    raise RuntimeError(f"M{m} did not execute on-demand FP8 prefill")
+                del actual, expected
+            ondemand_telemetry = qvq_grouped_runtime_telemetry(parent)[0]
+            ondemand_fp8_retained_bytes = int(
+                ondemand_telemetry["h100_fp8_ondemand_retained_bytes"]
+            )
+            ondemand_fp8_scratch_bytes = int(
+                ondemand_telemetry["h100_fp8_ondemand_scratch_bytes"]
+            )
+
+        os.environ["QVQ_HOPPER_FP8_PREFILL_ON_DEMAND"] = "0"
         os.environ["QVQ_HOPPER_FP8_PREFILL"] = "1"
         launches_before = int(
             qvq_grouped_runtime_telemetry(parent)[0]["h100_fp8_prefill_launches"]
@@ -432,6 +486,36 @@ def _main(args: argparse.Namespace) -> None:
                     "dense_oracle_error": native_fp16_prefill_errors[m],
                 }
             )
+            if m in ondemand_fp8:
+                rows.append(
+                    {
+                        "phase": "native_ondemand_fp8_prefill",
+                        "bits": bits,
+                        "m": m,
+                        "mkn": [m, common.K, sum(widths)],
+                        "qvq": ondemand_fp8[m],
+                        "qvq_phase2_fp16": native_fp16_prefill[m],
+                        "marlin_w4": comparators[("marlin", m)],
+                        "machete_w4": comparators[("machete", m)],
+                        "speedup_vs_phase2_fp16": _median_us(
+                            native_fp16_prefill[m]
+                        )
+                        / _median_us(ondemand_fp8[m]),
+                        "speedup_vs_marlin_w4": _median_us(
+                            comparators[("marlin", m)]
+                        )
+                        / _median_us(ondemand_fp8[m]),
+                        "speedup_vs_machete_w4": _median_us(
+                            comparators[("machete", m)]
+                        )
+                        / _median_us(ondemand_fp8[m]),
+                        "better_than_last_benchmark": _median_us(
+                            ondemand_fp8[m]
+                        )
+                        < _median_us(native_fp16_prefill[m]),
+                        "dense_oracle_error": ondemand_fp8_errors[m],
+                    }
+                )
             rows.append(
                 {
                     "phase": "warm_prefill",
@@ -473,6 +557,9 @@ def _main(args: argparse.Namespace) -> None:
                 "on_demand_fp16_call": fp16_call_memory,
                 "native_fp16_scratch_bytes": native_fp16_scratch_bytes,
                 "native_fp16_call": native_fp16_call_memory,
+                "ondemand_fp8_retained_bytes": ondemand_fp8_retained_bytes,
+                "ondemand_fp8_scratch_bytes": ondemand_fp8_scratch_bytes,
+                "ondemand_fp8_call": ondemand_fp8_call_memory,
                 "cold_build": cold,
             }
         )
@@ -484,6 +571,7 @@ def _main(args: argparse.Namespace) -> None:
     os.environ.pop("QVQ_HOPPER_FP8_PREFILL", None)
     os.environ.pop("QVQ_HOPPER_FP16_PREFILL", None)
     os.environ.pop("QVQ_HOPPER_FP16_PREFILL_NATIVE", None)
+    os.environ.pop("QVQ_HOPPER_FP8_PREFILL_ON_DEMAND", None)
     payload = {
         "git_commit": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, text=True

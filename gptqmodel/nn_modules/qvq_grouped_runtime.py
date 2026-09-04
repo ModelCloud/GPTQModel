@@ -76,6 +76,15 @@ class _H100FP8PrefillPayload:
     source_key: tuple[Any, ...]
 
 
+@dataclass(frozen=True)
+class _H100OnDemandFP8Scales:
+    """Tiny source-versioned scales retained by on-demand FP8 prefill."""
+
+    weight_scale: torch.Tensor
+    input_scale: torch.Tensor
+    source_key: tuple[Any, ...]
+
+
 def _is_exact_silu_activation(act_fn: Any) -> bool:
     """Return whether ``act_fn`` has PyTorch's standard non-inplace SiLU contract."""
 
@@ -237,6 +246,9 @@ class QVQGroupedRuntimeTelemetry:
     h100_large_m_group_chunk_rows: int = 0
     h100_fp8_prefill_launches: int = 0
     h100_fp8_prefill_bytes: int = 0
+    h100_fp8_ondemand_launches: int = 0
+    h100_fp8_ondemand_retained_bytes: int = 0
+    h100_fp8_ondemand_scratch_bytes: int = 0
     h100_fp16_prefill_launches: int = 0
     h100_fp16_prefill_temporary_bytes: int = 0
     h100_fp16_prefill_native_launches: int = 0
@@ -310,6 +322,13 @@ class QVQGroupedRuntimeTelemetry:
             "h100_large_m_group_chunk_rows": self.h100_large_m_group_chunk_rows,
             "h100_fp8_prefill_launches": self.h100_fp8_prefill_launches,
             "h100_fp8_prefill_bytes": self.h100_fp8_prefill_bytes,
+            "h100_fp8_ondemand_launches": self.h100_fp8_ondemand_launches,
+            "h100_fp8_ondemand_retained_bytes": (
+                self.h100_fp8_ondemand_retained_bytes
+            ),
+            "h100_fp8_ondemand_scratch_bytes": (
+                self.h100_fp8_ondemand_scratch_bytes
+            ),
             "h100_fp16_prefill_launches": self.h100_fp16_prefill_launches,
             "h100_fp16_prefill_temporary_bytes": (
                 self.h100_fp16_prefill_temporary_bytes
@@ -370,6 +389,7 @@ class QVQHopperGroupedRuntime:
         self._large_m_chunk_cache: dict[tuple[Any, ...], int] = {}
         self._large_m_chunk_cache_lock = RLock()
         self._h100_fp8_prefill_payload: _H100FP8PrefillPayload | None = None
+        self._h100_fp8_ondemand_scales: _H100OnDemandFP8Scales | None = None
         self._input: torch.Tensor | None = None
         self._input_version: int | None = None
         self._outputs: tuple[torch.Tensor, ...] | None = None
@@ -409,11 +429,14 @@ class QVQHopperGroupedRuntime:
         with self._large_m_chunk_cache_lock:
             self._large_m_chunk_cache.clear()
         self._h100_fp8_prefill_payload = None
+        self._h100_fp8_ondemand_scales = None
         self.telemetry.grouped_window_bytes = 0
         self.telemetry.grouped_selector_bytes = 0
         self.telemetry.child_window_bytes_avoided = 0
         self.telemetry.active_split_counts = ()
         self.telemetry.h100_fp8_prefill_bytes = 0
+        self.telemetry.h100_fp8_ondemand_retained_bytes = 0
+        self.telemetry.h100_fp8_ondemand_scratch_bytes = 0
         self.telemetry.h100_fp16_prefill_temporary_bytes = 0
         self.telemetry.h100_fp16_prefill_native_scratch_bytes = 0
 
@@ -649,6 +672,15 @@ class QVQHopperGroupedRuntime:
             raise ValueError("ordered partial execution cannot recover child outputs")
         children = self._children()
         rows = x.numel() // children[0].in_features
+        if (
+            recover
+            and not return_ordered_partials
+            and self._h100_fp8_ondemand_eligible(x, rows)
+        ):
+            scales = self._ensure_h100_fp8_ondemand_scales()
+            if scales is not None:
+                self.telemetry.h100_fp8_ondemand_launches += 1
+                return self._execute_h100_fp8_ondemand(x, scales)
         if (
             recover
             and not return_ordered_partials
@@ -982,6 +1014,16 @@ class QVQHopperGroupedRuntime:
         }
 
     @staticmethod
+    def _h100_fp8_ondemand_enabled() -> bool:
+        return os.environ.get("QVQ_HOPPER_FP8_PREFILL_ON_DEMAND", "0").lower() not in {
+            "0",
+            "false",
+            "off",
+            "no",
+            "",
+        }
+
+    @staticmethod
     def _h100_fp16_prefill_enabled() -> bool:
         return os.environ.get("QVQ_HOPPER_FP16_PREFILL", "0").lower() not in {
             "0",
@@ -1116,6 +1158,128 @@ class QVQHopperGroupedRuntime:
             and hasattr(torch, "_scaled_mm")
             and hasattr(torch, "float8_e4m3fn")
             and hasattr(torch, "float8_e5m2")
+        )
+
+    def _h100_fp8_ondemand_eligible(self, x: torch.Tensor, rows: int) -> bool:
+        children = self._children()
+        if not self._h100_fp8_ondemand_enabled() or rows < 16384:
+            return False
+        properties = torch.cuda.get_device_properties(x.device)
+        return (
+            self.category == "qkv"
+            and len(children) == 3
+            and children[0].in_features == 2048
+            and tuple(child.out_features for child in children)
+            == (2048, 512, 512)
+            and all(child.bias is None for child in children)
+            and properties.name == "NVIDIA H100"
+            and (properties.major, properties.minor) == (9, 0)
+            and hasattr(torch, "_scaled_mm")
+            and hasattr(torch, "float8_e4m3fn")
+            and hasattr(torch, "float8_e5m2")
+        )
+
+    def _build_h100_fp8_ondemand_scales(
+        self, source_key: tuple[Any, ...]
+    ) -> _H100OnDemandFP8Scales:
+        from ..utils.qvq_cuda import _pgc16_levels
+        from ..utils.qvq_wgmma_cuda import (
+            qvq_p32_window_prepare_grouped_fp16_packed,
+        )
+
+        children = self._children()
+        payload = self._ensure_payload()
+        levels = _pgc16_levels(children[0].trellis.device, children[0].codebook_version)
+        folded = qvq_p32_window_prepare_grouped_fp16_packed(
+            payload,
+            levels,
+            children[0]._cached_cast("SU", torch.float32, torch.float32),
+            [
+                child._cached_cast("SV", torch.float32, torch.float32)
+                for child in children
+            ],
+            [child.output_hadamard for child in children],
+        )
+        weight_scale = (folded.abs().amax() / 448.0).float()
+        weight_scale = torch.where(
+            weight_scale > 0, weight_scale, torch.ones_like(weight_scale)
+        )
+        scales = _H100OnDemandFP8Scales(
+            weight_scale=weight_scale,
+            input_scale=torch.ones_like(weight_scale),
+            source_key=source_key,
+        )
+        if source_key != self._h100_fp8_prefill_source_key():
+            raise RuntimeError(
+                "QVQ canonical state changed during on-demand FP8 scale calibration"
+            )
+        self.telemetry.h100_fp8_ondemand_retained_bytes = sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in (scales.weight_scale, scales.input_scale)
+        )
+        return scales
+
+    def _ensure_h100_fp8_ondemand_scales(
+        self,
+    ) -> _H100OnDemandFP8Scales | None:
+        source_key = self._h100_fp8_prefill_source_key()
+        cached = self._h100_fp8_ondemand_scales
+        if cached is not None and cached.source_key == source_key:
+            return cached
+        if torch.cuda.is_current_stream_capturing():
+            return None
+        self._h100_fp8_ondemand_scales = self._build_h100_fp8_ondemand_scales(
+            source_key
+        )
+        return self._h100_fp8_ondemand_scales
+
+    def _execute_h100_fp8_ondemand(
+        self, x: torch.Tensor, scales: _H100OnDemandFP8Scales
+    ) -> tuple[torch.Tensor, ...]:
+        from ..utils.qvq_cuda import _pgc16_levels
+        from ..utils.qvq_wgmma_cuda import (
+            qvq_p32_window_prepare_grouped_fp8_packed,
+        )
+
+        children = self._children()
+        rows = x.numel() // children[0].in_features
+        payload = self._ensure_payload()
+        levels = _pgc16_levels(x.device, children[0].codebook_version)
+        folded_fp8 = qvq_p32_window_prepare_grouped_fp8_packed(
+            payload,
+            levels,
+            children[0]._cached_cast("SU", torch.float32, torch.float32),
+            [
+                child._cached_cast("SV", torch.float32, torch.float32)
+                for child in children
+            ],
+            [child.output_hadamard for child in children],
+            scales.weight_scale,
+        )
+        x_fp8 = qvq_fp16_to_fp8_e5m2_clamped(
+            x.reshape(rows, children[0].in_features).contiguous()
+        )
+        output = torch._scaled_mm(
+            x_fp8,
+            folded_fp8,
+            scale_a=scales.input_scale,
+            scale_b=scales.weight_scale,
+            bias=None,
+            out_dtype=torch.float16,
+            use_fast_accum=True,
+        )
+        # Decoder FP16 + two FP32 transform planes + final E4M3 output.
+        self.telemetry.h100_fp8_ondemand_scratch_bytes = (
+            children[0].in_features
+            * sum(child.out_features for child in children)
+            * (torch.float16.itemsize + torch.float32.itemsize * 2 + 1)
+        )
+        widths = tuple(child.out_features for child in children)
+        return tuple(
+            child_output.reshape(*x.shape[:-1], width)
+            for child_output, width in zip(
+                torch.split(output, widths, dim=1), widths, strict=True
+            )
         )
 
     def _h100_fp8_prefill_source_key(self) -> tuple[Any, ...]:

@@ -121,6 +121,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m64_tma_grouped_reuse4",
         "p32_window_m64_tma_grouped_ordered_reuse4",
         "p32_window_decode_grouped_fp16",
+        "p32_window_prepare_grouped_fp8",
         "p32_window_prepare_grouped_fp16",
     ),
     sources=_source,
@@ -920,6 +921,63 @@ def qvq_p32_window_prepare_grouped_fp16_packed(
     )
 
 
+def qvq_p32_window_prepare_grouped_fp8_packed(
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+    input_scale: torch.Tensor,
+    output_scales: Sequence[torch.Tensor],
+    output_hadamards: Sequence[bool],
+    weight_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Decode/fold P32 directly to column-major E4M3 for cuBLASLt."""
+
+    plan = payload.plan
+    if (
+        levels.device.type != "cuda"
+        or levels.dtype != torch.float16
+        or input_scale.device != levels.device
+        or input_scale.dtype != torch.float32
+        or input_scale.shape != (plan.in_features,)
+        or weight_scale.device != levels.device
+        or weight_scale.dtype != torch.float32
+        or weight_scale.numel() != 1
+    ):
+        raise ValueError(
+            "grouped folded-FP8 preparation requires matching CUDA levels, "
+            "FP32 scales, and one FP32 weight scale"
+        )
+    if len(output_scales) != len(plan.segments) or len(output_hadamards) != len(
+        plan.segments
+    ):
+        raise ValueError(
+            "grouped folded-FP8 preparation requires one output scale and "
+            "Hadamard flag per segment"
+        )
+    for scale, segment in zip(output_scales, plan.segments, strict=True):
+        if (
+            scale.device != levels.device
+            or scale.dtype != torch.float32
+            or scale.shape != (segment.out_features,)
+        ):
+            raise ValueError(
+                "grouped folded-FP8 output scales must be matching FP32 CUDA vectors"
+            )
+    transposed = _QVQ_WGMMA_EXTENSION.op("p32_window_prepare_grouped_fp8")(
+        payload.trellis,
+        levels.contiguous(),
+        payload.bank_ids,
+        input_scale.contiguous(),
+        [scale.contiguous() for scale in output_scales],
+        weight_scale.contiguous(),
+        plan.transition_bits,
+        plan.in_features,
+        [segment.out_features for segment in plan.segments],
+        [segment.bank_alt_id for segment in plan.segments],
+        [int(enabled) for enabled in output_hadamards],
+    )
+    return transposed.t()
+
+
 def qvq_p32_window_wgmma_single_large_m_packed(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -1023,6 +1081,7 @@ __all__ = [
     "qvq_h100_ordered_split_count",
     "qvq_p32_window_decode_grouped_fp16_packed",
     "qvq_p32_window_grouped_prefill_fp16_packed",
+    "qvq_p32_window_prepare_grouped_fp8_packed",
     "qvq_p32_window_prepare_grouped_fp16_packed",
     "qvq_p32_window_wgmma_group_plan",
     "qvq_p32_window_wgmma_grouped",

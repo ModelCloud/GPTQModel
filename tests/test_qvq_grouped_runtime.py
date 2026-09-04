@@ -1222,6 +1222,78 @@ def test_h100_m8192_qkv_uses_folded_fp8_prefill_and_replays_cuda_graph():
     assert telemetry["plain_fallbacks"] == 0
 
 
+def test_h100_m16384_qkv_on_demand_fp8_is_bounded_and_replays_cuda_graph(
+    monkeypatch,
+):
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    from gptqmodel.nn_modules.qlinear.qvq import qvq_dense_oracle_forward
+
+    monkeypatch.setenv("QVQ_HOPPER_FP8_PREFILL_ON_DEMAND", "1")
+    shared = torch.ones(2048, device=device)
+    widths = (2048, 512, 512)
+    children = tuple(
+        _child(
+            name,
+            in_features=2048,
+            out_features=width,
+            bits=3,
+            su=shared,
+            alt_id=index + 1,
+            seed=320 + index,
+            device=device,
+        )
+        for index, (name, width) in enumerate(
+            zip(("q_proj", "k_proj", "v_proj"), widths, strict=True)
+        )
+    )
+    children[2].output_hadamard = False
+    for child in children:
+        child.bias = None
+        child.SV.fill_(0.002)
+        child._dtype_cache_clear()
+    attention = _Attention(children)
+    static_input = (
+        torch.randn((16384, 2048), device=device, dtype=torch.float16) * 0.02
+    )
+    with torch.inference_mode():
+        expected = tuple(
+            qvq_dense_oracle_forward(child, static_input, device=device)
+            for child in children
+        )
+    assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
+
+    def execute_group():
+        return tuple(
+            getattr(attention, name)(static_input)
+            for name in ("q_proj", "k_proj", "v_proj")
+        )
+
+    with torch.inference_mode():
+        eager = execute_group()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = execute_group()
+        for _ in range(3):
+            graph.replay()
+        torch.cuda.synchronize(device)
+
+    for actual, reference in zip(eager, expected, strict=True):
+        torch.testing.assert_close(actual.float(), reference, rtol=0, atol=2e-3)
+    assert all(
+        torch.equal(actual, reference)
+        for actual, reference in zip(captured, eager, strict=True)
+    )
+    telemetry = qvq_grouped_runtime_telemetry(attention)[0]
+    assert telemetry["h100_fp8_ondemand_launches"] == 2
+    assert telemetry["h100_fp8_ondemand_retained_bytes"] == 8
+    assert telemetry["h100_fp8_ondemand_scratch_bytes"] == 2048 * 3072 * 11
+    assert telemetry["h100_fp8_prefill_launches"] == 0
+    assert telemetry["h100_large_m_chunked_group_launches"] == 0
+    assert telemetry["plain_fallbacks"] == 0
+
+
 @pytest.mark.parametrize("native", (False, True))
 def test_h100_grouped_fp16_prefill_is_bounded_and_replays_cuda_graph(
     monkeypatch, native

@@ -759,11 +759,15 @@ __global__ void qvq_p32_prefill_transpose_fp32_kernel(
   }
 }
 
+template <bool OutputFp8>
 __global__ __launch_bounds__(kPrefillFoldThreads)
-void qvq_p32_prefill_fold_n_axis_fp32_to_fp16_kernel(
+void qvq_p32_prefill_fold_n_axis_kernel(
     const float* __restrict__ transformed,
-    __half* __restrict__ output,
+    std::conditional_t<OutputFp8, c10::Float8_e4m3fn, __half>*
+        __restrict__ output,
+    const float* __restrict__ weight_scale,
     HopperGroupedP32FoldParams params,
+    int size_k,
     int size_n) {
   extern __shared__ float shared[];
   const auto padded = [](int index) { return index + (index >> 5); };
@@ -798,14 +802,32 @@ void qvq_p32_prefill_fold_n_axis_fp32_to_fp16_kernel(
       float value = shared[padded(index)];
       value *= reciprocal;
       value *= params.output_scale[segment][index];
-      output[row_offset + index] = __float2half_rn(value);
+      if constexpr (OutputFp8) {
+        // Match the persistent FP8 control exactly: the folded effective
+        // weight first crosses its FP16 boundary, then is quantized to E4M3.
+        const float rounded = __half2float(__float2half_rn(value));
+        const float normalized =
+            __half2float(__float2half_rn(rounded / weight_scale[0]));
+        output[static_cast<int64_t>(start + index) * size_k + row] =
+            c10::Float8_e4m3fn(normalized);
+      } else {
+        output[row_offset + index] = __float2half_rn(value);
+      }
     }
   } else {
     for (int index = static_cast<int>(threadIdx.x); index < width;
          index += static_cast<int>(blockDim.x)) {
       float value = transformed[row_offset + index];
       value *= params.output_scale[segment][index];
-      output[row_offset + index] = __float2half_rn(value);
+      if constexpr (OutputFp8) {
+        const float rounded = __half2float(__float2half_rn(value));
+        const float normalized =
+            __half2float(__float2half_rn(rounded / weight_scale[0]));
+        output[static_cast<int64_t>(start + index) * size_k + row] =
+            c10::Float8_e4m3fn(normalized);
+      } else {
+        output[row_offset + index] = __float2half_rn(value);
+      }
     }
   }
 }
@@ -2879,7 +2901,7 @@ at::Tensor qvq_p32_window_decode_grouped_fp16(
   }
 }
 
-template <int TransitionBits>
+template <int TransitionBits, bool OutputFp8 = false>
 at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
     const at::Tensor& trellis,
     const at::Tensor& levels,
@@ -2889,7 +2911,8 @@ at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
     int64_t in_features,
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
-    at::IntArrayRef output_hadamards) {
+    at::IntArrayRef output_hadamards,
+    const at::Tensor* weight_scale = nullptr) {
   TORCH_CHECK(
       in_features >= 256 && in_features <= 16384 &&
           (in_features & (in_features - 1)) == 0,
@@ -2906,6 +2929,14 @@ at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
           input_scale.scalar_type() == at::kFloat && input_scale.is_contiguous() &&
           input_scale.numel() == in_features,
       "grouped P32 folded-FP16 preparation requires contiguous FP32 input scale [K]");
+  if constexpr (OutputFp8) {
+    TORCH_CHECK(
+        weight_scale != nullptr && weight_scale->is_cuda() &&
+            weight_scale->device() == trellis.device() &&
+            weight_scale->scalar_type() == at::kFloat &&
+            weight_scale->is_contiguous() && weight_scale->numel() == 1,
+        "grouped P32 folded-FP8 preparation requires one contiguous CUDA FP32 weight scale");
+  }
 
   HopperGroupedP32FoldParams fold_params{};
   fold_params.segment_count = static_cast<int>(segment_count);
@@ -2951,8 +2982,12 @@ at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
       {total_n, in_features}, levels.options().dtype(at::kFloat));
   auto transformed = at::empty(
       {in_features, total_n}, levels.options().dtype(at::kFloat));
-  auto output = at::empty(
-      {in_features, total_n}, levels.options().dtype(at::kHalf));
+  auto output = OutputFp8
+      ? at::empty(
+            {total_n, in_features},
+            levels.options().dtype(at::kFloat8_e4m3fn))
+      : at::empty(
+            {in_features, total_n}, levels.options().dtype(at::kHalf));
 
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(trellis.get_device());
@@ -2990,18 +3025,22 @@ at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
       max_hadamard_width + max_hadamard_width / 32) * sizeof(float);
   if (n_shared_bytes > 0) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(
-        qvq_p32_prefill_fold_n_axis_fp32_to_fp16_kernel,
+        qvq_p32_prefill_fold_n_axis_kernel<OutputFp8>,
         cudaFuncAttributeMaxDynamicSharedMemorySize,
         static_cast<int>(n_shared_bytes)));
   }
-  qvq_p32_prefill_fold_n_axis_fp32_to_fp16_kernel<<<
+  qvq_p32_prefill_fold_n_axis_kernel<OutputFp8><<<
       static_cast<unsigned>(in_features * segment_count),
       kPrefillFoldThreads,
       n_shared_bytes,
       stream>>>(
           transformed.data_ptr<float>(),
-          reinterpret_cast<__half*>(output.mutable_data_ptr()),
+          reinterpret_cast<std::conditional_t<
+              OutputFp8, c10::Float8_e4m3fn, __half>*>(
+              output.mutable_data_ptr()),
+          OutputFp8 ? weight_scale->data_ptr<float>() : nullptr,
           fold_params,
+          static_cast<int>(in_features),
           static_cast<int>(total_n));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
@@ -3042,6 +3081,39 @@ at::Tensor qvq_p32_window_prepare_grouped_fp16(
   }
 }
 
+at::Tensor qvq_p32_window_prepare_grouped_fp8(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    const at::Tensor& input_scale,
+    at::TensorList output_scales,
+    const at::Tensor& weight_scale,
+    int64_t transition_bits,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef output_hadamards) {
+#define QVQ_PREPARE_GROUPED_FP8(TRANSITION_BITS)                               \
+  return qvq_p32_window_prepare_grouped_fp16_impl<TRANSITION_BITS, true>(      \
+      trellis, levels, bank_ids, input_scale, output_scales, in_features,     \
+      out_features, bank_alt_ids, output_hadamards, &weight_scale)
+  switch (transition_bits) {
+    case 4:
+      QVQ_PREPARE_GROUPED_FP8(4);
+    case 5:
+      QVQ_PREPARE_GROUPED_FP8(5);
+    case 6:
+      QVQ_PREPARE_GROUPED_FP8(6);
+    case 7:
+      QVQ_PREPARE_GROUPED_FP8(7);
+    default:
+      TORCH_CHECK(
+          false,
+          "grouped P32 folded-FP8 preparation transition bits must be in [4, 7]");
+  }
+#undef QVQ_PREPARE_GROUPED_FP8
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
@@ -3060,6 +3132,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_m64_tma_grouped_ordered_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_decode_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids) -> Tensor");
   m.def("p32_window_prepare_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
+  m.def("p32_window_prepare_grouped_fp8(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, Tensor weight_scale, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
@@ -3078,4 +3151,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_m64_tma_grouped_ordered_reuse4", qvq_p32_window_wgmma_m64_tma_grouped_ordered_reuse4);
   m.impl("p32_window_decode_grouped_fp16", qvq_p32_window_decode_grouped_fp16);
   m.impl("p32_window_prepare_grouped_fp16", qvq_p32_window_prepare_grouped_fp16);
+  m.impl("p32_window_prepare_grouped_fp8", qvq_p32_window_prepare_grouped_fp8);
 }

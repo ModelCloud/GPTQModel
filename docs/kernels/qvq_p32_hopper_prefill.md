@@ -283,6 +283,79 @@ large-M recovery must be fused or independently brought below the dense
 preparation cost.  The Phase-1 attribution is a hard gate: an inner-only win is
 not promotable while activation-side recovery remains near two milliseconds.
 
+### Phase-3A shared-source result: rejected
+
+The first exact implementation used one producer warpgroup and four consumer
+warpgroups in a single `M256 x N64` CTA.  The producer reconstructed each P32
+weight tile once in shared memory; each consumer owned four M16 accumulator
+tiles.  It passed all W2--W3.5 dense-oracle and CUDA Graph gates, but the block
+used 640 threads and about 160 KiB of shared memory.  On H100 this forced one
+CTA per SM and the four shared-source consumers contended or serialized.
+
+For W3 Llama QKV inner projection, it measured 6,192.3 microseconds at M8192,
+versus 1,664.2 microseconds for the existing M64 register-source reuse path.
+Across M256--M8192 it achieved only `0.148--0.269x` of the existing inner
+kernel.  The implementation was removed rather than retained behind a flag.
+
+This rejects the large multi-consumer CTA, not weight-decode reuse itself.  A
+future on-chip attempt needs producer/consumer sharing across independently
+schedulable CTAs or a materially smaller shared-memory tile.
+
+### Phase-3B direct on-demand FP8: accepted for M >= 16384
+
+The successful Phase-3 path instead removes the remaining FP8 materialization
+boundary from Phase 2.  It retains only two source-versioned FP32 scalars:
+
+```text
+weight_scale = max(abs(round_fp16(W_effective))) / 448
+input_scale  = 1
+```
+
+Scale calibration runs once outside CUDA Graph capture.  It retains 8 bytes;
+it does not retain a decoded weight.  Every eligible forward reconstructs and
+folds the canonical P32 payload, but the final child-local N-axis kernel writes
+E4M3 directly in the column-major layout consumed by cuBLASLt:
+
+```text
+h       = round_fp16(W_effective[k,n])
+q       = round_fp16(h / weight_scale)
+B8[n,k] = E4M3(q)
+```
+
+The two explicit FP16 roundings reproduce the established persistent-FP8
+control byte-for-byte.  Activations are saturated to E5M2 and the matrix
+multiply is:
+
+```text
+A8 = E5M2_saturate(X)
+Y  = scaled_mm(A8, transpose_view(B8), 1, weight_scale, FP16 output)
+```
+
+Writing `[N,K]` directly eliminates the separate FP16 effective-weight output,
+its transposed contiguous copy, and the later E4M3 conversion.  Explicit
+per-forward scratch is 66 MiB for Llama QKV: 12 MiB decoded FP16, two 24 MiB
+FP32 transform planes, and 6 MiB final E4M3.  The measured allocator peak was
+about 134 MiB and retained allocation was allocator-rounded to 1 KiB; the
+logical persistent state is exactly 8 bytes.
+
+The physical-H100 benchmark used 20 warmups, 31 CUDA-event samples, and 10
+CUDA Graph replays per sample.  `Better than last` compares with Phase-2 native
+on-demand FP16 at the same rate and M.
+
+| Rate | M x K x aggregate N | Phase-3 us | vs Phase 2 | vs Marlin W4 | vs Machete W4 | Better than last | Max error |
+| ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: |
+| W2 | 16384 x 2048 x 3072 | 505.920 | 1.469x | 1.255x | 0.943x | Yes | 5.821e-4 |
+| W2.5 | 16384 x 2048 x 3072 | 506.886 | 1.459x | 1.253x | 0.941x | Yes | 6.079e-4 |
+| W3 | 16384 x 2048 x 3072 | 507.011 | 1.469x | 1.253x | 0.941x | Yes | 6.215e-4 |
+| W3.5 | 16384 x 2048 x 3072 | 507.101 | 1.466x | 1.253x | 0.941x | Yes | 6.086e-4 |
+
+All four rates improve, with a 1.466x geometric speedup over Phase 2.  The path
+is about 25% faster than three Marlin W4 projections and about 6% slower than
+three Machete W4 projections.  A preliminary M8192 run improved by only about
+1%; that is too close to run-to-run variation, so the measured runtime gate is
+M >= 16384 and explicit opt-in through
+`QVQ_HOPPER_FP8_PREFILL_ON_DEMAND=1`.
+
 ## Phase 4: on-chip FP8 execution
 
 After Phase 3 establishes tile ownership and synchronization, replace the

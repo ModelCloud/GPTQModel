@@ -22,6 +22,7 @@ from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_h100_large_m_ordered_split_count,
     qvq_p32_window_decode_grouped_fp16_packed,
     qvq_p32_window_grouped_prefill_fp16_packed,
+    qvq_p32_window_prepare_grouped_fp8_packed,
     qvq_p32_window_prepare_grouped_fp16_packed,
     qvq_p32_window_wgmma_group_plan,
     qvq_p32_window_wgmma_grouped,
@@ -363,6 +364,40 @@ def test_grouped_p32_fp16_prefill_decodes_once_and_is_graph_safe(bits):
     folded_graph.replay()
     torch.cuda.synchronize(device)
     assert torch.equal(captured_folded, phase2_folded)
+
+    weight_scale = (phase2_folded.abs().amax() / 448.0).float()
+    weight_scale = torch.where(
+        weight_scale > 0, weight_scale, torch.ones_like(weight_scale)
+    )
+    expected_fp8 = (
+        phase2_folded.t().contiguous() / weight_scale
+    ).to(torch.float8_e4m3fn).t()
+    phase3_fp8 = qvq_p32_window_prepare_grouped_fp8_packed(
+        payload,
+        levels,
+        input_scale,
+        output_scales,
+        output_hadamards,
+        weight_scale,
+    )
+    assert phase3_fp8.dtype == torch.float8_e4m3fn
+    assert phase3_fp8.shape == phase2_folded.shape
+    assert phase3_fp8.stride() == (1, in_features)
+    assert torch.equal(phase3_fp8.float(), expected_fp8.float())
+
+    fp8_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(fp8_graph):
+        captured_fp8 = qvq_p32_window_prepare_grouped_fp8_packed(
+            payload,
+            levels,
+            input_scale,
+            output_scales,
+            output_hadamards,
+            weight_scale,
+        )
+    fp8_graph.replay()
+    torch.cuda.synchronize(device)
+    assert torch.equal(captured_fp8.float(), phase3_fp8.float())
 
     expected = tuple(input.float() @ dense for dense in dense_children)
     actual = qvq_p32_window_grouped_prefill_fp16_packed(input, payload, levels)
