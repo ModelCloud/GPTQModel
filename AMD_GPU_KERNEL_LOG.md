@@ -81,6 +81,7 @@ engineering comparison but is never presented as an official result.
 | PASS | Folded-cache construction, amortization, and residency | The folded operand reuses one contiguous allocation and the temporary predecode cache is released; 235/235 AMD tests passed | At W3/M1, JIT-warm construction was 1.88-10.56 ms across the four enabled geometries and retained 10-126 MiB per projection, the same dense-FP16 cache class as the prior fast path rather than two copies. M1 amortization is about 2.4-13.3 calls. The process-first full-Q case also records the real 3.53 s one-time Triton JIT cost; subsequent same-process construction is 10.56 ms. |
 | PASS (profiled) | Post-commit full-layer trace at `f20cb265` | The traced public forward used only the folded operand; all steady dispatches had zero scratch | At W3/full-Q, M1 used the selected 256x16x64 hipBLASLt main kernel (20.54 us), its GSU8 reduction (3.96 us), and an FP32-to-FP16 cast (3.26 us). M4096 used the selected 256x256x64 GEMM (419.56 us) and a 56.80 us cast. The GEMM symbols exactly match the previously extracted gfx950 code objects and static ISA counts. SSA/dataflow reduction identified the separate cast as removable when no bias requires an FP32 epilogue. |
 | PASS (certified) | Fold result narrowing into the selected hipBLASLt GEMM | 236/236 AMD tests and all 364 full-sweep cases passed; worst enabled maximum absolute error remained `0.001853943` | Bias-free profitable regimes emit FP16 directly from FP32-accumulating GEMM. Profiling-guided exceptions keep FP32 output for KV M4096 and linear-Z M512, where hipBLASLt's FP16-output algorithms regressed 20.8% and 8.7%. Enabled cases measure 6.4953x minimum, **16.0899x geometric mean**, and 22.1455x maximum versus the pre-fold path. The complete target matrix, including exact fallbacks, measures **4.85537x geometric mean**; cast folding itself adds 12.47% geometric mean across enabled cases. |
+| PASS (profiled) | Post-commit trace and exact gfx950 ISA/SSA audit at `aa6b7ff5` | All four 200-forward traces completed; every recurring kernel had zero scratch | Direct-output M1 now contains only the 20.26 us hipBLASLt main pass and 3.28 us GSU8 reduction, 15.21% below the pre-commit three-pass trace. M4096 is one 365.26 us GEMM, 23.32% below GEMM-plus-cast. Exact HHS code-object disassembly confirms no online QVQ algebra; static universal-symbol counts are retained only as diagnostic upper bounds. Both selected FP32-output exceptions were traced and retained their cast. The remaining plausible algebraic target is a one-pass M1 dense GEMV that removes library GSU8, not more source-level QVQ folding. |
 
 The initial exploratory sweep is stored in
 `artifacts/mi355x_p32/initial_gfx950.json`. The expanded sweep is stored in
@@ -130,6 +131,8 @@ is retained locally but is not a production acceptance artifact.
 The profile-guided result-narrowing certification is stored as
 `qwen38_27b_folded_cast_selected_certified_gfx950.json`. Its raw `rocprofv3`
 databases and CSV traces remain local under `folded_profiles_gfx950/`.
+The compact post-commit trace, exact ISA, and SSA decision record is stored as
+`qwen38_27b_folded_cast_profile_gfx950.json`.
 
 ## Implementation notes
 

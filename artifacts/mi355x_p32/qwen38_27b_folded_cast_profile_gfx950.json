@@ -1,0 +1,139 @@
+{
+  "schema": "qvq_p32_amd_folded_cast_profile_v1",
+  "date": "2026-09-04",
+  "commit": "aa6b7ff5",
+  "model": "Qwen/Qwen3.8-27B",
+  "hardware": {
+    "name": "AMD Instinct MI355X VF",
+    "architecture": "gfx950:sramecc+:xnack-",
+    "compute_units": 256,
+    "pci_bus_id": "0000:83:00.0",
+    "unique_id": "0x333ef6e01ec019b3"
+  },
+  "software": {
+    "torch": "2.13.0+rocm10.0.0",
+    "hip": "7.15.26333",
+    "rocprofiler_sdk": "1.1.0",
+    "rocm_compute_profiler": "3.8.0"
+  },
+  "method": {
+    "runtime": "rocprofv3 --runtime-trace --kernel-trace --stats",
+    "warmup_forwards": 20,
+    "profiled_forwards": 200,
+    "isa": "Correlate rocprofv3 kernel_object-load_base to the exact hipBLASLt descriptor, zstd-decompress its CCOB payload, unbundle gfx950 HSACO, and disassemble from the selected global symbol to the next global function.",
+    "raw_trace_policy": "Raw profiler databases and CSVs remain local and uncommitted."
+  },
+  "pre_commit_trace": {
+    "commit": "f20cb265",
+    "m1_full_q": {
+      "passes": [
+        {"kind": "hipblaslt_main", "mean_us": 20.542484, "macro_tile": "256x16x64"},
+        {"kind": "hipblaslt_gsu8_reduction", "mean_us": 3.962778},
+        {"kind": "fp32_to_fp16_cast", "mean_us": 3.258946}
+      ],
+      "total_mean_us": 27.764208
+    },
+    "m4096_full_q": {
+      "passes": [
+        {"kind": "hipblaslt_main", "mean_us": 419.56395, "macro_tile": "256x256x64"},
+        {"kind": "fp32_to_fp16_cast", "mean_us": 56.802402}
+      ],
+      "total_mean_us": 476.366352
+    }
+  },
+  "post_commit_trace": {
+    "m1_full_q": {
+      "passes": [
+        {
+          "kind": "hipblaslt_main",
+          "mean_us": 20.26371,
+          "macro_tile": "256x16x64",
+          "lds_bytes": 108544,
+          "vgpr": 128,
+          "agpr": 16,
+          "sgpr": 96,
+          "scratch_bytes": 0
+        },
+        {
+          "kind": "hipblaslt_gsu8_reduction",
+          "mean_us": 3.276561,
+          "lds_bytes": 0,
+          "vgpr": 52,
+          "agpr": 4,
+          "sgpr": 48,
+          "scratch_bytes": 0
+        }
+      ],
+      "total_mean_us": 23.540271,
+      "trace_reduction": 0.15213601472417206
+    },
+    "m4096_full_q": {
+      "passes": [
+        {
+          "kind": "hipblaslt_main",
+          "mean_us": 365.25938,
+          "macro_tile": "256x256x64",
+          "lds_bytes": 135168,
+          "vgpr": 120,
+          "agpr": 384,
+          "sgpr": 96,
+          "scratch_bytes": 0
+        }
+      ],
+      "total_mean_us": 365.25938,
+      "trace_reduction": 0.23323656218824746
+    },
+    "fp32_output_exceptions": [
+      {
+        "shape": "full_kv",
+        "m": 4096,
+        "gemm_mean_us": 50.418878,
+        "cast_mean_us": 4.375897,
+        "scratch_bytes": 0
+      },
+      {
+        "shape": "linear_z",
+        "m": 512,
+        "gemm_mean_us": 42.652367,
+        "cast_mean_us": 4.113045,
+        "scratch_bytes": 0
+      }
+    ]
+  },
+  "static_isa_audit": {
+    "caveat": "hipBLASLt universal symbols contain guarded edge, user-argument, activation, and alternative epilogue paths. Static counts are diagnostic upper bounds, not dynamic instruction counts.",
+    "cases": [
+      {
+        "case": "m1_full_q_fp16_output",
+        "non_nop": 13447,
+        "mfma": 48,
+        "vmem": 732,
+        "lds": 263,
+        "salu": 2338,
+        "valu_non_mfma": 10066,
+        "scratch": 0
+      },
+      {
+        "case": "m4096_full_q_fp16_output",
+        "non_nop": 202296,
+        "mfma": 655,
+        "vmem": 10180,
+        "lds": 2966,
+        "salu": 17462,
+        "valu_non_mfma": 171033,
+        "scratch": 0
+      }
+    ]
+  },
+  "ssa_algebra_conclusion": [
+    "The online QVQ graph contains no SU/SV multiply, Hadamard butterfly, packed decode, bank selection, xor-shift, hash, level lookup, or finite reduction for enabled shapes; those operations are folded into the mutation-aware cache.",
+    "For bias-free profitable regimes, FP32 accumulation now narrows in the selected hipBLASLt epilogue, eliminating the standalone cast allocation, read, write, and launch.",
+    "M1 still has a library-selected GSU8 reduction after its main GEMM. Dispatch/layout/split sweeps found no generally faster library configuration; a one-pass dense GEMV is the remaining plausible tiny-M experiment.",
+    "KV M4096 and linear-Z M512 deliberately retain the standalone cast because direct-FP16-output hipBLASLt algorithms regress end-to-end latency there.",
+    "All recurring kernels have zero scratch; remaining integer/address algebra belongs to hipBLASLt universal kernels rather than source-level QVQ redundancy."
+  ],
+  "decision": {
+    "accepted": true,
+    "next_candidate": "A one-pass gfx950 dense GEMV specialized for M1 may remove the library GSU8 reduction, but it is lower priority because the requested full-matrix speedup is already exceeded and must preserve the current accuracy/VRAM contract."
+  }
+}
