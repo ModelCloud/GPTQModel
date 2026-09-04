@@ -3294,6 +3294,24 @@ gain, both source branches were reverted.  Outputs remained exact
 `artifacts/a100_p32_window/v40_candidate_m4_mlpgate_static20_40_8000.json`;
 control: `artifacts/a100_p32_window/v40_candidate_m4_mlpgate_probe.json`.
 
+## v41 M1 full-Q compile-time-K specialization
+
+The M1 full-Q route `(K,N)=(5120,12288)` already had a compile-time split-40
+launch.  I extended that guarded path with `StaticK=5120`, allowing the scalar
+body to constant-fold the K16 tile count, input stride, and tile bounds.  Two
+matched 8,000-iteration runs were bit-for-bit equivalent to the dynamic
+fallback and both produced medians
+`0.059392/0.066560/0.066560/0.068608 ms` at W2/W2.5/W3/W3.5.  The static-K
+disabled controls both measured
+`0.060416/0.066560/0.066560/0.068608 ms`; the four-rate geometric mean moved
+`0.0654619→0.0651827 ms` (`1.0043x`, 0.43%) for this shape.  The formal
+Ampere suite remains 56/56 with `max_abs <= 1.4e-5`.  Diagnostics are
+`artifacts/a100_p32_window/v41_candidate_m1_fullq_statick_8000.json`,
+`artifacts/a100_p32_window/v41_candidate_m1_fullq_statick_repeat8000.json`,
+`artifacts/a100_p32_window/v41_control_m1_fullq_static40_8000.json`, and
+`artifacts/a100_p32_window/v41_control_m1_fullq_static40_repeat8000.json`.
+This is shape-local progress; the full-matrix 10% target remains open.
+
 ## Reproduction
 
 ```bash

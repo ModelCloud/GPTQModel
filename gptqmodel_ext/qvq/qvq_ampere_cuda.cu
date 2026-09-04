@@ -862,7 +862,8 @@ template <
     int TilesPerBlock = kM1TilesPerBlock,
     int StageKTiles = kStageKTiles,
     int StaticN = 0,
-    int StaticSplitCount = 0>
+    int StaticSplitCount = 0,
+    int StaticK = 0>
 __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -899,7 +900,9 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
       kEffectiveStaticSplitCount > 0 ? kEffectiveStaticSplitCount : split_count;
   const int block_n_tile_base = n_block * TilesPerBlock;
   const int n_tile_base = block_n_tile_base + warp * 4;
-  const int k_tiles = size_k / kTileRows;
+  constexpr int kStaticKTiles = StaticK > 0 ? StaticK / kTileRows : 0;
+  const int k_tiles = StaticK > 0 ? kStaticKTiles : size_k / kTileRows;
+  const int input_stride = StaticK > 0 ? StaticK : size_k;
   const int k_tile_begin = (k_tiles * split) / effective_split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / effective_split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(bank_alt_id);
@@ -936,8 +939,8 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
       const int row = index / kInputVectorsPerRow;
       const int vector = index - row * kInputVectorsPerRow;
       const int source_column = k_tile_base * kTileRows + vector * 8;
-      if (source_column < size_k) {
-        const half* source = input + static_cast<int64_t>(row) * size_k + source_column;
+      if (source_column < input_stride) {
+        const half* source = input + static_cast<int64_t>(row) * input_stride + source_column;
         __pipeline_memcpy_async(
             input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
       } else {
@@ -1386,7 +1389,8 @@ template <
     int TilesPerBlock = kM1TilesPerBlock,
     int StageKTiles = kStageKTiles,
     int StaticN = 0,
-    int StaticSplitCount = 0>
+    int StaticSplitCount = 0,
+    int StaticK = 0>
 __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -1400,7 +1404,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     int bank_alt_id) {
   p32_window_ampere_m1_kernel_body<
       TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, StaticN,
-      StaticSplitCount>(
+      StaticSplitCount, StaticK>(
       input,
       trellis,
       levels,
@@ -1532,7 +1536,8 @@ template <
     int Threads = kM1Threads,
     int TilesPerBlock = kM1TilesPerBlock,
     int StageKTiles = kStageKTiles,
-    int StaticSplitCount = 0>
+    int StaticSplitCount = 0,
+    int StaticK = 0>
 inline bool launch_static_n_scalar_kernel(
     const half* input,
     const uint32_t* trellis,
@@ -1548,7 +1553,7 @@ inline bool launch_static_n_scalar_kernel(
     const cudaStream_t stream) {
 #define QVQ_LAUNCH_STATIC_N(N)                                                        \
   case N:                                                                             \
-    p32_window_ampere_m1_kernel<TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, N, StaticSplitCount> \
+    p32_window_ampere_m1_kernel<TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, N, StaticSplitCount, StaticK> \
         <<<grid, Threads, 0, stream>>>(                                               \
             input, trellis, levels, bank_ids, partial_output, output, size_k, size_n, \
             split_count, bank_alt_id);                                                \
@@ -1757,7 +1762,7 @@ at::Tensor p32_window_ampere_impl(
       split_count == 40 &&
       launch_static_n_scalar_kernel<
           TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
-          kScalarTripleStageKTiles, 40>(
+          kScalarTripleStageKTiles, 40, 5120>(
           input_ptr,
           trellis_ptr,
           levels_ptr,
