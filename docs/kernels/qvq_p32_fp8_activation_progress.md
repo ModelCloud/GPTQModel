@@ -269,7 +269,7 @@ whole-workload peaks; driver peak is sampled per-process NVML usage.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | dense BF16 | 183,811 | 22.28 / 23.06 | 31.68 | 31.39 / 32.23 | 2.710 / 2.795 | 3,558 | 2.303 | 130.50 |
 | W3.5A16 | 37,435 | 109.42 / 131.48 | 20.69 | 48.02 / 49.05 | 2.052 / 2.225 | 2,976 | 0.900 | 130.50 |
-| W3.5A8 | 9,926 | 412.66 / 413.51 | 35.98 | 27.67 / 28.75 | 1.799 / 1.994 | 2,724 | 0.900 | 72.25 |
+| W3.5A8 | 12,558 | 326.17 / 327.05 | 36.62 | 27.26 / 27.67 | 1.799 / 1.994 | 2,724 | 0.900 | 72.25 |
 
 The static A8 cache reserved 4,352 token slots for the 4,176-token logical
 sequence and still used 44.64% fewer retained bytes than the BF16 cache,
@@ -284,11 +284,12 @@ dense K/V prefix materializations.
 Relative to the earlier correctness baseline, M-grid launch collapsing raised
 A8 prefill from 803 to 3,993 tok/s (4.97x), decoded-weight row reuse raised it
 to 6,667 tok/s, and the FP8-specific allocation/launch reductions raised it to
-8,871 tok/s. Paired P32 state decode and simplified bank mixing then raised the
-final result to 9,926 tok/s. This is 2.486x over the 3,993 target baseline and
-12.36x over the 803 tok/s correctness baseline. A8 decode rose from 11.28 to
-35.98 tok/s and is now 1.14x dense decode. Matching dense prefill still requires
-another 18.52x; A16 requires 3.77x.
+8,871 tok/s. Paired P32 state decode and simplified bank mixing raised it to
+9,926 tok/s, and vectorized E4M3 activation staging raised the final result to
+12,558 tok/s. This is 3.145x over the 3,993 target baseline and 15.64x over the
+803 tok/s correctness baseline. A8 decode rose from 11.28 to 36.62 tok/s and is
+now 1.16x dense decode. Matching dense prefill still requires another 14.64x;
+A16 requires 2.98x.
 
 ### Phase 7 — FP8 decoded-weight row reuse (complete)
 
@@ -403,3 +404,43 @@ all 9,856 requested P32 calls executed natively, all 1,536 QK and 1,536 PV
 launches used the FP8 attention backend, and there were no P32 fallbacks, KV
 dequantizations, or dense-prefix materializations. The machine-readable result
 is `clean-9f7e93c5-w35-a8-4096.json`.
+
+### Phase 10 — vectorized FP8 activation staging (complete)
+
+NCU localized the dominant remaining Phase 9 stall to the scalar E4M3
+global-to-shared activation copy: each thread repeatedly issued byte-sized
+loads and stores before WGMMA. The CUTLASS SM90 B-operand layout keeps each
+K16 half-row contiguous and 16-byte aligned, including halves exchanged by the
+row swizzle. Commit `448dc2a1` therefore replaces the byte loop with aligned
+`uint4` copies. It changes only transient activation staging; P32 decoding,
+E4M3 bytes, row scales, WGMMAs, and output arithmetic are unchanged.
+
+The apples-to-apples H200 NCU result at M4096, K2048, N2048 is:
+
+| revision | duration | speedup | registers/thread | achieved / theoretical occupancy | DRAM | spills |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase 9 scalar staging | 757.54 us | 1.000x | 168 | 16.64% / 18.75% | 0.50% | 0 |
+| Phase 10 16-byte staging | 346.85 us | 2.184x | 168 | 16.48% / 18.75% | 1.11% | 0 |
+
+Long-scoreboard samples fell from 21,991 to 12,756 (42.0%). The static kernel
+still contains eight E4M3 WGMMAs, 64 FP32 multiplies, 64 FP32 fused
+multiply-adds, 73 global loads, and seven shared stores: the gain comes from
+executing the vector-copy loop sixteen times less often, not deleting the
+loop-body opcodes. The post-commit NCU/SASS report exactly matches the accepted
+binary (eight WGMMAs, 168 registers/thread, zero local/shared spills).
+
+Direct W3.5 shapes confirm that the result is not specific to the NCU point:
+M4096/K2048/N8192 fell from 2.569 to 1.163 ms (2.21x). Exact deployed-operand
+coverage passed all W2/W2.5/W3/W3.5 variants and the full M grid through 4096
+across three seeds; the complete test suite passed 172 tests with 70 skipped.
+
+At the full Llama-3.2-1B W3.5A8 boundary, exclusive H200 prefill improved from
+9,925.82 to 12,557.79 tok/s (1.265x), with median/p95 latency falling from
+412.66/413.51 to 326.17/327.05 ms. Decode improved from 35.98 to 36.62 tok/s
+(27.26/27.67 ms median/p95). Peak allocation/reservation remained
+1.799/1.994 GiB and sampled NVML peak remained 2,724 MiB. All 9,856 requested
+P32 calls executed with E4M3 operands and FP32 accumulation, with no fallback
+or rejection. The 72.25 MiB KV cache remained entirely E4M3 at 55.36% of its
+dense-equivalent storage; all 1,536 QK and 1,536 PV launches used native FP8
+attention, with zero cache dequantization or dense-prefix materialization. The
+machine-readable result is `clean-448dc2a1-w35-a8-4096.json`.
