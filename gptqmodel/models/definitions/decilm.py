@@ -8,4 +8,4 @@ from . import LlamaQModel
 
 class DeciLMQModel(LlamaQModel):
     require_trust_remote_code = True
-    layer_modules_strict = False  # nemotron ultra skips modules
+    layer_modules_strict = False # nemotron ultra skips modules
