@@ -3157,6 +3157,16 @@ diagnostics are `artifacts/a100_p32_window/v28_candidate_m1_fullkv_dynamic_20000
 (the shorter 8,000-iteration screens are also retained alongside them).
 This is another shape-local gain; the full-matrix 10% target remains open.
 
+## v29 neutral M1 linear-QKV static split probe
+
+The M1 linear-QKV route `(K,N)=(5120,10240)` autotunes to split 40 on all
+four rates.  A compile-time split-40 main-kernel specialization was screened,
+but matched 8,000-iteration medians were unchanged at
+`0.052224/0.057344/0.057344/0.058368 ms` for both dynamic and static launches.
+With no measurable gain, the source probe was reverted.  The diagnostic is
+`artifacts/a100_p32_window/v29_candidate_m1_linearqkv_static40_8000.json`;
+the dynamic control is `artifacts/a100_p32_window/v29_candidate_m1_linearqkv_dynamic_8000.json`.
+
 ## Reproduction
 
 ```bash
