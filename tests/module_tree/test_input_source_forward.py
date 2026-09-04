@@ -3,6 +3,7 @@
 
 import importlib
 
+import defuser
 import pytest
 import torch
 from torch import nn
@@ -50,6 +51,12 @@ def simulate(qmodel_cls, model, layer_index=0, seq=6, batch=2):
     """Run one tiny model forward while capturing module-tree inputs."""
 
     torch.manual_seed(0)
+    try:
+        defuser_converted = defuser.convert_model(model, cleanup_original=True)
+        defuser_reason = None if defuser_converted else "defuser returned no conversion"
+    except Exception as error:
+        defuser_converted = False
+        defuser_reason = f"defuser conversion failed: {type(error).__name__}: {error}"
     quantize_config = QuantizeConfig(bits=4, group_size=16)
     layer_modules = qmodel_cls.simple_layer_modules(model.config, quantize_config)
     prefix = _layer_prefix(qmodel_cls, layer_index)
@@ -91,7 +98,13 @@ def simulate(qmodel_cls, model, layer_index=0, seq=6, batch=2):
     )
     with InputSourceCapture(named_modules) as capture:
         model(input_ids=input_ids)
-    return validate_input_sources(groups, capture.captured), groups, capture.captured
+    return (
+        validate_input_sources(groups, capture.captured),
+        groups,
+        capture.captured,
+        defuser_converted,
+        defuser_reason,
+    )
 
 
 def _tiny_llama():
@@ -213,8 +226,18 @@ def _assert_routed_expert_gate_up(groups, captured):
     assert routed
 
 
+def _assert_shared_expert_gate_up(groups, captured):
+    assert any(
+        source.scope.endswith("mlp.shared_experts")
+        and {"gate_proj", "up_proj"}
+        <= {module.full_name.rsplit(".", 1)[-1] for module in modules}
+        and all(captured[module.full_name] for module in modules)
+        for source, modules in groups.items()
+    )
+
+
 def test_llama_cpu_forward_validates_qkv_and_gate_up_inputs():
-    report, groups, _ = simulate(LlamaQModel, _tiny_llama())
+    report, groups, _, _, _ = simulate(LlamaQModel, _tiny_llama())
     assert report.ok
     assert report.checked_sources >= 2
     qkv = next(
@@ -238,15 +261,20 @@ def test_llama_cpu_forward_validates_qkv_and_gate_up_inputs():
     ],
 )
 def test_moe_cpu_forward_validates_routed_expert_inputs(qmodel_cls, model_factory):
-    report, groups, captured = simulate(qmodel_cls, model_factory())
+    report, groups, captured, defuser_converted, defuser_reason = simulate(qmodel_cls, model_factory())
     assert report.ok
     assert report.checked_sources >= 1
-    if any("experts." in module.full_name for modules in groups.values() for module in modules):
-        _assert_routed_expert_gate_up(groups, captured)
+    if not defuser_converted:
+        pytest.skip(f"defuser did not expose per-expert modules: {defuser_reason}")
+    assert any("experts." in module.full_name for modules in groups.values() for module in modules)
+    _assert_routed_expert_gate_up(groups, captured)
 
 
 def test_deepseek_v3_cpu_forward_validates_mla_inputs():
-    report, groups, captured = simulate(DeepSeekV3QModel, _tiny_deepseek_v3())
+    report, groups, captured, defuser_converted, defuser_reason = simulate(
+        DeepSeekV3QModel,
+        _tiny_deepseek_v3(),
+    )
     assert report.ok
     assert report.checked_sources >= 2
     q_a = next(
@@ -267,10 +295,14 @@ def test_deepseek_v3_cpu_forward_validates_mla_inputs():
         assert len(
             groups[next(source for source, modules in groups.items() if module in modules)]
         ) == 1
+    if not defuser_converted:
+        pytest.skip(f"defuser did not expose per-expert modules: {defuser_reason}")
+    _assert_routed_expert_gate_up(groups, captured)
+    _assert_shared_expert_gate_up(groups, captured)
 
 
 def test_minicpm3_cpu_forward_validates_mla_inputs():
-    report, groups, _ = simulate(MiniCpm3QModel, _tiny_minicpm3())
+    report, groups, _, _, _ = simulate(MiniCpm3QModel, _tiny_minicpm3())
     assert report.ok
     assert report.checked_sources >= 2
     assert any(
@@ -281,7 +313,7 @@ def test_minicpm3_cpu_forward_validates_mla_inputs():
 
 
 def test_negative_deepseek_v3_group_detects_distinct_latent_inputs():
-    _, groups, captured = simulate(DeepSeekV3QModel, _tiny_deepseek_v3())
+    _, groups, captured, _, _ = simulate(DeepSeekV3QModel, _tiny_deepseek_v3())
     q_b = next(
         module
         for modules in groups.values()
@@ -301,19 +333,19 @@ def test_negative_deepseek_v3_group_detects_distinct_latent_inputs():
 
 
 def test_negative_qwen2_expert_group_detects_different_expert_calls():
-    _, groups, captured = simulate(Qwen2MoeQModel, _tiny_qwen2_moe())
+    _, groups, captured, defuser_converted, defuser_reason = simulate(Qwen2MoeQModel, _tiny_qwen2_moe())
+    if not defuser_converted:
+        pytest.skip(f"defuser did not expose per-expert modules: {defuser_reason}")
     expert_gates = [
         module
         for modules in groups.values()
         for module in modules
         if ".experts." in module.full_name and module.full_name.endswith("gate_proj")
     ]
-    if len(expert_gates) < 2:
-        pytest.skip(
-            "Transformers 5.16 Qwen2MoeExperts exposes fused gate_up_proj, "
-            "not per-expert gate_proj modules"
-        )
+    assert len(expert_gates) >= 2
     gate_zero, gate_one = expert_gates[:2]
+    assert captured[gate_zero.full_name]
+    assert captured[gate_one.full_name]
     captured[gate_zero.full_name] = [torch.ones(2, 32)]
     captured[gate_one.full_name] = [torch.zeros(2, 32)]
     source = InputSourceId(scope="model.layers.0.mlp.experts", subset_id=0)
@@ -324,7 +356,7 @@ def test_negative_qwen2_expert_group_detects_different_expert_calls():
 
 def test_negative_groups_produce_useful_mismatch_diagnostics():
     model = _tiny_llama()
-    report, groups, captured = simulate(LlamaQModel, model)
+    report, groups, captured, _, _ = simulate(LlamaQModel, model)
     assert report.ok
     q_proj = next(
         module
@@ -364,16 +396,16 @@ def _try_optional_forward(
     except Exception as error:
         pytest.skip(f"tiny CPU model construction unavailable: {type(error).__name__}: {error}")
     try:
-        report, groups, captured = simulate(qmodel_cls, model)
+        report, groups, captured, defuser_converted, defuser_reason = simulate(qmodel_cls, model)
     except Exception as error:
         pytest.skip(f"tiny CPU forward unavailable: {type(error).__name__}: {error}")
     assert report.ok
     assert report.checked_sources >= 1
-    return report, groups, captured
+    return report, groups, captured, defuser_converted, defuser_reason
 
 
 def test_deepseek_v32_cpu_forward_validates_dsa_latent_inputs():
-    _, groups, _ = _try_optional_forward(
+    _, groups, captured, defuser_converted, defuser_reason = _try_optional_forward(
         transformers_module="transformers.models.deepseek_v32",
         config_name="DeepseekV32Config",
         model_name="DeepseekV32ForCausalLM",
@@ -417,10 +449,14 @@ def test_deepseek_v32_cpu_forward_validates_dsa_latent_inputs():
         and modules[0].name.endswith("kv_b_proj")
         for modules in groups.values()
     )
+    if not defuser_converted:
+        pytest.skip(f"defuser did not expose per-expert modules: {defuser_reason}")
+    _assert_routed_expert_gate_up(groups, captured)
+    _assert_shared_expert_gate_up(groups, captured)
 
 
 def test_deepseek_v4_cpu_forward_validates_staged_query_inputs():
-    _, groups, _ = _try_optional_forward(
+    _, groups, _, _, _ = _try_optional_forward(
         transformers_module="transformers.models.deepseek_v4",
         config_name="DeepseekV4Config",
         model_name="DeepseekV4ForCausalLM",
@@ -458,7 +494,7 @@ def test_deepseek_v4_cpu_forward_validates_staged_query_inputs():
 
 
 def test_glm_moe_dsa_cpu_forward_validates_dsa_latent_inputs():
-    _, groups, _ = _try_optional_forward(
+    _, groups, captured, defuser_converted, defuser_reason = _try_optional_forward(
         transformers_module="transformers.models.glm_moe_dsa",
         config_name="GlmMoeDsaConfig",
         model_name="GlmMoeDsaForCausalLM",
@@ -502,10 +538,14 @@ def test_glm_moe_dsa_cpu_forward_validates_dsa_latent_inputs():
         and modules[0].name.endswith("kv_b_proj")
         for modules in groups.values()
     )
+    if not defuser_converted:
+        pytest.skip(f"defuser did not expose per-expert modules: {defuser_reason}")
+    _assert_routed_expert_gate_up(groups, captured)
+    _assert_shared_expert_gate_up(groups, captured)
 
 
 def test_glm4_moe_lite_cpu_forward_validates_mla_inputs():
-    _try_optional_forward(
+    _, groups, captured, defuser_converted, defuser_reason = _try_optional_forward(
         transformers_module="transformers.models.glm4_moe_lite",
         config_name="Glm4MoeLiteConfig",
         model_name="Glm4MoeLiteForCausalLM",
@@ -522,6 +562,7 @@ def test_glm4_moe_lite_cpu_forward_validates_mla_inputs():
             "n_routed_experts": 4,
             "n_shared_experts": 1,
             "num_experts_per_tok": 2,
+            "mlp_layer_types": ["sparse"],
             "q_lora_rank": 16,
             "kv_lora_rank": 16,
             "qk_rope_head_dim": 8,
@@ -531,6 +572,11 @@ def test_glm4_moe_lite_cpu_forward_validates_mla_inputs():
             "attn_implementation": "eager",
         },
     )
+    if not defuser_converted:
+        pytest.skip(f"defuser did not expose per-expert modules: {defuser_reason}")
+    assert any("experts." in module.full_name for modules in groups.values() for module in modules)
+    _assert_routed_expert_gate_up(groups, captured)
+    _assert_shared_expert_gate_up(groups, captured)
 
 
 def test_glm5_next_cpu_forward_is_attempted_or_skipped_with_reason():

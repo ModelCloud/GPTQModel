@@ -553,11 +553,7 @@ def build_subset_plan(
         "auto_forward_data_parallel",
         True,
     )
-    validate_input_sources = getattr(
-        looper.gptq_model.quantize_config,
-        "validate_input_sources",
-        False,
-    )
+    validate_input_sources = looper.gptq_model.quantize_config.validate_input_sources
     subset_forward_serial = (
         subset_forward_serial
         or not auto_forward_data_parallel
@@ -905,7 +901,7 @@ def _run_single_subset_pass(
     input_source_capture = None
     if execute_forward:
         if (
-            getattr(looper.gptq_model.quantize_config, "validate_input_sources", False)
+            looper.gptq_model.quantize_config.validate_input_sources
             and any(len(group) >= 2 for group in plan.input_sources.values())
         ):
             capture_modules = [
