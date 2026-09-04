@@ -137,6 +137,40 @@ intermediates.  Phase 2 must remove those intermediates; the 12 MiB logical
 matrix size is not a claim that the prototype's complete allocator footprint
 is only 12 MiB.
 
+### Phase-1 Nsight Compute and generated-instruction result
+
+A focused physical-H100 Nsight Compute capture profiled the committed W3
+decoder specialization at `M=8192`, `K=2048`, aggregate `N=3072`.  The decoder
+launch is independent of M because it constructs the temporary weight once.
+
+| Metric | Measured value |
+| --- | ---: |
+| Kernel time | 15.680 us |
+| Grid | 48 x 8 CTAs |
+| Threads per CTA | 128 |
+| Executed warp instructions | 2,759,424 |
+| Registers per thread | 40 |
+| Static shared memory per CTA | 7,296 bytes |
+| Local memory | 0 bytes |
+| SM throughput | 17.71% |
+| DRAM throughput | 6.33% |
+| Eligible warps per cycle | 0.263 |
+| Average warp latency per issued instruction | 13.28 cycles |
+| Long-scoreboard latency per issued instruction | 5.70 cycles |
+
+The executed-SASS attribution was generated from the same Nsight Compute
+report rather than inferred from CUDA source.  The largest opcode families
+were `LOP3` (371,712), address `LEA`/`LEA.HI.X` (417,024 combined), shared
+loads (196,608), permutation (196,608), level-table loads (196,608), FP16
+stores (196,608), and wide multiply-add address formation (193,536).
+
+This exposes more address common-subexpression and bit-extraction work that
+could eventually be removed.  It is not the next critical path: 15.68 us is
+only about 2.7% of the 587.96 us W3/M8192 operation.  Even deleting the decoder
+entirely would leave Phase 1 slower than Marlin and Machete.  Phase 2 therefore
+targets the FP32 transpose/Hadamard/scale/cast preparation boundaries and their
+allocator traffic before another decoder algebra pass.
+
 ## Phase 2: native folded-FP16 preparation
 
 Phase 1 proves that removing activation-side recovery is mandatory.  Phase 2
