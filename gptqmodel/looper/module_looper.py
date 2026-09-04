@@ -1653,8 +1653,7 @@ class ModuleLooper():
                 subset_id = None
                 input_spec = None
                 if not is_lm_head_module:
-                    resolver = getattr(type(self.gptq_model), "resolve_module_tree_entry", None)
-                    entry = resolver(name) if resolver is not None else None
+                    entry = type(self.gptq_model).resolve_module_tree_entry(name)
                     if entry is not None:
                         tree_scope_id = (
                             f"{layers_prefix}.{entry.scope}"

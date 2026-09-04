@@ -183,6 +183,8 @@ modeling_utils.check_support_param_buffer_assignment = check_support_param_buffe
 
 log = setup_logger()
 
+_MODULE_TREE_ENTRIES_CACHE: Dict[type, Dict[str, ModuleTreeEntry]] = {}
+
 class BaseQModel(nn.Module):
     # name of lm_head
     lm_head: str = "lm_head"
@@ -3219,14 +3221,10 @@ class BaseQModel(nn.Module):
     def resolve_module_tree_entry(cls, module_name: str) -> Optional[ModuleTreeEntry]:
         """Resolve exact or expert-template module-tree metadata."""
 
-        cache = cls.__dict__.get("_module_tree_entries_cache")
-        if cache is None:
-            cache = {}
-            setattr(cls, "_module_tree_entries_cache", cache)
-        entries = cache.get(cls)
+        entries = _MODULE_TREE_ENTRIES_CACHE.get(cls)
         if entries is None:
             entries = cls.build_module_tree_entries(cls.module_tree)
-            cache[cls] = entries
+            _MODULE_TREE_ENTRIES_CACHE[cls] = entries
 
         name = module_name
         if name.endswith(CAPTURE_ONLY_FLAG):
