@@ -9,7 +9,8 @@ codebook, selector stream, or input/output transform order.
 The development order is:
 
 ```text
-M16 existing -> M32 -> M64 -> M128 -> M256 -> logical M up to 4096
+M16 existing -> M32 -> M64 -> M128 -> M256 -> M512 -> M1024
+    -> M2048 -> M4096 -> autotuned row multiplexing above M4096
 ```
 
 M32 is the first promotion boundary.  It is exactly two M16 tensor-core row
@@ -18,11 +19,13 @@ to the planar CUDA fallback.
 
 ## Production state
 
-The production grouped runtime accepts one through 4096 logical rows.  It
-pads M17-M32 to M32 and larger non-bucket values to a multiple of M64, then
-uses one native row grid.  M32 reuses each decoded fragment for two M16 tiles;
-M64 and larger use four tiles per CTA.  Ordinary P32 children use the same
-one-segment path, so the MLP down projection no longer returns to planar GEMV.
+The native grouped kernels accept one through 4096 logical rows.  They pad
+M17-M32 to M32 and larger non-bucket values to a multiple of M64, then use one
+native row grid.  M32 reuses each decoded fragment for two M16 tiles; M64 and
+larger use four tiles per CTA.  Ordinary P32 children use the same one-segment
+path, so the MLP down projection no longer returns to planar GEMV.  On the
+measured H100, the production runtime accepts larger logical M by autotuning
+and replaying those exact native kernels over contiguous row chunks.
 
 For the narrow Llama `8192 -> 2048` down projection, measured H100 ordered
 split counts are `8` through M64, `4` through M128, `2` through M256, and `1`
@@ -206,7 +209,7 @@ Benchmarks use only the physical NVIDIA H100, reject foreign compute
 processes, and require three zero-utilization samples before setup plus another
 idle check before timing.  Timing uses warmed CUDA Graph replay and CUDA
 events.  The initial matrix contains M16, M32, M64, M128, and M256; later
-coverage includes M512, M1024, M2048, and M4096.
+coverage includes M512, M1024, M2048, M4096, and M8192.
 
 Each result row reports the realistic `(M, K, N)` projection geometry,
 latency distribution, effective throughput, dense-oracle errors, W4 Marlin
@@ -215,24 +218,25 @@ benchmark.  A regression is always recorded as `No`.
 
 ## Autotuned row multiplexing above M4096
 
-The validated low-level Hopper kernels retain their M4096 bound.  A fused MLP
-with more logical rows is partitioned at the runtime boundary instead of
-weakening that kernel contract:
+The validated low-level Hopper kernels retain their M4096 bound.  A grouped
+projection or fused MLP with more logical rows is partitioned at the runtime
+boundary instead of weakening that kernel contract:
 
 ```text
 logical rows M > 4096
     -> contiguous row chunks of T
-    -> existing exact grouped gate/up + transforms + down path per chunk
-    -> concatenate output rows in original order
+    -> existing exact grouped projection or fused-MLP path per chunk
+    -> concatenate each child/output along rows in original order
 ```
 
 The candidate downward-multiplexing targets are `T = {512, 1024, 2048,
 4096}`.  On the first eager call, each candidate is warmed, captured in its
 own CUDA Graph, and measured by CUDA events over repeated graph replays.  The
-median per-replay time selects the winner.  Plans are cached by CUDA device,
-dtype, next-power-of-two logical-M bucket, input width, child output widths,
+median per-replay time selects the winner.  Grouped-projection and fused-MLP
+plans use separate cache scopes.  Plans are cached by CUDA device, dtype,
+next-power-of-two logical-M bucket, input width, child output widths, optional
 down output width, and P32 transition rate.  This bounds tuning cardinality
-while keeping rate and geometry decisions independent.
+while keeping operation, rate, and geometry decisions independent.
 
 CUDA-event creation and synchronization never occur during graph capture.  A
 warm model with a cold row-plan cache captures the conservative 4096-row
@@ -243,6 +247,7 @@ must still be warmed before capture under the existing R0 lifecycle rule.
 Chunking changes only independent row scheduling.  It does not change K
 accumulation, P32 decoding, Hadamard order, FP16 rounding, or output row
 order.  M4097 testing requires exact equality across all four candidate
-targets and repeated CUDA Graph replay.  The physical H100 M8192 dense-oracle
-benchmark selects 4096 for W2 through W3.5 and remains below `1.14e-6`
-maximum absolute error.
+targets and repeated CUDA Graph replay for both generic QKV and the full MLP.
+The physical H100 M8192 dense-oracle benchmark selects 4096 for W2 through
+W3.5.  Maximum absolute error is `1.14e-6` for the full MLP and `1.71e-5` for
+grouped QKV.

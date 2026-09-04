@@ -347,6 +347,28 @@ capture plus repeated replay.  The remaining W4 comparator gap is therefore
 not a >4096 dispatch cliff; it is the scaling cost of the existing M64
 internal row tile.
 
+### Generic grouped QKV at M8192
+
+The same row-plan autotuner now covers the generic recovered grouped
+projection path, rather than only the fused MLP.  This closes the QKV runtime
+fallback above M4096 while retaining child-local recovery, output shapes, and
+CUDA Graph replay.  Every candidate target is bit-exact at M4097, and all four
+rates select 4096 rows at M8192.
+
+| Rate | M x K x aggregate N | Selected rows | QVQ us | vs prior fallback | vs Marlin W4 | vs Machete W4 | Better than last | Effective TFLOP/s | Max error |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: | ---: |
+| W2 | 8192 x 2048 x 3072 | 4096 | 2280.032 | 19.975x | 0.132x | 0.102x | Yes | 45.210 | 1.708e-5 |
+| W2.5 | 8192 x 2048 x 3072 | 4096 | 2340.605 | 19.460x | 0.129x | 0.099x | Yes | 44.040 | 1.679e-5 |
+| W3 | 8192 x 2048 x 3072 | 4096 | 2331.434 | 19.522x | 0.130x | 0.099x | Yes | 44.213 | 1.634e-5 |
+| W3.5 | 8192 x 2048 x 3072 | 4096 | 2334.272 | 19.489x | 0.129x | 0.099x | Yes | 44.159 | 1.638e-5 |
+
+The previous per-child path is roughly 45.5 milliseconds, so multiplexing
+removes the catastrophic dispatch cliff.  It remains about 7.7 times slower
+than Marlin and 10.1 times slower than Machete.  This is expected from
+replaying a decoder-oriented M64 internal tile: the next large-M phase needs
+a true prefill tile that increases row reuse without retaining one FP32
+accumulator set per M16 tile.
+
 ## Rejected reuse-8 experiment
 
 An exact M128 CTA stored eight input tiles and eight accumulator fragments
