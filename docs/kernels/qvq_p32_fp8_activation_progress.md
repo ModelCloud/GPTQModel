@@ -105,9 +105,9 @@ numerically identical to the previous A8 contract.
 
 Grouped QKV and gate/up launches accept A8 only when every sibling has identical
 activation-quantization state. `target=linear_input` retains one shared input
-quantization. For `target=p32_operand`, the current correctness implementation
-shares SU/Hadamard preparation and invokes each child's proven native FP8 P32
-kernel; a future grouped K32 kernel will share the final E4M3 conversion.
+quantization. For `target=p32_operand`, runtime shares SU/Hadamard preparation
+and the final dynamic per-row E4M3 conversion, then invokes each child's proven
+native FP8 P32 kernel with the same payload and row scales.
 Telemetry adds:
 
 - `grouped_a8_launches`
@@ -222,8 +222,10 @@ one-shot static allocation when generation provides the maximum length. K is
 stored row-major and V column-major, so decode neither concatenates the prefix
 nor transpose-copies V. For decode-sized query M<=16, one grouped cuBLASLt call
 executes every batch/KV-head matrix at each QK and PV site. Larger prefills keep
-the per-KV-head streaming path to avoid materializing a multi-gigabyte
-all-head score tensor.
+the per-KV-head streaming path and process at most 2,048 query tokens at once.
+The score allocation is reused in-place for softmax and V-scale folding. This
+bounds the FP32 workspace without materializing a multi-gigabyte all-head score
+tensor or a dense K/V prefix.
 
 Gate: cache payload stays E4M3 end to end, no BF16 residual cache exists, and
 Nsight/kernel telemetry proves the attention consumer reads FP8 payloads.
@@ -265,41 +267,42 @@ whole-workload peaks; driver peak is sampled per-process NVML usage.
 
 | arm | prefill tok/s | prefill p50 / p95 ms | decode tok/s | decode p50 / p95 ms | peak alloc / reserved GiB | NVML peak MiB | model GiB | KV MiB at 4,176 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| dense BF16 | 183,755 | 22.29 / 23.03 | 31.84 | 31.29 / 31.82 | 2.710 / 2.795 | 3,558 | 2.303 | 130.50 |
-| W3.5A16 | 32,274 | 126.92 / 127.52 | 18.66 | 53.36 / 55.41 | 1.942 / 2.115 | 2,864 | 0.900 | 130.50 |
-| W3.5A8 | 6,667 | 614.34 / 617.84 | 16.67 | 59.94 / 60.33 | 3.083 / 3.416 | 4,180 | 0.900 | 72.25 |
+| dense BF16 | 183,811 | 22.28 / 23.06 | 31.68 | 31.39 / 32.23 | 2.710 / 2.795 | 3,558 | 2.303 | 130.50 |
+| W3.5A16 | 37,435 | 109.42 / 131.48 | 20.69 | 48.02 / 49.05 | 2.052 / 2.225 | 2,976 | 0.900 | 130.50 |
+| W3.5A8 | 8,871 | 461.75 / 462.73 | 34.44 | 29.02 / 29.07 | 1.799 / 1.994 | 2,724 | 0.900 | 72.25 |
 
 The static A8 cache reserved 4,352 token slots for the 4,176-token logical
 sequence and still used 44.64% fewer retained bytes than the BF16 cache,
 including FP32 per-token scales. At an exact-capacity boundary the reduction is
 46.875%. It allocated once per layer, performed zero reallocations/copies, and
-executed 9,856/9,856 requested P32 FP8 calls plus 10,368 QK and 10,368 PV FP8
-matrices. Grouping reduced the attention work to 1,408 QK and 1,408 PV launches.
+executed 9,856/9,856 requested P32 FP8 calls plus 10,496 QK and 10,496 PV FP8
+matrices. Query chunking and grouped decode produced 1,536 QK and 1,536 PV
+launches.
 There were zero P32 fallback/rejections, zero KV dequantized elements, and zero
 dense K/V prefix materializations.
 
 Relative to the earlier correctness baseline, M-grid launch collapsing raised
-A8 prefill from 803 to 3,993 tok/s (4.97x), decoded-weight row reuse then raised
-it to 6,667 tok/s (another 1.67x; 8.30x total), grouped attention raised A8
-decode from 11.28 to 16.67 tok/s (1.48x), and FP16 large-M row reuse raised A16
-prefill from 5,225 to 32,274 tok/s (6.18x). Matching dense now requires another
-27.56x for A8 prefill or 5.69x for A16 prefill. A8 decode is 1.12x short of A16
-and 1.91x short of dense.
+A8 prefill from 803 to 3,993 tok/s (4.97x), decoded-weight row reuse raised it
+to 6,667 tok/s, and the FP8-specific allocation/launch reductions raised it to
+8,871 tok/s. This is 2.222x over the 3,993 target baseline and 11.05x over the
+803 tok/s correctness baseline. A8 decode rose from 11.28 to 34.44 tok/s and is
+now 1.09x dense decode. Matching dense prefill still requires another 20.72x;
+A16 requires 4.91x.
 
 ### Phase 7 — FP8 decoded-weight row reuse (complete)
 
 The E4M3 P32 atom now decodes each weight fragment once and issues it against
-up to four independent M16 activation tiles before committing the WGMMA batch.
+up to eight independent M16 activation tiles before committing the WGMMA batch.
 Each tile retains its own FP32 accumulator and dynamic per-row activation scale,
 so output-row arithmetic and the serialized P32 format are unchanged. Host
-dispatch chooses one row tile for M16/M32, four tiles for multiples of M64, and
-two tiles for larger shapes divisible by M32 but not M64. M32 deliberately keeps
-two independent M16 CTAs: on the H200 and the Llama-3.2-1B gate/up shape,
-reuse-2 was 7% slower because the smaller grid lost occupancy.
+dispatch keeps independent M16 CTAs for M16/M32, selects reuse-4 from M64, and
+selects reuse-8 at M256 and above when divisible by M128. Larger shapes
+divisible by M32 but not M64 retain reuse-2. M32 deliberately keeps two
+independent CTAs: on H200 and the Llama-3.2-1B gate/up shape, reuse-2 was 7%
+slower because the smaller grid lost occupancy.
 
-For a direct W3.5 kernel grid at K=2,048 and N=8,192, the accepted policy keeps
-M16/M32 flat and gives the following reuse-4 improvements over the prior
-single-row-tile grid:
+For a direct W3.5 kernel grid at K=2,048 and N=8,192, reuse-4 gave the following
+improvements over the prior single-row-tile grid:
 
 | M | prior ms | reuse ms | speedup |
 | ---: | ---: | ---: | ---: |
@@ -311,8 +314,45 @@ single-row-tile grid:
 | 2,048 | 5.830 | 2.314 | 2.52x |
 | 4,096 | 11.529 | 4.511 | 2.56x |
 
-The JIT-built cubin contains all W2/W2.5/W3/W3.5 reuse-1/2/4 variants and native
-Hopper `HGMMA.64x16x16.F32` instructions. W3.5 reuse-4 uses 86 registers per
-thread, 3 KiB shared memory, and no local-memory spill. Exact deployed-operand
+Reuse-8 crosses over at M256. At M4096 it reduces the reuse-4 result from
+4.511 ms to 3.415 ms (1.32x), or 3.38x versus the single-row-tile grid.
+
+The JIT-built cubin contains all W2/W2.5/W3/W3.5 reuse-1/2/4/8 variants and
+native Hopper E4M3 WGMMA instructions. W3.5 reuse-8 uses 168 registers per
+thread, 5 KiB shared memory, and no local-memory spill. Exact deployed-operand
 tests pass all four bit widths at M32 and M64, plus the full W3.5 M grid through
 4096 across three seeds.
+
+### Phase 8 — FP8 allocation, launch, and SSA reduction (complete)
+
+The final pass makes sibling groups share one transformed-operand E4M3
+quantization, fuses dynamic row quantization into one CUDA kernel, removes the
+redundant host-synchronizing BF16 finiteness probe from required native A8,
+stores recovered BF16 directly from the Hadamard kernel, and bounds attention
+scores with 2,048-query chunks and in-place softmax/V-scale operations. The
+fused quantizer is bit-exact to the former PyTorch chain for FP16, BF16, and
+FP32 inputs, including zero rows.
+
+NCU and SASS were rerun after instruction-changing commit `a8120b94` on the
+pinned H200:
+
+| kernel | duration | registers/thread | achieved / theoretical occupancy | compute | DRAM |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| W3.5 P32 E4M3 reuse-8, M4096 K2048 N8192 | 969.41 us | 168 | 16.76% / 18.75% | 65.68% | 0.41% |
+| fused E4M3 row quantizer, M4096 K2048 FP16 | 23.71 us | 20 | 90.20% / 100% | 48.26% | 14.81% |
+
+The P32 SASS contains eight E4M3 WGMMA instructions, 64 FP32 multiplies, and 64
+FP32 fused multiply-adds per static kernel body. Its low DRAM use and register
+occupancy confirm that P32 state decoding plus per-K32 FP32 rescaling, rather
+than FP8 tensor-core throughput or memory bandwidth, is the remaining limit.
+Reassociating each row scale with the level scale halved the static multiplies
+from 64 to 32, but changed floating-point association and measured 969.54 us,
+slightly slower than the accepted 969.41 us. It was rejected.
+
+The quantizer SASS uses one saturating E4M3 conversion and no per-element clamp:
+`F2FP.SATFINITE.E4M3` already provides the required finite saturation, so two
+redundant `FMNMX` operations were removed. This reduced the kernel from 24.67
+to 23.71 us. The remaining reciprocal/refinement sequence implements the
+data-dependent `value / row_scale`; replacing the scale calculation with IEEE
+division was also rejected because it changes some E4M3 bytes by one rounding
+boundary.
