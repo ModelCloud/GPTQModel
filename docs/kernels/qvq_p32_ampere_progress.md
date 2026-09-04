@@ -3233,6 +3233,24 @@ also not improved), so the WMMA template change and dispatch branch were
 removed.  Outputs stayed exact (`max_abs <= 1.6e-5`).  The failed diagnostic
 is `artifacts/a100_p32_window/v35_candidate_m16_fullkv_static32_8000.json`.
 
+## v36 aggregate candidate sweep
+
+A low-iteration 140-case sweep was rerun on candidate commit `ab902d08` and
+the fetched `origin/main` control `202eb8d7`.  The candidate/control median
+latency geometric-mean ratio was only `1.0009x`; CUDA-event quantization and
+autotune variability make this short sweep inconclusive, so it is not claimed
+as a broad gain.  Diagnostics are
+`artifacts/a100_p32_window/v36_candidate_full_100.json` and
+`/tmp/qvq-v24-main/artifacts/a100_p32_window/v36_main_full_100.json`.
+
+## v37 M2 full-Q autotune audit
+
+The M2 full-Q `(K,N)=(5120,12288)` autotune audit selected split 64 for W2/W2.5
+and split 40 for W3/W3.5 in one probe.  A high-iteration screen was retained
+as a control only; plan selection varied at event-tick resolution, so no
+static split specialization was carried from this audit.  Diagnostic:
+`artifacts/a100_p32_window/v37_candidate_m2_fullq_probe.json`.
+
 ## v38 M2 MLP gate/up static split specialization
 
 The M2 MLP gate/up route `(K,N)=(5120,17408)` autotunes to split 40.  A
