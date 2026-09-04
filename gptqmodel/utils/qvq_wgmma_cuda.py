@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +34,7 @@ _TORCH_NVCC_UNDEFINES = (
 )
 _P32_TRANSITION_BITS = {2: 4, 2.5: 5, 3: 6, 3.5: 7}
 _MAX_GROUPED_P32_SEGMENTS = 3
+_P32_WGMMA_NATIVE_ROWS = 16
 
 
 @dataclass(frozen=True)
@@ -190,6 +191,36 @@ def _resolve_hopper_split_count(
     }[transition_bits].get(shape, 1)
 
 
+def _run_p32_wgmma_m16_tiles(
+    input: torch.Tensor,
+    launch: Callable[[torch.Tensor], torch.Tensor],
+) -> torch.Tensor:
+    """Apply the native M16 operator to an arbitrary positive logical M."""
+
+    if input.dim() != 2 or input.shape[0] <= 0:
+        # Preserve the native operator's validation and error messages for
+        # malformed inputs instead of partially duplicating its contract here.
+        return launch(input)
+    logical_rows = int(input.shape[0])
+    if logical_rows == _P32_WGMMA_NATIVE_ROWS:
+        return launch(input)
+
+    # TODO(qvq-p32): replace this compatibility tiling with one bank-aware
+    # native Hopper P32 kernel for logical M=17..4096. The future kernel should
+    # grid-stride over M tiles so decoded weights are reused across rows and
+    # the Python dispatcher emits one launch instead of ceil(M / 16) launches.
+    outputs = []
+    for start in range(0, logical_rows, _P32_WGMMA_NATIVE_ROWS):
+        rows = min(_P32_WGMMA_NATIVE_ROWS, logical_rows - start)
+        tile = input[start : start + rows]
+        if rows != _P32_WGMMA_NATIVE_ROWS:
+            padded = input.new_zeros((_P32_WGMMA_NATIVE_ROWS, input.shape[1]))
+            padded[:rows].copy_(tile)
+            tile = padded
+        outputs.append(launch(tile)[:rows])
+    return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
+
+
 def qvq_h100_ordered_split_count(
     *,
     device_name: str,
@@ -340,7 +371,7 @@ def qvq_p32_window_wgmma_m16_tma(
     bank_alt_id: int = 3,
     split_count: int = 0,
 ) -> torch.Tensor:
-    """Run the two-stage TMA direct-window P32 RS-WGMMA kernel at W2-W3.5."""
+    """Run P32 RS-WGMMA at W2-W3.5, automatically tiling logical M over M16."""
 
     transition_bits = _resolve_transition_bits(bits)
     split_count = _resolve_hopper_split_count(
@@ -349,15 +380,19 @@ def qvq_p32_window_wgmma_m16_tma(
         out_features=int(out_features),
         split_count=int(split_count),
     )
-    return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma")(
+    native_op = _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma")
+    return _run_p32_wgmma_m16_tiles(
         input,
-        trellis,
-        levels,
-        bank_ids,
-        transition_bits,
-        out_features,
-        bank_alt_id,
-        split_count,
+        lambda tile: native_op(
+            tile,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            split_count,
+        ),
     )
 
 
@@ -381,15 +416,19 @@ def qvq_p32_window_wgmma_m16_tma_ordered_split(
         out_features=int(out_features),
         split_count=int(split_count),
     )
-    return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma_ordered_split")(
+    native_op = _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma_ordered_split")
+    return _run_p32_wgmma_m16_tiles(
         input,
-        trellis,
-        levels,
-        bank_ids,
-        transition_bits,
-        out_features,
-        bank_alt_id,
-        split_count,
+        lambda tile: native_op(
+            tile,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            split_count,
+        ),
     )
 
 

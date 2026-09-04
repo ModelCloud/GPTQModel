@@ -23,6 +23,7 @@ from gptqmodel.quantization.qvq_codecs import (
     pgc16_levels_for_version,
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
+from gptqmodel.utils import qvq_wgmma_cuda
 from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_h100_grouped_ordered_split_counts,
     qvq_h100_ordered_split_count,
@@ -31,6 +32,39 @@ from gptqmodel.utils.qvq_wgmma_cuda import (
 )
 
 P32_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
+
+
+def test_p32_window_tma_wgmma_auto_tiles_logical_m(monkeypatch):
+    calls = []
+
+    def fake_op(name):
+        assert name == "p32_window_m16_tma"
+
+        def run(input, *args):
+            del args
+            calls.append(input.clone())
+            return input.float()
+
+        return run
+
+    monkeypatch.setattr(qvq_wgmma_cuda._QVQ_WGMMA_EXTENSION, "op", fake_op)
+    input = torch.randn(
+        (35, 256), generator=torch.Generator().manual_seed(20260904)
+    ).half()
+
+    actual = qvq_p32_window_wgmma_m16_tma(
+        input,
+        torch.empty(1),
+        torch.empty(1),
+        torch.empty(1),
+        3.5,
+        out_features=256,
+    )
+
+    assert torch.equal(actual, input.float())
+    assert [tuple(call.shape) for call in calls] == [(16, 256), (16, 256), (16, 256)]
+    assert torch.equal(calls[-1][:3], input[-3:])
+    assert torch.count_nonzero(calls[-1][3:]) == 0
 
 
 @pytest.mark.parametrize("transition_bits", (4, 5, 6, 7))
@@ -229,7 +263,8 @@ def test_p32_window_cuda_matches_cpu_words_and_states(bits):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
-def test_p32_window_tma_wgmma_matches_exact_matrix(bits):
+@pytest.mark.parametrize("logical_rows", (1, 16, 17, 33, 4096))
+def test_p32_window_tma_wgmma_matches_exact_matrix(bits, logical_rows):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (9, 0):
         pytest.skip("P32 TMA RS-WGMMA requires SM90")
@@ -251,7 +286,8 @@ def test_p32_window_tma_wgmma_matches_exact_matrix(bits):
     bank_alt_id = torch.tensor(3, dtype=torch.uint8, device="cuda")
     levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
     x = (
-        torch.randn((16, in_features), generator=generator, device="cuda") * 0.1
+        torch.randn((logical_rows, in_features), generator=generator, device="cuda")
+        * 0.1
     ).half()
 
     dense = reconstruct_p32_window_inner_weight(
@@ -278,7 +314,8 @@ def test_p32_window_tma_wgmma_matches_exact_matrix(bits):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
-def test_p32_window_tma_wgmma_ordered_split_is_repeatable(bits):
+@pytest.mark.parametrize("logical_rows", (1, 16, 17, 33))
+def test_p32_window_tma_wgmma_ordered_split_is_repeatable(bits, logical_rows):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (9, 0):
         pytest.skip("P32 TMA RS-WGMMA requires SM90")
@@ -302,7 +339,8 @@ def test_p32_window_tma_wgmma_ordered_split_is_repeatable(bits):
     bank_alt_id = torch.tensor(3, dtype=torch.uint8, device="cuda")
     levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
     x = (
-        torch.randn((16, in_features), generator=generator, device="cuda") * 0.1
+        torch.randn((logical_rows, in_features), generator=generator, device="cuda")
+        * 0.1
     ).half()
 
     dense = reconstruct_p32_window_inner_weight(
@@ -336,7 +374,8 @@ def test_p32_window_tma_wgmma_ordered_split_is_repeatable(bits):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
-def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache():
+@pytest.mark.parametrize("logical_rows", (3, 17, 33))
+def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache(logical_rows):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (9, 0) or not (
         "H100" in properties.name or "H200" in properties.name
@@ -367,7 +406,10 @@ def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache():
         v2b2_p32=True,
     ).eval()
     x = torch.randn(
-        (3, in_features), generator=generator, device="cuda", dtype=torch.float16
+        (logical_rows, in_features),
+        generator=generator,
+        device="cuda",
+        dtype=torch.float16,
     )
     dense = reconstruct_qvq_inner_weight(
         planar,

@@ -1036,14 +1036,14 @@ class QVQLinear(BaseQuantLinear):
             # Hopper's RS-WGMMA path consumes the storage-neutral continuous
             # P32 window layout.  Keep checkpoints in canonical planar form,
             # lazily repack once per module, and use the two-stage TMA kernel
-            # for the high-value M<=16 FP16 inference case.  The padded rows
-            # are zero, so this is exact for every real row while retaining
-            # the existing planar path for unsupported rates/shapes/dtypes.
+            # for FP16 inference. The wrapper automatically tiles logical
+            # M>16 over the native M16 operator and zero-pads the final tile,
+            # while unsupported rates/shapes/dtypes retain the planar path.
             if (
                 self.v2b2_p32
                 and self.vector_size == 2
                 and x.dtype == torch.float16
-                and 0 < x.shape[0] <= 16
+                and 0 < x.shape[0]
                 and self.in_features % 256 == 0
                 and self.out_features % 256 == 0
                 and qvq_transition_bits(self.bits, vector_size=2) in (4, 5, 6, 7)
@@ -1063,7 +1063,7 @@ class QVQLinear(BaseQuantLinear):
                     with self._qvq_cuda_bank_cache_lock:
                         window = self._prepare_hopper_p32_window(x.device)
                     wgmma_input = x.contiguous()
-                    if wgmma_input.shape[0] != 16:
+                    if return_ordered_partials and wgmma_input.shape[0] != 16:
                         padded = torch.zeros(
                             (16, self.in_features),
                             dtype=wgmma_input.dtype,
@@ -1075,7 +1075,7 @@ class QVQLinear(BaseQuantLinear):
                     ordered_split = qvq_h100_ordered_split_count(
                         device_name=properties.name,
                         compute_capability=(properties.major, properties.minor),
-                        logical_rows=int(x.shape[0]),
+                        logical_rows=min(int(x.shape[0]), 16),
                         in_features=self.in_features,
                         out_features=self.out_features,
                         transition_bits=transition_bits,
