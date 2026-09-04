@@ -1255,6 +1255,7 @@ class QVQHopperGroupedRuntime:
             ],
             [child.output_hadamard for child in children],
             scales.weight_scale,
+            half_fold=True,
         )
         x_fp8 = qvq_fp16_to_fp8_e5m2_clamped(
             x.reshape(rows, children[0].in_features).contiguous()
@@ -1268,11 +1269,11 @@ class QVQHopperGroupedRuntime:
             out_dtype=torch.float16,
             use_fast_accum=True,
         )
-        # Decoder FP16 + two FP32 transform planes + final E4M3 output.
+        # Decoder FP16 + two FP16 transform planes + final E4M3 output.
         self.telemetry.h100_fp8_ondemand_scratch_bytes = (
             children[0].in_features
             * sum(child.out_features for child in children)
-            * (torch.float16.itemsize + torch.float32.itemsize * 2 + 1)
+            * (torch.float16.itemsize * 3 + 1)
         )
         widths = tuple(child.out_features for child in children)
         return tuple(

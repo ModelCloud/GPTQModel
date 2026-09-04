@@ -122,6 +122,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m64_tma_grouped_ordered_reuse4",
         "p32_window_decode_grouped_fp16",
         "p32_window_prepare_grouped_fp8",
+        "p32_window_prepare_grouped_fp8_half_fold",
         "p32_window_prepare_grouped_fp16",
     ),
     sources=_source,
@@ -928,6 +929,8 @@ def qvq_p32_window_prepare_grouped_fp8_packed(
     output_scales: Sequence[torch.Tensor],
     output_hadamards: Sequence[bool],
     weight_scale: torch.Tensor,
+    *,
+    half_fold: bool = False,
 ) -> torch.Tensor:
     """Decode/fold P32 directly to column-major E4M3 for cuBLASLt."""
 
@@ -962,7 +965,12 @@ def qvq_p32_window_prepare_grouped_fp8_packed(
             raise ValueError(
                 "grouped folded-FP8 output scales must be matching FP32 CUDA vectors"
             )
-    transposed = _QVQ_WGMMA_EXTENSION.op("p32_window_prepare_grouped_fp8")(
+    op_name = (
+        "p32_window_prepare_grouped_fp8_half_fold"
+        if half_fold
+        else "p32_window_prepare_grouped_fp8"
+    )
+    transposed = _QVQ_WGMMA_EXTENSION.op(op_name)(
         payload.trellis,
         levels.contiguous(),
         payload.bank_ids,

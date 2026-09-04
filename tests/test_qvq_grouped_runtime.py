@@ -1288,7 +1288,7 @@ def test_h100_m16384_qkv_on_demand_fp8_is_bounded_and_replays_cuda_graph(
     telemetry = qvq_grouped_runtime_telemetry(attention)[0]
     assert telemetry["h100_fp8_ondemand_launches"] == 2
     assert telemetry["h100_fp8_ondemand_retained_bytes"] == 8
-    assert telemetry["h100_fp8_ondemand_scratch_bytes"] == 2048 * 3072 * 11
+    assert telemetry["h100_fp8_ondemand_scratch_bytes"] == 2048 * 3072 * 7
     assert telemetry["h100_fp8_prefill_launches"] == 0
     assert telemetry["h100_large_m_chunked_group_launches"] == 0
     assert telemetry["plain_fallbacks"] == 0

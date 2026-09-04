@@ -401,7 +401,42 @@ prologue.  Reports remain outside Git under:
 /root/qvq-profiler-artifacts/prefill-phase3/
 ```
 
-## Phase 4: on-chip FP8 execution
+## Phase 4: packed FP16 folding for on-demand FP8
+
+Phase 3 still used two FP32 transform planes even though the final execution
+tier intentionally rounds weights to FP8.  Phase 4 keeps scale calibration in
+the Phase-3 FP32 oracle path, but performs every per-forward Hadamard butterfly
+in FP16:
+
+```text
+decode P32 -> FP16 [N,K]
+FP16 K-axis H + SU -> FP16 [N,K]
+FP16 tiled transpose -> FP16 [K,N]
+FP16 child N-axis H + SV -> direct E4M3 [N,K]
+```
+
+Butterflies retain the same ascending bit order.  Each add/subtract rounds in
+FP16; scale multiplication and normalization use FP32 before the explicit
+FP16 boundary.  The final normalized value is clamped to the finite E4M3 range
+before encoding.  Because this is already the approximate FP8 tier, promotion
+is governed by the dense-P32 oracle rather than bit identity with Phase 3.
+
+Scratch falls from 66 MiB to 42 MiB: three 12 MiB FP16 planes plus one 6 MiB
+E4M3 plane.  The 8-byte scale state is unchanged.  CUDA Graph replay remains
+exact.
+
+| Rate | M x K x aggregate N | Phase-4 us | vs Phase 3 | vs Marlin W4 | vs Machete W4 | Better than last | Max error |
+| ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: |
+| W2 | 16384 x 2048 x 3072 | 486.294 | 1.040x | 1.294x | 0.995x | Yes | 5.954e-4 |
+| W2.5 | 16384 x 2048 x 3072 | 488.080 | 1.041x | 1.289x | 0.991x | Yes | 5.908e-4 |
+| W3 | 16384 x 2048 x 3072 | 486.614 | 1.054x | 1.293x | 0.994x | Yes | 6.234e-4 |
+| W3.5 | 16384 x 2048 x 3072 | 485.734 | 1.048x | 1.295x | 0.996x | Yes | 5.909e-4 |
+
+The geometric means are `1.0456x` versus Phase 3, `1.2930x` versus Marlin W4,
+and `0.9939x` versus Machete W4.  Phase 4 is therefore within 0.61% of Machete
+across the four rates without retaining a dense execution weight.
+
+## Phase 5: on-chip FP8 execution
 
 After Phase 3 establishes tile ownership and synchronization, replace the
 decoded shared FP16 weight tile with E4M3 and convert each activation tile to
@@ -423,7 +458,7 @@ larger row tile or more resident CTAs.  It is promoted only if the complete
 operation beats Phase 3, not merely if its WGMMA instruction has higher peak
 throughput.
 
-## Phase 5: grouped QKV recovery and launch removal
+## Phase 6: grouped QKV recovery and launch removal
 
 Once a native inner kernel wins, fuse only boundaries shown material by an
 Nsight Systems trace:

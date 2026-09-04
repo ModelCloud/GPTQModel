@@ -399,6 +399,37 @@ def test_grouped_p32_fp16_prefill_decodes_once_and_is_graph_safe(bits):
     torch.cuda.synchronize(device)
     assert torch.equal(captured_fp8.float(), phase3_fp8.float())
 
+    half_folded_fp8 = qvq_p32_window_prepare_grouped_fp8_packed(
+        payload,
+        levels,
+        input_scale,
+        output_scales,
+        output_hadamards,
+        weight_scale,
+        half_fold=True,
+    )
+    assert half_folded_fp8.dtype == torch.float8_e4m3fn
+    assert half_folded_fp8.shape == phase2_folded.shape
+    assert half_folded_fp8.stride() == (1, in_features)
+    assert torch.isfinite(half_folded_fp8.float()).all()
+
+    half_fold_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(half_fold_graph):
+        captured_half_fold = qvq_p32_window_prepare_grouped_fp8_packed(
+            payload,
+            levels,
+            input_scale,
+            output_scales,
+            output_hadamards,
+            weight_scale,
+            half_fold=True,
+        )
+    half_fold_graph.replay()
+    torch.cuda.synchronize(device)
+    assert torch.equal(
+        captured_half_fold.float(), half_folded_fp8.float()
+    )
+
     expected = tuple(input.float() @ dense for dense in dense_children)
     actual = qvq_p32_window_grouped_prefill_fp16_packed(input, payload, levels)
     repeated = qvq_p32_window_grouped_prefill_fp16_packed(input, payload, levels)

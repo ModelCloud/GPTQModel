@@ -725,6 +725,47 @@ void qvq_p32_prefill_fold_k_axis_kernel(
   }
 }
 
+__global__ __launch_bounds__(kPrefillFoldThreads)
+void qvq_p32_prefill_fold_k_axis_fp16_kernel(
+    const __half* __restrict__ decoded_transposed,
+    __half* __restrict__ transformed_transposed,
+    const float* __restrict__ input_scale,
+    int size_k) {
+  extern __shared__ __half shared_half[];
+  const auto padded = [](int index) { return index + (index >> 5); };
+  const int row = static_cast<int>(blockIdx.x);
+  const int64_t row_offset = static_cast<int64_t>(row) * size_k;
+
+  for (int index = static_cast<int>(threadIdx.x); index < size_k;
+       index += static_cast<int>(blockDim.x)) {
+    shared_half[padded(index)] = decoded_transposed[row_offset + index];
+  }
+  __syncthreads();
+
+  for (int bit = 1; bit < size_k; bit <<= 1) {
+    for (int index = static_cast<int>(threadIdx.x); index < size_k;
+         index += static_cast<int>(blockDim.x)) {
+      const int peer = index ^ bit;
+      if (index < peer) {
+        const __half a = shared_half[padded(index)];
+        const __half b = shared_half[padded(peer)];
+        shared_half[padded(index)] = __hadd(a, b);
+        shared_half[padded(peer)] = __hsub(a, b);
+      }
+    }
+    __syncthreads();
+  }
+
+  const float reciprocal = 1.0f / sqrtf(static_cast<float>(size_k));
+  for (int index = static_cast<int>(threadIdx.x); index < size_k;
+       index += static_cast<int>(blockDim.x)) {
+    float value = __half2float(shared_half[padded(index)]);
+    value *= reciprocal;
+    value *= input_scale[index];
+    transformed_transposed[row_offset + index] = __float2half_rn(value);
+  }
+}
+
 __global__ void qvq_p32_prefill_transpose_fp32_kernel(
     const float* __restrict__ input,
     float* __restrict__ output,
@@ -755,6 +796,101 @@ __global__ void qvq_p32_prefill_transpose_fp32_kernel(
     if (column < rows && row + offset < columns) {
       output[static_cast<int64_t>(row + offset) * rows + column] =
           tile[threadIdx.x][threadIdx.y + offset];
+    }
+  }
+}
+
+__global__ void qvq_p32_prefill_transpose_fp16_kernel(
+    const __half* __restrict__ input,
+    __half* __restrict__ output,
+    int rows,
+    int columns) {
+  __shared__ __half tile[kPrefillTransposeTile][kPrefillTransposeTile + 1];
+  int column = static_cast<int>(blockIdx.x) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.x);
+  int row = static_cast<int>(blockIdx.y) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.y);
+#pragma unroll
+  for (int offset = 0; offset < kPrefillTransposeTile;
+       offset += kPrefillTransposeRows) {
+    if (column < columns && row + offset < rows) {
+      tile[threadIdx.y + offset][threadIdx.x] =
+          input[static_cast<int64_t>(row + offset) * columns + column];
+    }
+  }
+  __syncthreads();
+
+  column = static_cast<int>(blockIdx.y) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.x);
+  row = static_cast<int>(blockIdx.x) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.y);
+#pragma unroll
+  for (int offset = 0; offset < kPrefillTransposeTile;
+       offset += kPrefillTransposeRows) {
+    if (column < rows && row + offset < columns) {
+      output[static_cast<int64_t>(row + offset) * rows + column] =
+          tile[threadIdx.x][threadIdx.y + offset];
+    }
+  }
+}
+
+__global__ __launch_bounds__(kPrefillFoldThreads)
+void qvq_p32_prefill_fold_n_axis_fp16_to_fp8_kernel(
+    const __half* __restrict__ transformed,
+    c10::Float8_e4m3fn* __restrict__ output,
+    const float* __restrict__ weight_scale,
+    HopperGroupedP32FoldParams params,
+    int size_k,
+    int size_n) {
+  extern __shared__ __half shared_half[];
+  const auto padded = [](int index) { return index + (index >> 5); };
+  const int segment = static_cast<int>(blockIdx.x) % params.segment_count;
+  const int row = static_cast<int>(blockIdx.x) / params.segment_count;
+  const int width = params.width[segment];
+  const int start = params.n_start[segment];
+  const int64_t row_offset = static_cast<int64_t>(row) * size_n + start;
+
+  if (params.output_hadamard[segment]) {
+    for (int index = static_cast<int>(threadIdx.x); index < width;
+         index += static_cast<int>(blockDim.x)) {
+      shared_half[padded(index)] = transformed[row_offset + index];
+    }
+    __syncthreads();
+    for (int bit = 1; bit < width; bit <<= 1) {
+      for (int index = static_cast<int>(threadIdx.x); index < width;
+           index += static_cast<int>(blockDim.x)) {
+        const int peer = index ^ bit;
+        if (index < peer) {
+          const __half a = shared_half[padded(index)];
+          const __half b = shared_half[padded(peer)];
+          shared_half[padded(index)] = __hadd(a, b);
+          shared_half[padded(peer)] = __hsub(a, b);
+        }
+      }
+      __syncthreads();
+    }
+    const float reciprocal = 1.0f / sqrtf(static_cast<float>(width));
+    for (int index = static_cast<int>(threadIdx.x); index < width;
+         index += static_cast<int>(blockDim.x)) {
+      float value = __half2float(shared_half[padded(index)]);
+      value *= reciprocal;
+      value *= params.output_scale[segment][index];
+      value = __half2float(__float2half_rn(value));
+      value = __half2float(__float2half_rn(value / weight_scale[0]));
+      value = fminf(448.0f, fmaxf(-448.0f, value));
+      output[static_cast<int64_t>(start + index) * size_k + row] =
+          c10::Float8_e4m3fn(value);
+    }
+  } else {
+    for (int index = static_cast<int>(threadIdx.x); index < width;
+         index += static_cast<int>(blockDim.x)) {
+      float value = __half2float(transformed[row_offset + index]);
+      value *= params.output_scale[segment][index];
+      value = __half2float(__float2half_rn(value));
+      value = __half2float(__float2half_rn(value / weight_scale[0]));
+      value = fminf(448.0f, fmaxf(-448.0f, value));
+      output[static_cast<int64_t>(start + index) * size_k + row] =
+          c10::Float8_e4m3fn(value);
     }
   }
 }
@@ -2901,7 +3037,7 @@ at::Tensor qvq_p32_window_decode_grouped_fp16(
   }
 }
 
-template <int TransitionBits, bool OutputFp8 = false>
+template <int TransitionBits, bool OutputFp8 = false, bool HalfFold = false>
 at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
     const at::Tensor& trellis,
     const at::Tensor& levels,
@@ -2913,6 +3049,7 @@ at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
     at::IntArrayRef bank_alt_ids,
     at::IntArrayRef output_hadamards,
     const at::Tensor* weight_scale = nullptr) {
+  static_assert(!HalfFold || OutputFp8);
   TORCH_CHECK(
       in_features >= 256 && in_features <= 16384 &&
           (in_features & (in_features - 1)) == 0,
@@ -2979,9 +3116,11 @@ at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
       bank_alt_ids,
       true);
   auto transformed_transposed = at::empty(
-      {total_n, in_features}, levels.options().dtype(at::kFloat));
+      {total_n, in_features},
+      levels.options().dtype(HalfFold ? at::kHalf : at::kFloat));
   auto transformed = at::empty(
-      {in_features, total_n}, levels.options().dtype(at::kFloat));
+      {in_features, total_n},
+      levels.options().dtype(HalfFold ? at::kHalf : at::kFloat));
   auto output = OutputFp8
       ? at::empty(
             {total_n, in_features},
@@ -2992,20 +3131,37 @@ at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(trellis.get_device());
   const size_t k_shared_bytes = static_cast<size_t>(
-      in_features + in_features / 32) * sizeof(float);
-  C10_CUDA_CHECK(cudaFuncSetAttribute(
-      qvq_p32_prefill_fold_k_axis_kernel,
-      cudaFuncAttributeMaxDynamicSharedMemorySize,
-      static_cast<int>(k_shared_bytes)));
-  qvq_p32_prefill_fold_k_axis_kernel<<<
-      static_cast<unsigned>(total_n),
-      kPrefillFoldThreads,
-      k_shared_bytes,
-      stream>>>(
-          reinterpret_cast<const __half*>(decoded_transposed.const_data_ptr()),
-          transformed_transposed.data_ptr<float>(),
-          input_scale.data_ptr<float>(),
-          static_cast<int>(in_features));
+      in_features + in_features / 32) *
+      (HalfFold ? sizeof(__half) : sizeof(float));
+  if constexpr (HalfFold) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        qvq_p32_prefill_fold_k_axis_fp16_kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(k_shared_bytes)));
+    qvq_p32_prefill_fold_k_axis_fp16_kernel<<<
+        static_cast<unsigned>(total_n),
+        kPrefillFoldThreads,
+        k_shared_bytes,
+        stream>>>(
+            reinterpret_cast<const __half*>(decoded_transposed.const_data_ptr()),
+            reinterpret_cast<__half*>(transformed_transposed.mutable_data_ptr()),
+            input_scale.data_ptr<float>(),
+            static_cast<int>(in_features));
+  } else {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        qvq_p32_prefill_fold_k_axis_kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(k_shared_bytes)));
+    qvq_p32_prefill_fold_k_axis_kernel<<<
+        static_cast<unsigned>(total_n),
+        kPrefillFoldThreads,
+        k_shared_bytes,
+        stream>>>(
+            reinterpret_cast<const __half*>(decoded_transposed.const_data_ptr()),
+            transformed_transposed.data_ptr<float>(),
+            input_scale.data_ptr<float>(),
+            static_cast<int>(in_features));
+  }
 
   const dim3 transpose_block(kPrefillTransposeTile, kPrefillTransposeRows, 1);
   const dim3 transpose_grid(
@@ -3014,34 +3170,65 @@ at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
       static_cast<unsigned>(
           (total_n + kPrefillTransposeTile - 1) / kPrefillTransposeTile),
       1);
-  qvq_p32_prefill_transpose_fp32_kernel<<<
-      transpose_grid, transpose_block, 0, stream>>>(
-          transformed_transposed.data_ptr<float>(),
-          transformed.data_ptr<float>(),
-          static_cast<int>(total_n),
-          static_cast<int>(in_features));
+  if constexpr (HalfFold) {
+    qvq_p32_prefill_transpose_fp16_kernel<<<
+        transpose_grid, transpose_block, 0, stream>>>(
+            reinterpret_cast<const __half*>(
+                transformed_transposed.const_data_ptr()),
+            reinterpret_cast<__half*>(transformed.mutable_data_ptr()),
+            static_cast<int>(total_n),
+            static_cast<int>(in_features));
+  } else {
+    qvq_p32_prefill_transpose_fp32_kernel<<<
+        transpose_grid, transpose_block, 0, stream>>>(
+            transformed_transposed.data_ptr<float>(),
+            transformed.data_ptr<float>(),
+            static_cast<int>(total_n),
+            static_cast<int>(in_features));
+  }
 
   const size_t n_shared_bytes = static_cast<size_t>(
-      max_hadamard_width + max_hadamard_width / 32) * sizeof(float);
-  if (n_shared_bytes > 0) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(
-        qvq_p32_prefill_fold_n_axis_kernel<OutputFp8>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        static_cast<int>(n_shared_bytes)));
+      max_hadamard_width + max_hadamard_width / 32) *
+      (HalfFold ? sizeof(__half) : sizeof(float));
+  if constexpr (HalfFold) {
+    if (n_shared_bytes > 0) {
+      C10_CUDA_CHECK(cudaFuncSetAttribute(
+          qvq_p32_prefill_fold_n_axis_fp16_to_fp8_kernel,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          static_cast<int>(n_shared_bytes)));
+    }
+    qvq_p32_prefill_fold_n_axis_fp16_to_fp8_kernel<<<
+        static_cast<unsigned>(in_features * segment_count),
+        kPrefillFoldThreads,
+        n_shared_bytes,
+        stream>>>(
+            reinterpret_cast<const __half*>(transformed.const_data_ptr()),
+            output.data_ptr<c10::Float8_e4m3fn>(),
+            weight_scale->data_ptr<float>(),
+            fold_params,
+            static_cast<int>(in_features),
+            static_cast<int>(total_n));
+  } else {
+    if (n_shared_bytes > 0) {
+      C10_CUDA_CHECK(cudaFuncSetAttribute(
+          qvq_p32_prefill_fold_n_axis_kernel<OutputFp8>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          static_cast<int>(n_shared_bytes)));
+    }
+    qvq_p32_prefill_fold_n_axis_kernel<OutputFp8><<<
+        static_cast<unsigned>(in_features * segment_count),
+        kPrefillFoldThreads,
+        n_shared_bytes,
+        stream>>>(
+            transformed.data_ptr<float>(),
+            reinterpret_cast<std::conditional_t<
+                OutputFp8, c10::Float8_e4m3fn, __half>*>(
+                output.mutable_data_ptr()),
+            OutputFp8 ? weight_scale->data_ptr<float>() : nullptr,
+            fold_params,
+            static_cast<int>(in_features),
+            static_cast<int>(total_n));
   }
-  qvq_p32_prefill_fold_n_axis_kernel<OutputFp8><<<
-      static_cast<unsigned>(in_features * segment_count),
-      kPrefillFoldThreads,
-      n_shared_bytes,
-      stream>>>(
-          transformed.data_ptr<float>(),
-          reinterpret_cast<std::conditional_t<
-              OutputFp8, c10::Float8_e4m3fn, __half>*>(
-              output.mutable_data_ptr()),
-          OutputFp8 ? weight_scale->data_ptr<float>() : nullptr,
-          fold_params,
-          static_cast<int>(in_features),
-          static_cast<int>(total_n));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }
@@ -3114,6 +3301,40 @@ at::Tensor qvq_p32_window_prepare_grouped_fp8(
 #undef QVQ_PREPARE_GROUPED_FP8
 }
 
+at::Tensor qvq_p32_window_prepare_grouped_fp8_half_fold(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    const at::Tensor& input_scale,
+    at::TensorList output_scales,
+    const at::Tensor& weight_scale,
+    int64_t transition_bits,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef output_hadamards) {
+#define QVQ_PREPARE_GROUPED_FP8_HALF(TRANSITION_BITS)                          \
+  return qvq_p32_window_prepare_grouped_fp16_impl<                             \
+      TRANSITION_BITS, true, true>(                                            \
+      trellis, levels, bank_ids, input_scale, output_scales, in_features,     \
+      out_features, bank_alt_ids, output_hadamards, &weight_scale)
+  switch (transition_bits) {
+    case 4:
+      QVQ_PREPARE_GROUPED_FP8_HALF(4);
+    case 5:
+      QVQ_PREPARE_GROUPED_FP8_HALF(5);
+    case 6:
+      QVQ_PREPARE_GROUPED_FP8_HALF(6);
+    case 7:
+      QVQ_PREPARE_GROUPED_FP8_HALF(7);
+    default:
+      TORCH_CHECK(
+          false,
+          "grouped P32 half-folded FP8 preparation transition bits must be in [4, 7]");
+  }
+#undef QVQ_PREPARE_GROUPED_FP8_HALF
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
@@ -3133,6 +3354,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_decode_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids) -> Tensor");
   m.def("p32_window_prepare_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
   m.def("p32_window_prepare_grouped_fp8(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, Tensor weight_scale, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
+  m.def("p32_window_prepare_grouped_fp8_half_fold(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, Tensor weight_scale, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
@@ -3152,4 +3374,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_decode_grouped_fp16", qvq_p32_window_decode_grouped_fp16);
   m.impl("p32_window_prepare_grouped_fp16", qvq_p32_window_prepare_grouped_fp16);
   m.impl("p32_window_prepare_grouped_fp8", qvq_p32_window_prepare_grouped_fp8);
+  m.impl("p32_window_prepare_grouped_fp8_half_fold", qvq_p32_window_prepare_grouped_fp8_half_fold);
 }
