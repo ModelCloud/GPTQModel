@@ -524,7 +524,7 @@ def test_unequal_gate_up_widths_retain_exact_independent_recovery():
     assert telemetry["independent_recovery_children"] == 2
 
 
-@pytest.mark.parametrize("logical_m", (1, 32))
+@pytest.mark.parametrize("logical_m", (1, 32, 64))
 def test_warmed_production_group_is_cuda_graph_capturable(logical_m):
     device = _h100_device()
     if device is None:

@@ -292,7 +292,10 @@ def test_grouped_hopper_is_bit_exact_to_plain_children_and_bounded_by_dense(
 
 
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
-def test_grouped_hopper_m32_is_exact_to_two_m16_tiles_and_graph_safe(bits):
+@pytest.mark.parametrize("logical_m", (32, 64))
+def test_grouped_hopper_large_m_is_exact_to_m16_tiles_and_graph_safe(
+    bits, logical_m
+):
     device = _h100_device()
     if device is None:
         pytest.skip("requires the exclusive H100 validation device")
@@ -302,7 +305,7 @@ def test_grouped_hopper_m32_is_exact_to_two_m16_tiles_and_graph_safe(bits):
     generator = torch.Generator(device=device).manual_seed(20260904 + int(bits * 10))
     levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
     input = (
-        torch.randn((32, in_features), generator=generator, device=device) * 0.1
+        torch.randn((logical_m, in_features), generator=generator, device=device) * 0.1
     ).half()
     windows, selectors = _payloads(
         bits=bits,
@@ -329,7 +332,7 @@ def test_grouped_hopper_m32_is_exact_to_two_m16_tiles_and_graph_safe(bits):
                 qvq_p32_window_wgmma_grouped_packed(
                     input[row_start : row_start + 16], payload, levels
                 )[child_index]
-                for row_start in (0, 16)
+                for row_start in range(0, logical_m, 16)
             ),
             dim=0,
         )

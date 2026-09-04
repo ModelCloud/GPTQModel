@@ -396,8 +396,8 @@ class QVQHopperGroupedRuntime:
         if x.shape[-1] != children[0].in_features or x.numel() == 0:
             return "input shape is unsupported"
         rows = x.numel() // children[0].in_features
-        if not 1 <= rows <= 32:
-            return "grouped Hopper decode currently requires one through thirty-two rows"
+        if not 1 <= rows <= 64:
+            return "grouped Hopper decode currently requires one through sixty-four rows"
         if any(child.trellis.device != x.device for child in children):
             return "activation and grouped payload devices differ"
         properties = torch.cuda.get_device_properties(x.device)
