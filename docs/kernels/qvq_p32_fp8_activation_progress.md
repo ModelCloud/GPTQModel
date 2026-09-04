@@ -204,7 +204,7 @@ remain performance TODOs.
 Gate: cache payload stays E4M3 end to end, no BF16 residual cache exists, and
 Nsight/kernel telemetry proves the attention consumer reads FP8 payloads.
 
-### Phase 6 — end-to-end acceptance (pending after Phases 4 and 5)
+### Phase 6 — end-to-end acceptance (complete for correctness baseline)
 
 On the same exclusive H200 and matched prompts, publish one table for dense,
 W3.5A16, and W3.5A8 containing PPL, KLD, top-1/5/10 agreement, prefill tokens/s,
@@ -215,3 +215,33 @@ Required workload points are batch 1 with logical M=1/2/4/8/16 for decode and
 M=32/64/128/256/512/1024/2048/4096 for prefill. Logical M>16 continues to tile
 over the native M16 P32 operator until dedicated larger-M kernels win their own
 accuracy and performance gates.
+
+The held-out quality slice used parquet rows 256--319 (18,692 shifted tokens,
+maximum length 512), disjoint from calibration rows 0--127. All arms ran BF16
+model compute on the same H200; A8 additionally required native E4M3 P32 and KV
+attention execution.
+
+| arm | PPL | mean KL(dense || arm) | dense top-1 | dense top-5 overlap | dense top-10 overlap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| dense BF16 | 3.9234 | 0 | 100.00% | 100.00% | 100.00% |
+| W3.5A16 | 4.0151 | 0.04311 | 91.87% | 88.02% | 87.93% |
+| W3.5A8 | 4.0731 | 0.06366 | 90.36% | 85.19% | 85.11% |
+
+The matched resource run used batch 1, 4,096-token prefill, 16 decode warmup
+tokens, and 64 measured decode tokens. Peak allocated/reserved are PyTorch
+whole-workload peaks; driver peak is sampled per-process NVML usage.
+
+| arm | prefill tok/s | decode tok/s | peak alloc GiB | peak reserved GiB | driver peak MiB | model alloc GiB | KV MiB at 4,176 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dense BF16 | 183,789 | 31.86 | 2.710 | 2.795 | 3,558 | 2.303 | 130.50 |
+| W3.5A16 | 5,225 | 18.60 | 1.942 | 2.234 | 2,986 | 0.900 | 130.50 |
+| W3.5A8 | 803 | 11.28 | 3.079 | 3.537 | 4,304 | 0.900 | 69.33 |
+
+A8 reduced retained KV bytes by 46.875%, including FP32 per-token scales. It
+executed 9,856/9,856 requested P32 FP8 calls plus 10,368 QK and 10,368 PV FP8
+GEMMs, with zero P32 fallback/rejection, zero KV dequantized elements, and zero
+dense K/V prefix materializations. Its current correctness-first attention and
+M16-tiled P32 implementation are not yet performance-competitive: matching
+dense prefill requires about 229x current A8 throughput (and about 35.2x current
+A16 throughput). The next performance phase is native P32 M32--4096 plus a
+fused/paged FP8 attention kernel that avoids FP32 score/probability temporaries.
