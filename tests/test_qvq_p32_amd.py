@@ -25,6 +25,7 @@ from gptqmodel.utils.qvq_amd import (
     _use_gemv,
     qvq_p32_amd,
     qvq_p32_amd_folded,
+    qvq_p32_amd_folded_prefers_fp32_output,
     qvq_p32_amd_folded_shape_supported,
     qvq_p32_amd_supported,
 )
@@ -104,6 +105,13 @@ def test_qvq_p32_amd_folded_shape_gate_is_fail_closed():
         assert qvq_p32_amd_folded_shape_supported(*shape)
     for shape in ((6144, 5120), (5120, 17408), (17408, 5120), (256, 256)):
         assert not qvq_p32_amd_folded_shape_supported(*shape)
+
+
+def test_qvq_p32_amd_folded_output_dtype_gate_covers_measured_regressions():
+    assert qvq_p32_amd_folded_prefers_fp32_output(4096, 5120, 1024)
+    assert qvq_p32_amd_folded_prefers_fp32_output(512, 5120, 6144)
+    assert not qvq_p32_amd_folded_prefers_fp32_output(2048, 5120, 1024)
+    assert not qvq_p32_amd_folded_prefers_fp32_output(4096, 5120, 12288)
 
 
 @pytest.mark.parametrize(
@@ -490,8 +498,24 @@ def test_qvq_p32_amd_folded_full_layer_matches_fp32_oracle(
         input_hadamard=input_hadamard,
         output_hadamard=output_hadamard,
     )
+    narrowed = qvq_p32_amd_folded(
+        x,
+        window,
+        levels,
+        bank_ids,
+        su_half,
+        sv_half,
+        bits,
+        out_features=256,
+        bank_alt_id=3,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+        output_fp32=False,
+    )
     torch.testing.assert_close(actual, reference, rtol=0.0, atol=2e-3)
     torch.testing.assert_close(repeated, reference, rtol=0.0, atol=2e-3)
+    torch.testing.assert_close(narrowed.float(), reference, rtol=0.0, atol=2e-3)
+    assert narrowed.dtype == torch.float16
     assert window._qvq_p32_amd_dense_cache is None
 
     qvq_p32_amd(

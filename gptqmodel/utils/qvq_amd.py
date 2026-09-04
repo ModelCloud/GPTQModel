@@ -48,6 +48,14 @@ def qvq_p32_amd_folded_shape_supported(in_features: int, out_features: int) -> b
     return (in_features, out_features) in _QWEN38_27B_FOLDED_SHAPES
 
 
+def qvq_p32_amd_folded_prefers_fp32_output(m: int, in_features: int, out_features: int) -> bool:
+    """Keep FP32 output where gfx950's direct-FP16 GEMM algorithm regresses."""
+
+    return ((in_features, out_features) == (5120, 1024) and m == 4096) or (
+        (in_features, out_features) == (5120, 6144) and m == 512
+    )
+
+
 def _bank_mask(transition_bits: int, bank_alt_id: int) -> int:
     masks = {
         4: (0x0000, 0x5A5A, 0x3C3C, 0xC3C3),
@@ -680,6 +688,7 @@ def qvq_p32_amd_folded(
     bank_alt_id: int,
     input_hadamard: bool,
     output_hadamard: bool,
+    output_fp32: bool = True,
 ) -> torch.Tensor:
     """Apply a complete linear QVQ layer through one folded-cache GEMM."""
 
@@ -691,6 +700,8 @@ def qvq_p32_amd_folded(
     bank_alt_id = _integer_argument("bank_alt_id", bank_alt_id)
     if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
         raise TypeError("AMD folded P32 transform-axis flags must be boolean")
+    if not isinstance(output_fp32, bool):
+        raise TypeError("output_fp32 must be boolean")
     if not qvq_p32_amd_supported(x.device):
         raise RuntimeError("AMD folded P32 requires a ROCm gfx950 device")
     if x.ndim != 2 or window.ndim != 2:
@@ -743,12 +754,13 @@ def qvq_p32_amd_folded(
         input_hadamard=input_hadamard,
         output_hadamard=output_hadamard,
     )
-    return torch.mm(x, operand, out_dtype=torch.float32)
+    return torch.mm(x, operand, out_dtype=torch.float32 if output_fp32 else x.dtype)
 
 
 __all__ = [
     "qvq_p32_amd",
     "qvq_p32_amd_folded",
+    "qvq_p32_amd_folded_prefers_fp32_output",
     "qvq_p32_amd_folded_shape_supported",
     "qvq_p32_amd_supported",
 ]

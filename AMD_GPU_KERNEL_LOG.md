@@ -79,6 +79,8 @@ engineering comparison but is never presented as an official result.
 | PASS, PARTIALLY SELECTED | Real-payload transform-folding exploration over the complete Qwen3.8-27B matrix | 314/364 cases passed the `2e-3` FP32-oracle gate | The unrestricted path measured 1.8257x minimum, 10.1204x geometric mean, and 17.5133x maximum, but `attn_out`, `mlp_gate_up`, and `mlp_down` contained seed- or shape-sensitive FP16-folding failures up to `0.0030313`. Those three geometries were rejected as a unit rather than accepting optimistic per-M or per-seed exceptions. |
 | PASS (certified) | Fail-closed full-layer folded cache versus the exact prior public forward | All 364 cases passed: 208 selected cases stayed below `2e-3` (worst `0.001853943`), and all 156 fallback cases were bitwise identical to the prior path | Four measured geometries are enabled: full Q/gate, full KV, linear QKV, and linear Z. Enabled cases measured 5.1052x minimum, **14.2855x geometric mean**, and 19.4969x maximum. Including the three exact fallbacks, the complete 364-case target matrix measured **4.53369x geometric mean**; every requested M has a 3.1168x-5.1279x geometric mean. This exceeds the requested additional 50% at every M. |
 | PASS | Folded-cache construction, amortization, and residency | The folded operand reuses one contiguous allocation and the temporary predecode cache is released; 235/235 AMD tests passed | At W3/M1, JIT-warm construction was 1.88-10.56 ms across the four enabled geometries and retained 10-126 MiB per projection, the same dense-FP16 cache class as the prior fast path rather than two copies. M1 amortization is about 2.4-13.3 calls. The process-first full-Q case also records the real 3.53 s one-time Triton JIT cost; subsequent same-process construction is 10.56 ms. |
+| PASS (profiled) | Post-commit full-layer trace at `f20cb265` | The traced public forward used only the folded operand; all steady dispatches had zero scratch | At W3/full-Q, M1 used the selected 256x16x64 hipBLASLt main kernel (20.54 us), its GSU8 reduction (3.96 us), and an FP32-to-FP16 cast (3.26 us). M4096 used the selected 256x256x64 GEMM (419.56 us) and a 56.80 us cast. The GEMM symbols exactly match the previously extracted gfx950 code objects and static ISA counts. SSA/dataflow reduction identified the separate cast as removable when no bias requires an FP32 epilogue. |
+| PASS (certified) | Fold result narrowing into the selected hipBLASLt GEMM | 236/236 AMD tests and all 364 full-sweep cases passed; worst enabled maximum absolute error remained `0.001853943` | Bias-free profitable regimes emit FP16 directly from FP32-accumulating GEMM. Profiling-guided exceptions keep FP32 output for KV M4096 and linear-Z M512, where hipBLASLt's FP16-output algorithms regressed 20.8% and 8.7%. Enabled cases measure 6.4953x minimum, **16.0899x geometric mean**, and 22.1455x maximum versus the pre-fold path. The complete target matrix, including exact fallbacks, measures **4.85537x geometric mean**; cast folding itself adds 12.47% geometric mean across enabled cases. |
 
 The initial exploratory sweep is stored in
 `artifacts/mi355x_p32/initial_gfx950.json`. The expanded sweep is stored in
@@ -124,6 +126,10 @@ The full-layer folded-cache certification and cold-construction breakdown are
 stored as `qwen38_27b_folded_full_certified_gfx950.json` and
 `qwen38_27b_folded_cold_final_gfx950.json`. The unrestricted exploratory result
 is retained locally but is not a production acceptance artifact.
+
+The profile-guided result-narrowing certification is stored as
+`qwen38_27b_folded_cast_selected_certified_gfx950.json`. Its raw `rocprofv3`
+databases and CSV traces remain local under `folded_profiles_gfx950/`.
 
 ## Implementation notes
 

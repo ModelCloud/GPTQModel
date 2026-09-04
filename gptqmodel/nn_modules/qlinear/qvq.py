@@ -579,6 +579,7 @@ class QVQLinear(BaseQuantLinear):
             return None
         from ...utils.qvq_amd import (
             qvq_p32_amd_folded,
+            qvq_p32_amd_folded_prefers_fp32_output,
             qvq_p32_amd_folded_shape_supported,
             qvq_p32_amd_supported,
         )
@@ -591,6 +592,7 @@ class QVQLinear(BaseQuantLinear):
         if not self._bank_ids_loaded or self.bank_ids is None or self.bank_ids.device.type == "meta":
             raise RuntimeError("QVQ banked module cannot run before bank_ids selectors are loaded")
         window, bank_ids, bank_alt_id = self._prepare_amd_p32_metadata(x_2d.device)
+        bias = self._cached_cast("bias", compute_dtype, torch.float32)
         output = qvq_p32_amd_folded(
             x_2d.contiguous(),
             window,
@@ -603,8 +605,11 @@ class QVQLinear(BaseQuantLinear):
             bank_alt_id=bank_alt_id,
             input_hadamard=self.input_hadamard,
             output_hadamard=self.output_hadamard,
+            output_fp32=bias is not None
+            or qvq_p32_amd_folded_prefers_fp32_output(
+                x_2d.shape[0], self.in_features, self.out_features
+            ),
         )
-        bias = self._cached_cast("bias", compute_dtype, output.dtype)
         return output if bias is None else output + bias
 
     def _cached_cast(self, name: str, *dtypes: torch.dtype) -> torch.Tensor | None:
