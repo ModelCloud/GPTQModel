@@ -267,6 +267,17 @@ def test_qvq_p32_amd_rejects_invalid_contracts():
             bank_alt_id=3,
             output_fp32=1,
         )
+    with pytest.raises(TypeError, match="cache_weight must be boolean"):
+        qvq_p32_amd(
+            x,
+            window,
+            levels,
+            bank_ids,
+            3.0,
+            out_features=256,
+            bank_alt_id=3,
+            cache_weight=1,
+        )
     with pytest.raises(RuntimeError, match="ROCm gfx950"):
         qvq_p32_amd(x.cpu(), window, levels, bank_ids, 3.0, out_features=256, bank_alt_id=3)
     with pytest.raises(ValueError, match="expects 2D"):
@@ -358,3 +369,49 @@ def test_qvq_p32_amd_uses_current_non_default_stream():
         actual = qvq_p32_amd(x, window, levels, bank_ids, bits, out_features=80, bank_alt_id=3)
     stream.synchronize()
     torch.testing.assert_close(actual, reference, rtol=0.0, atol=2e-3)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not _gfx950_available(), reason="requires a ROCm gfx950 GPU")
+@pytest.mark.parametrize("bits", P32_RATES)
+def test_qvq_p32_amd_fused_opt_out_matches_reference(bits):
+    x, planar, window, levels, bank_ids, bank_alt_id = _case(bits, 64, seed=6950)
+    dense = reconstruct_qvq_inner_weight(
+        planar,
+        bits=bits,
+        in_features=256,
+        out_features=256,
+        bank_ids=bank_ids,
+        v2b2_p32=True,
+        bank_alt_id=bank_alt_id,
+    )
+    actual = qvq_p32_amd(
+        x,
+        window,
+        levels,
+        bank_ids,
+        bits,
+        out_features=256,
+        bank_alt_id=3,
+        cache_weight=False,
+    )
+    torch.testing.assert_close(actual, x.float() @ dense, rtol=0.0, atol=2e-3)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not _gfx950_available(), reason="requires a ROCm gfx950 GPU")
+def test_qvq_p32_amd_cache_reuses_and_invalidates_on_selector_mutation():
+    bits = 3.0
+    x, _, window, levels, bank_ids, _ = _case(bits, 17, seed=7950)
+    first = qvq_p32_amd(x, window, levels, bank_ids, bits, out_features=256, bank_alt_id=3)
+    first_dense = window._qvq_p32_amd_dense_cache[1]
+    repeated = qvq_p32_amd(x, window, levels, bank_ids, bits, out_features=256, bank_alt_id=3)
+    assert window._qvq_p32_amd_dense_cache[1] is first_dense
+    assert torch.equal(first, repeated)
+
+    bank_ids[0] ^= 1
+    changed = qvq_p32_amd(x, window, levels, bank_ids, bits, out_features=256, bank_alt_id=3)
+    second_dense = window._qvq_p32_amd_dense_cache[1]
+    assert second_dense is not first_dense
+    reference = x.float() @ second_dense.float().T
+    torch.testing.assert_close(changed, reference, rtol=0.0, atol=2e-3)

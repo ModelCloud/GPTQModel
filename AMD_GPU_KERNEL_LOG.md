@@ -67,6 +67,10 @@ engineering comparison but is never presented as an official result.
 | PASS | Remove the resident SGLang workload before certification | Not applicable | Graceful termination was requested for launcher PID 94512 and its scheduler/detokenizer children. The processes exited and target-GPU VRAM fell from 267.84 GB to the 781.8 MiB ROCm driver floor; no SGLang process restarted. |
 | PASS | Correct ROCm idle-gate target filtering and lifecycle races | 2 focused parser tests passed | KFD process records are now filtered by physical GPU and positive resident VRAM, so a GPU-1 process and a stale zero-byte GPU-0 record cannot invalidate GPU 0. All-unknown queue teardown records are retried, inter-shape cooldown prevents allocation-reclamation overlap, and valid component results can be resumed after a fail-closed interruption. The 781.8 MiB measured driver floor is explicitly covered by a 1024 MiB allowance; utilization and target-GPU process gates remain strict. |
 | PASS (certified) | Uncontended Qwen3.8-27B sweep versus fixed AMD commit `14928c96` | Candidate and baseline each passed 364/364 cases; worst maximum absolute error `6.198883e-5` | Both revisions were rerun with 3x 0%-utilization idle samples before every projection, zero resident target-GPU processes, and no `--allow-busy`. Every candidate case improved: **1.4076x minimum, 2.00315x geometric mean, and 3.2191x maximum**. Per-M geometric means range from 1.716x at M128 to 2.787x at M4096. This is the uncontended confirmation of the requested 2x target. |
+| PASS, REJECTED | Contiguous K-by-N FP16 runtime cache | All 364 cases passed; worst maximum absolute error `6.198883e-5` | The uncontended exploratory Qwen sweep improved 1.762x minimum and 3.721x geometric mean over `a46fdfe2`, short of the requested additional 4x. The layout was rejected in favor of direct N-by-K predecode. |
+| PASS | Direct N-by-K P32 predecode plus FP32-output GEMM | 209/209 AMD tests passed, including adversarial activation, alternate-bank, mutation-invalidation, fused opt-out, and non-default-stream cases | A complete seven-shape/13-M probe measured **4.634x geometric mean** versus `a46fdfe2`. The AITER-inspired transposed operand lets ROCm select faster GEMM algorithms while retaining FP32 accumulation/output. The transient cache is version-checked; `cache_weight=False` retains the storage-neutral fused kernel. |
+| PASS (profiled) | Separate predecode and steady GEMM passes, W3/M64/K5120/N12288 | Exact predecode output passed the FP32 oracle suite | After compilation warmup, predecode plus first GEMM was 0.537645 ms and steady GEMM was 0.036456 ms, estimating 0.501189 ms for predecode. Against the fixed fused median of 0.142761 ms, the cache amortizes after about 4.71 calls. The exact gfx950 predecode HSACO has 156 static opcodes, 87 VALU, 11 VMEM, 6 LDS, 16 VGPRs, no scratch, two `v_alignbit_b32`, and two `v_mad_u32_u24`. |
+| FAIL (profiler integration, bounded) | Direct `rocprofv3` trace of the new Python/Triton two-pass path | Process aborted before dispatch | The same duplicate LLVM `spirv-expand-step` registry conflict reproduced. The invocation was time-bounded and left no processes or GPU residency. Pass timings use synchronized ROCm events and static math uses direct gfx950 HSACO disassembly; prior counter passes use the minimal-HSACO workaround. |
 
 The initial exploratory sweep is stored in
 `artifacts/mi355x_p32/initial_gfx950.json`. The expanded sweep is stored in
@@ -89,11 +93,18 @@ The uncontended candidate, fixed-commit baseline, and comparison are stored as
 `qwen38_27b_2x_certified_vs_14928c96_gfx950.json`, with their per-shape files
 in matching `_shapes/` directories.
 
+The runtime-cache pass timing and exact predecode ISA breakdown are stored in
+`cache_profile_gfx950.json`.
+
 ## Implementation notes
 
-The selected Triton kernels decode the storage-neutral continuous-window P32
-layout in registers, apply packed binary bank selection and the exact PGC16
-mix once per adjacent output pair, and accumulate in FP32. A scalar GEMV path
+The default gfx950 path decodes the storage-neutral continuous-window P32
+layout once into a transient N-by-K FP16 cache, then uses ROCm GEMM with FP32
+accumulation and output. The cache is guarded by source identities and mutation
+versions and remains outside serialized checkpoints. It expands runtime weight
+storage to dense FP16; callers can set `cache_weight=False` to retain the
+storage-neutral fused path. That fused path applies packed binary bank
+selection and the exact PGC16 mix once per adjacent output pair. A scalar GEMV path
 handles occupancy-safe tiny-M shapes; the MFMA path uses 16x64 tiles through
 M16 and generally 32x64 through M64. Larger shapes select row tiles from 32 to
 1024 with a 64-column tile, based on the Qwen projection dimensions and M; K

@@ -93,6 +93,134 @@ def _integer_argument(name: str, value: int) -> int:
 
 
 @triton.jit
+def _qvq_p32_predecode_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
+    trellis_ptr,
+    levels_ptr,
+    bank_ids_ptr,
+    dense_ptr,
+    size_k: tl.constexpr,
+    size_n: tl.constexpr,
+    transition_bits: tl.constexpr,
+    words_per_tile: tl.constexpr,
+    alternate_mask: tl.constexpr,
+    block_n: tl.constexpr,
+):
+    """Expand four adjacent K16xN16 tiles into a preshuffled N-by-K operand."""
+
+    pid = tl.program_id(0)
+    n_blocks = tl.cdiv(size_n, block_n)
+    k_tile = pid // n_blocks
+    n_block = pid % n_blocks
+    local_k = tl.arange(0, 16)[:, None]
+    pair_columns = n_block * (block_n // 2) + tl.arange(0, block_n // 2)
+    pair_column_mask = pair_columns < size_n // 2
+    local_pair_n = pair_columns[None, :] & 7
+    pair = local_k * 8 + local_pair_n
+    tile = k_tile * (size_n // 16) + pair_columns[None, :] // 8
+    bit_position = (127 - pair) * transition_bits
+    first_word = bit_position >> 5
+    shift = bit_position & 31
+    next_word = tl.where(first_word + 1 == words_per_tile, 0, first_word + 1)
+    word_base = tile * words_per_tile
+    low = tl.load(
+        trellis_ptr + word_base + first_word,
+        mask=pair_column_mask[None, :],
+        other=0,
+    ).to(tl.uint32)
+    high_mask = pair_column_mask[None, :]
+    if transition_bits == 4:
+        high_mask &= shift > 16
+    high = tl.load(trellis_ptr + word_base + next_word, mask=high_mask, other=0).to(tl.uint32)
+    state = tl.inline_asm_elementwise(
+        "v_alignbit_b32 $0, $2, $1, $3",
+        "=v,v,v,v",
+        [low, high, shift],
+        dtype=tl.uint32,
+        is_pure=True,
+        pack=1,
+    ) & 0xFFFF
+    packed_bank = tl.load(bank_ids_ptr + tile, mask=pair_column_mask[None, :], other=0)
+    selected = (packed_bank >> (pair >> 4)) & 1
+    mixed = state ^ (state >> 8)
+    mixed ^= selected * (alternate_mask ^ (alternate_mask >> 8))
+    mixed = tl.inline_asm_elementwise(
+        "v_mad_u32_u24 $0, $1, $2, $3",
+        "=v,v,s,v",
+        [mixed, 40503, 17011],
+        dtype=tl.uint32,
+        is_pure=True,
+        pack=1,
+    ) & 0xFFFF
+    mixed ^= mixed >> 7
+    even_weight = tl.load(levels_ptr + (mixed >> 8)).to(tl.float16)
+    odd_weight = tl.load(levels_ptr + (mixed & 0xFF)).to(tl.float16)
+    weight = tl.interleave(even_weight, odd_weight)
+    columns = n_block * block_n + tl.arange(0, block_n)
+    offsets = columns[None, :] * size_k + (
+        k_tile * 16 + tl.arange(0, 16)
+    )[:, None]
+    tl.store(dense_ptr + offsets, weight, mask=columns[None, :] < size_n)
+
+
+def _qvq_p32_predecoded_weight(
+    window: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    *,
+    bits: float,
+    size_k: int,
+    size_n: int,
+    transition_bits: int,
+    words_per_tile: int,
+    bank_alt_id: int,
+) -> torch.Tensor:
+    """Return a mutation-aware transient FP16 cache for repeated inference."""
+
+    key = (
+        window._version,
+        levels,
+        levels._version,
+        bank_ids,
+        bank_ids._version,
+        bits,
+        size_k,
+        size_n,
+        bank_alt_id,
+    )
+    cached = getattr(window, "_qvq_p32_amd_dense_cache", None)
+    if cached is not None:
+        cached_key, dense = cached
+        if all(
+            current is recorded
+            if isinstance(current, torch.Tensor)
+            else current == recorded
+            for current, recorded in zip(key, cached_key, strict=True)
+        ):
+            return dense
+
+    block_n = 64
+    dense = torch.empty((size_n, size_k), dtype=torch.float16, device=window.device)
+    grid = ((size_k // 16) * triton.cdiv(size_n, block_n),)
+    _qvq_p32_predecode_gfx950_kernel[grid](
+        window,
+        levels,
+        bank_ids,
+        dense,
+        size_k=size_k,
+        size_n=size_n,
+        transition_bits=transition_bits,
+        words_per_tile=words_per_tile,
+        alternate_mask=_bank_mask(transition_bits, bank_alt_id),
+        block_n=block_n,
+        num_warps=4,
+        num_stages=1,
+        waves_per_eu=0,
+    )
+    window._qvq_p32_amd_dense_cache = (key, dense)
+    return dense
+
+
+@triton.jit
 def _qvq_p32_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
     input_ptr,
     trellis_ptr,
@@ -284,8 +412,14 @@ def qvq_p32_amd(
     out_features: int,
     bank_alt_id: int,
     output_fp32: bool = True,
+    cache_weight: bool = True,
 ) -> torch.Tensor:
-    """Multiply FP16 activations by continuous-window V2B2-P32 tiles on gfx950."""
+    """Multiply FP16 activations by continuous-window V2B2-P32 tiles on gfx950.
+
+    The default inference path lazily expands immutable P32 weights into a
+    transient FP16 GEMM cache. Set ``cache_weight=False`` to retain the fused,
+    storage-neutral decoder when runtime VRAM matters more than throughput.
+    """
 
     bits = normalize_qvq_rate(bits)
     if bits not in _P32_RATES:
@@ -295,6 +429,8 @@ def qvq_p32_amd(
     bank_alt_id = _integer_argument("bank_alt_id", bank_alt_id)
     if not isinstance(output_fp32, bool):
         raise TypeError("output_fp32 must be boolean")
+    if not isinstance(cache_weight, bool):
+        raise TypeError("cache_weight must be boolean")
     if not qvq_p32_amd_supported(x.device):
         raise RuntimeError("AMD P32 requires a ROCm gfx950 device")
     if x.ndim != 2 or window.ndim != 2:
@@ -328,6 +464,20 @@ def qvq_p32_amd(
     block_m, block_n, num_warps = _launch_config(m, n, k)
     block_k = 64 if m >= 128 else (32 if m == 64 and n >= 10240 else 16)
     output_dtype = torch.float32 if output_fp32 else x.dtype
+    if cache_weight:
+        dense = _qvq_p32_predecoded_weight(
+            window,
+            levels,
+            bank_ids,
+            bits=bits,
+            size_k=k,
+            size_n=n,
+            transition_bits=transition_bits,
+            words_per_tile=expected_window[1],
+            bank_alt_id=bank_alt_id,
+        )
+        return torch.mm(x, dense.T, out_dtype=output_dtype)
+
     output = torch.empty((m, n), device=x.device, dtype=output_dtype)
     alternate_mask = _bank_mask(transition_bits, bank_alt_id)
     if _use_gemv(m, n):
