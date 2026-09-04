@@ -1242,7 +1242,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_large_m_kernel(
 // keeps two accumulator fragments, so the second row group avoids repeating
 // trellis loads and state decoding while retaining the four-warp N layout.
 template <int TransitionBits, int StaticN, int StaticK = 0,
-          int StageKTiles = 1>
+          int StageKTiles = 1, int RowGroups = 2>
 __global__ __launch_bounds__(128) void p32_window_ampere_large_m2_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -1255,15 +1255,15 @@ __global__ __launch_bounds__(128) void p32_window_ampere_large_m2_kernel(
     int size_n,
     int split_count,
     const uint8_t* __restrict__ bank_alt_id) {
-  const int row_offset = static_cast<int>(blockIdx.y) * (2 * kRows);
-  const int local_m = min(2 * kRows, size_m - row_offset);
-  if (local_m < 2 * kRows) return;
+  const int row_offset = static_cast<int>(blockIdx.y) * (RowGroups * kRows);
+  const int local_m = min(RowGroups * kRows, size_m - row_offset);
+  if (local_m < RowGroups * kRows) return;
   const int n_tiles = size_n / kTileColumns;
   const int n_block = static_cast<int>(blockIdx.x);
   const int split = static_cast<int>(blockIdx.z);
   p32_window_ampere_kernel_body<
       TransitionBits, true, 0, StaticN, 128, 4, StageKTiles,
-      false, false, StaticK, 2>(
+      false, false, StaticK, RowGroups>(
       input + static_cast<int64_t>(row_offset) * size_k,
       trellis, levels, bank_ids, partial_output,
       output + static_cast<int64_t>(row_offset) * size_n, local_m, size_k,
@@ -2796,7 +2796,8 @@ int launch_p32_large_m_grid_dispatch(
       size_m, size_k, size_n, split_count, stream);
 }
 
-template <int TransitionBits, int StageKTiles, int StaticN, int StaticK = 0>
+template <int TransitionBits, int StageKTiles, int StaticN, int StaticK = 0,
+          int RowGroups = 2>
 int launch_p32_large_m2_grid(
     const half* input,
     const uint32_t* trellis,
@@ -2814,9 +2815,10 @@ int launch_p32_large_m2_grid(
   const int n_tiles = size_n / kTileColumns;
   const dim3 grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
-      static_cast<unsigned>(size_m / (2 * kRows)),
+      static_cast<unsigned>(size_m / (RowGroups * kRows)),
       static_cast<unsigned>(split_count));
-  p32_window_ampere_large_m2_kernel<TransitionBits, StaticN, StaticK, StageKTiles>
+  p32_window_ampere_large_m2_kernel<
+      TransitionBits, StaticN, StaticK, StageKTiles, RowGroups>
       <<<grid, 128, 0, stream>>>(
       input, trellis, levels, bank_ids, partial_output, output, size_m, size_k,
       size_n, split_count, bank_alt_id);
@@ -2832,7 +2834,7 @@ int launch_p32_large_m2_grid(
   return 0;
 }
 
-template <int TransitionBits, int StageKTiles>
+template <int TransitionBits, int StageKTiles, int RowGroups = 2>
 int launch_p32_large_m2_grid_dispatch(
     const half* input,
     const uint32_t* trellis,
@@ -2852,7 +2854,7 @@ int launch_p32_large_m2_grid_dispatch(
 #define QVQ_LARGE_M2_STATIC_N(N) \
       case N: \
         return launch_p32_large_m2_grid< \
-            TransitionBits, StageKTiles, N, 5120>( \
+            TransitionBits, StageKTiles, N, 5120, RowGroups>( \
             input, trellis, levels, bank_ids, bank_alt_id, output, \
             partial_output, size_m, size_k, size_n, split_count, stream)
       QVQ_LARGE_M2_STATIC_N(1024);
@@ -2872,7 +2874,7 @@ int launch_p32_large_m2_grid_dispatch(
 #define QVQ_LARGE_M2_STATIC_N(N) \
       case N: \
         return launch_p32_large_m2_grid< \
-            TransitionBits, StageKTiles, N, 0>( \
+            TransitionBits, StageKTiles, N, 0, RowGroups>( \
             input, trellis, levels, bank_ids, bank_alt_id, output, \
             partial_output, size_m, size_k, size_n, split_count, stream)
       QVQ_LARGE_M2_STATIC_N(1024);
@@ -2887,7 +2889,8 @@ int launch_p32_large_m2_grid_dispatch(
         return -1;
     }
   }
-  return launch_p32_large_m2_grid<TransitionBits, StageKTiles, 0, 0>(
+  return launch_p32_large_m2_grid<
+      TransitionBits, StageKTiles, 0, 0, RowGroups>(
       input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
       size_m, size_k, size_n, split_count, stream);
 }
@@ -2929,28 +2932,28 @@ int launch_p32_large_m(
       size_n == 10240 || size_n == 12288 || size_n == 17408;
   int status = -1;
   if (config.threads == 128 && size_m % (2 * kRows) == 0) {
-#define QVQ_LARGE_M2_STAGE \
+#define QVQ_LARGE_M2_STAGE(ROW_GROUPS) \
     switch (config.stage_k_tiles) { \
       case 1: \
-        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 1>( \
+        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 1, ROW_GROUPS>( \
             input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
             output, partial_output, size_m, size_k, size_n, config.split_count, \
             use_static_n, cuda_stream); \
         break; \
       case 2: \
-        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 2>( \
+        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 2, ROW_GROUPS>( \
             input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
             output, partial_output, size_m, size_k, size_n, config.split_count, \
             use_static_n, cuda_stream); \
         break; \
       case 3: \
-        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 3>( \
+        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 3, ROW_GROUPS>( \
             input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
             output, partial_output, size_m, size_k, size_n, config.split_count, \
             use_static_n, cuda_stream); \
         break; \
       case 4: \
-        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 4>( \
+        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 4, ROW_GROUPS>( \
             input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
             output, partial_output, size_m, size_k, size_n, config.split_count, \
             use_static_n, cuda_stream); \
@@ -2959,7 +2962,11 @@ int launch_p32_large_m(
         set_last_error("QVQ P32 large-M2 stage_k_tiles must be in [1, 4]"); \
         return -1; \
     }
-    QVQ_LARGE_M2_STAGE
+    if (size_m % (4 * kRows) == 0) {
+      QVQ_LARGE_M2_STAGE(4)
+    } else {
+      QVQ_LARGE_M2_STAGE(2)
+    }
     return status;
 #undef QVQ_LARGE_M2_STAGE
   }

@@ -3695,6 +3695,22 @@ committed row-reuse path retains the compiler's existing SSA treatment of these
 values.  NCU for the retained commit reported no local/shared spills, so no
 register-pressure workaround was needed.
 
+## v76 large-M four-row CTA reuse
+
+The reuse kernel is now parameterized for four adjacent 16-row groups (64
+rows per CTA) when `threads=128` and `M` is divisible by 64.  This keeps one
+packed trellis tile live across four output groups.  The probe remained exact
+for transition bits 4--7 on the randomized split-8 comparison.  A100 resource
+usage for the fixed `N=1024,K=5120,StageKTiles=1` specialization is 96
+registers/thread, 4,616 B static shared memory, and no local-memory spill.
+
+The 24-case `M=512/1024/2048/4096` by six-N sweep measured 2.565x geometric
+mean versus fetched `origin/main` (minimum 1.458x, maximum 2.826x), and
+1.440x versus the preceding two-row reuse commit.  Per-N means were
+2.140x/2.528x/2.635x/2.702x/2.758x/2.773x.  This is the first probe to clear
+2.5x main-relative throughput; the additional grouping pass is still being
+screened for the requested 50% step over the prior commit.
+
 ## Reproduction
 
 ```bash
