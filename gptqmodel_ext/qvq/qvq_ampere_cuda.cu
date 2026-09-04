@@ -2580,6 +2580,17 @@ at::Tensor p32_window_ampere_impl(
         return output;
       }
     }
+    if (size_m == 1 && size_k == 5120 && size_n == 1024 &&
+        split_count == 56) {
+      reduce_split_kernel<56>
+          <<<blocks, kReductionThreads, 0, stream>>>(
+              partial_output.data_ptr<float>(),
+              output.data_ptr<float>(),
+              output_values,
+              56);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      return output;
+    }
 #define QVQ_LAUNCH_STATIC_REDUCER(SPLITS)                                    \
   reduce_split_kernel<SPLITS><<<blocks, kReductionThreads, 0, stream>>>(     \
       partial_output.data_ptr<float>(),                                      \
