@@ -1754,6 +1754,23 @@ at::Tensor p32_window_ampere_impl(
   auto* partial_output_ptr = partial_output.data_ptr<float>();
   auto* output_ptr = output.data_ptr<float>();
   if (size_m == 1 && size_k == 5120 && size_n == 12288 &&
+      split_count == 40 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
+          kScalarTripleStageKTiles, 40>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
+  } else if (size_m == 1 && size_k == 5120 && size_n == 12288 &&
       launch_static_n_scalar_kernel<
           TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
           kScalarTripleStageKTiles>(

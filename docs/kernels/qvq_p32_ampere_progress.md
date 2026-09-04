@@ -3113,6 +3113,24 @@ Autotune also changed the W3.5 plan from split 48 to 96 between runs, so the
 probe provided no repeatable same-plan improvement and was reverted.  The
 diagnostic is `artifacts/a100_p32_window/v25_candidate_m2_mlpdown_static96_8000.json`.
 
+## v26 M1 full-Q static split specialization
+
+The measured M1 full-Q route `(K,N)=(5120,12288)` uses the scalar triple-stage
+kernel with split 40.  A guarded `StaticSplitCount=40` launch now removes the
+split-count divisions for that plan while retaining the existing dynamic
+triple-stage fallback for any other split count.  The formal Ampere suite is
+exact (56/56 tests; worst observed `max_abs=1.34e-5`).  Two matched
+8,000-iteration runs reproduced the same medians: dynamic
+`0.060416/0.067584/0.067584/0.068608 ms` versus static
+`0.060416/0.067584/0.066560/0.068608 ms` at W2/W2.5/W3/W3.5.  The resulting
+four-rate geometric mean improves from `0.0659635` to `0.0657122 ms`
+(`1.0038x`, 0.38%) for this shape.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m1_fullq_dynamic_8000.json`,
+`artifacts/a100_p32_window/v26_candidate_m1_fullq_static40_8000.json`, and
+`artifacts/a100_p32_window/v26_candidate_m1_fullq_static40_repeat8000.json`.
+This remains a shape-local progression; the full-matrix 10% target is still
+open.
+
 ## Reproduction
 
 ```bash
