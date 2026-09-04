@@ -3596,6 +3596,15 @@ Ampere medians regressed to about `0.033792 ms` for M2 and
 change was reverted.  Diagnostic:
 `artifacts/a100_p32_window/v32_candidate_m24_fullkv_vector_store_2000.json`.
 
+## v69 neutral M16 full-KV bank-mask hoist
+
+The M16 full-KV WMMA route `(K,N)=(5120,1024)` was screened with
+`HoistBankMasks=true`, extending the optimization used by the M8 route.  The
+2,000-iteration run remained exact and measured
+`0.033792/0.032768/0.033792/0.033792 ms`, matching the retained schedule
+within event resolution.  The source probe was reverted as neutral.
+Diagnostic: `artifacts/a100_p32_window/v33_candidate_m16_fullkv_hoistmask_2000.json`.
+
 ## Reproduction
 
 ```bash
