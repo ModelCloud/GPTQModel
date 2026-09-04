@@ -1690,7 +1690,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
         true,
         true,
         true,
-        TransitionBits == kW3TransitionBits>
+        TransitionBits <= kW3TransitionBits>
         <<<qwen_grid, kTmaThreads, 0, stream>>>(
             input_tma,
             trellis_tma,

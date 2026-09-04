@@ -616,7 +616,8 @@ def test_qwen38_full_attention_group_runs_measured_schedule_in_cuda_graph():
     assert telemetry["plain_fallbacks"] == 0
 
 
-def test_qwen38_folded_mlp_is_fused_and_cuda_graph_replay_exact():
+@pytest.mark.parametrize("bits", (2.0, 2.5, 3.0))
+def test_qwen38_folded_mlp_is_fused_and_cuda_graph_replay_exact(bits):
     device = _h100_device()
     if device is None:
         pytest.skip("requires the exclusive H100 validation device")
@@ -629,7 +630,7 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_replay_exact():
                 "gate_proj",
                 in_features=5120,
                 out_features=17408,
-                bits=3,
+                bits=bits,
                 su=shared,
                 seed=20260920,
                 device=device,
@@ -639,7 +640,7 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_replay_exact():
                 "up_proj",
                 in_features=5120,
                 out_features=17408,
-                bits=3,
+                bits=bits,
                 su=shared,
                 seed=20260921,
                 device=device,
@@ -649,7 +650,7 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_replay_exact():
                 "down_proj",
                 in_features=17408,
                 out_features=5120,
-                bits=3,
+                bits=bits,
                 seed=20260922,
                 device=device,
                 input_hadamard=False,
@@ -689,11 +690,18 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_replay_exact():
     assert telemetry["h100_folded_qwen_mlp_launches"] == 2
     assert telemetry["h100_folded_qwen_fused_precondition_launches"] == 2
     assert telemetry["h100_folded_qwen_fused_ordered_reduction_launches"] == 2
-    assert telemetry["h100_qwen_w3_ordered_decode_prefetch_launches"] == 2
-    assert telemetry["h100_qwen_w3_down_decode_prefetch_launches"] == 2
+    assert telemetry["h100_qwen_w3_ordered_decode_prefetch_launches"] == (
+        2 if bits == 3.0 else 0
+    )
+    assert telemetry["h100_qwen_ordered_decode_prefetch_launches"] == 2
+    assert telemetry["h100_qwen_w3_down_decode_prefetch_launches"] == (
+        2 if bits == 3.0 else 0
+    )
     assert telemetry["h100_qwen_fixed_ordered_grid_launches"] == 2
     assert telemetry["h100_qwen_composite_down_recovery_launches"] == 2
-    assert telemetry["h100_qwen_ordered_composite_down_recovery_launches"] == 2
+    assert telemetry["h100_qwen_ordered_composite_down_recovery_launches"] == (
+        2 if bits == 3.0 else 0
+    )
     assert telemetry["h100_qwen_composite_input_launches"] == 2
     assert telemetry["plain_fallbacks"] == 0
     assert telemetry["fused_mlp_fallbacks"] == 0
