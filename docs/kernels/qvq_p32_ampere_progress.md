@@ -3262,6 +3262,18 @@ with `max_abs <= 2.1e-5`.  Diagnostics are
 `artifacts/a100_p32_window/v39_candidate_m4_fullq_static40_repeat8000.json`.
 This is shape-local progress; the full-matrix 10% target remains open.
 
+## v40 neutral M4 MLP gate/up static split probe
+
+The M4 MLP gate/up autotuner selected split 20 or 40 depending on rate.  A
+paired static-20/static-40 scalar specialization was screened, but the
+8,000-iteration medians were mixed (dynamic
+`0.101376/0.115712/0.119808/0.117760 ms`; probe
+`0.101376/0.114688/0.120832/0.117760 ms`).  With no stable geometric-mean
+gain, both source branches were reverted.  Outputs remained exact
+(`max_abs <= 1.3e-5`).  Diagnostic:
+`artifacts/a100_p32_window/v40_candidate_m4_mlpgate_static20_40_8000.json`;
+control: `artifacts/a100_p32_window/v40_candidate_m4_mlpgate_probe.json`.
+
 ## Reproduction
 
 ```bash
