@@ -432,7 +432,7 @@ binary (eight WGMMAs, 168 registers/thread, zero local/shared spills).
 Direct W3.5 shapes confirm that the result is not specific to the NCU point:
 M4096/K2048/N8192 fell from 2.569 to 1.163 ms (2.21x). Exact deployed-operand
 coverage passed all W2/W2.5/W3/W3.5 variants and the full M grid through 4096
-across three seeds; the complete test suite passed 172 tests with 70 skipped.
+across three seeds; the focused QVQ suite passed 184 tests with 70 skipped.
 
 At the full Llama-3.2-1B W3.5A8 boundary, exclusive H200 prefill improved from
 9,925.82 to 12,557.79 tok/s (1.265x), with median/p95 latency falling from
