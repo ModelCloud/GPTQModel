@@ -25,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts import benchmark_qvq_a41_phase4_production as common
 
 RATES = (2.0, 2.5, 3.0, 3.5)
-M_VALUES = (16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
+M_VALUES = (16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192)
 SOURCE_PATHS = (
     Path("gptqmodel/nn_modules/qlinear/qvq.py"),
     Path("gptqmodel/nn_modules/qvq_grouped_runtime.py"),
@@ -59,8 +59,8 @@ def _args() -> argparse.Namespace:
     args = parser.parse_args()
     if any(rate not in RATES for rate in args.rates):
         parser.error("rates must be W2, W2.5, W3, or W3.5")
-    if any(value < 1 or value > 4096 for value in args.m_values):
-        parser.error("M must be in [1, 4096]")
+    if any(value < 1 or value > 8192 for value in args.m_values):
+        parser.error("M must be in [1, 8192]")
     if min(args.warmup, args.samples, args.replays_per_sample) <= 0:
         parser.error("timing counts must be positive")
     if args.idle_samples < 3 or args.idle_interval < 0 or args.idle_memory_mib < 0:
@@ -182,7 +182,10 @@ def _main(args: argparse.Namespace) -> None:
     import torch
 
     from gptqmodel.nn_modules.qlinear.qvq import qvq_dense_oracle_forward
-    from gptqmodel.nn_modules.qvq_grouped_runtime import install_qvq_hopper_groups
+    from gptqmodel.nn_modules.qvq_grouped_runtime import (
+        install_qvq_hopper_groups,
+        qvq_grouped_runtime_telemetry,
+    )
 
     device_info = common._assert_h100(torch)
     device = torch.device("cuda:0")
@@ -267,6 +270,7 @@ def _main(args: argparse.Namespace) -> None:
                     args,
                     device_info,
                 )
+                telemetry = qvq_grouped_runtime_telemetry(parent)[0]
                 expected = tuple(
                     qvq_dense_oracle_forward(child, inputs[(group, m)], device=device)
                     for child in children
@@ -298,6 +302,11 @@ def _main(args: argparse.Namespace) -> None:
                     "effective_tflops": logical_flops / (timing["median_us"] * 1e6),
                     "better_than_last_benchmark": timing["median_us"]
                     < plain[m]["median_us"],
+                    "selected_chunk_rows": (
+                        telemetry["h100_large_m_group_chunk_rows"]
+                        if m > 4096
+                        else None
+                    ),
                     "dense_oracle_error": error,
                 }
                 rows.append(row)
