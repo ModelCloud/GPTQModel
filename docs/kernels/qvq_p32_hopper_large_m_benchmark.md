@@ -385,3 +385,26 @@ Reuse-8 is not present in production.  The next design must share decoded
 weights without retaining eight independent FP32 accumulator fragments in one
 CTA—for example, a persistent/shared decoded-weight tile across smaller row
 consumer groups.
+
+## M8192 folded FP8 QKV prefill
+
+The physical-H100 prefill path algebraically folds the P32-reconstructed
+weight, input/output Hadamards, and child scales into one transient effective
+QKV weight.  It then performs a graph-safe packed E5M2 activation conversion
+and one E5M2-by-E4M3 FP8 matrix multiplication.  These rows use 20 warmups,
+31 samples, and 10 CUDA Graph replays per sample.  `Better than last` compares
+against the committed folded-FP8 pair-conversion benchmark rather than the
+much slower row-multiplexed result.
+
+| Rate | M x K x N | QVQ us | vs Marlin W4 | vs Machete W4 | Better than last | Effective TFLOP/s | Mean error | Max error |
+| ---: | ---: | ---: | ---: | ---: | :---: | ---: | ---: | ---: |
+| W2 | 8192 x 2048 x 3072 | 101.734 | 3.022x | 2.280x | Yes | 1013.219 | 8.495e-5 | 6.277e-4 |
+| W2.5 | 8192 x 2048 x 3072 | 102.016 | 3.014x | 2.274x | Yes | 1010.422 | 8.498e-5 | 5.856e-4 |
+| W3 | 8192 x 2048 x 3072 | 102.138 | 3.011x | 2.271x | Yes | 1009.219 | 8.496e-5 | 6.326e-4 |
+| W3.5 | 8192 x 2048 x 3072 | 101.696 | 3.024x | 2.281x | Yes | 1013.601 | 8.498e-5 | 6.360e-4 |
+
+Relative to the preceding exact row-multiplexed QVQ result, the complete
+speedup is `22.41-22.91x`.  Relative to the first folded-FP8 implementation,
+the promoted eight-value conversion adds another `1.085-1.094x`.  All four
+rates beat both W4 comparators and remain below the unchanged `2e-3`
+dense-P32 maximum-error gate.
