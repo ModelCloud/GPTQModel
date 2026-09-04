@@ -125,7 +125,7 @@ def main() -> None:
         device_ms = start_event.elapsed_time(end_event)
 
         window = layer._qvq_cuda_window_cache[3]
-        _, folded, operand = window._qvq_p32_amd_folded_cache
+        _, folded, operand, _, _ = window._qvq_p32_amd_folded_cache
         assert operand.untyped_storage().data_ptr() == folded.untyped_storage().data_ptr()
         assert window._qvq_p32_amd_dense_cache is None
         cache_bytes = folded.numel() * folded.element_size()

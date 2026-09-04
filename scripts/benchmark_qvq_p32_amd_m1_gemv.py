@@ -131,7 +131,7 @@ def main() -> None:
             # through both the row-major N-by-K and transposed K-by-N views.
             layer(x)
             window, prepared_bank_ids, bank_alt_id = layer._prepare_amd_p32_metadata(x.device)
-            _, folded_nk, operand_kn = window._qvq_p32_amd_folded_cache
+            _, folded_nk, operand_kn, _, _ = window._qvq_p32_amd_folded_cache
             levels = _pgc16_levels(x.device, layer.codebook_version)
             su = layer._cached_cast("SU", torch.float16)
             sv = layer._cached_cast("SV", torch.float16)

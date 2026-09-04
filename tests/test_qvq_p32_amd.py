@@ -109,9 +109,10 @@ def test_qvq_p32_amd_folded_shape_gate_is_fail_closed():
         (5120, 6144),
         (6144, 5120),
         (5120, 17408),
+        (17408, 5120),
     ):
         assert qvq_p32_amd_folded_shape_supported(*shape)
-    for shape in ((17408, 5120), (256, 256)):
+    for shape in ((256, 256), (8192, 2048)):
         assert not qvq_p32_amd_folded_shape_supported(*shape)
 
 
@@ -121,7 +122,8 @@ def test_qvq_p32_amd_folded_case_gate_enforces_accuracy_boundaries():
     assert not qvq_p32_amd_folded_case_supported(64, 6144, 5120)
     assert qvq_p32_amd_folded_case_supported(512, 5120, 17408)
     assert not qvq_p32_amd_folded_case_supported(1024, 5120, 17408)
-    assert not qvq_p32_amd_folded_case_supported(1, 17408, 5120)
+    assert qvq_p32_amd_folded_case_supported(512, 17408, 5120)
+    assert not qvq_p32_amd_folded_case_supported(1024, 17408, 5120)
 
 
 def test_qvq_p32_amd_folded_output_dtype_gate_covers_measured_regressions():
@@ -559,6 +561,68 @@ def test_qvq_p32_amd_folded_full_layer_matches_fp32_oracle(
         output_hadamard=output_hadamard,
     )
     assert window._qvq_p32_amd_dense_cache is None
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not _gfx950_available(), reason="requires a ROCm gfx950 GPU")
+@pytest.mark.parametrize("m", (1, 32))
+def test_qvq_p32_amd_folded_residual_cache_reuses_and_matches_fp32_oracle(m):
+    bits = 3.0
+    x, planar, window, levels, bank_ids, bank_alt_id = _case(bits, m, seed=9450)
+    su = torch.linspace(0.75, 1.25, 256, dtype=torch.float16, device="cuda")
+    sv = torch.linspace(1.25, 0.75, 256, dtype=torch.float16, device="cuda")
+    inner = reconstruct_qvq_inner_weight(
+        planar,
+        bits=bits,
+        in_features=256,
+        out_features=256,
+        bank_ids=bank_ids,
+        v2b2_p32=True,
+        bank_alt_id=bank_alt_id,
+    )
+    reference = matmul_hadU(x.float() * su.float()) @ inner
+    reference = matmul_hadU(reference) * sv.float()
+
+    with patch(
+        "gptqmodel.utils.qvq_amd._QWEN38_27B_RESIDUAL_FOLDED_SHAPES",
+        frozenset({(256, 256)}),
+    ):
+        actual = qvq_p32_amd_folded(
+            x,
+            window,
+            levels,
+            bank_ids,
+            su,
+            sv,
+            bits,
+            out_features=256,
+            bank_alt_id=3,
+            input_hadamard=True,
+            output_hadamard=True,
+        )
+        cache = window._qvq_p32_amd_folded_cache
+        folded, operand, residual, residual_operand = cache[1:]
+        repeated = qvq_p32_amd_folded(
+            x,
+            window,
+            levels,
+            bank_ids,
+            su,
+            sv,
+            bits,
+            out_features=256,
+            bank_alt_id=3,
+            input_hadamard=True,
+            output_hadamard=True,
+        )
+
+    assert residual is not None
+    assert residual_operand is not None
+    assert operand.untyped_storage().data_ptr() == folded.untyped_storage().data_ptr()
+    assert residual_operand.untyped_storage().data_ptr() == residual.untyped_storage().data_ptr()
+    assert window._qvq_p32_amd_folded_cache is cache
+    torch.testing.assert_close(actual, reference, rtol=0.0, atol=2e-3)
+    assert torch.equal(actual, repeated)
 
 
 @pytest.mark.cuda

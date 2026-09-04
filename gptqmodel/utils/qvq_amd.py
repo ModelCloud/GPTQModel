@@ -27,12 +27,15 @@ _QWEN38_27B_FOLDED_SHAPES = frozenset(
         (5120, 6144),
         (6144, 5120),
         (5120, 17408),
+        (17408, 5120),
     }
 )
 _QWEN38_27B_FOLDED_M_LIMITS = {
     (6144, 5120): 32,
     (5120, 17408): 512,
+    (17408, 5120): 512,
 }
+_QWEN38_27B_RESIDUAL_FOLDED_SHAPES = frozenset({(17408, 5120)})
 
 
 def qvq_p32_amd_supported(device: torch.device | str) -> bool:
@@ -272,8 +275,8 @@ def _qvq_p32_folded_weight(
     bank_alt_id: int,
     input_hadamard: bool,
     output_hadamard: bool,
-) -> torch.Tensor:
-    """Fold immutable QVQ axes into one mutation-aware N-by-K FP16 cache."""
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Fold immutable QVQ axes into mutation-aware N-by-K FP16 cache operands."""
 
     key = (
         window._version,
@@ -294,7 +297,7 @@ def _qvq_p32_folded_weight(
     )
     cached = getattr(window, "_qvq_p32_amd_folded_cache", None)
     if cached is not None:
-        cached_key, _, operand = cached
+        cached_key, _, operand, _, residual_operand = cached
         if all(
             current is recorded
             if isinstance(current, torch.Tensor)
@@ -304,7 +307,7 @@ def _qvq_p32_folded_weight(
             # A caller may have populated the ordinary predecode cache through
             # forward_pretransformed after this folded entry was built.
             window._qvq_p32_amd_dense_cache = None
-            return operand
+            return operand, residual_operand
 
     dense = _qvq_p32_predecoded_weight(
         window,
@@ -317,35 +320,47 @@ def _qvq_p32_folded_weight(
         words_per_tile=words_per_tile,
         bank_alt_id=bank_alt_id,
     )
-    folded = dense.to(torch.float32)
+    folded_fp32 = dense.to(torch.float32)
     if input_hadamard or output_hadamard:
         from ..quantization.rotation.hadamard_utils import matmul_hadU
 
         # dense is W^T. Input folding right-multiplies it by H_K^T;
         # output folding transposes around the row-oriented H_N helper.
         if input_hadamard:
-            folded = matmul_hadU(folded, transpose=True)
+            folded_fp32 = matmul_hadU(folded_fp32, transpose=True)
         if output_hadamard:
-            folded = matmul_hadU(folded.T.contiguous()).T.contiguous()
-    folded.mul_(sv.to(torch.float32)[:, None])
-    folded.mul_(su.to(torch.float32)[None, :])
-    folded = folded.to(torch.float16).contiguous()
+            folded_fp32 = matmul_hadU(folded_fp32.T.contiguous()).T.contiguous()
+    folded_fp32.mul_(sv.to(torch.float32)[:, None])
+    folded_fp32.mul_(su.to(torch.float32)[None, :])
+    folded = folded_fp32.to(torch.float16).contiguous()
     operand = folded.T
+    residual = None
+    residual_operand = None
+    if (size_k, size_n) in _QWEN38_27B_RESIDUAL_FOLDED_SHAPES:
+        # This shape narrowly misses the end-to-end 2e-3 error budget when the
+        # FP32 folded matrix is rounded once.  A second FP16 expansion term
+        # preserves that accuracy while remaining much cheaper than decoding
+        # P32 weights on every token.  Limit it to the measured down projection
+        # because it doubles that layer's persistent folded-cache footprint.
+        residual = (folded_fp32 - folded.to(torch.float32)).to(torch.float16).contiguous()
+        residual_operand = residual.T
     # The predecoded matrix is only a construction intermediate here. Keeping
     # it would double the persistent dense-cache footprint for every layer.
     window._qvq_p32_amd_dense_cache = None
-    window._qvq_p32_amd_folded_cache = (key, folded, operand)
-    return operand
+    window._qvq_p32_amd_folded_cache = (key, folded, operand, residual, residual_operand)
+    return operand, residual_operand
 
 
 @triton.jit
 def _qvq_p32_folded_gemv_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
     input_ptr,
     weight_ptr,
+    residual_ptr,
     output_ptr,
     size_k: tl.constexpr,
     block_n: tl.constexpr,
     block_k: tl.constexpr,
+    use_residual: tl.constexpr,
 ):
     """Multiply one row by the cached physical N-by-K folded weight."""
 
@@ -355,6 +370,10 @@ def _qvq_p32_folded_gemv_gfx950_kernel(  # pragma: no cover - compiled and exerc
         columns = k_block * block_k + tl.arange(0, block_k)
         activation = tl.load(input_ptr + columns).to(tl.float32)
         weight = tl.load(weight_ptr + rows[:, None] * size_k + columns[None, :]).to(tl.float32)
+        if use_residual:
+            weight += tl.load(
+                residual_ptr + rows[:, None] * size_k + columns[None, :]
+            ).to(tl.float32)
         accumulator += tl.sum(weight * activation[None, :], axis=1)
     tl.store(output_ptr + rows, accumulator)
 
@@ -362,6 +381,7 @@ def _qvq_p32_folded_gemv_gfx950_kernel(  # pragma: no cover - compiled and exerc
 def _qvq_p32_folded_execute(
     x: torch.Tensor,
     operand: torch.Tensor,
+    residual_operand: torch.Tensor | None = None,
     *,
     out_features: int,
     output_fp32: bool,
@@ -384,15 +404,26 @@ def _qvq_p32_folded_execute(
             x,
             # operand is a K-by-N transpose view over physical N-by-K storage.
             operand,
+            operand if residual_operand is None else residual_operand,
             output,
             size_k=k,
             block_n=block_n,
             block_k=block_k,
+            use_residual=residual_operand is not None,
             num_warps=4,
             num_stages=1,
             waves_per_eu=0,
         )
         return output
+    if residual_operand is not None:
+        primary = torch.mm(x, operand, out_dtype=torch.float32)
+        output = torch.addmm(
+            primary,
+            x,
+            residual_operand,
+            out_dtype=torch.float32,
+        )
+        return output if output_fp32 else output.to(x.dtype)
     return torch.mm(x, operand, out_dtype=torch.float32 if output_fp32 else x.dtype)
 
 
@@ -781,12 +812,12 @@ def qvq_p32_amd_folded(
     cached = getattr(window, "_qvq_p32_amd_folded_cache", None)
     if (
         isinstance(cached, tuple)
-        and len(cached) == 3
+        and len(cached) == 5
         and x.ndim == 2
         and x.dtype == torch.float16
         and x.is_contiguous()
     ):
-        cached_key, _, operand = cached
+        cached_key, _, operand, _, residual_operand = cached
         if (
             isinstance(cached_key, tuple)
             and len(cached_key) == 15
@@ -811,6 +842,7 @@ def qvq_p32_amd_folded(
             return _qvq_p32_folded_execute(
                 x,
                 operand,
+                residual_operand,
                 out_features=out_features,
                 output_fp32=output_fp32,
             )
@@ -853,7 +885,7 @@ def qvq_p32_amd_folded(
     if tuple(bank_ids.shape) != (tile_count,):
         raise ValueError(f"AMD folded P32 selectors must have shape {(tile_count,)}")
 
-    operand = _qvq_p32_folded_weight(
+    operand, residual_operand = _qvq_p32_folded_weight(
         window,
         levels,
         bank_ids,
@@ -871,6 +903,7 @@ def qvq_p32_amd_folded(
     return _qvq_p32_folded_execute(
         x,
         operand,
+        residual_operand,
         out_features=out_features,
         output_fp32=output_fp32,
     )
