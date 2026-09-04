@@ -217,6 +217,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_qwen_w3_ordered_decode_prefetch_launches: int = 0
     h100_qwen_composite_down_recovery_launches: int = 0
     h100_qwen_ordered_composite_down_recovery_launches: int = 0
+    h100_qwen_composite_input_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -269,6 +270,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_qwen_w3_ordered_decode_prefetch_launches": self.h100_qwen_w3_ordered_decode_prefetch_launches,
             "h100_qwen_composite_down_recovery_launches": self.h100_qwen_composite_down_recovery_launches,
             "h100_qwen_ordered_composite_down_recovery_launches": self.h100_qwen_ordered_composite_down_recovery_launches,
+            "h100_qwen_composite_input_launches": self.h100_qwen_composite_input_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -571,7 +573,30 @@ class QVQHopperGroupedRuntime:
         x_2d = x.reshape(rows, children[0].in_features).to(torch.float16)
         payload = self._ensure_payload()
         direct_pad = self._h100_direct_padded_input_enabled and rows < 16
-        if self._h100_multiblock_input_hadamard_enabled:
+        use_qwen_composite_input = (
+            self._h100_fp16_recovery_store_enabled
+            and children[0].input_hadamard
+            and children[0].in_features == 5120
+            # The single native H40 x H128 launch wins consistently once
+            # eight logical rows amortize its wider block-local transform.
+            # Decode-sized M1/M2/M4 retains the lower-latency staged path.
+            and rows >= 8
+        )
+        if use_qwen_composite_input:
+            from ..quantization.rotation.hadamard_utils import _get_hadK_on
+            from ..utils.qvq_cuda import qvq_cuda_qwen_composite_input_fp16_padded
+
+            input_scale = children[0]._cached_cast("SU", torch.float16)
+            base, base_width = _get_hadK_on(input_scale, False)
+            if base is None or base_width != 40:
+                raise _R0Fallback("Qwen 5120 input requires its canonical H40 base")
+            padded = qvq_cuda_qwen_composite_input_fp16_padded(
+                x_2d,
+                base=base,
+                pre_scale=input_scale,
+            )
+            self.telemetry.h100_qwen_composite_input_launches += 1
+        elif self._h100_multiblock_input_hadamard_enabled:
             from ..utils.qvq_cuda import (
                 qvq_cuda_hadamard_input_fp16_padded_multiblock,
             )

@@ -1,0 +1,48 @@
+{
+  "affected_rows": "M8 and M16; M1, M2, and M4 retain the previous path",
+  "change": "exact native H40 x H128 shared input transform with fused M16 zero padding",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "executable_parent_commit": "38fb5978de8b6c84fcb0684111076ee029cefaab",
+  "geomean_last_over_new": {
+    "full_qkv": 1.0131650294823642,
+    "linear_inputs": 1.010657095141989,
+    "mlp": 1.0062917689463775
+  },
+  "hf_model": "Qwen/Qwen3.8-27B",
+  "hf_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "max_abs_error": 1.773657277226448e-05,
+  "max_mean_abs_error": 2.4792983595034457e-06,
+  "phase": 74,
+  "promotion_cells": 18,
+  "promotion_wins": 18,
+  "rows": [
+    {"site": "mlp", "bits": 2.0, "m": 8, "median_us": 206.72319412231445, "last_us": 209.02591705322266, "last_over_new": 1.0111391609474925, "better_than_last": true},
+    {"site": "mlp", "bits": 2.0, "m": 16, "median_us": 209.90240097045898, "last_us": 210.97760200500488, "last_over_new": 1.005122385592422, "better_than_last": true},
+    {"site": "mlp", "bits": 2.5, "m": 8, "median_us": 206.2883186340332, "last_us": 207.98592567443848, "last_over_new": 1.0082292931158012, "better_than_last": true},
+    {"site": "mlp", "bits": 2.5, "m": 16, "median_us": 209.5910358428955, "last_us": 211.00287437438965, "last_over_new": 1.0067361589479067, "better_than_last": true},
+    {"site": "mlp", "bits": 3.0, "m": 8, "median_us": 208.98560523986816, "last_us": 210.0, "last_over_new": 1.004853897755147, "better_than_last": true},
+    {"site": "mlp", "bits": 3.0, "m": 16, "median_us": 212.1359920501709, "last_us": 212.49567985534668, "last_over_new": 1.0016955529408262, "better_than_last": true},
+    {"site": "full_qkv", "bits": 2.0, "m": 8, "median_us": 133.8476800918579, "last_us": 135.73855876922607, "last_over_new": 1.014127093395048, "better_than_last": true},
+    {"site": "full_qkv", "bits": 2.0, "m": 16, "median_us": 135.12511730194092, "last_us": 136.74304008483887, "last_over_new": 1.0119735162137373, "better_than_last": true},
+    {"site": "full_qkv", "bits": 2.5, "m": 8, "median_us": 134.84416007995605, "last_us": 136.67744159698486, "last_over_new": 1.0135955573896693, "better_than_last": true},
+    {"site": "full_qkv", "bits": 2.5, "m": 16, "median_us": 135.47200202941895, "last_us": 137.49216079711914, "last_over_new": 1.014912002018406, "better_than_last": true},
+    {"site": "full_qkv", "bits": 3.0, "m": 8, "median_us": 136.4252805709839, "last_us": 138.48096370697021, "last_over_new": 1.0150681979716856, "better_than_last": true},
+    {"site": "full_qkv", "bits": 3.0, "m": 16, "median_us": 137.63360023498535, "last_us": 138.91712188720703, "last_over_new": 1.0093256417766467, "better_than_last": true},
+    {"site": "linear_inputs", "bits": 2.0, "m": 8, "median_us": 183.23967933654785, "last_us": 185.21343231201172, "last_over_new": 1.0107714277966988, "better_than_last": true},
+    {"site": "linear_inputs", "bits": 2.0, "m": 16, "median_us": 194.2841625213623, "last_us": 195.71680068969727, "last_over_new": 1.0073739318210122, "better_than_last": true},
+    {"site": "linear_inputs", "bits": 2.5, "m": 8, "median_us": 183.43520164489746, "last_us": 185.46048164367676, "last_over_new": 1.0110408470163754, "better_than_last": true},
+    {"site": "linear_inputs", "bits": 2.5, "m": 16, "median_us": 194.66527938842773, "last_us": 196.81279182434082, "last_over_new": 1.0110318205827964, "better_than_last": true},
+    {"site": "linear_inputs", "bits": 3.0, "m": 8, "median_us": 178.82304191589355, "last_us": 181.3747215270996, "last_over_new": 1.0142692998836593, "better_than_last": true},
+    {"site": "linear_inputs", "bits": 3.0, "m": 16, "median_us": 190.2518367767334, "last_us": 192.0531177520752, "last_over_new": 1.0094678769249186, "better_than_last": true}
+  ],
+  "timing": {
+    "kind": "CUDA Graph replay with CUDA events",
+    "replays_per_sample": 50,
+    "samples": 60,
+    "warmup": 20
+  }
+}

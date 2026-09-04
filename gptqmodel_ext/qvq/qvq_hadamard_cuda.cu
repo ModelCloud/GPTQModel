@@ -1021,6 +1021,76 @@ qvq_qwen_composite_recovery_fp32_to_fp16_kernel(
   }
 }
 
+// Exact shared Qwen3.8 input transform.  The historical composite path first
+// rounds x*SU to FP16, divides by FP16(sqrt(5120)) and rounds again, performs
+// H128 with an FP16 boundary after every butterfly, then rounds the H40 base
+// result once.  One kernel preserves that order and writes the WGMMA M16 zero
+// tail without a separate allocation/fill/copy sequence.
+__global__ void __launch_bounds__(kHadamardThreads)
+qvq_qwen_composite_input_fp16_padded_kernel(
+    const half* __restrict__ input,
+    const half* __restrict__ base,
+    const half* __restrict__ pre_scale,
+    half* __restrict__ output,
+    int logical_rows) {
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= logical_rows) {
+    for (int column = static_cast<int>(threadIdx.x); column < kQwenCompositeN;
+         column += static_cast<int>(blockDim.x)) {
+      output[static_cast<int64_t>(row) * kQwenCompositeN + column] =
+          __float2half_rn(0.0f);
+    }
+    return;
+  }
+
+  extern __shared__ float low[];
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(kQwenCompositeN))));
+  for (int column = static_cast<int>(threadIdx.x); column < kQwenCompositeN;
+       column += static_cast<int>(blockDim.x)) {
+    const int64_t offset =
+        static_cast<int64_t>(row) * kQwenCompositeN + column;
+    const half scaled = __float2half_rn(
+        __fmul_rn(__half2float(input[offset]), __half2float(pre_scale[column])));
+    low[column] = __half2float(
+        __float2half_rn(__half2float(scaled) / divisor));
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 1; bit < kQwenCompositeLowN; bit <<= 1) {
+    for (int column = static_cast<int>(threadIdx.x);
+         column < kQwenCompositeN;
+         column += static_cast<int>(blockDim.x)) {
+      const int local = column & (kQwenCompositeLowN - 1);
+      const int peer = column ^ bit;
+      if (local < (local ^ bit)) {
+        const float a = low[column];
+        const float b = low[peer];
+        low[column] = __half2float(__float2half_rn(__fadd_rn(a, b)));
+        low[peer] = __half2float(__float2half_rn(__fsub_rn(a, b)));
+      }
+    }
+    __syncthreads();
+  }
+
+  for (int column = static_cast<int>(threadIdx.x); column < kQwenCompositeN;
+       column += static_cast<int>(blockDim.x)) {
+    const int base_row = column / kQwenCompositeLowN;
+    const int local = column & (kQwenCompositeLowN - 1);
+    float value = 0.0f;
+#pragma unroll
+    for (int source = 0; source < kQwenCompositeBase; ++source) {
+      value = __fmaf_rn(
+          __half2float(base[base_row * kQwenCompositeBase + source]),
+          low[source * kQwenCompositeLowN + local],
+          value);
+    }
+    output[static_cast<int64_t>(row) * kQwenCompositeN + column] =
+        __float2half_rn(value);
+  }
+}
+
 // Produce one selected output of the 32-point high Hadamard while retaining
 // the accepted ascending butterfly tree and overflow-preserving rounding at
 // every internal node.  Computing one output uses 31 rounded operations.  A
@@ -2420,6 +2490,58 @@ at::Tensor qvq_hadamard_pair_swiglu_precondition_multiblock_cuda(
   return output;
 }
 
+at::Tensor qvq_qwen_composite_input_fp16_padded_cuda(
+    const at::Tensor& input,
+    const at::Tensor& base,
+    const at::Tensor& pre_scale) {
+  TORCH_CHECK(input.is_cuda() && base.is_cuda() && pre_scale.is_cuda(),
+              "Qwen composite input tensors must be CUDA tensors");
+  TORCH_CHECK(
+      input.device() == base.device() && input.device() == pre_scale.device(),
+      "Qwen composite input tensors must share a device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf && input.dim() == 2 &&
+          input.size(0) >= 1 && input.size(0) <= 16 &&
+          input.size(1) == kQwenCompositeN && input.is_contiguous(),
+      "Qwen composite input must be contiguous FP16 [1..16, 5120]");
+  TORCH_CHECK(
+      base.scalar_type() == at::kHalf && base.is_contiguous() &&
+          base.numel() == kQwenCompositeBase * kQwenCompositeBase,
+      "Qwen composite input base must be contiguous FP16 [40, 40]");
+  TORCH_CHECK(
+      pre_scale.scalar_type() == at::kHalf && pre_scale.is_contiguous() &&
+          pre_scale.numel() == kQwenCompositeN,
+      "Qwen composite input scale must be contiguous FP16 [5120]");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
+  TORCH_CHECK(
+      properties.major == 9 && properties.minor == 0 &&
+          std::strcmp(properties.name, "NVIDIA H100") == 0,
+      "Qwen composite input requires the measured physical H100");
+  const size_t smem_bytes = kQwenCompositeN * sizeof(float);
+  auto output = at::empty(
+      {16, kQwenCompositeN}, input.options().dtype(at::kHalf));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      qvq_qwen_composite_input_fp16_padded_kernel,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(smem_bytes)));
+  qvq_qwen_composite_input_fp16_padded_kernel<<<
+      16,
+      kHadamardThreads,
+      smem_bytes,
+      stream>>>(
+      reinterpret_cast<const half*>(input.const_data_ptr()),
+      reinterpret_cast<const half*>(base.const_data_ptr()),
+      reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+      reinterpret_cast<half*>(output.mutable_data_ptr()),
+      static_cast<int>(input.size(0)));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
 at::Tensor qvq_qwen_composite_recovery_fp32_to_fp16_cuda(
     const at::Tensor& input,
     const at::Tensor& base,
@@ -2995,6 +3117,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("folded_swiglu_precondition_ordered_fp32(Tensor partials, Tensor gate_scale, Tensor up_scale, Tensor? gate_bias, Tensor? up_bias, Tensor down_scale, int split_count, int logical_rows) -> Tensor");
   m.def("qwen_composite_recovery_fp32_to_fp16(Tensor input, Tensor base, Tensor post_scale, Tensor? bias) -> Tensor");
   m.def("qwen_composite_ordered_recovery_fp32_to_fp16(Tensor partials, Tensor base, Tensor post_scale, Tensor? bias, int split_count, int logical_rows) -> Tensor");
+  m.def("qwen_composite_input_fp16_padded(Tensor input, Tensor base, Tensor pre_scale) -> Tensor");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
   m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False, bool half2_low=False, bool pad_to_16=False) -> Tensor");
 }
@@ -3010,6 +3133,7 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("folded_swiglu_precondition_ordered_fp32", &qvq_folded_swiglu_precondition_ordered_fp32_cuda);
   m.impl("qwen_composite_recovery_fp32_to_fp16", &qvq_qwen_composite_recovery_fp32_to_fp16_cuda);
   m.impl("qwen_composite_ordered_recovery_fp32_to_fp16", &qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda);
+  m.impl("qwen_composite_input_fp16_padded", &qvq_qwen_composite_input_fp16_padded_cuda);
   m.impl("swiglu_precondition", &qvq_swiglu_precondition_cuda);
   m.impl("swiglu_precondition_multiblock", &qvq_swiglu_precondition_multiblock_cuda);
 }

@@ -78,6 +78,7 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_hadamard_pair_swiglu_precondition_multiblock,
     qvq_cuda_qwen_composite_recovery_fp32_to_fp16,
     qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16,
+    qvq_cuda_qwen_composite_input_fp16_padded,
     qvq_cuda_supported,
     qvq_cuda_swiglu_precondition,
     qvq_cuda_swiglu_precondition_multiblock,
@@ -1542,6 +1543,44 @@ def test_qvq_cuda_qwen_composite_recovery_is_exact_and_graph_safe(m, with_bias):
             base=base,
             post_scale=post_scale,
             bias=bias,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_qwen_composite_input_is_exact_padded_and_graph_safe(m):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        pytest.skip("Qwen composite input requires the physical H100")
+    n = 5120
+    generator = torch.Generator(device="cuda").manual_seed(20261020 + m)
+    input = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float16
+    ) * 0.25
+    pre_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    base, base_n = get_hadK(n)
+    assert base_n == 40 and base is not None
+    base = base.to(device="cuda", dtype=torch.float16).contiguous()
+    reference = matmul_hadU_stable(input * pre_scale)
+    actual = qvq_cuda_qwen_composite_input_fp16_padded(
+        input,
+        base=base,
+        pre_scale=pre_scale,
+    )
+    assert actual.shape == (16, n)
+    assert torch.equal(actual[:m].view(torch.int16), reference.view(torch.int16))
+    assert torch.count_nonzero(actual[m:]) == 0
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_qwen_composite_input_fp16_padded(
+            input,
+            base=base,
+            pre_scale=pre_scale,
         )
     graph.replay()
     torch.cuda.synchronize()

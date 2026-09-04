@@ -612,6 +612,7 @@ def test_qwen38_full_attention_group_runs_measured_schedule_in_cuda_graph():
     telemetry = qvq_grouped_runtime_telemetry(attention)[0]
     assert telemetry["active_split_counts"] == (10, 20, 20)
     assert telemetry["grouped_launches"] == 2
+    assert telemetry["h100_qwen_composite_input_launches"] == 0
     assert telemetry["plain_fallbacks"] == 0
 
 
@@ -666,7 +667,7 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_replay_exact():
             child.SV.fill_(0.002)
             child.bias.zero_()
     static_input = torch.randn(
-        (1, 5120), device=device, dtype=torch.float16
+        (8, 5120), device=device, dtype=torch.float16
     ) * 0.02
     with torch.inference_mode():
         plain = mlp(static_input).clone()
@@ -691,6 +692,7 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_replay_exact():
     assert telemetry["h100_qwen_w3_ordered_decode_prefetch_launches"] == 2
     assert telemetry["h100_qwen_composite_down_recovery_launches"] == 2
     assert telemetry["h100_qwen_ordered_composite_down_recovery_launches"] == 2
+    assert telemetry["h100_qwen_composite_input_launches"] == 2
     assert telemetry["plain_fallbacks"] == 0
     assert telemetry["fused_mlp_fallbacks"] == 0
 
