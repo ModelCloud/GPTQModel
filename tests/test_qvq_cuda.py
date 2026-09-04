@@ -67,6 +67,8 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_viterbi_v2_segment_tail_trusted_op,
     _qvq_cuda_yaqa_feedback_op,
     _qvq_cuda_yaqa_feedback_update_op,
+    qvq_cuda_folded_swiglu_precondition_fp32,
+    qvq_cuda_folded_swiglu_precondition_ordered_fp32,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
     qvq_cuda_hadamard_input_fp16_padded_multiblock,
@@ -74,6 +76,9 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_hadamard_pair_fp32_to_fp16,
     qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock,
     qvq_cuda_hadamard_pair_swiglu_precondition_multiblock,
+    qvq_cuda_qwen_composite_recovery_fp32_to_fp16,
+    qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16,
+    qvq_cuda_qwen_composite_input_fp16_padded,
     qvq_cuda_supported,
     qvq_cuda_swiglu_precondition,
     qvq_cuda_swiglu_precondition_multiblock,
@@ -1374,6 +1379,305 @@ def test_qvq_cuda_swiglu_precondition_graph_stream_overflow_and_guards():
         qvq_cuda_swiglu_precondition(gate.float(), up.float(), pre_scale.float())
     with pytest.raises(ValueError, match="identical shapes"):
         qvq_cuda_swiglu_precondition(gate, up[:, :-1], pre_scale)
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("with_bias", (False, True))
+def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(m, with_bias):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("folded SwiGLU precondition requires Hopper")
+    n = 17408
+    generator = torch.Generator(device="cuda").manual_seed(20260940 + m)
+    gate = torch.randn((m, n), generator=generator, device="cuda") * 0.25
+    up = torch.randn((m, n), generator=generator, device="cuda") * 0.25
+    gate_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    up_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    down_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    gate_scale = gate_scale_half.float()
+    up_scale = up_scale_half.float()
+    gate_bias = (
+        torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float()
+        if with_bias else None
+    )
+    up_bias = (
+        torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float()
+        if with_bias else None
+    )
+
+    recovered_gate = gate * gate_scale
+    recovered_up = up * up_scale
+    if with_bias:
+        recovered_gate = recovered_gate + gate_bias
+        recovered_up = recovered_up + up_bias
+    reference = torch.nn.functional.silu(recovered_gate.half()) * recovered_up.half()
+    reference = reference * down_scale
+
+    actual = qvq_cuda_folded_swiglu_precondition_fp32(
+        gate,
+        up,
+        gate_scale=gate_scale,
+        up_scale=up_scale,
+        gate_bias=gate_bias,
+        up_bias=up_bias,
+        down_scale=down_scale,
+    )
+    assert actual.shape == (16, n)
+    assert torch.equal(actual[:m].view(torch.int16), reference.view(torch.int16))
+    assert torch.count_nonzero(actual[m:]) == 0
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_folded_swiglu_precondition_fp32(
+            gate,
+            up,
+            gate_scale=gate_scale,
+            up_scale=up_scale,
+            gate_bias=gate_bias,
+            up_bias=up_bias,
+            down_scale=down_scale,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
+@pytest.mark.parametrize("m", (1, 16))
+@pytest.mark.parametrize("with_bias", (False, True))
+@pytest.mark.parametrize("split_count", (5, 10))
+def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
+    m, with_bias, split_count
+):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("ordered folded SwiGLU precondition requires Hopper")
+    n = 17408
+    generator = torch.Generator(device="cuda").manual_seed(20260960 + m)
+    partials = torch.randn(
+        (2, split_count, 16, n), generator=generator, device="cuda"
+    ) * 0.02
+    gate_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    up_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    down_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    gate_scale = gate_scale_half.float()
+    up_scale = up_scale_half.float()
+    gate_bias = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float() if with_bias else None
+    up_bias = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float() if with_bias else None
+
+    reduced = []
+    for child in range(2):
+        value = torch.zeros((16, n), device="cuda")
+        for split in range(split_count):
+            value = value + partials[child, split]
+        reduced.append(value)
+    expected = qvq_cuda_folded_swiglu_precondition_fp32(
+        reduced[0][:m],
+        reduced[1][:m],
+        gate_scale=gate_scale,
+        up_scale=up_scale,
+        gate_bias=gate_bias,
+        up_bias=up_bias,
+        down_scale=down_scale,
+    )
+    actual = qvq_cuda_folded_swiglu_precondition_ordered_fp32(
+        partials.reshape(-1),
+        gate_scale=gate_scale,
+        up_scale=up_scale,
+        gate_bias=gate_bias,
+        up_bias=up_bias,
+        down_scale=down_scale,
+        split_count=split_count,
+        logical_rows=m,
+    )
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_folded_swiglu_precondition_ordered_fp32(
+            partials.reshape(-1),
+            gate_scale=gate_scale,
+            up_scale=up_scale,
+            gate_bias=gate_bias,
+            up_bias=up_bias,
+            down_scale=down_scale,
+            split_count=split_count,
+            logical_rows=m,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.parametrize("n", (5120, 6144, 10240))
+@pytest.mark.parametrize("m", (1, 16))
+@pytest.mark.parametrize("with_bias", (False, True))
+def test_qvq_cuda_qwen_composite_recovery_is_exact_and_graph_safe(n, m, with_bias):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        pytest.skip("Qwen composite recovery requires the physical H100")
+    generator = torch.Generator(device="cuda").manual_seed(20260980 + n + m)
+    input = torch.randn((m, n), generator=generator, device="cuda") * 0.25
+    post_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    ).float()
+    bias = (
+        torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float()
+        if with_bias
+        else None
+    )
+    base, base_n = get_hadK(n)
+    assert base_n == (12 if n == 6144 else 40) and base is not None
+    base = base.to(device="cuda", dtype=torch.float16).contiguous()
+
+    reference = matmul_hadU_stable(input.half()) * post_scale.half()
+    if bias is not None:
+        reference = reference + bias.half()
+    actual = qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
+        input,
+        base=base,
+        post_scale=post_scale,
+        bias=bias,
+    )
+    assert torch.equal(actual.view(torch.int16), reference.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
+            input,
+            base=base,
+            post_scale=post_scale,
+            bias=bias,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_qwen_composite_input_is_exact_padded_and_graph_safe(m):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        pytest.skip("Qwen composite input requires the physical H100")
+    n = 5120
+    generator = torch.Generator(device="cuda").manual_seed(20261020 + m)
+    input = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float16
+    ) * 0.25
+    pre_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    base, base_n = get_hadK(n)
+    assert base_n == 40 and base is not None
+    base = base.to(device="cuda", dtype=torch.float16).contiguous()
+    reference = matmul_hadU_stable(input * pre_scale)
+    actual = qvq_cuda_qwen_composite_input_fp16_padded(
+        input,
+        base=base,
+        pre_scale=pre_scale,
+    )
+    assert actual.shape == (16, n)
+    assert torch.equal(actual[:m].view(torch.int16), reference.view(torch.int16))
+    assert torch.count_nonzero(actual[m:]) == 0
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_qwen_composite_input_fp16_padded(
+            input,
+            base=base,
+            pre_scale=pre_scale,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
+@pytest.mark.parametrize("split_count", (17, 34))
+@pytest.mark.parametrize("m", (1, 16))
+@pytest.mark.parametrize("with_bias", (False, True))
+def test_qvq_cuda_qwen_ordered_composite_recovery_is_exact_and_graph_safe(
+    split_count, m, with_bias
+):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        pytest.skip("Qwen ordered composite recovery requires the physical H100")
+    n = 5120
+    generator = torch.Generator(device="cuda").manual_seed(
+        20261000 + split_count + m
+    )
+    partials = torch.randn(
+        (split_count, 16, n), generator=generator, device="cuda"
+    ) * 0.02
+    post_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    ).float()
+    bias = (
+        torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float()
+        if with_bias
+        else None
+    )
+    base, base_n = get_hadK(n)
+    assert base_n == 40 and base is not None
+    base = base.to(device="cuda", dtype=torch.float16).contiguous()
+    reduced = torch.zeros((16, n), device="cuda")
+    for split in range(split_count):
+        reduced = reduced + partials[split]
+    reference = qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
+        reduced[:m],
+        base=base,
+        post_scale=post_scale,
+        bias=bias,
+    )
+    actual = qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16(
+        partials,
+        base=base,
+        post_scale=post_scale,
+        bias=bias,
+        split_count=split_count,
+        logical_rows=m,
+    )
+    assert torch.equal(actual.view(torch.int16), reference.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16(
+            partials,
+            base=base,
+            post_scale=post_scale,
+            bias=bias,
+            split_count=split_count,
+            logical_rows=m,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
+@pytest.mark.parametrize("values", ((70000.0, 70000.0), (70000.0, -70000.0)))
+def test_qvq_cuda_qwen_composite_recovery_preserves_overflow_rescue(values):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        pytest.skip("Qwen composite recovery requires the physical H100")
+    from gptqmodel.nn_modules.qlinear.qvq import (
+        _qvq_fp16_emulated_hadamard_fallback,
+    )
+
+    input = torch.zeros((1, 5120), device="cuda")
+    input[0, 0], input[0, 1] = values
+    post_scale = torch.full((5120,), 0.01, device="cuda")
+    base, base_n = get_hadK(5120)
+    assert base_n == 40 and base is not None
+    base = base.to(device="cuda", dtype=torch.float16).contiguous()
+    reference = _qvq_fp16_emulated_hadamard_fallback(
+        input,
+        post_scale=post_scale,
+        bias=None,
+        scale_mode=3,
+    ).half()
+    actual = qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
+        input,
+        base=base,
+        post_scale=post_scale,
+    )
+    assert torch.isfinite(actual).all()
+    assert torch.equal(actual.view(torch.int16), reference.view(torch.int16))
 
 
 @pytest.mark.parametrize("bits", QVQ_CUDA_BITS)

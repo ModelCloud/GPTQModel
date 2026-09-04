@@ -21,6 +21,7 @@ from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_group_plan,
     qvq_p32_window_wgmma_grouped,
     qvq_p32_window_wgmma_grouped_ordered_packed,
+    qvq_p32_window_wgmma_grouped_ordered_partials_packed,
     qvq_p32_window_wgmma_grouped_packed,
     qvq_p32_window_wgmma_m16_tma,
     qvq_p32_window_wgmma_m16_tma_ordered_split,
@@ -350,6 +351,9 @@ def test_grouped_ordered_split_is_exact_to_ordered_children(bits, logical_m):
 
     grouped = qvq_p32_window_wgmma_grouped_ordered_packed(input, payload, levels)
     repeated = qvq_p32_window_wgmma_grouped_ordered_packed(input, payload, levels)
+    partials = qvq_p32_window_wgmma_grouped_ordered_partials_packed(
+        input, payload, levels
+    )
 
     assert all(
         torch.equal(child, plain)
@@ -359,6 +363,18 @@ def test_grouped_ordered_split_is_exact_to_ordered_children(bits, logical_m):
         torch.equal(child, repeat)
         for child, repeat in zip(grouped, repeated, strict=True)
     )
+    partial_offset = 0
+    for child, width, split_count in zip(grouped, widths, split_counts, strict=True):
+        partial_count = split_count * 16 * width
+        child_partials = partials[
+            partial_offset : partial_offset + partial_count
+        ].reshape(split_count, 16, width)
+        reduced = torch.zeros_like(child)
+        for split in range(split_count):
+            reduced = reduced + child_partials[split]
+        assert torch.equal(child, reduced)
+        partial_offset += partial_count
+    assert partial_offset == partials.numel()
     for child, window, child_selectors, width, alt_id in zip(
         grouped,
         windows,

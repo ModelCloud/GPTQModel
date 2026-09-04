@@ -1,0 +1,59 @@
+{
+  "change": "Enable register-prefetched decoded W3 levels for the exact H100 Qwen3.8-27B ordered split-17 down projection.",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "executable_parent_commit": "2963229d8892d1779cd50102ffff15219cc22ccf",
+  "geomean_phase76_over_new": 1.0072345915173553,
+  "hf_model": "Qwen/Qwen3.8-27B",
+  "hf_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "max_abs_error": 4.7591697693860624e-08,
+  "max_mean_abs_error": 1.5283166021617944e-08,
+  "phase": 77,
+  "rows": [
+    {
+      "better_than_phase76": true,
+      "bits": 3.0,
+      "m": 1,
+      "median_us": 185.68511962890625,
+      "phase76_over_new": 1.007882593232345
+    },
+    {
+      "better_than_phase76": true,
+      "bits": 3.0,
+      "m": 2,
+      "median_us": 187.71071434020996,
+      "phase76_over_new": 1.0086908455285668
+    },
+    {
+      "better_than_phase76": true,
+      "bits": 3.0,
+      "m": 4,
+      "median_us": 188.5702419281006,
+      "phase76_over_new": 1.0058596502922188
+    },
+    {
+      "better_than_phase76": true,
+      "bits": 3.0,
+      "m": 8,
+      "median_us": 188.70783805847168,
+      "phase76_over_new": 1.0054077202768563
+    },
+    {
+      "better_than_phase76": true,
+      "bits": 3.0,
+      "m": 16,
+      "median_us": 188.62176895141602,
+      "phase76_over_new": 1.0083366087877772
+    }
+  ],
+  "timing": {
+    "kind": "warmed CUDA Graph replay timed with H100 CUDA events",
+    "replays_per_sample": 50,
+    "samples": 60,
+    "warmup": 20
+  },
+  "wins": "5/5 W3 complete-MLP cells"
+}

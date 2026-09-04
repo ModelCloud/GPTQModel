@@ -1,0 +1,39 @@
+{
+  "change": "Factor Qwen 10240/6144 composite output recovery into exact low-slice and base-row CUDA grids.",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "executable_parent_commit": "5fa601c6c0c7c55ccb827563759489061ab8473f",
+  "geomean_baseline_over_new": 1.3356779895804582,
+  "hf_model": "Qwen/Qwen3.8-27B",
+  "hf_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "max_abs_error": 1.773657277226448e-05,
+  "max_mean_abs_error": 2.4792983595034457e-06,
+  "phase": 82,
+  "rows": [
+    {"bits": 2.0, "m": 1, "median_us": 90.74143886566162, "baseline_over_new": 1.3503, "better_than_baseline": true},
+    {"bits": 2.0, "m": 2, "median_us": 92.45728015899658, "baseline_over_new": 1.3427, "better_than_baseline": true},
+    {"bits": 2.0, "m": 4, "median_us": 92.9267168045044, "baseline_over_new": 1.3383, "better_than_baseline": true},
+    {"bits": 2.0, "m": 8, "median_us": 92.94335842132568, "baseline_over_new": 1.3392, "better_than_baseline": true},
+    {"bits": 2.0, "m": 16, "median_us": 96.8947172164917, "baseline_over_new": 1.2845, "better_than_baseline": true},
+    {"bits": 2.5, "m": 1, "median_us": 90.06591796875, "baseline_over_new": 1.3639, "better_than_baseline": true},
+    {"bits": 2.5, "m": 2, "median_us": 92.58880138397217, "baseline_over_new": 1.3474, "better_than_baseline": true},
+    {"bits": 2.5, "m": 4, "median_us": 93.18943977355957, "baseline_over_new": 1.3420, "better_than_baseline": true},
+    {"bits": 2.5, "m": 8, "median_us": 93.53568077087402, "baseline_over_new": 1.3357, "better_than_baseline": true},
+    {"bits": 2.5, "m": 16, "median_us": 97.2323226928711, "baseline_over_new": 1.2836, "better_than_baseline": true},
+    {"bits": 3.0, "m": 1, "median_us": 86.7680025100708, "baseline_over_new": 1.3633, "better_than_baseline": true},
+    {"bits": 3.0, "m": 2, "median_us": 89.05567646026611, "baseline_over_new": 1.3548, "better_than_baseline": true},
+    {"bits": 3.0, "m": 4, "median_us": 89.53984260559082, "baseline_over_new": 1.3520, "better_than_baseline": true},
+    {"bits": 3.0, "m": 8, "median_us": 89.9132776260376, "baseline_over_new": 1.3444, "better_than_baseline": true},
+    {"bits": 3.0, "m": 16, "median_us": 93.30687999725342, "baseline_over_new": 1.2967, "better_than_baseline": true}
+  ],
+  "timing": {
+    "kind": "warmed CUDA Graph replay timed with H100 CUDA events",
+    "replays_per_sample": 50,
+    "samples": 60,
+    "warmup": 20
+  },
+  "wins": "15/15 linear-input cells"
+}

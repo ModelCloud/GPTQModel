@@ -114,6 +114,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m16_tma_ordered_partials",
         "p32_window_m16_tma_grouped",
         "p32_window_m16_tma_grouped_ordered_split",
+        "p32_window_m16_tma_grouped_ordered_partials",
     ),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_WGMMA_BUILD_ROOT",
@@ -261,9 +262,13 @@ def qvq_h100_grouped_ordered_split_counts(
                 7: (4, 4),
             },
             (17408, 17408): {
-                4: (10, 10),
-                5: (10, 10),
-                6: (10, 10),
+                # The complete fused-MLP sweep found split five faster than
+                # split ten at every M1--M16 row count.  Four K256 stages per
+                # CTA amortize the grouped decoder setup better than the
+                # previous two-stage split-ten schedule.
+                4: (5, 5),
+                5: (5, 5),
+                6: (5, 5),
                 7: (5, 5),
             },
         }
@@ -629,6 +634,32 @@ def qvq_p32_window_wgmma_grouped_ordered_packed(
     )
 
 
+def qvq_p32_window_wgmma_grouped_ordered_partials_packed(
+    input: torch.Tensor,
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+) -> torch.Tensor:
+    """Run the grouped grid and return child-major ordered partial planes."""
+
+    plan = payload.plan
+    if tuple(input.shape) != (16, plan.in_features):
+        raise ValueError("grouped Hopper P32 input does not match its M16 plan")
+    if not any(segment.split_count > 1 for segment in plan.segments):
+        raise ValueError("ordered grouped partials require at least one split child")
+    return _QVQ_WGMMA_EXTENSION.op(
+        "p32_window_m16_tma_grouped_ordered_partials"
+    )(
+        input,
+        payload.trellis,
+        levels,
+        payload.bank_ids,
+        plan.transition_bits,
+        [segment.out_features for segment in plan.segments],
+        [segment.bank_alt_id for segment in plan.segments],
+        [segment.split_count for segment in plan.segments],
+    )
+
+
 def qvq_p32_window_wgmma_grouped(
     input: torch.Tensor,
     trellises: Sequence[torch.Tensor],
@@ -683,6 +714,7 @@ __all__ = [
     "qvq_p32_window_wgmma_group_plan",
     "qvq_p32_window_wgmma_grouped",
     "qvq_p32_window_wgmma_grouped_ordered_packed",
+    "qvq_p32_window_wgmma_grouped_ordered_partials_packed",
     "qvq_p32_window_wgmma_grouped_packed",
     "qvq_p32_window_wgmma_m16_tma",
     "qvq_p32_window_wgmma_m16_tma_ordered_split",
