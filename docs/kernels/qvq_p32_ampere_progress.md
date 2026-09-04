@@ -3576,6 +3576,16 @@ run remained exact (`max_abs <= 1.6e-5`) and measured
 earlier runs is timing noise, not a retained optimization.
 Diagnostic: `artifacts/a100_p32_window/v30_candidate_m16_fullkv_stage2_2000.json`.
 
+## v67 rejected M1 full-KV pair-decode probe
+
+The M1 full-KV scalar route already uses a fixed `StaticN=1024` launch, but
+falls back to the conservative per-pair decode because its bank-ID layout is
+special.  Reusing the batched pair-decode path from wider N shapes remained
+exact (`max_abs <= 1.1e-5`) but regressed the 2,000-iteration medians at W2.5,
+W3, and W3.5 to `0.032768/0.033792/0.033792 ms` (W2 was `0.031744 ms`).
+The source change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v31_candidate_m1_fullkv_pairdecode_2000.json`.
+
 ## Reproduction
 
 ```bash
