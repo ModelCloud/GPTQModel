@@ -594,6 +594,7 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
 
   const int thread = static_cast<int>(threadIdx.x);
   const int n64_block = static_cast<int>(blockIdx.x);
+  const int row_base = static_cast<int>(blockIdx.y) * kRows;
   const int n_base = n64_block * kOutputColumns;
   const int n_tiles = size_n / kP32TileColumns;
   const uint32_t alternate_bank_mask =
@@ -623,7 +624,8 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
     for (int index = thread; index < kRows * 32; index += kThreads) {
       const int row = index >> 5;
       const int column = index & 31;
-      sB(row, column) = input[static_cast<int64_t>(row) * size_k + k_base + column];
+      sB(row, column) = input[
+          static_cast<int64_t>(row_base + row) * size_k + k_base + column];
     }
     __syncthreads();
 
@@ -667,7 +669,7 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
       const auto coordinate = thread_coordinate_c(index);
       const int output_row = static_cast<int>(cute::get<1>(coordinate));
       scaled_accumulator(index) +=
-          accumulator(index) * input_scale[output_row] * level_scale;
+          accumulator(index) * input_scale[row_base + output_row] * level_scale;
     }
     cute::clear(accumulator);
     tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
@@ -680,7 +682,8 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
     const int wgmma_column = static_cast<int>(cute::get<0>(coordinate));
     const int output_row = static_cast<int>(cute::get<1>(coordinate));
     const int logical_n = n_base + qvq_p32_wgmma_logical_column(wgmma_column);
-    output[static_cast<int64_t>(output_row) * size_n + logical_n] = scaled_accumulator(index);
+    output[static_cast<int64_t>(row_base + output_row) * size_n + logical_n] =
+        scaled_accumulator(index);
   }
 #endif
 }
@@ -2388,9 +2391,11 @@ at::Tensor qvq_p32_window_wgmma_fp8_m16_impl(
       input.is_contiguous() && input_scale.is_contiguous() && trellis.is_contiguous() &&
           levels.is_contiguous() && bank_ids.is_contiguous(),
       "QVQ P32 FP8 WGMMA tensors must be contiguous");
-  TORCH_CHECK(input.dim() == 2 && input.size(0) == kRows,
-              "QVQ P32 FP8 WGMMA requires M=16");
-  TORCH_CHECK(input_scale.numel() == kRows,
+  TORCH_CHECK(
+      input.dim() == 2 && input.size(0) >= kRows &&
+          input.size(0) % kRows == 0 && input.size(0) <= 4096,
+      "QVQ P32 FP8 WGMMA requires M in [16, 4096] and divisible by 16");
+  TORCH_CHECK(input_scale.numel() == input.size(0),
               "QVQ P32 FP8 WGMMA requires one input scale per row");
   TORCH_CHECK(out_features > 0 && out_features % kOutputColumns == 0,
               "QVQ P32 FP8 WGMMA output features must be a positive multiple of 64");
@@ -2418,9 +2423,12 @@ at::Tensor qvq_p32_window_wgmma_fp8_m16_impl(
   TORCH_CHECK(levels.numel() == 256,
               "QVQ P32 FP8 WGMMA requires 256 quantized PGC16 levels");
 
-  auto output = at::empty({kRows, size_n}, input.options().dtype(at::kFloat));
+  const int size_m = static_cast<int>(input.size(0));
+  auto output = at::empty({size_m, size_n}, input.options().dtype(at::kFloat));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
-  const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns));
+  const dim3 grid(
+      static_cast<unsigned>(size_n / kOutputColumns),
+      static_cast<unsigned>(size_m / kRows));
   qvq_p32_window_wgmma_fp8_m16_kernel<TransitionBits><<<grid, kThreads, 0, stream>>>(
       reinterpret_cast<const Fp8Element*>(input.data_ptr()),
       input_scale.data_ptr<float>(),

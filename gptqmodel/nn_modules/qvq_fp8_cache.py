@@ -438,7 +438,16 @@ class QVQFP8CacheLayer(DynamicLayer):
         self.native_attention_query_tokens = 0
 
     def _rounded_capacity(self, required: int) -> int:
-        page_size = 1 if self.device.type == "cpu" else self.page_size
+        # A dynamic cache's first prefill already reveals its useful length;
+        # round only to the GEMM alignment there. Subsequent growth uses full
+        # pages. Static generation still reserves its known maximum once.
+        page_size = (
+            1
+            if self.device.type == "cpu"
+            else 16
+            if self.capacity == 0 and self.max_cache_length is None
+            else self.page_size
+        )
         capacity = ((required + page_size - 1) // page_size) * page_size
         if self.max_cache_length is not None:
             if required > self.max_cache_length:

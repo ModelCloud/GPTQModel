@@ -295,7 +295,7 @@ def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(
     assert telemetry["native_pv_fp8_launches"] == 2
     assert telemetry["dequantized_elements"] == 0
     assert telemetry["dense_kv_prefix_materializations"] == 0
-    assert telemetry["capacities"] == [256]
+    assert telemetry["capacities"] == [16]
     assert telemetry["allocations"] == 1
     assert telemetry["reallocations"] == 0
     assert layer.values.stride(-2) == 1

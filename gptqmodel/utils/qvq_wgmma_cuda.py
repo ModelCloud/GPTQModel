@@ -514,7 +514,7 @@ def qvq_p32_window_wgmma_fp8_m16(
     bank_alt_id: int,
     level_scale: float,
 ) -> torch.Tensor:
-    """Run true E4M3 x E4M3 P32 WGMMA, tiling logical M over native M16.
+    """Run true E4M3 x E4M3 P32 WGMMA on an M16-tiled 2D CUDA grid.
 
     ``input`` is the final transformed WGMMA operand, not the model-visible
     pre-transform activation. ``input_scale`` maps each E4M3 row back to that
@@ -537,42 +537,35 @@ def qvq_p32_window_wgmma_fp8_m16(
         raise ValueError(
             "QVQ P32 FP8 WGMMA requires contiguous FP32 [M, 1] input scales"
         )
-    native_op = _QVQ_WGMMA_EXTENSION.op("p32_window_fp8_m16")
-    outputs = []
     logical_rows = int(input.shape[0])
-    for start in range(0, logical_rows, _P32_WGMMA_NATIVE_ROWS):
-        rows = min(_P32_WGMMA_NATIVE_ROWS, logical_rows - start)
-        tile = input[start : start + rows]
-        tile_scale = input_scale[start : start + rows]
-        if rows != _P32_WGMMA_NATIVE_ROWS:
-            padded = torch.zeros(
-                (_P32_WGMMA_NATIVE_ROWS, input.shape[1]),
-                dtype=input.dtype,
-                device=input.device,
-            )
-            padded_scale = torch.ones(
-                (_P32_WGMMA_NATIVE_ROWS, 1),
-                dtype=torch.float32,
-                device=input.device,
-            )
-            padded[:rows].copy_(tile)
-            padded_scale[:rows].copy_(tile_scale)
-            tile = padded
-            tile_scale = padded_scale
-        outputs.append(
-            native_op(
-                tile.contiguous(),
-                tile_scale.contiguous(),
-                trellis,
-                levels,
-                bank_ids,
-                transition_bits,
-                int(out_features),
-                int(bank_alt_id),
-                float(level_scale),
-            )[:rows]
+    padded_rows = (
+        (logical_rows + _P32_WGMMA_NATIVE_ROWS - 1)
+        // _P32_WGMMA_NATIVE_ROWS
+        * _P32_WGMMA_NATIVE_ROWS
+    )
+    if padded_rows != logical_rows:
+        padded = torch.zeros(
+            (padded_rows, input.shape[1]), dtype=input.dtype, device=input.device
         )
-    return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
+        padded_scale = torch.ones(
+            (padded_rows, 1), dtype=torch.float32, device=input.device
+        )
+        padded[:logical_rows].copy_(input)
+        padded_scale[:logical_rows].copy_(input_scale)
+        input = padded
+        input_scale = padded_scale
+    native_op = _QVQ_WGMMA_EXTENSION.op("p32_window_fp8_m16")
+    return native_op(
+        input.contiguous(),
+        input_scale.contiguous(),
+        trellis,
+        levels,
+        bank_ids,
+        transition_bits,
+        int(out_features),
+        int(bank_alt_id),
+        float(level_scale),
+    )[:logical_rows]
 
 
 def qvq_p32_window_wgmma_group_plan(
