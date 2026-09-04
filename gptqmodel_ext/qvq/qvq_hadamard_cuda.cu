@@ -2416,8 +2416,12 @@ at::Tensor qvq_hadamard_pair_swiglu_precondition_multiblock_cuda(
   TORCH_CHECK(scale_mode == 3 || scale_mode == 4,
               "fused recovery scale_mode must be 3 or 4");
   const int64_t rows64 = input0.size(0);
-  TORCH_CHECK(rows64 > 0 && rows64 <= 16,
-              "fused recovery/precondition requires one through sixteen rows");
+  TORCH_CHECK(rows64 > 0 && rows64 <= 4096,
+              "fused recovery/precondition requires one through 4096 rows");
+  TORCH_CHECK(
+      rows64 <= 16 ||
+          (!pad_to_16 && !pair_tiles && !bounded_rounding && !packed_gate_up),
+      "large-M fused recovery/precondition requires unpadded, unpaired execution");
 
   const auto check_float_vector = [&](const at::Tensor& tensor, const char* name) {
     TORCH_CHECK(tensor.is_cuda() && tensor.device() == input0.device(),
