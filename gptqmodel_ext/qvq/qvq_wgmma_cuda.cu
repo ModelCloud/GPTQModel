@@ -1761,7 +1761,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
         true,
         true,
         false,
-        false,
+        TransitionBits != 5,
         1,
         true><<<grid, kTmaThreads, 0, stream>>>(
             input_tma,

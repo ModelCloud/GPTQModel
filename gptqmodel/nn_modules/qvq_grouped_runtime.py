@@ -220,6 +220,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_qwen_down_decode_prefetch_launches: int = 0
     h100_qwen_fixed_ordered_grid_launches: int = 0
     h100_qwen_fixed_linear_grid_launches: int = 0
+    h100_qwen_linear_decode_prefetch_launches: int = 0
     h100_qwen_composite_down_recovery_launches: int = 0
     h100_qwen_ordered_composite_down_recovery_launches: int = 0
     h100_qwen_linear_composite_recovery_launches: int = 0
@@ -280,6 +281,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_qwen_down_decode_prefetch_launches": self.h100_qwen_down_decode_prefetch_launches,
             "h100_qwen_fixed_ordered_grid_launches": self.h100_qwen_fixed_ordered_grid_launches,
             "h100_qwen_fixed_linear_grid_launches": self.h100_qwen_fixed_linear_grid_launches,
+            "h100_qwen_linear_decode_prefetch_launches": self.h100_qwen_linear_decode_prefetch_launches,
             "h100_qwen_composite_down_recovery_launches": self.h100_qwen_composite_down_recovery_launches,
             "h100_qwen_ordered_composite_down_recovery_launches": self.h100_qwen_ordered_composite_down_recovery_launches,
             "h100_qwen_linear_composite_recovery_launches": self.h100_qwen_linear_composite_recovery_launches,
@@ -673,6 +675,10 @@ class QVQHopperGroupedRuntime:
                 <= 6
             ):
                 self.telemetry.h100_qwen_fixed_linear_grid_launches += 1
+                if qvq_transition_bits(
+                    children[0].bits, vector_size=children[0].vector_size
+                ) != 5:
+                    self.telemetry.h100_qwen_linear_decode_prefetch_launches += 1
         if self._h100_w25_n128_gate_up_enabled:
             self.telemetry.h100_w25_n128_gate_up_launches += 1
         if not recover:
