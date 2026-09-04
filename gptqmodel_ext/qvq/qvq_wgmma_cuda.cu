@@ -611,6 +611,7 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
   const int n16_tile = n64_block * kP32N16TilesPerBlock + warp;
   const uint32_t alternate_bank_mask =
       qvq_wgmma_v2_alternate_bank_mask<TransitionBits>(bank_alt_id);
+  const uint32_t alternate_mix_mask = alternate_bank_mask & 0xff00u;
 
   auto sB = cute::make_tensor(cute::make_smem_ptr(shared_input), Fp8WgmmaSmemLayoutB{});
   auto sB1 = cute::make_tensor(
@@ -715,14 +716,18 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
       const int64_t tile = static_cast<int64_t>(k16_tile) * n_tiles + n16_tile;
       const uint32_t* window_words = trellis + tile * kWordsPerP32Tile;
       const uint32_t bank_id = static_cast<uint32_t>(bank_ids[tile]);
+      const uint32_t bank_pair_bits = bank_id >> (k4 >> 1);
+      const uint32_t bank_mask0 = (bank_pair_bits & 1u) * alternate_mix_mask;
+      const uint32_t bank_mask1 = ((bank_pair_bits >> 1) & 1u) * alternate_mix_mask;
 #pragma unroll
       for (int k_in_group = 0; k_in_group < 4; ++k_in_group) {
         const int pair = (k4 + k_in_group) * 8 + n_pair;
         const uint32_t state =
             qvq_p32_window_state<TransitionBits>(window_words, pair);
-        const uint32_t selected_bank = (bank_id >> (pair >> 4)) & 1u;
-        const uint32_t mixed = qvq_wgmma_pgc16_mix(
-            state ^ (selected_bank ? alternate_bank_mask : 0u));
+        const uint32_t bank_mask = k_in_group < 2 ? bank_mask0 : bank_mask1;
+        const uint32_t product =
+            qvq_wgmma_pgc16_product_masked(state, bank_mask);
+        const uint32_t mixed = qvq_wgmma_pgc16_finish(product);
         const int fragment_base = k16_half * 8 + k_in_group;
         fragment_a(fragment_base) = levels[qvq_wgmma_high_byte(mixed)];
         fragment_a(fragment_base + 4) = levels[mixed & 0xffu];
