@@ -77,6 +77,7 @@ _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = Non
 _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP: Callable | None = None
 _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_ORDERED_FP32_OP: Callable | None = None
 _QVQ_CUDA_QWEN_COMPOSITE_RECOVERY_FP32_TO_FP16_OP: Callable | None = None
+_QVQ_CUDA_QWEN_COMPOSITE_ORDERED_RECOVERY_FP32_TO_FP16_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_OP: Callable | None = None
@@ -129,6 +130,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "folded_swiglu_precondition_fp32",
         "folded_swiglu_precondition_ordered_fp32",
         "qwen_composite_recovery_fp32_to_fp16",
+        "qwen_composite_ordered_recovery_fp32_to_fp16",
         "swiglu_precondition",
         "swiglu_precondition_multiblock",
         "yaqa_feedback",
@@ -368,6 +370,22 @@ def _qvq_cuda_qwen_composite_recovery_fp32_to_fp16_op() -> Callable:
                     )
                 )
     return _QVQ_CUDA_QWEN_COMPOSITE_RECOVERY_FP32_TO_FP16_OP
+
+
+def _qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16_op() -> Callable:
+    """Resolve the ordered-partial Qwen composite recovery operator."""
+
+    global _QVQ_CUDA_QWEN_COMPOSITE_ORDERED_RECOVERY_FP32_TO_FP16_OP
+    if _QVQ_CUDA_QWEN_COMPOSITE_ORDERED_RECOVERY_FP32_TO_FP16_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_QWEN_COMPOSITE_ORDERED_RECOVERY_FP32_TO_FP16_OP is None:
+                _QVQ_CUDA_QWEN_COMPOSITE_ORDERED_RECOVERY_FP32_TO_FP16_OP = (
+                    _extension_api().op(
+                        "qvq_cuda",
+                        "qwen_composite_ordered_recovery_fp32_to_fp16",
+                    )
+                )
+    return _QVQ_CUDA_QWEN_COMPOSITE_ORDERED_RECOVERY_FP32_TO_FP16_OP
 
 
 def _qvq_cuda_swiglu_precondition_op() -> Callable:
@@ -1151,6 +1169,59 @@ def qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
     )
 
 
+def qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16(
+    partials: torch.Tensor,
+    *,
+    base: torch.Tensor,
+    post_scale: torch.Tensor,
+    split_count: int,
+    logical_rows: int,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Reduce ordered Qwen down partials directly through H40 x H128."""
+
+    if (
+        partials.device.type != "cuda"
+        or partials.dtype != torch.float32
+        or not partials.is_contiguous()
+        or split_count not in (17, 34)
+        or partials.numel() != split_count * 16 * 5120
+    ):
+        raise ValueError("Qwen ordered composite partials must be FP32 split-major M16x5120")
+    if not 0 < logical_rows <= 16:
+        raise ValueError("Qwen ordered composite logical rows must be in [1, 16]")
+    if (
+        base.device != partials.device
+        or base.dtype != torch.float16
+        or base.numel() != 1600
+        or not base.is_contiguous()
+    ):
+        raise ValueError("Qwen ordered composite base must be contiguous FP16 [40, 40]")
+    for name, tensor in (("post_scale", post_scale), ("bias", bias)):
+        if tensor is None:
+            if name == "post_scale":
+                raise TypeError("post_scale is required")
+            continue
+        if (
+            tensor.device != partials.device
+            or tensor.dtype != torch.float32
+            or tensor.numel() != 5120
+            or not tensor.is_contiguous()
+        ):
+            raise ValueError(f"{name} must be contiguous CUDA FP32 [5120]")
+    properties = torch.cuda.get_device_properties(partials.device)
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        raise RuntimeError("Qwen ordered composite recovery requires the measured physical H100")
+    return _qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16_op()(
+        partials,
+        base.reshape(40, 40),
+        post_scale,
+        bias,
+        split_count,
+        logical_rows,
+    )
+
+
 def qvq_cuda_folded_swiglu_precondition_fp32(
     gate: torch.Tensor,
     up: torch.Tensor,
@@ -1647,6 +1718,7 @@ __all__ = [
     "qvq_cuda_gemv",
     "qvq_cuda_hadamard",
     "qvq_cuda_qwen_composite_recovery_fp32_to_fp16",
+    "qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16",
     "qvq_cuda_supported",
     "qvq_cuda_viterbi",
     "qvq_cuda_viterbi_banked",
