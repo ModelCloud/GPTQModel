@@ -3068,6 +3068,28 @@ M16 path is L1/TEX and decode-load bound (95% L1 hit, ~4.3 useful bytes per
 32-byte sector), so these probes do not justify claiming the requested 10%
 overall gain.
 
+## v24 follow-up from the merged tip
+
+After PR #100 merged, `git fetch origin main` was repeated and the new branch
+was based on `origin/main` at `202eb8d7dd9ccdb728051a7a41160b6cb4c21fc1`.
+The staged M1 long-K dispatch was cherry-picked as commit `778cfea1` and
+opened as WIP PR #101.  The formal Ampere suite passes 56/56 cases on the
+A100 sm_80.
+
+To revalidate against that exact fetched tip, matched 8,000-iteration CUDA
+event runs were made for M1 MLP-down `(K,N)=(17408,5120)` at W2/W2.5/W3/W3.5.
+The origin/main control Ampere medians were
+`0.084992/0.094208/0.093184/0.095232 ms`; the three-K16 candidate medians
+were `0.082944/0.089088/0.091136/0.092160 ms`.  The geometric mean is
+`0.091812/0.088758 = 1.0344x` (3.44%) for this affected four-rate shape,
+with exact output checks (`max_abs < 2.4e-5`).  Results are recorded in
+`artifacts/a100_p32_window/v24_main_m1_mlpdown_8000.json` and
+`artifacts/a100_p32_window/v24_candidate_m1_mlpdown_8000.json`.
+
+This is a shape-local progression, not a claim of a 10% full-matrix gain;
+the M16 decode-bound paths and the remaining M values still require a fresh
+full-matrix sweep before the target can be assessed.
+
 ## Reproduction
 
 ```bash
