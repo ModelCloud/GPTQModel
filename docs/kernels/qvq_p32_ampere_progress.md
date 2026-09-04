@@ -3035,6 +3035,423 @@ The current full 140-row refresh remains the measured reference:
 versus `v21_main_baseline_300.json`, so no additional 10% Ampere progression
 is claimed from these probes.
 
+## v23 after the September origin refresh
+
+`git fetch origin main` confirms that `origin/main` is still
+`631411ee3b07ed14c29fb21c0e959b0d811eb5cb`; PR #100 remains the open WIP
+branch, so this cycle continues to use that exact fetched tip as its control.
+
+The accepted progression specializes the M1 long-K MLP-down shape
+`(K,N)=(17408,5120)` to the existing three-K16 scalar software stage. The
+matched 8,000-iteration CUDA-event runs are exact and measure
+`0.082944/0.089088/0.090112/0.092160 ms` for W2/W2.5/W3/W3.5, versus the
+two-stage control's `0.082944/0.093184/0.093184/0.095232 ms`. This is a
+`0.088508/0.091004 = 1.0282x` (2.82%) geomean reduction for the affected
+four-rate shape. The candidate and control are
+`artifacts/a100_p32_window/v23_m1_mlpdown_stage3_verify8000.json` and
+`artifacts/a100_p32_window/v23_m1_mlpdown_stage2_control8000.json`.
+The full formal suite remains the gate; `tests/test_qvq_p32_ampere.py` passes
+56/56 cases on the A100.
+
+The following v23 probes were rejected and restored: an eight-block
+`__launch_bounds__` register/occupancy cap (M16 full-Q W3.5 rose to
+`0.094208 ms`, about 4.5% slower), an eight-half-row activation shared-memory
+skew (exact but M16 full-Q W3.5 rose to `0.093184 ms`), and warp or 8-lane
+subgroup broadcasts of the shared bank selector (the full-warp version was
+not exact because a scalar warp owns four different tiles; the corrected
+subgroup version was exact but about 1.5% slower in the M1 full-Q probe).
+The diagnostics are `v23_m16_fullq_minblocks8_candidate.json`,
+`v23_m16_fullq_inputskew_candidate.json`,
+`v23_m16_fullq_bankbroadcast_candidate.json`, and
+`v23_m1_fullq_bankbroadcast_probe.json`. Nsight Compute confirms the retained
+M16 path is L1/TEX and decode-load bound (95% L1 hit, ~4.3 useful bytes per
+32-byte sector), so these probes do not justify claiming the requested 10%
+overall gain.
+
+## v24 follow-up from the merged tip
+
+After PR #100 merged, `git fetch origin main` was repeated and the new branch
+was based on `origin/main` at `202eb8d7dd9ccdb728051a7a41160b6cb4c21fc1`.
+The staged M1 long-K dispatch was cherry-picked as commit `778cfea1` and
+opened as WIP PR #101.  The formal Ampere suite passes 56/56 cases on the
+A100 sm_80.
+
+To revalidate against that exact fetched tip, matched 8,000-iteration CUDA
+event runs were made for M1 MLP-down `(K,N)=(17408,5120)` at W2/W2.5/W3/W3.5.
+The origin/main control Ampere medians were
+`0.084992/0.094208/0.093184/0.095232 ms`; the three-K16 candidate medians
+were `0.082944/0.089088/0.091136/0.092160 ms`.  The geometric mean is
+`0.091812/0.088758 = 1.0344x` (3.44%) for this affected four-rate shape,
+with exact output checks (`max_abs < 2.4e-5`).  Results are recorded in
+`artifacts/a100_p32_window/v24_main_m1_mlpdown_8000.json` and
+`artifacts/a100_p32_window/v24_candidate_m1_mlpdown_8000.json`.
+
+This is a shape-local progression, not a claim of a 10% full-matrix gain;
+the M16 decode-bound paths and the remaining M values still require a fresh
+full-matrix sweep before the target can be assessed.
+
+## v25 M1 long-K static split specialization
+
+The M1 long-K autotuner selects split 128 on the A100.  A compile-time
+`StaticSplitCount=128` specialization removes the per-CTA split-count
+divisions while preserving the runtime fallback for every other split plan.
+The change is exact under the formal suite (56/56 tests) and was repeated at
+8,000 iterations: Ampere medians moved from
+`0.082944/0.089088/0.091136/0.092160 ms` to
+`0.081920/0.088064/0.090112/0.092160 ms` for W2/W2.5/W3/W3.5.  This is a
+repeatable `1.0089x` (0.89%) improvement over the v24 staged candidate for
+the affected shape.  The static-split diagnostics are
+`artifacts/a100_p32_window/v24_candidate_splitstatic_m1_mlpdown_8000.json`
+and `artifacts/a100_p32_window/v24_candidate_splitstatic_m1_mlpdown_repeat8000.json`.
+The full-matrix 10% target remains open; no broad gain is claimed from this
+shape-local specialization alone.
+
+The analogous M2 long-K `StaticSplitCount=96` probe was rejected.  Its
+8,000-iteration medians were `0.089088/0.098304/0.098304/0.102400 ms`, while
+the dynamic-dispatch control was `0.089088/0.098304/0.099328/0.100352 ms`.
+Autotune also changed the W3.5 plan from split 48 to 96 between runs, so the
+probe provided no repeatable same-plan improvement and was reverted.  The
+diagnostic is `artifacts/a100_p32_window/v25_candidate_m2_mlpdown_static96_8000.json`.
+
+## v26 M1 full-Q static split specialization
+
+The measured M1 full-Q route `(K,N)=(5120,12288)` uses the scalar triple-stage
+kernel with split 40.  A guarded `StaticSplitCount=40` launch now removes the
+split-count divisions for that plan while retaining the existing dynamic
+triple-stage fallback for any other split count.  The formal Ampere suite is
+exact (56/56 tests; worst observed `max_abs=1.34e-5`).  Two matched
+8,000-iteration runs reproduced the same medians: dynamic
+`0.060416/0.067584/0.067584/0.068608 ms` versus static
+`0.060416/0.067584/0.066560/0.068608 ms` at W2/W2.5/W3/W3.5.  The resulting
+four-rate geometric mean improves from `0.0659635` to `0.0657122 ms`
+(`1.0038x`, 0.38%) for this shape.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m1_fullq_dynamic_8000.json`,
+`artifacts/a100_p32_window/v26_candidate_m1_fullq_static40_8000.json`, and
+`artifacts/a100_p32_window/v26_candidate_m1_fullq_static40_repeat8000.json`.
+This remains a shape-local progression; the full-matrix 10% target is still
+open.
+
+## v27 rejected M1 attention static split probe
+
+The M1 attention-out route `(K,N)=(6144,5120)` uses split 48, so I screened a
+matching compile-time split specialization.  It was reverted after the
+8,000-iteration run showed a severe W3 regression: dynamic medians were
+`0.040960/0.044032/0.043008/0.041984 ms`, while the static probe measured
+`0.040960/0.040960/0.281600/0.040960 ms` at W2/W2.5/W3/W3.5.  Outputs stayed
+exact (`max_abs <= 1.6e-5`), but the performance result is not acceptable.
+The failed diagnostic is `artifacts/a100_p32_window/v27_candidate_m1_attention_static48_8000.json`.
+
+## v28 M1 full-KV static split specialization
+
+The M1 full-KV route `(K,N)=(5120,1024)` uses split 56.  Guarded
+`StaticSplitCount=56` launches remove the split-count divisions in both the
+scalar main kernel and its matching reducer, while leaving other plans on the
+dynamic static-N launcher.  A matched 20,000-iteration control/candidate run
+measured dynamic medians `0.033792/0.035840/0.035840/0.033792 ms` versus
+static-main medians `0.032768/0.034816/0.034816/0.032768 ms` at W2/W2.5/W3/W3.5
+(a `1.0303x`, 3.03% improvement).  Adding the compile-time reducer gives
+`0.032768/0.033792/0.033792/0.032768 ms` in a repeat run, for a
+`1.0458x` (4.58%) geometric-mean improvement over dynamic.  Outputs remained
+exact (`max_abs <= 1.1e-5`), and the formal suite passes 56/56.  The
+diagnostics are `artifacts/a100_p32_window/v28_candidate_m1_fullkv_dynamic_20000.json`,
+`artifacts/a100_p32_window/v28_candidate_m1_fullkv_static56_20000.json`, and
+`artifacts/a100_p32_window/v28_candidate_m1_fullkv_static56_reducer_repeat20000.json`
+(the shorter 8,000-iteration screens are also retained alongside them).
+This is another shape-local gain; the full-matrix 10% target remains open.
+
+## v29 neutral M1 linear-QKV static split probe
+
+The M1 linear-QKV route `(K,N)=(5120,10240)` autotunes to split 40 on all
+four rates.  A compile-time split-40 main-kernel specialization was screened,
+but matched 8,000-iteration medians were unchanged at
+`0.052224/0.057344/0.057344/0.058368 ms` for both dynamic and static launches.
+With no measurable gain, the source probe was reverted.  The diagnostic is
+`artifacts/a100_p32_window/v29_candidate_m1_linearqkv_static40_8000.json`;
+the dynamic control is `artifacts/a100_p32_window/v29_candidate_m1_linearqkv_dynamic_8000.json`.
+
+## v30 rejected M1 linear-Z static split probe
+
+The M1 linear-Z route `(K,N)=(5120,6144)` also autotunes to split 40.  Its
+compile-time split specialization regressed the 8,000-iteration medians from
+dynamic `0.038912/0.039936/0.039936/0.040960 ms` to static
+`0.044032/0.045056/0.044032/0.046080 ms` at W2/W2.5/W3/W3.5.  Exactness was
+preserved (`max_abs <= 1.4e-5`), but the source probe was reverted.  The
+diagnostics are `artifacts/a100_p32_window/v30_candidate_m1_linearz_dynamic_8000.json`
+and `artifacts/a100_p32_window/v30_candidate_m1_linearz_static40_8000.json`.
+
+## v31 M1 MLP gate/up static split specialization
+
+The M1 MLP gate/up route `(K,N)=(5120,17408)` autotunes to split 40 on all
+rates.  A guarded compile-time split-40 main-kernel launch is exact under the
+formal suite (56/56) and reproduced over two 8,000-iteration runs.  Dynamic
+medians were `0.079872/0.088064/0.088064/0.092160 ms`; static medians were
+`0.079872/0.087040/0.088064/0.091136 ms` at W2/W2.5/W3/W3.5.  The four-rate
+geometric mean improves `0.0869228→0.0864272 ms` (`1.0057x`, 0.57%), with
+`max_abs <= 1.4e-5`.  Diagnostics are
+`artifacts/a100_p32_window/v31_candidate_m1_mlpgate_dynamic_8000.json`,
+`artifacts/a100_p32_window/v31_candidate_m1_mlpgate_static40_8000.json`, and
+`artifacts/a100_p32_window/v31_candidate_m1_mlpgate_static40_repeat8000.json`.
+This remains shape-local; the full-matrix 10% target is still open.
+
+## v32 neutral M2 full-KV static split probe
+
+The measured M2 full-KV route `(K,N)=(5120,1024)` dispatches split 64.  A
+compile-time split-64 scalar main-kernel specialization was screened against
+20,000-iteration runs, but the repeats moved individual rates in opposite
+directions and did not establish a stable geometric-mean gain.  The source
+probe was reverted.  Diagnostics are
+`artifacts/a100_p32_window/v32_candidate_m2_fullkv_dynamic_20000.json`,
+`artifacts/a100_p32_window/v32_candidate_m2_fullkv_static64_20000.json`, and
+`artifacts/a100_p32_window/v32_candidate_m2_fullkv_static64_repeat20000.json`.
+
+## v33 rejected M2 attention static split probe
+
+The M2 attention-out route `(K,N)=(6144,5120)` uses split 48 for W2--W3
+(W3.5 uses 64).  A split-48 scalar specialization was mixed: dynamic
+8,000-iteration medians were `0.040960/0.044032/0.044032/0.044032 ms`, while
+the probe measured `0.041984/0.044032/0.043008/0.045056 ms`.  Since W2 and
+W3.5 regressed and there was no stable geometric-mean gain, the source probe
+was reverted.  Outputs remained exact (`max_abs <= 2.1e-5`).  Diagnostics are
+`artifacts/a100_p32_window/v33_candidate_m2_attention_dynamic_8000.json` and
+`artifacts/a100_p32_window/v33_candidate_m2_attention_static48_8000.json`.
+
+## v34 neutral M4 full-KV static split probe
+
+The M4 full-KV scalar route uses split 64.  A compile-time split-64
+specialization was screened with 20,000-iteration runs, but repeats swung
+from apparent one-tick gains to neutral (`0.034816 ms` at every rate), so no
+stable improvement was established at this short latency.  The source probe
+was reverted; outputs remained exact.  Diagnostics are
+`artifacts/a100_p32_window/v34_candidate_m4_fullkv_dynamic_20000.json`,
+`artifacts/a100_p32_window/v34_candidate_m4_fullkv_static64_20000.json`, and
+`artifacts/a100_p32_window/v34_candidate_m4_fullkv_static64_repeat20000.json`.
+
+## v35 rejected M16 WMMA static split probe
+
+I screened a compile-time split-count parameter on the M16 WMMA full-KV route
+`(K,N)=(5120,1024)`, which dispatches split 32.  The probe regressed W2/W2.5
+from dynamic `0.092160/0.034816 ms` to `0.111616/0.065536 ms` (W3/W3.5 were
+also not improved), so the WMMA template change and dispatch branch were
+removed.  Outputs stayed exact (`max_abs <= 1.6e-5`).  The failed diagnostic
+is `artifacts/a100_p32_window/v35_candidate_m16_fullkv_static32_8000.json`.
+
+## v36 aggregate candidate sweep
+
+A low-iteration 140-case sweep was rerun on candidate commit `ab902d08` and
+the fetched `origin/main` control `202eb8d7`.  The candidate/control median
+latency geometric-mean ratio was only `1.0009x`; CUDA-event quantization and
+autotune variability make this short sweep inconclusive, so it is not claimed
+as a broad gain.  Diagnostics are
+`artifacts/a100_p32_window/v36_candidate_full_100.json` and
+`/tmp/qvq-v24-main/artifacts/a100_p32_window/v36_main_full_100.json`.
+
+## v37 M2 full-Q autotune audit
+
+The M2 full-Q `(K,N)=(5120,12288)` autotune audit selected split 64 for W2/W2.5
+and split 40 for W3/W3.5 in one probe.  A high-iteration screen was retained
+as a control only; plan selection varied at event-tick resolution, so no
+static split specialization was carried from this audit.  Diagnostic:
+`artifacts/a100_p32_window/v37_candidate_m2_fullq_probe.json`.
+
+## v38 M2 MLP gate/up static split specialization
+
+The M2 MLP gate/up route `(K,N)=(5120,17408)` autotunes to split 40.  A
+guarded compile-time split-40 scalar main-kernel launch is exact under the
+formal suite (56/56) and reproduced across two 8,000-iteration runs.  The
+dynamic geometric mean was `0.0958727 ms`; static runs measured
+`0.0948473 ms` and `0.0950857 ms` (approximately 0.8--1.1% improvement),
+with `max_abs <= 9.6e-6`.  Diagnostics are
+`artifacts/a100_p32_window/v38_candidate_m2_mlpgate_dynamic_8000.json`,
+`artifacts/a100_p32_window/v38_candidate_m2_mlpgate_static40_8000.json`, and
+`artifacts/a100_p32_window/v38_candidate_m2_mlpgate_static40_repeat8000.json`.
+This is shape-local progress; the full-matrix 10% target remains open.
+
+## v39 M4 full-Q static split specialization
+
+The M4 full-Q route `(K,N)=(5120,12288)` uses the four-tile scalar kernel;
+autotune selected split 40 for the measured W2.5/W3 cases.  A guarded
+compile-time split-40 launch is exact under the formal suite (56/56).  Two
+8,000-iteration runs measured dynamic medians
+`0.077824/0.086016/0.089088/0.087040 ms` and static medians
+`0.076800/0.086016/0.088064/0.088064 ms` and
+`0.076800/0.087040/0.088064/0.087040 ms` at W2/W2.5/W3/W3.5, respectively.
+The geometric mean moves `0.0848805→0.084603/0.084606 ms` (about 0.33%),
+with `max_abs <= 2.1e-5`.  Diagnostics are
+`artifacts/a100_p32_window/v39_candidate_m4_fullq_dynamic_8000.json`,
+`artifacts/a100_p32_window/v39_candidate_m4_fullq_static40_8000.json`, and
+`artifacts/a100_p32_window/v39_candidate_m4_fullq_static40_repeat8000.json`.
+This is shape-local progress; the full-matrix 10% target remains open.
+
+## v40 neutral M4 MLP gate/up static split probe
+
+The M4 MLP gate/up autotuner selected split 20 or 40 depending on rate.  A
+paired static-20/static-40 scalar specialization was screened, but the
+8,000-iteration medians were mixed (dynamic
+`0.101376/0.115712/0.119808/0.117760 ms`; probe
+`0.101376/0.114688/0.120832/0.117760 ms`).  With no stable geometric-mean
+gain, both source branches were reverted.  Outputs remained exact
+(`max_abs <= 1.3e-5`).  Diagnostic:
+`artifacts/a100_p32_window/v40_candidate_m4_mlpgate_static20_40_8000.json`;
+control: `artifacts/a100_p32_window/v40_candidate_m4_mlpgate_probe.json`.
+
+## v41 M1 full-Q compile-time-K specialization
+
+The M1 full-Q route `(K,N)=(5120,12288)` already had a compile-time split-40
+launch.  I extended that guarded path with `StaticK=5120`, allowing the scalar
+body to constant-fold the K16 tile count, input stride, and tile bounds.  Two
+matched 8,000-iteration runs were bit-for-bit equivalent to the dynamic
+fallback and both produced medians
+`0.059392/0.066560/0.066560/0.068608 ms` at W2/W2.5/W3/W3.5.  The static-K
+disabled controls both measured
+`0.060416/0.066560/0.066560/0.068608 ms`; the four-rate geometric mean moved
+`0.0654619→0.0651827 ms` (`1.0043x`, 0.43%) for this shape.  The formal
+Ampere suite remains 56/56 with `max_abs <= 1.4e-5`.  Diagnostics are
+`artifacts/a100_p32_window/v41_candidate_m1_fullq_statick_8000.json`,
+`artifacts/a100_p32_window/v41_candidate_m1_fullq_statick_repeat8000.json`,
+`artifacts/a100_p32_window/v41_control_m1_fullq_static40_8000.json`, and
+`artifacts/a100_p32_window/v41_control_m1_fullq_static40_repeat8000.json`.
+This is shape-local progress; the full-matrix 10% target remains open.
+
+## v42 neutral M1 MLP gate/up compile-time-K probe
+
+I screened the same `StaticK=5120` scalar specialization on the M1 MLP
+gate/up route `(K,N)=(5120,17408)`, which already uses static split 40.  The
+8,000-iteration probe measured medians
+`0.079872/0.088064/0.087040/0.091136 ms`; the accepted static-split control
+was `0.079872/0.087040/0.088064/0.091136 ms`.  Their four-rate geometric
+means are identical (`0.0864272 ms`), so the source probe was reverted.
+Outputs remained exact (`max_abs <= 1.4e-5`).  Diagnostic:
+`artifacts/a100_p32_window/v42_candidate_m1_mlpgate_statick_8000.json`;
+control diagnostics are the v31 static-40 runs.
+
+## v44 rejected M16 linear-QKV wide-N WMMA probe
+
+The M16 linear-QKV route `(K,N)=(5120,10240)` currently uses one N16 tile per
+warp.  I screened the two-adjacent-tile `WideNTiles` configuration to apply
+Marlin-style output reuse, but the first correctness gate failed immediately:
+the M16 W2 result had `max_abs=43.72` and relative L2 error `1.20`, versus the
+planar reference.  The wide-N branch was reverted before any timing; no
+performance claim is made.  Diagnostic run:
+`artifacts/a100_p32_window/v44_candidate_m16_linearqkv_wide_8000.json`.
+
+## v46 rejected M1 MLP down compile-time-K probe
+
+The M1 MLP down route `(K,N)=(17408,5120)` already uses static split 128.
+Adding `StaticK=17408` to this guarded scalar launch preserved exactness but
+regressed the W2.5 median by one CUDA event tick (`0.088064→0.089088 ms`),
+with no compensating rate improvement.  The source change was reverted before
+retention.  Diagnostic:
+`artifacts/a100_p32_window/v46_candidate_m1_mlpdown_statick_8000.json`.
+
+## v47 M2 full-Q static split specialization
+
+The M2 full-Q route `(K,N)=(5120,12288)` autotunes to split 64 for W2/W2.5
+and split 40 for W3/W3.5 on this A100.  A guarded dispatch keyed by
+`TransitionBits` now passes those measured split counts as compile-time
+constants to the scalar kernel.  Two matched 8,000-iteration runs were exact
+(`max_abs <= 1.4e-5`): the dynamic medians were
+`0.067584/0.073728/0.073728/0.074752 ms`, while static medians were
+`0.066560/0.072704/0.072704/0.074752 ms` and
+`0.066560/0.073728/0.072704/0.074752 ms`.  Geometric mean improved from
+`0.0723907 ms` to `0.0716124/0.0718632 ms` (0.73--1.09% shape-local).
+The formal Ampere suite remains 56/56.  Diagnostics are
+`artifacts/a100_p32_window/v47_candidate_m2_fullq_static64_40_8000.json` and
+`artifacts/a100_p32_window/v47_candidate_m2_fullq_static64_40_repeat8000.json`;
+the v43 full sweep provides the dynamic control.  The full-matrix 10% target
+remains open.
+
+## v48 rejected M2 full-Q compile-time-K extension
+
+I extended the retained M2 full-Q split specialization with `StaticK=5120`.
+Although the first 8,000-iteration screen was exact and appeared one tick
+faster at W3.5, the matched repeat exposed a severe W3 outlier
+(`0.284672 ms` versus `0.072704 ms`), producing a 17.5x planar speedup rather
+than the normal ~35x.  The compile-time-K addition was therefore reverted;
+the stable split-only v47 path remains.  Diagnostic:
+`artifacts/a100_p32_window/v48_candidate_m2_fullq_static_splitk_repeat8000.json`.
+
+## v50 M2 linear-QKV static split specialization
+
+The M2 linear-QKV route `(K,N)=(5120,10240)` consistently autotunes to split
+40.  A guarded static-split-40 scalar launch was exact across the formal
+matrix suite.  The dynamic 500-iteration sweep measured medians
+`0.057344/0.062464/0.062464/0.063488 ms`; two 8,000-iteration probes and a
+20,000-iteration confirmation of the static path measured
+`0.056320/0.061440/0.062464/0.062464 ms` (the first short probe was noisier at
+W2).  The long confirmation reduces the four-rate geometric mean from
+`0.0613917` to `0.0606168 ms` (1.28% shape-local).  Exactness remained within
+`max_abs <= 1.2e-5`, and the formal Ampere suite is 56/56.  Diagnostics are
+`artifacts/a100_p32_window/v50_candidate_m2_linearqkv_static40_8000.json`,
+`artifacts/a100_p32_window/v50_candidate_m2_linearqkv_static40_repeat8000.json`,
+and `artifacts/a100_p32_window/v50_candidate_m2_linearqkv_static40_20000.json`;
+the v43 full sweep provides the dynamic control.  The full-matrix 10% target
+remains open.
+
+## v51 M4 linear-QKV static split specialization
+
+The M4 linear-QKV route `(K,N)=(5120,10240)` consistently selects split 40.
+A guarded static-split-40 scalar launch was exact in two runs.  The 20,000-
+iteration medians were `0.065536/0.072704/0.074752/0.074752 ms`; the 8,000-
+iteration repeat was `0.065536/0.072704/0.074752/0.073728 ms`, versus the v43
+dynamic sweep's `0.066560/0.073728/0.075776/0.073728 ms`.  The long run moves
+the four-rate geometric mean `0.0723607→0.0718325 ms` (0.73% shape-local),
+with `max_abs <= 1.8e-5`.  The formal Ampere suite remains 56/56.  Diagnostics
+are `artifacts/a100_p32_window/v51_candidate_m4_linearqkv_static40_20000.json`
+and `artifacts/a100_p32_window/v51_candidate_m4_linearqkv_static40_repeat8000.json`;
+the v43 full sweep provides the dynamic control.  The full-matrix 10% target
+remains open.
+
+## v52 rejected M8 full-Q WMMA static split probe
+
+The M8 full-Q wide WMMA route already uses the validated split-14 reducer, so
+I screened a matching compile-time split-14 main-kernel specialization.  The
+probe was exact (`max_abs <= 3.3e-5`) but regressed W3 and W3.5 by one CUDA
+event tick: medians were
+`0.084992/0.089088/0.087040/0.088064 ms`, versus the dynamic
+`0.086016/0.089088/0.086016/0.087040 ms`.  The WMMA template and dispatch
+changes were reverted; diagnostic:
+`artifacts/a100_p32_window/v52_candidate_m8_fullq_static_split14_8000.json`.
+
+## v53 rejected M1 full-KV compile-time-K probe
+
+The accepted M1 full-KV scalar route `(K,N)=(5120,1024)` already uses static
+split 56 and a matching reducer.  Adding `StaticK=5120` preserved exactness,
+but the 20,000-iteration probe measured
+`0.034816/0.033792/0.035840/0.033792 ms`; this was slower than the retained
+static-split path at W2 and W3.  The source addition was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v53_candidate_m1_fullkv_statick_20000.json`.
+
+## v54 rejected M8 full-Q compile-time-K probe
+
+The M8 full-Q wide WMMA route has fixed `N=12288` but retained dynamic K
+stride/bounds.  Adding `StaticK=5120` preserved exactness
+(`max_abs <= 3.3e-5`), but the 8,000-iteration medians moved from the v43
+dynamic `0.086016/0.089088/0.086016/0.087040 ms` to
+`0.086016/0.086016/0.087040/0.088064 ms`, losing W3 and W3.5 ticks.  The
+source change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v54_candidate_m8_fullq_statick_8000.json`.
+
+## v55 rejected M16 long-K compile-time-split probe
+
+The M16 long-K MLP-down route `(K,N)=(17408,5120)` retains the measured
+split-24 plan.  A WMMA main-kernel specialization with `StaticSplitCount=24`
+was exact, but the matched 20,000-iteration medians moved from the retained
+`0.124928/0.124928/0.125952/0.129024 ms` control to
+`0.123904/0.125952/0.128000/0.130048 ms` for W2/W2.5/W3/W3.5.  The single
+W2 tick was outweighed by regressions at the other rates, so the template
+extension and dispatch were reverted.  Diagnostic:
+`artifacts/a100_p32_window/v25_candidate_m16_mlpdown_static24_20000.json`.
+
+## v56 rejected M16 long-K four-stage probe
+
+As a barrier-cost follow-up, I screened a four-K16 stage on the same M16
+long-K MLP-down WMMA route.  It remained exact, but the first two matched
+rates regressed sharply: W2 moved from the retained `0.124928 ms` control to
+`0.145408 ms`, and W2.5 from `0.124928 ms` to `0.143360 ms`.  The run was
+stopped before the remaining rates and the stage-4 dispatch was reverted; no
+performance claim is made.  The interrupted diagnostic did not produce a
+JSON artifact.
+
 ## Reproduction
 
 ```bash
