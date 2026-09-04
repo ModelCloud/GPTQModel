@@ -25,8 +25,18 @@ weight scales.
 
 ## Comparison quantization configurations
 
-Dense BF16 is the unmodified source checkpoint and has no quantization config.
-The two P32 arms share the same weight artifact contract:
+Dense BF16 is the unmodified source checkpoint:
+
+```json
+{
+  "quantization_config": null,
+  "weights": "bfloat16",
+  "activations": "bfloat16",
+  "kv_cache": "bfloat16"
+}
+```
+
+W3.5A16 uses P32 weights with native BF16 model activations and KV cache:
 
 ```json
 {
@@ -36,14 +46,23 @@ The two P32 arms share the same weight artifact contract:
   "vector_size": 2,
   "trellis_window": 16,
   "bank_count": 2,
-  "rounding": "block_ldlq"
+  "rounding": "block_ldlq",
+  "activation_quantization": null
 }
 ```
 
-W3.5A16 sets `activation_quantization` to `null`. W3.5A8 adds:
+W3.5A8 uses the same P32 weight format and opts into the exact deployed FP8
+operand, replay, and KV-cache contracts:
 
 ```json
 {
+  "method": "qvq",
+  "bits": 3.5,
+  "format": "qvq_v2b2_p32",
+  "vector_size": 2,
+  "trellis_window": 16,
+  "bank_count": 2,
+  "rounding": "block_ldlq",
   "activation_quantization": {
     "bits": 8,
     "format": "float8_e4m3fn",
@@ -114,7 +133,7 @@ The H200 compile-and-run smoke uses the SM90A register/shared
 register-A values per lane. This is the shape required to combine two adjacent
 P32 K16 decoded tiles without changing the P32 stream.
 
-### Phase 4 — integrate optional FP8 P32 operands (correctness complete)
+### Phase 4 — integrate optional FP8 P32 operands (complete)
 
 1. Decode two adjacent P32 K16 tiles into one K32 E4M3 register-A fragment.
 2. Write the transformed activation operand to the WGMMA shared-memory layout
@@ -135,10 +154,14 @@ specializations (transition widths 4/5/6/7) behind one host launch site. Each
 K32 partial is scaled in FP32 before summation to prevent raw FP8 accumulator
 growth from weakening the strict 2e-3 exact-deployed-operand gate.
 
-The native operator remains M16. The wrapper automatically tiles and tail-pads
-every positive logical M. H200 coverage passed W2/W2.5/W3/W3.5 at M=1/16/17,
-and W3.5 at M=1/2/4/8/16/17/32/64/128/256/512/1024/2048/4096 across three
-seeds. A dedicated native M=17..4096 kernel remains a performance TODO.
+The tensor-core atom remains M16, but one native two-dimensional CUDA grid now
+covers every logical M through 4096. The wrapper tail-pads once and launches
+once; it no longer invokes one CUDA operator per M16 tile. H200 coverage passed
+W2/W2.5/W3/W3.5 at M=1/16/17, and W3.5 at
+M=1/2/4/8/16/17/32/64/128/256/512/1024/2048/4096 across three seeds. The new
+grid is exact to the deployed E4M3 operand/weight reference at every point.
+Porting the FP16 M32/M64 decoded-weight reuse optimization to the E4M3 atom is
+an optional future throughput optimization, not a format or correctness gap.
 
 ### Phase 4.5 — recommended FP8-targeted quantization replay (complete)
 
@@ -185,7 +208,7 @@ The comparison boundary is the real FP32 WGMMA accumulator followed by the
 existing output recovery and BF16 model cast. The accumulator itself is not
 stored as FP8; each following linear quantizes its own actual input operand.
 
-### Phase 5 — native FP8 KV attention (correctness complete)
+### Phase 5 — native FP8 KV attention (complete)
 
 The H200 attention interface now receives opaque E4M3 cache views. It
 row-quantizes Q and runs native E4M3 QK-transpose through cuBLASLt with FP32
@@ -196,15 +219,18 @@ or V prefix is constructed. Telemetry counts both FP8 GEMM sites,
 dequantized elements, and dense-prefix materializations; acceptance requires
 the latter two to remain zero.
 
-The current correctness path groups all query heads that share one GQA KV head,
-reducing each layer from 32 to 8 QK/PV cuBLASLt launch pairs for Llama-3.2-1B.
-A single batched launch across all KV heads and a static/paged FP8 allocation
-remain performance TODOs.
+The cache uses aligned initial allocation, page-based dynamic growth, or a
+one-shot static allocation when generation provides the maximum length. K is
+stored row-major and V column-major, so decode neither concatenates the prefix
+nor transpose-copies V. For decode-sized query M<=16, one grouped cuBLASLt call
+executes every batch/KV-head matrix at each QK and PV site. Larger prefills keep
+the per-KV-head streaming path to avoid materializing a multi-gigabyte
+all-head score tensor.
 
 Gate: cache payload stays E4M3 end to end, no BF16 residual cache exists, and
 Nsight/kernel telemetry proves the attention consumer reads FP8 payloads.
 
-### Phase 6 — end-to-end acceptance (complete for correctness baseline)
+### Phase 6 — end-to-end acceptance (complete)
 
 On the same exclusive H200 and matched prompts, publish one table for dense,
 W3.5A16, and W3.5A8 containing PPL, KLD, top-1/5/10 agreement, prefill tokens/s,
@@ -212,9 +238,9 @@ decode tokens/s, latency percentiles, allocated/reserved/driver peak VRAM, model
 bytes, KV payload/scale bytes, cache ratio, and all P32/FP8 dispatch counters.
 
 Required workload points are batch 1 with logical M=1/2/4/8/16 for decode and
-M=32/64/128/256/512/1024/2048/4096 for prefill. Logical M>16 continues to tile
-over the native M16 P32 operator until dedicated larger-M kernels win their own
-accuracy and performance gates.
+M=32/64/128/256/512/1024/2048/4096 for prefill. The FP16 P32 path uses accepted
+M32/M64 row reuse through M4096. The FP8 P32 path uses a single native M-tiled
+grid through M4096 while preserving its E4M3 x E4M3, FP32-accumulation atom.
 
 The held-out quality slice used parquet rows 256--319 (18,692 shifted tokens,
 maximum length 512), disjoint from calibration rows 0--127. All arms ran BF16
@@ -227,21 +253,36 @@ attention execution.
 | W3.5A16 | 4.0151 | 0.04311 | 91.87% | 88.02% | 87.93% |
 | W3.5A8 | 4.0731 | 0.06366 | 90.36% | 85.19% | 85.11% |
 
+Ground-truth next-token accuracy on the same positions:
+
+| arm | top-1 | top-5 | top-10 |
+| --- | ---: | ---: | ---: |
+| dense BF16 | 68.89% | 87.60% | 91.17% |
+| W3.5A16 | 68.47% | 87.06% | 90.96% |
+| W3.5A8 | 68.15% | 87.01% | 90.75% |
+
 The matched resource run used batch 1, 4,096-token prefill, 16 decode warmup
 tokens, and 64 measured decode tokens. Peak allocated/reserved are PyTorch
 whole-workload peaks; driver peak is sampled per-process NVML usage.
 
-| arm | prefill tok/s | decode tok/s | peak alloc GiB | peak reserved GiB | driver peak MiB | model alloc GiB | KV MiB at 4,176 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| dense BF16 | 183,789 | 31.86 | 2.710 | 2.795 | 3,558 | 2.303 | 130.50 |
-| W3.5A16 | 5,225 | 18.60 | 1.942 | 2.234 | 2,986 | 0.900 | 130.50 |
-| W3.5A8 | 803 | 11.28 | 3.079 | 3.537 | 4,304 | 0.900 | 69.33 |
+| arm | prefill tok/s | prefill p50 / p95 ms | decode tok/s | decode p50 / p95 ms | peak alloc / reserved GiB | NVML peak MiB | model GiB | KV MiB at 4,176 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| dense BF16 | 183,790 | 22.29 / 23.07 | 31.80 | 31.35 / 31.74 | 2.710 / 2.795 | 3,558 | 2.303 | 130.50 |
+| W3.5A16 | 32,246 | 127.02 / 129.51 | 18.69 | 53.35 / 54.85 | 1.942 / 2.115 | 2,864 | 0.900 | 130.50 |
+| W3.5A8 | 4,003 | 1,023.12 / 1,027.18 | 16.42 | 60.71 / 62.72 | 3.083 / 3.416 | 4,180 | 0.900 | 72.25 |
 
-A8 reduced retained KV bytes by 46.875%, including FP32 per-token scales. It
+The static A8 cache reserved 4,352 token slots for the 4,176-token logical
+sequence and still used 44.64% fewer retained bytes than the BF16 cache,
+including FP32 per-token scales. At an exact-capacity boundary the reduction is
+46.875%. It allocated once per layer, performed zero reallocations/copies, and
 executed 9,856/9,856 requested P32 FP8 calls plus 10,368 QK and 10,368 PV FP8
-GEMMs, with zero P32 fallback/rejection, zero KV dequantized elements, and zero
-dense K/V prefix materializations. Its current correctness-first attention and
-M16-tiled P32 implementation are not yet performance-competitive: matching
-dense prefill requires about 229x current A8 throughput (and about 35.2x current
-A16 throughput). The next performance phase is native P32 M32--4096 plus a
-fused/paged FP8 attention kernel that avoids FP32 score/probability temporaries.
+matrices. Grouping reduced the attention work to 1,408 QK and 1,408 PV launches.
+There were zero P32 fallback/rejections, zero KV dequantized elements, and zero
+dense K/V prefix materializations.
+
+Relative to the earlier correctness baseline, M-grid launch collapsing raised
+A8 prefill from 805 to 4,003 tok/s (4.97x), grouped attention raised A8 decode
+from 11.28 to 16.42 tok/s (1.46x), and FP16 large-M row reuse raised A16 prefill
+from 5,225 to 32,246 tok/s (6.17x). Matching dense now requires another 45.91x
+for A8 prefill or 5.70x for A16 prefill. A8 decode is 1.14x short of A16 and
+1.94x short of dense.
