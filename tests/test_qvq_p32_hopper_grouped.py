@@ -292,7 +292,7 @@ def test_grouped_hopper_is_bit_exact_to_plain_children_and_bounded_by_dense(
 
 
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
-@pytest.mark.parametrize("logical_m", (32, 64))
+@pytest.mark.parametrize("logical_m", (32, 64, 128, 256))
 def test_grouped_hopper_large_m_is_exact_to_m16_tiles_and_graph_safe(
     bits, logical_m
 ):

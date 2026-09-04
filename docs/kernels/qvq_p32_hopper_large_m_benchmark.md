@@ -55,3 +55,28 @@ That is why QKV remains within roughly 23 percent of Machete at M64 while the
 wide gate/up group is still 2.7 to 2.8 times slower.  The next M64 kernel
 experiment must amortize P32 decode over multiple independent M16 WGMMA input
 fragments rather than only increasing the row-grid size.
+
+## M128 and M256
+
+| Rate | Site | M x K x aggregate N | QVQ us | vs previous fallback | vs Marlin W4 | vs Machete W4 | Better than last | Mean error | Max error |
+| ---: | :--- | ---: | ---: | ---: | ---: | ---: | :---: | ---: | ---: |
+| W2 | QKV | 128 x 2048 x 3072 | 69.390 | 11.552x | 1.734x | 0.586x | Yes | 1.724e-6 | 1.337e-5 |
+| W2 | QKV | 256 x 2048 x 3072 | 117.099 | 12.513x | 0.967x | 0.388x | Yes | 1.731e-6 | 1.479e-5 |
+| W2 | gate/up | 128 x 2048 x 16384 | 170.697 | 21.742x | 0.224x | 0.212x | Yes | 1.887e-6 | 1.544e-5 |
+| W2 | gate/up | 256 x 2048 x 16384 | 324.782 | 22.448x | 0.165x | 0.134x | Yes | 1.885e-6 | 1.741e-5 |
+| W2.5 | QKV | 128 x 2048 x 3072 | 69.495 | 12.543x | 1.731x | 0.585x | Yes | 1.730e-6 | 1.293e-5 |
+| W2.5 | QKV | 256 x 2048 x 3072 | 117.806 | 12.823x | 0.961x | 0.386x | Yes | 1.729e-6 | 1.403e-5 |
+| W2.5 | gate/up | 128 x 2048 x 16384 | 171.586 | 21.926x | 0.223x | 0.211x | Yes | 1.887e-6 | 1.497e-5 |
+| W2.5 | gate/up | 256 x 2048 x 16384 | 327.305 | 22.472x | 0.164x | 0.133x | Yes | 1.886e-6 | 1.438e-5 |
+| W3 | QKV | 128 x 2048 x 3072 | 69.568 | 11.911x | 1.729x | 0.585x | Yes | 1.734e-6 | 1.261e-5 |
+| W3 | QKV | 256 x 2048 x 3072 | 118.449 | 12.544x | 0.956x | 0.384x | Yes | 1.726e-6 | 1.377e-5 |
+| W3 | gate/up | 128 x 2048 x 16384 | 176.604 | 21.029x | 0.217x | 0.205x | Yes | 1.886e-6 | 1.398e-5 |
+| W3 | gate/up | 256 x 2048 x 16384 | 329.926 | 22.071x | 0.163x | 0.132x | Yes | 1.886e-6 | 1.607e-5 |
+| W3.5 | QKV | 128 x 2048 x 3072 | 71.074 | 12.080x | 1.693x | 0.572x | Yes | 1.729e-6 | 1.592e-5 |
+| W3.5 | QKV | 256 x 2048 x 3072 | 120.398 | 12.495x | 0.940x | 0.378x | Yes | 1.730e-6 | 1.314e-5 |
+| W3.5 | gate/up | 128 x 2048 x 16384 | 180.295 | 20.782x | 0.212x | 0.201x | Yes | 1.886e-6 | 1.636e-5 |
+| W3.5 | gate/up | 256 x 2048 x 16384 | 335.638 | 21.843x | 0.160x | 0.130x | Yes | 1.886e-6 | 1.640e-5 |
+
+All sixteen M128/M256 cells improve over the preceding planar fallback.  The
+largest maximum absolute error is `1.741e-5`; the M128 and M256 CUDA Graph
+tests are bit-exact to the corresponding sequence of M16 row tiles.
