@@ -24,7 +24,12 @@ def _args() -> argparse.Namespace:
     parser.add_argument(
         "--group", choices=(*common.GROUPS, "full_mlp"), default="gate_up"
     )
-    parser.add_argument("--m", type=int, choices=(32, 64, 128, 256), default=64)
+    parser.add_argument(
+        "--m",
+        type=int,
+        choices=(32, 64, 128, 256, 512, 1024, 2048, 4096),
+        default=64,
+    )
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--replays", type=int, default=5)
     parser.add_argument("--idle-samples", type=int, default=3)

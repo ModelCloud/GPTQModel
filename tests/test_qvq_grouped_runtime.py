@@ -136,13 +136,16 @@ def test_qwen38_h100_grouped_schedules_preserve_child_split_policies(
         for shape in shapes
     )
     assert actual == expected
-    assert qvq_h100_grouped_ordered_split_counts(
-        device_name="NVIDIA H200",
-        compute_capability=(9, 0),
-        in_features=5120,
-        out_features=shapes[0],
-        transition_bits=transition_bits,
-    ) is None
+    assert (
+        qvq_h100_grouped_ordered_split_counts(
+            device_name="NVIDIA H200",
+            compute_capability=(9, 0),
+            in_features=5120,
+            out_features=shapes[0],
+            transition_bits=transition_bits,
+        )
+        is None
+    )
 
 
 def test_r0_installs_only_bit_identical_input_transforms():
@@ -413,7 +416,7 @@ def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
             name,
             in_features=in_features,
             out_features=width,
-                bits=bits,
+            bits=bits,
             su=shared,
             alt_id=index + 1,
             seed=110 + index,
@@ -524,7 +527,7 @@ def test_unequal_gate_up_widths_retain_exact_independent_recovery():
     assert telemetry["independent_recovery_children"] == 2
 
 
-@pytest.mark.parametrize("logical_m", (1, 32, 64, 128, 256))
+@pytest.mark.parametrize("logical_m", (1, 32, 64, 128, 256, 512, 1024, 2048, 4096))
 def test_warmed_production_group_is_cuda_graph_capturable(logical_m):
     device = _h100_device()
     if device is None:
@@ -593,9 +596,7 @@ def test_qwen38_full_attention_group_runs_measured_schedule_in_cuda_graph():
         for index, (name, width) in enumerate(zip(names, widths, strict=True))
     )
     attention = _Attention(children)
-    static_input = torch.randn(
-        (1, 5120), device=device, dtype=torch.float16
-    ) * 0.02
+    static_input = torch.randn((1, 5120), device=device, dtype=torch.float16) * 0.02
     with torch.inference_mode():
         plain = tuple(child(static_input).clone() for child in children)
     assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
@@ -603,9 +604,7 @@ def test_qwen38_full_attention_group_runs_measured_schedule_in_cuda_graph():
         eager = tuple(getattr(attention, name)(static_input) for name in names)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            captured = tuple(
-                getattr(attention, name)(static_input) for name in names
-            )
+            captured = tuple(getattr(attention, name)(static_input) for name in names)
         graph.replay()
         torch.cuda.synchronize(device)
 
@@ -623,9 +622,7 @@ def test_qwen38_full_attention_group_runs_measured_schedule_in_cuda_graph():
     ("bits", "expected_splits"),
     ((2.0, (10, 20)), (2.5, (10, 20)), (3.0, (4, 20))),
 )
-def test_qwen38_linear_input_group_uses_fixed_grid_in_cuda_graph(
-    bits, expected_splits
-):
+def test_qwen38_linear_input_group_uses_fixed_grid_in_cuda_graph(bits, expected_splits):
     device = _h100_device()
     if device is None:
         pytest.skip("requires the exclusive H100 validation device")
@@ -653,9 +650,7 @@ def test_qwen38_linear_input_group_uses_fixed_grid_in_cuda_graph(
         for child in children:
             child.SV.fill_(0.002)
             child.bias.zero_()
-    static_input = torch.randn(
-        (8, 5120), device=device, dtype=torch.float16
-    ) * 0.02
+    static_input = torch.randn((8, 5120), device=device, dtype=torch.float16) * 0.02
     with torch.inference_mode():
         plain = tuple(child(static_input).clone() for child in children)
     assert install_qvq_hopper_groups(
@@ -668,9 +663,7 @@ def test_qwen38_linear_input_group_uses_fixed_grid_in_cuda_graph(
         eager = tuple(getattr(parent, name)(static_input) for name in names)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            captured = tuple(
-                getattr(parent, name)(static_input) for name in names
-            )
+            captured = tuple(getattr(parent, name)(static_input) for name in names)
         for _ in range(5):
             graph.replay()
         torch.cuda.synchronize(device)
@@ -732,18 +725,14 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_safe(bits):
             self.act_fn = nn.SiLU()
 
         def forward(self, x):
-            return self.down_proj(
-                self.act_fn(self.gate_proj(x)) * self.up_proj(x)
-            )
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
     mlp = QwenMLP().eval()
     with torch.no_grad():
         for child in (mlp.gate_proj, mlp.up_proj, mlp.down_proj):
             child.SV.fill_(0.002)
             child.bias.zero_()
-    static_input = torch.randn(
-        (8, 5120), device=device, dtype=torch.float16
-    ) * 0.02
+    static_input = torch.randn((8, 5120), device=device, dtype=torch.float16) * 0.02
     with torch.inference_mode():
         plain = mlp(static_input).clone()
     assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
@@ -924,7 +913,7 @@ def test_fused_mlp_lifecycle_flag_fallback_and_uninstall_are_exact():
         assert torch.equal(mlp(x), expected)
 
 
-@pytest.mark.parametrize("logical_rows", (32, 64))
+@pytest.mark.parametrize("logical_rows", (32, 64, 128, 256, 512, 1024, 2048, 4096))
 def test_large_m_fused_mlp_uses_native_row_reuse_and_replays_cuda_graph(
     logical_rows,
 ):
@@ -942,9 +931,7 @@ def test_large_m_fused_mlp_uses_native_row_reuse_and_replays_cuda_graph(
             self.up_proj = _child(
                 "up_proj", su=shared_input, alt_id=2, seed=281, device=device
             )
-            self.down_proj = _child(
-                "down_proj", alt_id=3, seed=282, device=device
-            )
+            self.down_proj = _child("down_proj", alt_id=3, seed=282, device=device)
             self.act_fn = nn.SiLU()
 
         def forward(self, x):
@@ -952,10 +939,7 @@ def test_large_m_fused_mlp_uses_native_row_reuse_and_replays_cuda_graph(
 
     mlp = LlamaLikeMLP().eval()
     static_input = (
-        torch.randn(
-            (logical_rows, 256), device=device, dtype=torch.float16
-        )
-        * 0.02
+        torch.randn((logical_rows, 256), device=device, dtype=torch.float16) * 0.02
     )
     with torch.inference_mode():
         plain = mlp(static_input).clone()
@@ -1111,12 +1095,9 @@ def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     assert {entry["category"] for entry in telemetry} == {"qkv", "gate_up"}
     assert all(entry["grouped_launches"] >= 4 for entry in telemetry)
     assert all(entry["plain_fallbacks"] == 0 for entry in telemetry)
+    assert all(entry["h100_direct_padded_input_launches"] >= 3 for entry in telemetry)
     assert all(
-        entry["h100_direct_padded_input_launches"] >= 3 for entry in telemetry
-    )
-    assert all(
-        entry["h100_multiblock_input_hadamard_launches"] >= 4
-        for entry in telemetry
+        entry["h100_multiblock_input_hadamard_launches"] >= 4 for entry in telemetry
     )
     assert all(entry["h100_fp16_recovery_store_launches"] >= 4 for entry in telemetry)
     gate_up_telemetry = next(

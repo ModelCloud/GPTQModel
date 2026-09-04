@@ -22,7 +22,7 @@ from scripts import benchmark_qvq_a41_phase4_production as common
 from scripts import benchmark_qvq_hopper_large_m as large_m
 
 RATES = (2.0, 2.5, 3.0, 3.5)
-M_VALUES = (32, 64, 128, 256)
+M_VALUES = (32, 64, 128, 256, 512, 1024, 2048, 4096)
 HIDDEN = 2048
 INTERMEDIATE = 8192
 SOURCE_PATHS = (

@@ -25,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts import benchmark_qvq_a41_phase4_production as common
 
 RATES = (2.0, 2.5, 3.0, 3.5)
-M_VALUES = (16, 32, 64, 128, 256)
+M_VALUES = (16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
 SOURCE_PATHS = (
     Path("gptqmodel/nn_modules/qlinear/qvq.py"),
     Path("gptqmodel/nn_modules/qvq_grouped_runtime.py"),
@@ -40,7 +40,10 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--rates", nargs="+", type=float, default=RATES)
     parser.add_argument("--m-values", nargs="+", type=int, default=M_VALUES)
     parser.add_argument(
-        "--groups", nargs="+", choices=tuple(common.GROUPS), default=tuple(common.GROUPS)
+        "--groups",
+        nargs="+",
+        choices=tuple(common.GROUPS),
+        default=tuple(common.GROUPS),
     )
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--samples", type=int, default=50)
@@ -61,7 +64,9 @@ def _args() -> argparse.Namespace:
     if min(args.warmup, args.samples, args.replays_per_sample) <= 0:
         parser.error("timing counts must be positive")
     if args.idle_samples < 3 or args.idle_interval < 0 or args.idle_memory_mib < 0:
-        parser.error("idle gate requires at least three samples and nonnegative thresholds")
+        parser.error(
+            "idle gate requires at least three samples and nonnegative thresholds"
+        )
     return args
 
 
@@ -161,7 +166,9 @@ def _errors(torch, actual, expected) -> dict:
     )
     absolute_sum = sum(float(value.abs().sum().item()) for value in differences)
     square_sum = sum(float(value.square().sum().item()) for value in differences)
-    reference_square_sum = sum(float(value.float().square().sum().item()) for value in expected)
+    reference_square_sum = sum(
+        float(value.float().square().sum().item()) for value in expected
+    )
     count = sum(value.numel() for value in differences)
     return {
         "mean_abs": absolute_sum / count,
@@ -240,8 +247,8 @@ def _main(args: argparse.Namespace) -> None:
             for m in args.m_values:
                 plain[m], _ = _graph_timing(
                     torch,
-                    lambda parent=parent, names=names, x=inputs[(group, m)]: common._call_children(
-                        parent, names, x
+                    lambda parent=parent, names=names, x=inputs[(group, m)]: (
+                        common._call_children(parent, names, x)
                     ),
                     args,
                     device_info,
@@ -254,8 +261,8 @@ def _main(args: argparse.Namespace) -> None:
             for m in args.m_values:
                 timing, actual = _graph_timing(
                     torch,
-                    lambda parent=parent, names=names, x=inputs[(group, m)]: common._call_children(
-                        parent, names, x
+                    lambda parent=parent, names=names, x=inputs[(group, m)]: (
+                        common._call_children(parent, names, x)
                     ),
                     args,
                     device_info,
@@ -284,11 +291,13 @@ def _main(args: argparse.Namespace) -> None:
                     "pre_pr_main": plain[m],
                     "marlin_w4": marlin,
                     "machete_w4": machete,
-                    "speedup_vs_pre_pr_main": plain[m]["median_us"] / timing["median_us"],
+                    "speedup_vs_pre_pr_main": plain[m]["median_us"]
+                    / timing["median_us"],
                     "speedup_vs_marlin_w4": marlin["median_us"] / timing["median_us"],
                     "speedup_vs_machete_w4": machete["median_us"] / timing["median_us"],
                     "effective_tflops": logical_flops / (timing["median_us"] * 1e6),
-                    "better_than_last_benchmark": timing["median_us"] < plain[m]["median_us"],
+                    "better_than_last_benchmark": timing["median_us"]
+                    < plain[m]["median_us"],
                     "dense_oracle_error": error,
                 }
                 rows.append(row)
