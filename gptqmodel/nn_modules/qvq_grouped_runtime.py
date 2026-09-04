@@ -223,6 +223,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_qwen_composite_down_recovery_launches: int = 0
     h100_qwen_ordered_composite_down_recovery_launches: int = 0
     h100_qwen_linear_composite_recovery_launches: int = 0
+    h100_qwen_linear_multiblock_recovery_launches: int = 0
     h100_qwen_composite_input_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
@@ -282,6 +283,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_qwen_composite_down_recovery_launches": self.h100_qwen_composite_down_recovery_launches,
             "h100_qwen_ordered_composite_down_recovery_launches": self.h100_qwen_ordered_composite_down_recovery_launches,
             "h100_qwen_linear_composite_recovery_launches": self.h100_qwen_linear_composite_recovery_launches,
+            "h100_qwen_linear_multiblock_recovery_launches": self.h100_qwen_linear_multiblock_recovery_launches,
             "h100_qwen_composite_input_launches": self.h100_qwen_composite_input_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
@@ -761,6 +763,7 @@ class QVQHopperGroupedRuntime:
                     ),
                 )
                 self.telemetry.h100_qwen_linear_composite_recovery_launches += 1
+                self.telemetry.h100_qwen_linear_multiblock_recovery_launches += 1
                 self.telemetry.h100_fp16_recovery_store_launches += 1
                 outputs.append(
                     recovered.reshape(*x.shape[:-1], child.out_features).to(x.dtype)
