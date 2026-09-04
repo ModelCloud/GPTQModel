@@ -7,7 +7,7 @@
 
 static_assert(QVQ_P32_OPERATION_VERSION == 1);
 static_assert(QVQ_P32_ABI_VERSION == 1);
-static_assert(QVQ_P32_KERNEL_VERSION == 8);
+static_assert(QVQ_P32_KERNEL_VERSION == 9);
 static_assert(QVQ_P32_COMPILED_SM == 80);
 static_assert(QVQ_P32_TILE_SIZE == 16);
 static_assert(QVQ_P32_LEVEL_COUNT == 256);
