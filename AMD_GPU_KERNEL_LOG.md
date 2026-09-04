@@ -42,6 +42,20 @@ engineering comparison but is never presented as an official result.
 | PASS | Increase M32-M64 32x64 tile from 4 to 8 warps | All four rates at M32 and M64 passed | Median latency improved by 12.5%-15.7% in the final full sweep. Accepted. |
 | PASS (exploratory) | Full tuned requested M/rate sweep, K=N=4096 | All 52 cases passed; worst maximum absolute error `1.2397766e-5` | Every changed requested shape improved by 3.9%-33.3%. Reconstruct-plus-GEMM speedup was 3.78x-26.64x and peak effective throughput was 165.6 TFLOP/s. The same three foreign residents keep this result explicitly invalidated for official reporting. |
 | PASS | Tuned correctness and contract suite | 185/185 tests passed | Three-seed requested matrix, repeatability, adversarial inputs, alternate banks, dtypes, public dispatch, stream behavior, and contract rejection all pass. Python branch coverage remains 100% with the GPU-compiled Triton body covered by oracle tests. |
+| PASS | Synchronize with `origin/main` before the second tuning pass | 185/185 post-merge tests passed | Merged `origin/main` commit `4ef2089f` as merge commit `7667bd5e`; the fixed performance baseline remains AMD kernel commit `14928c96`, not the moving main branch. |
+| RESEARCH | Hopper and ROCm/AITER kernel review | Not applicable | Hopper's useful pattern was decoding one weight tile for multiple activation rows. AITER's gfx950 kernels reinforced shape-specific tiles, K-pipelining, XCD swizzling, and avoiding cache-policy assumptions. Hardware-FP4 AITER timings are not comparable to exact QVQ PGC16 lookup decoding and were not used as a baseline. |
+| PASS | Pairwise adjacent-column decode | Full 52-case square matrix passed | One trellis state and bank/hash recurrence now produces both adjacent level indices before `tl.interleave`. This is the main algebraic reduction and improved the exploratory square sweep by 1.11x-1.47x on its own. |
+| PASS | Shape-specialized dimensions, flattened grid/XCD swizzle, `matrix_instr_nonkdim=16`, and stage split | All focused rate/M cases passed | Static M/N remove runtime shape branches. Three compiler stages are selected through M64 and two thereafter; the flattened launch uses an eight-XCD permutation when it is bijective. |
+| PASS | Dedicated scalar GEMV for tiny M | All focused square and Qwen cases passed | A one-row FP32 vector reduction avoids mostly empty 16-row MFMA tiles. It is always selected at M1 and at M2/M4 only when `M*ceil(N/64)<=256`, preventing over-dispatch on wide Qwen projections. |
+| PASS | Shape-aware large-M output tile | All four affected rates passed | The 128-column tile remains selected from M2048 except for N<=1024 at M2048, where the 64-column tile restored occupancy and reduced latency from 0.240-0.291 ms to 0.153-0.204 ms. M4096 retains the 128-column tile. |
+| PASS, REJECTED | 128/256-column tiles outside the selected large-M regime | Accuracy passed | Wider tiles regressed small/mid M. BN256 also lost at M1024/M2048 and offered no material M4096 advantage. |
+| PASS, REJECTED | `.cg` input/weight cache policy and four compiler stages | Accuracy passed | Both changes regressed focused small-M timings and were reverted. |
+| FAIL, REJECTED | Load unique packed words once and recover lanes with `tl.gather` | Did not compile | Triton rejected the gather because its lowering was not warp-local. No timing was accepted. |
+| PASS (exploratory) | Qwen3.8-27B projection sweep against fixed commit `14928c96` | All 364 candidate cases passed; worst maximum absolute error `6.198883e-5` | Across seven official projection shapes, four P32 rates, and all 13 requested M values, every candidate case was faster: 1.003x minimum, 1.514x geometric mean, and 2.351x maximum. M1 geometric mean was 2.021x. The 10x target was not reached. Both baseline and candidate sweeps are invalidated by foreign GPU residency. |
+| PASS (exploratory) | Final K=N=4096 sweep against fixed commit `14928c96` | All 52 cases passed; worst maximum absolute error `1.239777e-5` | Every case improved: 1.022x minimum, 1.519x geometric mean, and 2.070x maximum. M1 geometric mean was 2.039x. |
+| PASS (exploratory) | ROCm Compute Profiler stages `sol` and `cu_ins` plus gfx950 ISA disassembly | Exact HSACO launches completed with the correct dynamic LDS allocation | At W3/M64/K=N=4096, pairwise stage-3 MFMA reduced static VALU 234 to 161 (31.20%), VGPRs 68 to 40 (41.18%), dynamic VALU 14.28M to 6.10M (57.31%), and dynamic VMEM 2.37M to 1.57M (33.52%); profiled median improved from 192.35 us to 85.42 us. The M1 GEMV has 208 static opcodes, 26 VGPRs, and no MFMA; its direct median improved from 189.30 us to 83.14 us (2.277x). The large-M stage-2 kernel reached 95.88% CU utilization. |
+| FAIL (profiler integration), FIXED | Direct `rocprof-compute` injection into the Triton Python process | Benchmark aborted before dispatch | ROCm and Triton's LLVM libraries registered `spirv-expand-step` twice. The corrected path loads the exact cached HSACO in a minimal HIP module launcher and preserves grid, block, LDS, and argument ABI. `rocprof-compute` 3.8.0, `rocprofv3`, and `llvm-objdump` were verified; the profiler analysis dependencies were installed in `/home/ubuntu/.venvs/rocprof-compute`. |
+| PASS | Final correctness and contract suite | 193/193 tests passed | Covers three seeds for every requested M/rate pair, ten repeat calls, adversarial inputs, alternate banks, FP16/FP32 output, public module dispatch, non-default stream behavior, launch/GEMV policy, and invalid contracts. |
 
 The initial exploratory sweep is stored in
 `artifacts/mi355x_p32/initial_gfx950.json`. The expanded sweep is stored in
@@ -51,13 +65,19 @@ context before rejecting newly arriving PIDs ahead of every timed case. Tuning
 experiments and the final full sweep are stored alongside it as
 `experiment_*.json` and `tuned_gfx950.json`.
 
+The second-pass final square sweep, Qwen3.8-27B candidate and fixed-baseline
+sweeps, pairwise experiment records, comparison summaries, and counter/ISA
+breakdown are stored as `final_gfx950.json`, `qwen38_27b_*_gfx950.json`,
+`experiment_*.json`, and `isa_profile_gfx950.json` in the same directory.
+
 ## Implementation notes
 
-The selected Triton kernel decodes the storage-neutral continuous-window P32
-layout in registers, applies packed binary bank selection and the exact PGC16
-mix, loads canonical FP16 levels, and accumulates with `tl.dot` into FP32. The
-integration dispatch is limited to ROCm `gfx950`, inference mode, FP16 input,
-V2B2-P32 vector size 2, and transition widths 4 through 7. The final launch
-policy uses 16x64 tiles through M16, 32x64 through M64, and 128x64 from M128,
-all with eight warps. Unsupported devices and formats retain the existing
-reference or CUDA paths.
+The selected Triton kernels decode the storage-neutral continuous-window P32
+layout in registers, apply packed binary bank selection and the exact PGC16
+mix once per adjacent output pair, and accumulate in FP32. A scalar GEMV path
+handles occupancy-safe tiny-M shapes; the MFMA path uses 16x64 tiles through
+M16, 32x64 through M64, 128x64 through M1024, and shape-aware 128x128 tiles at
+large M, all with eight warps. Dispatch remains limited to ROCm `gfx950`,
+inference mode, FP16 input, V2B2-P32 vector size 2, and transition widths 4
+through 7. Unsupported devices and formats retain the existing reference or
+CUDA paths.

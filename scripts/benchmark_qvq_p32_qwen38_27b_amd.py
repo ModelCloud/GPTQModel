@@ -127,7 +127,7 @@ def main() -> None:
                 "name": name,
                 "k": k,
                 "n": n,
-                "path": str(output),
+                "path": str(output.relative_to(args.output.parent)),
                 "benchmark_valid": component["benchmark_valid"],
             }
         )
