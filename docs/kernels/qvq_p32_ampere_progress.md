@@ -3334,6 +3334,15 @@ planar reference.  The wide-N branch was reverted before any timing; no
 performance claim is made.  Diagnostic run:
 `artifacts/a100_p32_window/v44_candidate_m16_linearqkv_wide_8000.json`.
 
+## v46 rejected M1 MLP down compile-time-K probe
+
+The M1 MLP down route `(K,N)=(17408,5120)` already uses static split 128.
+Adding `StaticK=17408` to this guarded scalar launch preserved exactness but
+regressed the W2.5 median by one CUDA event tick (`0.088064→0.089088 ms`),
+with no compensating rate improvement.  The source change was reverted before
+retention.  Diagnostic:
+`artifacts/a100_p32_window/v46_candidate_m1_mlpdown_statick_8000.json`.
+
 ## Reproduction
 
 ```bash
