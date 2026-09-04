@@ -217,6 +217,32 @@ def qvq_h100_ordered_split_count(
     return 0
 
 
+def qvq_h100_large_m_ordered_split_count(
+    *,
+    device_name: str,
+    compute_capability: tuple[int, int],
+    logical_rows: int,
+    in_features: int,
+    out_features: int,
+) -> int:
+    """Return the measured H100 large-M split for narrow Llama down."""
+
+    if (
+        device_name != "NVIDIA H100"
+        or compute_capability != (9, 0)
+        or (in_features, out_features) != (8192, 2048)
+        or logical_rows <= 16
+    ):
+        return 1
+    if logical_rows <= 64:
+        return 8
+    if logical_rows <= 128:
+        return 4
+    if logical_rows <= 256:
+        return 2
+    return 1
+
+
 def qvq_h100_grouped_ordered_split_counts(
     *,
     device_name: str,
@@ -678,9 +704,7 @@ def qvq_p32_window_wgmma_grouped_ordered_partials_packed(
         raise ValueError("grouped Hopper P32 input does not match its row-tiled plan")
     if not any(segment.split_count > 1 for segment in plan.segments):
         raise ValueError("ordered grouped partials require at least one split child")
-    return _QVQ_WGMMA_EXTENSION.op(
-        "p32_window_m16_tma_grouped_ordered_partials"
-    )(
+    return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma_grouped_ordered_partials")(
         input,
         payload.trellis,
         levels,
@@ -822,18 +846,12 @@ def qvq_p32_window_wgmma_single_large_m_packed(
     )
     rows = int(input.shape[0])
     if rows >= 64 and rows % 64 == 0:
-        output = qvq_p32_window_wgmma_grouped_reuse4_packed(
-            input, payload, levels
-        )
+        output = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
     elif rows >= 32 and rows % 32 == 0:
-        output = qvq_p32_window_wgmma_grouped_reuse2_packed(
-            input, payload, levels
-        )
+        output = qvq_p32_window_wgmma_grouped_reuse2_packed(input, payload, levels)
     else:
         output = (
-            qvq_p32_window_wgmma_grouped_ordered_packed(
-                input, payload, levels
-            )
+            qvq_p32_window_wgmma_grouped_ordered_packed(input, payload, levels)
             if split_count != 1
             else qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
         )
@@ -890,6 +908,7 @@ __all__ = [
     "QVQHopperGroupedP32Plan",
     "QVQHopperP32SegmentPlan",
     "qvq_h100_grouped_ordered_split_counts",
+    "qvq_h100_large_m_ordered_split_count",
     "qvq_h100_ordered_split_count",
     "qvq_p32_window_wgmma_group_plan",
     "qvq_p32_window_wgmma_grouped",

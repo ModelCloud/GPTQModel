@@ -21,7 +21,9 @@ from scripts import benchmark_qvq_a41_phase4_production as common
 def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bits", type=float, choices=(2, 2.5, 3, 3.5), default=3)
-    parser.add_argument("--group", choices=tuple(common.GROUPS), default="gate_up")
+    parser.add_argument(
+        "--group", choices=(*common.GROUPS, "full_mlp"), default="gate_up"
+    )
     parser.add_argument("--m", type=int, choices=(32, 64, 128, 256), default=64)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--replays", type=int, default=5)
@@ -39,48 +41,85 @@ def _main(args: argparse.Namespace) -> None:
 
     device_info = common._assert_h100(torch)
     device = torch.device("cuda:0")
-    names, widths, alt_ids = common.GROUPS[args.group]
-    shared_su = torch.ones(common.K, device=device, dtype=torch.float32)
-    children = tuple(
-        common._qvq_child(
-            torch,
-            name,
-            width,
-            args.bits,
-            alt_id,
-            93000 + index,
-            device,
-            shared_su,
-        )
-        for index, (name, width, alt_id) in enumerate(
-            zip(names, widths, alt_ids, strict=True)
-        )
-    )
-    for child in children:
-        child.SV.fill_(0.002)
-        child._dtype_cache_clear()
-    parent = common._projection_parent(torch, names, children)
-    installed = install_qvq_hopper_groups(
-        parent, qkv=args.group == "qkv", gate_up=args.group == "gate_up"
-    )
-    if installed[args.group] != 1:
-        raise RuntimeError(f"failed to install grouped runtime: {installed}")
-    input = (
-        torch.randn(
-            (args.m, common.K),
-            generator=torch.Generator(device=device).manual_seed(93100 + args.m),
-            device=device,
-        )
-        * 0.02
-    ).half()
+    if args.group == "full_mlp":
+        from scripts import benchmark_qvq_hopper_large_m_mlp as mlp_bench
 
-    def call():
-        return common._call_children(parent, names, input)
+        parent = mlp_bench._qvq_mlp(torch, args.bits, device)
+        children = (parent.gate_proj, parent.up_proj, parent.down_proj)
+        names = ("gate_proj", "up_proj", "down_proj")
+        widths = (mlp_bench.INTERMEDIATE, mlp_bench.INTERMEDIATE, mlp_bench.HIDDEN)
+        installed = install_qvq_hopper_groups(parent, qkv=False)
+        if installed != {"gate_up": 1}:
+            raise RuntimeError(f"failed to install grouped MLP runtime: {installed}")
+        input = (
+            torch.randn(
+                (args.m, common.K),
+                generator=torch.Generator(device=device).manual_seed(93100 + args.m),
+                device=device,
+            )
+            * 0.02
+        ).half()
+
+        def call():
+            return (parent(input),)
+
+        with torch.inference_mode():
+            gate = qvq_dense_oracle_forward(
+                parent.gate_proj, input, device=device
+            ).half()
+            up = qvq_dense_oracle_forward(parent.up_proj, input, device=device).half()
+            intermediate = torch.nn.functional.silu(gate) * up
+            expected = (
+                qvq_dense_oracle_forward(
+                    parent.down_proj, intermediate, device=device
+                ).half(),
+            )
+    else:
+        names, widths, alt_ids = common.GROUPS[args.group]
+        shared_su = torch.ones(common.K, device=device, dtype=torch.float32)
+        children = tuple(
+            common._qvq_child(
+                torch,
+                name,
+                width,
+                args.bits,
+                alt_id,
+                93000 + index,
+                device,
+                shared_su,
+            )
+            for index, (name, width, alt_id) in enumerate(
+                zip(names, widths, alt_ids, strict=True)
+            )
+        )
+        for child in children:
+            child.SV.fill_(0.002)
+            child._dtype_cache_clear()
+        parent = common._projection_parent(torch, names, children)
+        installed = install_qvq_hopper_groups(
+            parent, qkv=args.group == "qkv", gate_up=args.group == "gate_up"
+        )
+        if installed[args.group] != 1:
+            raise RuntimeError(f"failed to install grouped runtime: {installed}")
+        input = (
+            torch.randn(
+                (args.m, common.K),
+                generator=torch.Generator(device=device).manual_seed(93100 + args.m),
+                device=device,
+            )
+            * 0.02
+        ).half()
+
+        def call():
+            return common._call_children(parent, names, input)
+
+        with torch.inference_mode():
+            expected = tuple(
+                qvq_dense_oracle_forward(child, input, device=device)
+                for child in children
+            )
 
     with torch.inference_mode():
-        expected = tuple(
-            qvq_dense_oracle_forward(child, input, device=device) for child in children
-        )
         eager = call()
         max_abs = max(
             float((actual.float() - reference.float()).abs().max().item())
@@ -98,9 +137,7 @@ def _main(args: argparse.Namespace) -> None:
             graph.replay()
         torch.cuda.synchronize(device)
         torch.cuda.cudart().cudaProfilerStart()
-        torch.cuda.nvtx.range_push(
-            f"qvq_large_m_{args.group}_w{args.bits:g}_m{args.m}"
-        )
+        torch.cuda.nvtx.range_push(f"qvq_large_m_{args.group}_w{args.bits:g}_m{args.m}")
         for _ in range(args.replays):
             graph.replay()
         torch.cuda.nvtx.range_pop()

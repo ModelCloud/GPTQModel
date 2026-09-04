@@ -18,6 +18,7 @@ from gptqmodel.quantization.qvq_codecs import (
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.utils import qvq_wgmma_cuda
 from gptqmodel.utils.qvq_wgmma_cuda import (
+    qvq_h100_large_m_ordered_split_count,
     qvq_p32_window_wgmma_group_plan,
     qvq_p32_window_wgmma_grouped,
     qvq_p32_window_wgmma_grouped_ordered_packed,
@@ -29,6 +30,51 @@ from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_m16_tma_ordered_split,
     qvq_pack_p32_window_hopper_group,
 )
+
+
+@pytest.mark.parametrize(
+    ("logical_rows", "expected"),
+    (
+        (17, 8),
+        (32, 8),
+        (64, 8),
+        (65, 4),
+        (128, 4),
+        (129, 2),
+        (256, 2),
+        (257, 1),
+        (4096, 1),
+    ),
+)
+def test_h100_large_m_down_split_policy(logical_rows, expected):
+    assert (
+        qvq_h100_large_m_ordered_split_count(
+            device_name="NVIDIA H100",
+            compute_capability=(9, 0),
+            logical_rows=logical_rows,
+            in_features=8192,
+            out_features=2048,
+        )
+        == expected
+    )
+
+
+def test_h100_large_m_down_split_policy_fails_closed_for_other_devices_and_shapes():
+    common = {
+        "compute_capability": (9, 0),
+        "logical_rows": 64,
+        "in_features": 8192,
+        "out_features": 2048,
+    }
+    assert (
+        qvq_h100_large_m_ordered_split_count(device_name="NVIDIA H200", **common) == 1
+    )
+    assert (
+        qvq_h100_large_m_ordered_split_count(
+            device_name="NVIDIA H100", **(common | {"out_features": 4096})
+        )
+        == 1
+    )
 
 
 def test_hopper_group_plan_retains_child_boundaries_and_policy():
@@ -295,9 +341,7 @@ def test_grouped_hopper_is_bit_exact_to_plain_children_and_bounded_by_dense(
 
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
 @pytest.mark.parametrize("logical_m", (32, 64, 128, 256))
-def test_grouped_hopper_large_m_is_exact_to_m16_tiles_and_graph_safe(
-    bits, logical_m
-):
+def test_grouped_hopper_large_m_is_exact_to_m16_tiles_and_graph_safe(bits, logical_m):
     device = _h100_device()
     if device is None:
         pytest.skip("requires the exclusive H100 validation device")
