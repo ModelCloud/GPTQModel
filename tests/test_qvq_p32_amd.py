@@ -572,14 +572,18 @@ def test_qvq_linear_amd_folded_cache_reuses_and_invalidates_auxiliary_mutation()
     first = layer(x)
     window = layer._qvq_cuda_window_cache[3]
     first_folded = window._qvq_p32_amd_folded_cache[1]
+    first_hot = layer._qvq_amd_folded_hot_cache
+    assert first_hot is not None
     repeated = layer(x)
     assert window._qvq_p32_amd_folded_cache[1] is first_folded
+    assert layer._qvq_amd_folded_hot_cache is first_hot
     assert torch.equal(first, repeated)
 
     layer.SU.mul_(0.875)
     changed = layer(x)
     second_folded = window._qvq_p32_amd_folded_cache[1]
     assert second_folded is not first_folded
+    assert layer._qvq_amd_folded_hot_cache is not first_hot
     inner = layer.get_inner_weight_tensor()
     reference = matmul_hadU(x.float() * layer.SU) @ inner
     reference = matmul_hadU(reference) * layer.SV + layer.bias.float()

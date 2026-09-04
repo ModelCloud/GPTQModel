@@ -324,6 +324,64 @@ def _qvq_p32_folded_weight(
 
 
 @triton.jit
+def _qvq_p32_folded_gemv_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
+    input_ptr,
+    weight_ptr,
+    output_ptr,
+    size_k: tl.constexpr,
+    block_n: tl.constexpr,
+    block_k: tl.constexpr,
+):
+    """Multiply one row by the cached physical N-by-K folded weight."""
+
+    rows = tl.program_id(0) * block_n + tl.arange(0, block_n)
+    accumulator = tl.zeros((block_n,), dtype=tl.float32)
+    for k_block in range(size_k // block_k):
+        columns = k_block * block_k + tl.arange(0, block_k)
+        activation = tl.load(input_ptr + columns).to(tl.float32)
+        weight = tl.load(weight_ptr + rows[:, None] * size_k + columns[None, :]).to(tl.float32)
+        accumulator += tl.sum(weight * activation[None, :], axis=1)
+    tl.store(output_ptr + rows, accumulator)
+
+
+def _qvq_p32_folded_execute(
+    x: torch.Tensor,
+    operand: torch.Tensor,
+    *,
+    out_features: int,
+    output_fp32: bool,
+) -> torch.Tensor:
+    """Run the measured folded-cache kernel after its operands are validated."""
+
+    m, k = x.shape
+    n = out_features
+    if m == 1 and not output_fp32 and qvq_p32_amd_folded_shape_supported(k, n):
+        output = torch.empty((1, n), device=x.device, dtype=x.dtype)
+        if n == 1024:
+            block_n, block_k = 16, 256
+        elif n == 12288:
+            block_n, block_k = 8, 256
+        elif n == 10240:
+            block_n, block_k = 8, 512
+        else:
+            block_n, block_k = 4, 512
+        _qvq_p32_folded_gemv_gfx950_kernel[(n // block_n,)](
+            x,
+            # operand is a K-by-N transpose view over physical N-by-K storage.
+            operand,
+            output,
+            size_k=k,
+            block_n=block_n,
+            block_k=block_k,
+            num_warps=4,
+            num_stages=1,
+            waves_per_eu=0,
+        )
+        return output
+    return torch.mm(x, operand, out_dtype=torch.float32 if output_fp32 else x.dtype)
+
+
+@triton.jit
 def _qvq_p32_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
     input_ptr,
     trellis_ptr,
@@ -695,13 +753,54 @@ def qvq_p32_amd_folded(
     bits = normalize_qvq_rate(bits)
     if bits not in _P32_RATES:
         raise ValueError("AMD folded P32 supports rates W2, W2.5, W3, and W3.5")
-    transition_bits = qvq_transition_bits(bits, vector_size=2)
     out_features = _integer_argument("out_features", out_features)
     bank_alt_id = _integer_argument("bank_alt_id", bank_alt_id)
     if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
         raise TypeError("AMD folded P32 transform-axis flags must be boolean")
     if not isinstance(output_fp32, bool):
         raise TypeError("output_fp32 must be boolean")
+
+    # The first invocation performs the full public-API validation below.
+    # A mutation-aware cache hit can avoid device-property queries, shape
+    # reconstruction, and a second cache-key tuple/zip on every token.
+    cached = getattr(window, "_qvq_p32_amd_folded_cache", None)
+    if (
+        isinstance(cached, tuple)
+        and len(cached) == 3
+        and x.ndim == 2
+        and x.dtype == torch.float16
+        and x.is_contiguous()
+    ):
+        cached_key, _, operand = cached
+        if (
+            isinstance(cached_key, tuple)
+            and len(cached_key) == 15
+            and x.device == window.device
+            and cached_key[0] == window._version
+            and cached_key[1] is levels
+            and cached_key[2] == levels._version
+            and cached_key[3] is bank_ids
+            and cached_key[4] == bank_ids._version
+            and cached_key[5] == bits
+            and cached_key[6] == x.shape[1]
+            and cached_key[7] == out_features
+            and cached_key[8] == bank_alt_id
+            and cached_key[9] is su
+            and cached_key[10] == su._version
+            and cached_key[11] is sv
+            and cached_key[12] == sv._version
+            and cached_key[13] == input_hadamard
+            and cached_key[14] == output_hadamard
+        ):
+            window._qvq_p32_amd_dense_cache = None
+            return _qvq_p32_folded_execute(
+                x,
+                operand,
+                out_features=out_features,
+                output_fp32=output_fp32,
+            )
+
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
     if not qvq_p32_amd_supported(x.device):
         raise RuntimeError("AMD folded P32 requires a ROCm gfx950 device")
     if x.ndim != 2 or window.ndim != 2:
@@ -754,7 +853,12 @@ def qvq_p32_amd_folded(
         input_hadamard=input_hadamard,
         output_hadamard=output_hadamard,
     )
-    return torch.mm(x, operand, out_dtype=torch.float32 if output_fp32 else x.dtype)
+    return _qvq_p32_folded_execute(
+        x,
+        operand,
+        out_features=out_features,
+        output_fp32=output_fp32,
+    )
 
 
 __all__ = [
