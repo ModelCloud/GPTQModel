@@ -724,6 +724,8 @@ def qvq_cuda_viterbi_v2_segment_banked(
 def qvq_cuda_hadamard(
     x: torch.Tensor,
     *,
+    input_scale: torch.Tensor | None = None,
+    input_rounding_mode: int = 0,
     pre_scale: torch.Tensor | None = None,
     post_scale: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
@@ -747,8 +749,14 @@ def qvq_cuda_hadamard(
 
     if x.device.type != "cuda":
         raise ValueError("QVQ CUDA Hadamard requires a CUDA input")
-    if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise TypeError(f"QVQ CUDA Hadamard requires float16, bfloat16, or float32 x, got {x.dtype}")
+    fp8_dtype = getattr(torch, "float8_e4m3fn", None)
+    scaled_fp8 = input_scale is not None
+    if isinstance(input_rounding_mode, bool) or not isinstance(input_rounding_mode, int):
+        raise TypeError("QVQ CUDA Hadamard input_rounding_mode must be an integer")
+    if x.dtype not in (torch.float16, torch.bfloat16, torch.float32) and not (
+        scaled_fp8 and fp8_dtype is not None and x.dtype == fp8_dtype
+    ):
+        raise TypeError(f"QVQ CUDA Hadamard requires float16, bfloat16, float32, or scaled E4M3 x, got {x.dtype}")
     if x.dim() < 1 or not x.is_contiguous():
         raise ValueError("QVQ CUDA Hadamard requires a contiguous tensor with rank >= 1")
     n = x.shape[-1]
@@ -756,8 +764,8 @@ def qvq_cuda_hadamard(
         raise ValueError(f"QVQ CUDA Hadamard requires a power-of-two last dim in [2, 16384], got {n}")
     if scale_mode not in (0, 1, 2, 3, 4, 5):
         raise ValueError("QVQ CUDA Hadamard scale_mode must be one of 0, 1, 2, 3, 4, or 5")
-    if scale_mode == 2 and x.dtype != torch.float16:
-        raise TypeError("QVQ CUDA Hadamard range-safe pre-scale mode 2 requires float16 x")
+    if scale_mode == 2 and x.dtype != torch.float16 and not scaled_fp8:
+        raise TypeError("QVQ CUDA Hadamard range-safe pre-scale mode 2 requires float16 or scaled E4M3 x")
     if scale_mode in (3, 4) and x.dtype != torch.float32:
         raise TypeError("QVQ CUDA Hadamard FP16-emulation modes 3/4 require float32 x")
     if not isinstance(pad_to_16, bool):
@@ -774,10 +782,38 @@ def qvq_cuda_hadamard(
         raise ValueError(
             "FP16 QVQ CUDA Hadamard output requires float32 x, scale mode 3/4, and no padding"
         )
+    if scaled_fp8:
+        if fp8_dtype is None or x.dtype != fp8_dtype:
+            raise TypeError("QVQ CUDA Hadamard input_scale requires torch.float8_e4m3fn x")
+        rows = x.numel() // n
+        if (
+            input_scale.device != x.device
+            or input_scale.dtype != torch.float32
+            or tuple(input_scale.shape) != (*x.shape[:-1], 1)
+            or not input_scale.is_contiguous()
+        ):
+            raise ValueError("QVQ CUDA Hadamard input_scale must be contiguous FP32 with one value per row")
+        if input_scale.numel() != rows:
+            raise ValueError("QVQ CUDA Hadamard input_scale row count does not match x")
+        if scale_mode not in (1, 2) or pre_scale is None or post_scale is not None or bias is not None or output_fp16:
+            raise ValueError(
+                "scaled E4M3 QVQ Hadamard requires input mode 1/2 with pre_scale and no post_scale, bias, or output_fp16"
+            )
+        if pre_scale.dtype != torch.float16:
+            raise TypeError("scaled E4M3 QVQ Hadamard requires float16 pre_scale")
+        if input_rounding_mode not in (0, 1):
+            raise ValueError("scaled E4M3 QVQ Hadamard input_rounding_mode must be 0 (FP16) or 1 (BF16)")
+    elif input_rounding_mode != 0:
+        raise ValueError("QVQ CUDA Hadamard input_rounding_mode requires input_scale")
     if torch.cuda.get_device_capability(x.device) < (8, 0):
         raise RuntimeError("QVQ CUDA Hadamard requires a compute capability >= 8.0 device")
+    if scaled_fp8 and not (
+        torch.cuda.get_device_capability(x.device) >= (9, 0)
+        or torch.cuda.get_device_capability(x.device) == (8, 9)
+    ):
+        raise RuntimeError("scaled E4M3 QVQ Hadamard requires NVIDIA compute capability 8.9 or newer")
     return _qvq_cuda_hadamard_op()(
-        x, pre_scale, post_scale, bias, scale_mode, pad_to_16, output_fp16
+        x, pre_scale, post_scale, bias, scale_mode, pad_to_16, output_fp16, input_scale, input_rounding_mode
     )
 
 

@@ -67,7 +67,7 @@ QVQ_FORMATS = tuple(
         FORMAT.QVQ_V2B2_P32,
         FORMAT.QVQ_V2B4_P64,
     )
-)
+) + ("v2b2-g32",)
 DEFAULT_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
 
 
@@ -139,6 +139,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--bits", type=float, default=2.0)
     parser.add_argument("--format", choices=QVQ_FORMATS, default=FORMAT.QVQ.value)
+    parser.add_argument(
+        "--activation-quantization",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Target dynamic per-token NVIDIA FP8 E4M3 input activations during "
+            "calibration and inference (QVQ V2B2-P32/v2b2-g32 at W2--W3.5 only)."
+        ),
+    )
     parser.add_argument("--bank-count", type=int, choices=(1, 2, 4))
     parser.add_argument("--rounding", choices=("block_ldlq", "yaqa"), default="yaqa")
     parser.add_argument(
@@ -339,7 +348,7 @@ def aggregate_qvq_process_telemetry(
 
 
 def _automatic_bank_count(format_value: str) -> int:
-    if format_value == FORMAT.QVQ_V2B2_P32.value:
+    if format_value in {FORMAT.QVQ_V2B2_P32.value, "v2b2-g32"}:
         return 2
     if format_value in {FORMAT.QVQ_V4.value, FORMAT.QVQ_V2B4_P64.value}:
         return 4
@@ -392,10 +401,11 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
     )
     return QVQConfig(
         bits=args.bits,
-        format=FORMAT(args.format),
+        format=args.format,
         bank_count=args.bank_count or _automatic_bank_count(args.format),
         rounding=args.rounding,
         device=args.device,
+        activation_quantization=args.activation_quantization,
         propagated_bank_selection=args.propagated_bank_selection,
         yaqa=yaqa,
         output_alignment=alignment,

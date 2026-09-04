@@ -19,6 +19,12 @@ import torch.nn.functional as F
 from torch import nn
 from torch.utils.checkpoint import checkpoint
 
+from .qvq_activation import (
+    fake_quantize_qvq_fp8_activation,
+    normalize_qvq_fp8_activation_format,
+    normalize_qvq_fp8_activation_scale_method,
+)
+
 YAQA_PAPER_REGULARIZATION = 1e-4
 YAQA_DEFAULT_REGULARIZATION = 0.05
 YAQA_DEFAULT_RATE_REGULARIZATION = (
@@ -294,6 +300,8 @@ def capture_yaqa_sketch_b(
     gram_strategy: str = "batched",
     gram_projection_rank: int | None = None,
     chat_template_config=None,
+    activation_quantization=None,
+    activation_modules: dict[str, nn.Linear] | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, Any]]:
     """Collect exact per-sequence YAQA Sketch-B factors from full-model score gradients."""
 
@@ -309,6 +317,31 @@ def capture_yaqa_sketch_b(
         raise TypeError("YAQA Sketch B targets must all be linear modules")
     if len({id(module) for module in modules.values()}) != len(modules):
         raise ValueError("YAQA Sketch B target modules must be unique")
+    if activation_quantization is None:
+        activation_format = None
+        activation_scale_method = None
+        if activation_modules is not None:
+            raise ValueError("YAQA activation modules require an activation-quantization config")
+    else:
+        if isinstance(activation_quantization, dict):
+            activation_bits = activation_quantization.get("bits", 8)
+            activation_format = activation_quantization.get("format")
+            activation_scale_method = activation_quantization.get("scale_method")
+        else:
+            activation_bits = getattr(activation_quantization, "bits", 8)
+            activation_format = getattr(activation_quantization, "format", None)
+            activation_scale_method = getattr(activation_quantization, "scale_method", None)
+        if activation_bits != 8:
+            raise ValueError("YAQA QVQ activation quantization requires 8 bits")
+        activation_format = normalize_qvq_fp8_activation_format(activation_format)
+        activation_scale_method = normalize_qvq_fp8_activation_scale_method(activation_scale_method)
+        activation_modules = modules if activation_modules is None else activation_modules
+        if not activation_modules or any(not isinstance(module, nn.Linear) for module in activation_modules.values()):
+            raise TypeError("YAQA activation-quantization targets must be a nonempty linear-module dictionary")
+        if len({id(module) for module in activation_modules.values()}) != len(activation_modules):
+            raise ValueError("YAQA activation-quantization target modules must be unique")
+        if not set(modules).issubset(activation_modules):
+            raise ValueError("YAQA Sketch-B targets must be included in the activation-quantization module set")
     if progress_callback is not None and not callable(progress_callback):
         raise TypeError("YAQA Sketch B progress callback must be callable")
     if (
@@ -421,6 +454,8 @@ def capture_yaqa_sketch_b(
     active_calls: set[str] = set()
     tensor_hook_handles = []
     module_hook_handles = []
+    activation_hook_handles = []
+    activation_errors: dict[str, dict[str, Any]] = {}
     parameters = tuple(model.parameters())
     parameter_requires_grad = tuple(parameter.requires_grad for parameter in parameters)
     generator = torch.Generator(device=device).manual_seed(seed)
@@ -511,6 +546,57 @@ def capture_yaqa_sketch_b(
             input_accumulators[module_name] = input_update.contiguous()
             output_accumulators[module_name] = output_update.contiguous()
         sequence_counts[module_name] += batch_sequences
+
+    if activation_format is not None:
+        assert activation_modules is not None
+
+        for activation_name, activation_module in activation_modules.items():
+
+            def activation_pre_hook(_module, args, module_name=activation_name):
+                if not args:
+                    raise ValueError(f"YAQA module {module_name} received no positional activation input")
+                source = _first_tensor(args)
+                if not source.is_floating_point():
+                    raise TypeError(f"YAQA module {module_name} activation input must be floating point")
+                _, scale, dequantized = fake_quantize_qvq_fp8_activation(
+                    source,
+                    format=activation_format,
+                    scale_method=activation_scale_method,
+                    straight_through=True,
+                    validate=False,
+                )
+                if not _YAQA_CHECKPOINT_RECOMPUTING.get():
+                    source_fp32 = source.detach().to(torch.float32)
+                    error = dequantized.detach().to(torch.float32) - source_fp32
+                    update = {
+                        "elements": source.numel(),
+                        "source_square_sum": source_fp32.square().sum(),
+                        "error_square_sum": error.square().sum(),
+                        "maximum_absolute_error": error.abs().amax(),
+                        "minimum_scale": scale.amin(),
+                        "maximum_scale": scale.amax(),
+                        "finite": torch.isfinite(source_fp32).all() & torch.isfinite(dequantized).all(),
+                    }
+                    accumulated = activation_errors.get(module_name)
+                    if accumulated is None:
+                        activation_errors[module_name] = update
+                    else:
+                        accumulated["elements"] += update["elements"]
+                        accumulated["source_square_sum"].add_(update["source_square_sum"])
+                        accumulated["error_square_sum"].add_(update["error_square_sum"])
+                        accumulated["maximum_absolute_error"] = torch.maximum(
+                            accumulated["maximum_absolute_error"], update["maximum_absolute_error"]
+                        )
+                        accumulated["minimum_scale"] = torch.minimum(
+                            accumulated["minimum_scale"], update["minimum_scale"]
+                        )
+                        accumulated["maximum_scale"] = torch.maximum(
+                            accumulated["maximum_scale"], update["maximum_scale"]
+                        )
+                        accumulated["finite"].logical_and_(update["finite"])
+                return (dequantized, *args[1:])
+
+            activation_hook_handles.append(activation_module.register_forward_pre_hook(activation_pre_hook))
 
     for name, module in modules.items():
 
@@ -679,6 +765,8 @@ def capture_yaqa_sketch_b(
             handle.remove()
         for handle in module_hook_handles:
             handle.remove()
+        for handle in activation_hook_handles:
+            handle.remove()
         for parameter, requires_grad in zip(parameters, parameter_requires_grad):
             parameter.requires_grad_(requires_grad)
         if previous_fp32_precision is not None:
@@ -738,6 +826,60 @@ def capture_yaqa_sketch_b(
 
     input_factor_elements = sum(factor.numel() for factor in input_hessians.values())
     output_factor_elements = sum(factor.numel() for factor in output_hessians.values())
+    activation_error_summary = None
+    if activation_format is not None:
+        missing_activation_modules = set(activation_modules or {}) - set(activation_errors)
+        if missing_activation_modules:
+            raise ValueError(
+                f"YAQA full-model forward did not execute activation-quantization targets "
+                f"{sorted(missing_activation_modules)}"
+            )
+        module_summaries = {}
+        total_elements = 0
+        total_source_square = 0.0
+        total_error_square = 0.0
+        maximum_absolute_error = 0.0
+        minimum_scale = math.inf
+        maximum_scale = 0.0
+        for name, accumulated in activation_errors.items():
+            if not bool(accumulated["finite"].item()):
+                raise ValueError(f"YAQA module {name} produced non-finite A8 calibration values")
+            elements = int(accumulated["elements"])
+            source_square = float(accumulated["source_square_sum"].item())
+            error_square = float(accumulated["error_square_sum"].item())
+            module_maximum_error = float(accumulated["maximum_absolute_error"].item())
+            module_minimum_scale = float(accumulated["minimum_scale"].item())
+            module_maximum_scale = float(accumulated["maximum_scale"].item())
+            module_summaries[name] = {
+                "elements": elements,
+                "rmse": math.sqrt(error_square / max(1, elements)),
+                "relative_rmse": math.sqrt(
+                    error_square / max(source_square, torch.finfo(torch.float32).tiny)
+                ),
+                "maximum_absolute_error": module_maximum_error,
+                "minimum_scale": module_minimum_scale,
+                "maximum_scale": module_maximum_scale,
+            }
+            total_elements += elements
+            total_source_square += source_square
+            total_error_square += error_square
+            maximum_absolute_error = max(maximum_absolute_error, module_maximum_error)
+            minimum_scale = min(minimum_scale, module_minimum_scale)
+            maximum_scale = max(maximum_scale, module_maximum_scale)
+        activation_error_summary = {
+            "bits": 8,
+            "format": activation_format,
+            "scale_method": activation_scale_method,
+            "elements": total_elements,
+            "rmse": math.sqrt(total_error_square / max(1, total_elements)),
+            "relative_rmse": math.sqrt(
+                total_error_square / max(total_source_square, torch.finfo(torch.float32).tiny)
+            ),
+            "maximum_absolute_error": maximum_absolute_error,
+            "minimum_scale": minimum_scale,
+            "maximum_scale": maximum_scale,
+            "modules": module_summaries,
+        }
     return (
         input_hessians,
         output_hessians,
@@ -781,6 +923,7 @@ def capture_yaqa_sketch_b(
             "factor_storage_bytes": (input_factor_elements + output_factor_elements) * 4,
             "tf32": False,
             "seed": seed,
+            "activation_quantization_error": activation_error_summary,
         },
     )
 

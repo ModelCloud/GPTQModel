@@ -13,6 +13,8 @@ import torch
 from ...adapter.adapter import Adapter
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
+from ...quantization.config import QVQActivationConfig, _normalize_qvq_activation_config
+from ...quantization.dtype import device_supports_native_fp8
 from ...quantization.qvq import (
     QVQ_BITS,
     pack_qvq_bank_ids,
@@ -21,6 +23,10 @@ from ...quantization.qvq import (
     repack_p32_planar_to_window,
     unpack_qvq_bank_ids,
     unpack_qvq_binary_bank_ids,
+)
+from ...quantization.qvq_activation import (
+    dequantize_qvq_fp8_activation,
+    fake_quantize_qvq_fp8_activation,
 )
 from ...quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
 from ...quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
@@ -77,6 +83,8 @@ def _qvq_fp16_emulated_hadamard_fallback(
 def _qvq_hadamard_fused(
     x: torch.Tensor,
     *,
+    input_scale: torch.Tensor | None = None,
+    input_rounding_mode: int = 0,
     pre_scale: torch.Tensor | None = None,
     post_scale: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
@@ -93,6 +101,21 @@ def _qvq_hadamard_fused(
     """
 
     n = x.shape[-1]
+    if input_scale is not None:
+        fp8_dtype = getattr(torch, "float8_e4m3fn", None)
+        if fp8_dtype is None or x.dtype != fp8_dtype:
+            raise TypeError("scaled QVQ A8 Hadamard input must use torch.float8_e4m3fn")
+        if (
+            input_scale.dtype != torch.float32
+            or input_scale.device != x.device
+            or input_scale.shape != (*x.shape[:-1], 1)
+            or not input_scale.is_contiguous()
+        ):
+            raise ValueError("QVQ A8 Hadamard scale must be contiguous FP32 with one value per input row")
+        if input_rounding_mode not in (0, 1):
+            raise ValueError("QVQ A8 Hadamard input rounding mode must be 0 (FP16) or 1 (BF16)")
+    elif input_rounding_mode != 0:
+        raise ValueError("QVQ A8 Hadamard input rounding mode requires input_scale")
     if x.device.type == "mps" and pre_scale is not None:
         # Keep x*SU in FP32 until normalization; Metal GEMV narrows only the
         # already range-reduced transform result to FP16.
@@ -118,7 +141,10 @@ def _qvq_hadamard_fused(
             )
     if (
         x.device.type == "cuda"
-        and x.dtype in (torch.float16, torch.float32)
+        and (
+            x.dtype in (torch.float16, torch.float32)
+            or input_scale is not None
+        )
         and x.is_contiguous()
         and n >= 2
         and n & (n - 1) == 0
@@ -133,6 +159,8 @@ def _qvq_hadamard_fused(
         )
         return qvq_cuda_hadamard(
             x,
+            input_scale=input_scale,
+            input_rounding_mode=input_rounding_mode,
             pre_scale=pre_scale,
             post_scale=post_scale,
             bias=bias,
@@ -140,6 +168,11 @@ def _qvq_hadamard_fused(
             pad_to_16=pad_to_16,
             output_fp16=output_fp16,
         )
+    if input_scale is not None:
+        source_dtype = torch.bfloat16 if input_rounding_mode == 1 else torch.float16
+        x = dequantize_qvq_fp8_activation(x, input_scale, dtype=source_dtype)
+        if pre_scale is not None:
+            x = x.to(pre_scale.dtype)
     if pad_to_16 or output_fp16:
         raise RuntimeError("requested QVQ Hadamard output specialization requires the native CUDA path")
     if x.device.type == "cuda" and x.dtype == torch.float32 and scale_mode in (3, 4):
@@ -257,6 +290,7 @@ class QVQLinear(BaseQuantLinear):
         dual_v2: bool = False,
         v2b4_p64: bool = False,
         v2b2_p32: bool = False,
+        activation_quantization: QVQActivationConfig | dict | bool | None = None,
         input_hadamard: bool = True,
         output_hadamard: bool = True,
         **kwargs,
@@ -332,6 +366,11 @@ class QVQLinear(BaseQuantLinear):
         if v2b2_p32 and (vector_size != 2 or trellis_window != 16 or bank_count != 2 or self.bits > 3.5):
             raise ValueError("QVQ V2B2-P32 requires vector_size=2, trellis_window=16, bank_count=2, and W1-W3.5")
         self.v2b2_p32 = v2b2_p32
+        self.activation_quantization = _normalize_qvq_activation_config(activation_quantization)
+        if self.activation_quantization is not None and (
+            not self.v2b2_p32 or self.bits not in (2, 2.5, 3, 3.5)
+        ):
+            raise ValueError("QVQ A8 requires V2B2-P32 weights at rates W2 through W3.5")
         if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
             raise TypeError("QVQ transform-axis flags must be bools")
         self.input_hadamard = input_hadamard
@@ -560,6 +599,7 @@ class QVQLinear(BaseQuantLinear):
         dual_v2: bool = False,
         v2b4_p64: bool = False,
         v2b2_p32: bool = False,
+        activation_quantization: QVQActivationConfig | dict | bool | None = None,
         input_hadamard: bool = True,
         output_hadamard: bool = True,
     ) -> QVQLinear:
@@ -576,6 +616,7 @@ class QVQLinear(BaseQuantLinear):
             dual_v2=dual_v2,
             v2b4_p64=v2b4_p64,
             v2b2_p32=v2b2_p32,
+            activation_quantization=activation_quantization,
             input_hadamard=input_hadamard,
             output_hadamard=output_hadamard,
         )
@@ -1106,6 +1147,40 @@ class QVQLinear(BaseQuantLinear):
             )
         return self._reference_inner_forward(x)
 
+    def _prepare_activation_input(
+        self,
+        x_2d: torch.Tensor,
+        compute_dtype: torch.dtype,
+        *,
+        straight_through: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, int]:
+        """Apply the checkpoint's A8 contract and retain FP8 for the fused CUDA transform."""
+
+        config = self.activation_quantization
+        if config is None:
+            return x_2d.to(compute_dtype), None, 0
+        quantized, scale, dequantized = fake_quantize_qvq_fp8_activation(
+            x_2d,
+            format=config.format,
+            scale_method=config.scale_method,
+            straight_through=straight_through,
+            # Avoid a device-to-host synchronization in the inference hot path.
+            # Calibration validates finite source activations before installing
+            # a checkpoint; runtime non-finites retain ordinary propagation.
+            validate=straight_through or x_2d.device.type == "cpu",
+        )
+        native_fp8_transform = (
+            not straight_through
+            and self.input_hadamard
+            and x_2d.device.type == "cuda"
+            and compute_dtype == torch.float16
+            and device_supports_native_fp8(x_2d.device)
+        )
+        if native_fp8_transform:
+            input_rounding_mode = 1 if x_2d.dtype == torch.bfloat16 else 0
+            return quantized, scale, input_rounding_mode
+        return dequantized.to(compute_dtype), None, 0
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1] != self.in_features:
             raise ValueError(
@@ -1119,7 +1194,7 @@ class QVQLinear(BaseQuantLinear):
             return state.consume(consumer_index, module_name, self, x)
         input_dtype = x.dtype
         compute_dtype = _qvq_compute_dtype(input_dtype, x.device.type)
-        x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
+        x_2d = x.reshape(-1, self.in_features)
 
         # The CUDA inner kernel accumulates and returns FP32. Preserve that
         # range through the output Hadamard/SV epilogue, then round only the
@@ -1184,10 +1259,13 @@ class QVQLinear(BaseQuantLinear):
         if x.numel() == 0:
             return x
         compute_dtype = _qvq_compute_dtype(x.dtype, x.device.type)
-        x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
+        x_2d = x.reshape(-1, self.in_features)
+        x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(x_2d, compute_dtype)
         if self.input_hadamard:
             transformed = _qvq_hadamard_fused(
                 x_2d,
+                input_scale=input_scale,
+                input_rounding_mode=input_rounding_mode,
                 pre_scale=self._cached_cast("SU", compute_dtype),
                 scale_mode=(
                     2
@@ -1269,6 +1347,11 @@ class QVQLinear(BaseQuantLinear):
         )
 
     def _forward_compute_dtype(self, x_2d: torch.Tensor, compute_dtype: torch.dtype) -> torch.Tensor:
+        x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(
+            x_2d,
+            compute_dtype,
+            straight_through=self.training,
+        )
         if self.training:
             # Keep the differentiable Python butterfly path for the reference
             # forward used in training.
@@ -1305,6 +1388,8 @@ class QVQLinear(BaseQuantLinear):
             if self.input_hadamard:
                 transformed = _qvq_hadamard_fused(
                     x_2d,
+                    input_scale=input_scale,
+                    input_rounding_mode=input_rounding_mode,
                     pre_scale=self._cached_cast("SU", compute_dtype),
                     scale_mode=(
                         2
@@ -1362,12 +1447,16 @@ class QVQLinear(BaseQuantLinear):
         or subtly reordering QVQLinear's numerical contract.
         """
 
+        x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(x_2d, compute_dtype)
+
         if not self.input_hadamard:
             if pad_to_16:
                 raise RuntimeError("direct padded input requires an input Hadamard")
             return x_2d * self._cached_cast("SU", compute_dtype)
         return _qvq_hadamard_fused(
             x_2d,
+            input_scale=input_scale,
+            input_rounding_mode=input_rounding_mode,
             pre_scale=self._cached_cast("SU", compute_dtype),
             scale_mode=(
                 2
@@ -1454,7 +1543,14 @@ def qvq_dense_oracle_forward(
                     None if layer.bank_alt_id is None else layer.bank_alt_id.to(device=compute_device)
                 ),
             ).to(dtype=torch.float32)
-            x_2d = x.to(device=compute_device, dtype=torch.float32).reshape(-1, layer.in_features)
+            x_2d = x.to(device=compute_device).reshape(-1, layer.in_features)
+            if layer.activation_quantization is not None:
+                _, _, x_2d = fake_quantize_qvq_fp8_activation(
+                    x_2d,
+                    format=layer.activation_quantization.format,
+                    scale_method=layer.activation_quantization.scale_method,
+                )
+            x_2d = x_2d.to(torch.float32)
             transformed = x_2d * layer.SU.to(device=compute_device, dtype=torch.float32)
             if layer.input_hadamard:
                 transformed = matmul_hadU(transformed)

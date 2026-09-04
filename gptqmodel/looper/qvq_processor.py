@@ -54,18 +54,19 @@ from ..nn_modules.qlinear.qvq import QVQLinear
 from ..quantization.config import FORMAT, METHOD, GPTQConfig, HessianConfig, QVQConfig
 from ..quantization.gptq import GPTQ
 from ..quantization.qvq import QVQQuantizationTelemetry, quantize_qvq_linear
+from ..quantization.qvq_activation import fake_quantize_qvq_fp8_activation
 from ..quantization.qvq_axis_policy import (
     qvq_shared_input_seed,
     resolve_qvq_transform_axes,
     set_qvq_transform_axis_metadata,
     validate_qvq_transform_axis_overrides,
 )
+from ..quantization.qvq_yaqa import capture_yaqa_sketch_b
 from ..quantization.swiglu import (
     apply_swiglu_reparameterization,
     choose_swiglu_scales,
     select_swiglu_candidate_triplet,
 )
-from ..quantization.qvq_yaqa import capture_yaqa_sketch_b
 from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.backend import BACKEND
 from ..utils.device import get_device
@@ -74,7 +75,6 @@ from ..utils.looper_helpers import normalize_device_like
 from ..utils.model import find_modules, get_layers_with_prefixes, recurse_setattr
 from ..utils.module_locks import parent_module_lock
 from .qvq_output_alignment import QVQOutputAlignmentAttachment
-
 
 log = setup_logger()
 
@@ -723,6 +723,7 @@ class QVQProcessor(LoopProcessor):
             dual_v2=module_qcfg.format == FORMAT.QVQ_DUAL_V2,
             v2b4_p64=module_qcfg.format == FORMAT.QVQ_V2B4_P64,
             v2b2_p32=module_qcfg.format == FORMAT.QVQ_V2B2_P32,
+            activation_quantization=module_qcfg.activation_quantization,
             input_hadamard=input_hadamard,
             output_hadamard=output_hadamard,
         ).eval()
@@ -1545,6 +1546,8 @@ class QVQProcessor(LoopProcessor):
                         progress_callback=log_progress,
                         mps_cleanup_interval=self.qcfg.yaqa.mps_cleanup_interval,
                         chat_template_config=self.qcfg.yaqa.chat_template,
+                        activation_quantization=self.qcfg.activation_quantization,
+                        activation_modules=targets,
                     )
                     input_hessians.update(pass_inputs)
                     output_hessians.update(pass_outputs)
@@ -1651,6 +1654,11 @@ class QVQProcessor(LoopProcessor):
             "qcfg": module_qcfg,
             "yaqa_input_hessian": yaqa_input_hessian,
             "yaqa_output_hessian": yaqa_output_hessian,
+            # Calibration forwards may run replicas on multiple devices. Keep
+            # accelerator scalars device-local until finalization instead of
+            # introducing cross-device adds or a synchronization in the hook.
+            "activation_quantization_error": {},
+            "activation_quantization_error_lock": threading.Lock(),
         }
         if self._output_alignment is not None:
             self._output_alignment.register_module(module)
@@ -1892,6 +1900,44 @@ class QVQProcessor(LoopProcessor):
             capture_source = prepared_source.data
             capture_output = None if prepared_output is None else prepared_output.data
             qcfg = task_entry["qcfg"]
+            if qcfg.activation_quantization is not None and capture_source.numel() > 0:
+                _, activation_scale, dequantized_source = fake_quantize_qvq_fp8_activation(
+                    capture_source,
+                    format=qcfg.activation_quantization.format,
+                    scale_method=qcfg.activation_quantization.scale_method,
+                    validate=False,
+                )
+                source_fp32 = capture_source.detach().to(torch.float32)
+                error = dequantized_source.detach().to(torch.float32) - source_fp32
+                update = {
+                    "elements": capture_source.numel(),
+                    "source_square_sum": source_fp32.square().sum(),
+                    "error_square_sum": error.square().sum(),
+                    "maximum_absolute_error": error.abs().amax(),
+                    "minimum_scale": activation_scale.amin(),
+                    "maximum_scale": activation_scale.amax(),
+                    "finite": torch.isfinite(source_fp32).all() & torch.isfinite(dequantized_source).all(),
+                }
+                with task_entry["activation_quantization_error_lock"]:
+                    accumulated_by_device = task_entry["activation_quantization_error"]
+                    accumulated = accumulated_by_device.get(capture_source.device)
+                    if accumulated is None:
+                        accumulated_by_device[capture_source.device] = update
+                    else:
+                        accumulated["elements"] += update["elements"]
+                        accumulated["source_square_sum"].add_(update["source_square_sum"])
+                        accumulated["error_square_sum"].add_(update["error_square_sum"])
+                        accumulated["maximum_absolute_error"] = torch.maximum(
+                            accumulated["maximum_absolute_error"], update["maximum_absolute_error"]
+                        )
+                        accumulated["minimum_scale"] = torch.minimum(
+                            accumulated["minimum_scale"], update["minimum_scale"]
+                        )
+                        accumulated["maximum_scale"] = torch.maximum(
+                            accumulated["maximum_scale"], update["maximum_scale"]
+                        )
+                        accumulated["finite"].logical_and_(update["finite"])
+                capture_source = dequantized_source
             if (
                 qcfg.propagated_bank_selection
                 and qcfg.format != FORMAT.QVQ_V2B2_P32
@@ -1918,6 +1964,33 @@ class QVQProcessor(LoopProcessor):
             task.add_batch(capture_source, capture_output, batch_index=self.current_batch_index())
 
         return capture_input
+
+    @staticmethod
+    def _activation_quantization_error_summary(task_entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        accumulated_by_device = task_entry.get("activation_quantization_error")
+        if not accumulated_by_device:
+            return None
+        accumulated_values = tuple(accumulated_by_device.values())
+        if not all(bool(accumulated["finite"].item()) for accumulated in accumulated_values):
+            raise ValueError("QVQ A8 calibration observed non-finite source or dequantized activations.")
+        elements = sum(int(accumulated["elements"]) for accumulated in accumulated_values)
+        source_square_sum = sum(float(accumulated["source_square_sum"].item()) for accumulated in accumulated_values)
+        error_square_sum = sum(float(accumulated["error_square_sum"].item()) for accumulated in accumulated_values)
+        epsilon = torch.finfo(torch.float32).tiny
+        config = task_entry["qcfg"].activation_quantization
+        return {
+            "bits": config.bits,
+            "format": config.format,
+            "scale_method": config.scale_method,
+            "elements": elements,
+            "rmse": math.sqrt(error_square_sum / max(1, elements)),
+            "relative_rmse": math.sqrt(error_square_sum / max(source_square_sum, epsilon)),
+            "maximum_absolute_error": max(
+                float(accumulated["maximum_absolute_error"].item()) for accumulated in accumulated_values
+            ),
+            "minimum_scale": min(float(accumulated["minimum_scale"].item()) for accumulated in accumulated_values),
+            "maximum_scale": max(float(accumulated["maximum_scale"].item()) for accumulated in accumulated_values),
+        }
 
     @staticmethod
     def _restore_module_weight(module: NamedModule, quantized_weight: torch.Tensor) -> torch.Tensor:
@@ -1966,6 +2039,7 @@ class QVQProcessor(LoopProcessor):
             if capture.nsamples <= 0:
                 raise RuntimeError(f"QVQ captured no calibration activations for module `{module.full_name}`.")
             self._assert_calibration_sample_count(module.name, capture.nsamples)
+            activation_quantization_error = self._activation_quantization_error_summary(task_entry)
 
             canonical_weight = capture.clone_module(copy=True, device=target_device)
             seed = zlib.crc32(module.full_name.encode("utf-8")) & 0x7FFFFFFF
@@ -2098,6 +2172,7 @@ class QVQProcessor(LoopProcessor):
                     module_qcfg.format == FORMAT.QVQ_V2B2_P32,
                     result.input_hadamard,
                     result.output_hadamard,
+                    copy.deepcopy(module_qcfg.activation_quantization),
                 )
             restored_weight = self._restore_module_weight(module, result.weight)
             module.weight.data = restored_weight.to(dtype=module.weight.dtype)
@@ -2177,6 +2252,7 @@ class QVQProcessor(LoopProcessor):
                     None if result.kronecker_proxy_loss is None else float(result.kronecker_proxy_loss.item())
                 ),
                 "module_granular_replay": self._module_replay_stats.get(module.full_name),
+                "activation_quantization_error": activation_quantization_error,
             }
             if result.telemetry is not None:
                 stat["qvq_telemetry"] = result.telemetry
@@ -2260,6 +2336,7 @@ class QVQProcessor(LoopProcessor):
                 v2b2_p32 = runtime_config[7] if len(runtime_config) > 7 else False
                 input_hadamard = runtime_config[8] if len(runtime_config) > 8 else True
                 output_hadamard = runtime_config[9] if len(runtime_config) > 9 else True
+                activation_quantization = runtime_config[10] if len(runtime_config) > 10 else None
                 for tensor_name in ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"):
                     tensor = module.state.get(tensor_name)
                     if tensor is not None:
@@ -2288,6 +2365,7 @@ class QVQProcessor(LoopProcessor):
                 dual_v2=dual_v2,
                 v2b4_p64=v2b4_p64,
                 v2b2_p32=v2b2_p32,
+                activation_quantization=activation_quantization,
                 input_hadamard=input_hadamard,
                 output_hadamard=output_hadamard,
             )

@@ -362,6 +362,8 @@ class QVQHopperGroupedRuntime:
             return "autograd/training requires the original forward"
         if any(getattr(child, "adapter", None) is not None for child in children):
             return "an attached adapter requires the original forward"
+        if any(child.activation_quantization is not None for child in children):
+            return "A8 activation quantization requires the child-local fused input transform"
         if x.device.type != "cuda" or x.dtype != torch.float16:
             return "grouped Hopper currently requires FP16 CUDA activations"
         if x.shape[-1] != children[0].in_features or x.numel() == 0:

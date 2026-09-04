@@ -376,13 +376,39 @@ if Qwen3_5_MoeQModel is not None:
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
 
+def _is_qvq_fp8_activation_metadata(quantization_config: dict) -> bool:
+    """Recognize the activation contract implemented by QVQ V2B2-P32."""
+
+    method = quantization_config.get("method", quantization_config.get("quant_method"))
+    quant_format = quantization_config.get("format", quantization_config.get("quant_format"))
+    activation = quantization_config.get("activation_quantization")
+    if not isinstance(method, str) or method.lower() != METHOD.QVQ:
+        return False
+    if not isinstance(quant_format, str) or quant_format.strip().lower() not in {
+        "qvq_v2b2_p32",
+        "qvq_v2b2_g32",
+        "v2b2_g32",
+        "v2b2-g32",
+    }:
+        return False
+    if not isinstance(activation, dict):
+        return False
+    bits = activation.get("bits", 8)
+    activation_format = str(activation.get("format", "float8_e4m3fn")).strip().lower()
+    scale_method = str(activation.get("scale_method", "dynamic_per_token")).strip().lower()
+    return (
+        bits == 8
+        and activation_format in {"e4m3", "e4m3fn", "float8_e4m3fn"}
+        and scale_method in {"dynamic_per_token", "per_token", "token"}
+    )
+
+
 def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
     """Return the first activation-quantization field that makes this config unsupported.
 
-    GPT-QModel can load weight-only quantized checkpoints through the Transformers
-    surface, but it does not currently implement activation-quantized runtime
-    semantics. This helper keeps the rejection logic in one place for both
-    ModelOpt-style grouped configs and flatter HF quantization payloads.
+    The exact QVQ V2B2-P32/A8 contract is implemented below. Other activation-
+    quantized checkpoints remain unsupported; this helper keeps their rejection
+    logic in one place for ModelOpt-style groups and flatter HF payloads.
     """
 
     config_groups = quantization_config.get("config_groups")
@@ -401,6 +427,8 @@ def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
     for key in ("input_activations", "activation_quantization", "activations"):
         value = quantization_config.get(key)
         if isinstance(value, dict) and value:
+            if key == "activation_quantization" and _is_qvq_fp8_activation_metadata(quantization_config):
+                continue
             return key
     return None
 
@@ -430,6 +458,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.PARO,
         METHOD.QQQ,
         METHOD.EXL3,
+        METHOD.QVQ,
     ):
         return True
 
@@ -438,6 +467,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.GPTQ,
         METHOD.GGUF,
         METHOD.FP8,
+        METHOD.QVQ,
         METHOD.BITSANDBYTES,
         METHOD.AWQ,
         METHOD.PARO,

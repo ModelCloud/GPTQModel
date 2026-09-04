@@ -82,6 +82,33 @@ def test_qvq_quantize_parser_can_disable_nested_telemetry():
     assert args.qvq_telemetry is False
 
 
+def test_qvq_quantize_parser_builds_v2b2_g32_a8_configuration():
+    args = build_quantize_parser().parse_args(
+        [
+            "--model",
+            "dense-model",
+            "--output",
+            "quantized-model",
+            "--calibration-dataset",
+            "dataset",
+            "--format",
+            "v2b2-g32",
+            "--bits",
+            "3",
+            "--activation-quantization",
+        ]
+    )
+
+    config = build_quantize_config(args)
+
+    assert config.format == FORMAT.QVQ_V2B2_P32
+    assert config.bits == 3
+    assert config.bank_count == 2
+    assert config.activation_quantization.bits == 8
+    assert config.activation_quantization.format == "float8_e4m3fn"
+    assert config.activation_quantization.scale_method == "dynamic_per_token"
+
+
 def test_qvq_quantize_parser_exposes_fail_closed_disjointness_gate():
     args = build_quantize_parser().parse_args(
         [
@@ -185,6 +212,7 @@ def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():
     [
         (FORMAT.QVQ.value, 1),
         (FORMAT.QVQ_V2B2_P32.value, 2),
+        ("v2b2-g32", 2),
         (FORMAT.QVQ_V2B4_P64.value, 4),
         (FORMAT.QVQ_V4.value, 4),
     ],
