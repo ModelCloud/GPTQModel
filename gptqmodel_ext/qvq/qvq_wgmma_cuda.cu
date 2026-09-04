@@ -1176,6 +1176,65 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   }
 
   constexpr int kAccumulatorValuesPerThread = cute::size(decltype(thread_coordinate_c){});
+  constexpr bool kUseCoalescedOutput =
+      FixedGateUp && !OrderedSplit && N64BlocksPerCta == 2 &&
+      RowTilesPerCta == 4 && TransitionBits != 5;
+  if constexpr (kUseCoalescedOutput) {
+    // The RS-WGMMA accumulator mapping gives every consumer eight scattered
+    // FP32 values. Direct stores therefore generate almost twice the ideal
+    // number of global sectors on H100. All TMA stages are dead here, so
+    // reclaim the input buffer as one 16x64 scratch tile per consumer group,
+    // then write the tile as aligned float4 vectors. The first named barrier
+    // keeps either group from overwriting pipeline storage before the other
+    // group has completed its final WGMMA stage. Separate group-local
+    // barriers let the independent N64 consumers progress without meeting on
+    // every output row tile.
+    asm volatile("bar.sync 1, 256;" ::: "memory");
+    float* output_scratch =
+        reinterpret_cast<float*>(shared.input.begin()) + consumer_group * 1024;
+#pragma unroll
+    for (int row_local = 0; row_local < RowTilesPerCta; ++row_local) {
+#pragma unroll
+      for (int index = 0; index < kAccumulatorValuesPerThread; ++index) {
+        const auto coordinate = thread_coordinate_c(index);
+        const int wgmma_column = static_cast<int>(cute::get<0>(coordinate));
+        const int output_row = static_cast<int>(cute::get<1>(coordinate));
+        const int tile_column = wgmma_column & 15;
+        const int p32_column =
+            (wgmma_column & ~15) + ((tile_column & 7) << 1) +
+            (tile_column >> 3);
+        const float value = row_local == 0 ? accumulator(index)
+            : row_local == 1             ? accumulator1(index)
+            : row_local == 2             ? accumulator2(index)
+                                         : accumulator3(index);
+        output_scratch[output_row * kOutputColumns + p32_column] = value;
+      }
+      if (consumer_group == 0) {
+        asm volatile("bar.sync 2, 128;" ::: "memory");
+      } else {
+        asm volatile("bar.sync 3, 128;" ::: "memory");
+      }
+
+#pragma unroll
+      for (int vector = consumer_thread; vector < 256; vector += kThreads) {
+        const int output_row = vector >> 4;
+        const int output_column = (vector & 15) << 2;
+        const int global_output_row =
+            (row_tile_begin + row_local) * kRows + output_row;
+        const int64_t output_index =
+            output_offset + static_cast<int64_t>(global_output_row) * size_n +
+            n64_block * kOutputColumns + output_column;
+        *reinterpret_cast<float4*>(partial_output + output_index) =
+            reinterpret_cast<const float4*>(output_scratch)[vector];
+      }
+      if (consumer_group == 0) {
+        asm volatile("bar.sync 2, 128;" ::: "memory");
+      } else {
+        asm volatile("bar.sync 3, 128;" ::: "memory");
+      }
+    }
+    return;
+  }
 #pragma unroll
   for (int index = 0; index < kAccumulatorValuesPerThread; ++index) {
     const auto coordinate = thread_coordinate_c(index);
