@@ -16,14 +16,18 @@ M32 is the first promotion boundary.  It is exactly two M16 tensor-core row
 tiles and covers every logical row count from 17 through 32 without returning
 to the planar CUDA fallback.
 
-## Current limitation
+## Production state
 
-The production grouped runtime accepts only one through sixteen rows.  The
-Hopper kernel creates a TMA tensor with shape `[16, K]`, launches no row-grid
-dimension, and writes segment-major `[16, N_i]` outputs.  At M greater than
-sixteen the runtime falls back to each child projection independently.  That
-also discards the shared input transform and grouped output recovery that are
-part of A41/R0 execution.
+The production grouped runtime accepts one through 4096 logical rows.  It
+pads M17-M32 to M32 and larger non-bucket values to a multiple of M64, then
+uses one native row grid.  M32 reuses each decoded fragment for two M16 tiles;
+M64 and larger use four tiles per CTA.  Ordinary P32 children use the same
+one-segment path, so the MLP down projection no longer returns to planar GEMV.
+
+For the narrow Llama `8192 -> 2048` down projection, measured H100 ordered
+split counts are `8` through M64, `4` through M128, `2` through M256, and `1`
+thereafter.  Full gate/up, activation/product, and down execution remains CUDA
+Graph replayable at every promoted boundary through M4096.
 
 ## Mathematical contract
 
@@ -98,7 +102,7 @@ M <= 128  measured M64 or M128 CTA tile
 M > 128   fixed internal row tile across one grid launch
 ```
 
-Reuse will be promoted only if it beats the generalized row-grid baseline.  A
+Reuse is promoted only if it beats the generalized row-grid baseline.  A
 larger CTA is not assumed to be faster: register pressure, shared-memory use,
 WGMMA dependency depth, and reduced occupancy are measured on the physical
 H100.
@@ -134,7 +138,7 @@ Benchmarks use only the physical NVIDIA H100, reject foreign compute
 processes, and require three zero-utilization samples before setup plus another
 idle check before timing.  Timing uses warmed CUDA Graph replay and CUDA
 events.  The initial matrix contains M16, M32, M64, M128, and M256; later
-coverage adds M512 through M4096.
+coverage includes M512, M1024, M2048, and M4096.
 
 Each result row reports the realistic `(M, K, N)` projection geometry,
 latency distribution, effective throughput, dense-oracle errors, W4 Marlin

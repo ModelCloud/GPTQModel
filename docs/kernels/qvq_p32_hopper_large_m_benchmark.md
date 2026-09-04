@@ -191,3 +191,50 @@ the M32 path.
 
 All 24 cells improve over reuse-2.  Geometric mean speedup is `1.243x`,
 with a `1.035x` to `1.518x` range.
+
+## Complete MLP through M4096
+
+The complete workload includes grouped gate/up, SiLU, product, and down.  The
+Llama down split staircase improves the M32-M256 matrix by `1.237x` geometric
+mean versus ordinary per-module QVQ.  All M512-M4096 rows use split 1 because
+the reuse-4 row grid already exposes at least 256 down CTAs.
+
+| Rate | M; gate/up K,N; down K,N | QVQ us | vs Marlin W4 | vs Machete W4 | Better than ordinary QVQ | Max error |
+| ---: | :--- | ---: | ---: | ---: | :---: | ---: |
+| W2 | 512; 2048,8192; 8192,2048 | 524.091 | 0.315x | 0.226x | Yes | 1.013e-6 |
+| W2 | 1024; 2048,8192; 8192,2048 | 1031.271 | 0.324x | 0.217x | Yes | 1.013e-6 |
+| W2 | 2048; 2048,8192; 8192,2048 | 2013.989 | 0.346x | 0.226x | Yes | 1.132e-6 |
+| W2 | 4096; 2048,8192; 8192,2048 | 3898.226 | 0.361x | 0.236x | Yes | 1.073e-6 |
+| W2.5 | 512; 2048,8192; 8192,2048 | 525.933 | 0.314x | 0.225x | Yes | 9.537e-7 |
+| W2.5 | 1024; 2048,8192; 8192,2048 | 1040.114 | 0.322x | 0.215x | Yes | 1.132e-6 |
+| W2.5 | 2048; 2048,8192; 8192,2048 | 2045.082 | 0.341x | 0.222x | Yes | 9.537e-7 |
+| W2.5 | 4096; 2048,8192; 8192,2048 | 3964.218 | 0.355x | 0.232x | Yes | 1.073e-6 |
+| W3 | 512; 2048,8192; 8192,2048 | 530.256 | 0.311x | 0.223x | Yes | 9.537e-7 |
+| W3 | 1024; 2048,8192; 8192,2048 | 1049.795 | 0.319x | 0.213x | Yes | 9.537e-7 |
+| W3 | 2048; 2048,8192; 8192,2048 | 2046.111 | 0.341x | 0.222x | Yes | 1.013e-6 |
+| W3 | 4096; 2048,8192; 8192,2048 | 3990.118 | 0.352x | 0.231x | Yes | 1.013e-6 |
+| W3.5 | 512; 2048,8192; 8192,2048 | 564.892 | 0.292x | 0.209x | Yes | 8.941e-7 |
+| W3.5 | 1024; 2048,8192; 8192,2048 | 1096.604 | 0.305x | 0.204x | Yes | 1.013e-6 |
+| W3.5 | 2048; 2048,8192; 8192,2048 | 2165.379 | 0.322x | 0.210x | Yes | 1.073e-6 |
+| W3.5 | 4096; 2048,8192; 8192,2048 | 4290.026 | 0.328x | 0.215x | Yes | 1.073e-6 |
+
+The extended matrix improves ordinary QVQ by `1.076x` geometric mean, but is
+only `0.327x` Marlin and `0.220x` Machete.  This near-linear scaling identifies
+repeated P32 decode per M64 slab as the main redesign target.
+
+## Rejected reuse-8 experiment
+
+An exact M128 CTA stored eight input tiles and eight accumulator fragments
+while decoding each P32 fragment once.  It compiled, replayed in a CUDA Graph,
+and was bit-exact, but its shared-memory/register footprint lost to reuse-4:
+
+| Rate | M x K x N (down) | Reuse-4 best us | Reuse-8 best us | Better than last |
+| ---: | ---: | ---: | ---: | :---: |
+| W3 | 128 x 8192 x 2048 | 31.229 | 30.918 | Yes, 1.010x |
+| W3 | 256 x 8192 x 2048 | 53.408 | 53.603 | No |
+| W3 | 512 x 8192 x 2048 | about 66 | 92.416 | No |
+
+Reuse-8 is not present in production.  The next design must share decoded
+weights without retaining eight independent FP32 accumulator fragments in one
+CTA—for example, a persistent/shared decoded-weight tile across smaller row
+consumer groups.
