@@ -3649,6 +3649,15 @@ gain for every individual shape.  The matching diagnostics used
 `/tmp/bench_p32` against `/tmp/libqvq_p32_main.so` and the candidate shared
 library built from this source.
 
+## v73 all-rate validation for the expanded-M target
+
+The same 24-case sweep was repeated for transition bits 5, 6, and 7 (the
+W2.5/W3/W3.5 paths), in addition to the bits-4 results above.  Geometric-mean
+candidate/main speedups were 1.140x, 1.145x, and 1.134x respectively.  A
+randomized `M=32,N=6144,split=8` comparison remained bit-for-bit identical for
+all four transition-bit values, covering the global partial-layout and single
+reduction changes across every supported rate.
+
 ## Reproduction
 
 ```bash
