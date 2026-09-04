@@ -326,6 +326,27 @@ The `No` cells belong to paths whose executable kernel did not change and are
 retained as strict run-to-run telemetry.  The optimization's promotion gate
 is the 18 affected cells, all of which report `Yes`.
 
+## M8192 autotuned downward multiplexing
+
+Before this path, M8192 was rejected by the grouped runtime and fell back to
+ordinary per-module CUDA execution at roughly 357 milliseconds.  The runtime
+now graph-times row targets 512, 1024, 2048, and 4096 once per cached shape
+bucket.  Every rate selected 4096 rows on the physical H100.
+
+| Rate | M; gate/up K,N; down K,N | Selected rows | QVQ us | vs Marlin W4 | vs Machete W4 | Better than last |
+| ---: | :--- | ---: | ---: | ---: | ---: | :---: |
+| W2 | 8192; 2048,8192; 8192,2048 | 4096 | 7064.101 | 0.384x | 0.244x | Yes |
+| W2.5 | 8192; 2048,8192; 8192,2048 | 4096 | 7114.485 | 0.382x | 0.243x | Yes |
+| W3 | 8192; 2048,8192; 8192,2048 | 4096 | 7032.811 | 0.386x | 0.246x | Yes |
+| W3.5 | 8192; 2048,8192; 8192,2048 | 4096 | 7291.296 | 0.372x | 0.237x | Yes |
+
+Speedup over the preceding fallback ranges from `49.03x` to `50.85x`.
+Maximum dense-oracle error is `1.132e-6`.  M4097 also passes exact output
+equality across every candidate target and warmed-model/cold-plan CUDA Graph
+capture plus repeated replay.  The remaining W4 comparator gap is therefore
+not a >4096 dispatch cliff; it is the scaling cost of the existing M64
+internal row tile.
+
 ## Rejected reuse-8 experiment
 
 An exact M128 CTA stored eight input tiles and eight accumulator fragments

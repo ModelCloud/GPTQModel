@@ -208,6 +208,13 @@ def _main(args: argparse.Namespace) -> None:
                 )
             marlin = comparator[("marlin", m)]
             machete = comparator[("machete", m)]
+            previous_qvq = previous.get((float(bits), m))
+            if previous_qvq is None and m > 4096:
+                # Before row multiplexing, these shapes fell through to the
+                # ordinary per-module CUDA path. Preserve that measured path
+                # as the strict pre-feature benchmark instead of emitting an
+                # unhelpful N/A for the first supported >4096 result.
+                previous_qvq = plain[m]
             logical_flops = 2 * m * (HIDDEN * INTERMEDIATE * 2 + INTERMEDIATE * HIDDEN)
             result = {
                 "bits": bits,
@@ -224,11 +231,10 @@ def _main(args: argparse.Namespace) -> None:
                 "effective_tflops": logical_flops / (timing["median_us"] * 1e6),
                 "better_than_plain_qvq": timing["median_us"]
                 < plain[m]["median_us"],
-                "previous_qvq": previous.get((float(bits), m)),
+                "previous_qvq": previous_qvq,
                 "better_than_last_benchmark": (
-                    timing["median_us"]
-                    < previous[(float(bits), m)]["median_us"]
-                    if (float(bits), m) in previous
+                    timing["median_us"] < previous_qvq["median_us"]
+                    if previous_qvq is not None
                     else None
                 ),
                 "dense_oracle_error": error,

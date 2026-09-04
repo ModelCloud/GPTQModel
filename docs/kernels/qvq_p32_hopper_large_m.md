@@ -212,3 +212,37 @@ Each result row reports the realistic `(M, K, N)` projection geometry,
 latency distribution, effective throughput, dense-oracle errors, W4 Marlin
 ratio, W4 Machete ratio, and whether it improves on the last committed
 benchmark.  A regression is always recorded as `No`.
+
+## Autotuned row multiplexing above M4096
+
+The validated low-level Hopper kernels retain their M4096 bound.  A fused MLP
+with more logical rows is partitioned at the runtime boundary instead of
+weakening that kernel contract:
+
+```text
+logical rows M > 4096
+    -> contiguous row chunks of T
+    -> existing exact grouped gate/up + transforms + down path per chunk
+    -> concatenate output rows in original order
+```
+
+The candidate downward-multiplexing targets are `T = {512, 1024, 2048,
+4096}`.  On the first eager call, each candidate is warmed, captured in its
+own CUDA Graph, and measured by CUDA events over repeated graph replays.  The
+median per-replay time selects the winner.  Plans are cached by CUDA device,
+dtype, next-power-of-two logical-M bucket, input width, child output widths,
+down output width, and P32 transition rate.  This bounds tuning cardinality
+while keeping rate and geometry decisions independent.
+
+CUDA-event creation and synchronization never occur during graph capture.  A
+warm model with a cold row-plan cache captures the conservative 4096-row
+target without caching it; a later eager invocation can still tune.  Once
+tuned, capture takes only the cached branch.  Canonical payload construction
+must still be warmed before capture under the existing R0 lifecycle rule.
+
+Chunking changes only independent row scheduling.  It does not change K
+accumulation, P32 decoding, Hadamard order, FP16 rounding, or output row
+order.  M4097 testing requires exact equality across all four candidate
+targets and repeated CUDA Graph replay.  The physical H100 M8192 dense-oracle
+benchmark selects 4096 for W2 through W3.5 and remains below `1.14e-6`
+maximum absolute error.
