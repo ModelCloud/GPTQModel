@@ -3548,6 +3548,24 @@ launcher preserved correctness but regressed M512 full-KV from roughly 9.2x to
 6.8x Ampere/planar speedup.  The change was reverted; diagnostic:
 `artifacts/a100_p32_window/v27_candidate_m512_fullkv_wide_smoke.json`.
 
+## v65 large-M static shape and stage specialization
+
+The large-M row launcher now specializes the fixed Qwen projection shapes for
+`StaticN`, `StaticK`, and the measured K-stage count (2 stages for
+`(K,N)=(5120,1024)`, 3 for the other six shapes).  The specialization is
+exact across M=512/1024/2048/4096 and all seven projection shapes, with
+`max_abs <= 6.8e-4`.  Against the generic row launcher, the 112-case
+50-iteration sweep improved Ampere latency by a 1.121x geometric mean (12.2%);
+per-M geometric means were 1.127x, 1.134x, 1.115x, and 1.109x for
+M=512/1024/2048/4096.  M512 full-KV repeated at 0.344064 ms geometric mean
+over W2/W2.5/W3/W3.5 (the generic launcher was about 0.351 ms).  Diagnostics
+are `artifacts/a100_p32_window/v28_candidate_m512_fullkv_staticnk_50.json`,
+`artifacts/a100_p32_window/v28_candidate_m512_fullkv_staticnk_repeat100.json`,
+and `artifacts/a100_p32_window/v28_candidate_large_m_all_shapes_staticnk_50.json`.
+
+As in v63, `origin/main` rejects M>16, so these large-M comparisons are
+capability/planar-oracle measurements rather than direct main-branch deltas.
+
 ## Reproduction
 
 ```bash
