@@ -157,11 +157,9 @@ growth from weakening the strict 2e-3 exact-deployed-operand gate.
 The tensor-core atom remains M16, but one native two-dimensional CUDA grid now
 covers every logical M through 4096. The wrapper tail-pads once and launches
 once; it no longer invokes one CUDA operator per M16 tile. H200 coverage passed
-W2/W2.5/W3/W3.5 at M=1/16/17, and W3.5 at
+W2/W2.5/W3/W3.5 at M=1/16/17/32/64, and W3.5 at
 M=1/2/4/8/16/17/32/64/128/256/512/1024/2048/4096 across three seeds. The new
 grid is exact to the deployed E4M3 operand/weight reference at every point.
-Porting the FP16 M32/M64 decoded-weight reuse optimization to the E4M3 atom is
-an optional future throughput optimization, not a format or correctness gap.
 
 ### Phase 4.5 — recommended FP8-targeted quantization replay (complete)
 
@@ -269,7 +267,7 @@ whole-workload peaks; driver peak is sampled per-process NVML usage.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | dense BF16 | 183,755 | 22.29 / 23.03 | 31.84 | 31.29 / 31.82 | 2.710 / 2.795 | 3,558 | 2.303 | 130.50 |
 | W3.5A16 | 32,274 | 126.92 / 127.52 | 18.66 | 53.36 / 55.41 | 1.942 / 2.115 | 2,864 | 0.900 | 130.50 |
-| W3.5A8 | 3,993 | 1,025.76 / 1,028.12 | 16.59 | 60.20 / 60.78 | 3.083 / 3.416 | 4,180 | 0.900 | 72.25 |
+| W3.5A8 | 6,659 | 615.11 / 620.14 | 16.62 | 60.09 / 60.78 | 3.083 / 3.416 | 4,180 | 0.900 | 72.25 |
 
 The static A8 cache reserved 4,352 token slots for the 4,176-token logical
 sequence and still used 44.64% fewer retained bytes than the BF16 cache,
@@ -281,8 +279,40 @@ There were zero P32 fallback/rejections, zero KV dequantized elements, and zero
 dense K/V prefix materializations.
 
 Relative to the earlier correctness baseline, M-grid launch collapsing raised
-A8 prefill from 803 to 3,993 tok/s (4.97x), grouped attention raised A8 decode
-from 11.28 to 16.59 tok/s (1.47x), and FP16 large-M row reuse raised A16 prefill
-from 5,225 to 32,274 tok/s (6.18x). Matching dense now requires another 46.02x
-for A8 prefill or 5.69x for A16 prefill. A8 decode is 1.12x short of A16 and
-1.92x short of dense.
+A8 prefill from 803 to 3,993 tok/s (4.97x), decoded-weight row reuse then raised
+it to 6,659 tok/s (another 1.67x; 8.29x total), grouped attention raised A8
+decode from 11.28 to 16.62 tok/s (1.47x), and FP16 large-M row reuse raised A16
+prefill from 5,225 to 32,274 tok/s (6.18x). Matching dense now requires another
+27.59x for A8 prefill or 5.69x for A16 prefill. A8 decode is 1.12x short of A16
+and 1.92x short of dense.
+
+### Phase 7 — FP8 decoded-weight row reuse (complete)
+
+The E4M3 P32 atom now decodes each weight fragment once and issues it against
+up to four independent M16 activation tiles before committing the WGMMA batch.
+Each tile retains its own FP32 accumulator and dynamic per-row activation scale,
+so output-row arithmetic and the serialized P32 format are unchanged. Host
+dispatch chooses one row tile for M16/M32, four tiles for multiples of M64, and
+two tiles for larger shapes divisible by M32 but not M64. M32 deliberately keeps
+two independent M16 CTAs: on the H200 and the Llama-3.2-1B gate/up shape,
+reuse-2 was 7% slower because the smaller grid lost occupancy.
+
+For a direct W3.5 kernel grid at K=2,048 and N=8,192, the accepted policy keeps
+M16/M32 flat and gives the following reuse-4 improvements over the prior
+single-row-tile grid:
+
+| M | prior ms | reuse ms | speedup |
+| ---: | ---: | ---: | ---: |
+| 64 | 0.224 | 0.160 | 1.40x |
+| 128 | 0.410 | 0.188 | 2.18x |
+| 256 | 0.783 | 0.332 | 2.36x |
+| 512 | 1.524 | 0.615 | 2.48x |
+| 1,024 | 2.968 | 1.187 | 2.50x |
+| 2,048 | 5.830 | 2.314 | 2.52x |
+| 4,096 | 11.529 | 4.511 | 2.56x |
+
+The JIT-built cubin contains all W2/W2.5/W3/W3.5 reuse-1/2/4 variants and native
+Hopper `HGMMA.64x16x16.F32` instructions. W3.5 reuse-4 uses 86 registers per
+thread, 3 KiB shared memory, and no local-memory spill. Exact deployed-operand
+tests pass all four bit widths at M32 and M64, plus the full W3.5 M grid through
+4096 across three seeds.

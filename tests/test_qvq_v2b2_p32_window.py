@@ -377,7 +377,7 @@ def test_p32_window_tma_wgmma_matches_exact_matrix(bits, logical_rows):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
-@pytest.mark.parametrize("logical_rows", (1, 16, 17))
+@pytest.mark.parametrize("logical_rows", (1, 16, 17, 32, 64))
 def test_p32_window_fp8_wgmma_matches_exact_deployed_operand(bits, logical_rows):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
