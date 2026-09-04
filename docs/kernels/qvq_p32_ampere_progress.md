@@ -3421,6 +3421,16 @@ but the 20,000-iteration probe measured
 static-split path at W2 and W3.  The source addition was reverted.  Diagnostic:
 `artifacts/a100_p32_window/v53_candidate_m1_fullkv_statick_20000.json`.
 
+## v54 rejected M8 full-Q compile-time-K probe
+
+The M8 full-Q wide WMMA route has fixed `N=12288` but retained dynamic K
+stride/bounds.  Adding `StaticK=5120` preserved exactness
+(`max_abs <= 3.3e-5`), but the 8,000-iteration medians moved from the v43
+dynamic `0.086016/0.089088/0.086016/0.087040 ms` to
+`0.086016/0.086016/0.087040/0.088064 ms`, losing W3 and W3.5 ticks.  The
+source change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v54_candidate_m8_fullq_statick_8000.json`.
+
 ## Reproduction
 
 ```bash
