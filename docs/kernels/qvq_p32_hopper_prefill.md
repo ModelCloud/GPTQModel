@@ -436,6 +436,32 @@ The geometric means are `1.0456x` versus Phase 3, `1.2930x` versus Marlin W4,
 and `0.9939x` versus Machete W4.  Phase 4 is therefore within 0.61% of Machete
 across the four rates without retaining a dense execution weight.
 
+### Phase-4 NCU and SASS result
+
+The committed W3/M16384 CUDA Graph was profiled with the same 19-pass Nsight
+Compute configuration as Phase 3.  All reported instruction counts come from
+the source-correlated SASS page.
+
+| Preparation stage | Phase-3 time | Phase-4 time | Phase-3 instructions | Phase-4 instructions |
+|:--|--:|--:|--:|--:|
+| K-axis fold | 83.808 us | 77.536 us | 69.01M | 62.82M |
+| tiled transpose | 15.584 us | 11.104 us | 6.88M | 6.88M |
+| N-axis + E4M3 store | 191.104 us | 182.144 us | 89.49M | 75.30M |
+| sum | 290.496 us | 270.784 us | 165.38M | 145.00M |
+
+The K fold uses 22 registers/thread and 5.248 KiB shared memory, the transpose
+uses 30 registers/thread and 3.2 KiB shared memory, and the N fold uses 32
+registers/thread and 5.248 KiB shared memory.  All three report zero local
+spilling.  NCU reports 77.66%, 60.41%, and 39.68% SM throughput respectively.
+
+Generated instructions show 3.34M `HADD2` operations in the K fold and 3.15M
+in the N fold.  They originate from scalar-half source, so the next experiment
+should give each thread an explicit adjacent `half2` pair: perform the bit-1
+butterfly within the pair, then execute bits 2 and above as independent packed
+pair butterflies.  This targets arithmetic and loop-control work together;
+the rejected Phase-3 coordinate specialization showed that prologue-only
+instruction removal is insufficient.
+
 ## Phase 5: on-chip FP8 execution
 
 After Phase 3 establishes tile ownership and synchronization, replace the
