@@ -24,6 +24,7 @@ from gptqmodel.quantization.qvq import (
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.utils.qvq_wgmma_cuda import (
+    qvq_h100_grouped_ordered_split_counts,
     qvq_p32_window_wgmma_m16_tma_ordered_split,
 )
 
@@ -38,6 +39,8 @@ def _child(
     alt_id: int = 1,
     seed: int = 1,
     device: torch.device | str = "cpu",
+    input_hadamard: bool = True,
+    output_hadamard: bool = True,
 ) -> QVQLinear:
     device = torch.device(device)
     generator = torch.Generator(device=device).manual_seed(seed)
@@ -77,6 +80,8 @@ def _child(
         tensors=tensors,
         bank_count=2,
         v2b2_p32=True,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
     ).eval()
 
 
@@ -101,6 +106,43 @@ def test_exact_silu_activation_recognition_is_narrow():
     assert not _is_exact_silu_activation(nn.SiLU(inplace=True))
     assert not _is_exact_silu_activation(nn.GELU())
     assert not _is_exact_silu_activation(lambda value: torch.nn.functional.silu(value))
+
+
+@pytest.mark.parametrize(
+    ("transition_bits", "expected"),
+    (
+        (4, ((10, 20, 20), (10, 20), (10, 10))),
+        (5, ((10, 20, 20), (10, 20), (10, 10))),
+        (6, ((10, 20, 20), (4, 20), (10, 10))),
+        (7, ((4, 20, 20), (4, 4), (5, 5))),
+    ),
+)
+def test_qwen38_h100_grouped_schedules_preserve_child_split_policies(
+    transition_bits, expected
+):
+    shapes = (
+        (12288, 1024, 1024),
+        (10240, 6144),
+        (17408, 17408),
+    )
+    actual = tuple(
+        qvq_h100_grouped_ordered_split_counts(
+            device_name="NVIDIA H100 80GB HBM3",
+            compute_capability=(9, 0),
+            in_features=5120,
+            out_features=shape,
+            transition_bits=transition_bits,
+        )
+        for shape in shapes
+    )
+    assert actual == expected
+    assert qvq_h100_grouped_ordered_split_counts(
+        device_name="NVIDIA H200",
+        compute_capability=(9, 0),
+        in_features=5120,
+        out_features=shapes[0],
+        transition_bits=transition_bits,
+    ) is None
 
 
 def test_r0_installs_only_bit_identical_input_transforms():
@@ -256,6 +298,38 @@ def test_base_fuse_uses_architecture_roles_and_preserves_qvq_checkpoint_buffers(
     state = model.state_dict()
     assert torch.equal(state["layers.0.attention.alpha.trellis"], q_trellis)
     assert torch.equal(state["layers.0.mlp.first.trellis"], gate_trellis)
+
+
+def test_base_fuse_honors_qvq_only_architecture_group_declarations():
+    shared = torch.ones(256)
+
+    class HFModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.linear_attn = nn.Module()
+            self.linear_attn.packed = _child("packed", su=shared, seed=75)
+            self.linear_attn.gate = _child("gate", su=shared, seed=76)
+
+    class QModel(BaseQModel):
+        qvq_grouped_p32_candidates = {
+            "qkv": (("packed", "gate"),),
+        }
+
+        def __init__(self, model):
+            nn.Module.__init__(self)
+            self.model = model
+            self.quantized = True
+            self.load_quantized_model = True
+
+    model = HFModel().eval()
+    counts = QModel(model).fuse(
+        gate_up=False,
+        free_original_weights=False,
+    )
+
+    assert counts == {"qkv": 1}
+    runtime = model.linear_attn.packed._gptqmodel_qvq_grouped_runtime
+    assert runtime.member_names == ("packed", "gate")
 
 
 def _h100_device() -> torch.device | None:
@@ -492,6 +566,177 @@ def test_warmed_production_group_is_cuda_graph_capturable():
     # alter host telemetry.
     assert telemetry["grouped_launches"] == 2
     assert telemetry["sibling_cache_hits"] == 4
+
+
+def test_qwen38_full_attention_group_runs_measured_schedule_in_cuda_graph():
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    shared = torch.ones(5120, device=device)
+    widths = (12288, 1024, 1024)
+    names = ("q_proj", "k_proj", "v_proj")
+    children = tuple(
+        _child(
+            name,
+            in_features=5120,
+            out_features=width,
+            bits=3,
+            su=shared,
+            alt_id=index + 1,
+            seed=20260910 + index,
+            device=device,
+            output_hadamard=name != "v_proj",
+        )
+        for index, (name, width) in enumerate(zip(names, widths, strict=True))
+    )
+    attention = _Attention(children)
+    static_input = torch.randn(
+        (1, 5120), device=device, dtype=torch.float16
+    ) * 0.02
+    with torch.inference_mode():
+        plain = tuple(child(static_input).clone() for child in children)
+    assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
+    with torch.inference_mode():
+        eager = tuple(getattr(attention, name)(static_input) for name in names)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = tuple(
+                getattr(attention, name)(static_input) for name in names
+            )
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    for actual, replayed, reference in zip(eager, captured, plain, strict=True):
+        assert torch.equal(replayed, actual)
+        torch.testing.assert_close(actual, reference, rtol=0, atol=2e-3)
+    telemetry = qvq_grouped_runtime_telemetry(attention)[0]
+    assert telemetry["active_split_counts"] == (10, 20, 20)
+    assert telemetry["grouped_launches"] == 2
+    assert telemetry["plain_fallbacks"] == 0
+
+
+def test_qwen38_folded_mlp_is_fused_and_cuda_graph_replay_exact():
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+
+    class QwenMLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            shared = torch.ones(5120, device=device)
+            self.gate_proj = _child(
+                "gate_proj",
+                in_features=5120,
+                out_features=17408,
+                bits=3,
+                su=shared,
+                seed=20260920,
+                device=device,
+                output_hadamard=False,
+            )
+            self.up_proj = _child(
+                "up_proj",
+                in_features=5120,
+                out_features=17408,
+                bits=3,
+                su=shared,
+                seed=20260921,
+                device=device,
+                output_hadamard=False,
+            )
+            self.down_proj = _child(
+                "down_proj",
+                in_features=17408,
+                out_features=5120,
+                bits=3,
+                seed=20260922,
+                device=device,
+                input_hadamard=False,
+            )
+            self.act_fn = nn.SiLU()
+
+        def forward(self, x):
+            return self.down_proj(
+                self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+            )
+
+    mlp = QwenMLP().eval()
+    with torch.no_grad():
+        for child in (mlp.gate_proj, mlp.up_proj, mlp.down_proj):
+            child.SV.fill_(0.002)
+            child.bias.zero_()
+    static_input = torch.randn(
+        (1, 5120), device=device, dtype=torch.float16
+    ) * 0.02
+    with torch.inference_mode():
+        plain = mlp(static_input).clone()
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+    assert hasattr(mlp, "_gptqmodel_qvq_fused_mlp_runtime")
+    with torch.inference_mode():
+        eager = mlp(static_input)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = mlp(static_input)
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    assert torch.equal(captured, eager)
+    torch.testing.assert_close(eager, plain, rtol=0, atol=2e-3)
+    telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
+    assert telemetry["active_split_counts"] == (10, 10)
+    assert telemetry["fused_mlp_launches"] == 2
+    assert telemetry["h100_folded_qwen_mlp_launches"] == 2
+    assert telemetry["plain_fallbacks"] == 0
+    assert telemetry["fused_mlp_fallbacks"] == 0
+
+
+def test_unwarmed_group_fails_closed_to_graph_safe_children(monkeypatch):
+    """Capture must never run R0 tensor comparisons or payload repacking."""
+
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    shared = torch.ones(256, device=device)
+    children = tuple(
+        _child(
+            name,
+            su=shared,
+            alt_id=index + 1,
+            seed=230 + index,
+            device=device,
+        )
+        for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+    )
+    attention = _Attention(children)
+    static_input = torch.randn((1, 256), device=device, dtype=torch.float16) * 0.02
+    with torch.inference_mode():
+        expected = tuple(child(static_input).clone() for child in children)
+    assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
+    runtime = attention.q_proj._gptqmodel_qvq_grouped_runtime
+    runtime.invalidate()
+
+    def forbidden_payload_build(*_args, **_kwargs):
+        raise AssertionError("payload construction ran during CUDA Graph capture")
+
+    monkeypatch.setattr(runtime, "_build_payload", forbidden_payload_build)
+
+    with torch.inference_mode():
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = tuple(
+                getattr(attention, name)(static_input)
+                for name in ("q_proj", "k_proj", "v_proj")
+            )
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    assert all(
+        torch.equal(output, reference)
+        for output, reference in zip(captured, expected, strict=True)
+    )
+    telemetry = qvq_grouped_runtime_telemetry(attention)[0]
+    assert telemetry["grouped_launches"] == 0
+    assert telemetry["plain_fallbacks"] == 3
 
 
 def test_warmed_gate_up_paired_recovery_is_cuda_graph_capturable():

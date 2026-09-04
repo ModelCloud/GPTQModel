@@ -51,6 +51,7 @@ from gptqmodel.quantization.qvq_pruning import viterbi_pruning_dispatch_code
 from gptqmodel.quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
 from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
 from gptqmodel.quantization.rotation.hadamard_utils import (
+    get_hadK,
     matmul_hadU,
     matmul_hadU_stable,
 )
@@ -4089,6 +4090,76 @@ def test_qvq_stable_fp16_hadamard_avoids_delayed_normalization_overflow(width):
     assert not torch.isfinite(delayed).all()
     assert torch.isfinite(stable).all()
     torch.testing.assert_close(stable.float(), reference, rtol=3e-3, atol=2e-2)
+
+
+def test_qvq_stable_composite_hadamard_is_cuda_graph_replay_safe():
+    """Qwen's K=20 base and normalization scalar must stay on device."""
+
+    static = torch.randn((2, 5120), device="cuda", dtype=torch.float16) * 0.02
+    eager = matmul_hadU_stable(static).clone()
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = matmul_hadU_stable(static)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert torch.equal(captured, eager)
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16, torch.float32))
+@pytest.mark.parametrize("width", (5120, 6144, 10240, 12288))
+@pytest.mark.parametrize("rows", (1, 16))
+def test_qvq_composite_cuda_stage_is_bit_exact_to_torch_butterfly(
+    dtype, width, rows
+):
+    """Qwen K=12/K=20 transforms may collapse only their power-of-two stage."""
+
+    generator = torch.Generator(device="cuda").manual_seed(
+        20260904 + width + rows
+    )
+    source = (
+        torch.randn((rows, width), generator=generator, device="cuda") * 0.02
+    ).to(dtype)
+
+    def torch_reference(stable: bool):
+        hadK, K = get_hadK(width)
+        hadK = hadK.to(source)
+        values = (
+            source / source.new_full((), float(width)).sqrt()
+            if stable
+            else source
+        ).clone().view(-1, width, 1)
+        scratch = values.clone()
+        while values.shape[1] > K:
+            values = values.view(
+                values.shape[0], values.shape[1] // 2, 2, values.shape[2]
+            )
+            scratch = scratch.view(values.shape)
+            scratch[:, :, 0, :] = values[:, :, 0, :] + values[:, :, 1, :]
+            scratch[:, :, 1, :] = values[:, :, 0, :] - values[:, :, 1, :]
+            scratch = scratch.view(values.shape[0], values.shape[1], -1)
+            values, scratch = scratch, values
+        values = hadK.view(1, K, K) @ values
+        result = values.view(source.shape)
+        return result if stable else result / torch.tensor(width).sqrt()
+
+    expected_end = torch_reference(False)
+    expected_stable = torch_reference(True)
+    actual_end = matmul_hadU(source)
+    actual_stable = matmul_hadU_stable(source)
+    assert torch.equal(actual_end, expected_end)
+    assert torch.equal(actual_stable, expected_stable)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_end = matmul_hadU(source)
+        captured_stable = matmul_hadU_stable(source)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured_end, expected_end)
+    assert torch.equal(captured_stable, expected_stable)
 
 
 

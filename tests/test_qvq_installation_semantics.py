@@ -28,12 +28,23 @@ def test_qvq_mlx_load_uses_qvq_tensor_owner_before_native_conversion(format_code
     assert _external_preload_backend(BACKEND.QVQ, METHOD.QVQ, format_code) == BACKEND.QVQ
 
 
-def _quantized_bf16_named_module(seed: int):
+def _quantized_bf16_named_module(
+    seed: int,
+    *,
+    full_name: str = "proj",
+    grouped_p32_candidates=None,
+    transform_axis_overrides=None,
+):
     torch.manual_seed(seed)
     root = torch.nn.Module()
     root.proj = torch.nn.Linear(16, 16, bias=True, dtype=torch.bfloat16)
     root.eval()
-    named = NamedModule(root.proj, name="proj", full_name="proj", layer_index=0)
+    named = NamedModule(
+        root.proj,
+        name=full_name.rsplit(".", 1)[-1],
+        full_name=full_name,
+        layer_index=0,
+    )
     processor = QVQProcessor(
         tokenizer=None,
         qcfg=QVQConfig(bits=2, rounding="block_ldlq", device="cpu", offload_to_disk=False),
@@ -47,6 +58,8 @@ def _quantized_bf16_named_module(seed: int):
         calibration_concat_size=None,
         calibration_sort=None,
         batch_size=1,
+        grouped_p32_candidates=grouped_p32_candidates,
+        transform_axis_overrides=transform_axis_overrides,
     )
     processor.preprocess(named)
     source = torch.randn((1, 4, 16), dtype=torch.bfloat16)
@@ -54,10 +67,40 @@ def _quantized_bf16_named_module(seed: int):
     processor._mask_tls = threading.local()
     processor._mask_tls.value = torch.ones((1, 4), dtype=torch.bool)
     processor._set_current_batch_index(0)
-    processor.pre_process_fwd_hook("proj")(root.proj, (source,), output)
+    processor.pre_process_fwd_hook(named.name)(root.proj, (source,), output)
     original_weight = root.proj.weight.detach().clone()
     processor.process(named, device=torch.device("cpu"))
     return root, named, processor, source, original_weight
+
+
+def test_qvq_processor_applies_declared_shared_input_and_axis_policy_at_quantization():
+    groups = {"gate_up": (("gate_proj", "up_proj"),)}
+    axes = {
+        "mlp.gate_proj": (True, False),
+        "mlp.up_proj": (True, False),
+    }
+    gate = _quantized_bf16_named_module(
+        401,
+        full_name="model.layers.3.mlp.gate_proj",
+        grouped_p32_candidates=groups,
+        transform_axis_overrides=axes,
+    )
+    up = _quantized_bf16_named_module(
+        402,
+        full_name="model.layers.3.mlp.up_proj",
+        grouped_p32_candidates=groups,
+        transform_axis_overrides=axes,
+    )
+
+    gate_named, gate_processor = gate[1], gate[2]
+    up_named, up_processor = up[1], up[2]
+    assert torch.equal(gate_named.state["SU"], up_named.state["SU"])
+    assert gate_named.state["_qvq_runtime_config"][8:10] == (True, False)
+    assert up_named.state["_qvq_runtime_config"][8:10] == (True, False)
+    assert (
+        gate_processor.qcfg.meta["qvq_transform_axis_overrides"]
+        == up_processor.qcfg.meta["qvq_transform_axis_overrides"]
+    )
 
 
 @pytest.mark.parametrize("seed", (11, 29, 47, 83))

@@ -64,6 +64,8 @@ class _FixedTrellisAlignmentLinear(nn.Module):
         SV: torch.Tensor,
         bias: Optional[torch.Tensor],
         output_dtype: Optional[torch.dtype],
+        input_hadamard: bool = True,
+        output_hadamard: bool = True,
     ) -> None:
         super().__init__()
         self.register_buffer("inner_weight", inner_weight.detach().to(torch.float32))
@@ -74,6 +76,8 @@ class _FixedTrellisAlignmentLinear(nn.Module):
             None if bias is None else bias.detach().to(device=inner_weight.device, dtype=torch.float32).clone(),
         )
         self.output_dtype = output_dtype
+        self.input_hadamard = input_hadamard
+        self.output_hadamard = output_hadamard
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         input_shape = inputs.shape
@@ -99,11 +103,12 @@ class _FixedTrellisAlignmentLinear(nn.Module):
             # Hadamard path normalizes before any FP16 narrowing, so a finite
             # value such as 60,000 multiplied by SU=2 must not become inf here.
             transformed = work.to(torch.float32) * self.SU
-            transformed = (
-                matmul_hadU_stable(transformed)
-                if transformed.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH
-                else matmul_hadU(transformed)
-            )
+            if self.input_hadamard:
+                transformed = (
+                    matmul_hadU_stable(transformed)
+                    if transformed.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                    else matmul_hadU(transformed)
+                )
             # The surrounding alignment pass runs under model autocast. Merely
             # converting the operands to FP32 is insufficient: CUDA autocast
             # narrows matmul back to FP16, which can overflow the factorized
@@ -113,18 +118,31 @@ class _FixedTrellisAlignmentLinear(nn.Module):
             # accumulator *and* FP32 output contract.
             with torch.autocast(device_type=work.device.type, enabled=False):
                 work = transformed.to(torch.float32) @ self.inner_weight
-            work = _qvq_fp16_emulated_hadamard_fallback(
-                work,
-                post_scale=self.SV,
-                bias=self.bias,
-                scale_mode=3 if work.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH else 4,
-            )
+            if self.output_hadamard:
+                work = _qvq_fp16_emulated_hadamard_fallback(
+                    work,
+                    post_scale=self.SV,
+                    bias=self.bias,
+                    scale_mode=(
+                        3
+                        if work.shape[-1] >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                        else 4
+                    ),
+                )
+            else:
+                work = work * self.SV
+                if self.bias is not None:
+                    work = work + self.bias
         else:
             work = work.to(torch.float32)
-            work = matmul_hadU(work * self.SU)
+            work = work * self.SU
+            if self.input_hadamard:
+                work = matmul_hadU(work)
             with torch.autocast(device_type=work.device.type, enabled=False):
                 work = work @ self.inner_weight
-            work = matmul_hadU(work) * self.SV
+            if self.output_hadamard:
+                work = matmul_hadU(work)
+            work = work * self.SV
             if self.bias is not None:
                 work = work + self.bias
         return work.reshape(*input_shape[:-1], self.SV.numel()).to(output_dtype)
@@ -377,6 +395,8 @@ class QVQOutputAlignmentAttachment:
             dual_v2 = runtime_config[5] if len(runtime_config) > 5 else False
             v2b4_p64 = runtime_config[6] if len(runtime_config) > 6 else False
             v2b2_p32 = runtime_config[7] if len(runtime_config) > 7 else False
+            input_hadamard = runtime_config[8] if len(runtime_config) > 8 else True
+            output_hadamard = runtime_config[9] if len(runtime_config) > 9 else True
             trellis = module.state["trellis"].to(device=device)
             SU = module.state["SU"].to(device=device)
             SV = module.state["SV"].to(device=device)
@@ -406,6 +426,8 @@ class QVQOutputAlignmentAttachment:
             SV=SV,
             bias=module.module.bias,
             output_dtype=module.module_dtype,
+            input_hadamard=input_hadamard,
+            output_hadamard=output_hadamard,
         )
 
     def _build_runtime_module(
@@ -427,6 +449,8 @@ class QVQOutputAlignmentAttachment:
             dual_v2 = runtime_config[5] if len(runtime_config) > 5 else False
             v2b4_p64 = runtime_config[6] if len(runtime_config) > 6 else False
             v2b2_p32 = runtime_config[7] if len(runtime_config) > 7 else False
+            input_hadamard = runtime_config[8] if len(runtime_config) > 8 else True
+            output_hadamard = runtime_config[9] if len(runtime_config) > 9 else True
             trellis = module.state["trellis"].to(device=device)
             bank_ids = module.state.get("bank_ids")
             if bank_ids is not None:
@@ -461,6 +485,8 @@ class QVQOutputAlignmentAttachment:
             dual_v2=dual_v2,
             v2b4_p64=v2b4_p64,
             v2b2_p32=v2b2_p32,
+            input_hadamard=input_hadamard,
+            output_hadamard=output_hadamard,
         )
         runtime.eval()
         runtime.post_init()
@@ -475,6 +501,8 @@ class QVQOutputAlignmentAttachment:
                 temporary.inner_weight,
                 temporary.SU,
                 temporary.SV,
+                input_hadamard=temporary.input_hadamard,
+                output_hadamard=temporary.output_hadamard,
             )
             for name, temporary in temporary_modules.items()
         }

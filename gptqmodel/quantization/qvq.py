@@ -451,7 +451,8 @@ class QVQLinearQuantizationResult:
 
         if not self.serialization_allowed:
             raise RuntimeError(
-                "QVQ results produced with an experimental codebook are evaluation-only and cannot be serialized."
+                "QVQ results produced with an experimental codebook or an undeclared folded axis "
+                "are evaluation-only and cannot be serialized."
             )
         tensors = {"trellis": self.trellis, "SU": self.SU, "SV": self.SV}
         if self.bias is not None:
@@ -6901,8 +6902,10 @@ def quantize_qvq_linear(
     output_hessian: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
     seed: int = 0,
+    input_sign_seed: int | None = None,
     input_hadamard: bool = True,
     output_hadamard: bool = True,
+    allow_folded_axis_serialization: bool = False,
     damp_percent: float | None = None,
     trellis_batch_size: int | None = None,
     codebook_version: str = PGC16_CODEBOOK_VERSION,
@@ -6955,6 +6958,8 @@ def quantize_qvq_linear(
     bits = normalize_qvq_rate(bits)
     if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
         raise TypeError("QVQ transform-axis flags must be bools.")
+    if not isinstance(allow_folded_axis_serialization, bool):
+        raise TypeError("QVQ folded-axis serialization control must be boolean.")
     if not isinstance(dual_v2, bool):
         raise TypeError("QVQ `dual_v2` must be a bool.")
     if not isinstance(v2b4_p64, bool):
@@ -7014,6 +7019,10 @@ def quantize_qvq_linear(
             raise ValueError("QVQ bias must contain only finite values.")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise TypeError("QVQ seed must be an integer.")
+    if input_sign_seed is not None and (
+        isinstance(input_sign_seed, bool) or not isinstance(input_sign_seed, int)
+    ):
+        raise TypeError("QVQ input sign seed must be an integer or None.")
     if not isinstance(output_channel_scale_optimization, bool):
         raise TypeError("QVQ output-channel scale optimization must be boolean.")
     if not isinstance(module_scale_search, bool):
@@ -7245,8 +7254,22 @@ def quantize_qvq_linear(
             trellis_window=trellis_window,
         )
     generator = torch.Generator(device="cpu").manual_seed(seed)
-    SU = torch.randint(0, 2, (in_features,), generator=generator, dtype=torch.int8).mul_(2).sub_(1)
+    # Always consume the module-local SU draw so choosing a shared input sign
+    # seed cannot perturb SV or any later randomized quantization decision.
+    # The legacy ``input_sign_seed=None`` path remains byte-for-byte identical.
+    local_SU = torch.randint(
+        0, 2, (in_features,), generator=generator, dtype=torch.int8
+    ).mul_(2).sub_(1)
     SV_sign = torch.randint(0, 2, (out_features,), generator=generator, dtype=torch.int8).mul_(2).sub_(1)
+    if input_sign_seed is None:
+        SU = local_SU
+        effective_input_sign_seed = seed
+    else:
+        input_generator = torch.Generator(device="cpu").manual_seed(input_sign_seed)
+        SU = torch.randint(
+            0, 2, (in_features,), generator=input_generator, dtype=torch.int8
+        ).mul_(2).sub_(1)
+        effective_input_sign_seed = input_sign_seed
     SU = SU.to(device=device, dtype=torch.float32)
     SV_sign = SV_sign.to(device=device, dtype=torch.float32)
 
@@ -7273,7 +7296,7 @@ def quantize_qvq_linear(
                     _safe_tensor_version(preparation.factorization[1]),
                 )
                 or preparation.block_size != 16
-                or preparation.seed != seed
+                or preparation.seed != effective_input_sign_seed
                 or preparation.damp_percent != damp_percent
                 or preparation.hessian.device != device
                 or tuple(preparation.hessian.shape) != tuple(H.shape)
@@ -8396,7 +8419,11 @@ def quantize_qvq_linear(
         module_scale_reencoded=module_scale_reencoded,
         telemetry=telemetry_result,
         serialization_allowed=(
-            experimental_codebook is None and input_hadamard and output_hadamard
+            experimental_codebook is None
+            and (
+                (input_hadamard and output_hadamard)
+                or allow_folded_axis_serialization
+            )
         ),
         bank_ids=None if selected_bank_ids is None else selected_bank_ids.detach().clone(),
         bank_selector_bits=1 if v2b2_p32 else 2,

@@ -25,7 +25,7 @@ from gptqmodel.quantization.qvq import (
 )
 from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
-from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU_stable
+from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU, matmul_hadU_stable
 from gptqmodel.utils.looper_helpers import normalize_device_like
 from gptqmodel.utils.python import has_gil_disabled
 from gptqmodel.utils.threadx import DeviceThreadPool
@@ -287,6 +287,51 @@ def test_qvq_output_alignment_mps_tensor_device_resolves_to_single_owner_lane():
     assert pool._key(torch.device("mps")) == "mps"
     assert pool._key(torch.device("mps:0")) == "mps"
     assert normalize_device_like(torch.device("mps:0")) == torch.device("mps")
+
+
+@pytest.mark.parametrize(
+    ("input_hadamard", "output_hadamard"),
+    ((True, True), (False, True), (True, False), (False, False)),
+)
+def test_fixed_trellis_alignment_preserves_declared_transform_axes(
+    input_hadamard, output_hadamard
+):
+    generator = torch.Generator().manual_seed(20260904)
+    source = torch.randn((3, 16), generator=generator)
+    inner = torch.randn((16, 16), generator=generator) * 0.1
+    SU = torch.linspace(0.75, 1.25, 16)
+    SV = torch.linspace(1.25, 0.75, 16)
+    bias = torch.linspace(-0.1, 0.1, 16)
+    module = _FixedTrellisAlignmentLinear(
+        inner_weight=inner,
+        SU=SU,
+        SV=SV,
+        bias=bias,
+        output_dtype=torch.float32,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+    )
+
+    expected = source * SU
+    if input_hadamard:
+        expected = matmul_hadU(expected)
+    expected = expected @ inner
+    if output_hadamard:
+        expected = matmul_hadU(expected)
+    expected = expected * SV + bias
+
+    assert torch.equal(module(source), expected)
+    reconstructed = QVQOutputAlignmentAttachment(OutputAlignConfig())._candidate_weights(
+        {"proj": module}
+    )["proj"]
+    reference_weight = rht_reconstruct_weight(
+        inner,
+        SU,
+        SV,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+    )
+    assert torch.equal(reconstructed, reference_weight)
 
 
 @pytest.mark.skipif(not torch.backends.mps.is_available(), reason="MPS is required")

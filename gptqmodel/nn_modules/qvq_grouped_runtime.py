@@ -210,6 +210,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_fused_down_reduction_recovery_launches: int = 0
     h100_multiblock_down_recovery_launches: int = 0
     h100_w25_n128_gate_up_launches: int = 0
+    h100_folded_qwen_mlp_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -256,6 +257,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_fused_down_reduction_recovery_launches": self.h100_fused_down_reduction_recovery_launches,
             "h100_multiblock_down_recovery_launches": self.h100_multiblock_down_recovery_launches,
             "h100_w25_n128_gate_up_launches": self.h100_w25_n128_gate_up_launches,
+            "h100_folded_qwen_mlp_launches": self.h100_folded_qwen_mlp_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -343,7 +345,13 @@ class QVQHopperGroupedRuntime:
         # A plain child may lazily build its own continuous-window cache.  Drop
         # the grouped window first so an unsupported prefill cannot make both
         # representations persistent at once.
-        if self._payload is not None:
+        if (
+            self._payload is not None
+            and not (
+                self._payload.trellis.device.type == "cuda"
+                and torch.cuda.is_current_stream_capturing()
+            )
+        ):
             self.invalidate()
 
     def _runtime_eligible(self, x: torch.Tensor) -> str | None:
@@ -432,17 +440,15 @@ class QVQHopperGroupedRuntime:
         self._h100_packed_gate_up_recovery_enabled = (
             self._h100_multiblock_intermediate_enabled
         )
-        measured_splits = None
-        if self.category == "qkv":
-            measured_splits = qvq_h100_grouped_ordered_split_counts(
-                device_name=properties.name,
-                compute_capability=(properties.major, properties.minor),
-                in_features=children[0].in_features,
-                out_features=tuple(child.out_features for child in children),
-                transition_bits=qvq_transition_bits(
-                    children[0].bits, vector_size=children[0].vector_size
-                ),
-            )
+        measured_splits = qvq_h100_grouped_ordered_split_counts(
+            device_name=properties.name,
+            compute_capability=(properties.major, properties.minor),
+            in_features=children[0].in_features,
+            out_features=tuple(child.out_features for child in children),
+            transition_bits=qvq_transition_bits(
+                children[0].bits, vector_size=children[0].vector_size
+            ),
+        )
 
         plan = qvq_p32_window_wgmma_group_plan(
             placeholder,
@@ -523,6 +529,17 @@ class QVQHopperGroupedRuntime:
         source_key = _source_key(children)
         if self._payload is not None and source_key == self._payload_source_key:
             return self._payload
+        if (
+            children[0].trellis.device.type == "cuda"
+            and torch.cuda.is_current_stream_capturing()
+        ):
+            # R0 validation compares canonical tensors and payload construction
+            # repacks them.  Neither operation belongs in capture.  A group
+            # whose exact payload was not successfully warmed must fail closed
+            # to the original graph-safe child path for this capture.
+            raise _R0Fallback(
+                "grouped P32 payload must be successfully warmed before CUDA Graph capture"
+            )
         self.invalidate()
         payload = self._build_payload(children, source_key)
         self._payload = payload
@@ -638,6 +655,8 @@ class QVQHopperGroupedRuntime:
                 self._h100_fp16_recovery_store_enabled
                 and child.output_hadamard
                 and inner.dtype == torch.float32
+                and child.out_features <= 16384
+                and child.out_features & (child.out_features - 1) == 0
             )
             recovered = child._qvq_recover_inference_output(
                 inner[:rows],
@@ -702,12 +721,40 @@ class QVQHopperGroupedRuntime:
         )
 
         rows = x.numel() // self._children()[0].in_features
-        if (
+        children = self._children()
+        qwen_folded_intermediate = (
+            self._mlp_activation_is_exact_silu
+            and not children[0].output_hadamard
+            and not children[1].output_hadamard
+            and not down.input_hadamard
+        )
+        if qwen_folded_intermediate:
+            # Qwen3.8-27B has a 17*1024 intermediate width, for which no exact
+            # composite Hadamard base exists.  Its model definition therefore
+            # quantizes gate/up without output H and down without input H.
+            # Preserve the ordinary module boundary exactly: recover each
+            # FP32 child, round it to the model FP16 dtype, execute SiLU and
+            # product, then apply down.SU.  No transform is commuted through
+            # the nonlinearity, and every operation is CUDA Graph capturable.
+            inner_gate, inner_up = self._execute(x, recover=False)
+            gate = children[0]._qvq_recover_inference_output(
+                inner_gate, torch.float16
+            ).reshape(rows, down.in_features).to(x.dtype)
+            up = children[1]._qvq_recover_inference_output(
+                inner_up, torch.float16
+            ).reshape(rows, down.in_features).to(x.dtype)
+            activated_gate = self._mlp_act_fn(gate)
+            transformed = down._qvq_prepare_inference_input(
+                activated_gate * up,
+                torch.float16,
+            )
+            self.telemetry.independent_recovery_children += 2
+            self.telemetry.h100_folded_qwen_mlp_launches += 1
+        elif (
             self._h100_multiblock_intermediate_enabled
             and self._mlp_activation_is_exact_silu
         ):
             direct_pad = rows < 16
-            children = self._children()
             inner_gate, inner_up = self._execute(x, recover=False)
             transformed = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
                 inner_gate,
@@ -820,6 +867,8 @@ class QVQHopperGroupedRuntime:
             self._h100_fp16_recovery_store_enabled
             and down.output_hadamard
             and inner.dtype == torch.float32
+            and down.out_features <= 16384
+            and down.out_features & (down.out_features - 1) == 0
         )
         recovered = down._qvq_recover_inference_output(
             inner[:rows],

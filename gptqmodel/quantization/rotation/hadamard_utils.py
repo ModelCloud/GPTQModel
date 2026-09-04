@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+import threading
 from typing import Optional
 
 import torch
@@ -16,6 +17,57 @@ from gptqmodel.utils.logger import setup_logger
 # https://github.com/Dao-AILab/fast-hadamard-transform (Tri Dao, BSD-3-Clause).
 
 log = setup_logger()
+
+
+# Composite Hadamards finish with a small dense base transform (for example,
+# K=20 at width 5120).  The canonical bases live on CPU.  Moving one to CUDA
+# from inside a graph capture is illegal, so retain the device/dtype view after
+# the ordinary eager warmup.  The cache is deliberately tiny: it is bounded by
+# the supported bases, visible devices, dtypes, and transpose choices.
+_HADAMARD_DEVICE_BASES: dict[
+    tuple[int, bool, str, torch.dtype], tuple[torch.Tensor | None, int]
+] = {}
+_HADAMARD_DEVICE_BASES_LOCK = threading.Lock()
+
+
+def _get_hadK_on(X: torch.Tensor, transpose: bool) -> tuple[torch.Tensor | None, int]:
+    n = int(X.shape[-1])
+    if X.device.type == "cpu":
+        return get_hadK(n, transpose)
+
+    key = (n, bool(transpose), str(X.device), X.dtype)
+    with _HADAMARD_DEVICE_BASES_LOCK:
+        cached = _HADAMARD_DEVICE_BASES.get(key)
+    if cached is not None:
+        return cached
+
+    hadK, K = get_hadK(n, transpose)
+    if hadK is None:
+        cached = (None, K)
+        with _HADAMARD_DEVICE_BASES_LOCK:
+            return _HADAMARD_DEVICE_BASES.setdefault(key, cached)
+
+    if X.device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "composite Hadamard constants must be warmed before CUDA Graph capture"
+        )
+
+    converted = hadK.to(device=X.device, dtype=X.dtype)
+    cached = (converted, K)
+    with _HADAMARD_DEVICE_BASES_LOCK:
+        cached = _HADAMARD_DEVICE_BASES.setdefault(key, cached)
+        # QVQ CUDA Graph capture evaluates overflow-rescue branches even when
+        # the ordinary FP16 warmup is finite.  Input rescue uses BF16 while
+        # the FP32-accumulator output epilogue uses FP32.  Populate both small
+        # base views alongside FP16 so capture never discovers a cold CPU base.
+        if X.device.type == "cuda" and X.dtype == torch.float16:
+            for rescue_dtype in (torch.bfloat16, torch.float32):
+                rescue_key = (n, bool(transpose), str(X.device), rescue_dtype)
+                _HADAMARD_DEVICE_BASES.setdefault(
+                    rescue_key,
+                    (hadK.to(device=X.device, dtype=rescue_dtype), K),
+                )
+        return cached
 
 def get_hadK(n, transpose=False):
     hadK, K = None, None
@@ -70,9 +122,44 @@ def get_hadK(n, transpose=False):
     return hadK, K
 
 
+def _cuda_composite_low_stage(values: torch.Tensor, K: int) -> torch.Tensor | None:
+    """Run the power-of-two part of a composite Hadamard in one CUDA launch.
+
+    The small KxK base multiply remains the same PyTorch matmul as the oracle.
+    Mode 5 deliberately performs no normalization, so moving only the
+    ascending power-of-two butterflies into CUDA changes neither arithmetic
+    order nor a low-precision rounding boundary.
+    """
+
+    if values.device.type != "cuda" or K <= 1 or not values.is_contiguous():
+        return None
+    power_two_width = values.shape[-1] // K
+    if (
+        power_two_width < 2
+        or power_two_width & (power_two_width - 1)
+        or power_two_width > 16384
+    ):
+        return None
+    from gptqmodel.utils.qvq_cuda import (
+        qvq_cuda_available,
+        qvq_cuda_device_supported,
+        qvq_cuda_hadamard,
+    )
+
+    if not qvq_cuda_device_supported(values.device) or not qvq_cuda_available():
+        return None
+    staged = values.reshape(-1, K, power_two_width).reshape(-1, power_two_width)
+    staged = qvq_cuda_hadamard(staged, scale_mode=5)
+    return staged.reshape(-1, K, power_two_width)
+
+
 def matmul_hadU(X, transpose=False):
     n = X.shape[-1]
-    hadK, K = get_hadK(n, transpose)
+    hadK, K = _get_hadK_on(X, transpose)
+    composite = _cuda_composite_low_stage(X, K)
+    if composite is not None:
+        composite = hadK.view(1, K, K) @ composite
+        return composite.view(X.shape) / torch.tensor(n).sqrt()
     input = X.clone().view(-1, n, 1)
     output = input.clone()
     while input.shape[1] > K:
@@ -89,7 +176,7 @@ def matmul_hadU(X, transpose=False):
         # input = torch.bmm(
         #     hadK.repeat(len(input), 1, 1).to(input.device).to(input.dtype), input)
         # Use bcast instead
-        input = hadK.view(1, K, K).to(input) @ input
+        input = hadK.view(1, K, K) @ input
 
     return input.view(X.shape) / torch.tensor(n).sqrt()
 
@@ -105,8 +192,17 @@ def matmul_hadU_stable(X, transpose=False):
     """
 
     n = X.shape[-1]
-    hadK, K = get_hadK(n, transpose)
-    input = (X / X.new_tensor(float(n)).sqrt()).view(-1, n, 1)
+    hadK, K = _get_hadK_on(X, transpose)
+    # new_full initializes the scalar directly on X's device.  new_tensor
+    # stages the Python value through CPU and is forbidden during CUDA Graph
+    # capture.  Both paths retain X's dtype before sqrt, preserving the exact
+    # historical low-precision normalization value.
+    normalized = X / X.new_full((), float(n)).sqrt()
+    composite = _cuda_composite_low_stage(normalized, K)
+    if composite is not None:
+        composite = hadK.view(1, K, K) @ composite
+        return composite.view(X.shape)
+    input = normalized.view(-1, n, 1)
     output = input.clone()
     while input.shape[1] > K:
         input = input.view(input.shape[0], input.shape[1] // 2, 2, input.shape[2])
@@ -118,7 +214,7 @@ def matmul_hadU_stable(X, transpose=False):
     del output
 
     if K > 1:
-        input = hadK.view(1, K, K).to(input) @ input
+        input = hadK.view(1, K, K) @ input
 
     return input.view(X.shape)
 

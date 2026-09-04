@@ -21,6 +21,21 @@ class Qwen3_5TextQModel(Qwen3QModel):
     # auxiliary safetensors files.
     out_of_model_tensors = {"prefixes": ["mtp"]}
 
+    qvq_grouped_p32_candidates = {
+        "qkv": (
+            ("q_proj", "k_proj", "v_proj"),
+            ("in_proj_qkv", "in_proj_z"),
+        ),
+        "gate_up": (("gate_proj", "up_proj"),),
+    }
+
+    qvq_transform_axis_overrides = {
+        "self_attn.v_proj": (True, False),
+        "mlp.gate_proj": (True, False),
+        "mlp.up_proj": (True, False),
+        "mlp.down_proj": (False, True),
+    }
+
     module_tree = [
         "model",
         "layers",

@@ -108,6 +108,69 @@ def test_qvq_p32_quantization_and_runtime_support_folded_axes(input_hadamard, ou
     torch.testing.assert_close(actual, expected, rtol=2e-5, atol=2e-5)
 
 
+def test_qvq_shared_input_seed_changes_only_su_random_stream():
+    generator = torch.Generator().manual_seed(42501)
+    weight = torch.randn((32, 32), generator=generator) * 0.1
+    samples = torch.randn((96, 32), generator=generator)
+    hessian = samples.T @ samples / samples.shape[0]
+
+    baseline = quantize_qvq_linear(
+        weight,
+        hessian,
+        bits=2,
+        seed=71,
+        rounding="block_ldlq",
+        bank_count=2,
+        v2b2_p32=True,
+    )
+    shared_a = quantize_qvq_linear(
+        weight,
+        hessian,
+        bits=2,
+        seed=71,
+        input_sign_seed=991,
+        rounding="block_ldlq",
+        bank_count=2,
+        v2b2_p32=True,
+    )
+    shared_b = quantize_qvq_linear(
+        weight,
+        hessian,
+        bits=2,
+        seed=72,
+        input_sign_seed=991,
+        rounding="block_ldlq",
+        bank_count=2,
+        v2b2_p32=True,
+    )
+
+    assert torch.equal(shared_a.SU, shared_b.SU)
+    assert not torch.equal(baseline.SU, shared_a.SU)
+    # Consuming the ordinary module SU draw before generating SV preserves
+    # all module-local randomness when a shared SU is selected.
+    assert torch.equal(baseline.SV.sign(), shared_a.SV.sign())
+
+
+def test_qvq_declared_folded_axes_can_be_serialized():
+    generator = torch.Generator().manual_seed(42502)
+    weight = torch.randn((32, 32), generator=generator) * 0.1
+    samples = torch.randn((96, 32), generator=generator)
+    result = quantize_qvq_linear(
+        weight,
+        samples.T @ samples / samples.shape[0],
+        bits=2,
+        seed=73,
+        input_hadamard=True,
+        output_hadamard=False,
+        allow_folded_axis_serialization=True,
+        rounding="block_ldlq",
+        bank_count=2,
+        v2b2_p32=True,
+    )
+    assert result.serialization_allowed is True
+    assert set(result.serialized_tensors()) >= {"trellis", "SU", "SV"}
+
+
 @pytest.mark.parametrize(("input_hadamard", "output_hadamard"), ((False, True), (True, False), (False, False)))
 def test_qvq_mlx_p32_folded_axes_match_quantized_dense_weight(input_hadamard, output_hadamard):
     mx = pytest.importorskip("mlx.core")

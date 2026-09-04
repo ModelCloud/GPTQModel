@@ -1632,11 +1632,12 @@ at::Tensor qvq_hadamard_cuda(
                   input.scalar_type() == at::kFloat,
               "hadamard requires float16, bfloat16, or float32 input");
   TORCH_CHECK(input.is_contiguous(), "input must be contiguous");
-  TORCH_CHECK(scale_mode >= 0 && scale_mode <= 4,
-              "scale_mode must be 0/1 (native), 2 (range-safe pre-scale), or 3/4 (FP16 emulation)");
+  TORCH_CHECK(scale_mode >= 0 && scale_mode <= 5,
+              "scale_mode must be 0/1 (native), 2 (range-safe pre-scale), 3/4 (FP16 emulation), "
+              "or 5 (unnormalized composite stage)");
   TORCH_CHECK(scale_mode != 2 || input.scalar_type() == at::kHalf,
               "range-safe pre-scale mode 2 requires float16 input");
-  TORCH_CHECK(scale_mode < 3 || input.scalar_type() == at::kFloat,
+  TORCH_CHECK(scale_mode < 3 || scale_mode == 5 || input.scalar_type() == at::kFloat,
               "FP16-emulation scale modes 3/4 require float32 input");
   const int64_t n64 = input.size(-1);
   TORCH_CHECK(n64 >= 2 && (n64 & (n64 - 1)) == 0, "hadamard requires a power-of-two last dim");

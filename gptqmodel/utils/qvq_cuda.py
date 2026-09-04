@@ -740,6 +740,7 @@ def qvq_cuda_hadamard(
       - scale_mode 1: normalize LAST (matmul_hadU, float sqrtf(n) divisor)
       - scale_mode 2: fuse pre-scale and normalization before the first narrow store
       - scale_mode 3/4: FP32 storage with finite FP16-rounding emulation for mode 0/1
+      - scale_mode 5: unnormalized power-of-two stage of a composite transform
     Validated bitwise-identical to the corresponding Python butterfly on CUDA for
     power-of-two dims.
     """
@@ -753,11 +754,11 @@ def qvq_cuda_hadamard(
     n = x.shape[-1]
     if n < 2 or n & (n - 1) or n > 16384:
         raise ValueError(f"QVQ CUDA Hadamard requires a power-of-two last dim in [2, 16384], got {n}")
-    if scale_mode not in (0, 1, 2, 3, 4):
-        raise ValueError("QVQ CUDA Hadamard scale_mode must be one of 0, 1, 2, 3, or 4")
+    if scale_mode not in (0, 1, 2, 3, 4, 5):
+        raise ValueError("QVQ CUDA Hadamard scale_mode must be one of 0, 1, 2, 3, 4, or 5")
     if scale_mode == 2 and x.dtype != torch.float16:
         raise TypeError("QVQ CUDA Hadamard range-safe pre-scale mode 2 requires float16 x")
-    if scale_mode >= 3 and x.dtype != torch.float32:
+    if scale_mode in (3, 4) and x.dtype != torch.float32:
         raise TypeError("QVQ CUDA Hadamard FP16-emulation modes 3/4 require float32 x")
     if not isinstance(pad_to_16, bool):
         raise TypeError("QVQ CUDA Hadamard pad_to_16 must be a bool")

@@ -560,6 +560,8 @@ class QVQLinear(BaseQuantLinear):
         dual_v2: bool = False,
         v2b4_p64: bool = False,
         v2b2_p32: bool = False,
+        input_hadamard: bool = True,
+        output_hadamard: bool = True,
     ) -> QVQLinear:
         return cls(
             bits=bits,
@@ -574,6 +576,8 @@ class QVQLinear(BaseQuantLinear):
             dual_v2=dual_v2,
             v2b4_p64=v2b4_p64,
             v2b2_p32=v2b2_p32,
+            input_hadamard=input_hadamard,
+            output_hadamard=output_hadamard,
         )
 
     def _validate_tensors(self) -> None:

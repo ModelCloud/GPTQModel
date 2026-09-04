@@ -1815,6 +1815,12 @@ class BaseQModel(nn.Module):
                 "calibration_sort": calibration_sort,
                 "calibration_concat_separator": calibration_concat_separator,
                 "batch_size": batch_size,
+                "grouped_p32_candidates": getattr(
+                    self, "qvq_grouped_p32_candidates", None
+                ),
+                "transform_axis_overrides": getattr(
+                    self, "qvq_transform_axis_overrides", None
+                ),
             }
             if yaqa_calibration is not None:
                 qvq_args["yaqa_calibration"] = self.prepare_dataset(
@@ -2405,11 +2411,31 @@ class BaseQModel(nn.Module):
             except Exception:
                 pass
 
+        # QVQ may share transforms between architecture-specific siblings
+        # that are not a conventional Q/K/V or gate/up set.  Keep those
+        # declarations separate from generic GPTQ fusion so model definitions
+        # can expose groups such as Qwen3.8 linear-attention qkv/z without
+        # assigning misleading projection roles.
+        qvq_qkv_candidates = qkv_candidates
+        qvq_gateup_candidates = gateup_candidates
+        qvq_declared = getattr(self, "qvq_grouped_p32_candidates", None)
+        if qvq_declared is not None:
+            if not isinstance(qvq_declared, dict):
+                raise TypeError("qvq_grouped_p32_candidates must be a dictionary")
+
+            def qvq_candidates(category, discovered):
+                declared = tuple(tuple(group) for group in qvq_declared.get(category, ()))
+                combined = tuple(dict.fromkeys((*(() if discovered is None else discovered), *declared)))
+                return None if not combined else combined
+
+            qvq_qkv_candidates = qvq_candidates("qkv", qkv_candidates)
+            qvq_gateup_candidates = qvq_candidates("gate_up", gateup_candidates)
+
         counts: Dict[str, int] = {}
         qvq_counts = install_qvq_hopper_groups(
             self.model,
-            qkv_candidates=qkv_candidates,
-            gate_up_candidates=gateup_candidates,
+            qkv_candidates=qvq_qkv_candidates,
+            gate_up_candidates=qvq_gateup_candidates,
             qkv=qkv,
             gate_up=gate_up,
             gate_up_activation=gate_up_activation,

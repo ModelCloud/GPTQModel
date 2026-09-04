@@ -238,6 +238,36 @@ def qvq_h100_grouped_ordered_split_counts(
         and int(transition_bits) in (4, 5, 6, 7)
     ):
         return (8, 8, 8)
+    if (
+        "H100" in device_name
+        and compute_capability == (9, 0)
+        and int(in_features) == 5120
+        and int(transition_bits) in (4, 5, 6, 7)
+    ):
+        # Official Qwen3.8-27B projection geometry.  Preserve the same
+        # per-child split schedule selected by the independently benchmarked
+        # kernels instead of choosing one split from concatenated N.
+        qwen_splits = {
+            (12288, 1024, 1024): {
+                4: (10, 20, 20),
+                5: (10, 20, 20),
+                6: (10, 20, 20),
+                7: (4, 20, 20),
+            },
+            (10240, 6144): {
+                4: (10, 20),
+                5: (10, 20),
+                6: (4, 20),
+                7: (4, 4),
+            },
+            (17408, 17408): {
+                4: (10, 10),
+                5: (10, 10),
+                6: (10, 10),
+                7: (5, 5),
+            },
+        }
+        return qwen_splits.get(widths, {}).get(int(transition_bits))
     return None
 
 
