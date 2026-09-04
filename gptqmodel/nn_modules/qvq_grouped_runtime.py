@@ -37,6 +37,8 @@ from ..utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_grouped_ordered_packed,
     qvq_p32_window_wgmma_grouped_ordered_partials_packed,
     qvq_p32_window_wgmma_grouped_packed,
+    qvq_p32_window_wgmma_grouped_reuse2_packed,
+    qvq_p32_window_wgmma_grouped_reuse4_packed,
 )
 from .qlinear.qvq import QVQLinear
 
@@ -233,6 +235,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_fused_down_reduction_recovery_launches: int = 0
     h100_multiblock_down_recovery_launches: int = 0
     h100_w25_n128_gate_up_launches: int = 0
+    h100_wide_reuse_gate_up_launches: int = 0
     h100_folded_qwen_mlp_launches: int = 0
     h100_folded_qwen_fused_precondition_launches: int = 0
     h100_folded_qwen_fused_ordered_reduction_launches: int = 0
@@ -297,6 +300,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_fused_down_reduction_recovery_launches": self.h100_fused_down_reduction_recovery_launches,
             "h100_multiblock_down_recovery_launches": self.h100_multiblock_down_recovery_launches,
             "h100_w25_n128_gate_up_launches": self.h100_w25_n128_gate_up_launches,
+            "h100_wide_reuse_gate_up_launches": self.h100_wide_reuse_gate_up_launches,
             "h100_folded_qwen_mlp_launches": self.h100_folded_qwen_mlp_launches,
             "h100_folded_qwen_fused_precondition_launches": self.h100_folded_qwen_fused_precondition_launches,
             "h100_folded_qwen_fused_ordered_reduction_launches": self.h100_folded_qwen_fused_ordered_reduction_launches,
@@ -421,8 +425,8 @@ class QVQHopperGroupedRuntime:
         if x.shape[-1] != children[0].in_features or x.numel() == 0:
             return "input shape is unsupported"
         rows = x.numel() // children[0].in_features
-        if not 1 <= rows <= 16:
-            return "grouped Hopper decode requires one through sixteen rows"
+        if not 1 <= rows <= 4096:
+            return "grouped Hopper execution currently requires one through 4096 rows"
         if any(child.trellis.device != x.device for child in children):
             return "activation and grouped payload devices differ"
         properties = torch.cuda.get_device_properties(x.device)
@@ -615,6 +619,13 @@ class QVQHopperGroupedRuntime:
         # rounding contract matches ordinary child execution. The shared
         # input transform narrows the resulting operand to FP16 for WGMMA.
         x_2d = x.reshape(rows, children[0].in_features)
+        padded_rows = (
+            16
+            if rows <= 16
+            else 32
+            if rows <= 32
+            else ((rows + 63) // 64) * 64
+        )
         payload = self._ensure_payload()
         direct_pad = self._h100_direct_padded_input_enabled and rows < 16
         use_qwen_composite_input = (
@@ -623,6 +634,7 @@ class QVQHopperGroupedRuntime:
             and children[0].activation_quantization is None
             and children[0].input_hadamard
             and children[0].in_features == 5120
+            and rows <= 16
             # The single native H40 x H128 launch wins consistently once
             # eight logical rows amortize its wider block-local transform.
             # Decode-sized M1/M2/M4 retains the lower-latency staged path.
@@ -644,6 +656,7 @@ class QVQHopperGroupedRuntime:
             self.telemetry.h100_qwen_composite_input_launches += 1
         elif (
             self._h100_multiblock_input_hadamard_enabled
+            and rows <= 16
             and x.dtype == torch.float16
             and children[0].activation_quantization is None
         ):
@@ -688,11 +701,13 @@ class QVQHopperGroupedRuntime:
             if direct_pad:
                 padded = transformed
                 self.telemetry.h100_direct_padded_input_launches += 1
-            elif rows == 16:
+            elif rows == padded_rows:
                 padded = transformed.contiguous()
             else:
                 padded = torch.zeros(
-                    (16, children[0].in_features), device=x.device, dtype=torch.float16
+                    (padded_rows, children[0].in_features),
+                    device=x.device,
+                    dtype=torch.float16,
                 )
                 padded[:rows].copy_(transformed)
         from ..utils.qvq_cuda import _pgc16_levels
@@ -706,11 +721,16 @@ class QVQHopperGroupedRuntime:
             self.telemetry.ordered_split_launches += 1
             return partials
 
-        grouped_inner = (
-            qvq_p32_window_wgmma_grouped_ordered_packed
-            if any(segment.split_count != 1 for segment in payload.plan.segments)
-            else qvq_p32_window_wgmma_grouped_packed
-        )
+        if padded.shape[0] >= 64 and padded.shape[0] % 64 == 0:
+            grouped_inner = qvq_p32_window_wgmma_grouped_reuse4_packed
+        elif padded.shape[0] >= 32 and padded.shape[0] % 32 == 0:
+            grouped_inner = qvq_p32_window_wgmma_grouped_reuse2_packed
+        else:
+            grouped_inner = (
+                qvq_p32_window_wgmma_grouped_ordered_packed
+                if any(segment.split_count != 1 for segment in payload.plan.segments)
+                else qvq_p32_window_wgmma_grouped_packed
+            )
         inner_outputs = grouped_inner(
             padded,
             payload,
@@ -718,7 +738,19 @@ class QVQHopperGroupedRuntime:
         )
         if children[0].activation_quantization is not None:
             self.telemetry.grouped_a8_launches += 1
-        if grouped_inner is qvq_p32_window_wgmma_grouped_ordered_packed:
+        if (
+            grouped_inner is qvq_p32_window_wgmma_grouped_reuse4_packed
+            and padded.shape[0] >= 128
+            and self._h100_multiblock_intermediate_enabled
+            and children[0].in_features == 2048
+            and all(segment.split_count == 1 for segment in payload.plan.segments)
+        ):
+            self.telemetry.h100_wide_reuse_gate_up_launches += 1
+        if grouped_inner in (
+            qvq_p32_window_wgmma_grouped_ordered_packed,
+            qvq_p32_window_wgmma_grouped_reuse2_packed,
+            qvq_p32_window_wgmma_grouped_reuse4_packed,
+        ) and any(segment.split_count != 1 for segment in payload.plan.segments):
             self.telemetry.ordered_split_launches += 1
             if (
                 self._h100_fp16_recovery_store_enabled
@@ -764,7 +796,9 @@ class QVQHopperGroupedRuntime:
             # products keep the established single-CTA path until separately
             # measured; device identity comes from CUDA properties, never a
             # visible-device index.
-            use_h100_multiblock = self._h100_multiblock_intermediate_enabled
+            use_h100_multiblock = (
+                self._h100_multiblock_intermediate_enabled and rows <= 16
+            )
             recovery = (
                 qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock
                 if use_h100_multiblock
@@ -797,6 +831,7 @@ class QVQHopperGroupedRuntime:
                 and children[0].in_features == 5120
                 and tuple(member.out_features for member in children)
                 == (10240, 6144)
+                and rows <= 16
                 and child.output_hadamard
                 and inner.dtype == torch.float32
             )
@@ -838,6 +873,7 @@ class QVQHopperGroupedRuntime:
                 and inner.dtype == torch.float32
                 and child.out_features <= 16384
                 and child.out_features & (child.out_features - 1) == 0
+                and rows <= 16
             )
             recovered = child._qvq_recover_inference_output(
                 inner[:rows],
@@ -911,6 +947,19 @@ class QVQHopperGroupedRuntime:
             and not children[1].output_hadamard
             and not down.input_hadamard
         )
+        if rows > 16 and (
+            qwen_folded_intermediate
+            or not self._h100_multiblock_intermediate_enabled
+        ):
+            # Large-M uses the exact generic module boundaries while sharing
+            # gate/up input preparation and P32 decode. The ordinary down
+            # module now owns the same M32/M64 row-reuse dispatch, so this
+            # route is graph-safe and avoids the planar GEMV fallback without
+            # extending decode-only fused transform kernels beyond their
+            # measured geometry.
+            gate, up = self._execute(x)
+            activated_gate = self._mlp_act_fn(gate)
+            return down(activated_gate * up)
         if qwen_folded_intermediate:
             # Qwen3.8-27B has a 17*1024 intermediate width, for which no exact
             # composite Hadamard base exists.  Its model definition therefore
@@ -1071,7 +1120,8 @@ class QVQHopperGroupedRuntime:
                     down._cached_cast("SU", torch.float16),
                 )
         fused_down_recovery = (
-            self._h100_multiblock_intermediate_enabled
+            rows <= 16
+            and self._h100_multiblock_intermediate_enabled
             and down.output_hadamard
             and (down.in_features, down.out_features) == (8192, 2048)
         )
@@ -1099,7 +1149,8 @@ class QVQHopperGroupedRuntime:
             down.bits, vector_size=down.vector_size
         )
         use_qwen_ordered_composite_recovery = (
-            self._h100_fp16_recovery_store_enabled
+            rows <= 16
+            and self._h100_fp16_recovery_store_enabled
             and down.output_hadamard
             and (down.in_features, down.out_features) == (17408, 5120)
             and qwen_transition_bits == 6

@@ -18,15 +18,63 @@ from gptqmodel.quantization.qvq_codecs import (
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.utils import qvq_wgmma_cuda
 from gptqmodel.utils.qvq_wgmma_cuda import (
+    qvq_h100_large_m_ordered_split_count,
     qvq_p32_window_wgmma_group_plan,
     qvq_p32_window_wgmma_grouped,
     qvq_p32_window_wgmma_grouped_ordered_packed,
     qvq_p32_window_wgmma_grouped_ordered_partials_packed,
     qvq_p32_window_wgmma_grouped_packed,
+    qvq_p32_window_wgmma_grouped_reuse2_packed,
+    qvq_p32_window_wgmma_grouped_reuse4_packed,
     qvq_p32_window_wgmma_m16_tma,
     qvq_p32_window_wgmma_m16_tma_ordered_split,
     qvq_pack_p32_window_hopper_group,
 )
+
+
+@pytest.mark.parametrize(
+    ("logical_rows", "expected"),
+    (
+        (17, 8),
+        (32, 8),
+        (64, 8),
+        (65, 4),
+        (128, 4),
+        (129, 2),
+        (256, 2),
+        (257, 1),
+        (4096, 1),
+    ),
+)
+def test_h100_large_m_down_split_policy(logical_rows, expected):
+    assert (
+        qvq_h100_large_m_ordered_split_count(
+            device_name="NVIDIA H100",
+            compute_capability=(9, 0),
+            logical_rows=logical_rows,
+            in_features=8192,
+            out_features=2048,
+        )
+        == expected
+    )
+
+
+def test_h100_large_m_down_split_policy_fails_closed_for_other_devices_and_shapes():
+    common = {
+        "compute_capability": (9, 0),
+        "logical_rows": 64,
+        "in_features": 8192,
+        "out_features": 2048,
+    }
+    assert (
+        qvq_h100_large_m_ordered_split_count(device_name="NVIDIA H200", **common) == 1
+    )
+    assert (
+        qvq_h100_large_m_ordered_split_count(
+            device_name="NVIDIA H100", **(common | {"out_features": 4096})
+        )
+        == 1
+    )
 
 
 def test_hopper_group_plan_retains_child_boundaries_and_policy():
@@ -167,11 +215,13 @@ def test_hopper_group_plan_rejects_invalid_metadata(field, value, message):
         qvq_p32_window_wgmma_group_plan(torch.empty((16, 256)), **arguments)
 
 
-def _h100_device() -> torch.device | None:
+def _hopper_device() -> torch.device | None:
     if not torch.cuda.is_available() or torch.cuda.device_count() != 1:
         return None
     properties = torch.cuda.get_device_properties(0)
-    if (properties.major, properties.minor) == (9, 0) and "H100" in properties.name:
+    if (properties.major, properties.minor) == (9, 0) and (
+        "H100" in properties.name or "H200" in properties.name
+    ):
         return torch.device("cuda", 0)
     return None
 
@@ -218,9 +268,9 @@ def _payloads(
 def test_grouped_hopper_is_bit_exact_to_plain_children_and_bounded_by_dense(
     bits, logical_m
 ):
-    device = _h100_device()
+    device = _hopper_device()
     if device is None:
-        pytest.skip("requires the exclusive H100 validation device")
+        pytest.skip("requires an exclusive SM90 H100/H200 validation device")
     in_features = 256
     widths = (256, 512, 256)
     alt_ids = (3, 1, 2)
@@ -292,11 +342,161 @@ def test_grouped_hopper_is_bit_exact_to_plain_children_and_bounded_by_dense(
 
 
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
+@pytest.mark.parametrize("logical_m", (32, 64, 128, 256))
+def test_grouped_hopper_large_m_is_exact_to_m16_tiles_and_graph_safe(bits, logical_m):
+    device = _hopper_device()
+    if device is None:
+        pytest.skip("requires an exclusive SM90 H100/H200 validation device")
+    in_features = 256
+    widths = (256, 512, 256)
+    alt_ids = (3, 1, 2)
+    generator = torch.Generator(device=device).manual_seed(20260904 + int(bits * 10))
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
+    input = (
+        torch.randn((logical_m, in_features), generator=generator, device=device) * 0.1
+    ).half()
+    windows, selectors = _payloads(
+        bits=bits,
+        in_features=in_features,
+        widths=widths,
+        generator=generator,
+        device=device,
+    )
+    plan = qvq_p32_window_wgmma_group_plan(
+        input,
+        windows,
+        levels,
+        selectors,
+        bits,
+        out_features=widths,
+        bank_alt_ids=alt_ids,
+        split_counts=(1, 1, 1),
+    )
+    payload = qvq_pack_p32_window_hopper_group(windows, selectors, plan)
+    actual = qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
+    reused = qvq_p32_window_wgmma_grouped_reuse2_packed(input, payload, levels)
+    reused4 = (
+        qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
+        if logical_m >= 64
+        else None
+    )
+    tiled = tuple(
+        torch.cat(
+            tuple(
+                qvq_p32_window_wgmma_grouped_packed(
+                    input[row_start : row_start + 16], payload, levels
+                )[child_index]
+                for row_start in range(0, logical_m, 16)
+            ),
+            dim=0,
+        )
+        for child_index in range(len(widths))
+    )
+
+    for child, expected, window, child_selectors, width, alt_id in zip(
+        reused,
+        tiled,
+        windows,
+        selectors,
+        widths,
+        alt_ids,
+        strict=True,
+    ):
+        assert torch.equal(child, expected)
+        dense = reconstruct_p32_window_inner_weight(
+            window,
+            bits=bits,
+            in_features=in_features,
+            out_features=width,
+            bank_ids=child_selectors,
+            bank_alt_id=torch.tensor(alt_id, dtype=torch.uint8, device=device),
+        )
+        torch.testing.assert_close(child, input.float() @ dense, rtol=0, atol=2e-3)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = (
+            qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
+            if reused4 is not None
+            else qvq_p32_window_wgmma_grouped_reuse2_packed(input, payload, levels)
+        )
+    graph.replay()
+    torch.cuda.synchronize(device)
+    assert all(
+        torch.equal(child, expected)
+        for child, expected in zip(captured, reused4 or reused, strict=True)
+    )
+    assert all(
+        torch.equal(child, expected)
+        for child, expected in zip(reused, actual, strict=True)
+    )
+    if reused4 is not None:
+        assert all(
+            torch.equal(child, expected)
+            for child, expected in zip(reused4, actual, strict=True)
+        )
+
+
+@pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
+def test_h100_gate_up_n128_reuse_is_exact_and_graph_safe(bits):
+    """Exercise the measured N128 x M64 CTA, not a reduced test geometry."""
+
+    device = _hopper_device()
+    if device is None:
+        pytest.skip("requires an exclusive SM90 H100/H200 validation device")
+    logical_m = 128
+    in_features = 2048
+    widths = (8192, 8192)
+    alt_ids = (1, 3)
+    generator = torch.Generator(device=device).manual_seed(20260940 + int(bits * 10))
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
+    input = (
+        torch.randn((logical_m, in_features), generator=generator, device=device) * 0.1
+    ).half()
+    windows, selectors = _payloads(
+        bits=bits,
+        in_features=in_features,
+        widths=widths,
+        generator=generator,
+        device=device,
+    )
+    plan = qvq_p32_window_wgmma_group_plan(
+        input,
+        windows,
+        levels,
+        selectors,
+        bits,
+        out_features=widths,
+        bank_alt_ids=alt_ids,
+        split_counts=(1, 1),
+    )
+    payload = qvq_pack_p32_window_hopper_group(windows, selectors, plan)
+    expected = qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
+    actual = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
+    assert all(
+        torch.equal(child, reference)
+        for child, reference in zip(actual, expected, strict=True)
+    )
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_p32_window_wgmma_grouped_reuse4_packed(
+            input, payload, levels
+        )
+    graph.replay()
+    torch.cuda.synchronize(device)
+    assert all(
+        torch.equal(child, reference)
+        for child, reference in zip(captured, expected, strict=True)
+    )
+
+
+@pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
 @pytest.mark.parametrize("logical_m", (1, 2, 4, 8, 16))
 def test_grouped_ordered_split_is_exact_to_ordered_children(bits, logical_m):
-    device = _h100_device()
+    device = _hopper_device()
     if device is None:
-        pytest.skip("requires the exclusive H100 validation device")
+        pytest.skip("requires an exclusive SM90 H100/H200 validation device")
     in_features = 512
     widths = (512, 256, 256)
     alt_ids = (3, 1, 2)
@@ -397,9 +597,9 @@ def test_grouped_ordered_split_is_exact_to_ordered_children(bits, logical_m):
 
 
 def test_grouped_ordered_split_is_cuda_graph_stable_at_llama_qkv_shape():
-    device = _h100_device()
+    device = _hopper_device()
     if device is None:
-        pytest.skip("requires the exclusive H100 validation device")
+        pytest.skip("requires an exclusive SM90 H100/H200 validation device")
     bits = 3.0
     in_features = 2048
     widths = (2048, 512, 512)
@@ -454,9 +654,9 @@ def test_grouped_ordered_split_is_cuda_graph_stable_at_llama_qkv_shape():
 def test_grouped_hopper_is_exact_at_llama32_1b_shapes(
     group, widths, alt_ids, bits, logical_m
 ):
-    device = _h100_device()
+    device = _hopper_device()
     if device is None:
-        pytest.skip("requires the exclusive H100 validation device")
+        pytest.skip("requires an exclusive SM90 H100/H200 validation device")
     in_features = 2048
     generator = torch.Generator(device=device).manual_seed(
         20261220 + logical_m + (0 if group == "qkv" else 100)

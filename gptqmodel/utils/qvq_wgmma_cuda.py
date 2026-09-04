@@ -117,6 +117,10 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m16_tma_grouped_ordered_split",
         "p32_window_m16_tma_grouped_ordered_partials",
         "p32_window_fp8_m16",
+        "p32_window_m32_tma_grouped_reuse2",
+        "p32_window_m32_tma_grouped_ordered_reuse2",
+        "p32_window_m64_tma_grouped_reuse4",
+        "p32_window_m64_tma_grouped_ordered_reuse4",
     ),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_WGMMA_BUILD_ROOT",
@@ -243,6 +247,32 @@ def qvq_h100_ordered_split_count(
     ):
         return 16
     return 0
+
+
+def qvq_h100_large_m_ordered_split_count(
+    *,
+    device_name: str,
+    compute_capability: tuple[int, int],
+    logical_rows: int,
+    in_features: int,
+    out_features: int,
+) -> int:
+    """Return the measured H100 large-M split for narrow Llama down."""
+
+    if (
+        device_name != "NVIDIA H100"
+        or compute_capability != (9, 0)
+        or (in_features, out_features) != (8192, 2048)
+        or logical_rows <= 16
+    ):
+        return 1
+    if logical_rows <= 64:
+        return 8
+    if logical_rows <= 128:
+        return 4
+    if logical_rows <= 256:
+        return 2
+    return 1
 
 
 def qvq_h100_grouped_ordered_split_counts(
@@ -577,8 +607,15 @@ def qvq_p32_window_wgmma_group_plan(
         requested_splits = tuple(int(value) for value in split_counts)
         if len(requested_splits) != segment_count:
             raise ValueError("grouped Hopper P32 split_counts length must match")
-    if input.ndim != 2 or input.shape[0] != 16:
-        raise ValueError("grouped Hopper P32 requires an M16 input")
+    if (
+        input.ndim != 2
+        or input.shape[0] < 16
+        or input.shape[0] > 4096
+        or input.shape[0] % 16
+    ):
+        raise ValueError(
+            "grouped Hopper P32 requires M in [16, 4096] and divisible by 16"
+        )
     if input.shape[1] <= 0 or input.shape[1] % 256:
         raise ValueError(
             "grouped Hopper P32 input K must be a positive multiple of 256"
@@ -688,8 +725,15 @@ def qvq_p32_window_wgmma_grouped_packed(
     """Run one segmented Hopper TMA/RS-WGMMA grid for a cached payload."""
 
     plan = payload.plan
-    if tuple(input.shape) != (16, plan.in_features):
-        raise ValueError("grouped Hopper P32 input does not match its M16 plan")
+    rows = int(input.shape[0]) if input.ndim == 2 else 0
+    if (
+        input.ndim != 2
+        or input.shape[1] != plan.in_features
+        or rows < 16
+        or rows > 4096
+        or rows % 16
+    ):
+        raise ValueError("grouped Hopper P32 input does not match its row-tiled plan")
     if any(segment.split_count != 1 for segment in plan.segments):
         raise ValueError(
             "grouped Hopper P32 fusion requires split-1 children for exact "
@@ -707,9 +751,9 @@ def qvq_p32_window_wgmma_grouped_packed(
         [segment.split_count for segment in plan.segments],
     )
     return tuple(
-        child.reshape(16, width)
+        child.reshape(rows, width)
         for child, width in zip(
-            torch.split(output, [16 * width for width in widths]),
+            torch.split(output, [rows * width for width in widths]),
             widths,
             strict=True,
         )
@@ -724,8 +768,15 @@ def qvq_p32_window_wgmma_grouped_ordered_packed(
     """Run a flattened grouped grid with child-local ordered split reduction."""
 
     plan = payload.plan
-    if tuple(input.shape) != (16, plan.in_features):
-        raise ValueError("grouped Hopper P32 input does not match its M16 plan")
+    rows = int(input.shape[0]) if input.ndim == 2 else 0
+    if (
+        input.ndim != 2
+        or input.shape[1] != plan.in_features
+        or rows < 16
+        or rows > 4096
+        or rows % 16
+    ):
+        raise ValueError("grouped Hopper P32 input does not match its row-tiled plan")
     widths = [segment.out_features for segment in plan.segments]
     output = _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma_grouped_ordered_split")(
         input,
@@ -738,9 +789,9 @@ def qvq_p32_window_wgmma_grouped_ordered_packed(
         [segment.split_count for segment in plan.segments],
     )
     return tuple(
-        child.reshape(16, width)
+        child.reshape(rows, width)
         for child, width in zip(
-            torch.split(output, [16 * width for width in widths]),
+            torch.split(output, [rows * width for width in widths]),
             widths,
             strict=True,
         )
@@ -755,13 +806,18 @@ def qvq_p32_window_wgmma_grouped_ordered_partials_packed(
     """Run the grouped grid and return child-major ordered partial planes."""
 
     plan = payload.plan
-    if tuple(input.shape) != (16, plan.in_features):
-        raise ValueError("grouped Hopper P32 input does not match its M16 plan")
+    rows = int(input.shape[0]) if input.ndim == 2 else 0
+    if (
+        input.ndim != 2
+        or input.shape[1] != plan.in_features
+        or rows < 16
+        or rows > 4096
+        or rows % 16
+    ):
+        raise ValueError("grouped Hopper P32 input does not match its row-tiled plan")
     if not any(segment.split_count > 1 for segment in plan.segments):
         raise ValueError("ordered grouped partials require at least one split child")
-    return _QVQ_WGMMA_EXTENSION.op(
-        "p32_window_m16_tma_grouped_ordered_partials"
-    )(
+    return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma_grouped_ordered_partials")(
         input,
         payload.trellis,
         levels,
@@ -771,6 +827,148 @@ def qvq_p32_window_wgmma_grouped_ordered_partials_packed(
         [segment.bank_alt_id for segment in plan.segments],
         [segment.split_count for segment in plan.segments],
     )
+
+
+def qvq_p32_window_wgmma_grouped_reuse2_packed(
+    input: torch.Tensor,
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Decode once for each pair of M16 row tiles in a grouped Hopper grid."""
+
+    plan = payload.plan
+    rows = int(input.shape[0]) if input.ndim == 2 else 0
+    if (
+        input.ndim != 2
+        or input.shape[1] != plan.in_features
+        or rows < 32
+        or rows > 4096
+        or rows % 32
+    ):
+        raise ValueError(
+            "grouped Hopper P32 row-reuse input requires M in [32, 4096] "
+            "and divisible by 32"
+        )
+    widths = [segment.out_features for segment in plan.segments]
+    ordered = any(segment.split_count != 1 for segment in plan.segments)
+    op_name = (
+        "p32_window_m32_tma_grouped_ordered_reuse2"
+        if ordered
+        else "p32_window_m32_tma_grouped_reuse2"
+    )
+    output = _QVQ_WGMMA_EXTENSION.op(op_name)(
+        input,
+        payload.trellis,
+        levels,
+        payload.bank_ids,
+        plan.transition_bits,
+        widths,
+        [segment.bank_alt_id for segment in plan.segments],
+        [segment.split_count for segment in plan.segments],
+    )
+    return tuple(
+        child.reshape(rows, width)
+        for child, width in zip(
+            torch.split(output, [rows * width for width in widths]),
+            widths,
+            strict=True,
+        )
+    )
+
+
+def qvq_p32_window_wgmma_grouped_reuse4_packed(
+    input: torch.Tensor,
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Decode once for each group of four M16 row tiles on Hopper."""
+
+    plan = payload.plan
+    rows = int(input.shape[0]) if input.ndim == 2 else 0
+    if (
+        input.ndim != 2
+        or input.shape[1] != plan.in_features
+        or rows < 64
+        or rows > 4096
+        or rows % 64
+    ):
+        raise ValueError(
+            "grouped Hopper P32 reuse-4 input requires M in [64, 4096] "
+            "and divisible by 64"
+        )
+    widths = [segment.out_features for segment in plan.segments]
+    ordered = any(segment.split_count != 1 for segment in plan.segments)
+    op_name = (
+        "p32_window_m64_tma_grouped_ordered_reuse4"
+        if ordered
+        else "p32_window_m64_tma_grouped_reuse4"
+    )
+    output = _QVQ_WGMMA_EXTENSION.op(op_name)(
+        input,
+        payload.trellis,
+        levels,
+        payload.bank_ids,
+        plan.transition_bits,
+        widths,
+        [segment.bank_alt_id for segment in plan.segments],
+        [segment.split_count for segment in plan.segments],
+    )
+    return tuple(
+        child.reshape(rows, width)
+        for child, width in zip(
+            torch.split(output, [rows * width for width in widths]),
+            widths,
+            strict=True,
+        )
+    )
+
+
+def qvq_p32_window_wgmma_single_large_m_packed(
+    input: torch.Tensor,
+    trellis: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    bits: float,
+    *,
+    out_features: int,
+    bank_alt_id: int,
+    split_count: int = 1,
+) -> torch.Tensor:
+    """Run one canonical P32 child through the large-M grouped row grid.
+
+    This is a zero-copy plan wrapper: the canonical child's prepared window
+    payload and selectors become the single segment. Ordinary ``QVQLinear``
+    modules can therefore use M32/M64 decode reuse without manufacturing a
+    grouped checkpoint or retaining another weight representation.
+    """
+
+    plan = qvq_p32_window_wgmma_group_plan(
+        input,
+        (trellis,),
+        levels,
+        (bank_ids,),
+        bits,
+        out_features=(out_features,),
+        bank_alt_ids=(bank_alt_id,),
+        split_counts=(split_count,),
+    )
+    payload = QVQHopperGroupedP32Payload(
+        trellis=trellis,
+        bank_ids=bank_ids,
+        plan=plan,
+    )
+    rows = int(input.shape[0])
+    if rows >= 64 and rows % 64 == 0:
+        output = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
+    elif rows >= 32 and rows % 32 == 0:
+        output = qvq_p32_window_wgmma_grouped_reuse2_packed(input, payload, levels)
+    else:
+        output = (
+            qvq_p32_window_wgmma_grouped_ordered_packed(input, payload, levels)
+            if split_count != 1
+            else qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
+        )
+    return output[0]
 
 
 def qvq_p32_window_wgmma_grouped(
@@ -823,6 +1021,7 @@ __all__ = [
     "QVQHopperGroupedP32Plan",
     "QVQHopperP32SegmentPlan",
     "qvq_h100_grouped_ordered_split_counts",
+    "qvq_h100_large_m_ordered_split_count",
     "qvq_h100_ordered_split_count",
     "qvq_p32_window_wgmma_fp8_m16",
     "qvq_p32_window_wgmma_group_plan",
@@ -830,8 +1029,11 @@ __all__ = [
     "qvq_p32_window_wgmma_grouped_ordered_packed",
     "qvq_p32_window_wgmma_grouped_ordered_partials_packed",
     "qvq_p32_window_wgmma_grouped_packed",
+    "qvq_p32_window_wgmma_grouped_reuse2_packed",
+    "qvq_p32_window_wgmma_grouped_reuse4_packed",
     "qvq_p32_window_wgmma_m16_tma",
     "qvq_p32_window_wgmma_m16_tma_ordered_split",
+    "qvq_p32_window_wgmma_single_large_m_packed",
     "qvq_p32_window_wgmma_w3_m16",
     "qvq_p32_window_wgmma_w3_m16_tma",
     "qvq_pack_p32_window_hopper_group",
