@@ -267,9 +267,9 @@ whole-workload peaks; driver peak is sampled per-process NVML usage.
 
 | arm | prefill tok/s | prefill p50 / p95 ms | decode tok/s | decode p50 / p95 ms | peak alloc / reserved GiB | NVML peak MiB | model GiB | KV MiB at 4,176 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| dense BF16 | 183,790 | 22.29 / 23.07 | 31.80 | 31.35 / 31.74 | 2.710 / 2.795 | 3,558 | 2.303 | 130.50 |
-| W3.5A16 | 32,246 | 127.02 / 129.51 | 18.69 | 53.35 / 54.85 | 1.942 / 2.115 | 2,864 | 0.900 | 130.50 |
-| W3.5A8 | 4,003 | 1,023.12 / 1,027.18 | 16.42 | 60.71 / 62.72 | 3.083 / 3.416 | 4,180 | 0.900 | 72.25 |
+| dense BF16 | 183,755 | 22.29 / 23.03 | 31.84 | 31.29 / 31.82 | 2.710 / 2.795 | 3,558 | 2.303 | 130.50 |
+| W3.5A16 | 32,274 | 126.92 / 127.52 | 18.66 | 53.36 / 55.41 | 1.942 / 2.115 | 2,864 | 0.900 | 130.50 |
+| W3.5A8 | 3,993 | 1,025.76 / 1,028.12 | 16.59 | 60.20 / 60.78 | 3.083 / 3.416 | 4,180 | 0.900 | 72.25 |
 
 The static A8 cache reserved 4,352 token slots for the 4,176-token logical
 sequence and still used 44.64% fewer retained bytes than the BF16 cache,
@@ -281,8 +281,8 @@ There were zero P32 fallback/rejections, zero KV dequantized elements, and zero
 dense K/V prefix materializations.
 
 Relative to the earlier correctness baseline, M-grid launch collapsing raised
-A8 prefill from 805 to 4,003 tok/s (4.97x), grouped attention raised A8 decode
-from 11.28 to 16.42 tok/s (1.46x), and FP16 large-M row reuse raised A16 prefill
-from 5,225 to 32,246 tok/s (6.17x). Matching dense now requires another 45.91x
-for A8 prefill or 5.70x for A16 prefill. A8 decode is 1.14x short of A16 and
-1.94x short of dense.
+A8 prefill from 803 to 3,993 tok/s (4.97x), grouped attention raised A8 decode
+from 11.28 to 16.59 tok/s (1.47x), and FP16 large-M row reuse raised A16 prefill
+from 5,225 to 32,274 tok/s (6.18x). Matching dense now requires another 46.02x
+for A8 prefill or 5.69x for A16 prefill. A8 decode is 1.12x short of A16 and
+1.92x short of dense.
