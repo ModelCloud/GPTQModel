@@ -176,6 +176,27 @@ def test_p32_ampere_dispatches_measured_m16_wide_gate_plan_directly(monkeypatch)
     assert calls[0][-1] == 10
 
 
+def test_p32_ampere_large_m_uses_single_k_wave(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((512, 5120))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=1024,
+        bank_alt_id=3,
+        split_count=1,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == 1
+
+
 @pytest.mark.parametrize("rate", (2, 2.5, 3, 3.5))
 def test_p32_ampere_dispatches_measured_m16_packed_qkv_plan_directly(
     monkeypatch, rate
@@ -492,7 +513,7 @@ def test_p32_ampere_dispatches_measured_m2_attention_plan_directly(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
-@pytest.mark.parametrize("size_m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("size_m", (1, 2, 4, 8, 16, 17, 32))
 def test_p32_window_ampere_matches_exact_matrix(bits, size_m):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (8, 0):
