@@ -1658,6 +1658,12 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
   const bool use_wide_gate_up =
       use_gate_up_geometry && TransitionBits == 5 &&
       std::strcmp(properties.name, "NVIDIA H100") == 0;
+  const bool use_h100_qwen_ordered_prefetch =
+      OrderedSplit && size_k == 5120 && segment_count == 2 &&
+      out_features[0] == 17408 && out_features[1] == 17408 &&
+      split_counts[0] == 10 && split_counts[1] == 10 &&
+      TransitionBits == kW3TransitionBits &&
+      std::strcmp(properties.name, "NVIDIA H100") == 0;
   if (use_wide_gate_up) {
     const HopperFixedGateUpLaunchParams fixed_params{
         {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
@@ -1734,6 +1740,23 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
         static_cast<int>(total_n),
         1,
         0);
+  } else if (use_h100_qwen_ordered_prefetch) {
+    qvq_p32_window_wgmma_m16_tma_kernel<
+        TransitionBits,
+        true,
+        true,
+        false,
+        true><<<grid, kTmaThreads, 0, stream>>>(
+            input_tma,
+            trellis_tma,
+            bank_tma,
+            reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+            partial_output.data_ptr<float>(),
+            grouped_params,
+            size_k,
+            static_cast<int>(total_n),
+            1,
+            0);
   } else {
     qvq_p32_window_wgmma_m16_tma_kernel<TransitionBits, true, OrderedSplit>
         <<<grid, kTmaThreads, 0, stream>>>(

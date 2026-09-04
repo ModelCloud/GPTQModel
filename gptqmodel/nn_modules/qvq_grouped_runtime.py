@@ -214,6 +214,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_folded_qwen_mlp_launches: int = 0
     h100_folded_qwen_fused_precondition_launches: int = 0
     h100_folded_qwen_fused_ordered_reduction_launches: int = 0
+    h100_qwen_w3_ordered_decode_prefetch_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -263,6 +264,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_folded_qwen_mlp_launches": self.h100_folded_qwen_mlp_launches,
             "h100_folded_qwen_fused_precondition_launches": self.h100_folded_qwen_fused_precondition_launches,
             "h100_folded_qwen_fused_ordered_reduction_launches": self.h100_folded_qwen_fused_ordered_reduction_launches,
+            "h100_qwen_w3_ordered_decode_prefetch_launches": self.h100_qwen_w3_ordered_decode_prefetch_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -788,6 +790,8 @@ class QVQHopperGroupedRuntime:
                 )
                 self.telemetry.h100_folded_qwen_fused_precondition_launches += 1
                 self.telemetry.h100_folded_qwen_fused_ordered_reduction_launches += 1
+                if children[0].bits == 3:
+                    self.telemetry.h100_qwen_w3_ordered_decode_prefetch_launches += 1
             elif use_h100_folded_fusion:
                 inner_gate, inner_up = self._execute(x, recover=False)
                 transformed = qvq_cuda_folded_swiglu_precondition_fp32(
