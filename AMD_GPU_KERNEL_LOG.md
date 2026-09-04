@@ -34,12 +34,22 @@ engineering comparison but is never presented as an official result.
 | FAIL (test harness), FIXED | Public `QVQLinear.forward()` integration assertion compared FP16 output metadata to an FP32 oracle | Numeric values reached the assertion, but 3 integration cases failed on dtype equality | Public forward intentionally restores the activation dtype after scaling. The assertion now promotes the output to FP32 before applying the `2e-3` oracle gate. This was not a kernel numeric failure. |
 | PASS | Expanded correctness and contract suite | 183/183 tests passed | Covers three independent seeds for every requested M/rate pair, 10 repeat calls per pair, adversarial signs and magnitudes, all alternate bank IDs, FP16/FP32 output, public module dispatch, a non-default stream, and invalid contracts. Python branch coverage is 100% after excluding the Triton JIT body that is compiled and validated by the GPU oracle cases. |
 | FAIL (pre-existing test portability) | Existing `test_qvq_v2b2_p32.py`, `test_qvq_v2b2_p32_window.py`, and `test_qvq.py` regression selection on ROCm | 853 passed, 139 skipped, 125 failed | The CUDA-marked failures are not in the new inference path. They gate only on `torch.cuda.is_available()`, which is true on ROCm, then require NVIDIA-only QVQ/diagnostic CUDA extensions or NVIDIA telemetry. The extension reports `QVQ CUDA requires NVIDIA CUDA; ROCm is not supported`. Five representative non-matrix failures were rerun separately and confirmed the same ROCm/NVIDIA capability mismatch. |
+| PASS | Move M256 from 64x64/4 warps to 128x64/8 warps | All four rates passed | Median latency improved by 22.2%-33.3% in the final full sweep, depending on rate. Accepted. |
+| PASS | Move M128 from 64x64/4 warps to 128x64/8 warps | All four rates passed | Median latency improved by 17.6%-22.6% in the final full sweep. Accepted. |
+| PASS, REJECTED | Move M64 from 32x64/4 warps to 64x64/4 warps | All four rates passed | Median latency regressed by about 4%-6%. The 32-row tile was restored. |
+| PASS, REJECTED | Move M32 from 32x64/4 warps to 64x64/4 warps | All four rates passed | Median latency regressed by about 4%-6%. The 32-row tile was restored. |
+| PASS | Increase M1-M16 16x64 tile from 4 to 8 warps | All four rates at M1 and M16 passed | Median latency improved by 3.9%-7.2% in the final full sweep. Accepted. |
+| PASS | Increase M32-M64 32x64 tile from 4 to 8 warps | All four rates at M32 and M64 passed | Median latency improved by 12.5%-15.7% in the final full sweep. Accepted. |
+| PASS (exploratory) | Full tuned requested M/rate sweep, K=N=4096 | All 52 cases passed; worst maximum absolute error `1.2397766e-5` | Every changed requested shape improved by 3.9%-33.3%. Reconstruct-plus-GEMM speedup was 3.78x-26.64x and peak effective throughput was 165.6 TFLOP/s. The same three foreign residents keep this result explicitly invalidated for official reporting. |
+| PASS | Tuned correctness and contract suite | 185/185 tests passed | Three-seed requested matrix, repeatability, adversarial inputs, alternate banks, dtypes, public dispatch, stream behavior, and contract rejection all pass. Python branch coverage remains 100% with the GPU-compiled Triton body covered by oracle tests. |
 
 The initial exploratory sweep is stored in
 `artifacts/mi355x_p32/initial_gfx950.json`. The expanded sweep is stored in
 `artifacts/mi355x_p32/fallback_gfx950.json`; it also records effective
 throughput, packed/dense storage, and enrolls the benchmark's host-visible ROCm
-context before rejecting newly arriving PIDs ahead of every timed case.
+context before rejecting newly arriving PIDs ahead of every timed case. Tuning
+experiments and the final full sweep are stored alongside it as
+`experiment_*.json` and `tuned_gfx950.json`.
 
 ## Implementation notes
 
@@ -47,5 +57,7 @@ The selected Triton kernel decodes the storage-neutral continuous-window P32
 layout in registers, applies packed binary bank selection and the exact PGC16
 mix, loads canonical FP16 levels, and accumulates with `tl.dot` into FP32. The
 integration dispatch is limited to ROCm `gfx950`, inference mode, FP16 input,
-V2B2-P32 vector size 2, and transition widths 4 through 7. Unsupported devices
-and formats retain the existing reference or CUDA paths.
+V2B2-P32 vector size 2, and transition widths 4 through 7. The final launch
+policy uses 16x64 tiles through M16, 32x64 through M64, and 128x64 from M128,
+all with eight warps. Unsupported devices and formats retain the existing
+reference or CUDA paths.

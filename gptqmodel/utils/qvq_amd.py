@@ -48,11 +48,9 @@ def _launch_config(m: int) -> tuple[int, int, int]:
     """Choose an MFMA tile without materializing a shape Cartesian product."""
 
     if m <= 16:
-        return 16, 64, 4
+        return 16, 64, 8
     if m <= 64:
-        return 32, 64, 4
-    if m <= 256:
-        return 64, 64, 4
+        return 32, 64, 8
     return 128, 64, 8
 
 

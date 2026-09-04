@@ -74,7 +74,15 @@ def test_qvq_p32_amd_support_is_rocm_gfx950_only():
 
 @pytest.mark.parametrize(
     ("m", "expected"),
-    ((1, (16, 64, 4)), (16, (16, 64, 4)), (32, (32, 64, 4)), (128, (64, 64, 4)), (4096, (128, 64, 8))),
+    (
+        (1, (16, 64, 8)),
+        (16, (16, 64, 8)),
+        (32, (32, 64, 8)),
+        (64, (32, 64, 8)),
+        (128, (128, 64, 8)),
+        (256, (128, 64, 8)),
+        (4096, (128, 64, 8)),
+    ),
 )
 def test_qvq_p32_amd_launch_config_covers_requested_regimes(m, expected):
     assert _launch_config(m) == expected
