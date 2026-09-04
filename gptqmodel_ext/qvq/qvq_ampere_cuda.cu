@@ -403,7 +403,8 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
     int payload_n_tile_offset,
     int output_n_offset,
     int output_stride,
-    int64_t partial_segment_offset) {
+    int64_t partial_segment_offset,
+    int64_t partial_split_stride = 0) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
   constexpr int kWordsPerTile = 4 * TransitionBits;
   // The wide specialization follows Marlin's output-reuse principle: each
@@ -724,10 +725,13 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
     parity ^= 1;
   }
 
+  const int64_t split_stride = partial_split_stride > 0
+      ? partial_split_stride
+      : static_cast<int64_t>(size_m) * size_n;
   float* target = effective_split_count == 1
       ? output + output_n_offset
       : partial_output + partial_segment_offset +
-          static_cast<int64_t>(split) * size_m * size_n;
+          static_cast<int64_t>(split) * split_stride;
   const int target_stride = effective_split_count == 1 ? output_stride : size_n;
   if (active_tile) {
     const int output_row_0 = lane >> 2;
@@ -852,6 +856,60 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       0,
       size_n,
       0);
+}
+
+// Large-batch launches reuse the same 16-row WMMA tile across a two-dimensional
+// row grid.  Keeping the row tile in the existing kernel body preserves the
+// exact decode and accumulation order while avoiding one host launch per row
+// chunk for prefill workloads.
+template <int TransitionBits>
+__global__ __launch_bounds__(kThreads) void p32_window_ampere_large_m_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int split_count,
+    int bank_alt_id) {
+  const int row_offset = static_cast<int>(blockIdx.y) * kRows;
+  const int local_m = min(kRows, size_m - row_offset);
+  if (local_m <= 0) {
+    return;
+  }
+  const int n_tiles = size_n / kTileColumns;
+  const int n_block = static_cast<int>(blockIdx.x);
+  const int split = static_cast<int>(blockIdx.z);
+#define QVQ_LARGE_M_BODY(FULL_ROWS) \
+  p32_window_ampere_kernel_body<TransitionBits, FULL_ROWS>( \
+      input + static_cast<int64_t>(row_offset) * size_k, \
+      trellis, \
+      levels, \
+      bank_ids, \
+      partial_output, \
+      output + static_cast<int64_t>(row_offset) * size_n, \
+      local_m, \
+      size_k, \
+      size_n, \
+      split_count, \
+      bank_alt_id, \
+      n_block, \
+      split, \
+      n_tiles, \
+      0, \
+      0, \
+      size_n, \
+      static_cast<int64_t>(row_offset) * size_n, \
+      static_cast<int64_t>(size_m) * size_n)
+  if (local_m == kRows) {
+    QVQ_LARGE_M_BODY(true);
+  } else {
+    QVQ_LARGE_M_BODY(false);
+  }
+#undef QVQ_LARGE_M_BODY
 }
 
 // M=1 is a distinct workload on Ampere.  The WMMA path above must carry a
@@ -1701,8 +1759,8 @@ at::Tensor p32_window_ampere_impl(
           bank_ids.is_contiguous(),
       "QVQ P32 Ampere tensors must be contiguous");
   TORCH_CHECK(
-      input.dim() == 2 && input.size(0) >= 1 && input.size(0) <= kRows,
-      "QVQ P32 Ampere input must have between 1 and 16 rows");
+      input.dim() == 2 && input.size(0) >= 1,
+      "QVQ P32 Ampere input must have at least one row");
   TORCH_CHECK(
       input.size(1) > 0 && input.size(1) % kTileRows == 0,
       "QVQ P32 Ampere K must be positive and divisible by 16");
@@ -1764,7 +1822,25 @@ at::Tensor p32_window_ampere_impl(
   const auto* bank_ids_ptr = bank_ids.data_ptr<uint8_t>();
   auto* partial_output_ptr = partial_output.data_ptr<float>();
   auto* output_ptr = output.data_ptr<float>();
-  if (size_m == 1 && size_k == 5120 && size_n == 12288 &&
+  if (size_m > kRows) {
+    const dim3 large_grid(
+        static_cast<unsigned>((n_tiles + kTilesPerBlock - 1) / kTilesPerBlock),
+        static_cast<unsigned>((size_m + kRows - 1) / kRows),
+        static_cast<unsigned>(split_count));
+    p32_window_ampere_large_m_kernel<TransitionBits>
+        <<<large_grid, kThreads, 0, stream>>>(
+        input_ptr,
+        trellis_ptr,
+        levels_ptr,
+        bank_ids_ptr,
+        partial_output_ptr,
+        output_ptr,
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 1 && size_k == 5120 && size_n == 12288 &&
       split_count == 40 &&
       launch_static_n_scalar_kernel<
           TransitionBits, 1, kM1Threads, kM1TilesPerBlock,

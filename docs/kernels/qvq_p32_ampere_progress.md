@@ -3516,6 +3516,38 @@ no losses at the other rates.  Diagnostics are
 `artifacts/a100_p32_window/v26_candidate_m16_attention_static12_20000.json`
 and `artifacts/a100_p32_window/v26_candidate_m16_attention_static12_repeat20000.json`.
 
+## v62 rejected M2 full-KV static-N probe
+
+The M2 full-KV route `(K,N)=(5120,1024)` was screened with a compile-time
+`StaticN=1024` and `StaticSplitCount=64` scalar launch.  It remained exact, but
+the matched 20,000-iteration medians regressed at W2.5/W3/W3.5: latest-main
+was `0.034816/0.033792/0.032768/0.034816 ms`, while the candidate was
+`0.034816/0.036864/0.035840/0.036864 ms`.  The source change was reverted;
+diagnostics are `artifacts/a100_p32_window/v26_candidate_m2_fullkv_staticn1024_20000.json`
+and `artifacts/a100_p32_window/v26_candidate_m2_fullkv_staticn1024_repeat20000.json`.
+
+## v63 large-M row-block capability (M=512/1024/2048/4096)
+
+The Ampere P32 entry point previously rejected `M>16`.  The new row-blocked
+launcher tiles each prefill batch into 16-row WMMA CTAs, uses one K wave, and
+writes directly into the global output layout.  The Python policy disables
+autotune for these large batches and selects split 1, avoiding a partial tensor
+that scales with M.  Correctness covers M=17 and M=32 across all four rates;
+the requested M=512/1024/2048/4096 sweep across all seven projection shapes
+also stayed within `max_abs <= 6.8e-4`.  The 50-iteration diagnostic is
+`artifacts/a100_p32_window/v27_candidate_large_m_all_shapes_50.json`.
+
+The fetched `origin/main` still rejects `M>16`, so no direct main-branch timing
+exists for these new shapes; the reported large-M speedups are against the
+planar oracle only until a comparable main implementation is available.
+
+## v64 rejected large-M wide-N Marlin-style probe
+
+Applying the two-N-tile-per-warp (`WideNTiles=true`) reuse path to the large-M
+launcher preserved correctness but regressed M512 full-KV from roughly 9.2x to
+6.8x Ampere/planar speedup.  The change was reverted; diagnostic:
+`artifacts/a100_p32_window/v27_candidate_m512_fullkv_wide_smoke.json`.
+
 ## Reproduction
 
 ```bash
