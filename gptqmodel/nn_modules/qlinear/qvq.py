@@ -465,11 +465,11 @@ class QVQLinear(BaseQuantLinear):
         self,
         device: torch.device,
     ) -> torch.Tensor:
-        """Build and retain the storage-neutral P32 window payload for Hopper WGMMA.
+        """Build and retain the storage-neutral P32 window payload for direct kernels.
 
         Serialized checkpoints remain canonical planar P32.  The direct-window
-        Hopper kernel uses an equivalent bit layout, so convert once per module
-        after the weights reach CUDA and reuse the result for subsequent calls.
+        Hopper and gfx950 kernels use an equivalent bit layout, so convert once
+        per module after the weights reach the accelerator and reuse the result.
         """
 
         source = self.trellis
@@ -484,7 +484,7 @@ class QVQLinear(BaseQuantLinear):
             return cached[3]
         window = repack_p32_planar_to_window(source.contiguous(), bits=self.bits).to(device=device)
         if self.trellis is not source or source._version != source_version:
-            raise RuntimeError("QVQ P32 trellis changed while preparing the Hopper window payload")
+            raise RuntimeError("QVQ P32 trellis changed while preparing the window payload")
         self._qvq_cuda_window_cache = (source, source_version, device, window)
         return window
 
@@ -1000,6 +1000,29 @@ class QVQLinear(BaseQuantLinear):
             if (
                 not qvq_cuda_device_supported(x.device)
             ):
+                if (
+                    torch.version.hip is not None
+                    and self.v2b2_p32
+                    and self.vector_size == 2
+                    and x.dtype == torch.float16
+                    and qvq_transition_bits(self.bits, vector_size=2) in (4, 5, 6, 7)
+                ):
+                    from ...utils.qvq_amd import qvq_p32_amd, qvq_p32_amd_supported
+                    from ...utils.qvq_cuda import _pgc16_levels
+
+                    if qvq_p32_amd_supported(x.device):
+                        with self._qvq_cuda_bank_cache_lock:
+                            window = self._prepare_hopper_p32_window(x.device)
+                        return qvq_p32_amd(
+                            x.contiguous(),
+                            window,
+                            _pgc16_levels(x.device, self.codebook_version),
+                            cuda_bank_ids,
+                            self.bits,
+                            out_features=self.out_features,
+                            bank_alt_id=cuda_bank_alt_id,
+                            output_fp32=True,
+                        )
                 return self._reference_inner_forward(x)
 
             # Hopper's RS-WGMMA path consumes the storage-neutral continuous
