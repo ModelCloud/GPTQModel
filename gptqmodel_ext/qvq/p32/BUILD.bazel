@@ -1,5 +1,6 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -39,5 +40,44 @@ fi
   -I$$(dirname $(location qvq_p32_abi.h)) \
   -shared -o "$@" $(location qvq_p32_cuda.cu)
 """,
+    tags = ["manual"],
+)
+
+genrule(
+    name = "runtime_smoke_bin",
+    srcs = [
+        ":libqvq_p32",
+        "qvq_p32_abi.h",
+        "qvq_p32_runtime_smoke.cu",
+    ],
+    outs = ["qvq_p32_runtime_smoke"],
+    cmd = """
+set -eu
+cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then cuda_home=/usr/local/cuda-13.3; fi
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
+  echo "nvcc not found; set CUDA_HOME to a CUDA toolkit containing nvcc" >&2
+  exit 1
+fi
+"$${cuda_home}/bin/nvcc" \
+  -std=c++17 -O2 \
+  -gencode arch=compute_80,code=sm_80 \
+  -I$$(dirname $(location qvq_p32_abi.h)) \
+  -L$$(dirname $(location :libqvq_p32)) -lqvq_p32 \
+  -Xlinker=-rpath -Xlinker='$$ORIGIN' \
+  -o "$@" $(location qvq_p32_runtime_smoke.cu)
+""",
+    executable = True,
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "runtime_smoke",
+    srcs = ["run_runtime_smoke.sh"],
+    args = ["$(location :runtime_smoke_bin)"],
+    data = [
+        ":libqvq_p32",
+        ":runtime_smoke_bin",
+    ],
     tags = ["manual"],
 )

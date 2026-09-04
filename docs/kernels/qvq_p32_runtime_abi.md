@@ -19,3 +19,7 @@ libraries during initialization.
 The initial library target is deliberately SM80-only. Additional architecture
 libraries must use distinct targets and runtime capability gates rather than a
 single implicit device assumption.
+
+`runtime_smoke` validates the shared object through this public ABI on SM80. It
+uses nonzero deterministic inputs and checks that native split reduction equals
+the caller-visible sum of split partials.
