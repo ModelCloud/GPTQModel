@@ -604,6 +604,11 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
       static_cast<int>(blockIdx.y) * RowTilesPerCta * kRows;
   const int n_base = n64_block * kOutputColumns;
   const int n_tiles = size_n / kP32TileColumns;
+  const int warp = thread >> 5;
+  const int lane = thread & 31;
+  const int n_pair = lane >> 2;
+  const int k4 = (lane & 3) << 2;
+  const int n16_tile = n64_block * kP32N16TilesPerBlock + warp;
   const uint32_t alternate_bank_mask =
       qvq_wgmma_v2_alternate_bank_mask<TransitionBits>(bank_alt_id);
 
@@ -698,27 +703,30 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
     }
     __syncthreads();
 
+    // Each lane owns four K values for one adjacent pair of P32 N columns in
+    // each of the two canonical K16 tiles.  The even and odd columns select
+    // the high and low bytes of the same PGC state, respectively.  Decode the
+    // state once and feed both fragment positions instead of rediscovering
+    // identical tile, bank, window, and affine state for all 16 elements.
 #pragma unroll
-    for (int index = 0; index < 16; ++index) {
-      const auto coordinate = thread_coordinate_a(index);
-      const int wgmma_column = static_cast<int>(cute::get<0>(coordinate));
-      const int k_column = static_cast<int>(cute::get<1>(coordinate));
-      const int logical_n = n_base + qvq_p32_wgmma_logical_column(wgmma_column);
-      const int logical_k = k_base + k_column;
-      const int n16_tile = logical_n >> 4;
-      const int k16_tile = logical_k >> 4;
-      const int pair = (logical_k & 15) * 8 + ((logical_n & 15) >> 1);
+    for (int k16_half = 0; k16_half < 2; ++k16_half) {
       constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+      const int k16_tile = (k_base >> 4) + k16_half;
       const int64_t tile = static_cast<int64_t>(k16_tile) * n_tiles + n16_tile;
       const uint32_t* window_words = trellis + tile * kWordsPerP32Tile;
-      const uint32_t state = qvq_p32_window_state<TransitionBits>(window_words, pair);
-      const uint32_t selected_bank =
-          (static_cast<uint32_t>(bank_ids[tile]) >> (pair >> 4)) & 1u;
-      const uint32_t mixed = qvq_wgmma_pgc16_mix(
-          state ^ (selected_bank ? alternate_bank_mask : 0u));
-      const uint32_t level_index =
-          (logical_n & 1) == 0 ? qvq_wgmma_high_byte(mixed) : mixed & 0xffu;
-      fragment_a(index) = levels[level_index];
+      const uint32_t bank_id = static_cast<uint32_t>(bank_ids[tile]);
+#pragma unroll
+      for (int k_in_group = 0; k_in_group < 4; ++k_in_group) {
+        const int pair = (k4 + k_in_group) * 8 + n_pair;
+        const uint32_t state =
+            qvq_p32_window_state<TransitionBits>(window_words, pair);
+        const uint32_t selected_bank = (bank_id >> (pair >> 4)) & 1u;
+        const uint32_t mixed = qvq_wgmma_pgc16_mix(
+            state ^ (selected_bank ? alternate_bank_mask : 0u));
+        const int fragment_base = k16_half * 8 + k_in_group;
+        fragment_a(fragment_base) = levels[qvq_wgmma_high_byte(mixed)];
+        fragment_a(fragment_base + 4) = levels[mixed & 0xffu];
+      }
     }
 
     cute::warpgroup_fence_operand(fragment_a);
