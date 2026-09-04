@@ -1,0 +1,1292 @@
+{
+  "axis_topology": "A41-style folded V output plus folded unsupported 17408 gate/up-output/down-input MLP axis",
+  "commit": "202eb8d7dd9ccdb728051a7a41160b6cb4c21fc1",
+  "derived_sites": {
+    "full_attention_output": [
+      [
+        6144,
+        5120
+      ]
+    ],
+    "full_qkv": [
+      [
+        5120,
+        12288
+      ],
+      [
+        5120,
+        1024
+      ],
+      [
+        5120,
+        1024
+      ]
+    ],
+    "linear_inputs": [
+      [
+        5120,
+        10240
+      ],
+      [
+        5120,
+        6144
+      ]
+    ],
+    "mlp": [
+      [
+        5120,
+        17408
+      ],
+      [
+        5120,
+        17408
+      ],
+      [
+        17408,
+        5120
+      ]
+    ]
+  },
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "grouping": "enabled production grouping",
+  "hf_config_sha256": "191e0af232104ed8b65258cf3fb2b842e288008baca7633c11b82a1ac7203aab",
+  "hf_model": "Qwen/Qwen3.8-27B",
+  "hf_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "installed_groups": [
+    {
+      "bits": 2.0,
+      "counts": {
+        "gate_up": 1
+      },
+      "site": "mlp"
+    },
+    {
+      "bits": 2.5,
+      "counts": {
+        "gate_up": 1
+      },
+      "site": "mlp"
+    },
+    {
+      "bits": 3.0,
+      "counts": {
+        "gate_up": 1
+      },
+      "site": "mlp"
+    }
+  ],
+  "label": "qwen-folded-fused-precondition",
+  "oracle": "qvq_dense_oracle_forward FP32, retaining model FP16 boundaries between MLP children",
+  "rows": [
+    {
+      "bits": 2.0,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 44564480,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 5,
+          "grouped_launches": 5,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 44564480,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 5,
+          "h100_folded_qwen_mlp_launches": 5,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 10,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 5,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 1,
+      "max_abs_error": 4.286903276806697e-08,
+      "max_us": 238.47360610961914,
+      "mean_abs_error": 1.503358078025485e-08,
+      "mean_us": 235.08246358235678,
+      "median_us": 235.50240516662598,
+      "min_us": 231.62368774414062,
+      "mode": "decode",
+      "p95_us": 236.3814353942871,
+      "shapes": [
+        [
+          1,
+          5120,
+          17408
+        ],
+        [
+          1,
+          5120,
+          17408
+        ],
+        [
+          1,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 2.0,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 44564480,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 10,
+          "grouped_launches": 10,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 44564480,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 10,
+          "h100_folded_qwen_mlp_launches": 10,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 20,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 10,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 2,
+      "max_abs_error": 4.265660891178413e-08,
+      "max_us": 242.24191665649414,
+      "mean_abs_error": 1.5332486213992525e-08,
+      "mean_us": 238.87908172607422,
+      "median_us": 238.7452793121338,
+      "min_us": 238.34688186645508,
+      "mode": "prefill_m16",
+      "p95_us": 239.41312789916992,
+      "shapes": [
+        [
+          2,
+          5120,
+          17408
+        ],
+        [
+          2,
+          5120,
+          17408
+        ],
+        [
+          2,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 2.0,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 44564480,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 15,
+          "grouped_launches": 15,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 44564480,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 15,
+          "h100_folded_qwen_mlp_launches": 15,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 30,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 15,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 4,
+      "max_abs_error": 4.4470461091350444e-08,
+      "max_us": 243.76127243041992,
+      "mean_abs_error": 1.5218476789868875e-08,
+      "mean_us": 241.68619696299234,
+      "median_us": 241.76128387451172,
+      "min_us": 238.9971160888672,
+      "mode": "prefill_m16",
+      "p95_us": 243.1884765625,
+      "shapes": [
+        [
+          4,
+          5120,
+          17408
+        ],
+        [
+          4,
+          5120,
+          17408
+        ],
+        [
+          4,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 2.0,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 44564480,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 20,
+          "grouped_launches": 20,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 44564480,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 20,
+          "h100_folded_qwen_mlp_launches": 20,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 40,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 20,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 8,
+      "max_abs_error": 4.44349232964214e-08,
+      "max_us": 253.69728088378906,
+      "mean_abs_error": 1.5208289028123544e-08,
+      "mean_us": 250.38732751210532,
+      "median_us": 250.53695678710938,
+      "min_us": 246.3750457763672,
+      "mode": "prefill_m16",
+      "p95_us": 253.1283187866211,
+      "shapes": [
+        [
+          8,
+          5120,
+          17408
+        ],
+        [
+          8,
+          5120,
+          17408
+        ],
+        [
+          8,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 2.0,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 44564480,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 25,
+          "grouped_launches": 25,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 44564480,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 25,
+          "h100_folded_qwen_mlp_launches": 25,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 50,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 25,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 16,
+      "max_abs_error": 4.488515514822211e-08,
+      "max_us": 262.72064208984375,
+      "mean_abs_error": 1.519973125141405e-08,
+      "mean_us": 259.2876904805501,
+      "median_us": 259.15072441101074,
+      "min_us": 258.59968185424805,
+      "mode": "prefill_m16",
+      "p95_us": 260.09471893310547,
+      "shapes": [
+        [
+          16,
+          5120,
+          17408
+        ],
+        [
+          16,
+          5120,
+          17408
+        ],
+        [
+          16,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 2.5,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 55705600,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 5,
+          "grouped_launches": 5,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 55705600,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 5,
+          "h100_folded_qwen_mlp_launches": 5,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 10,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 5,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 1,
+      "max_abs_error": 3.820149174771359e-08,
+      "max_us": 238.94975662231445,
+      "mean_abs_error": 1.514014513759321e-08,
+      "mean_us": 235.53170204162598,
+      "median_us": 235.43776512145996,
+      "min_us": 234.8204803466797,
+      "mode": "decode",
+      "p95_us": 237.0604705810547,
+      "shapes": [
+        [
+          1,
+          5120,
+          17408
+        ],
+        [
+          1,
+          5120,
+          17408
+        ],
+        [
+          1,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 2.5,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 55705600,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 10,
+          "grouped_launches": 10,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 55705600,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 10,
+          "h100_folded_qwen_mlp_launches": 10,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 20,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 10,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 2,
+      "max_abs_error": 4.837841061089421e-08,
+      "max_us": 240.95104217529297,
+      "mean_abs_error": 1.5341530001933278e-08,
+      "mean_us": 238.6299311319987,
+      "median_us": 238.54527473449707,
+      "min_us": 237.13151931762695,
+      "mode": "prefill_m16",
+      "p95_us": 239.63520050048828,
+      "shapes": [
+        [
+          2,
+          5120,
+          17408
+        ],
+        [
+          2,
+          5120,
+          17408
+        ],
+        [
+          2,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 2.5,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 55705600,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 15,
+          "grouped_launches": 15,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 55705600,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 15,
+          "h100_folded_qwen_mlp_launches": 15,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 30,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 15,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 4,
+      "max_abs_error": 4.497007921600016e-08,
+      "max_us": 245.17568588256836,
+      "mean_abs_error": 1.5226005700696986e-08,
+      "mean_us": 241.18180243174234,
+      "median_us": 240.95871925354004,
+      "min_us": 239.59295272827148,
+      "mode": "prefill_m16",
+      "p95_us": 242.69695281982422,
+      "shapes": [
+        [
+          4,
+          5120,
+          17408
+        ],
+        [
+          4,
+          5120,
+          17408
+        ],
+        [
+          4,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 2.5,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 55705600,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 20,
+          "grouped_launches": 20,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 55705600,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 20,
+          "h100_folded_qwen_mlp_launches": 20,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 40,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 20,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 8,
+      "max_abs_error": 4.352318683231715e-08,
+      "max_us": 252.13760375976562,
+      "mean_abs_error": 1.5261046826253732e-08,
+      "mean_us": 249.3952430089315,
+      "median_us": 249.28800582885742,
+      "min_us": 248.08448791503906,
+      "mode": "prefill_m16",
+      "p95_us": 250.77760696411133,
+      "shapes": [
+        [
+          8,
+          5120,
+          17408
+        ],
+        [
+          8,
+          5120,
+          17408
+        ],
+        [
+          8,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 2.5,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 55705600,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 25,
+          "grouped_launches": 25,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 55705600,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 25,
+          "h100_folded_qwen_mlp_launches": 25,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 50,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 25,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 16,
+      "max_abs_error": 4.4063654058845714e-08,
+      "max_us": 262.3916816711426,
+      "mean_abs_error": 1.525600623608625e-08,
+      "mean_us": 258.439754486084,
+      "median_us": 258.02016258239746,
+      "min_us": 257.324161529541,
+      "mode": "prefill_m16",
+      "p95_us": 259.80031967163086,
+      "shapes": [
+        [
+          16,
+          5120,
+          17408
+        ],
+        [
+          16,
+          5120,
+          17408
+        ],
+        [
+          16,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 3.0,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 66846720,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 5,
+          "grouped_launches": 5,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 66846720,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 5,
+          "h100_folded_qwen_mlp_launches": 5,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 10,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 5,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 1,
+      "max_abs_error": 4.5229398892843165e-08,
+      "max_us": 247.57183074951172,
+      "mean_abs_error": 1.5395802677176108e-08,
+      "mean_us": 242.42097918192545,
+      "median_us": 242.41695404052734,
+      "min_us": 238.97472381591797,
+      "mode": "decode",
+      "p95_us": 245.21791458129883,
+      "shapes": [
+        [
+          1,
+          5120,
+          17408
+        ],
+        [
+          1,
+          5120,
+          17408
+        ],
+        [
+          1,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 3.0,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 66846720,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 10,
+          "grouped_launches": 10,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 66846720,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 10,
+          "h100_folded_qwen_mlp_launches": 10,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 20,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 10,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 2,
+      "max_abs_error": 4.3045815800724085e-08,
+      "max_us": 248.9081573486328,
+      "mean_abs_error": 1.544103156447818e-08,
+      "mean_us": 245.46599578857422,
+      "median_us": 245.41696548461914,
+      "min_us": 244.50048446655273,
+      "mode": "prefill_m16",
+      "p95_us": 246.0691261291504,
+      "shapes": [
+        [
+          2,
+          5120,
+          17408
+        ],
+        [
+          2,
+          5120,
+          17408
+        ],
+        [
+          2,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 3.0,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 66846720,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 15,
+          "grouped_launches": 15,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 66846720,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 15,
+          "h100_folded_qwen_mlp_launches": 15,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 30,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 15,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 4,
+      "max_abs_error": 4.2790802012859785e-08,
+      "max_us": 252.60992050170898,
+      "mean_abs_error": 1.5140453513140528e-08,
+      "mean_us": 248.38179206848145,
+      "median_us": 248.2483196258545,
+      "min_us": 247.45983123779297,
+      "mode": "prefill_m16",
+      "p95_us": 249.42399978637695,
+      "shapes": [
+        [
+          4,
+          5120,
+          17408
+        ],
+        [
+          4,
+          5120,
+          17408
+        ],
+        [
+          4,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 3.0,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 66846720,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 20,
+          "grouped_launches": 20,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 66846720,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 20,
+          "h100_folded_qwen_mlp_launches": 20,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 40,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 20,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 8,
+      "max_abs_error": 4.5411525206873193e-08,
+      "max_us": 262.1343994140625,
+      "mean_abs_error": 1.5237604600315537e-08,
+      "mean_us": 257.6137711207072,
+      "median_us": 257.4886417388916,
+      "min_us": 256.83712005615234,
+      "mode": "prefill_m16",
+      "p95_us": 258.6444854736328,
+      "shapes": [
+        [
+          8,
+          5120,
+          17408
+        ],
+        [
+          8,
+          5120,
+          17408
+        ],
+        [
+          8,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    },
+    {
+      "bits": 3.0,
+      "group_telemetry": [
+        {
+          "active_split_counts": [
+            10,
+            10
+          ],
+          "category": "gate_up",
+          "child_window_bytes_avoided": 66846720,
+          "fused_mlp_fallbacks": 0,
+          "fused_mlp_launches": 25,
+          "grouped_launches": 25,
+          "grouped_selector_bytes": 696320,
+          "grouped_window_bytes": 66846720,
+          "h100_bounded_recovery_rounding_launches": 0,
+          "h100_direct_padded_input_launches": 0,
+          "h100_direct_padded_precondition_launches": 0,
+          "h100_folded_qwen_fused_precondition_launches": 25,
+          "h100_folded_qwen_mlp_launches": 25,
+          "h100_fp16_recovery_store_launches": 0,
+          "h100_fused_down_reduction_recovery_launches": 0,
+          "h100_fused_recovery_precondition_launches": 0,
+          "h100_fused_silu_precondition_low_launches": 0,
+          "h100_half2_precondition_high_launches": 0,
+          "h100_half2_precondition_low_launches": 0,
+          "h100_multiblock_down_recovery_launches": 0,
+          "h100_multiblock_input_hadamard_launches": 0,
+          "h100_multiblock_precondition_launches": 0,
+          "h100_multiblock_recovery_launches": 0,
+          "h100_packed_gate_up_recovery_launches": 0,
+          "h100_paired_recovery_tiles_launches": 0,
+          "h100_w25_n128_gate_up_launches": 0,
+          "h100_warp_recovery_low_launches": 0,
+          "independent_recovery_children": 50,
+          "last_fallback_reason": null,
+          "members": [
+            "gate_proj",
+            "up_proj"
+          ],
+          "ordered_split_launches": 25,
+          "paired_recovery_launches": 0,
+          "payload_builds": 1,
+          "payload_drops": 0,
+          "plain_fallbacks": 0,
+          "sibling_cache_hits": 0,
+          "stale_cycles": 0
+        }
+      ],
+      "installed_groups": {
+        "gate_up": 1
+      },
+      "m": 16,
+      "max_abs_error": 4.4565922507899813e-08,
+      "max_us": 269.80480194091797,
+      "mean_abs_error": 1.5253917240443116e-08,
+      "mean_us": 266.16863950093585,
+      "median_us": 265.74048042297363,
+      "min_us": 264.9017524719238,
+      "mode": "prefill_m16",
+      "p95_us": 268.67456436157227,
+      "shapes": [
+        [
+          16,
+          5120,
+          17408
+        ],
+        [
+          16,
+          5120,
+          17408
+        ],
+        [
+          16,
+          17408,
+          5120
+        ]
+      ],
+      "site": "mlp"
+    }
+  ],
+  "timing": {
+    "kind": "CUDA Graph replay with CUDA events",
+    "replays_per_sample": 50,
+    "samples": 60,
+    "warmup": 20
+  }
+}

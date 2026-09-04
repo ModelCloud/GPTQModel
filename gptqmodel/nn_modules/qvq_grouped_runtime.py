@@ -211,6 +211,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_multiblock_down_recovery_launches: int = 0
     h100_w25_n128_gate_up_launches: int = 0
     h100_folded_qwen_mlp_launches: int = 0
+    h100_folded_qwen_fused_precondition_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -258,6 +259,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_multiblock_down_recovery_launches": self.h100_multiblock_down_recovery_launches,
             "h100_w25_n128_gate_up_launches": self.h100_w25_n128_gate_up_launches,
             "h100_folded_qwen_mlp_launches": self.h100_folded_qwen_mlp_launches,
+            "h100_folded_qwen_fused_precondition_launches": self.h100_folded_qwen_fused_precondition_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -714,6 +716,7 @@ class QVQHopperGroupedRuntime:
     def _execute_mlp(self, x: torch.Tensor) -> torch.Tensor:
         down = self._mlp_down_ref()
         from ..utils.qvq_cuda import (
+            qvq_cuda_folded_swiglu_precondition_fp32,
             qvq_cuda_hadamard_ordered_split16_fp32_to_fp16,
             qvq_cuda_hadamard_pair_swiglu_precondition_multiblock,
             qvq_cuda_swiglu_precondition,
@@ -737,17 +740,36 @@ class QVQHopperGroupedRuntime:
             # product, then apply down.SU.  No transform is commuted through
             # the nonlinearity, and every operation is CUDA Graph capturable.
             inner_gate, inner_up = self._execute(x, recover=False)
-            gate = children[0]._qvq_recover_inference_output(
-                inner_gate, torch.float16
-            ).reshape(rows, down.in_features).to(x.dtype)
-            up = children[1]._qvq_recover_inference_output(
-                inner_up, torch.float16
-            ).reshape(rows, down.in_features).to(x.dtype)
-            activated_gate = self._mlp_act_fn(gate)
-            transformed = down._qvq_prepare_inference_input(
-                activated_gate * up,
-                torch.float16,
+            use_h100_folded_fusion = (
+                self._h100_fp16_recovery_store_enabled
+                and x.dtype == torch.float16
+                and children[0].in_features == 5120
+                and down.in_features == 17408
+                and down.out_features == 5120
             )
+            if use_h100_folded_fusion:
+                transformed = qvq_cuda_folded_swiglu_precondition_fp32(
+                    inner_gate,
+                    inner_up,
+                    gate_scale=children[0]._cached_cast("SV", torch.float16, torch.float32),
+                    up_scale=children[1]._cached_cast("SV", torch.float16, torch.float32),
+                    gate_bias=children[0]._cached_cast("bias", torch.float16, torch.float32),
+                    up_bias=children[1]._cached_cast("bias", torch.float16, torch.float32),
+                    down_scale=down._cached_cast("SU", torch.float16),
+                )
+                self.telemetry.h100_folded_qwen_fused_precondition_launches += 1
+            else:
+                gate = children[0]._qvq_recover_inference_output(
+                    inner_gate, torch.float16
+                ).reshape(rows, down.in_features).to(x.dtype)
+                up = children[1]._qvq_recover_inference_output(
+                    inner_up, torch.float16
+                ).reshape(rows, down.in_features).to(x.dtype)
+                activated_gate = self._mlp_act_fn(gate)
+                transformed = down._qvq_prepare_inference_input(
+                    activated_gate * up,
+                    torch.float16,
+                )
             self.telemetry.independent_recovery_children += 2
             self.telemetry.h100_folded_qwen_mlp_launches += 1
         elif (

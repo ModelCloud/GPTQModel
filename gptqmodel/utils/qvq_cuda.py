@@ -74,6 +74,7 @@ _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = None
+_QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_OP: Callable | None = None
@@ -123,6 +124,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "hadamard_ordered_split16_fp32_to_fp16",
         "hadamard_pair_fp32_to_fp16_multiblock",
         "hadamard_pair_swiglu_precondition_multiblock",
+        "folded_swiglu_precondition_fp32",
         "swiglu_precondition",
         "swiglu_precondition_multiblock",
         "yaqa_feedback",
@@ -319,6 +321,19 @@ def _qvq_cuda_hadamard_pair_swiglu_precondition_multiblock_op() -> Callable:
                     )
                 )
     return _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP
+
+
+def _qvq_cuda_folded_swiglu_precondition_fp32_op() -> Callable:
+    """Resolve the Hopper folded-intermediate recovery/SwiGLU operator."""
+
+    global _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP
+    if _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP is None:
+                _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP = (
+                    _extension_api().op("qvq_cuda", "folded_swiglu_precondition_fp32")
+                )
+    return _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP
 
 
 def _qvq_cuda_swiglu_precondition_op() -> Callable:
@@ -993,6 +1008,72 @@ def qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
         bias1,
         scale_mode,
         warp_low,
+    )
+
+
+def qvq_cuda_folded_swiglu_precondition_fp32(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+    *,
+    gate_scale: torch.Tensor,
+    up_scale: torch.Tensor,
+    down_scale: torch.Tensor,
+    gate_bias: torch.Tensor | None = None,
+    up_bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Fuse folded-axis FP32 recovery through the padded down input.
+
+    Hopper P32 consumes an M16 tile, so rows beyond ``gate.shape[0]`` in the
+    returned tensor are exactly zero.
+    """
+
+    if gate.device.type != "cuda" or up.device.type != "cuda":
+        raise ValueError("folded QVQ SwiGLU inputs must be CUDA tensors")
+    if gate.device != up.device or gate.device != down_scale.device:
+        raise ValueError("folded QVQ SwiGLU tensors must share a device")
+    if gate.dtype != torch.float32 or up.dtype != torch.float32:
+        raise TypeError("folded QVQ SwiGLU inputs must be float32")
+    if (
+        gate.ndim != 2
+        or gate.shape != up.shape
+        or not gate.is_contiguous()
+        or not up.is_contiguous()
+        or not 0 < gate.shape[0] <= 16
+    ):
+        raise ValueError(
+            "folded QVQ SwiGLU inputs must be equal contiguous 2D tensors with M in [1, 16]"
+        )
+    n = gate.shape[1]
+    for name, tensor, dtype in (
+        ("gate_scale", gate_scale, torch.float32),
+        ("up_scale", up_scale, torch.float32),
+        ("down_scale", down_scale, torch.float16),
+        ("gate_bias", gate_bias, torch.float32),
+        ("up_bias", up_bias, torch.float32),
+    ):
+        if tensor is None:
+            if name.endswith("_scale"):
+                raise TypeError(f"{name} is required")
+            continue
+        if (
+            tensor.device != gate.device
+            or tensor.dtype != dtype
+            or not tensor.is_contiguous()
+            or tensor.numel() != n
+        ):
+            raise ValueError(
+                f"{name} must be contiguous {dtype} with one value per column"
+            )
+    if torch.cuda.get_device_capability(gate.device)[0] != 9:
+        raise RuntimeError("folded QVQ SwiGLU precondition requires Hopper")
+    return _qvq_cuda_folded_swiglu_precondition_fp32_op()(
+        gate,
+        up,
+        gate_scale,
+        up_scale,
+        gate_bias,
+        up_bias,
+        down_scale,
     )
 
 

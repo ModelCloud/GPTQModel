@@ -67,6 +67,7 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_viterbi_v2_segment_tail_trusted_op,
     _qvq_cuda_yaqa_feedback_op,
     _qvq_cuda_yaqa_feedback_update_op,
+    qvq_cuda_folded_swiglu_precondition_fp32,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
     qvq_cuda_hadamard_input_fp16_padded_multiblock,
@@ -1374,6 +1375,66 @@ def test_qvq_cuda_swiglu_precondition_graph_stream_overflow_and_guards():
         qvq_cuda_swiglu_precondition(gate.float(), up.float(), pre_scale.float())
     with pytest.raises(ValueError, match="identical shapes"):
         qvq_cuda_swiglu_precondition(gate, up[:, :-1], pre_scale)
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("with_bias", (False, True))
+def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(m, with_bias):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("folded SwiGLU precondition requires Hopper")
+    n = 17408
+    generator = torch.Generator(device="cuda").manual_seed(20260940 + m)
+    gate = torch.randn((m, n), generator=generator, device="cuda") * 0.25
+    up = torch.randn((m, n), generator=generator, device="cuda") * 0.25
+    gate_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    up_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    down_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    gate_scale = gate_scale_half.float()
+    up_scale = up_scale_half.float()
+    gate_bias = (
+        torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float()
+        if with_bias else None
+    )
+    up_bias = (
+        torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float()
+        if with_bias else None
+    )
+
+    recovered_gate = gate * gate_scale
+    recovered_up = up * up_scale
+    if with_bias:
+        recovered_gate = recovered_gate + gate_bias
+        recovered_up = recovered_up + up_bias
+    reference = torch.nn.functional.silu(recovered_gate.half()) * recovered_up.half()
+    reference = reference * down_scale
+
+    actual = qvq_cuda_folded_swiglu_precondition_fp32(
+        gate,
+        up,
+        gate_scale=gate_scale,
+        up_scale=up_scale,
+        gate_bias=gate_bias,
+        up_bias=up_bias,
+        down_scale=down_scale,
+    )
+    assert actual.shape == (16, n)
+    assert torch.equal(actual[:m].view(torch.int16), reference.view(torch.int16))
+    assert torch.count_nonzero(actual[m:]) == 0
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_folded_swiglu_precondition_fp32(
+            gate,
+            up,
+            gate_scale=gate_scale,
+            up_scale=up_scale,
+            gate_bias=gate_bias,
+            up_bias=up_bias,
+            down_scale=down_scale,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
 
 
 @pytest.mark.parametrize("bits", QVQ_CUDA_BITS)
