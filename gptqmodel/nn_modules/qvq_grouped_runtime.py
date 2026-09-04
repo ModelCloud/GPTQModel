@@ -221,6 +221,8 @@ class QVQGroupedRuntimeTelemetry:
     h100_large_m_chunk_autotunes: int = 0
     h100_large_m_chunked_mlp_launches: int = 0
     h100_large_m_chunk_rows: int = 0
+    h100_large_m_chunked_group_launches: int = 0
+    h100_large_m_group_chunk_rows: int = 0
     h100_folded_qwen_mlp_launches: int = 0
     h100_folded_qwen_fused_precondition_launches: int = 0
     h100_folded_qwen_fused_ordered_reduction_launches: int = 0
@@ -286,6 +288,8 @@ class QVQGroupedRuntimeTelemetry:
             "h100_large_m_chunk_autotunes": self.h100_large_m_chunk_autotunes,
             "h100_large_m_chunked_mlp_launches": self.h100_large_m_chunked_mlp_launches,
             "h100_large_m_chunk_rows": self.h100_large_m_chunk_rows,
+            "h100_large_m_chunked_group_launches": self.h100_large_m_chunked_group_launches,
+            "h100_large_m_group_chunk_rows": self.h100_large_m_group_chunk_rows,
             "h100_folded_qwen_mlp_launches": self.h100_folded_qwen_mlp_launches,
             "h100_folded_qwen_fused_precondition_launches": self.h100_folded_qwen_fused_precondition_launches,
             "h100_folded_qwen_fused_ordered_reduction_launches": self.h100_folded_qwen_fused_ordered_reduction_launches,
@@ -402,7 +406,7 @@ class QVQHopperGroupedRuntime:
             self.invalidate()
 
     def _runtime_eligible(
-        self, x: torch.Tensor, *, maximum_rows: int | None = 4096
+        self, x: torch.Tensor, *, maximum_rows: int | None = None
     ) -> str | None:
         children = self._children()
         if not isinstance(x, torch.Tensor):
@@ -417,12 +421,16 @@ class QVQHopperGroupedRuntime:
             return "input shape is unsupported"
         rows = x.numel() // children[0].in_features
         if rows < 1 or (maximum_rows is not None and rows > maximum_rows):
-            return "grouped Hopper execution currently requires one through 4096 rows"
+            if maximum_rows is None:
+                return "grouped Hopper execution requires at least one row"
+            return f"grouped Hopper execution currently requires one through {maximum_rows} rows"
         if any(child.trellis.device != x.device for child in children):
             return "activation and grouped payload devices differ"
         properties = torch.cuda.get_device_properties(x.device)
         if (properties.major, properties.minor) != (9, 0):
             return "grouped runtime requires Hopper SM90"
+        if rows > 4096 and properties.name != "NVIDIA H100":
+            return "row multiplexing above 4096 is measured only on H100"
         return None
 
     def _packed_selectors(self, child: QVQLinear) -> torch.Tensor:
@@ -606,6 +614,17 @@ class QVQHopperGroupedRuntime:
             raise ValueError("ordered partial execution cannot recover child outputs")
         children = self._children()
         rows = x.numel() // children[0].in_features
+        if rows > 4096:
+            if return_ordered_partials or not recover:
+                raise _R0Fallback(
+                    "raw grouped output above 4096 requires child-local reduction"
+                )
+            chunk_rows = self._autotune_large_m_chunk_rows(
+                x, rows, scope="group"
+            )
+            self.telemetry.h100_large_m_chunked_group_launches += 1
+            self.telemetry.h100_large_m_group_chunk_rows = chunk_rows
+            return self._execute_group_chunked(x, chunk_rows, recover=recover)
         padded_rows = (
             16
             if rows <= 16
@@ -920,18 +939,19 @@ class QVQHopperGroupedRuntime:
         return tuple(candidates) or _H100_LARGE_M_CHUNK_CANDIDATES
 
     def _large_m_chunk_cache_key(
-        self, x: torch.Tensor, rows: int
+        self, x: torch.Tensor, rows: int, *, scope: str
     ) -> tuple[Any, ...]:
         children = self._children()
-        down = self._mlp_down_ref()
+        down = None if self._mlp_down_ref is None else self._mlp_down_ref()
         row_bucket = 1 << (rows - 1).bit_length()
         return (
             x.get_device(),
             x.dtype,
+            scope,
             row_bucket,
             children[0].in_features,
             tuple(child.out_features for child in children),
-            down.out_features,
+            None if down is None else down.out_features,
             qvq_transition_bits(
                 children[0].bits, vector_size=children[0].vector_size
             ),
@@ -952,8 +972,31 @@ class QVQHopperGroupedRuntime:
             *x.shape[:-1], down.out_features
         )
 
-    def _autotune_large_m_chunk_rows(self, x: torch.Tensor, rows: int) -> int:
-        key = self._large_m_chunk_cache_key(x, rows)
+    def _execute_group_chunked(
+        self, x: torch.Tensor, chunk_rows: int, *, recover: bool
+    ) -> tuple[torch.Tensor, ...]:
+        children = self._children()
+        rows = x.numel() // children[0].in_features
+        x_2d = x.reshape(rows, children[0].in_features)
+        chunks = [
+            self._execute(
+                x_2d[begin : min(begin + chunk_rows, rows)], recover=recover
+            )
+            for begin in range(0, rows, chunk_rows)
+        ]
+        return tuple(
+            torch.cat(child_chunks, dim=0).reshape(
+                *x.shape[:-1], child.out_features
+            )
+            for child, child_chunks in zip(children, zip(*chunks), strict=True)
+        )
+
+    def _autotune_large_m_chunk_rows(
+        self, x: torch.Tensor, rows: int, *, scope: str
+    ) -> int:
+        if scope not in ("group", "mlp"):
+            raise ValueError("large-M autotune scope must be group or mlp")
+        key = self._large_m_chunk_cache_key(x, rows, scope=scope)
         with self._large_m_chunk_cache_lock:
             cached = self._large_m_chunk_cache.get(key)
             if cached is not None:
@@ -983,15 +1026,22 @@ class QVQHopperGroupedRuntime:
             best_chunk = 4096
             best_ms = float("inf")
             telemetry_before = self.telemetry.__dict__.copy()
+            execute = (
+                self._execute_mlp_chunked
+                if scope == "mlp"
+                else lambda value, chunk: self._execute_group_chunked(
+                    value, chunk, recover=True
+                )
+            )
             for candidate in candidates:
                 try:
                     for _ in range(warmup):
-                        output = self._execute_mlp_chunked(x, candidate)
+                        output = execute(x, candidate)
                         del output
                     torch.cuda.synchronize(x.device)
                     graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(graph):
-                        captured = self._execute_mlp_chunked(x, candidate)
+                        captured = execute(x, candidate)
                     for _ in range(warmup):
                         graph.replay()
                     torch.cuda.synchronize(x.device)
@@ -1031,7 +1081,9 @@ class QVQHopperGroupedRuntime:
 
         rows = x.numel() // self._children()[0].in_features
         if rows > 4096:
-            chunk_rows = self._autotune_large_m_chunk_rows(x, rows)
+            chunk_rows = self._autotune_large_m_chunk_rows(
+                x, rows, scope="mlp"
+            )
             self.telemetry.h100_large_m_chunked_mlp_launches += 1
             self.telemetry.h100_large_m_chunk_rows = chunk_rows
             return self._execute_mlp_chunked(x, chunk_rows)

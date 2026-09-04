@@ -1059,6 +1059,80 @@ def test_large_m_fused_mlp_uses_native_row_reuse_and_replays_cuda_graph(
         assert telemetry["h100_large_m_chunk_rows"] in (512, 1024, 2048, 4096)
 
 
+def test_h100_grouped_projection_above_4096_autotunes_and_replays_cuda_graph():
+    """Generic grouped QKV must multiplex rows without changing child output."""
+
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    shared = torch.ones(256, device=device)
+    children = tuple(
+        _child(
+            name,
+            su=shared,
+            alt_id=index + 1,
+            seed=290 + index,
+            device=device,
+        )
+        for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+    )
+    children[2].output_hadamard = False
+    attention = _Attention(children)
+    static_input = (
+        torch.randn((4097, 256), device=device, dtype=torch.float16) * 0.02
+    )
+    assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
+    runtime = attention.q_proj._gptqmodel_qvq_grouped_runtime
+
+    def execute_group():
+        return tuple(
+            getattr(attention, name)(static_input)
+            for name in ("q_proj", "k_proj", "v_proj")
+        )
+
+    with torch.inference_mode():
+        # Warm canonical payload/kernel state on a normal row tile. Keep the
+        # >4096 plan cold so capture records the conservative 4096-row path
+        # and the following eager call remains free to measure all targets.
+        warm = static_input[:16]
+        tuple(
+            getattr(attention, name)(warm)
+            for name in ("q_proj", "k_proj", "v_proj")
+        )
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = execute_group()
+        eager = execute_group()
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+        assert all(
+            torch.equal(output, reference)
+            for output, reference in zip(captured, eager, strict=True)
+        )
+        for chunk_rows in (512, 1024, 2048, 4096):
+            candidate = runtime._execute_group_chunked(
+                static_input, chunk_rows, recover=True
+            )
+            assert all(
+                torch.equal(output, reference)
+                for output, reference in zip(candidate, eager, strict=True)
+            )
+        for _ in range(3):
+            graph.replay()
+        torch.cuda.synchronize(device)
+
+    assert all(
+        torch.equal(output, reference)
+        for output, reference in zip(captured, eager, strict=True)
+    )
+    telemetry = qvq_grouped_runtime_telemetry(attention)[0]
+    assert telemetry["h100_large_m_chunk_autotunes"] == 1
+    assert telemetry["h100_large_m_chunked_group_launches"] == 2
+    assert telemetry["h100_large_m_group_chunk_rows"] in (512, 1024, 2048, 4096)
+    assert telemetry["plain_fallbacks"] == 0
+
+
 def test_real_llama32_layer_logits_and_cached_generation_are_exact():
     """Exercise the production coordinator inside Transformers' real Llama graph."""
 
