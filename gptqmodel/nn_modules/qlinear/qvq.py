@@ -1004,15 +1004,15 @@ class QVQLinear(BaseQuantLinear):
 
             # Hopper's RS-WGMMA path consumes the storage-neutral continuous
             # P32 window layout.  Keep checkpoints in canonical planar form,
-            # lazily repack once per module, and use the two-stage TMA kernel
-            # for the high-value M<=16 FP16 inference case.  The padded rows
-            # are zero, so this is exact for every real row while retaining
-            # the existing planar path for unsupported rates/shapes/dtypes.
+            # lazily repack once per module. H100 additionally uses the native
+            # row-tiled grid through M4096; M32/M64 buckets decode each P32
+            # fragment once for two/four independent M16 tensor-core tiles.
+            # Padded rows are zero, so every logical row remains exact.
             if (
                 self.v2b2_p32
                 and self.vector_size == 2
                 and x.dtype == torch.float16
-                and 0 < x.shape[0] <= 16
+                and 0 < x.shape[0] <= 4096
                 and self.in_features % 256 == 0
                 and self.out_features % 256 == 0
                 and qvq_transition_bits(self.bits, vector_size=2) in (4, 5, 6, 7)
@@ -1027,19 +1027,59 @@ class QVQLinear(BaseQuantLinear):
                         qvq_p32_window_wgmma_m16_tma,
                         qvq_p32_window_wgmma_m16_tma_ordered_partials,
                         qvq_p32_window_wgmma_m16_tma_ordered_split,
+                        qvq_p32_window_wgmma_single_large_m_packed,
                     )
 
                     with self._qvq_cuda_bank_cache_lock:
                         window = self._prepare_hopper_p32_window(x.device)
                     wgmma_input = x.contiguous()
-                    if wgmma_input.shape[0] != 16:
+                    logical_rows = int(wgmma_input.shape[0])
+                    large_m_h100 = logical_rows > 16 and properties.name == "NVIDIA H100"
+                    if logical_rows > 16 and not large_m_h100:
+                        return qvq_cuda_gemv(
+                            x.contiguous(),
+                            self.trellis.contiguous(),
+                            self.bits,
+                            out_features=self.out_features,
+                            codebook_version=self.codebook_version,
+                            output_fp32=True,
+                            vector_size=self.vector_size,
+                            bank_ids=cuda_bank_ids,
+                            v2b2_p32=True,
+                            bank_alt_id=cuda_bank_alt_id,
+                        )
+                    padded_rows = (
+                        16
+                        if logical_rows <= 16
+                        else 32
+                        if logical_rows <= 32
+                        else ((logical_rows + 63) // 64) * 64
+                    )
+                    if wgmma_input.shape[0] != padded_rows:
                         padded = torch.zeros(
-                            (16, self.in_features),
+                            (padded_rows, self.in_features),
                             dtype=wgmma_input.dtype,
                             device=wgmma_input.device,
                         )
                         padded[: wgmma_input.shape[0]].copy_(wgmma_input)
                         wgmma_input = padded
+                    if large_m_h100:
+                        output = qvq_p32_window_wgmma_single_large_m_packed(
+                            wgmma_input,
+                            window,
+                            _pgc16_levels(x.device, self.codebook_version),
+                            cuda_bank_ids,
+                            self.bits,
+                            out_features=self.out_features,
+                            bank_alt_id=cuda_bank_alt_id,
+                            # Decode-era split policies are intentionally not
+                            # inherited by prefill: their FP32 partial planes
+                            # grow as split*M*N and lose once row reuse fills
+                            # the grid. A measured large-M policy may override
+                            # this in a later phase.
+                            split_count=1,
+                        )
+                        return output[:logical_rows]
                     transition_bits = qvq_transition_bits(self.bits, vector_size=2)
                     ordered_split = qvq_h100_ordered_split_count(
                         device_name=properties.name,

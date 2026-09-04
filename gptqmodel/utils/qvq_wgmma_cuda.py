@@ -786,6 +786,60 @@ def qvq_p32_window_wgmma_grouped_reuse4_packed(
     )
 
 
+def qvq_p32_window_wgmma_single_large_m_packed(
+    input: torch.Tensor,
+    trellis: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    bits: float,
+    *,
+    out_features: int,
+    bank_alt_id: int,
+    split_count: int = 1,
+) -> torch.Tensor:
+    """Run one canonical P32 child through the large-M grouped row grid.
+
+    This is a zero-copy plan wrapper: the canonical child's prepared window
+    payload and selectors become the single segment. Ordinary ``QVQLinear``
+    modules can therefore use M32/M64 decode reuse without manufacturing a
+    grouped checkpoint or retaining another weight representation.
+    """
+
+    plan = qvq_p32_window_wgmma_group_plan(
+        input,
+        (trellis,),
+        levels,
+        (bank_ids,),
+        bits,
+        out_features=(out_features,),
+        bank_alt_ids=(bank_alt_id,),
+        split_counts=(split_count,),
+    )
+    payload = QVQHopperGroupedP32Payload(
+        trellis=trellis,
+        bank_ids=bank_ids,
+        plan=plan,
+    )
+    rows = int(input.shape[0])
+    if rows >= 64 and rows % 64 == 0:
+        output = qvq_p32_window_wgmma_grouped_reuse4_packed(
+            input, payload, levels
+        )
+    elif rows >= 32 and rows % 32 == 0:
+        output = qvq_p32_window_wgmma_grouped_reuse2_packed(
+            input, payload, levels
+        )
+    else:
+        output = (
+            qvq_p32_window_wgmma_grouped_ordered_packed(
+                input, payload, levels
+            )
+            if split_count != 1
+            else qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
+        )
+    return output[0]
+
+
 def qvq_p32_window_wgmma_grouped(
     input: torch.Tensor,
     trellises: Sequence[torch.Tensor],
@@ -846,6 +900,7 @@ __all__ = [
     "qvq_p32_window_wgmma_grouped_reuse4_packed",
     "qvq_p32_window_wgmma_m16_tma",
     "qvq_p32_window_wgmma_m16_tma_ordered_split",
+    "qvq_p32_window_wgmma_single_large_m_packed",
     "qvq_p32_window_wgmma_w3_m16",
     "qvq_p32_window_wgmma_w3_m16_tma",
     "qvq_pack_p32_window_hopper_group",

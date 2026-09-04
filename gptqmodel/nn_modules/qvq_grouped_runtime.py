@@ -398,8 +398,8 @@ class QVQHopperGroupedRuntime:
         if x.shape[-1] != children[0].in_features or x.numel() == 0:
             return "input shape is unsupported"
         rows = x.numel() // children[0].in_features
-        if not 1 <= rows <= 256:
-            return "grouped Hopper decode currently requires one through 256 rows"
+        if not 1 <= rows <= 4096:
+            return "grouped Hopper execution currently requires one through 4096 rows"
         if any(child.trellis.device != x.device for child in children):
             return "activation and grouped payload devices differ"
         properties = torch.cuda.get_device_properties(x.device)
@@ -588,7 +588,13 @@ class QVQHopperGroupedRuntime:
             raise ValueError("ordered partial execution cannot recover child outputs")
         children = self._children()
         rows = x.numel() // children[0].in_features
-        padded_rows = ((rows + 15) // 16) * 16
+        padded_rows = (
+            16
+            if rows <= 16
+            else 32
+            if rows <= 32
+            else ((rows + 63) // 64) * 64
+        )
         x_2d = x.reshape(rows, children[0].in_features).to(torch.float16)
         payload = self._ensure_payload()
         direct_pad = self._h100_direct_padded_input_enabled and rows < 16
@@ -637,7 +643,7 @@ class QVQHopperGroupedRuntime:
             if direct_pad:
                 padded = transformed
                 self.telemetry.h100_direct_padded_input_launches += 1
-            elif rows % 16 == 0:
+            elif rows == padded_rows:
                 padded = transformed.contiguous()
             else:
                 padded = torch.zeros(
@@ -835,9 +841,6 @@ class QVQHopperGroupedRuntime:
         rejection = self._runtime_eligible(x)
         if rejection is not None:
             return rejection
-        rows = x.numel() // self._children()[0].in_features
-        if rows > 16:
-            return "fused MLP large-M execution is not promoted yet"
         down = None if self._mlp_down_ref is None else self._mlp_down_ref()
         if not isinstance(down, QVQLinear):
             return "fused MLP lost its QVQ down projection"
@@ -870,6 +873,16 @@ class QVQHopperGroupedRuntime:
 
         rows = x.numel() // self._children()[0].in_features
         children = self._children()
+        if rows > 16:
+            # Large-M uses the exact generic module boundaries while sharing
+            # gate/up input preparation and P32 decode. The ordinary down
+            # module now owns the same M32/M64 row-reuse dispatch, so this
+            # route is graph-safe and avoids the planar GEMV fallback without
+            # extending decode-only fused transform kernels beyond their
+            # measured geometry.
+            gate, up = self._execute(x)
+            activated_gate = self._mlp_act_fn(gate)
+            return down(activated_gate * up)
         qwen_folded_intermediate = (
             self._mlp_activation_is_exact_silu
             and not children[0].output_hadamard

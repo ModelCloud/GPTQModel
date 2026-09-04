@@ -903,25 +903,82 @@ def test_fused_mlp_lifecycle_flag_fallback_and_uninstall_are_exact():
 
     mlp = LlamaLikeMLP().eval()
     x = torch.randn((2, 256), device=device, dtype=torch.float16) * 0.02
-    fallback_x = torch.randn((17, 256), device=device, dtype=torch.float16) * 0.02
+    large_m_x = torch.randn((17, 256), device=device, dtype=torch.float16) * 0.02
     with torch.inference_mode():
         expected = mlp(x)
-        expected_fallback = mlp(fallback_x)
+        expected_large_m = mlp(large_m_x)
     assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
     assert hasattr(mlp, "_gptqmodel_qvq_fused_mlp_runtime")
     with torch.inference_mode():
         actual = mlp(x)
-        actual_fallback = mlp(fallback_x)
+        actual_large_m = mlp(large_m_x)
 
     assert torch.equal(actual, expected)
-    assert torch.equal(actual_fallback, expected_fallback)
+    assert torch.equal(actual_large_m, expected_large_m)
     telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
-    assert telemetry["fused_mlp_launches"] == 1
-    assert telemetry["fused_mlp_fallbacks"] == 1
+    assert telemetry["fused_mlp_launches"] == 2
+    assert telemetry["fused_mlp_fallbacks"] == 0
     assert uninstall_qvq_hopper_groups(mlp) == 1
     assert not hasattr(mlp, "_gptqmodel_qvq_fused_mlp_runtime")
     with torch.inference_mode():
         assert torch.equal(mlp(x), expected)
+
+
+@pytest.mark.parametrize("logical_rows", (32, 64))
+def test_large_m_fused_mlp_uses_native_row_reuse_and_replays_cuda_graph(
+    logical_rows,
+):
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+
+    class LlamaLikeMLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            shared_input = torch.ones(256, device=device)
+            self.gate_proj = _child(
+                "gate_proj", su=shared_input, alt_id=1, seed=280, device=device
+            )
+            self.up_proj = _child(
+                "up_proj", su=shared_input, alt_id=2, seed=281, device=device
+            )
+            self.down_proj = _child(
+                "down_proj", alt_id=3, seed=282, device=device
+            )
+            self.act_fn = nn.SiLU()
+
+        def forward(self, x):
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+    mlp = LlamaLikeMLP().eval()
+    static_input = (
+        torch.randn(
+            (logical_rows, 256), device=device, dtype=torch.float16
+        )
+        * 0.02
+    )
+    with torch.inference_mode():
+        plain = mlp(static_input).clone()
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+
+    with torch.inference_mode():
+        eager = mlp(static_input)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = mlp(static_input)
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    assert torch.equal(eager, plain)
+    assert torch.equal(captured, eager)
+    for _ in range(3):
+        graph.replay()
+    torch.cuda.synchronize(device)
+    assert torch.equal(captured, eager)
+    telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
+    assert telemetry["fused_mlp_launches"] == 2
+    assert telemetry["fused_mlp_fallbacks"] == 0
+    assert telemetry["plain_fallbacks"] == 0
 
 
 def test_real_llama32_layer_logits_and_cached_generation_are_exact():
