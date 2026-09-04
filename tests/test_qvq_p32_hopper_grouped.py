@@ -408,10 +408,42 @@ def test_grouped_p32_fp16_prefill_decodes_once_and_is_graph_safe(bits):
         weight_scale,
         half_fold=True,
     )
+    # The packed-half implementation owns adjacent columns as one half2.  Its
+    # bit-1 butterfly is lane-local and all later butterflies operate on two
+    # independent lanes, so it must retain the scalar FP16 stage ordering and
+    # rounding boundaries exactly.  Build that scalar reference from the
+    # established Hadamard primitive instead of only checking finite output.
+    half_k = qvq_cuda_hadamard(
+        decoded.t().contiguous(), scale_mode=5
+    )
+    half_k = (
+        half_k.float()
+        * (1.0 / float(in_features) ** 0.5)
+        * input_scale
+    ).half()
+    half_transformed = half_k.t().contiguous()
+    half_children = []
+    offset = 0
+    for width, scale, output_hadamard in zip(
+        widths, output_scales, output_hadamards, strict=True
+    ):
+        child = half_transformed[:, offset : offset + width].contiguous()
+        if output_hadamard:
+            child = qvq_cuda_hadamard(child, scale_mode=5)
+            child = child.float() * (1.0 / float(width) ** 0.5)
+        else:
+            child = child.float()
+        half_children.append((child * scale).half())
+        offset += width
+    half_reference = torch.cat(half_children, dim=1)
+    expected_half_fp8 = (
+        (half_reference.t().contiguous().float() / weight_scale).half()
+    ).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).t()
     assert half_folded_fp8.dtype == torch.float8_e4m3fn
     assert half_folded_fp8.shape == phase2_folded.shape
     assert half_folded_fp8.stride() == (1, in_features)
     assert torch.isfinite(half_folded_fp8.float()).all()
+    assert torch.equal(half_folded_fp8.float(), expected_half_fp8.float())
 
     half_fold_graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(half_fold_graph):

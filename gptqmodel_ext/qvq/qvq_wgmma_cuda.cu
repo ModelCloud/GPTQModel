@@ -731,38 +731,53 @@ void qvq_p32_prefill_fold_k_axis_fp16_kernel(
     __half* __restrict__ transformed_transposed,
     const float* __restrict__ input_scale,
     int size_k) {
-  extern __shared__ __half shared_half[];
-  const auto padded = [](int index) { return index + (index >> 5); };
+  extern __shared__ __half2 shared_pairs[];
+  const auto padded_pair = [](int index) { return index + (index >> 4); };
   const int row = static_cast<int>(blockIdx.x);
   const int64_t row_offset = static_cast<int64_t>(row) * size_k;
+  const int pair_count = size_k >> 1;
 
-  for (int index = static_cast<int>(threadIdx.x); index < size_k;
-       index += static_cast<int>(blockDim.x)) {
-    shared_half[padded(index)] = decoded_transposed[row_offset + index];
+  for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+       pair += static_cast<int>(blockDim.x)) {
+    shared_pairs[padded_pair(pair)] =
+        reinterpret_cast<const __half2*>(decoded_transposed + row_offset)[pair];
   }
   __syncthreads();
 
-  for (int bit = 1; bit < size_k; bit <<= 1) {
-    for (int index = static_cast<int>(threadIdx.x); index < size_k;
-         index += static_cast<int>(blockDim.x)) {
-      const int peer = index ^ bit;
-      if (index < peer) {
-        const __half a = shared_half[padded(index)];
-        const __half b = shared_half[padded(peer)];
-        shared_half[padded(index)] = __hadd(a, b);
-        shared_half[padded(peer)] = __hsub(a, b);
+  for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+       pair += static_cast<int>(blockDim.x)) {
+    const __half2 value = shared_pairs[padded_pair(pair)];
+    const __half a = __low2half(value);
+    const __half b = __high2half(value);
+    shared_pairs[padded_pair(pair)] =
+        __halves2half2(__hadd(a, b), __hsub(a, b));
+  }
+  __syncthreads();
+
+  for (int bit = 2; bit < size_k; bit <<= 1) {
+    const int pair_bit = bit >> 1;
+    for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+         pair += static_cast<int>(blockDim.x)) {
+      const int peer = pair ^ pair_bit;
+      if (pair < peer) {
+        const __half2 a = shared_pairs[padded_pair(pair)];
+        const __half2 b = shared_pairs[padded_pair(peer)];
+        shared_pairs[padded_pair(pair)] = __hadd2(a, b);
+        shared_pairs[padded_pair(peer)] = __hsub2(a, b);
       }
     }
     __syncthreads();
   }
 
   const float reciprocal = 1.0f / sqrtf(static_cast<float>(size_k));
-  for (int index = static_cast<int>(threadIdx.x); index < size_k;
-       index += static_cast<int>(blockDim.x)) {
-    float value = __half2float(shared_half[padded(index)]);
-    value *= reciprocal;
-    value *= input_scale[index];
-    transformed_transposed[row_offset + index] = __float2half_rn(value);
+  for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+       pair += static_cast<int>(blockDim.x)) {
+    const __half2 value = shared_pairs[padded_pair(pair)];
+    const int index = pair << 1;
+    transformed_transposed[row_offset + index] = __float2half_rn(
+        __half2float(__low2half(value)) * reciprocal * input_scale[index]);
+    transformed_transposed[row_offset + index + 1] = __float2half_rn(
+        __half2float(__high2half(value)) * reciprocal * input_scale[index + 1]);
   }
 }
 
@@ -842,55 +857,89 @@ void qvq_p32_prefill_fold_n_axis_fp16_to_fp8_kernel(
     HopperGroupedP32FoldParams params,
     int size_k,
     int size_n) {
-  extern __shared__ __half shared_half[];
-  const auto padded = [](int index) { return index + (index >> 5); };
+  extern __shared__ __half2 shared_pairs[];
+  const auto padded_pair = [](int index) { return index + (index >> 4); };
   const int segment = static_cast<int>(blockIdx.x) % params.segment_count;
   const int row = static_cast<int>(blockIdx.x) / params.segment_count;
   const int width = params.width[segment];
   const int start = params.n_start[segment];
   const int64_t row_offset = static_cast<int64_t>(row) * size_n + start;
+  const int pair_count = width >> 1;
 
   if (params.output_hadamard[segment]) {
-    for (int index = static_cast<int>(threadIdx.x); index < width;
-         index += static_cast<int>(blockDim.x)) {
-      shared_half[padded(index)] = transformed[row_offset + index];
+    for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+         pair += static_cast<int>(blockDim.x)) {
+      shared_pairs[padded_pair(pair)] =
+          reinterpret_cast<const __half2*>(transformed + row_offset)[pair];
     }
     __syncthreads();
-    for (int bit = 1; bit < width; bit <<= 1) {
-      for (int index = static_cast<int>(threadIdx.x); index < width;
-           index += static_cast<int>(blockDim.x)) {
-        const int peer = index ^ bit;
-        if (index < peer) {
-          const __half a = shared_half[padded(index)];
-          const __half b = shared_half[padded(peer)];
-          shared_half[padded(index)] = __hadd(a, b);
-          shared_half[padded(peer)] = __hsub(a, b);
+
+    for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+         pair += static_cast<int>(blockDim.x)) {
+      const __half2 value = shared_pairs[padded_pair(pair)];
+      const __half a = __low2half(value);
+      const __half b = __high2half(value);
+      shared_pairs[padded_pair(pair)] =
+          __halves2half2(__hadd(a, b), __hsub(a, b));
+    }
+    __syncthreads();
+
+    for (int bit = 2; bit < width; bit <<= 1) {
+      const int pair_bit = bit >> 1;
+      for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+           pair += static_cast<int>(blockDim.x)) {
+        const int peer = pair ^ pair_bit;
+        if (pair < peer) {
+          const __half2 a = shared_pairs[padded_pair(pair)];
+          const __half2 b = shared_pairs[padded_pair(peer)];
+          shared_pairs[padded_pair(pair)] = __hadd2(a, b);
+          shared_pairs[padded_pair(peer)] = __hsub2(a, b);
         }
       }
       __syncthreads();
     }
     const float reciprocal = 1.0f / sqrtf(static_cast<float>(width));
-    for (int index = static_cast<int>(threadIdx.x); index < width;
-         index += static_cast<int>(blockDim.x)) {
-      float value = __half2float(shared_half[padded(index)]);
-      value *= reciprocal;
-      value *= params.output_scale[segment][index];
-      value = __half2float(__float2half_rn(value));
-      value = __half2float(__float2half_rn(value / weight_scale[0]));
-      value = fminf(448.0f, fmaxf(-448.0f, value));
+    for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+         pair += static_cast<int>(blockDim.x)) {
+      const __half2 packed = shared_pairs[padded_pair(pair)];
+      const int index = pair << 1;
+      float low = __half2float(__low2half(packed));
+      low *= reciprocal;
+      low *= params.output_scale[segment][index];
+      low = __half2float(__float2half_rn(low));
+      low = __half2float(__float2half_rn(low / weight_scale[0]));
+      low = fminf(448.0f, fmaxf(-448.0f, low));
       output[static_cast<int64_t>(start + index) * size_k + row] =
-          c10::Float8_e4m3fn(value);
+          c10::Float8_e4m3fn(low);
+      float high = __half2float(__high2half(packed));
+      high *= reciprocal;
+      high *= params.output_scale[segment][index + 1];
+      high = __half2float(__float2half_rn(high));
+      high = __half2float(__float2half_rn(high / weight_scale[0]));
+      high = fminf(448.0f, fmaxf(-448.0f, high));
+      output[static_cast<int64_t>(start + index + 1) * size_k + row] =
+          c10::Float8_e4m3fn(high);
     }
   } else {
-    for (int index = static_cast<int>(threadIdx.x); index < width;
-         index += static_cast<int>(blockDim.x)) {
-      float value = __half2float(transformed[row_offset + index]);
-      value *= params.output_scale[segment][index];
-      value = __half2float(__float2half_rn(value));
-      value = __half2float(__float2half_rn(value / weight_scale[0]));
-      value = fminf(448.0f, fmaxf(-448.0f, value));
+    for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+         pair += static_cast<int>(blockDim.x)) {
+      const int index = pair << 1;
+      const __half2 packed =
+          reinterpret_cast<const __half2*>(transformed + row_offset)[pair];
+      float low = __half2float(__low2half(packed));
+      low *= params.output_scale[segment][index];
+      low = __half2float(__float2half_rn(low));
+      low = __half2float(__float2half_rn(low / weight_scale[0]));
+      low = fminf(448.0f, fmaxf(-448.0f, low));
       output[static_cast<int64_t>(start + index) * size_k + row] =
-          c10::Float8_e4m3fn(value);
+          c10::Float8_e4m3fn(low);
+      float high = __half2float(__high2half(packed));
+      high *= params.output_scale[segment][index + 1];
+      high = __half2float(__float2half_rn(high));
+      high = __half2float(__float2half_rn(high / weight_scale[0]));
+      high = fminf(448.0f, fmaxf(-448.0f, high));
+      output[static_cast<int64_t>(start + index + 1) * size_k + row] =
+          c10::Float8_e4m3fn(high);
     }
   }
 }
@@ -3131,7 +3180,7 @@ at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(trellis.get_device());
   const size_t k_shared_bytes = static_cast<size_t>(
-      in_features + in_features / 32) *
+      in_features + in_features / (HalfFold ? 16 : 32)) *
       (HalfFold ? sizeof(__half) : sizeof(float));
   if constexpr (HalfFold) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(
@@ -3188,7 +3237,7 @@ at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
   }
 
   const size_t n_shared_bytes = static_cast<size_t>(
-      max_hadamard_width + max_hadamard_width / 32) *
+      max_hadamard_width + max_hadamard_width / (HalfFold ? 16 : 32)) *
       (HalfFold ? sizeof(__half) : sizeof(float));
   if constexpr (HalfFold) {
     if (n_shared_bytes > 0) {
