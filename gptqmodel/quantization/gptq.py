@@ -674,6 +674,41 @@ class GPTQ:
             self._device_sample_counts.clear()
             del result_accum
 
+    def adopt_hessian_from(self, leader: "GPTQ") -> None:
+        """Replace this task's Hessian statistics with a private copy of ``leader``'s.
+
+        Both modules must consume the identical input tensor (see ``:in=<tag>`` in
+        ``module_tree``). The copy is independent because :meth:`quantize` mutates
+        ``self.H`` in place and :meth:`free` drops it.
+        """
+        if leader is self:
+            return
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"GPTQ: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+
+        leader.materialize_global_hessian()
+        with leader.lock:
+            source = leader.H
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            if source is None:
+                source = leader.create_H(None)
+
+            target_device = self._select_hessian_target_device(getattr(self.module, "target_device", None))
+            copy = source.detach().to(device=target_device, dtype=torch.float32, copy=True)
+
+        with self.lock:
+            self.H = copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            self._hessian_dirty = False
+            self._final_hessian_device_hint = copy.device
+
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
         self.materialize_global_hessian(target_device=target_device)
         if self.H is None:

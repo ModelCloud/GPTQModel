@@ -6,7 +6,7 @@
 import copy
 import threading
 import time
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch.nn import Module
@@ -15,6 +15,7 @@ from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_F
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
+from ..models.shared_input import SharedInputPlan
 from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
                              PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
 from ..quantization import GPTAQ, GPTQ, FOEM
@@ -146,6 +147,14 @@ class GPTQProcessor(LoopProcessor):
         # activations and applies the current batch mask itself.
         self.preserve_batch_keep_mask = True
 
+        # Shared-input Hessian dedup state. The plan is derived once per model
+        # class; `_shared_input_leaders` is `{follower: leader}` for the subset
+        # pass currently being captured and is cleared once followers adopt.
+        self._shared_input_plan: Optional[SharedInputPlan] = None
+        self._shared_input_plan_owner: Optional[type] = None
+        self._shared_input_leaders: Dict[str, str] = {}
+        self.shared_input_dedup_count = 0
+
     def set_calibration_dataset(self, calibration_dataset):
         """Rejects dataset replacement because GPTQ capture is fixed at construction."""
 
@@ -191,8 +200,113 @@ class GPTQProcessor(LoopProcessor):
         else:
             return False
 
+    def _resolve_shared_input_plan(self, model) -> Optional[SharedInputPlan]:
+        """Derives (once per model class) the explicit `:in=<tag>` plan for one decoder layer."""
+
+        owner = type(model)
+        if self._shared_input_plan_owner is owner:
+            return self._shared_input_plan
+
+        plan: Optional[SharedInputPlan] = None
+        shared_input_plan = getattr(model, "shared_input_plan", None)
+        if callable(shared_input_plan):
+            inner = getattr(model, "model", None)
+            plan = shared_input_plan(
+                model_config=getattr(inner, "config", None),
+                quantize_config=getattr(model, "quantize_config", None),
+            )
+
+        self._shared_input_plan = plan
+        self._shared_input_plan_owner = owner
+        return plan
+
+    def begin_shared_input_capture(
+        self,
+        model,
+        subset_names: List[str],
+        is_lm_head_module: bool = False,
+    ) -> Dict[str, str]:
+        """Elects one Hessian capture leader per explicit shared-input group present in this subset.
+
+        Only plain `GPTQ` tasks participate (GPTAQ/FOEM also consume outputs). Groups that
+        are split across subsets dedup only among the members captured in this pass.
+        """
+
+        with self.lock:
+            self._shared_input_leaders = {}
+
+        if is_lm_head_module or not self.qcfg.hessian.dedup_shared_inputs:
+            return {}
+
+        plan = self._resolve_shared_input_plan(model)
+        if plan is None or not plan.shared_groups:
+            return {}
+
+        leaders: Dict[str, str] = {}
+        with self.lock:
+            tasks = dict(self.tasks)
+        for group in plan.shared_groups:
+            if not group.explicit:
+                continue
+            members = [
+                name for name in subset_names
+                if name in group.modules
+                and type(tasks.get(name)) is GPTQ
+                and tasks[name].qcfg.hessian.dedup_shared_inputs
+            ]
+            if len(members) < 2:
+                continue
+            leader = members[0]
+            columns = tasks[leader].columns
+            for follower in members[1:]:
+                if tasks[follower].columns != columns:
+                    log.warn(
+                        f"Quantization: shared-input group `{group.key}` mixes input widths "
+                        f"({leader}={columns}, {follower}={tasks[follower].columns}); not sharing Hessian."
+                    )
+                    continue
+                leaders[follower] = leader
+
+        with self.lock:
+            self._shared_input_leaders = leaders
+        return dict(leaders)
+
+    def end_shared_input_capture(self, subset_names: List[str]) -> None:
+        """Copies each leader's finalized Hessian into its followers, then clears the election."""
+
+        with self.lock:
+            leaders = self._shared_input_leaders
+            self._shared_input_leaders = {}
+            tasks = dict(self.tasks)
+
+        adopted = 0
+        for follower, leader in leaders.items():
+            follower_task = tasks.get(follower)
+            leader_task = tasks.get(leader)
+            if follower_task is None or leader_task is None:
+                continue
+            follower_task.adopt_hessian_from(leader_task)
+            adopted += 1
+
+        if adopted:
+            with self.lock:
+                self.shared_input_dedup_count += adopted
+
+    def shared_input_leader(self, name: str) -> Optional[str]:
+        """Returns the module whose Hessian `name` will adopt in the current pass, if any."""
+
+        with self.lock:
+            return self._shared_input_leaders.get(name)
+
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the GPTQ task."""
+
+        if self.shared_input_leader(name) is not None:
+            def skip(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
+                """Follower of a shared-input group: the leader collects this module's Hessian."""
+
+                del module, inp, out
+            return skip
 
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             """Records one activation batch for GPTQ Hessian/statistics accumulation."""

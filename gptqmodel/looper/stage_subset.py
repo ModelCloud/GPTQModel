@@ -780,6 +780,24 @@ def _run_single_subset_pass(
     if execute_forward and moe_block is not None and moe_block_name is not None:
         processor.register_moe_root_capture_hook(moe_block, moe_block_name, handle)
 
+    shared_input_leaders: Dict[str, str] = {}
+    if execute_forward:
+        # Explicit `:in=<tag>` groups collect the Hessian once (leader) and copy it
+        # to followers after the forward, so follower hooks become no-ops.
+        shared_input_leaders = processor.begin_shared_input_capture(
+            looper.gptq_model,
+            subset_names,
+            is_lm_head_module=is_lm_head_module,
+        )
+        if shared_input_leaders and DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "StageSubset: layer=%s subset=%s/%s sharing Hessian capture for %s",
+                layer_index,
+                subset_index + 1,
+                subset_total,
+                shared_input_leaders,
+            )
+
     if execute_forward:
         for idx, name in enumerate(subset_names):
             m = subset[name]
@@ -962,6 +980,10 @@ def _run_single_subset_pass(
             if hasattr(subset[name], 'forward_hook'):
                 subset[name].forward_hook = None
                 subset[name].forward_hook_last = False
+
+        # Followers adopt the leader's finalized Hessian before coverage checks and
+        # before any worker may quantize (and mutate/free) the leader's copy.
+        processor.end_shared_input_capture(subset_names)
 
     forward_flush_device = _resolve_forward_flush_device(plan, cur_layer_device)
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:

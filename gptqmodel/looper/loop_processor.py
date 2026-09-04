@@ -868,6 +868,26 @@ class LoopProcessor:
 
         pass
 
+    def begin_shared_input_capture(
+        self,
+        model: Any,
+        subset_names: List[str],
+        is_lm_head_module: bool = False,
+    ) -> Dict[str, str]:
+        """Optionally elect one capture leader per explicit shared-input group in ``subset_names``.
+
+        Called before capture hooks are registered for a subset pass. Returns
+        ``{follower: leader}``; processors that do not dedup capture return ``{}``.
+        """
+
+        del model, subset_names, is_lm_head_module
+        return {}
+
+    def end_shared_input_capture(self, subset_names: List[str]) -> None:
+        """Propagate leader statistics to followers after the subset forward completes."""
+
+        del subset_names
+
     def register_moe_root_capture_hook(
         self,
         moe_block: Module,

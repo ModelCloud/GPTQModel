@@ -1211,9 +1211,19 @@ class HessianConfig:
         default=torch.float32,
         metadata={"help": "Stage Hessian chunks in a lower precision dtype when supported"},
     )
+    dedup_shared_inputs: bool = field(
+        default=True,
+        metadata={
+            "help": "Collect the Hessian once per explicit `:in=<tag>` shared-input group and copy it to the "
+                    "other group members instead of accumulating it separately for each module"
+        },
+    )
 
     def __post_init__(self):
         """Validate Hessian chunking and staging dtype settings."""
+
+        if not isinstance(self.dedup_shared_inputs, bool):
+            raise ValueError("HessianConfig: `dedup_shared_inputs` must be a bool.")
 
         if self.chunk_size is not None:
             if not isinstance(self.chunk_size, int):
@@ -3307,6 +3317,7 @@ class GPTQConfig(PreProcessorConfig):
             "chunk_size": self.hessian.chunk_size,
             "chunk_bytes": self.hessian.chunk_bytes,
             "staging_dtype": str(self.hessian.staging_dtype).split(".")[-1],
+            "dedup_shared_inputs": self.hessian.dedup_shared_inputs,
         }
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
