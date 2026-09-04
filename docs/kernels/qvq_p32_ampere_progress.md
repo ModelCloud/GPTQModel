@@ -3167,6 +3167,16 @@ With no measurable gain, the source probe was reverted.  The diagnostic is
 `artifacts/a100_p32_window/v29_candidate_m1_linearqkv_static40_8000.json`;
 the dynamic control is `artifacts/a100_p32_window/v29_candidate_m1_linearqkv_dynamic_8000.json`.
 
+## v30 rejected M1 linear-Z static split probe
+
+The M1 linear-Z route `(K,N)=(5120,6144)` also autotunes to split 40.  Its
+compile-time split specialization regressed the 8,000-iteration medians from
+dynamic `0.038912/0.039936/0.039936/0.040960 ms` to static
+`0.044032/0.045056/0.044032/0.046080 ms` at W2/W2.5/W3/W3.5.  Exactness was
+preserved (`max_abs <= 1.4e-5`), but the source probe was reverted.  The
+diagnostics are `artifacts/a100_p32_window/v30_candidate_m1_linearz_dynamic_8000.json`
+and `artifacts/a100_p32_window/v30_candidate_m1_linearz_static40_8000.json`.
+
 ## Reproduction
 
 ```bash
