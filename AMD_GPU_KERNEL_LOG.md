@@ -73,6 +73,9 @@ engineering comparison but is never presented as an official result.
 | PASS (certified) | Mutation-aware fast dispatch for the preshuffled cache | 209/209 AMD tests passed; strict sweep passed 364/364 cases with worst maximum absolute error `6.198883e-5` | Reusing the validated K-by-N transpose view and bypassing invariant device/shape reconstruction removes the host launch gap while retaining version and operand identity checks. Against `a46fdfe2`, the strict uncontended result is **1.9419x minimum, 4.27402x geometric mean, and 11.5828x maximum**. Directly against `14928c96`, it is **3.9708x minimum, 8.56151x geometric mean, and 25.2155x maximum**. Every projection passed three 0%-utilization idle samples with no resident target-GPU process. |
 | PASS (profiled) | Separate predecode and steady GEMM passes, W3/M64/K5120/N12288 | Exact predecode output passed the FP32 oracle suite | After compilation warmup, predecode plus first GEMM was 0.537645 ms and steady GEMM was 0.036456 ms, estimating 0.501189 ms for predecode. Against the fixed fused median of 0.142761 ms, the cache amortizes after about 4.71 calls. The exact gfx950 predecode HSACO has 156 static opcodes, 87 VALU, 11 VMEM, 6 LDS, 16 VGPRs, no scratch, two `v_alignbit_b32`, and two `v_mad_u32_u24`. |
 | FAIL (profiler integration, bounded) | Direct `rocprofv3` trace of the new Python/Triton two-pass path | Process aborted before dispatch | The same duplicate LLVM `spirv-expand-step` registry conflict reproduced. The invocation was time-bounded and left no processes or GPU residency. Pass timings use synchronized ROCm events and static math uses direct gfx950 HSACO disassembly; prior counter passes use the minimal-HSACO workaround. |
+| PASS, REJECTED AS PRIMARY PATH | Full 91-case cached-GEMM dispatch/layout/split sweep | Every supported candidate matched the current FP32-output GEMM within `2e-3` | Across seven Qwen3.8-27B K/N geometries and all 13 requested M values, the independent repeat found only 1.000x minimum, 1.03801x geometric mean, and 1.27511x maximum best-per-shape speedup. Physical K-by-N caches, forced default/hipBLAS/hipBLASLt/CK selection, and 2/4/8/16-way M/N batched splits cannot provide the requested 1.5x geometric gain. |
+| PASS (profiled) | Nine-regime `rocprofv3` runtime/kernel trace plus exact selected-symbol gfx950 disassembly | No numerical path changed | Layout gains come from different hipBLASLt macro-tiles: M32/full-Q changes 16x32x1024 to 64x32x256, while M128/QKV changes 64x128x128 to 192x128x64. Every selected kernel has zero scratch. The steady pass contains no P32 extraction, bank, hash, or lookup algebra; static universal hipBLASLt symbols contain guarded edge/activation paths and are not treated as dynamic instruction counts. Direct counter injection again hit the duplicate LLVM `spirv-expand-step` failure before dispatch, so no new BLAS PMCs are claimed. |
+| PASS (ceiling and numeric probe) | Fold immutable QVQ axes into the persistent dense cache | Synthetic target-dimension FP16-cache probe passed `2e-3`; worst maximum absolute error was `0.001476735` at M4096/K17408/N5120 | The architecture-aware 91-case stage sweep folds `diag(SU) * H_K * W_inner * H_N * diag(SV)`, omitting disabled axes. Removing online input/output recovery has a 1.9442x minimum, 14.8003x geometric-mean, and 43.9830x maximum ceiling; all 91 cases exceed 1.5x. This is selected as the next implementation path, subject to all-rate canonical full-layer oracle testing on real Qwen3.8 payloads and cold-cache/break-even measurement. |
 
 The initial exploratory sweep is stored in
 `artifacts/mi355x_p32/initial_gfx950.json`. The expanded sweep is stored in
@@ -104,6 +107,15 @@ comparisons against `a46fdfe2` and `14928c96` are stored as
 `qwen38_27b_4x_fastpath_certified_gfx950_shapes/`,
 `qwen38_27b_4x_fastpath_certified_vs_a46fdfe2_gfx950.json`, and
 `qwen38_27b_4x_fastpath_certified_vs_14928c96_gfx950.json`.
+
+The 91-case dispatch sweeps, transform-folding ceiling, and compact
+trace/ISA/SSA decision record are stored as
+`qwen38_27b_dispatch_sweep_gfx950.json`,
+`qwen38_27b_dispatch_sweep_repeat_gfx950.json`,
+`qwen38_27b_fold_ceiling_gfx950.json`, and
+`qwen38_27b_dispatch_profile_gfx950.json`. Raw `rocprofv3` databases and CSVs
+remain local profiling artifacts and are not intended for source-control
+commits.
 
 ## Implementation notes
 
