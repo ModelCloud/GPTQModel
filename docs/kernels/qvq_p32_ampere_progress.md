@@ -3233,6 +3233,19 @@ also not improved), so the WMMA template change and dispatch branch were
 removed.  Outputs stayed exact (`max_abs <= 1.6e-5`).  The failed diagnostic
 is `artifacts/a100_p32_window/v35_candidate_m16_fullkv_static32_8000.json`.
 
+## v38 M2 MLP gate/up static split specialization
+
+The M2 MLP gate/up route `(K,N)=(5120,17408)` autotunes to split 40.  A
+guarded compile-time split-40 scalar main-kernel launch is exact under the
+formal suite (56/56) and reproduced across two 8,000-iteration runs.  The
+dynamic geometric mean was `0.0958727 ms`; static runs measured
+`0.0948473 ms` and `0.0950857 ms` (approximately 0.8--1.1% improvement),
+with `max_abs <= 9.6e-6`.  Diagnostics are
+`artifacts/a100_p32_window/v38_candidate_m2_mlpgate_dynamic_8000.json`,
+`artifacts/a100_p32_window/v38_candidate_m2_mlpgate_static40_8000.json`, and
+`artifacts/a100_p32_window/v38_candidate_m2_mlpgate_static40_repeat8000.json`.
+This is shape-local progress; the full-matrix 10% target remains open.
+
 ## Reproduction
 
 ```bash
