@@ -59,25 +59,15 @@ def _validate_viterbi_distance_range(
 
     if sequences.numel() == 0:
         return
-    maximum_weight = (
-        1.0
-        if step_weights is None
-        else float(step_weights.detach().abs().amax().item())
-    )
+    maximum_weight = 1.0 if step_weights is None else float(step_weights.detach().abs().amax().item())
     accumulation_terms = max(1.0, max(1, int(sequences.shape[-2])) * maximum_weight)
-    safe_magnitude = math.sqrt(torch.finfo(torch.float32).max / accumulation_terms) / (
-        2.0 * math.sqrt(vector_size)
-    )
-    maximum = torch.maximum(
-        sequences.detach().abs().amax(), codebook.detach().abs().amax()
-    )
+    safe_magnitude = math.sqrt(torch.finfo(torch.float32).max / accumulation_terms) / (2.0 * math.sqrt(vector_size))
+    maximum = torch.maximum(sequences.detach().abs().amax(), codebook.detach().abs().amax())
     if bool(maximum > safe_magnitude):
         raise ValueError(
             "QVQ CUDA Viterbi sequence/codebook magnitudes are too large for finite FP32 "
             "squared-distance arithmetic"
         )
-
-
 _QVQ_CUDA_HADAMARD_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP: Callable | None = None
@@ -161,9 +151,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         enable_bf16=True,
         include_lineinfo=True,
         include_nvcc_threads=True,
-        nvcc_threads=os.getenv(
-            "GPTQMODEL_QVQ_NVCC_THREADS", os.getenv("NVCC_THREADS", "1")
-        ),
+        nvcc_threads=os.getenv("GPTQMODEL_QVQ_NVCC_THREADS", os.getenv("NVCC_THREADS", "1")),
         include_split_compile=True,
         include_fast_compile=True,
         include_ptxas_optimizations=True,
@@ -183,22 +171,14 @@ def _extension_api():
     return extension_api
 
 
-def qvq_cuda_norm_rank_telemetry_snapshot(
-    device: torch.device | str | int,
-) -> dict[str, int | float | bool | str]:
+def qvq_cuda_norm_rank_telemetry_snapshot(device: torch.device | str | int) -> dict[str, int | float | bool | str]:
     """Return cumulative exact-pruning work counters for one CUDA device."""
 
-    resolved = (
-        torch.device("cuda", device)
-        if isinstance(device, int)
-        else torch.device(device)
-    )
+    resolved = torch.device("cuda", device) if isinstance(device, int) else torch.device(device)
     with torch.cuda.device(resolved):
         values = _extension_api().op("qvq_cuda", "norm_rank_telemetry_snapshot")()
         cache_entries = int(_extension_api().op("qvq_cuda", "norm_rank_cache_size")())
-    dispatches, baseline_fallbacks, evaluated, possible = (
-        int(value) for value in values
-    )
+    dispatches, baseline_fallbacks, evaluated, possible = (int(value) for value in values)
     skipped = max(0, possible - evaluated)
     reduction = 0.0 if possible == 0 else skipped / possible
     return {
@@ -256,9 +236,7 @@ def _qvq_cuda_viterbi_trusted_op() -> Callable:
     if _QVQ_CUDA_VITERBI_TRUSTED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_TRUSTED_OP is None:
-                _QVQ_CUDA_VITERBI_TRUSTED_OP = _extension_api().op(
-                    "qvq_cuda", "viterbi_trusted"
-                )
+                _QVQ_CUDA_VITERBI_TRUSTED_OP = _extension_api().op("qvq_cuda", "viterbi_trusted")
     return _QVQ_CUDA_VITERBI_TRUSTED_OP
 
 
@@ -360,8 +338,8 @@ def _qvq_cuda_folded_swiglu_precondition_fp32_op() -> Callable:
     if _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP is None:
-                _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP = _extension_api().op(
-                    "qvq_cuda", "folded_swiglu_precondition_fp32"
+                _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP = (
+                    _extension_api().op("qvq_cuda", "folded_swiglu_precondition_fp32")
                 )
     return _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP
 
@@ -388,8 +366,10 @@ def _qvq_cuda_qwen_composite_recovery_fp32_to_fp16_op() -> Callable:
     if _QVQ_CUDA_QWEN_COMPOSITE_RECOVERY_FP32_TO_FP16_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_QWEN_COMPOSITE_RECOVERY_FP32_TO_FP16_OP is None:
-                _QVQ_CUDA_QWEN_COMPOSITE_RECOVERY_FP32_TO_FP16_OP = _extension_api().op(
-                    "qvq_cuda", "qwen_composite_recovery_fp32_to_fp16"
+                _QVQ_CUDA_QWEN_COMPOSITE_RECOVERY_FP32_TO_FP16_OP = (
+                    _extension_api().op(
+                        "qvq_cuda", "qwen_composite_recovery_fp32_to_fp16"
+                    )
                 )
     return _QVQ_CUDA_QWEN_COMPOSITE_RECOVERY_FP32_TO_FP16_OP
 
@@ -456,9 +436,7 @@ def _qvq_cuda_yaqa_feedback_op() -> Callable:
     if _QVQ_CUDA_YAQA_FEEDBACK_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_YAQA_FEEDBACK_OP is None:
-                _QVQ_CUDA_YAQA_FEEDBACK_OP = _extension_api().op(
-                    "qvq_cuda", "yaqa_feedback"
-                )
+                _QVQ_CUDA_YAQA_FEEDBACK_OP = _extension_api().op("qvq_cuda", "yaqa_feedback")
     return _QVQ_CUDA_YAQA_FEEDBACK_OP
 
 
@@ -515,9 +493,7 @@ def _qvq_cuda_viterbi_banked_op() -> Callable:
     if _QVQ_CUDA_VITERBI_BANKED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_BANKED_OP is None:
-                _QVQ_CUDA_VITERBI_BANKED_OP = _extension_api().op(
-                    "qvq_cuda", "viterbi_banked"
-                )
+                _QVQ_CUDA_VITERBI_BANKED_OP = _extension_api().op("qvq_cuda", "viterbi_banked")
     return _QVQ_CUDA_VITERBI_BANKED_OP
 
 
@@ -606,10 +582,8 @@ def _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op() -> Callable:
     if _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP is None:
-                _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP = (
-                    _extension_api().op(
-                        "qvq_cuda", "viterbi_v2_segment_family_grid_trusted"
-                    )
+                _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP = _extension_api().op(
+                    "qvq_cuda", "viterbi_v2_segment_family_grid_trusted"
                 )
     return _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP
 
@@ -629,81 +603,48 @@ def qvq_cuda_viterbi(
         raise ValueError("QVQ CUDA Viterbi vector_size must be 2 or 4")
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
     if vector_size == 4 and transition_bits not in (4, 6, 8, 10, 12, 14, 16):
-        raise ValueError(
-            "QVQ CUDA V4 Viterbi supports only even transition widths from 4 through 16"
-        )
+        raise ValueError("QVQ CUDA V4 Viterbi supports only even transition widths from 4 through 16")
     if sequences.ndim != 3 or sequences.shape[2] != vector_size:
-        raise ValueError(
-            f"QVQ CUDA Viterbi expects sequences with shape [batch, steps, {vector_size}]"
-        )
+        raise ValueError(f"QVQ CUDA Viterbi expects sequences with shape [batch, steps, {vector_size}]")
     if tuple(codebook.shape) != (1 << 16, vector_size):
         raise ValueError(f"QVQ CUDA Viterbi expects a [65536, {vector_size}] codebook")
     if sequences.device.type != "cuda" or codebook.device != sequences.device:
         raise ValueError("QVQ CUDA Viterbi tensors must share one CUDA device")
-    if sequences.dtype != torch.float32 or codebook.dtype not in (
-        torch.float16,
-        torch.float32,
-    ):
-        raise TypeError(
-            "QVQ CUDA Viterbi requires float32 sequences and float16 or float32 codebook"
-        )
+    if sequences.dtype != torch.float32 or codebook.dtype not in (torch.float16, torch.float32):
+        raise TypeError("QVQ CUDA Viterbi requires float32 sequences and float16 or float32 codebook")
     if any(not tensor.is_contiguous() for tensor in (sequences, codebook)):
         raise ValueError("QVQ CUDA Viterbi tensors must be contiguous")
     sequence_alignment = 16 if vector_size == 4 else 4
-    codebook_alignment = (
-        16 if vector_size == 4 and codebook.dtype == torch.float32 else 4
-    )
-    if (
-        sequences.data_ptr() % sequence_alignment
-        or codebook.data_ptr() % codebook_alignment
-    ):
+    codebook_alignment = 16 if vector_size == 4 and codebook.dtype == torch.float32 else 4
+    if sequences.data_ptr() % sequence_alignment or codebook.data_ptr() % codebook_alignment:
         raise ValueError(
             "QVQ CUDA Viterbi tensors must satisfy the native vector-load alignment contract "
             f"(sequence={sequence_alignment}, codebook={codebook_alignment} bytes)"
         )
     if not torch.isfinite(sequences).all() or not torch.isfinite(codebook).all():
         raise ValueError("QVQ CUDA Viterbi sequences and codebook must be finite")
-    _validate_viterbi_distance_range(
-        sequences, codebook, vector_size=vector_size, step_weights=step_weights
-    )
+    _validate_viterbi_distance_range(sequences, codebook, vector_size=vector_size, step_weights=step_weights)
     if overlap is not None and (
-        overlap.device != sequences.device
-        or overlap.dtype != torch.int64
-        or not overlap.is_contiguous()
+        overlap.device != sequences.device or overlap.dtype != torch.int64 or not overlap.is_contiguous()
     ):
-        raise ValueError(
-            "QVQ CUDA Viterbi overlap must be contiguous int64 on the sequence device"
-        )
+        raise ValueError("QVQ CUDA Viterbi overlap must be contiguous int64 on the sequence device")
     if overlap is not None:
         if tuple(overlap.shape) != (sequences.shape[0],):
             raise ValueError("QVQ CUDA Viterbi overlap must have shape [batch]")
         overlap_limit = 1 << (16 - transition_bits)
         if torch.any((overlap < 0) | (overlap >= overlap_limit)):
-            raise ValueError(
-                f"QVQ CUDA Viterbi overlap must be in [0, {overlap_limit})"
-            )
+            raise ValueError(f"QVQ CUDA Viterbi overlap must be in [0, {overlap_limit})")
     if step_weights is not None:
         if tuple(step_weights.shape) != tuple(sequences.shape[:2]):
-            raise ValueError(
-                "QVQ CUDA Viterbi step weights must have shape [batch, steps]"
-            )
-        if (
-            step_weights.device != sequences.device
-            or step_weights.dtype != torch.float32
-        ):
-            raise ValueError(
-                "QVQ CUDA Viterbi step weights must be float32 on the sequence device"
-            )
+            raise ValueError("QVQ CUDA Viterbi step weights must have shape [batch, steps]")
+        if step_weights.device != sequences.device or step_weights.dtype != torch.float32:
+            raise ValueError("QVQ CUDA Viterbi step weights must be float32 on the sequence device")
         if not step_weights.is_contiguous():
             raise ValueError("QVQ CUDA Viterbi step weights must be contiguous")
         if not torch.isfinite(step_weights).all() or torch.any(step_weights < 0):
-            raise ValueError(
-                "QVQ CUDA Viterbi step weights must be finite and nonnegative"
-            )
+            raise ValueError("QVQ CUDA Viterbi step weights must be finite and nonnegative")
     if torch.cuda.get_device_capability(sequences.device) < (8, 0):
-        raise RuntimeError(
-            "QVQ CUDA Viterbi requires a compute capability >= 8.0 device"
-        )
+        raise RuntimeError("QVQ CUDA Viterbi requires a compute capability >= 8.0 device")
     op = _qvq_cuda_viterbi_op() if vector_size == 2 else _qvq_cuda_viterbi_v4_op()
     return op(sequences, codebook, transition_bits, overlap, step_weights)
 
@@ -718,9 +659,7 @@ def _qvq_cuda_viterbi_trusted(
     """Run V2 after YAQA has deferred all dynamic value/range checks."""
 
     transition_bits = qvq_transition_bits(normalize_qvq_rate(bits), vector_size=2)
-    return _qvq_cuda_viterbi_trusted_op()(
-        sequences, codebook, transition_bits, overlap, step_weights
-    )
+    return _qvq_cuda_viterbi_trusted_op()(sequences, codebook, transition_bits, overlap, step_weights)
 
 
 def qvq_cuda_viterbi_banked(
@@ -740,34 +679,17 @@ def qvq_cuda_viterbi_banked(
     bits = normalize_qvq_rate(bits)
     transition_bits = qvq_transition_bits(bits, vector_size=4)
     if transition_bits not in (4, 6, 8, 10, 12, 14, 16):
-        raise ValueError(
-            "QVQ banked CUDA Viterbi supports only even transition widths from 4 through 16"
-        )
+        raise ValueError("QVQ banked CUDA Viterbi supports only even transition widths from 4 through 16")
     if sequences.ndim not in (3, 4) or sequences.shape[-1] != 4:
-        raise ValueError(
-            "QVQ banked Viterbi expects sequences with shape [batch, steps, 4] or [banks, batch, steps, 4]"
-        )
+        raise ValueError("QVQ banked Viterbi expects sequences with shape [batch, steps, 4] or [banks, batch, steps, 4]")
     if sequences.ndim == 4 and sequences.shape[0] != codebooks.shape[0]:
-        raise ValueError(
-            "bank-specific QVQ sequences must have one batch per codebook bank"
-        )
-    if (
-        codebooks.ndim != 3
-        or codebooks.shape[0] not in (1, 2, 3, 4)
-        or tuple(codebooks.shape[1:]) != (1 << 16, 4)
-    ):
-        raise ValueError(
-            "QVQ banked Viterbi expects one to four codebooks with shape [banks, 65536, 4]"
-        )
+        raise ValueError("bank-specific QVQ sequences must have one batch per codebook bank")
+    if codebooks.ndim != 3 or codebooks.shape[0] not in (1, 2, 3, 4) or tuple(codebooks.shape[1:]) != (1 << 16, 4):
+        raise ValueError("QVQ banked Viterbi expects one to four codebooks with shape [banks, 65536, 4]")
     if sequences.device.type != "cuda" or codebooks.device != sequences.device:
         raise ValueError("QVQ banked Viterbi tensors must share one CUDA device")
-    if sequences.dtype != torch.float32 or codebooks.dtype not in (
-        torch.float16,
-        torch.float32,
-    ):
-        raise TypeError(
-            "QVQ banked Viterbi requires float32 sequences and float16 or float32 codebooks"
-        )
+    if sequences.dtype != torch.float32 or codebooks.dtype not in (torch.float16, torch.float32):
+        raise TypeError("QVQ banked Viterbi requires float32 sequences and float16 or float32 codebooks")
     if not sequences.is_contiguous() or not codebooks.is_contiguous():
         raise ValueError("QVQ banked Viterbi tensors must be contiguous")
     codebook_alignment = 16 if codebooks.dtype == torch.float32 else 4
@@ -778,9 +700,7 @@ def qvq_cuda_viterbi_banked(
         )
     if not torch.isfinite(sequences).all() or not torch.isfinite(codebooks).all():
         raise ValueError("QVQ banked Viterbi sequences and codebooks must be finite")
-    _validate_viterbi_distance_range(
-        sequences, codebooks, vector_size=4, step_weights=step_weights
-    )
+    _validate_viterbi_distance_range(sequences, codebooks, vector_size=4, step_weights=step_weights)
     bank_count = codebooks.shape[0]
     batch = sequences.shape[1] if sequences.ndim == 4 else sequences.shape[0]
     steps = sequences.shape[2] if sequences.ndim == 4 else sequences.shape[1]
@@ -788,39 +708,24 @@ def qvq_cuda_viterbi_banked(
         if overlap.device != sequences.device or overlap.dtype != torch.int64:
             raise ValueError("QVQ banked Viterbi overlap must be CUDA int64")
         if overlap.numel() != bank_count * batch or not overlap.is_contiguous():
-            raise ValueError(
-                "QVQ banked Viterbi overlap must contain bank_count * batch entries"
-            )
+            raise ValueError("QVQ banked Viterbi overlap must contain bank_count * batch entries")
         overlap_limit = 1 << (16 - transition_bits)
         if torch.any((overlap < 0) | (overlap >= overlap_limit)):
-            raise ValueError(
-                f"QVQ banked Viterbi overlap must be in [0, {overlap_limit})"
-            )
+            raise ValueError(f"QVQ banked Viterbi overlap must be in [0, {overlap_limit})")
         overlap = overlap.reshape(-1).contiguous()
     if step_weights is not None:
-        if (
-            tuple(step_weights.shape) != (batch, steps)
-            or step_weights.device != sequences.device
-        ):
-            raise ValueError(
-                "QVQ banked Viterbi step weights must have shape [batch, steps] on CUDA"
-            )
+        if tuple(step_weights.shape) != (batch, steps) or step_weights.device != sequences.device:
+            raise ValueError("QVQ banked Viterbi step weights must have shape [batch, steps] on CUDA")
         if step_weights.dtype != torch.float32 or not step_weights.is_contiguous():
-            raise ValueError(
-                "QVQ banked Viterbi step weights must be contiguous float32"
-            )
+            raise ValueError("QVQ banked Viterbi step weights must be contiguous float32")
         if not torch.isfinite(step_weights).all() or torch.any(step_weights < 0):
-            raise ValueError(
-                "QVQ banked Viterbi step weights must be finite and nonnegative"
-            )
+            raise ValueError("QVQ banked Viterbi step weights must be finite and nonnegative")
     if torch.cuda.get_device_capability(sequences.device) < (8, 0):
         raise RuntimeError("QVQ banked Viterbi requires compute capability >= 8.0")
     states, squared_error = _qvq_cuda_viterbi_banked_op()(
         sequences, codebooks, transition_bits, overlap, step_weights
     )
-    return states.reshape(bank_count, batch, steps), squared_error.reshape(
-        bank_count, batch
-    )
+    return states.reshape(bank_count, batch, steps), squared_error.reshape(bank_count, batch)
 
 
 def qvq_cuda_viterbi_v2_segment_banked(
@@ -842,46 +747,25 @@ def qvq_cuda_viterbi_v2_segment_banked(
     bits = normalize_qvq_rate(bits)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     if transition_bits not in (2, 3, 4, 5, 6, 7):
-        raise ValueError(
-            "QVQ segmented-bank CUDA V2 supports only rates W1 through W3.5"
-        )
+        raise ValueError("QVQ segmented-bank CUDA V2 supports only rates W1 through W3.5")
     if tuple(sequences.shape[1:]) != (128, 2) or sequences.ndim != 3:
-        raise ValueError(
-            "QVQ segmented-bank V2 expects sequences with shape [batch, 128, 2]"
-        )
-    if (
-        codebooks.ndim != 3
-        or codebooks.shape[0] not in (2, 4)
-        or tuple(codebooks.shape[1:]) != (1 << 16, 2)
-    ):
-        raise ValueError(
-            "QVQ segmented-bank V2 expects codebooks with shape [2|4, 65536, 2]"
-        )
+        raise ValueError("QVQ segmented-bank V2 expects sequences with shape [batch, 128, 2]")
+    if codebooks.ndim != 3 or codebooks.shape[0] not in (2, 4) or tuple(codebooks.shape[1:]) != (1 << 16, 2):
+        raise ValueError("QVQ segmented-bank V2 expects codebooks with shape [2|4, 65536, 2]")
     bank_count = int(codebooks.shape[0])
     if (bank_count, segment_steps) not in ((2, 16), (4, 32)):
-        raise ValueError(
-            "QVQ segmented-bank V2 requires two P32 banks or four P64 banks"
-        )
+        raise ValueError("QVQ segmented-bank V2 requires two P32 banks or four P64 banks")
     if sequences.device.type != "cuda" or codebooks.device != sequences.device:
         raise ValueError("QVQ segmented-bank V2 tensors must share one CUDA device")
-    if sequences.dtype != torch.float32 or codebooks.dtype not in (
-        torch.float16,
-        torch.float32,
-    ):
-        raise TypeError(
-            "QVQ segmented-bank V2 requires float32 sequences and float16 or float32 codebooks"
-        )
+    if sequences.dtype != torch.float32 or codebooks.dtype not in (torch.float16, torch.float32):
+        raise TypeError("QVQ segmented-bank V2 requires float32 sequences and float16 or float32 codebooks")
     if not sequences.is_contiguous() or not codebooks.is_contiguous():
         raise ValueError("QVQ segmented-bank V2 tensors must be contiguous")
     if sequences.data_ptr() % 4 or codebooks.data_ptr() % 4:
-        raise ValueError(
-            "QVQ segmented-bank V2 tensors must satisfy four-byte native alignment"
-        )
+        raise ValueError("QVQ segmented-bank V2 tensors must satisfy four-byte native alignment")
     if not torch.isfinite(sequences).all() or not torch.isfinite(codebooks).all():
         raise ValueError("QVQ segmented-bank V2 sequences and codebooks must be finite")
-    _validate_viterbi_distance_range(
-        sequences, codebooks, vector_size=2, step_weights=step_weights
-    )
+    _validate_viterbi_distance_range(sequences, codebooks, vector_size=2, step_weights=step_weights)
     batch = int(sequences.shape[0])
     if overlap is not None:
         if (
@@ -890,14 +774,10 @@ def qvq_cuda_viterbi_v2_segment_banked(
             or tuple(overlap.shape) != (batch,)
             or not overlap.is_contiguous()
         ):
-            raise ValueError(
-                "QVQ segmented-bank V2 overlap must be contiguous CUDA int64 with shape [batch]"
-            )
+            raise ValueError("QVQ segmented-bank V2 overlap must be contiguous CUDA int64 with shape [batch]")
         overlap_limit = 1 << (16 - transition_bits)
         if torch.any((overlap < 0) | (overlap >= overlap_limit)):
-            raise ValueError(
-                f"QVQ segmented-bank V2 overlap must be in [0, {overlap_limit})"
-            )
+            raise ValueError(f"QVQ segmented-bank V2 overlap must be in [0, {overlap_limit})")
     if step_weights is not None:
         if (
             step_weights.device != sequences.device
@@ -909,9 +789,7 @@ def qvq_cuda_viterbi_v2_segment_banked(
                 "QVQ segmented-bank V2 step weights must be contiguous CUDA float32 with shape [batch, 128]"
             )
         if not torch.isfinite(step_weights).all() or torch.any(step_weights < 0):
-            raise ValueError(
-                "QVQ segmented-bank V2 step weights must be finite and nonnegative"
-            )
+            raise ValueError("QVQ segmented-bank V2 step weights must be finite and nonnegative")
     if torch.cuda.get_device_capability(sequences.device) < (8, 0):
         raise RuntimeError("QVQ segmented-bank V2 requires compute capability >= 8.0")
     return _qvq_cuda_viterbi_v2_segment_grid_op()(
@@ -952,26 +830,16 @@ def qvq_cuda_hadamard(
     if x.device.type != "cuda":
         raise ValueError("QVQ CUDA Hadamard requires a CUDA input")
     if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise TypeError(
-            f"QVQ CUDA Hadamard requires float16, bfloat16, or float32 x, got {x.dtype}"
-        )
+        raise TypeError(f"QVQ CUDA Hadamard requires float16, bfloat16, or float32 x, got {x.dtype}")
     if x.dim() < 1 or not x.is_contiguous():
-        raise ValueError(
-            "QVQ CUDA Hadamard requires a contiguous tensor with rank >= 1"
-        )
+        raise ValueError("QVQ CUDA Hadamard requires a contiguous tensor with rank >= 1")
     n = x.shape[-1]
     if n < 2 or n & (n - 1) or n > 16384:
-        raise ValueError(
-            f"QVQ CUDA Hadamard requires a power-of-two last dim in [2, 16384], got {n}"
-        )
+        raise ValueError(f"QVQ CUDA Hadamard requires a power-of-two last dim in [2, 16384], got {n}")
     if scale_mode not in (0, 1, 2, 3, 4, 5):
-        raise ValueError(
-            "QVQ CUDA Hadamard scale_mode must be one of 0, 1, 2, 3, 4, or 5"
-        )
+        raise ValueError("QVQ CUDA Hadamard scale_mode must be one of 0, 1, 2, 3, 4, or 5")
     if scale_mode == 2 and x.dtype != torch.float16:
-        raise TypeError(
-            "QVQ CUDA Hadamard range-safe pre-scale mode 2 requires float16 x"
-        )
+        raise TypeError("QVQ CUDA Hadamard range-safe pre-scale mode 2 requires float16 x")
     if scale_mode in (3, 4) and x.dtype != torch.float32:
         raise TypeError("QVQ CUDA Hadamard FP16-emulation modes 3/4 require float32 x")
     if not isinstance(pad_to_16, bool):
@@ -989,9 +857,7 @@ def qvq_cuda_hadamard(
             "FP16 QVQ CUDA Hadamard output requires float32 x, scale mode 3/4, and no padding"
         )
     if torch.cuda.get_device_capability(x.device) < (8, 0):
-        raise RuntimeError(
-            "QVQ CUDA Hadamard requires a compute capability >= 8.0 device"
-        )
+        raise RuntimeError("QVQ CUDA Hadamard requires a compute capability >= 8.0 device")
     return _qvq_cuda_hadamard_op()(
         x, pre_scale, post_scale, bias, scale_mode, pad_to_16, output_fp16
     )
@@ -1011,21 +877,15 @@ def qvq_cuda_hadamard_input_fp16_padded_multiblock(
     """
 
     if x.device.type != "cuda" or pre_scale.device != x.device:
-        raise ValueError(
-            "multiblock QVQ input Hadamard tensors must share one CUDA device"
-        )
+        raise ValueError("multiblock QVQ input Hadamard tensors must share one CUDA device")
     if x.dtype != torch.float16 or pre_scale.dtype != torch.float16:
         raise TypeError("multiblock QVQ input Hadamard tensors must be float16")
     if x.dim() != 2 or not 0 < x.shape[0] <= 16 or x.shape[1] != 2048:
-        raise ValueError(
-            "multiblock QVQ input Hadamard requires an Mx2048 input with M in [1, 16]"
-        )
+        raise ValueError("multiblock QVQ input Hadamard requires an Mx2048 input with M in [1, 16]")
     if not x.is_contiguous() or not pre_scale.is_contiguous():
         raise ValueError("multiblock QVQ input Hadamard tensors must be contiguous")
     if pre_scale.numel() != 2048:
-        raise ValueError(
-            "multiblock QVQ input Hadamard pre_scale must contain 2048 values"
-        )
+        raise ValueError("multiblock QVQ input Hadamard pre_scale must contain 2048 values")
     if torch.cuda.get_device_capability(x.device) < (9, 0):
         raise RuntimeError("multiblock QVQ input Hadamard requires Hopper")
     return _qvq_cuda_hadamard_input_multiblock_op()(x, pre_scale)
@@ -1171,9 +1031,7 @@ def qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
     if input0.dtype != torch.float32 or input1.dtype != torch.float32:
         raise TypeError("multiblock paired QVQ Hadamard inputs must be float32")
     if input0.shape != input1.shape:
-        raise ValueError(
-            "multiblock paired QVQ Hadamard inputs must have identical shapes"
-        )
+        raise ValueError("multiblock paired QVQ Hadamard inputs must have identical shapes")
     if (
         input0.ndim < 1
         or not input0.is_contiguous()
@@ -1307,10 +1165,7 @@ def qvq_cuda_qwen_composite_input_fp16_padded(
         ):
             raise ValueError(f"{name} must be contiguous CUDA FP16 with {count} values")
     properties = torch.cuda.get_device_properties(input.device)
-    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (
-        9,
-        0,
-    ):
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
         raise RuntimeError("Qwen composite input requires the measured physical H100")
     return _qvq_cuda_qwen_composite_input_fp16_padded_op()(
         input,
@@ -1366,13 +1221,8 @@ def qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
         ):
             raise ValueError(f"{name} must be contiguous CUDA FP32 [{n}]")
     properties = torch.cuda.get_device_properties(input.device)
-    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (
-        9,
-        0,
-    ):
-        raise RuntimeError(
-            "Qwen composite recovery requires the measured physical H100"
-        )
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        raise RuntimeError("Qwen composite recovery requires the measured physical H100")
     return _qvq_cuda_qwen_composite_recovery_fp32_to_fp16_op()(
         input,
         base.reshape(base_width, base_width),
@@ -1399,9 +1249,7 @@ def qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16(
         or split_count not in (17, 34)
         or partials.numel() != split_count * 16 * 5120
     ):
-        raise ValueError(
-            "Qwen ordered composite partials must be FP32 split-major M16x5120"
-        )
+        raise ValueError("Qwen ordered composite partials must be FP32 split-major M16x5120")
     if not 0 < logical_rows <= 16:
         raise ValueError("Qwen ordered composite logical rows must be in [1, 16]")
     if (
@@ -1424,13 +1272,8 @@ def qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16(
         ):
             raise ValueError(f"{name} must be contiguous CUDA FP32 [5120]")
     properties = torch.cuda.get_device_properties(partials.device)
-    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (
-        9,
-        0,
-    ):
-        raise RuntimeError(
-            "Qwen ordered composite recovery requires the measured physical H100"
-        )
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        raise RuntimeError("Qwen ordered composite recovery requires the measured physical H100")
     return _qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16_op()(
         partials,
         base.reshape(40, 40),
@@ -1531,18 +1374,14 @@ def qvq_cuda_swiglu_precondition(
     ):
         raise TypeError("QVQ SwiGLU precondition tensors must be float16")
     if activated_gate.shape != up.shape:
-        raise ValueError(
-            "QVQ SwiGLU activated gate and up tensors must have identical shapes"
-        )
+        raise ValueError("QVQ SwiGLU activated gate and up tensors must have identical shapes")
     if (
         activated_gate.ndim < 1
         or not activated_gate.is_contiguous()
         or not up.is_contiguous()
         or not pre_scale.is_contiguous()
     ):
-        raise ValueError(
-            "QVQ SwiGLU precondition tensors must be contiguous with rank >= 1"
-        )
+        raise ValueError("QVQ SwiGLU precondition tensors must be contiguous with rank >= 1")
     n = activated_gate.shape[-1]
     if n < 2 or n & (n - 1) or n > 16384:
         raise ValueError(
@@ -1589,13 +1428,9 @@ def qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
         or not pre_scale.is_contiguous()
         or pre_scale.numel() != 8192
     ):
-        raise ValueError(
-            "fused QVQ recovery/precondition requires contiguous 2D N=8192 tensors"
-        )
-    if not 0 < input0.shape[0] <= 4096:
-        raise ValueError(
-            "fused QVQ recovery/precondition requires one through 4096 rows"
-        )
+        raise ValueError("fused QVQ recovery/precondition requires contiguous 2D N=8192 tensors")
+    if not 0 < input0.shape[0] <= 16:
+        raise ValueError("fused QVQ recovery/precondition requires one through sixteen rows")
     if scale_mode not in (3, 4):
         raise ValueError("fused QVQ recovery scale_mode must be 3 or 4")
     if not isinstance(pad_to_16, bool):
@@ -1607,15 +1442,7 @@ def qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
     if not isinstance(packed_gate_up, bool):
         raise TypeError("fused QVQ recovery packed_gate_up must be a bool")
     if packed_gate_up and (not pair_tiles or not bounded_rounding):
-        raise ValueError(
-            "fused QVQ recovery packed_gate_up requires paired bounded rounding"
-        )
-    if input0.shape[0] > 16 and (
-        pad_to_16 or pair_tiles or bounded_rounding or packed_gate_up
-    ):
-        raise ValueError(
-            "large-M fused QVQ recovery requires unpadded, unpaired execution"
-        )
+        raise ValueError("fused QVQ recovery packed_gate_up requires paired bounded rounding")
     for name, tensor in (
         ("post_scale0", post_scale0),
         ("post_scale1", post_scale1),
@@ -1676,13 +1503,9 @@ def qvq_cuda_swiglu_precondition_multiblock(
     """
 
     if activated_gate.device.type != "cuda" or up.device.type != "cuda":
-        raise ValueError(
-            "multiblock QVQ SwiGLU precondition inputs must be CUDA tensors"
-        )
+        raise ValueError("multiblock QVQ SwiGLU precondition inputs must be CUDA tensors")
     if activated_gate.device != up.device or activated_gate.device != pre_scale.device:
-        raise ValueError(
-            "multiblock QVQ SwiGLU precondition tensors must share a device"
-        )
+        raise ValueError("multiblock QVQ SwiGLU precondition tensors must share a device")
     if (
         activated_gate.dtype != torch.float16
         or up.dtype != torch.float16
@@ -1690,9 +1513,7 @@ def qvq_cuda_swiglu_precondition_multiblock(
     ):
         raise TypeError("multiblock QVQ SwiGLU precondition tensors must be float16")
     if activated_gate.shape != up.shape:
-        raise ValueError(
-            "multiblock activated gate and up tensors must have identical shapes"
-        )
+        raise ValueError("multiblock activated gate and up tensors must have identical shapes")
     if (
         activated_gate.ndim < 1
         or not activated_gate.is_contiguous()
@@ -1704,9 +1525,7 @@ def qvq_cuda_swiglu_precondition_multiblock(
             "multiblock QVQ SwiGLU precondition requires contiguous N=8192 tensors"
         )
     if pre_scale.numel() != 8192:
-        raise ValueError(
-            "multiblock QVQ SwiGLU precondition scale must contain 8192 values"
-        )
+        raise ValueError("multiblock QVQ SwiGLU precondition scale must contain 8192 values")
     if not isinstance(half2_high, bool):
         raise TypeError("multiblock QVQ SwiGLU half2_high must be a bool")
     if not isinstance(fuse_silu, bool):
@@ -1715,16 +1534,12 @@ def qvq_cuda_swiglu_precondition_multiblock(
         raise TypeError("multiblock QVQ SwiGLU half2_low must be a bool")
     if not isinstance(pad_to_16, bool):
         raise TypeError("multiblock QVQ SwiGLU pad_to_16 must be a bool")
-    if pad_to_16 and (
-        activated_gate.ndim != 2 or not 0 < activated_gate.shape[0] <= 16
-    ):
+    if pad_to_16 and (activated_gate.ndim != 2 or not 0 < activated_gate.shape[0] <= 16):
         raise ValueError(
             "padded multiblock QVQ SwiGLU precondition requires a nonempty 2D input with at most 16 rows"
         )
     if torch.cuda.get_device_capability(activated_gate.device)[0] != 9:
-        raise RuntimeError(
-            "multiblock QVQ SwiGLU precondition requires a Hopper device"
-        )
+        raise RuntimeError("multiblock QVQ SwiGLU precondition requires a Hopper device")
     return _qvq_cuda_swiglu_precondition_multiblock_op()(
         activated_gate,
         up,
@@ -1740,11 +1555,7 @@ def qvq_cuda_device_supported(device: torch.device | str) -> bool:
     """Return whether one concrete device can execute the native QVQ kernels."""
 
     target = torch.device(device)
-    if (
-        target.type != "cuda"
-        or not torch.cuda.is_available()
-        or torch.version.hip is not None
-    ):
+    if target.type != "cuda" or not torch.cuda.is_available() or torch.version.hip is not None:
         return False
     try:
         return torch.cuda.get_device_capability(target) >= (8, 0)
@@ -1787,9 +1598,7 @@ def _integer_argument(name: str, value: int) -> int:
     try:
         return index(value)
     except TypeError as exc:
-        raise TypeError(
-            f"{name} must be an integer, got {type(value).__name__}"
-        ) from exc
+        raise TypeError(f"{name} must be an integer, got {type(value).__name__}") from exc
 
 
 def _pgc16_levels(
@@ -1846,13 +1655,9 @@ def qvq_cuda_gemv(
     if (v2b4_p64 or v2b2_p32) and vector_size != 2:
         raise ValueError("QVQ CUDA segmented-bank formats require vector_size=2")
     if bank_ids is not None and vector_size != 4 and not (v2b4_p64 or v2b2_p32):
-        raise ValueError(
-            "QVQ CUDA bank selectors require V4 or a segmented-bank V2 format"
-        )
+        raise ValueError("QVQ CUDA bank selectors require V4 or a segmented-bank V2 format")
     if vector_size == 2 and (v2b4_p64 or v2b2_p32) != (bank_ids is not None):
-        raise ValueError(
-            "QVQ CUDA segmented-bank formats require exactly one packed selector byte per tile"
-        )
+        raise ValueError("QVQ CUDA segmented-bank formats require exactly one packed selector byte per tile")
     bank_alt_id = _integer_argument("bank_alt_id", bank_alt_id)
     if not isinstance(_bank_alt_ids_validated, bool):
         raise TypeError("_bank_alt_ids_validated must be boolean")
@@ -1869,9 +1674,7 @@ def qvq_cuda_gemv(
         raise ValueError("QVQ CUDA bank_alt_id is valid only for V2B2-P32")
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
     if (v2b4_p64 or v2b2_p32) and transition_bits > 7:
-        raise ValueError(
-            "QVQ CUDA segmented-bank V2 inference supports only rates W1 through W3.5"
-        )
+        raise ValueError("QVQ CUDA segmented-bank V2 inference supports only rates W1 through W3.5")
     out_features = _integer_argument("out_features", out_features)
     if x.ndim != 2 or trellis.ndim != 2:
         raise ValueError("QVQ CUDA expects 2D x and trellis tensors")
@@ -1887,31 +1690,20 @@ def qvq_cuda_gemv(
     m, k = x.shape
     n = out_features
     if k <= 0 or n <= 0 or k % 16 or n % 16:
-        raise ValueError(
-            f"QVQ CUDA requires positive K/N divisible by 16, got K={k}, N={n}"
-        )
-    expected = (
-        (k // 16) * (n // 16),
-        qvq_words_per_tile(bits, vector_size=vector_size),
-    )
+        raise ValueError(f"QVQ CUDA requires positive K/N divisible by 16, got K={k}, N={n}")
+    expected = ((k // 16) * (n // 16), qvq_words_per_tile(bits, vector_size=vector_size))
     if tuple(trellis.shape) != expected:
-        raise ValueError(
-            f"QVQ planar trellis must have shape {expected}, got {tuple(trellis.shape)}"
-        )
+        raise ValueError(f"QVQ planar trellis must have shape {expected}, got {tuple(trellis.shape)}")
     if not isinstance(output_fp32, bool):
         raise TypeError("QVQ CUDA output_fp32 must be boolean")
     if bank_ids is not None:
         if bank_ids.device != x.device or bank_ids.dtype != torch.uint8:
-            raise TypeError(
-                "QVQ CUDA bank selectors must be contiguous uint8 on the input CUDA device"
-            )
+            raise TypeError("QVQ CUDA bank selectors must be contiguous uint8 on the input CUDA device")
         if not bank_ids.is_contiguous():
             raise ValueError("QVQ CUDA bank selectors must be contiguous")
         expected_selectors = expected[0] if (v2b4_p64 or v2b2_p32) else expected[0]
         if tuple(bank_ids.shape) != (expected_selectors,):
-            raise ValueError(
-                f"QVQ CUDA bank selectors must have shape {(expected_selectors,)}"
-            )
+            raise ValueError(f"QVQ CUDA bank selectors must have shape {(expected_selectors,)}")
         if vector_size == 4 and torch.any(bank_ids > 3):
             raise ValueError("QVQ V4 bank selectors must be in [0, 3]")
     if bank_alt_ids is not None:
@@ -1931,9 +1723,7 @@ def qvq_cuda_gemv(
         ):
             raise ValueError("QVQ CUDA grouped alternative-bank IDs must be in [1, 3]")
         if not isinstance(bank_alt_boundaries, tuple):
-            raise TypeError(
-                "QVQ CUDA grouped alternative-bank boundaries must be a tuple"
-            )
+            raise TypeError("QVQ CUDA grouped alternative-bank boundaries must be a tuple")
         if len(bank_alt_boundaries) != group_count - 1:
             raise ValueError(
                 "QVQ CUDA grouped alternative-bank boundaries must separate every output group"
@@ -1943,8 +1733,9 @@ def qvq_cuda_gemv(
             for value in bank_alt_boundaries
         )
         output_tiles = n // 16
-        if any(value <= 0 or value >= output_tiles for value in boundaries) or any(
-            left >= right for left, right in zip(boundaries, boundaries[1:])
+        if (
+            any(value <= 0 or value >= output_tiles for value in boundaries)
+            or any(left >= right for left, right in zip(boundaries, boundaries[1:]))
         ):
             raise ValueError(
                 "QVQ CUDA grouped alternative-bank boundaries must be strictly increasing N16 indices"
@@ -1953,9 +1744,7 @@ def qvq_cuda_gemv(
         boundaries = ()
     levels = _pgc16_levels(x.device, codebook_version)
     if m == 0:
-        return torch.empty(
-            (0, n), dtype=torch.float32 if output_fp32 else x.dtype, device=x.device
-        )
+        return torch.empty((0, n), dtype=torch.float32 if output_fp32 else x.dtype, device=x.device)
     if max(m, k, n) > 2**31 - 1:
         raise ValueError("QVQ CUDA dimensions exceed the int32 kernel limit")
     if torch.cuda.get_device_capability(x.device) < (8, 0):
@@ -1979,17 +1768,7 @@ def qvq_cuda_gemv(
             x, trellis, levels, transition_bits, n, output_fp32, bank_ids
         )
     bank_mode = 2 if v2b4_p64 else 3 if v2b2_p32 else 0
-    return op(
-        x,
-        trellis,
-        levels,
-        transition_bits,
-        n,
-        output_fp32,
-        bank_ids,
-        bank_mode,
-        bank_alt_id,
-    )
+    return op(x, trellis, levels, transition_bits, n, output_fp32, bank_ids, bank_mode, bank_alt_id)
 
 
 __all__ = [

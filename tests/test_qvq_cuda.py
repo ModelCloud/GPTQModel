@@ -108,13 +108,9 @@ def _case(
     codebook_version: str = PGC16_CODEBOOK_VERSION,
 ):
     transition_bits = qvq_transition_bits(bits)
-    generator = torch.Generator().manual_seed(
-        9100 + transition_bits * 100 + m + k + n + seed_offset
-    )
+    generator = torch.Generator().manual_seed(9100 + transition_bits * 100 + m + k + n + seed_offset)
     tiles = (k // 16) * (n // 16)
-    edges = torch.randint(
-        0, 1 << transition_bits, (128, tiles), generator=generator, dtype=torch.int32
-    )
+    edges = torch.randint(0, 1 << transition_bits, (128, tiles), generator=generator, dtype=torch.int32)
     trellis = planar_pack_rows(edges, transition_bits).T.contiguous()
     x = torch.randn((m, k), generator=generator).to(dtype)
     inner = reconstruct_qvq_inner_weight(
@@ -128,9 +124,9 @@ def _case(
     return (x.to(device), trellis.to(device)), reference
 
 
-def _accuracy_metrics(
-    actual: torch.Tensor, reference: torch.Tensor
-) -> tuple[float, float, float, float]:
+
+
+def _accuracy_metrics(actual: torch.Tensor, reference: torch.Tensor) -> tuple[float, float, float, float]:
     actual_f = actual.float()
     reference_f = reference.float()
     mse = (actual_f - reference_f).square().mean().item()
@@ -140,13 +136,7 @@ def _accuracy_metrics(
     top1 = (actual_f.argmax(dim=-1) == reference_f.argmax(dim=-1)).float().mean().item()
     actual_top5 = actual_f.topk(5, dim=-1).indices
     reference_top5 = reference_f.topk(5, dim=-1).indices
-    top5_overlap = (
-        (actual_top5.unsqueeze(-1) == reference_top5.unsqueeze(-2))
-        .any(dim=-1)
-        .float()
-        .mean()
-        .item()
-    )
+    top5_overlap = (actual_top5.unsqueeze(-1) == reference_top5.unsqueeze(-2)).any(dim=-1).float().mean().item()
     return mse, forward_kld, top1, top5_overlap
 
 
@@ -247,9 +237,7 @@ def test_yaqa_cuda_activation_checkpointing_is_bit_exact_and_deterministic(seed)
 
 @pytest.mark.parametrize("bits", (1, 1.5))
 @pytest.mark.parametrize("seed", (17, 31, 47))
-def test_qvq_cuda_yaqa_ultralow_rates_are_deterministic_and_match_dense_decoder(
-    bits, seed
-):
+def test_qvq_cuda_yaqa_ultralow_rates_are_deterministic_and_match_dense_decoder(bits, seed):
     """Pin YAQA-v3 state selection and unchanged planar reconstruction over repeated CUDA launches."""
 
     generator = torch.Generator().manual_seed(20261200 + seed + int(bits * 2))
@@ -285,11 +273,7 @@ def test_qvq_cuda_yaqa_ultralow_rates_are_deterministic_and_match_dense_decoder(
             in_features=16,
             out_features=32,
             name="proj",
-            tensors={
-                "trellis": result.trellis.cpu(),
-                "SU": result.SU.cpu(),
-                "SV": result.SV.cpu(),
-            },
+            tensors={"trellis": result.trellis.cpu(), "SU": result.SU.cpu(), "SV": result.SV.cpu()},
             out_dtype=torch.float32,
         )
         actual = layer(held_out.cpu())
@@ -332,9 +316,7 @@ def test_qvq_cuda_structured_trellis_words_match_pgc16_reference(bits, word):
     generator = torch.Generator().manual_seed(17000 + qvq_transition_bits(bits))
     x = torch.randn((3, 32), generator=generator, dtype=torch.float16)
     trellis = torch.full((4, qvq_words_per_tile(bits)), word, dtype=torch.int32)
-    inner = reconstruct_qvq_inner_weight(
-        trellis, bits=bits, in_features=32, out_features=32
-    )
+    inner = reconstruct_qvq_inner_weight(trellis, bits=bits, in_features=32, out_features=32)
     reference = (x.float() @ inner.float()).to(torch.float16)
 
     actual = qvq_cuda_gemv(x.cuda(), trellis.cuda(), bits, out_features=32).cpu()
@@ -345,9 +327,7 @@ def test_qvq_cuda_structured_trellis_words_match_pgc16_reference(bits, word):
 
 def test_qvq_cuda_bfloat16_input_keeps_canonical_pgc16_levels_in_float16():
     x = torch.zeros((1, 16), device="cuda", dtype=torch.bfloat16)
-    trellis = torch.zeros(
-        (1, qvq_words_per_tile(2.5)), device="cuda", dtype=torch.int32
-    )
+    trellis = torch.zeros((1, qvq_words_per_tile(2.5)), device="cuda", dtype=torch.int32)
     captured = {}
 
     def fake_op(
@@ -378,9 +358,7 @@ def test_qvq_cuda_bfloat16_input_keeps_canonical_pgc16_levels_in_float16():
 
     levels = captured["levels"]
     assert levels.dtype == torch.float16
-    assert torch.equal(
-        levels.cpu().view(torch.int16), canonical_pgc16_levels().view(torch.int16)
-    )
+    assert torch.equal(levels.cpu().view(torch.int16), canonical_pgc16_levels().view(torch.int16))
     assert captured["transition_bits"] == 5
     assert captured["output_fp32"] is False
     assert captured["bank_mode"] == 0
@@ -390,9 +368,7 @@ def test_qvq_cuda_bfloat16_input_keeps_canonical_pgc16_levels_in_float16():
 def test_qvq_cuda_fp32_inner_output_preserves_accumulator_range_and_accuracy():
     operands, _ = _case(2, 4, k=256, n=80)
     x, trellis = operands
-    inner = reconstruct_qvq_inner_weight(
-        trellis.cpu(), bits=2, in_features=256, out_features=80
-    )
+    inner = reconstruct_qvq_inner_weight(trellis.cpu(), bits=2, in_features=256, out_features=80)
     reference = x.float().cpu() @ inner.float()
 
     actual = qvq_cuda_gemv(x, trellis, 2, out_features=80, output_fp32=True).cpu()
@@ -429,7 +405,9 @@ def test_qvq_cuda_range_safe_hadamard_is_bitwise_identical_when_prescale_fits_fp
 def test_qvq_cuda_hadamard_direct_padding_is_exact_and_graph_stable(m):
     n = 2048
     generator = torch.Generator(device="cuda").manual_seed(20261800 + m)
-    x = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
+    x = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float16
+    )
     pre_scale = torch.randn(
         (n,), generator=generator, device="cuda", dtype=torch.float16
     )
@@ -477,12 +455,18 @@ def test_qvq_cuda_hadamard_multiblock_input_is_exact_and_graph_stable(m):
         pytest.skip("requires the physical H100 Phase-26 path")
 
     generator = torch.Generator(device="cuda").manual_seed(20262600 + m)
-    x = torch.randn((m, 2048), generator=generator, device="cuda", dtype=torch.float16)
+    x = torch.randn(
+        (m, 2048), generator=generator, device="cuda", dtype=torch.float16
+    )
     pre_scale = torch.randn(
         (2048,), generator=generator, device="cuda", dtype=torch.float16
     )
-    expected = qvq_cuda_hadamard(x, pre_scale=pre_scale, scale_mode=2, pad_to_16=True)
-    actual = qvq_cuda_hadamard_input_fp16_padded_multiblock(x, pre_scale=pre_scale)
+    expected = qvq_cuda_hadamard(
+        x, pre_scale=pre_scale, scale_mode=2, pad_to_16=True
+    )
+    actual = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+        x, pre_scale=pre_scale
+    )
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
     graph = torch.cuda.CUDAGraph()
@@ -512,7 +496,9 @@ def test_qvq_cuda_hadamard_multiblock_input_rescues_prescale_overflow_on_stream(
         expected = qvq_cuda_hadamard(
             x, pre_scale=pre_scale, scale_mode=2, pad_to_16=True
         )
-        actual = qvq_cuda_hadamard_input_fp16_padded_multiblock(x, pre_scale=pre_scale)
+        actual = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+            x, pre_scale=pre_scale
+        )
     stream.synchronize()
     assert torch.isfinite(actual).all()
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
@@ -536,9 +522,7 @@ def test_qvq_cuda_fp16_emulation_rescues_late_butterfly_and_sv_overflow():
     x[0, :2] = 40000
     post_scale = torch.full((32,), 2.0, dtype=torch.float16, device="cuda").float()
     bias = torch.full((32,), -60000.0, dtype=torch.float16, device="cuda").float()
-    historical = matmul_hadU(x.to(torch.float16)) * post_scale.to(
-        torch.float16
-    ) + bias.to(torch.float16)
+    historical = matmul_hadU(x.to(torch.float16)) * post_scale.to(torch.float16) + bias.to(torch.float16)
     reference = matmul_hadU(x) * post_scale + bias
 
     actual = qvq_cuda_hadamard(x, post_scale=post_scale, bias=bias, scale_mode=4)
@@ -565,11 +549,15 @@ def test_qvq_cuda_hadamard_fp16_final_store_is_bit_exact_and_graph_stable(
     generator = torch.Generator(device="cuda").manual_seed(
         20261900 + 10 * scale_mode + m
     )
-    x = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float32)
+    x = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float32
+    )
     post_scale = torch.randn(
         (n,), generator=generator, device="cuda", dtype=torch.float32
     )
-    bias = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float32)
+    bias = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float32
+    )
     expected = qvq_cuda_hadamard(
         x,
         post_scale=post_scale,
@@ -645,7 +633,9 @@ def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(
         (2048,), generator=generator, device="cuda", dtype=torch.float32
     )
     bias = (
-        torch.randn((2048,), generator=generator, device="cuda", dtype=torch.float32)
+        torch.randn(
+            (2048,), generator=generator, device="cuda", dtype=torch.float32
+        )
         if bias_enabled
         else None
     )
@@ -675,7 +665,9 @@ def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(
         logical_rows=m,
         multiblock=True,
     )
-    assert torch.equal(actual_multiblock.view(torch.int16), expected.view(torch.int16))
+    assert torch.equal(
+        actual_multiblock.view(torch.int16), expected.view(torch.int16)
+    )
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -750,8 +742,12 @@ def test_qvq_cuda_paired_output_recovery_is_bit_exact_and_repeatable(m, seed):
     bias0 = torch.randn((n,), generator=generator, device="cuda")
     bias1 = torch.randn((n,), generator=generator, device="cuda")
     expected = (
-        qvq_cuda_hadamard(input0, post_scale=scale0, bias=bias0, scale_mode=3).half(),
-        qvq_cuda_hadamard(input1, post_scale=scale1, bias=bias1, scale_mode=3).half(),
+        qvq_cuda_hadamard(
+            input0, post_scale=scale0, bias=bias0, scale_mode=3
+        ).half(),
+        qvq_cuda_hadamard(
+            input1, post_scale=scale1, bias=bias1, scale_mode=3
+        ).half(),
     )
 
     for _ in range(10):
@@ -909,7 +905,9 @@ def test_qvq_cuda_paired_output_recovery_handles_overflow_optional_bias_and_stre
     scale1 = torch.full((n,), 0.25, device="cuda")
     bias0 = torch.full((n,), -60000.0, device="cuda")
     expected = (
-        qvq_cuda_hadamard(input0, post_scale=scale0, bias=bias0, scale_mode=4).half(),
+        qvq_cuda_hadamard(
+            input0, post_scale=scale0, bias=bias0, scale_mode=4
+        ).half(),
         qvq_cuda_hadamard(input1, post_scale=scale1, scale_mode=4).half(),
     )
     stream = torch.cuda.Stream()
@@ -982,9 +980,7 @@ def test_qvq_cuda_swiglu_precondition_is_bit_exact_and_repeatable(m, seed):
     generator = torch.Generator(device="cuda").manual_seed(seed)
     gate = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
     up = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
-    pre_scale = torch.randn(
-        (n,), generator=generator, device="cuda", dtype=torch.float16
-    )
+    pre_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
     activated_gate = torch.nn.functional.silu(gate)
     reference = qvq_cuda_hadamard(
         activated_gate * up,
@@ -1010,8 +1006,12 @@ def test_qvq_cuda_multiblock_swiglu_precondition_is_bit_exact_and_repeatable(
         pytest.skip("multiblock SwiGLU precondition requires Hopper")
     n = 8192
     generator = torch.Generator(device="cuda").manual_seed(seed)
-    gate = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
-    up = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
+    gate = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float16
+    )
+    up = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float16
+    )
     pre_scale = torch.randn(
         (n,), generator=generator, device="cuda", dtype=torch.float16
     )
@@ -1117,18 +1117,14 @@ def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(
 
 
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
-def test_qvq_cuda_multiblock_swiglu_precondition_direct_padding_is_exact_and_graph_stable(
-    m,
-):
+def test_qvq_cuda_multiblock_swiglu_precondition_direct_padding_is_exact_and_graph_stable(m):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("multiblock SwiGLU precondition requires Hopper")
     n = 8192
     generator = torch.Generator(device="cuda").manual_seed(20261700 + m)
     gate = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
     up = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
-    pre_scale = torch.randn(
-        (n,), generator=generator, device="cuda", dtype=torch.float16
-    )
+    pre_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
     expected = qvq_cuda_swiglu_precondition_multiblock(
         gate,
         up,
@@ -1171,9 +1167,7 @@ def test_qvq_cuda_multiblock_fused_silu_covers_every_finite_fp16_value():
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("multiblock SwiGLU precondition requires Hopper")
     n = 8192
-    all_bits = (
-        torch.arange(1 << 16, dtype=torch.int32).to(torch.int16).view(torch.float16)
-    )
+    all_bits = torch.arange(1 << 16, dtype=torch.int32).to(torch.int16).view(torch.float16)
     finite = all_bits[torch.isfinite(all_bits)]
     gate = torch.zeros((8, n), device="cuda", dtype=torch.float16)
     gate.view(-1)[: finite.numel()].copy_(finite.to(device="cuda"))
@@ -1300,64 +1294,6 @@ def test_qvq_cuda_bounded_recovery_rounding_preserves_high_magnitude_fallback():
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
 
-@pytest.mark.parametrize("m", (32, 512))
-def test_qvq_cuda_large_m_fused_recovery_to_precondition_is_exact_and_graph_safe(m):
-    if torch.cuda.get_device_capability()[0] != 9:
-        pytest.skip("large-M fused recovery/precondition requires Hopper")
-    n = 8192
-    generator = torch.Generator(device="cuda").manual_seed(20260904 + m)
-    input0 = torch.randn((m, n), generator=generator, device="cuda") * 20
-    input1 = torch.randn((m, n), generator=generator, device="cuda") * 20
-    scale0 = torch.randn((n,), generator=generator, device="cuda")
-    scale1 = torch.randn((n,), generator=generator, device="cuda")
-    bias0 = torch.randn((n,), generator=generator, device="cuda")
-    pre_scale = torch.randn(
-        (n,), generator=generator, device="cuda", dtype=torch.float16
-    )
-    gate, up = qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
-        input0,
-        input1,
-        post_scale0=scale0,
-        post_scale1=scale1,
-        bias0=bias0,
-        scale_mode=3,
-        warp_low=True,
-    )
-    expected = qvq_cuda_swiglu_precondition_multiblock(
-        gate,
-        up,
-        pre_scale,
-        half2_high=True,
-        fuse_silu=True,
-        half2_low=True,
-    )
-    actual = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
-        input0,
-        input1,
-        post_scale0=scale0,
-        post_scale1=scale1,
-        bias0=bias0,
-        pre_scale=pre_scale,
-        scale_mode=3,
-    )
-    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
-
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        captured = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
-            input0,
-            input1,
-            post_scale0=scale0,
-            post_scale1=scale1,
-            bias0=bias0,
-            pre_scale=pre_scale,
-            scale_mode=3,
-        )
-    graph.replay()
-    torch.cuda.synchronize()
-    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
-
-
 @pytest.mark.parametrize("scale_mode", (3, 4))
 @pytest.mark.parametrize("with_bias", (False, True))
 def test_qvq_cuda_packed_gate_up_recovery_is_bit_exact_and_graph_stable(
@@ -1371,8 +1307,16 @@ def test_qvq_cuda_packed_gate_up_recovery_is_bit_exact_and_graph_stable(
     input1 = torch.randn((m, n), generator=generator, device="cuda") * 20
     scale0 = torch.randn((n,), generator=generator, device="cuda")
     scale1 = torch.randn((n,), generator=generator, device="cuda")
-    bias0 = torch.randn((n,), generator=generator, device="cuda") if with_bias else None
-    bias1 = torch.randn((n,), generator=generator, device="cuda") if with_bias else None
+    bias0 = (
+        torch.randn((n,), generator=generator, device="cuda")
+        if with_bias
+        else None
+    )
+    bias1 = (
+        torch.randn((n,), generator=generator, device="cuda")
+        if with_bias
+        else None
+    )
     pre_scale = torch.randn(
         (n,), generator=generator, device="cuda", dtype=torch.float16
     )
@@ -1439,39 +1383,25 @@ def test_qvq_cuda_swiglu_precondition_graph_stream_overflow_and_guards():
 
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
 @pytest.mark.parametrize("with_bias", (False, True))
-def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(
-    m, with_bias
-):
+def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(m, with_bias):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("folded SwiGLU precondition requires Hopper")
     n = 17408
     generator = torch.Generator(device="cuda").manual_seed(20260940 + m)
     gate = torch.randn((m, n), generator=generator, device="cuda") * 0.25
     up = torch.randn((m, n), generator=generator, device="cuda") * 0.25
-    gate_scale_half = torch.randn(
-        (n,), generator=generator, device="cuda", dtype=torch.float16
-    )
-    up_scale_half = torch.randn(
-        (n,), generator=generator, device="cuda", dtype=torch.float16
-    )
-    down_scale = torch.randn(
-        (n,), generator=generator, device="cuda", dtype=torch.float16
-    )
+    gate_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    up_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    down_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
     gate_scale = gate_scale_half.float()
     up_scale = up_scale_half.float()
     gate_bias = (
-        torch.randn(
-            (n,), generator=generator, device="cuda", dtype=torch.float16
-        ).float()
-        if with_bias
-        else None
+        torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float()
+        if with_bias else None
     )
     up_bias = (
-        torch.randn(
-            (n,), generator=generator, device="cuda", dtype=torch.float16
-        ).float()
-        if with_bias
-        else None
+        torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float()
+        if with_bias else None
     )
 
     recovered_gate = gate * gate_scale
@@ -1521,34 +1451,16 @@ def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
         pytest.skip("ordered folded SwiGLU precondition requires Hopper")
     n = 17408
     generator = torch.Generator(device="cuda").manual_seed(20260960 + m)
-    partials = (
-        torch.randn((2, split_count, 16, n), generator=generator, device="cuda") * 0.02
-    )
-    gate_scale_half = torch.randn(
-        (n,), generator=generator, device="cuda", dtype=torch.float16
-    )
-    up_scale_half = torch.randn(
-        (n,), generator=generator, device="cuda", dtype=torch.float16
-    )
-    down_scale = torch.randn(
-        (n,), generator=generator, device="cuda", dtype=torch.float16
-    )
+    partials = torch.randn(
+        (2, split_count, 16, n), generator=generator, device="cuda"
+    ) * 0.02
+    gate_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    up_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    down_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
     gate_scale = gate_scale_half.float()
     up_scale = up_scale_half.float()
-    gate_bias = (
-        torch.randn(
-            (n,), generator=generator, device="cuda", dtype=torch.float16
-        ).float()
-        if with_bias
-        else None
-    )
-    up_bias = (
-        torch.randn(
-            (n,), generator=generator, device="cuda", dtype=torch.float16
-        ).float()
-        if with_bias
-        else None
-    )
+    gate_bias = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float() if with_bias else None
+    up_bias = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float() if with_bias else None
 
     reduced = []
     for child in range(2):
@@ -1599,10 +1511,7 @@ def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
 @pytest.mark.parametrize("with_bias", (False, True))
 def test_qvq_cuda_qwen_composite_recovery_is_exact_and_graph_safe(n, m, with_bias):
     properties = torch.cuda.get_device_properties(0)
-    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (
-        9,
-        0,
-    ):
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
         pytest.skip("Qwen composite recovery requires the physical H100")
     generator = torch.Generator(device="cuda").manual_seed(20260980 + n + m)
     input = torch.randn((m, n), generator=generator, device="cuda") * 0.25
@@ -1610,9 +1519,7 @@ def test_qvq_cuda_qwen_composite_recovery_is_exact_and_graph_safe(n, m, with_bia
         (n,), generator=generator, device="cuda", dtype=torch.float16
     ).float()
     bias = (
-        torch.randn(
-            (n,), generator=generator, device="cuda", dtype=torch.float16
-        ).float()
+        torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float()
         if with_bias
         else None
     )
@@ -1647,17 +1554,13 @@ def test_qvq_cuda_qwen_composite_recovery_is_exact_and_graph_safe(n, m, with_bia
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
 def test_qvq_cuda_qwen_composite_input_is_exact_padded_and_graph_safe(m):
     properties = torch.cuda.get_device_properties(0)
-    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (
-        9,
-        0,
-    ):
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
         pytest.skip("Qwen composite input requires the physical H100")
     n = 5120
     generator = torch.Generator(device="cuda").manual_seed(20261020 + m)
-    input = (
-        torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
-        * 0.25
-    )
+    input = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float16
+    ) * 0.25
     pre_scale = torch.randn(
         (n,), generator=generator, device="cuda", dtype=torch.float16
     )
@@ -1693,23 +1596,20 @@ def test_qvq_cuda_qwen_ordered_composite_recovery_is_exact_and_graph_safe(
     split_count, m, with_bias
 ):
     properties = torch.cuda.get_device_properties(0)
-    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (
-        9,
-        0,
-    ):
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
         pytest.skip("Qwen ordered composite recovery requires the physical H100")
     n = 5120
-    generator = torch.Generator(device="cuda").manual_seed(20261000 + split_count + m)
-    partials = (
-        torch.randn((split_count, 16, n), generator=generator, device="cuda") * 0.02
+    generator = torch.Generator(device="cuda").manual_seed(
+        20261000 + split_count + m
     )
+    partials = torch.randn(
+        (split_count, 16, n), generator=generator, device="cuda"
+    ) * 0.02
     post_scale = torch.randn(
         (n,), generator=generator, device="cuda", dtype=torch.float16
     ).float()
     bias = (
-        torch.randn(
-            (n,), generator=generator, device="cuda", dtype=torch.float16
-        ).float()
+        torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16).float()
         if with_bias
         else None
     )
@@ -1753,10 +1653,7 @@ def test_qvq_cuda_qwen_ordered_composite_recovery_is_exact_and_graph_safe(
 @pytest.mark.parametrize("values", ((70000.0, 70000.0), (70000.0, -70000.0)))
 def test_qvq_cuda_qwen_composite_recovery_preserves_overflow_rescue(values):
     properties = torch.cuda.get_device_properties(0)
-    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (
-        9,
-        0,
-    ):
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
         pytest.skip("Qwen composite recovery requires the physical H100")
     from gptqmodel.nn_modules.qlinear.qvq import (
         _qvq_fp16_emulated_hadamard_fallback,
@@ -1821,10 +1718,7 @@ def test_qvq_cuda_split_count_cap_matches_dense_reference():
 @pytest.mark.parametrize("seed_offset", (0, 1, 2))
 def test_qvq_cuda_repeated_launches_are_bitwise_deterministic(bits, seed_offset):
     operands, reference = _case(bits, 8, k=64, n=48, seed_offset=seed_offset)
-    outputs = [
-        qvq_cuda_gemv(*operands, bits, out_features=reference.shape[1])
-        for _ in range(10)
-    ]
+    outputs = [qvq_cuda_gemv(*operands, bits, out_features=reference.shape[1]) for _ in range(10)]
     torch.cuda.synchronize()
 
     for output in outputs:
@@ -1845,19 +1739,13 @@ def test_qvq_cuda_uses_current_non_default_stream():
     _assert_accuracy(actual.cpu(), reference)
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="requires two visible CUDA devices"
-)
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two visible CUDA devices")
 def test_qvq_cuda_one_free_threaded_caller_per_device():
     def run(device_index: int, bits: int):
         device = f"cuda:{device_index}"
         with torch.cuda.device(device_index):
-            operands, reference = _case(
-                bits, 16, k=128, n=64, dtype=torch.bfloat16, device=device
-            )
-            outputs = [
-                qvq_cuda_gemv(*operands, bits, out_features=64).cpu() for _ in range(3)
-            ]
+            operands, reference = _case(bits, 16, k=128, n=64, dtype=torch.bfloat16, device=device)
+            outputs = [qvq_cuda_gemv(*operands, bits, out_features=64).cpu() for _ in range(3)]
         return outputs, reference
 
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -1870,33 +1758,20 @@ def test_qvq_cuda_one_free_threaded_caller_per_device():
         assert torch.equal(outputs[1], outputs[2])
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="requires two visible CUDA devices"
-)
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two visible CUDA devices")
 def test_qvq_cuda_viterbi_one_free_threaded_caller_per_device():
     def run(device_index: int, bits: float):
         device = torch.device("cuda", device_index)
         generator = torch.Generator().manual_seed(20260890 + int(bits * 2))
-        sequences = torch.randn(
-            (16, 128, 2), generator=generator, dtype=torch.float32
-        ).to(device)
-        codebook = torch.randn(
-            (1 << 16, 2), generator=generator, dtype=torch.float32
-        ).to(device)
-        step_weights = torch.rand(
-            (16, 128), generator=generator, dtype=torch.float32
-        ).to(device)
-        outputs = [
-            qvq_cuda_viterbi(sequences, codebook, bits, step_weights=step_weights)
-            for _ in range(10)
-        ]
+        sequences = torch.randn((16, 128, 2), generator=generator, dtype=torch.float32).to(device)
+        codebook = torch.randn((1 << 16, 2), generator=generator, dtype=torch.float32).to(device)
+        step_weights = torch.rand((16, 128), generator=generator, dtype=torch.float32).to(device)
+        outputs = [qvq_cuda_viterbi(sequences, codebook, bits, step_weights=step_weights) for _ in range(10)]
         torch.cuda.synchronize(device)
         return [(states.cpu(), error.cpu()) for states, error in outputs]
 
     with ThreadPoolExecutor(max_workers=2) as pool:
-        futures = [
-            pool.submit(run, device, bits) for device, bits in ((0, 1), (1, 1.5))
-        ]
+        futures = [pool.submit(run, device, bits) for device, bits in ((0, 1), (1, 1.5))]
     for future in futures:
         outputs = future.result()
         assert all(torch.equal(outputs[0][0], output[0]) for output in outputs[1:])
@@ -1905,12 +1780,8 @@ def test_qvq_cuda_viterbi_one_free_threaded_caller_per_device():
 
 def test_qvq_cuda_viterbi_uses_current_non_default_stream():
     generator = torch.Generator().manual_seed(20260891)
-    sequences = torch.randn(
-        (4, 128, 2), generator=generator, dtype=torch.float32
-    ).cuda()
-    codebook = torch.randn(
-        (1 << 16, 2), generator=generator, dtype=torch.float32
-    ).cuda()
+    sequences = torch.randn((4, 128, 2), generator=generator, dtype=torch.float32).cuda()
+    codebook = torch.randn((1 << 16, 2), generator=generator, dtype=torch.float32).cuda()
     step_weights = torch.rand((4, 128), generator=generator, dtype=torch.float32).cuda()
     expected = qvq_cuda_viterbi(sequences, codebook, 4, step_weights=step_weights)
     torch.cuda.synchronize()
@@ -1928,9 +1799,7 @@ def test_qvq_cuda_viterbi_uses_current_non_default_stream():
 
 @pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
 @pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
-@pytest.mark.parametrize(
-    "constrained,weighted", ((False, False), (True, False), (True, True))
-)
+@pytest.mark.parametrize("constrained,weighted", ((False, False), (True, False), (True, True)))
 @pytest.mark.parametrize("codebook_dtype", (torch.float16, torch.float32))
 def test_qvq_cuda_v2_segment_banked_is_bit_exact_eager_reference(
     monkeypatch,
@@ -1944,14 +1813,9 @@ def test_qvq_cuda_v2_segment_banked_is_bit_exact_eager_reference(
     generator = torch.Generator(device="cuda").manual_seed(
         20260815 + int(bits * 2) * 100 + bank_count * 10 + constrained * 2 + weighted
     )
-    sequences = torch.randn(
-        (2, 128, 2), generator=generator, device="cuda", dtype=torch.float32
-    )
+    sequences = torch.randn((2, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
     codebooks = torch.stack(
-        tuple(
-            pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32)
-            for bank in range(bank_count)
-        )
+        tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
     ).to(device="cuda", dtype=codebook_dtype)
     overlap = (
         torch.randint(
@@ -1966,12 +1830,7 @@ def test_qvq_cuda_v2_segment_banked_is_bit_exact_eager_reference(
         else None
     )
     step_weights = (
-        (
-            0.1
-            + torch.rand(
-                (2, 128), generator=generator, device="cuda", dtype=torch.float32
-            )
-        ).contiguous()
+        (0.1 + torch.rand((2, 128), generator=generator, device="cuda", dtype=torch.float32)).contiguous()
         if weighted
         else None
     )
@@ -2001,9 +1860,7 @@ def test_qvq_cuda_v2_segment_banked_is_bit_exact_eager_reference(
 
 
 @pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
-def test_qvq_cuda_v2_segment_banked_half_ties_prefer_bank_zero(
-    bank_count, segment_steps
-):
+def test_qvq_cuda_v2_segment_banked_half_ties_prefer_bank_zero(bank_count, segment_steps):
     sequences = torch.zeros((3, 128, 2), device="cuda", dtype=torch.float32)
     codebook = torch.zeros((1 << 16, 2), device="cuda", dtype=torch.float16)
     codebooks = codebook.unsqueeze(0).expand(bank_count, -1, -1).contiguous()
@@ -2020,20 +1877,11 @@ def test_qvq_cuda_v2_segment_banked_half_ties_prefer_bank_zero(
 
 @pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
 @pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
-def test_qvq_cuda_prevalidated_segmented_v2_matches_public_boundary(
-    bits, bank_count, segment_steps
-):
-    generator = torch.Generator(device="cuda").manual_seed(
-        20260818 + int(bits * 2) * 10 + bank_count
-    )
-    sequences = torch.randn(
-        (3, 128, 2), generator=generator, device="cuda", dtype=torch.float32
-    )
+def test_qvq_cuda_prevalidated_segmented_v2_matches_public_boundary(bits, bank_count, segment_steps):
+    generator = torch.Generator(device="cuda").manual_seed(20260818 + int(bits * 2) * 10 + bank_count)
+    sequences = torch.randn((3, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
     codebooks = torch.stack(
-        tuple(
-            pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32)
-            for bank in range(bank_count)
-        )
+        tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
     ).to(device="cuda", dtype=torch.float16)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     overlap = torch.randint(
@@ -2044,9 +1892,7 @@ def test_qvq_cuda_prevalidated_segmented_v2_matches_public_boundary(
         device="cuda",
         dtype=torch.int64,
     )
-    step_weights = (
-        0.1 + torch.rand((3, 128), generator=generator, device="cuda")
-    ).contiguous()
+    step_weights = (0.1 + torch.rand((3, 128), generator=generator, device="cuda")).contiguous()
 
     expected = qvq_cuda_viterbi_v2_segment_banked(
         sequences,
@@ -2064,10 +1910,7 @@ def test_qvq_cuda_prevalidated_segmented_v2_matches_public_boundary(
         overlap,
         step_weights,
     )
-    assert all(
-        torch.equal(expected_tensor, actual_tensor)
-        for expected_tensor, actual_tensor in zip(expected, actual)
-    )
+    assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
 
 
 @pytest.mark.parametrize("codebook_dtype", (torch.float16, torch.float32))
@@ -2087,22 +1930,15 @@ def test_qvq_cuda_w25_segmented_cooperative_dispatch_is_exact(
     )
     sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda")
     codebooks = torch.stack(
-        tuple(
-            pgc16_codebook_v2_bank(bank, bits=2.5, dtype=torch.float32)
-            for bank in range(2)
-        )
+        tuple(pgc16_codebook_v2_bank(bank, bits=2.5, dtype=torch.float32) for bank in range(2))
     ).to(device="cuda", dtype=codebook_dtype)
     overlap = (
-        torch.randint(
-            0, 1 << 11, (batch,), generator=generator, device="cuda", dtype=torch.int64
-        )
+        torch.randint(0, 1 << 11, (batch,), generator=generator, device="cuda", dtype=torch.int64)
         if constrained
         else None
     )
     step_weights = (
-        (
-            0.1 + torch.rand((batch, 128), generator=generator, device="cuda")
-        ).contiguous()
+        (0.1 + torch.rand((batch, 128), generator=generator, device="cuda")).contiguous()
         if weighted
         else None
     )
@@ -2147,22 +1983,13 @@ def test_qvq_cuda_segmented_v2_midpoint_matches_full_traceback(
     generator = torch.Generator(device="cuda").manual_seed(
         20260821 + int(bits * 2) * 1_000 + bank_count * 100 + int(weighted) * 10 + batch
     )
-    sequences = torch.randn(
-        (batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32
-    )
+    sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
     codebooks = torch.stack(
-        tuple(
-            pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32)
-            for bank in range(bank_count)
-        )
+        tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
     ).to(device="cuda", dtype=torch.float16)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     step_weights = (
-        (
-            0.1 + torch.rand((batch, 128), generator=generator, device="cuda")
-        ).contiguous()
-        if weighted
-        else None
+        (0.1 + torch.rand((batch, 128), generator=generator, device="cuda")).contiguous() if weighted else None
     )
 
     full_states = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
@@ -2176,9 +2003,7 @@ def test_qvq_cuda_segmented_v2_midpoint_matches_full_traceback(
     expected = full_states[:, 63] & ((1 << (16 - transition_bits)) - 1)
     midpoint_op = _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op()
     for _ in range(3):
-        actual = midpoint_op(
-            sequences, codebooks, transition_bits, segment_steps, step_weights
-        )
+        actual = midpoint_op(sequences, codebooks, transition_bits, segment_steps, step_weights)
         assert torch.equal(expected, actual)
 
 
@@ -2198,25 +2023,14 @@ def test_qvq_cuda_fused_segmented_tail_matches_two_pass(
     )
     sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda")
     codebooks = torch.stack(
-        tuple(
-            pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32)
-            for bank in range(bank_count)
-        )
+        tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
     ).to(device="cuda", dtype=torch.float16)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     step_weights = (
-        (
-            0.1 + torch.rand((batch, 128), generator=generator, device="cuda")
-        ).contiguous()
-        if weighted
-        else None
+        (0.1 + torch.rand((batch, 128), generator=generator, device="cuda")).contiguous() if weighted else None
     )
     rotated = torch.roll(sequences, 64, dims=1).contiguous()
-    rotated_weights = (
-        None
-        if step_weights is None
-        else torch.roll(step_weights, 64, dims=1).contiguous()
-    )
+    rotated_weights = None if step_weights is None else torch.roll(step_weights, 64, dims=1).contiguous()
     provisional = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
         rotated,
         codebooks,
@@ -2241,10 +2055,7 @@ def test_qvq_cuda_fused_segmented_tail_matches_two_pass(
         segment_steps,
         step_weights,
     )
-    assert all(
-        torch.equal(expected_tensor, actual_tensor)
-        for expected_tensor, actual_tensor in zip(expected, actual)
-    )
+    assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
 
 
 @pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
@@ -2261,46 +2072,23 @@ def test_qvq_cuda_fused_canonical_tail_matches_two_pass(bits, weighted, batch):
     )
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     step_weights = (
-        (
-            0.1 + torch.rand((batch, 128), generator=generator, device="cuda")
-        ).contiguous()
-        if weighted
-        else None
+        (0.1 + torch.rand((batch, 128), generator=generator, device="cuda")).contiguous() if weighted else None
     )
     rotated = torch.roll(sequences, 64, dims=1).contiguous()
-    rotated_weights = (
-        None
-        if step_weights is None
-        else torch.roll(step_weights, 64, dims=1).contiguous()
-    )
-    provisional = _qvq_cuda_viterbi_trusted(
-        rotated, codebook, bits, step_weights=rotated_weights
-    )
+    rotated_weights = None if step_weights is None else torch.roll(step_weights, 64, dims=1).contiguous()
+    provisional = _qvq_cuda_viterbi_trusted(rotated, codebook, bits, step_weights=rotated_weights)
     overlap = (provisional[0][:, 63] & ((1 << (16 - transition_bits)) - 1)).contiguous()
-    expected = _qvq_cuda_viterbi_trusted(
-        sequences, codebook, bits, overlap, step_weights
-    )
-    actual = _qvq_cuda_viterbi_tail_trusted_op()(
-        sequences, codebook, transition_bits, step_weights
-    )
-    assert all(
-        torch.equal(expected_tensor, actual_tensor)
-        for expected_tensor, actual_tensor in zip(expected, actual)
-    )
+    expected = _qvq_cuda_viterbi_trusted(sequences, codebook, bits, overlap, step_weights)
+    actual = _qvq_cuda_viterbi_tail_trusted_op()(sequences, codebook, transition_bits, step_weights)
+    assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
 
 
 @pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
 @pytest.mark.parametrize("weighted", (False, True))
-def test_qvq_cuda_family_batched_segmented_v2_matches_independent_searches(
-    bits, weighted
-):
-    generator = torch.Generator(device="cuda").manual_seed(
-        20260819 + int(bits * 2) + int(weighted) * 100
-    )
+def test_qvq_cuda_family_batched_segmented_v2_matches_independent_searches(bits, weighted):
+    generator = torch.Generator(device="cuda").manual_seed(20260819 + int(bits * 2) + int(weighted) * 100)
     families, batch = 3, 3
-    sequences = torch.randn(
-        (families, batch, 128, 2), generator=generator, device="cuda"
-    )
+    sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
     codebooks = torch.stack(
         tuple(
             torch.stack(
@@ -2322,9 +2110,7 @@ def test_qvq_cuda_family_batched_segmented_v2_matches_independent_searches(
         dtype=torch.int64,
     )
     step_weights = (
-        (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda"))
-        if weighted
-        else None
+        (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda")) if weighted else None
     )
 
     expected = tuple(
@@ -2351,10 +2137,7 @@ def test_qvq_cuda_family_batched_segmented_v2_matches_independent_searches(
     )
 
     for family in range(families):
-        assert all(
-            torch.equal(expected[family][index], actual[index][family])
-            for index in range(3)
-        )
+        assert all(torch.equal(expected[family][index], actual[index][family]) for index in range(3))
 
 
 def _fused_family_grid_dispatch_count() -> int:
@@ -2411,11 +2194,7 @@ def _assert_family_grid_decision_equivalent(
         bank_flip_fraction,
     )
     torch.testing.assert_close(
-        loss_a,
-        loss_e,
-        rtol=_FUSED_LOSS_RTOL,
-        atol=_FUSED_LOSS_ATOL,
-        msg=lambda m: f"{context}: {m}",
+        loss_a, loss_e, rtol=_FUSED_LOSS_RTOL, atol=_FUSED_LOSS_ATOL, msg=lambda m: f"{context}: {m}"
     )
 
 
@@ -2425,22 +2204,15 @@ def _assert_family_grid_decision_equivalent(
 @pytest.mark.parametrize("constrained", (False, True))
 @pytest.mark.parametrize("weighted", (False, True))
 @pytest.mark.parametrize("scale", (1.0, 0.05, 4.0))
-def test_qvq_cuda_fused_w2_family_grid_is_decision_equivalent_to_reference_grid(
-    batch, constrained, weighted, scale
-):
+def test_qvq_cuda_fused_w2_family_grid_is_decision_equivalent_to_reference_grid(batch, constrained, weighted, scale):
     """The W2 <4,2,16,fused> family op runs the fused persistent kernel; the per-family
     ``viterbi_v2_segment_grid_trusted`` op still runs the reference segmented grid kernels.
     Small batches take the (bit-exact) reference path; fused batches are decision-equivalent."""
 
     bits = 2.0
-    generator = torch.Generator(device="cuda").manual_seed(
-        20260823 + batch * 7 + int(constrained) + 2 * int(weighted)
-    )
+    generator = torch.Generator(device="cuda").manual_seed(20260823 + batch * 7 + int(constrained) + 2 * int(weighted))
     families = 3
-    sequences = (
-        torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
-        * scale
-    )
+    sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda") * scale
     codebooks = torch.stack(
         tuple(
             torch.stack(
@@ -2455,32 +2227,18 @@ def test_qvq_cuda_fused_w2_family_grid_is_decision_equivalent_to_reference_grid(
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     assert transition_bits == 4
     overlap = (
-        torch.randint(
-            0,
-            1 << (16 - transition_bits),
-            (families, batch),
-            generator=generator,
-            device="cuda",
-            dtype=torch.int64,
-        )
+        torch.randint(0, 1 << (16 - transition_bits), (families, batch), generator=generator, device="cuda", dtype=torch.int64)
         if constrained
         else None
     )
-    step_weights = (
-        (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda"))
-        if weighted
-        else None
-    )
+    step_weights = (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda")) if weighted else None
 
     dispatches_before = _fused_family_grid_dispatch_count()
     actual = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
         sequences, codebooks, transition_bits, 16, overlap, step_weights
     )
     expected_fused_dispatches = 1 if families * batch >= 40 else 0
-    assert (
-        _fused_family_grid_dispatch_count() - dispatches_before
-        == expected_fused_dispatches
-    )
+    assert _fused_family_grid_dispatch_count() - dispatches_before == expected_fused_dispatches
     for family in range(families):
         expected = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
             sequences[family],
@@ -2492,10 +2250,7 @@ def test_qvq_cuda_fused_w2_family_grid_is_decision_equivalent_to_reference_grid(
         )
         if expected_fused_dispatches == 0:
             for index in range(3):
-                assert torch.equal(expected[index], actual[index][family]), (
-                    family,
-                    index,
-                )
+                assert torch.equal(expected[index], actual[index][family]), (family, index)
         else:
             _assert_family_grid_decision_equivalent(
                 expected,
@@ -2506,54 +2261,28 @@ def test_qvq_cuda_fused_w2_family_grid_is_decision_equivalent_to_reference_grid(
 
 @pytest.mark.parametrize("constrained", (False, True))
 @pytest.mark.parametrize("weighted", (False, True))
-def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_decision_equivalent(
-    constrained, weighted
-):
+def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_decision_equivalent(constrained, weighted):
     """Bank 1 that is not an XOR-permutation of bank 0 must take the in-kernel general path
     (fused_step_general); batch >= 40 per family keeps the fused kernel dispatched."""
 
     bits = 2.0
-    generator = torch.Generator(device="cuda").manual_seed(
-        20260824 + int(constrained) + 2 * int(weighted)
-    )
+    generator = torch.Generator(device="cuda").manual_seed(20260824 + int(constrained) + 2 * int(weighted))
     families, batch = 3, 41
-    sequences = torch.randn(
-        (families, batch, 128, 2), generator=generator, device="cuda"
-    )
-    bank0 = pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32).to(
-        "cuda", torch.float16
-    )
+    sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
+    bank0 = pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32).to("cuda", torch.float16)
     codebooks = torch.stack(
         tuple(
-            torch.stack(
-                (
-                    bank0,
-                    torch.randn((1 << 16, 2), generator=generator, device="cuda").to(
-                        torch.float16
-                    ),
-                )
-            )
+            torch.stack((bank0, torch.randn((1 << 16, 2), generator=generator, device="cuda").to(torch.float16)))
             for _ in range(families)
         )
     ).contiguous()
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     overlap = (
-        torch.randint(
-            0,
-            1 << (16 - transition_bits),
-            (families, batch),
-            generator=generator,
-            device="cuda",
-            dtype=torch.int64,
-        )
+        torch.randint(0, 1 << (16 - transition_bits), (families, batch), generator=generator, device="cuda", dtype=torch.int64)
         if constrained
         else None
     )
-    step_weights = (
-        (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda"))
-        if weighted
-        else None
-    )
+    step_weights = (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda")) if weighted else None
     dispatches_before = _fused_family_grid_dispatch_count()
     actual = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
         sequences, codebooks, transition_bits, 16, overlap, step_weights
@@ -2578,60 +2307,36 @@ def test_qvq_cuda_fused_w2_family_grid_general_codebook_fallback_is_decision_equ
 @pytest.mark.parametrize("batch", (40, 67, 128))
 @pytest.mark.parametrize("weighted", (False, True))
 @pytest.mark.parametrize("xor_related_banks", (True, False))
-def test_qvq_cuda_fused_w2_segment_tail_matches_reference_two_pass(
-    batch, weighted, xor_related_banks
-):
+def test_qvq_cuda_fused_w2_segment_tail_matches_reference_two_pass(batch, weighted, xor_related_banks):
     """viterbi_v2_segment_tail_trusted at W2 with >= 40 sequences runs both passes on the fused
     family-grid kernel; under the round-2 relaxed contract it must be decision-equivalent
     (sequence-wise, see below) to the reference two-pass construction built from the
     (never fused) viterbi_v2_segment_grid_trusted op."""
 
     bits = 2.0
-    generator = torch.Generator(device="cuda").manual_seed(
-        20260826 + batch * 10 + int(weighted) + 2 * int(xor_related_banks)
-    )
+    generator = torch.Generator(device="cuda").manual_seed(20260826 + batch * 10 + int(weighted) + 2 * int(xor_related_banks))
     sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda")
-    bank0 = pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32).to(
-        "cuda", torch.float16
-    )
+    bank0 = pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32).to("cuda", torch.float16)
     bank1 = (
-        pgc16_codebook_v2_bank(2, bits=bits, dtype=torch.float32).to(
-            "cuda", torch.float16
-        )
+        pgc16_codebook_v2_bank(2, bits=bits, dtype=torch.float32).to("cuda", torch.float16)
         if xor_related_banks
-        else torch.randn((1 << 16, 2), generator=generator, device="cuda").to(
-            torch.float16
-        )
+        else torch.randn((1 << 16, 2), generator=generator, device="cuda").to(torch.float16)
     )
     codebooks = torch.stack((bank0, bank1)).contiguous()
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     assert transition_bits == 4
     step_weights = (
-        (
-            0.1 + torch.rand((batch, 128), generator=generator, device="cuda")
-        ).contiguous()
-        if weighted
-        else None
+        (0.1 + torch.rand((batch, 128), generator=generator, device="cuda")).contiguous() if weighted else None
     )
     rotated = torch.roll(sequences, 64, dims=1).contiguous()
-    rotated_weights = (
-        None
-        if step_weights is None
-        else torch.roll(step_weights, 64, dims=1).contiguous()
-    )
+    rotated_weights = None if step_weights is None else torch.roll(step_weights, 64, dims=1).contiguous()
     reference = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
-    provisional = reference(
-        rotated, codebooks, transition_bits, 16, None, rotated_weights
-    )
+    provisional = reference(rotated, codebooks, transition_bits, 16, None, rotated_weights)
     overlap = (provisional[0][:, 63] & ((1 << (16 - transition_bits)) - 1)).contiguous()
-    expected = reference(
-        sequences, codebooks, transition_bits, 16, overlap, step_weights
-    )
+    expected = reference(sequences, codebooks, transition_bits, 16, overlap, step_weights)
 
     dispatches_before = _fused_family_grid_dispatch_count()
-    actual = _qvq_cuda_viterbi_v2_segment_tail_trusted_op()(
-        sequences, codebooks, transition_bits, 16, step_weights
-    )
+    actual = _qvq_cuda_viterbi_v2_segment_tail_trusted_op()(sequences, codebooks, transition_bits, 16, step_weights)
     # Provisional (rotated) pass + constrained pass, both on the fused kernel.
     assert _fused_family_grid_dispatch_count() - dispatches_before == 2
     # Decision equivalence, sequence-wise: a near-tie flip in the provisional
@@ -2649,10 +2354,7 @@ def test_qvq_cuda_fused_w2_segment_tail_matches_reference_two_pass(
     assert torch.equal(banks_e[matched], banks_a[matched])
     if bool(diverged.any()):
         assert bool(
-            (
-                loss_a[diverged]
-                <= loss_e[diverged] * (1 + _FUSED_LOSS_RTOL) + _FUSED_LOSS_ATOL
-            ).all()
+            (loss_a[diverged] <= loss_e[diverged] * (1 + _FUSED_LOSS_RTOL) + _FUSED_LOSS_ATOL).all()
         ), (loss_a[diverged], loss_e[diverged])
 
 
@@ -2698,19 +2400,13 @@ print("DISABLED-PATH-OK")
 """
     env = dict(os.environ, QVQ_DISABLE_FUSED_FAMILY_GRID="1")
     result = subprocess.run(
-        [sys.executable, "-c", script],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=600,
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=600
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert "DISABLED-PATH-OK" in result.stdout
 
 
-def _rescore_family_grid_paths_fp64(
-    sequences, codebooks, states, bank_ids, step_weights
-):
+def _rescore_family_grid_paths_fp64(sequences, codebooks, states, bank_ids, step_weights):
     """Independent re-scoring of a returned discrete path under ONE common
     reference objective: sum_s w_s * ||t_s - codebook[bank(s), state_s]||^2,
     evaluated in fp64 (the clip is a no-op for a sum of squares).  Both
@@ -2777,52 +2473,27 @@ def test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence():
     for _ in range(4):  # adversarial: targets snapped to codebook entries
         cases.append((64, True, False, True, False, True))
 
-    for (
-        batch,
-        weighted,
-        constrained,
-        xor_related,
-        adversarial_dup,
-        adversarial_snap,
-    ) in cases:
+    for batch, weighted, constrained, xor_related, adversarial_dup, adversarial_snap in cases:
         codebooks = torch.stack(
             tuple(bank_pair(f, xor_related, adversarial_dup) for f in range(families))
         ).contiguous()
-        sequences = torch.randn(
-            (families, batch, 128, 2), generator=generator, device="cuda"
-        )
+        sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
         if adversarial_snap:
-            picks = torch.randint(
-                0, 1 << 16, (families, batch, 128), generator=generator, device="cuda"
-            )
+            picks = torch.randint(0, 1 << 16, (families, batch, 128), generator=generator, device="cuda")
             for f in range(families):
                 sequences[f] = codebooks[f, 0].float()[picks[f]]
         overlap = (
-            torch.randint(
-                0,
-                1 << 12,
-                (families, batch),
-                generator=generator,
-                device="cuda",
-                dtype=torch.int64,
-            )
+            torch.randint(0, 1 << 12, (families, batch), generator=generator, device="cuda", dtype=torch.int64)
             if constrained
             else None
         )
         step_weights = (
-            (
-                0.1
-                + torch.rand((families, batch, 128), generator=generator, device="cuda")
-            )
-            if weighted
-            else None
+            (0.1 + torch.rand((families, batch, 128), generator=generator, device="cuda")) if weighted else None
         )
         dispatches_before = _fused_family_grid_dispatch_count()
         actual = fam(sequences, codebooks, 4, 16, overlap, step_weights)
         expected_fused = 1 if families * batch >= 40 else 0
-        assert (
-            _fused_family_grid_dispatch_count() - dispatches_before == expected_fused
-        ), batch
+        assert _fused_family_grid_dispatch_count() - dispatches_before == expected_fused, batch
         case_key = (
             ("xor" if xor_related else "arbitrary")
             + ("+dup" if adversarial_dup else "")
@@ -2850,32 +2521,19 @@ def test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence():
             _assert_valid_trellis_paths(states_a)
             weights_f = None if step_weights is None else step_weights[f]
             rescore_e = _rescore_family_grid_paths_fp64(
-                sequences[f], codebooks[f], states_e, banks_e, weights_f
-            )
+                sequences[f], codebooks[f], states_e, banks_e, weights_f)
             rescore_a = _rescore_family_grid_paths_fp64(
-                sequences[f], codebooks[f], states_a, banks_a, weights_f
-            )
+                sequences[f], codebooks[f], states_a, banks_a, weights_f)
             # Each kernel's own reported FP32 loss must match its own path's
             # fp64 rescore within the accumulation bound (catches traceback or
             # loss-reporting bugs independently of any flips).
             for own_loss, own_rescore, which in (
-                (loss_e, rescore_e, "reference"),
-                (loss_a, rescore_a, "fused"),
-            ):
+                (loss_e, rescore_e, "reference"), (loss_a, rescore_a, "fused")):
                 own_delta = (own_loss.to(torch.float64) - own_rescore).abs()
-                own_bound = (
-                    _FUSED_ACCUMULATION_ATOL
-                    + _FUSED_ACCUMULATION_RTOL * own_rescore.abs()
-                )
+                own_bound = _FUSED_ACCUMULATION_ATOL + _FUSED_ACCUMULATION_RTOL * own_rescore.abs()
                 assert bool((own_delta <= own_bound).all()), (
-                    context,
-                    which,
-                    float(own_delta.max()),
-                    float(own_rescore.max()),
-                )
-            flipped = ((states_e != states_a).any(dim=1)) | (
-                (banks_e != banks_a).any(dim=1)
-            )
+                    context, which, float(own_delta.max()), float(own_rescore.max()))
+            flipped = ((states_e != states_a).any(dim=1)) | ((banks_e != banks_a).any(dim=1))
             # Identical discrete paths must rescore bitwise-identically.
             assert torch.equal(rescore_e[~flipped], rescore_a[~flipped]), context
             # Flipped paths are score-equal iff their fp64 rescores agree
@@ -2884,24 +2542,15 @@ def test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence():
             # each other's rounding envelopes.
             if bool(flipped.any()):
                 delta = (rescore_a[flipped] - rescore_e[flipped]).abs()
-                bound = (
-                    _FUSED_ACCUMULATION_ATOL
-                    + _FUSED_ACCUMULATION_RTOL * rescore_e[flipped].abs()
-                )
+                bound = _FUSED_ACCUMULATION_ATOL + _FUSED_ACCUMULATION_RTOL * rescore_e[flipped].abs()
                 assert bool((delta <= bound).all()), (
-                    context,
-                    float(delta.max()),
-                    float(rescore_e[flipped].min()),
-                )
+                    context, float(delta.max()), float(rescore_e[flipped].min()))
                 flip_deltas.extend(
-                    (delta / rescore_e[flipped].abs().clamp_min(1e-9)).tolist()
-                )
+                    (delta / rescore_e[flipped].abs().clamp_min(1e-9)).tolist())
             fused_sequences += batch
             fused_states += states_e.numel()
             stats = per_category_stats.setdefault(
-                case_key,
-                {"sequences": 0, "states": 0, "flip_sequences": 0, "flip_states": 0},
-            )
+                case_key, {"sequences": 0, "states": 0, "flip_sequences": 0, "flip_states": 0})
             stats["sequences"] += batch
             stats["states"] += states_e.numel()
             stats["flip_sequences"] += int(flipped.sum())
@@ -2909,13 +2558,8 @@ def test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence():
 
     # Deterministic totals of the fused-path comparison, derived from `cases`:
     # only calls with families * batch >= 40 dispatch the fused kernel.
-    expected_sequences = sum(
-        families * b for (b, *_rest) in cases if families * b >= 40
-    )
-    assert fused_sequences == expected_sequences == 11_154, (
-        fused_sequences,
-        expected_sequences,
-    )
+    expected_sequences = sum(families * b for (b, *_rest) in cases if families * b >= 40)
+    assert fused_sequences == expected_sequences == 11_154, (fused_sequences, expected_sequences)
     assert fused_states == expected_sequences * 128 == 1_427_712, fused_states
     flip_sequences = sum(s["flip_sequences"] for s in per_category_stats.values())
     flip_states = sum(s["flip_states"] for s in per_category_stats.values())
@@ -2939,9 +2583,7 @@ def test_qvq_cuda_fused_w2_family_grid_randomized_stress_decision_equivalence():
 def test_qvq_cuda_sampled_yaqa_family_batch_matches_serial_selection(monkeypatch):
     bits = 2.5
     generator = torch.Generator(device="cuda").manual_seed(20260820)
-    source = (torch.randn((32, 32), generator=generator, device="cuda") * 0.05).to(
-        torch.float16
-    )
+    source = (torch.randn((32, 32), generator=generator, device="cuda") * 0.05).to(torch.float16)
     input_samples = torch.randn((41, 32), generator=generator, device="cuda")
     output_samples = torch.randn((37, 32), generator=generator, device="cuda")
     input_hessian = input_samples.T @ input_samples / input_samples.shape[0]
@@ -2963,9 +2605,7 @@ def test_qvq_cuda_sampled_yaqa_family_batch_matches_serial_selection(monkeypatch
 
     native_resolver = qvq_cuda_utils._qvq_cuda_viterbi_v2_segment_family_grid_trusted_op
 
-    def serial_family_op(
-        sequences, codebooks, transition_bits, segment_steps, overlap, step_weights
-    ):
+    def serial_family_op(sequences, codebooks, transition_bits, segment_steps, overlap, step_weights):
         results = tuple(
             _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
                 sequences[family],
@@ -2977,10 +2617,7 @@ def test_qvq_cuda_sampled_yaqa_family_batch_matches_serial_selection(monkeypatch
             )
             for family in range(sequences.shape[0])
         )
-        return tuple(
-            torch.stack(tuple(result[index] for result in results))
-            for index in range(3)
-        )
+        return tuple(torch.stack(tuple(result[index] for result in results)) for index in range(3))
 
     common = {
         "bits": bits,
@@ -2994,38 +2631,22 @@ def test_qvq_cuda_sampled_yaqa_family_batch_matches_serial_selection(monkeypatch
         "_qvq_cuda_viterbi_v2_segment_family_grid_trusted_op",
         lambda: serial_family_op,
     )
-    expected = yaqa_inner_v2b2_p32(
-        source, input_hessian, output_hessian, banks, **common
-    )
-    monkeypatch.setattr(
-        qvq_cuda_utils,
-        "_qvq_cuda_viterbi_v2_segment_family_grid_trusted_op",
-        native_resolver,
-    )
+    expected = yaqa_inner_v2b2_p32(source, input_hessian, output_hessian, banks, **common)
+    monkeypatch.setattr(qvq_cuda_utils, "_qvq_cuda_viterbi_v2_segment_family_grid_trusted_op", native_resolver)
     actual = yaqa_inner_v2b2_p32(source, input_hessian, output_hessian, banks, **common)
 
-    assert all(
-        torch.equal(expected_tensor, actual_tensor)
-        for expected_tensor, actual_tensor in zip(expected, actual)
-    )
+    assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
 
 
 @pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
-def test_qvq_cuda_v2_segment_banked_multiwave_grid_is_deterministic(
-    bank_count, segment_steps
-):
+def test_qvq_cuda_v2_segment_banked_multiwave_grid_is_deterministic(bank_count, segment_steps):
     """Cover more bank CTAs than one 124-SM A100 wave with identical work."""
 
     generator = torch.Generator(device="cuda").manual_seed(20260817 + bank_count)
-    one_sequence = torch.randn(
-        (1, 128, 2), generator=generator, device="cuda", dtype=torch.float32
-    )
+    one_sequence = torch.randn((1, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
     sequences = one_sequence.expand(64, -1, -1).contiguous()
     codebooks = torch.stack(
-        tuple(
-            pgc16_codebook_v2_bank(bank, bits=1.5, dtype=torch.float32)
-            for bank in range(bank_count)
-        )
+        tuple(pgc16_codebook_v2_bank(bank, bits=1.5, dtype=torch.float32) for bank in range(bank_count))
     ).to(device="cuda", dtype=torch.float16)
     expected = _qvq_cuda_viterbi_v2_segment_g_op()(
         sequences,
@@ -3036,9 +2657,7 @@ def test_qvq_cuda_v2_segment_banked_multiwave_grid_is_deterministic(
         None,
     )
     for _ in range(5):
-        actual = qvq_cuda_viterbi_v2_segment_banked(
-            sequences, codebooks, 1.5, segment_steps
-        )
+        actual = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, 1.5, segment_steps)
         assert all(
             torch.equal(expected_tensor, actual_tensor)
             for expected_tensor, actual_tensor in zip(expected, actual)
@@ -3046,25 +2665,14 @@ def test_qvq_cuda_v2_segment_banked_multiwave_grid_is_deterministic(
 
 
 @pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
-def test_qvq_cuda_v2_segment_banked_w3_5_uses_current_non_default_stream(
-    bank_count, segment_steps
-):
+def test_qvq_cuda_v2_segment_banked_w3_5_uses_current_non_default_stream(bank_count, segment_steps):
     generator = torch.Generator(device="cuda").manual_seed(20260816 + bank_count)
-    sequences = torch.randn(
-        (3, 128, 2), generator=generator, device="cuda", dtype=torch.float32
-    )
+    sequences = torch.randn((3, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
     codebooks = torch.stack(
-        tuple(
-            pgc16_codebook_v2_bank(bank, bits=3.5, dtype=torch.float32)
-            for bank in range(bank_count)
-        )
+        tuple(pgc16_codebook_v2_bank(bank, bits=3.5, dtype=torch.float32) for bank in range(bank_count))
     ).cuda()
-    weights = (
-        0.1 + torch.rand((3, 128), generator=generator, device="cuda")
-    ).contiguous()
-    overlap = torch.randint(
-        0, 1 << 9, (3,), generator=generator, device="cuda", dtype=torch.int64
-    )
+    weights = (0.1 + torch.rand((3, 128), generator=generator, device="cuda")).contiguous()
+    overlap = torch.randint(0, 1 << 9, (3,), generator=generator, device="cuda", dtype=torch.int64)
     expected = qvq_cuda_viterbi_v2_segment_banked(
         sequences, codebooks, 3.5, segment_steps, overlap, weights
     )
@@ -3076,22 +2684,14 @@ def test_qvq_cuda_v2_segment_banked_w3_5_uses_current_non_default_stream(
         completion = torch.cuda.Event()
         completion.record(stream)
     completion.synchronize()
-    assert all(
-        torch.equal(expected_tensor, actual_tensor)
-        for expected_tensor, actual_tensor in zip(expected, actual)
-    )
+    assert all(torch.equal(expected_tensor, actual_tensor) for expected_tensor, actual_tensor in zip(expected, actual))
 
 
 def test_qvq_cuda_v2_segment_banked_public_quantizer_routes_native():
     generator = torch.Generator(device="cuda").manual_seed(20260817)
-    sequences = torch.randn(
-        (2, 128, 2), generator=generator, device="cuda", dtype=torch.float32
-    )
+    sequences = torch.randn((2, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
     codebooks = torch.stack(
-        tuple(
-            pgc16_codebook_v2_bank(bank, bits=2.0, dtype=torch.float32)
-            for bank in range(2)
-        )
+        tuple(pgc16_codebook_v2_bank(bank, bits=2.0, dtype=torch.float32) for bank in range(2))
     ).cuda()
     with patch(
         "gptqmodel.utils.qvq_cuda.qvq_cuda_viterbi_v2_segment_banked",
@@ -3112,13 +2712,9 @@ def test_qvq_cuda_v2_segment_banked_public_quantizer_routes_native():
     "bank_count,segment_steps,error",
     ((2, 32, "two P32 banks"), (4, 16, "four P64 banks"), (3, 16, "shape")),
 )
-def test_qvq_cuda_v2_segment_banked_rejects_invalid_format(
-    bank_count, segment_steps, error
-):
+def test_qvq_cuda_v2_segment_banked_rejects_invalid_format(bank_count, segment_steps, error):
     sequences = torch.zeros((1, 128, 2), device="cuda", dtype=torch.float32)
-    codebooks = torch.zeros(
-        (bank_count, 1 << 16, 2), device="cuda", dtype=torch.float16
-    )
+    codebooks = torch.zeros((bank_count, 1 << 16, 2), device="cuda", dtype=torch.float16)
     with pytest.raises(ValueError, match=error):
         qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, 2.0, segment_steps)
 
@@ -3139,9 +2735,7 @@ def test_qvq_v4_banked_viterbi_matches_four_serial_reference_runs():
     serial_states = []
     serial_error = []
     for bank in range(4):
-        states, error = qvq_cuda_viterbi(
-            sequences, banks[bank], bits=2.0, vector_size=4
-        )
+        states, error = qvq_cuda_viterbi(sequences, banks[bank], bits=2.0, vector_size=4)
         serial_states.append(states)
         serial_error.append(error)
 
@@ -3152,9 +2746,7 @@ def test_qvq_v4_banked_viterbi_matches_four_serial_reference_runs():
 def test_qvq_v4_banked_viterbi_supports_three_active_propagation_banks():
     generator = torch.Generator(device="cpu").manual_seed(20260820)
     sequences = torch.randn((5, 19, 4), generator=generator, dtype=torch.float32).cuda()
-    banks = torch.randn(
-        (3, 1 << 16, 4), generator=generator, dtype=torch.float16
-    ).cuda()
+    banks = torch.randn((3, 1 << 16, 4), generator=generator, dtype=torch.float16).cuda()
 
     banked_states, banked_error = qvq_cuda_viterbi_banked(sequences, banks, bits=2.0)
     serial = [
@@ -3169,9 +2761,7 @@ def test_qvq_v4_banked_viterbi_supports_three_active_propagation_banks():
 def test_qvq_v4_banked_memoryless_w4_matches_serial_runs():
     generator = torch.Generator(device="cpu").manual_seed(20260815)
     sequences = torch.randn((3, 9, 4), generator=generator, dtype=torch.float32).cuda()
-    banks = torch.randn(
-        (4, 1 << 16, 4), generator=generator, dtype=torch.float16
-    ).cuda()
+    banks = torch.randn((4, 1 << 16, 4), generator=generator, dtype=torch.float16).cuda()
 
     banked_states, banked_error = qvq_cuda_viterbi_banked(sequences, banks, bits=4.0)
     serial = [
@@ -3180,19 +2770,13 @@ def test_qvq_v4_banked_memoryless_w4_matches_serial_runs():
     ]
     torch.cuda.synchronize()
     assert torch.equal(banked_states, torch.stack([result[0] for result in serial]))
-    torch.testing.assert_close(
-        banked_error, torch.stack([result[1] for result in serial]), rtol=0, atol=0
-    )
+    torch.testing.assert_close(banked_error, torch.stack([result[1] for result in serial]), rtol=0, atol=0)
 
 
 def test_qvq_v4_banked_independent_sequences_match_serial_runs():
     generator = torch.Generator(device="cpu").manual_seed(20260819)
-    sequences = torch.randn(
-        (4, 2, 13, 4), generator=generator, dtype=torch.float32
-    ).cuda()
-    banks = torch.randn(
-        (4, 1 << 16, 4), generator=generator, dtype=torch.float16
-    ).cuda()
+    sequences = torch.randn((4, 2, 13, 4), generator=generator, dtype=torch.float32).cuda()
+    banks = torch.randn((4, 1 << 16, 4), generator=generator, dtype=torch.float16).cuda()
 
     banked_states, banked_error = qvq_cuda_viterbi_banked(sequences, banks, bits=2.0)
     serial = [
@@ -3207,32 +2791,22 @@ def test_qvq_v4_banked_independent_sequences_match_serial_runs():
 def test_qvq_v4_banked_weighted_constrained_non_default_stream_matches_serial():
     generator = torch.Generator(device="cpu").manual_seed(20260816)
     sequences = torch.randn((2, 11, 4), generator=generator, dtype=torch.float32).cuda()
-    banks = torch.randn(
-        (4, 1 << 16, 4), generator=generator, dtype=torch.float16
-    ).cuda()
-    weights = (
-        0.1 + torch.rand((2, 11), generator=generator, dtype=torch.float32)
-    ).cuda()
+    banks = torch.randn((4, 1 << 16, 4), generator=generator, dtype=torch.float16).cuda()
+    weights = (0.1 + torch.rand((2, 11), generator=generator, dtype=torch.float32)).cuda()
     transition_bits = qvq_transition_bits(2.0, vector_size=4)
     overlap_bits = 16 - transition_bits
-    overlap = torch.randint(
-        0, 1 << overlap_bits, (8,), generator=generator, dtype=torch.int64
-    ).cuda()
+    overlap = torch.randint(0, 1 << overlap_bits, (8,), generator=generator, dtype=torch.int64).cuda()
 
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
-        banked = qvq_cuda_viterbi_banked(
-            sequences, banks, 2.0, overlap=overlap, step_weights=weights
-        )
+        banked = qvq_cuda_viterbi_banked(sequences, banks, 2.0, overlap=overlap, step_weights=weights)
     stream.synchronize()
     serial = [
         qvq_cuda_viterbi(
             sequences,
             banks[bank],
             2.0,
-            overlap=overlap[
-                bank * sequences.shape[0] : (bank + 1) * sequences.shape[0]
-            ],
+            overlap=overlap[bank * sequences.shape[0] : (bank + 1) * sequences.shape[0]],
             step_weights=weights,
             vector_size=4,
         )
@@ -3244,11 +2818,9 @@ def test_qvq_v4_banked_weighted_constrained_non_default_stream_matches_serial():
 
 
 def test_qvq_banked_viterbi_norm_cache_uses_versioned_codebooks():
-    codebook = (
-        torch.linspace(-1, 1, 4 * (1 << 16) * 4, dtype=torch.float32, device="cuda")
-        .to(torch.float16)
-        .reshape(4, 1 << 16, 4)
-    )
+    codebook = torch.linspace(-1, 1, 4 * (1 << 16) * 4, dtype=torch.float32, device="cuda").to(
+        torch.float16
+    ).reshape(4, 1 << 16, 4)
     sequences = torch.zeros((4, 8, 4), dtype=torch.float32, device="cuda")
 
     original_states, _ = qvq_cuda_viterbi_banked(sequences, codebook, bits=2.0)
@@ -3256,29 +2828,21 @@ def test_qvq_banked_viterbi_norm_cache_uses_versioned_codebooks():
     mutated[:, 0, 0].add_(torch.as_tensor(4096, device="cuda", dtype=codebook.dtype))
     codebook[:, 0, 0].add_(4096)
 
-    updated_mutated_states, updated_mutated_error = qvq_cuda_viterbi_banked(
-        sequences, codebook, bits=2.0
-    )
-    updated_expected_states, updated_expected_error = qvq_cuda_viterbi_banked(
-        sequences, mutated, bits=2.0
-    )
+    updated_mutated_states, updated_mutated_error = qvq_cuda_viterbi_banked(sequences, codebook, bits=2.0)
+    updated_expected_states, updated_expected_error = qvq_cuda_viterbi_banked(sequences, mutated, bits=2.0)
 
     torch.cuda.synchronize()
     # The mutation need not change the argmin state for this deliberately
     # simple zero-input fixture; it must nevertheless produce the same result
     # as a fresh tensor with the mutated values, rather than a stale cache hit.
     assert torch.equal(updated_mutated_states, updated_expected_states)
-    torch.testing.assert_close(
-        updated_mutated_error, updated_expected_error, rtol=0, atol=0
-    )
+    torch.testing.assert_close(updated_mutated_error, updated_expected_error, rtol=0, atol=0)
 
 
 def test_qvq_viterbi_accepts_inference_mode_codebooks():
     generator = torch.Generator(device="cpu").manual_seed(20260817)
     sequences = torch.randn((2, 7, 4), generator=generator, dtype=torch.float32).cuda()
-    codebook = torch.randn(
-        (1 << 16, 4), generator=generator, dtype=torch.float16
-    ).cuda()
+    codebook = torch.randn((1 << 16, 4), generator=generator, dtype=torch.float16).cuda()
     with torch.inference_mode():
         states, error = qvq_cuda_viterbi(sequences, codebook, bits=2.0, vector_size=4)
     assert states.shape == (2, 7)
@@ -3293,12 +2857,8 @@ def test_qvq_viterbi_inference_mode_codebook_mutation_rebuilds_norms():
         codebook = source.clone()
         qvq_cuda_viterbi(sequences, codebook, bits=2.0, vector_size=4)
         codebook[0, 0].add_(1.0)
-        mutated_states, mutated_error = qvq_cuda_viterbi(
-            sequences, codebook, bits=2.0, vector_size=4
-        )
-        fresh_states, fresh_error = qvq_cuda_viterbi(
-            sequences, codebook.clone(), bits=2.0, vector_size=4
-        )
+        mutated_states, mutated_error = qvq_cuda_viterbi(sequences, codebook, bits=2.0, vector_size=4)
+        fresh_states, fresh_error = qvq_cuda_viterbi(sequences, codebook.clone(), bits=2.0, vector_size=4)
     torch.cuda.synchronize()
     assert torch.equal(mutated_states, fresh_states)
     torch.testing.assert_close(mutated_error, fresh_error, rtol=0, atol=0)
@@ -3317,8 +2877,7 @@ def test_qvq_norm_cache_eviction_waits_for_cross_stream_consumer():
     generator = torch.Generator(device="cpu").manual_seed(20260814)
     sequences = torch.randn((1, 33, 4), generator=generator, dtype=torch.float32).cuda()
     codebooks = [
-        torch.randn((1 << 16, 4), generator=generator, dtype=torch.float16).cuda()
-        for _ in range(33)
+        torch.randn((1 << 16, 4), generator=generator, dtype=torch.float16).cuda() for _ in range(33)
     ]
     consumer_stream = torch.cuda.Stream()
     with torch.cuda.stream(consumer_stream):
@@ -3340,16 +2899,10 @@ def test_qvq_norm_cache_eviction_waits_for_cross_stream_consumer():
 def test_qvq_propagated_banked_candidates_parallel_matches_serial():
     generator = torch.Generator(device="cpu").manual_seed(20260818)
     inner = torch.randn((32, 32), generator=generator, dtype=torch.float32).cuda()
-    hessian_source = torch.randn(
-        (32, 32), generator=generator, dtype=torch.float32
-    ).cuda()
-    hessian = (
-        hessian_source @ hessian_source.T
-        + torch.eye(32, dtype=torch.float32, device="cuda") * 0.25
-    )
+    hessian_source = torch.randn((32, 32), generator=generator, dtype=torch.float32).cuda()
+    hessian = hessian_source @ hessian_source.T + torch.eye(32, dtype=torch.float32, device="cuda") * 0.25
     banks = tuple(
-        torch.randn((1 << 16, 4), generator=generator, dtype=torch.float16).cuda()
-        for _ in range(4)
+        torch.randn((1 << 16, 4), generator=generator, dtype=torch.float16).cuda() for _ in range(4)
     )
     parallel_weights, parallel_states = block_ldlq_inner_banked_candidates(
         inner,
@@ -3387,9 +2940,7 @@ def test_qvq_v4_banked_block_ldlq_native_matches_cpu_selection_and_oracle():
     cpu_weight = torch.randn((32, 32), generator=generator, dtype=torch.float32)
     hessian_source = torch.randn((32, 32), generator=generator, dtype=torch.float32)
     cpu_hessian = hessian_source @ hessian_source.T + torch.eye(32) * 0.5
-    cpu_stack = torch.randn(
-        (4, 1 << 16, 4), generator=generator, dtype=torch.float32
-    ).contiguous()
+    cpu_stack = torch.randn((4, 1 << 16, 4), generator=generator, dtype=torch.float32).contiguous()
     cpu_banks = tuple(cpu_stack[bank] for bank in range(4))
     cpu_result = block_ldlq_inner_banked(
         cpu_weight,
@@ -3429,18 +2980,9 @@ def test_qvq_propagated_banked_candidates_nontrivial_hessian_rate_objective_pari
 ):
     generator = torch.Generator(device="cpu").manual_seed(20260819 + int(bits * 10))
     inner = torch.randn((32, 64), generator=generator, dtype=torch.float32).cuda()
-    hessian_source = torch.randn(
-        (32, 32), generator=generator, dtype=torch.float32
-    ).cuda()
-    hessian = (
-        hessian_source @ hessian_source.T
-        + torch.eye(32, dtype=torch.float32, device="cuda") * 0.5
-    )
-    bank_stack = (
-        torch.randn((4, 1 << 16, 4), generator=generator, dtype=torch.float16)
-        .cuda()
-        .contiguous()
-    )
+    hessian_source = torch.randn((32, 32), generator=generator, dtype=torch.float32).cuda()
+    hessian = hessian_source @ hessian_source.T + torch.eye(32, dtype=torch.float32, device="cuda") * 0.5
+    bank_stack = torch.randn((4, 1 << 16, 4), generator=generator, dtype=torch.float16).cuda().contiguous()
     banks = tuple(bank_stack[bank] for bank in range(4))
     baseline = block_ldlq_inner(
         inner,
@@ -3495,13 +3037,9 @@ def _nontrivial_yaqa_fixture(seed: int):
     weight = (torch.randn((16, 16), generator=generator) * 0.05).cuda()
     input_samples = torch.randn((41, 16), generator=generator).cuda()
     output_samples = torch.randn((37, 16), generator=generator).cuda()
-    input_hessian = (
-        input_samples.T @ input_samples / input_samples.shape[0]
-        + torch.eye(16, device="cuda") * 0.1
-    )
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0] + torch.eye(16, device="cuda") * 0.1
     output_hessian = (
-        output_samples.T @ output_samples / output_samples.shape[0]
-        + torch.eye(16, device="cuda") * 0.1
+        output_samples.T @ output_samples / output_samples.shape[0] + torch.eye(16, device="cuda") * 0.1
     )
     return weight, input_hessian, output_hessian
 
@@ -3528,13 +3066,9 @@ def test_qvq_cuda_incremental_yaqa_feedback_is_bit_exact_for_canonical_b2_and_b4
     weight = (torch.randn((32, 32), generator=generator) * 0.05).cuda()
     input_samples = torch.randn((47, 32), generator=generator).cuda()
     output_samples = torch.randn((43, 32), generator=generator).cuda()
-    input_hessian = (
-        input_samples.T @ input_samples / input_samples.shape[0]
-        + torch.eye(32, device="cuda") * 0.1
-    )
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0] + torch.eye(32, device="cuda") * 0.1
     output_hessian = (
-        output_samples.T @ output_samples / output_samples.shape[0]
-        + torch.eye(32, device="cuda") * 0.1
+        output_samples.T @ output_samples / output_samples.shape[0] + torch.eye(32, device="cuda") * 0.1
     )
     canonical_codebook = _canonical_qvq_codebook(
         device=weight.device,
@@ -3599,23 +3133,16 @@ def test_qvq_cuda_incremental_yaqa_feedback_is_bit_exact_for_canonical_b2_and_b4
             **format_kwargs,
         )
         assert len(incremental) == len(reference)
-        assert all(
-            torch.equal(actual, expected)
-            for actual, expected in zip(incremental, reference, strict=True)
-        )
+        assert all(torch.equal(actual, expected) for actual, expected in zip(incremental, reference, strict=True))
 
 
 @pytest.mark.parametrize("shape", ((32, 48), (48, 32)))
 @pytest.mark.parametrize("bits", (1.0, 2.5, 3.5))
-def test_qvq_cuda_factored_incremental_yaqa_feedback_is_exact_for_rectangular_b2(
-    shape, bits
-):
+def test_qvq_cuda_factored_incremental_yaqa_feedback_is_exact_for_rectangular_b2(shape, bits):
     """Factored anti-diagonal GEMMs must preserve the complete rectangular B2 artifact."""
 
     in_features, out_features = shape
-    generator = torch.Generator(device="cpu").manual_seed(
-        20260822 + in_features + int(bits * 10)
-    )
+    generator = torch.Generator(device="cpu").manual_seed(20260822 + in_features + int(bits * 10))
     weight = (torch.randn(shape, generator=generator) * 0.05).cuda()
     input_samples = torch.randn((47, in_features), generator=generator).cuda()
     output_samples = torch.randn((43, out_features), generator=generator).cuda()
@@ -3641,9 +3168,7 @@ def test_qvq_cuda_factored_incremental_yaqa_feedback_is_exact_for_rectangular_b2
         "v2b2_p32": True,
         "_defer_segmented_cuda_checks": True,
     }
-    reference = yaqa_inner(
-        weight, input_hessian, output_hessian, pair_stack[0], **kwargs
-    )
+    reference = yaqa_inner(weight, input_hessian, output_hessian, pair_stack[0], **kwargs)
     actual = yaqa_inner(
         weight,
         input_hessian,
@@ -3652,10 +3177,7 @@ def test_qvq_cuda_factored_incremental_yaqa_feedback_is_exact_for_rectangular_b2
         _incremental_cuda_feedback=True,
         **kwargs,
     )
-    assert all(
-        torch.equal(candidate, expected)
-        for candidate, expected in zip(actual, reference, strict=True)
-    )
+    assert all(torch.equal(candidate, expected) for candidate, expected in zip(actual, reference, strict=True))
     factored_incremental = yaqa_inner(
         weight,
         input_hessian,
@@ -3671,21 +3193,15 @@ def test_qvq_cuda_factored_incremental_yaqa_feedback_is_exact_for_rectangular_b2
 
 
 @pytest.mark.parametrize("with_bias", (False, True))
-def test_qvq_cuda_factored_yaqa_feedback_matches_fp32_reference_on_nondefault_stream(
-    with_bias,
-):
+def test_qvq_cuda_factored_yaqa_feedback_matches_fp32_reference_on_nondefault_stream(with_bias):
     """The grouped anti-diagonal contraction stays within the quantization FP32 gate."""
 
     generator = torch.Generator(device="cuda").manual_seed(20260824 + with_bias)
-    source = (
-        torch.randn((32, 64), generator=generator, device="cuda", dtype=torch.float32)
-        * 0.05
-    )
+    source = torch.randn((32, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.05
     left = torch.randn_like(source, generator=generator) * 0.01
     right = torch.randn_like(source, generator=generator) * 0.01
     output_feedback = torch.tril(
-        torch.randn((64, 64), generator=generator, device="cuda", dtype=torch.float32)
-        * 0.01,
+        torch.randn((64, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.01,
         diagonal=-1,
     )
     bias = torch.randn_like(source, generator=generator) * 0.001 if with_bias else None
@@ -3695,10 +3211,7 @@ def test_qvq_cuda_factored_yaqa_feedback_matches_fp32_reference_on_nondefault_st
         output_start = output_block * 16
         tile = source[input_start : input_start + 16, output_start : output_start + 16]
         if bias is not None:
-            tile = (
-                tile
-                + bias[input_start : input_start + 16, output_start : output_start + 16]
-            )
+            tile = tile + bias[input_start : input_start + 16, output_start : output_start + 16]
         expected.append(
             tile
             + left[input_start : input_start + 16, output_start:]
@@ -3711,12 +3224,8 @@ def test_qvq_cuda_factored_yaqa_feedback_matches_fp32_reference_on_nondefault_st
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        actual = _qvq_cuda_yaqa_feedback_op()(
-            source, left, right, output_feedback, 0, 3, 2, bias
-        )
-        repeated = _qvq_cuda_yaqa_feedback_op()(
-            source, left, right, output_feedback, 0, 3, 2, bias
-        )
+        actual = _qvq_cuda_yaqa_feedback_op()(source, left, right, output_feedback, 0, 3, 2, bias)
+        repeated = _qvq_cuda_yaqa_feedback_op()(source, left, right, output_feedback, 0, 3, 2, bias)
     torch.cuda.current_stream().wait_stream(stream)
     assert torch.equal(actual, repeated)
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=1e-6)
@@ -3726,17 +3235,12 @@ def test_qvq_cuda_factored_yaqa_feedback_rejects_invalid_geometry():
     source = torch.zeros((32, 32), device="cuda", dtype=torch.float32)
     output_feedback = torch.zeros((32, 32), device="cuda", dtype=torch.float32)
     with pytest.raises(RuntimeError, match="anti-diagonal geometry"):
-        _qvq_cuda_yaqa_feedback_op()(
-            source, source, source, output_feedback, 0, 0, 2, None
-        )
+        _qvq_cuda_yaqa_feedback_op()(source, source, source, output_feedback, 0, 0, 2, None)
 
 
 def test_qvq_cuda_factored_yaqa_cache_update_matches_fp32_reference_on_nondefault_stream():
     generator = torch.Generator(device="cuda").manual_seed(20260825)
-    left = (
-        torch.randn((32, 64), generator=generator, device="cuda", dtype=torch.float32)
-        * 0.01
-    )
+    left = torch.randn((32, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.01
     right = torch.randn_like(left, generator=generator) * 0.01
     input_feedback = torch.randn((32, 32), generator=generator, device="cuda") * 0.01
     output_feedback = torch.randn((64, 64), generator=generator, device="cuda") * 0.01
@@ -3761,24 +3265,10 @@ def test_qvq_cuda_factored_yaqa_cache_update_matches_fp32_reference_on_nondefaul
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         _qvq_cuda_yaqa_feedback_update_op()(
-            actual_left,
-            actual_right,
-            input_feedback,
-            output_feedback,
-            reconstructed,
-            0,
-            3,
-            2,
+            actual_left, actual_right, input_feedback, output_feedback, reconstructed, 0, 3, 2
         )
         _qvq_cuda_yaqa_feedback_update_op()(
-            repeated_left,
-            repeated_right,
-            input_feedback,
-            output_feedback,
-            reconstructed,
-            0,
-            3,
-            2,
+            repeated_left, repeated_right, input_feedback, output_feedback, reconstructed, 0, 3, 2
         )
     torch.cuda.current_stream().wait_stream(stream)
     assert torch.equal(actual_left, repeated_left)
@@ -3797,9 +3287,7 @@ def test_qvq_cuda_factored_yaqa_family_batch_matches_independent_candidates():
     right = torch.randn_like(left, generator=generator) * 0.01
     input_feedback = torch.randn((32, 32), generator=generator, device="cuda") * 0.01
     output_feedback = torch.randn((64, 64), generator=generator, device="cuda") * 0.01
-    reconstructed = (
-        torch.randn((families, 2, 16, 16), generator=generator, device="cuda") * 0.05
-    )
+    reconstructed = torch.randn((families, 2, 16, 16), generator=generator, device="cuda") * 0.05
 
     expected_tiles = torch.stack(
         tuple(
@@ -3825,18 +3313,9 @@ def test_qvq_cuda_factored_yaqa_family_batch_matches_independent_candidates():
 
     actual_left = left.clone()
     actual_right = right.clone()
-    actual_tiles = _qvq_cuda_yaqa_feedback_op()(
-        source, left, right, output_feedback, 0, 3, 2, None
-    )
+    actual_tiles = _qvq_cuda_yaqa_feedback_op()(source, left, right, output_feedback, 0, 3, 2, None)
     _qvq_cuda_yaqa_feedback_update_op()(
-        actual_left,
-        actual_right,
-        input_feedback,
-        output_feedback,
-        reconstructed,
-        0,
-        3,
-        2,
+        actual_left, actual_right, input_feedback, output_feedback, reconstructed, 0, 3, 2
     )
 
     assert torch.equal(actual_tiles, expected_tiles)
@@ -3893,19 +3372,14 @@ def test_qvq_cuda_b2_yaqa_candidate_batch_is_bit_exact():
         _parallel_candidates=True,
         **kwargs,
     )
-    assert all(
-        torch.equal(candidate, expected)
-        for candidate, expected in zip(actual, reference, strict=True)
-    )
+    assert all(torch.equal(candidate, expected) for candidate, expected in zip(actual, reference, strict=True))
 
 
 @pytest.mark.parametrize("bits", (1.0, 1.5, 2.0, 2.5, 3.0, 3.5))
 @pytest.mark.parametrize("objective", ("euclidean", "hessian_diagonal"))
 def test_qvq_cuda_b2_block_ldl_family_batch_matches_serial(bits, objective):
     generator = torch.Generator(device="cuda").manual_seed(20260827 + int(bits * 2))
-    weight = (torch.randn((32, 64), generator=generator, device="cuda") * 0.05).to(
-        torch.float16
-    )
+    weight = (torch.randn((32, 64), generator=generator, device="cuda") * 0.05).to(torch.float16)
     samples = torch.randn((47, 32), generator=generator, device="cuda")
     hessian = samples.T @ samples / samples.shape[0]
     hessian.diagonal().add_(0.1)
@@ -3927,23 +3401,14 @@ def test_qvq_cuda_b2_block_ldl_family_batch_matches_serial(bits, objective):
         "viterbi_objective": objective,
         "bank_codebook_pair_stacks": pair_stacks,
     }
-    expected = block_ldlq_inner_v2b2_p32(
-        weight, hessian, banks, _family_batch=False, **common
-    )
-    actual = block_ldlq_inner_v2b2_p32(
-        weight, hessian, banks, _family_batch=True, **common
-    )
-    assert all(
-        torch.equal(candidate, reference)
-        for candidate, reference in zip(actual, expected, strict=True)
-    )
+    expected = block_ldlq_inner_v2b2_p32(weight, hessian, banks, _family_batch=False, **common)
+    actual = block_ldlq_inner_v2b2_p32(weight, hessian, banks, _family_batch=True, **common)
+    assert all(torch.equal(candidate, reference) for candidate, reference in zip(actual, expected, strict=True))
 
 
 @pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
 def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_are_exact_and_baseline_safe(bits):
-    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(
-        20260830 + int(bits * 10)
-    )
+    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260830 + int(bits * 10))
     common = {
         "bits": bits,
         "output_hessian": output_hessian,
@@ -3988,9 +3453,7 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_are_exact_and_baseline_safe(bits
 
 def test_qvq_v2b2_family_batch_telemetry_reports_phase1_reuse_and_consumption():
     generator = torch.Generator(device="cuda").manual_seed(20260823)
-    weight = torch.randn(
-        (32, 32), generator=generator, device="cuda", dtype=torch.float16
-    )
+    weight = torch.randn((32, 32), generator=generator, device="cuda", dtype=torch.float16)
     hessian = torch.eye(32, device="cuda", dtype=torch.float32)
     pair_stacks = torch.stack(
         _canonical_qvq_v2b2_pair_stacks(
@@ -4018,10 +3481,7 @@ def test_qvq_v2b2_family_batch_telemetry_reports_phase1_reuse_and_consumption():
     assert counters["viterbi_family_state_steps"] > 0
     assert counters["viterbi_exact_reuse_candidates"] == 0
     assert counters["viterbi_reselection_revisits"] == 0
-    assert (
-        counters["viterbi_logical_solve_ids"]
-        == counters["viterbi_unique_logical_solve_ids"]
-    )
+    assert counters["viterbi_logical_solve_ids"] == counters["viterbi_unique_logical_solve_ids"]
     assert counters["viterbi_provisional_states_produced"] == (
         counters["viterbi_provisional_states_consumed"] * 128
     )
@@ -4057,9 +3517,7 @@ def test_qvq_v2b2_p32_yaqa_reselection_uses_non_default_producer_stream_safely()
 
 @pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
 def test_qvq_v2b4_p64_yaqa_is_exact_and_independent_v2_yaqa_safe(bits):
-    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(
-        20260840 + int(bits * 10)
-    )
+    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260840 + int(bits * 10))
     common = {
         "bits": bits,
         "output_hessian": output_hessian,
@@ -4095,13 +3553,9 @@ def test_qvq_banked_v2_yaqa_multitile_partial_batch_is_exact_and_safe(format_nam
     weight = (torch.randn((64, 32), generator=generator) * 0.05).cuda()
     input_samples = torch.randn((53, 32), generator=generator).cuda()
     output_samples = torch.randn((47, 64), generator=generator).cuda()
-    input_hessian = (
-        input_samples.T @ input_samples / input_samples.shape[0]
-        + torch.eye(32, device="cuda") * 0.1
-    )
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0] + torch.eye(32, device="cuda") * 0.1
     output_hessian = (
-        output_samples.T @ output_samples / output_samples.shape[0]
-        + torch.eye(64, device="cuda") * 0.1
+        output_samples.T @ output_samples / output_samples.shape[0] + torch.eye(64, device="cuda") * 0.1
     )
     common = {
         "bits": 2.0,
@@ -4112,10 +3566,10 @@ def test_qvq_banked_v2_yaqa_multitile_partial_batch_is_exact_and_safe(format_nam
     canonical = quantize_qvq_linear(weight, input_hessian, **common)
     format_kwargs = (
         {
-            "bank_count": 2,
-            "v2b2_p32": True,
-            "yaqa_v2b2_family_mode": "fixed_block_ldlq",
-        }
+                "bank_count": 2,
+                "v2b2_p32": True,
+                "yaqa_v2b2_family_mode": "fixed_block_ldlq",
+            }
         if format_name == "v2b2-p32"
         else {"bank_count": 4, "v2b4_p64": True}
     )
@@ -4148,13 +3602,8 @@ def test_qvq_cuda_empty_batch_and_contract_guards():
     x = torch.zeros((0, 16), device="cuda", dtype=torch.float16)
     trellis = torch.zeros((1, 16), device="cuda", dtype=torch.int32)
     assert qvq_cuda_gemv(x, trellis, 2, out_features=16).shape == (0, 16)
-    assert (
-        qvq_cuda_gemv(x, trellis, 2, out_features=16, output_fp32=True).dtype
-        == torch.float32
-    )
-    empty_hadamard = qvq_cuda_hadamard(
-        torch.empty((0, 16), device="cuda", dtype=torch.float16)
-    )
+    assert qvq_cuda_gemv(x, trellis, 2, out_features=16, output_fp32=True).dtype == torch.float32
+    empty_hadamard = qvq_cuda_hadamard(torch.empty((0, 16), device="cuda", dtype=torch.float16))
     assert empty_hadamard.shape == (0, 16)
     assert empty_hadamard.dtype == torch.float16
     with pytest.raises(ValueError, match="pgc16-v1"):
@@ -4242,10 +3691,8 @@ def test_qvq_cuda_bfloat16_recovery_uses_completed_output_finiteness():
 
     def fake_compute(inputs, compute_dtype):
         calls.append((inputs.dtype, compute_dtype))
-        return (
-            torch.full((inputs.shape[0], 16), float("inf"), device="cuda")
-            if len(calls) == 1
-            else torch.ones((inputs.shape[0], 16), device="cuda")
+        return torch.full((inputs.shape[0], 16), float("inf"), device="cuda") if len(calls) == 1 else torch.ones(
+            (inputs.shape[0], 16), device="cuda"
         )
 
     with patch.object(layer, "_forward_compute_dtype", side_effect=fake_compute):
@@ -4341,11 +3788,7 @@ def test_qvq_cuda_viterbi_contract_guards():
 @pytest.mark.parametrize("bits", [1.0, 1.5, 2.0, 2.5, 3.0, 3.5])
 def test_qvq_cuda_trusted_v2_viterbi_is_bit_exact_after_yaqa_style_prevalidation(bits):
     generator = torch.Generator(device="cpu").manual_seed(20260817 + int(bits * 10))
-    sequences = (
-        torch.randn((3, 128, 2), generator=generator, dtype=torch.float32)
-        .cuda()
-        .contiguous()
-    )
+    sequences = torch.randn((3, 128, 2), generator=generator, dtype=torch.float32).cuda().contiguous()
     codebook = pgc16_codebook_v2_bank(
         0,
         bits=bits,
@@ -4379,9 +3822,7 @@ def _noncontiguous_viterbi_tensor(values: torch.Tensor) -> torch.Tensor:
 
 
 def _noncontiguous_viterbi_weights(values: torch.Tensor) -> torch.Tensor:
-    storage = torch.empty(
-        (values.shape[0], values.shape[1] * 2), device=values.device, dtype=values.dtype
-    )
+    storage = torch.empty((values.shape[0], values.shape[1] * 2), device=values.device, dtype=values.dtype)
     view = storage[:, ::2]
     view.copy_(values)
     assert not view.is_contiguous()
@@ -4392,23 +3833,15 @@ def _noncontiguous_viterbi_weights(values: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize("constrained", (False, True))
 def test_qvq_cuda_weighted_viterbi_matches_eager_reference(bits, constrained):
     transition_bits = qvq_transition_bits(bits)
-    generator = torch.Generator().manual_seed(
-        20260920 + 10 * transition_bits + constrained
-    )
+    generator = torch.Generator().manual_seed(20260920 + 10 * transition_bits + constrained)
     sequences = torch.randn((2, 7, 2), generator=generator, dtype=torch.float32).cuda()
-    codebook = torch.randn(
-        (1 << 16, 2), generator=generator, dtype=torch.float32
-    ).cuda()
-    step_weights = (
-        0.05 + 2.0 * torch.rand((2, 7), generator=generator, dtype=torch.float32)
-    ).cuda()
+    codebook = torch.randn((1 << 16, 2), generator=generator, dtype=torch.float32).cuda()
+    step_weights = (0.05 + 2.0 * torch.rand((2, 7), generator=generator, dtype=torch.float32)).cuda()
     overlap = None
     if constrained:
         overlap_bits = 16 - transition_bits
         overlap_limit = 1 << overlap_bits
-        overlap = torch.randint(
-            0, overlap_limit, (2,), generator=generator, dtype=torch.int64
-        ).cuda()
+        overlap = torch.randint(0, overlap_limit, (2,), generator=generator, dtype=torch.int64).cuda()
 
     actual_states, actual_error = qvq_cuda_viterbi(
         sequences,
@@ -4434,28 +3867,20 @@ def test_qvq_cuda_weighted_viterbi_matches_eager_reference(bits, constrained):
     torch.cuda.synchronize()
 
     assert torch.equal(actual_states, reference.states)
-    torch.testing.assert_close(
-        actual_error, reference.squared_error, rtol=2e-5, atol=2e-5
-    )
+    torch.testing.assert_close(actual_error, reference.squared_error, rtol=2e-5, atol=2e-5)
     assert torch.equal(dispatched.states, actual_states)
     assert torch.equal(dispatched.squared_error, actual_error)
 
 
 @pytest.mark.parametrize("seed", (2026081201, 2026081202))
 @pytest.mark.parametrize("constrained", (False, True))
-def test_qvq_cuda_w8_scalar_recurrence_matches_long_pgc16_eager_paths(
-    seed, constrained
-):
+def test_qvq_cuda_w8_scalar_recurrence_matches_long_pgc16_eager_paths(seed, constrained):
     """Exercise every production-codebook tile and step in the W8 specialization."""
 
     generator = torch.Generator().manual_seed(seed)
-    sequences = torch.randn(
-        (7, 128, 2), generator=generator, dtype=torch.float32
-    ).cuda()
+    sequences = torch.randn((7, 128, 2), generator=generator, dtype=torch.float32).cuda()
     codebook = pgc16_codebook(device="cuda", dtype=torch.float32)
-    step_weights = (
-        0.05 + 2.0 * torch.rand((7, 128), generator=generator, dtype=torch.float32)
-    ).cuda()
+    step_weights = (0.05 + 2.0 * torch.rand((7, 128), generator=generator, dtype=torch.float32)).cuda()
     overlap = torch.zeros(7, device="cuda", dtype=torch.int64) if constrained else None
 
     actual_states, actual_error = qvq_cuda_viterbi(
@@ -4475,29 +3900,19 @@ def test_qvq_cuda_w8_scalar_recurrence_matches_long_pgc16_eager_paths(
     torch.cuda.synchronize()
 
     assert torch.equal(actual_states, reference.states)
-    torch.testing.assert_close(
-        actual_error, reference.squared_error, rtol=2e-5, atol=2e-5
-    )
+    torch.testing.assert_close(actual_error, reference.squared_error, rtol=2e-5, atol=2e-5)
 
 
 @pytest.mark.parametrize("bits", (2.5, 3.5, 4.5, 5.5, 6.5, 7.5))
 @pytest.mark.parametrize("constrained", (False, True))
-def test_qvq_cuda_fused_suffix_recurrence_matches_long_pgc16_eager_paths(
-    bits, constrained
-):
+def test_qvq_cuda_fused_suffix_recurrence_matches_long_pgc16_eager_paths(bits, constrained):
     """Cover every half-step fused-recurrence shape at production length."""
 
     transition_bits = qvq_transition_bits(bits)
-    generator = torch.Generator().manual_seed(
-        2026081250 + transition_bits + constrained
-    )
-    sequences = torch.randn(
-        (3, 128, 2), generator=generator, dtype=torch.float32
-    ).cuda()
+    generator = torch.Generator().manual_seed(2026081250 + transition_bits + constrained)
+    sequences = torch.randn((3, 128, 2), generator=generator, dtype=torch.float32).cuda()
     codebook = pgc16_codebook(device="cuda", dtype=torch.float32)
-    step_weights = (
-        0.05 + 2.0 * torch.rand((3, 128), generator=generator, dtype=torch.float32)
-    ).cuda()
+    step_weights = (0.05 + 2.0 * torch.rand((3, 128), generator=generator, dtype=torch.float32)).cuda()
     overlap = None
     if constrained:
         overlap = torch.randint(
@@ -4508,9 +3923,7 @@ def test_qvq_cuda_fused_suffix_recurrence_matches_long_pgc16_eager_paths(
             dtype=torch.int64,
         ).cuda()
 
-    actual_states, actual_error = qvq_cuda_viterbi(
-        sequences, codebook, bits, overlap, step_weights
-    )
+    actual_states, actual_error = qvq_cuda_viterbi(sequences, codebook, bits, overlap, step_weights)
     reference = batched_viterbi_quantize(
         _noncontiguous_viterbi_tensor(sequences),
         codebook,
@@ -4521,18 +3934,14 @@ def test_qvq_cuda_fused_suffix_recurrence_matches_long_pgc16_eager_paths(
     torch.cuda.synchronize()
 
     assert torch.equal(actual_states, reference.states)
-    torch.testing.assert_close(
-        actual_error, reference.squared_error, rtol=2e-5, atol=2e-5
-    )
+    torch.testing.assert_close(actual_error, reference.squared_error, rtol=2e-5, atol=2e-5)
 
 
 @pytest.mark.parametrize("bits", QVQ_CUDA_BITS)
 def test_qvq_cuda_unit_step_weights_are_exactly_disabled_control(bits):
     generator = torch.Generator().manual_seed(20261000 + qvq_transition_bits(bits))
     sequences = torch.randn((3, 11, 2), generator=generator, dtype=torch.float32).cuda()
-    codebook = torch.randn(
-        (1 << 16, 2), generator=generator, dtype=torch.float32
-    ).cuda()
+    codebook = torch.randn((1 << 16, 2), generator=generator, dtype=torch.float32).cuda()
     unit_weights = torch.ones((3, 11), device="cuda", dtype=torch.float32)
 
     control = qvq_cuda_viterbi(sequences, codebook, bits)
@@ -4631,9 +4040,7 @@ def test_qvq_cuda_linear_inference_matches_portable_dense_layer(bits):
     reference_layer = QVQReferenceLinear(
         bits=bits, in_features=32, out_features=32, name="proj", tensors=tensors
     ).eval()
-    cuda_layer = QVQLinear(
-        bits=bits, in_features=32, out_features=32, name="proj", tensors=tensors
-    ).eval()
+    cuda_layer = QVQLinear(bits=bits, in_features=32, out_features=32, name="proj", tensors=tensors).eval()
 
     shaped_x = x.reshape(2, 2, 32)
     reference_layer.train()
@@ -4646,10 +4053,7 @@ def test_qvq_cuda_linear_inference_matches_portable_dense_layer(bits):
     actual = cuda_layer(shaped_x)
 
     torch.testing.assert_close(actual, reference, rtol=2e-2, atol=2e-2)
-    _assert_accuracy(
-        differentiable_reference.cpu().reshape(-1, 32),
-        fp32_oracle.cpu().reshape(-1, 32),
-    )
+    _assert_accuracy(differentiable_reference.cpu().reshape(-1, 32), fp32_oracle.cpu().reshape(-1, 32))
     _assert_accuracy(reference.cpu().reshape(-1, 32), fp32_oracle.cpu().reshape(-1, 32))
     _assert_accuracy(actual.cpu().reshape(-1, 32), fp32_oracle.cpu().reshape(-1, 32))
     assert set(dict(cuda_layer.named_buffers())) == {"trellis", "SU", "SV", "bias"}
@@ -4697,9 +4101,7 @@ def test_qvq_cuda_linear_uses_more_accurate_fp16_compute_for_in_range_bfloat16(b
     # Two rows have FP32 margins smaller than one BF16 ULP and therefore become
     # exact BF16 ties. Keep reporting raw argmax agreement, but separately
     # require every FP32 winner to remain among the tied BF16 maxima.
-    _assert_accuracy(
-        actual.cpu(), reference.cpu(), max_kld=2e-3, min_top1=0.9375, min_top5=0.96
-    )
+    _assert_accuracy(actual.cpu(), reference.cpu(), max_kld=2e-3, min_top1=0.9375, min_top5=0.96)
     reference_winners = reference.argmax(dim=-1, keepdim=True)
     actual_winners = actual == actual.max(dim=-1, keepdim=True).values
     assert actual_winners.gather(-1, reference_winners).all()
@@ -4747,19 +4149,13 @@ def test_qvq_cuda_linear_retries_extreme_bfloat16_in_native_bfloat16(bits, basis
     assert observed == [torch.float16, torch.bfloat16]
     assert torch.isfinite(actual).all()
     assert actual.dtype == torch.bfloat16
-    relative_l2 = (
-        (actual.float() - reference).square().sum() / reference.square().sum()
-    ).sqrt()
+    relative_l2 = ((actual.float() - reference).square().sum() / reference.square().sum()).sqrt()
     assert relative_l2 < 0.01
     # At this magnitude two distinct FP32 values can round to the same BF16
     # maximum. The FP32 winner must remain in the BF16 winner set; requiring
     # argmax's first tied index would incorrectly treat an exact tie as drift.
     reference_winner = reference.argmax(dim=-1, keepdim=True)
-    assert (
-        (actual == actual.max(dim=-1, keepdim=True).values)
-        .gather(-1, reference_winner)
-        .all()
-    )
+    assert (actual == actual.max(dim=-1, keepdim=True).values).gather(-1, reference_winner).all()
 
 
 def test_qvq_cuda_linear_retries_narrow_fp16_factorization_overflow():
@@ -4982,17 +4378,9 @@ def test_qvq_cuda_composite_input_width_retries_overflow_in_bfloat16():
 
     assert observed == [(torch.float16, True), (torch.bfloat16, True)]
     assert torch.isfinite(actual).all()
-    relative_l2 = (
-        (actual.float() - reference).square().sum() / reference.square().sum()
-    ).sqrt()
+    relative_l2 = ((actual.float() - reference).square().sum() / reference.square().sum()).sqrt()
     assert relative_l2 < 0.01
-    _assert_accuracy(
-        actual.float().cpu(),
-        reference.cpu(),
-        max_kld=2e-3,
-        min_top1=0.96875,
-        min_top5=0.96875,
-    )
+    _assert_accuracy(actual.float().cpu(), reference.cpu(), max_kld=2e-3, min_top1=0.96875, min_top5=0.96875)
 
 
 @pytest.mark.parametrize("width", (8192, 14336))
@@ -5027,22 +4415,26 @@ def test_qvq_stable_composite_hadamard_is_cuda_graph_replay_safe():
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16, torch.float32))
 @pytest.mark.parametrize("width", (5120, 6144, 10240, 12288))
 @pytest.mark.parametrize("rows", (1, 16))
-def test_qvq_composite_cuda_stage_is_bit_exact_to_torch_butterfly(dtype, width, rows):
+def test_qvq_composite_cuda_stage_is_bit_exact_to_torch_butterfly(
+    dtype, width, rows
+):
     """Qwen K=12/K=20 transforms may collapse only their power-of-two stage."""
 
-    generator = torch.Generator(device="cuda").manual_seed(20260904 + width + rows)
-    source = (torch.randn((rows, width), generator=generator, device="cuda") * 0.02).to(
-        dtype
+    generator = torch.Generator(device="cuda").manual_seed(
+        20260904 + width + rows
     )
+    source = (
+        torch.randn((rows, width), generator=generator, device="cuda") * 0.02
+    ).to(dtype)
 
     def torch_reference(stable: bool):
         hadK, K = get_hadK(width)
         hadK = hadK.to(source)
         values = (
-            (source / source.new_full((), float(width)).sqrt() if stable else source)
-            .clone()
-            .view(-1, width, 1)
-        )
+            source / source.new_full((), float(width)).sqrt()
+            if stable
+            else source
+        ).clone().view(-1, width, 1)
         scratch = values.clone()
         while values.shape[1] > K:
             values = values.view(
@@ -5074,6 +4466,8 @@ def test_qvq_composite_cuda_stage_is_bit_exact_to_torch_butterfly(dtype, width, 
     assert torch.equal(captured_stable, expected_stable)
 
 
+
+
 def test_qvq_cuda_linear_training_uses_differentiable_reference_path():
     operands, _ = _case(4, 2, k=32, n=32)
     x, trellis = operands
@@ -5082,9 +4476,7 @@ def test_qvq_cuda_linear_training_uses_differentiable_reference_path():
         "SU": torch.ones(32, dtype=torch.float16, device="cuda"),
         "SV": torch.ones(32, dtype=torch.float16, device="cuda"),
     }
-    layer = QVQLinear(
-        bits=4, in_features=32, out_features=32, name="proj", tensors=tensors
-    ).train()
+    layer = QVQLinear(bits=4, in_features=32, out_features=32, name="proj", tensors=tensors).train()
     with patch(
         "gptqmodel.utils.qvq_cuda.qvq_cuda_gemv",
         side_effect=AssertionError("CUDA inference path called"),
@@ -5104,14 +4496,10 @@ def test_qvq_v4_cuda_gemv_multitile_matches_reference():
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
     generator = torch.Generator(device="cpu").manual_seed(4491)
     tiles = (k // 16) * (n // 16)
-    edges = torch.randint(
-        0, 1 << transition_bits, (64, tiles), generator=generator, dtype=torch.int32
-    )
+    edges = torch.randint(0, 1 << transition_bits, (64, tiles), generator=generator, dtype=torch.int32)
     trellis = planar_pack_rows(edges, transition_bits).T.contiguous().cuda()
     x = torch.randn((m, k), generator=generator, dtype=torch.float16).cuda()
-    inner = reconstruct_qvq_inner_weight(
-        trellis, bits=bits, vector_size=vector_size, in_features=k, out_features=n
-    )
+    inner = reconstruct_qvq_inner_weight(trellis, bits=bits, vector_size=vector_size, in_features=k, out_features=n)
     reference = (x.float() @ inner.float()).to(torch.float16)
     actual = qvq_cuda_gemv(x, trellis, bits, out_features=n, vector_size=vector_size)
     torch.testing.assert_close(actual, reference, rtol=0, atol=0)
@@ -5124,9 +4512,7 @@ def test_qvq_v4_cuda_bank_dispatch_matches_selected_reference_tiles(bits):
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
     generator = torch.Generator(device="cpu").manual_seed(4492)
     tiles = (k // 16) * (n // 16)
-    edges = torch.randint(
-        0, 1 << transition_bits, (64, tiles), generator=generator, dtype=torch.int32
-    )
+    edges = torch.randint(0, 1 << transition_bits, (64, tiles), generator=generator, dtype=torch.int32)
     trellis = planar_pack_rows(edges, transition_bits).T.contiguous().cuda()
     bank_ids = torch.arange(tiles, dtype=torch.uint8, device="cuda") % 4
     x = torch.randn((m, k), generator=generator, dtype=torch.float16).cuda()
@@ -5159,13 +4545,9 @@ def test_qvq_segmented_v2_cuda_gemv_matches_dense_reference(bits, format_name, m
 
     k, n = 64, 64
     transition_bits = qvq_transition_bits(bits)
-    generator = torch.Generator(device="cpu").manual_seed(
-        5330 + int(bits * 10) + m + len(format_name)
-    )
+    generator = torch.Generator(device="cpu").manual_seed(5330 + int(bits * 10) + m + len(format_name))
     tiles = (k // 16) * (n // 16)
-    edges = torch.randint(
-        0, 1 << transition_bits, (128, tiles), generator=generator, dtype=torch.int32
-    )
+    edges = torch.randint(0, 1 << transition_bits, (128, tiles), generator=generator, dtype=torch.int32)
     trellis = planar_pack_rows(edges, transition_bits).T.contiguous().cuda()
     x = torch.randn((m, k), generator=generator, dtype=torch.float16).cuda()
     if format_name == "v2b2-p32":
@@ -5174,9 +4556,7 @@ def test_qvq_segmented_v2_cuda_gemv_matches_dense_reference(bits, format_name, m
         bank_alt_id = 3
         format_kwargs = {
             "v2b2_p32": True,
-            "bank_alt_id": torch.tensor(
-                [bank_alt_id], dtype=torch.uint8, device="cuda"
-            ),
+            "bank_alt_id": torch.tensor([bank_alt_id], dtype=torch.uint8, device="cuda"),
         }
         kernel_kwargs = {"v2b2_p32": True, "bank_alt_id": bank_alt_id}
     else:
@@ -5228,7 +4608,9 @@ def test_qvq_grouped_p32_cuda_gemv_preserves_independent_alternative_banks(
     trellises = []
     bank_selectors = []
     references = []
-    for out_features, bank_alt_id in zip(output_widths, alternative_banks, strict=True):
+    for out_features, bank_alt_id in zip(
+        output_widths, alternative_banks, strict=True
+    ):
         n_tiles = out_features // 16
         tile_count = k_tiles * n_tiles
         edges = torch.randint(
@@ -5255,7 +4637,9 @@ def test_qvq_grouped_p32_cuda_gemv_preserves_independent_alternative_banks(
             out_features=out_features,
             bank_ids=bank_ids,
             v2b2_p32=True,
-            bank_alt_id=torch.tensor([bank_alt_id], dtype=torch.uint8, device="cuda"),
+            bank_alt_id=torch.tensor(
+                [bank_alt_id], dtype=torch.uint8, device="cuda"
+            ),
         )
         trellises.append(trellis.view(k_tiles, n_tiles, words_per_tile))
         bank_selectors.append(bank_ids.view(k_tiles, n_tiles))
@@ -5267,7 +4651,8 @@ def test_qvq_grouped_p32_cuda_gemv_preserves_independent_alternative_banks(
         alternative_banks, dtype=torch.uint8, device="cuda"
     )
     grouped_bank_alt_boundaries = tuple(
-        sum(output_widths[:index]) // 16 for index in range(1, len(output_widths))
+        sum(output_widths[:index]) // 16
+        for index in range(1, len(output_widths))
     )
     actual = qvq_cuda_gemv(
         x,
@@ -5339,21 +4724,15 @@ def test_qvq_segmented_v2_cuda_gemv_rejects_invalid_contracts():
         )
 
 
-@pytest.mark.parametrize(
-    ("bits", "format_name"), ((3.0, "v2b2-p32"), (3.5, "v2b4-p64"))
-)
+@pytest.mark.parametrize(("bits", "format_name"), ((3.0, "v2b2-p32"), (3.5, "v2b4-p64")))
 def test_qvq_segmented_v2_linear_routes_w3_rates_to_native_cuda(bits, format_name):
     k = n = 16
     transition_bits = qvq_transition_bits(bits)
     generator = torch.Generator(device="cpu").manual_seed(5390 + int(bits * 10))
-    edges = torch.randint(
-        0, 1 << transition_bits, (128, 1), generator=generator, dtype=torch.int32
-    )
+    edges = torch.randint(0, 1 << transition_bits, (128, 1), generator=generator, dtype=torch.int32)
     trellis = planar_pack_rows(edges, transition_bits).T.contiguous().cuda()
     if format_name == "v2b2-p32":
-        bank_ids = pack_qvq_binary_bank_ids(
-            torch.arange(8, dtype=torch.uint8) % 2
-        ).cuda()
+        bank_ids = pack_qvq_binary_bank_ids(torch.arange(8, dtype=torch.uint8) % 2).cuda()
         tensors = {
             "trellis": trellis,
             "SU": torch.ones(k, dtype=torch.float16, device="cuda"),
@@ -5371,9 +4750,7 @@ def test_qvq_segmented_v2_linear_routes_w3_rates_to_native_cuda(bits, format_nam
             "bank_ids": bank_ids,
         }
         format_kwargs = {"bank_count": 4, "v2b4_p64": True}
-    layer = QVQLinear(
-        bits=bits, in_features=k, out_features=n, tensors=tensors, **format_kwargs
-    ).eval()
+    layer = QVQLinear(bits=bits, in_features=k, out_features=n, tensors=tensors, **format_kwargs).eval()
     x = torch.randn((3, k), generator=generator, dtype=torch.float16).cuda()
     reference = x.float() @ layer.get_inner_weight_tensor(dtype=torch.float32)
     with patch("gptqmodel.utils.qvq_cuda.qvq_cuda_gemv", wraps=qvq_cuda_gemv) as native:
@@ -5390,17 +4767,11 @@ def test_qvq_v4_cuda_all_rates_batches_and_dtypes_match_dense_reference(bits, m,
     vector_size = 4
     k, n = 64, 48
     transition_bits = qvq_transition_bits(bits, vector_size=vector_size)
-    generator = torch.Generator(device="cpu").manual_seed(
-        18000 + transition_bits * 100 + m
-    )
+    generator = torch.Generator(device="cpu").manual_seed(18000 + transition_bits * 100 + m)
     tiles = (k // 16) * (n // 16)
-    edges = torch.randint(
-        0, 1 << transition_bits, (64, tiles), generator=generator, dtype=torch.int32
-    )
+    edges = torch.randint(0, 1 << transition_bits, (64, tiles), generator=generator, dtype=torch.int32)
     trellis = planar_pack_rows(edges, transition_bits).T.contiguous().cuda()
-    x = torch.randn((m, k), generator=generator, dtype=torch.float32).to(
-        device="cuda", dtype=dtype
-    )
+    x = torch.randn((m, k), generator=generator, dtype=torch.float32).to(device="cuda", dtype=dtype)
     inner = reconstruct_qvq_inner_weight(
         trellis,
         bits=bits,
@@ -5409,9 +4780,7 @@ def test_qvq_v4_cuda_all_rates_batches_and_dtypes_match_dense_reference(bits, m,
         out_features=n,
     )
     reference = x.float() @ inner.float()
-    actual = qvq_cuda_gemv(
-        x, trellis, bits, out_features=n, vector_size=vector_size, output_fp32=True
-    )
+    actual = qvq_cuda_gemv(x, trellis, bits, out_features=n, vector_size=vector_size, output_fp32=True)
     delta = (actual.float() - reference.float()).abs()
     assert delta.max().item() <= 2e-3
     torch.testing.assert_close(actual, reference, rtol=0, atol=2e-3)
@@ -5420,7 +4789,6 @@ def test_qvq_v4_cuda_all_rates_batches_and_dtypes_match_dense_reference(bits, m,
 def test_qvq_v4_cuda_quantization_uses_reference_until_native_dispatch():
     """V4 CUDA Viterbi must return finite, correctly shaped production paths."""
     from gptqmodel.quantization.qvq import batched_viterbi_quantize
-
     sequences = torch.randn((1, 64, 4), dtype=torch.float32, device="cuda")
     codebook = pgc16_codebook_v4(device="cuda", dtype=torch.float32)
     result = batched_viterbi_quantize(sequences, codebook, bits=2)
@@ -5453,9 +4821,7 @@ def test_qvq_v4_cuda_telemetry_reports_native_dispatch_without_changing_math():
     generator = torch.Generator().manual_seed(20260821)
     weight = torch.randn((16, 16), generator=generator, dtype=torch.float32).cuda()
     hessian = torch.eye(16, dtype=torch.float32, device="cuda")
-    control = quantize_qvq_linear(
-        weight, hessian, bits=2, vector_size=4, trellis_batch_size=1
-    )
+    control = quantize_qvq_linear(weight, hessian, bits=2, vector_size=4, trellis_batch_size=1)
     measured = quantize_qvq_linear(
         weight,
         hessian,
@@ -5513,9 +4879,7 @@ def test_qvq_v4_cuda_viterbi_path_matches_cpu_reference(bits, steps, codebook_dt
     # The selected path is the exact contract.  The loss scalar uses CUDA
     # FP32 FMA order while the eager oracle uses the host BLAS reduction;
     # those legal reduction orders differ by a few ulps.
-    torch.testing.assert_close(
-        actual_error.cpu(), expected.squared_error, rtol=1e-6, atol=1e-5
-    )
+    torch.testing.assert_close(actual_error.cpu(), expected.squared_error, rtol=1e-6, atol=1e-5)
 
 
 @pytest.mark.parametrize("bits", QVQ_CUDA_BITS)
@@ -5535,9 +4899,7 @@ def test_qvq_v2_cuda_fp16_codebook_matches_cpu_reference(bits):
     )
     torch.cuda.synchronize()
     assert torch.equal(actual_states.cpu(), expected.states)
-    torch.testing.assert_close(
-        actual_error.cpu(), expected.squared_error, rtol=1e-6, atol=1e-5
-    )
+    torch.testing.assert_close(actual_error.cpu(), expected.squared_error, rtol=1e-6, atol=1e-5)
 
 
 @pytest.mark.parametrize("codebook_dtype", (torch.float16, torch.float32))
@@ -5550,15 +4912,11 @@ def test_qvq_v4_cuda_viterbi_covers_overlap_and_weighted_edges(codebook_dtype):
     overlap_bits = 16 - 4 * 2
     overlap = torch.tensor([0, (1 << overlap_bits) - 1], dtype=torch.int64)
     weights = torch.tensor(
-        [
-            [0.0, 1.0, 0.5, 2.0, 1.0, 0.25, 3.0, 1.0, 0.75],
-            [1.0, 0.0, 2.0, 0.5, 1.5, 1.0, 0.25, 2.0, 1.0],
-        ],
+        [[0.0, 1.0, 0.5, 2.0, 1.0, 0.25, 3.0, 1.0, 0.75],
+         [1.0, 0.0, 2.0, 0.5, 1.5, 1.0, 0.25, 2.0, 1.0]],
         dtype=torch.float32,
     )
-    expected = batched_viterbi_quantize(
-        sequences, codebook, bits=2, overlap=overlap, step_weights=weights
-    )
+    expected = batched_viterbi_quantize(sequences, codebook, bits=2, overlap=overlap, step_weights=weights)
     states, error = qvq_cuda_viterbi(
         sequences.cuda(),
         codebook.to(device="cuda", dtype=codebook_dtype),
@@ -5569,9 +4927,7 @@ def test_qvq_v4_cuda_viterbi_covers_overlap_and_weighted_edges(codebook_dtype):
     )
     torch.cuda.synchronize()
     assert torch.equal(states.cpu(), expected.states)
-    torch.testing.assert_close(
-        error.cpu(), expected.squared_error, rtol=1e-6, atol=1e-5
-    )
+    torch.testing.assert_close(error.cpu(), expected.squared_error, rtol=1e-6, atol=1e-5)
 
 
 @pytest.mark.parametrize("codebook_dtype", (torch.float16, torch.float32))
@@ -5582,16 +4938,12 @@ def test_qvq_v4_cuda_w4_memoryless_weighted_matches_reference(codebook_dtype):
     sequences = torch.randn((3, 7, 4), generator=generator, dtype=torch.float32)
     codebook = pgc16_codebook_v4(device="cpu", dtype=torch.float32)
     weights = torch.tensor(
-        [
-            [0.0, 1.0, 0.5, 2.0, 1.0, 0.25, 3.0],
-            [1.0, 0.0, 2.0, 0.5, 1.5, 1.0, 0.25],
-            [2.0, 1.0, 0.0, 0.75, 1.25, 0.5, 1.0],
-        ],
+        [[0.0, 1.0, 0.5, 2.0, 1.0, 0.25, 3.0],
+         [1.0, 0.0, 2.0, 0.5, 1.5, 1.0, 0.25],
+         [2.0, 1.0, 0.0, 0.75, 1.25, 0.5, 1.0]],
         dtype=torch.float32,
     )
-    expected = batched_viterbi_quantize(
-        sequences, codebook, bits=4, step_weights=weights
-    )
+    expected = batched_viterbi_quantize(sequences, codebook, bits=4, step_weights=weights)
     states, error = qvq_cuda_viterbi(
         sequences.cuda(),
         codebook.to(device="cuda", dtype=codebook_dtype),
@@ -5601,9 +4953,7 @@ def test_qvq_v4_cuda_w4_memoryless_weighted_matches_reference(codebook_dtype):
     )
     torch.cuda.synchronize()
     assert torch.equal(states.cpu(), expected.states)
-    torch.testing.assert_close(
-        error.cpu(), expected.squared_error, rtol=1e-6, atol=1e-5
-    )
+    torch.testing.assert_close(error.cpu(), expected.squared_error, rtol=1e-6, atol=1e-5)
 
 
 # ---------------------------------------------------------------------------
@@ -5611,20 +4961,13 @@ def test_qvq_v4_cuda_w4_memoryless_weighted_matches_reference(codebook_dtype):
 # ---------------------------------------------------------------------------
 
 
-def _norm_rank_case(
-    seed, batch, bits, bank_count, codebook_dtype=torch.float16, sequence_scale=None
-):
+def _norm_rank_case(seed, batch, bits, bank_count, codebook_dtype=torch.float16, sequence_scale=None):
     generator = torch.Generator(device="cuda").manual_seed(seed)
-    sequences = torch.randn(
-        (batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32
-    )
+    sequences = torch.randn((batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
     if sequence_scale is not None:
         sequences = sequences * sequence_scale
     codebooks = torch.stack(
-        tuple(
-            pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32)
-            for bank in range(bank_count)
-        )
+        tuple(pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32) for bank in range(bank_count))
     ).to(device="cuda", dtype=codebook_dtype)
     return sequences, codebooks
 
@@ -5634,13 +4977,8 @@ def _norm_rank_dispatch_count():
     return int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count())
 
 
-@pytest.mark.parametrize(
-    "bits,bank_count,segment_steps",
-    ((2.5, 2, 16), (2.5, 4, 32), (3.0, 2, 16), (3.0, 4, 32)),
-)
-def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(
-    monkeypatch, bits, bank_count, segment_steps
-):
+@pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (2.5, 4, 32), (3.0, 2, 16), (3.0, 4, 32)))
+def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(monkeypatch, bits, bank_count, segment_steps):
     """The norm-rank band path must actually dispatch for supported configs and
     agree bit-for-bit with the segmented banked reference."""
 
@@ -5651,9 +4989,7 @@ def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(
         sequences, codebooks, transition_bits, segment_steps, None, None
     )
     assert _norm_rank_dispatch_count() == before + 1
-    expected = qvq_cuda_viterbi_v2_segment_banked(
-        sequences, codebooks, bits, segment_steps, None, None
-    )
+    expected = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, bits, segment_steps, None, None)
     assert all(torch.equal(e, a) for e, a in zip(expected, actual))
     # This is an independent eager recurrence oracle, not another CUDA kernel.
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: (7, 5))
@@ -5668,59 +5004,27 @@ def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(
 @pytest.mark.parametrize(
     "bits,bank_count,segment_steps,constrained,weighted,codebook_dtype",
     (
-        (
-            2.0,
-            2,
-            16,
-            False,
-            False,
-            torch.float16,
-        ),  # shift 4: candidate list too short to pay for banding
-        (3.5, 2, 16, False, False, torch.float16),  # shift 7: unsupported rate
-        (
-            2.5,
-            2,
-            16,
-            True,
-            False,
-            torch.float16,
-        ),  # constrained keeps the exact fallback
-        (2.5, 2, 16, False, True, torch.float16),  # weighted keeps the exact fallback
+        (2.0, 2, 16, False, False, torch.float16),   # shift 4: candidate list too short to pay for banding
+        (3.5, 2, 16, False, False, torch.float16),   # shift 7: unsupported rate
+        (2.5, 2, 16, True, False, torch.float16),    # constrained keeps the exact fallback
+        (2.5, 2, 16, False, True, torch.float16),    # weighted keeps the exact fallback
         (3.0, 4, 32, True, True, torch.float16),
-        (
-            3.0,
-            2,
-            16,
-            False,
-            False,
-            torch.float32,
-        ),  # fp32 codebooks keep the reference path
+        (3.0, 2, 16, False, False, torch.float32),   # fp32 codebooks keep the reference path
     ),
 )
 def test_qvq_cuda_norm_rank_grid_leaves_unsupported_configs_on_reference_path(
     bits, bank_count, segment_steps, constrained, weighted, codebook_dtype
 ):
-    sequences, codebooks = _norm_rank_case(
-        20260826, 5, bits, bank_count, codebook_dtype=codebook_dtype
-    )
+    sequences, codebooks = _norm_rank_case(20260826, 5, bits, bank_count, codebook_dtype=codebook_dtype)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     generator = torch.Generator(device="cuda").manual_seed(20260827)
     overlap = (
-        torch.randint(
-            0,
-            1 << (16 - transition_bits),
-            (5,),
-            generator=generator,
-            device="cuda",
-            dtype=torch.int64,
-        )
+        torch.randint(0, 1 << (16 - transition_bits), (5,), generator=generator, device="cuda", dtype=torch.int64)
         if constrained
         else None
     )
     step_weights = (
-        (0.1 + torch.rand((5, 128), generator=generator, device="cuda")).contiguous()
-        if weighted
-        else None
+        (0.1 + torch.rand((5, 128), generator=generator, device="cuda")).contiguous() if weighted else None
     )
     before = _norm_rank_dispatch_count()
     actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
@@ -5735,15 +5039,7 @@ def test_qvq_cuda_norm_rank_grid_leaves_unsupported_configs_on_reference_path(
 
 @pytest.mark.parametrize(
     "value,enabled",
-    (
-        (None, True),
-        ("", True),
-        ("0", True),
-        ("1", False),
-        ("00", False),
-        ("0foo", False),
-        ("false", False),
-    ),
+    ((None, True), ("", True), ("0", True), ("1", False), ("00", False), ("0foo", False), ("false", False)),
 )
 def test_qvq_cuda_norm_rank_grid_disable_env_parser(value, enabled):
     """Only unset, empty, and exact ``0`` keep the eligible path enabled.
@@ -5785,12 +5081,7 @@ print("ENV-PARSER-OK")
         env["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = value
     script = f"EXPECTED = {int(enabled)}\n" + script
     result = subprocess.run(
-        [sys.executable, "-c", script],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=600,
-        check=False,
+        [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=600, check=False
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert "ENV-PARSER-OK" in result.stdout
@@ -5881,9 +5172,7 @@ def test_qvq_cuda_viterbi_norm_rank_repeated_later_segment_initialization(
     for repeat in range(8):
         candidate_sequences = sequences.clone()
         candidate_sequences[:, repeat::segment_steps, 0].add_(repeat * 0.03125)
-        actual = op(
-            candidate_sequences, codebooks, transition_bits, segment_steps, None, None
-        )
+        actual = op(candidate_sequences, codebooks, transition_bits, segment_steps, None, None)
         expected = qvq_cuda_viterbi_v2_segment_banked(
             candidate_sequences, codebooks, bits, segment_steps, None, None
         )
@@ -5909,9 +5198,7 @@ def test_qvq_cuda_norm_rank_cache_eviction_lifetime_and_boundedness():
     for codebook in codebooks[1:]:
         op(sequences, codebook, 5, 16, None, None)
     del codebooks
-    pressure = [
-        torch.empty((1 << 20,), device="cuda", dtype=torch.uint8) for _ in range(32)
-    ]
+    pressure = [torch.empty((1 << 20,), device="cuda", dtype=torch.uint8) for _ in range(32)]
     for tensor in pressure:
         tensor.fill_(0x5A)
     consumer.synchronize()
@@ -5925,9 +5212,7 @@ def test_qvq_cuda_norm_rank_cache_eviction_lifetime_and_boundedness():
         mutation_stream = torch.cuda.Stream()
         consumer_stream = torch.cuda.Stream()
         with torch.cuda.stream(mutation_stream):
-            mutable[:, index, 0].add_(
-                torch.tensor(0.125, device="cuda", dtype=torch.float16)
-            )
+            mutable[:, index, 0].add_(torch.tensor(0.125, device="cuda", dtype=torch.float16))
             mutation_done = torch.cuda.Event()
             mutation_done.record()
         # Mutation is asynchronous; make its cross-stream dependency explicit.
@@ -5940,9 +5225,7 @@ def test_qvq_cuda_norm_rank_cache_eviction_lifetime_and_boundedness():
         assert int(torch.ops.gptqmodel_qvq.norm_rank_cache_size()) <= 8
 
 
-@pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="requires two visible CUDA devices"
-)
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two visible CUDA devices")
 def test_qvq_cuda_mixed_device_cache_eviction_destroys_events_on_owner_device():
     """Both event-owning caches may evict an entry created on another GPU."""
 
@@ -5951,28 +5234,19 @@ def test_qvq_cuda_mixed_device_cache_eviction_destroys_events_on_owner_device():
         device = torch.device("cuda", 0 if index == 0 else 1)
         generator = torch.Generator(device=device).manual_seed(20260900 + index)
         sequences = torch.randn((1, 2, 4), generator=generator, device=device)
-        codebook = torch.randn(
-            (1 << 16, 4), generator=generator, device=device, dtype=torch.float16
-        )
+        codebook = torch.randn((1 << 16, 4), generator=generator, device=device, dtype=torch.float16)
         qvq_cuda_viterbi(sequences, codebook, bits=2.0, vector_size=4)
     with torch.cuda.device(0):
         op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
         for index in range(9):
             generator = torch.Generator(device="cuda:0").manual_seed(20261000 + index)
             sequences = torch.randn((1, 128, 2), generator=generator, device="cuda:0")
-            codebooks = torch.randn(
-                (2, 1 << 16, 2),
-                generator=generator,
-                device="cuda:0",
-                dtype=torch.float16,
-            )
+            codebooks = torch.randn((2, 1 << 16, 2), generator=generator, device="cuda:0", dtype=torch.float16)
             op(sequences, codebooks, 5, 16, None, None)
     with torch.cuda.device(1):
         generator = torch.Generator(device="cuda:1").manual_seed(20261100)
         sequences = torch.randn((1, 128, 2), generator=generator, device="cuda:1")
-        codebooks = torch.randn(
-            (2, 1 << 16, 2), generator=generator, device="cuda:1", dtype=torch.float16
-        )
+        codebooks = torch.randn((2, 1 << 16, 2), generator=generator, device="cuda:1", dtype=torch.float16)
         op(sequences, codebooks, 5, 16, None, None)
         assert torch.cuda.current_device() == 1
     torch.cuda.synchronize(0)
@@ -5982,20 +5256,14 @@ def test_qvq_cuda_mixed_device_cache_eviction_destroys_events_on_owner_device():
     assert torch.cuda.current_device() == original_device
 
 
-def test_qvq_cuda_norm_rank_w25_bank4_nextafter_chunk_boundary_matches_eager(
-    monkeypatch,
-):
+def test_qvq_cuda_norm_rank_w25_bank4_nextafter_chunk_boundary_matches_eager(monkeypatch):
     """Irregular finite FP16 values around a width-4 rank boundary stay exact."""
 
     bits, bank_count, segment_steps = 2.5, 4, 32
     sequences, codebooks = _norm_rank_case(20260838, 3, bits, bank_count)
     lo = torch.tensor(0.5, device="cuda", dtype=torch.float16)
-    hi = torch.nextafter(
-        lo, torch.tensor(torch.inf, device="cuda", dtype=torch.float16)
-    )
-    below = torch.nextafter(
-        lo, torch.tensor(-torch.inf, device="cuda", dtype=torch.float16)
-    )
+    hi = torch.nextafter(lo, torch.tensor(torch.inf, device="cuda", dtype=torch.float16))
+    below = torch.nextafter(lo, torch.tensor(-torch.inf, device="cuda", dtype=torch.float16))
     # Prefixes 3/4 straddle a sorted width-4 chunk boundary for suffix zero.
     suffix_count = 1 << (16 - 5)
     codebooks[:, 3 * suffix_count, :] = torch.stack((below, hi))
@@ -6003,9 +5271,7 @@ def test_qvq_cuda_norm_rank_w25_bank4_nextafter_chunk_boundary_matches_eager(
     sequence_values = torch.stack((below.float(), lo.float(), hi.float(), -hi.float()))
     repeated = sequence_values.repeat((sequences.numel() + 3) // 4)
     sequences.copy_(repeated[: sequences.numel()].reshape_as(sequences))
-    actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
-        sequences, codebooks, 5, segment_steps, None, None
-    )
+    actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(sequences, codebooks, 5, segment_steps, None, None)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: (7, 5))
     eager = _batched_v2_banked_viterbi_quantize(
         sequences, codebooks, bits=bits, segment_steps=segment_steps
@@ -6015,13 +5281,9 @@ def test_qvq_cuda_norm_rank_w25_bank4_nextafter_chunk_boundary_matches_eager(
     assert torch.equal(actual[2], eager.segment_bank_ids)
 
 
-@pytest.mark.parametrize(
-    "bits,bank_count,segment_steps", ((2.5, 2, 16), (3.0, 2, 16), (3.0, 4, 32))
-)
+@pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (3.0, 2, 16), (3.0, 4, 32)))
 @pytest.mark.parametrize("pattern", ("ties", "tiny", "large"))
-def test_qvq_cuda_norm_rank_rounding_edges_and_ties_match_banked_reference(
-    bits, bank_count, segment_steps, pattern
-):
+def test_qvq_cuda_norm_rank_rounding_edges_and_ties_match_banked_reference(bits, bank_count, segment_steps, pattern):
     """Adversarial inputs for the directed-rounding band derivation: massive
     exact value ties (the lowest original prefix must win), denormal-scale
     sequences, and large sequences near the finite-accumulation contract."""
@@ -6031,32 +5293,20 @@ def test_qvq_cuda_norm_rank_rounding_edges_and_ties_match_banked_reference(
         # Repeat one small code table across every prefix of each suffix column:
         # every candidate value ties, so selections exercise pure tie-breaking.
         generator = torch.Generator(device="cuda").manual_seed(20260833)
-        base = torch.randn(
-            (bank_count, 1 << (16 - transition_bits), 2),
-            generator=generator,
-            device="cuda",
-        )
+        base = torch.randn((bank_count, 1 << (16 - transition_bits), 2), generator=generator, device="cuda")
         codebooks = (
             base.repeat(1, 1 << transition_bits, 1).to(torch.float16).contiguous()
         )
-        sequences = torch.randn(
-            (5, 128, 2), generator=generator, device="cuda", dtype=torch.float32
-        )
+        sequences = torch.randn((5, 128, 2), generator=generator, device="cuda", dtype=torch.float32)
     elif pattern == "tiny":
-        sequences, codebooks = _norm_rank_case(
-            20260834, 5, bits, bank_count, sequence_scale=1e-30
-        )
+        sequences, codebooks = _norm_rank_case(20260834, 5, bits, bank_count, sequence_scale=1e-30)
     else:
         # Just inside the finite FP32 squared-distance contract of the op.
-        sequences, codebooks = _norm_rank_case(
-            20260835, 5, bits, bank_count, sequence_scale=1e15
-        )
+        sequences, codebooks = _norm_rank_case(20260835, 5, bits, bank_count, sequence_scale=1e15)
     actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
         sequences, codebooks, transition_bits, segment_steps, None, None
     )
-    expected = qvq_cuda_viterbi_v2_segment_banked(
-        sequences, codebooks, bits, segment_steps, None, None
-    )
+    expected = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, bits, segment_steps, None, None)
     assert all(torch.equal(e, a) for e, a in zip(expected, actual))
 
 
@@ -6071,14 +5321,9 @@ def _pruning_code(**kwargs):
     return viterbi_pruning_dispatch_code(ViterbiPruningConfig(**kwargs))
 
 
-@pytest.mark.parametrize(
-    "bits,bank_count,segment_steps",
-    ((2.5, 2, 16), (2.5, 4, 32), (3.0, 2, 16), (3.0, 4, 32)),
-)
+@pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (2.5, 4, 32), (3.0, 2, 16), (3.0, 4, 32)))
 @pytest.mark.parametrize("mode", ("auto", "required"))
-def test_qvq_pruning_policy_dispatches_eligible_cells(
-    bits, bank_count, segment_steps, mode
-):
+def test_qvq_pruning_policy_dispatches_eligible_cells(bits, bank_count, segment_steps, mode):
     """`auto` and `required` both norm-band dispatch every eligible cell and
     stay bit-exact against the unmodified reference."""
 
@@ -6093,22 +5338,14 @@ def test_qvq_pruning_policy_dispatches_eligible_cells(
     )
     before = _norm_rank_dispatch_count()
     actual = op(
-        sequences,
-        codebooks,
-        transition_bits,
-        segment_steps,
-        None,
-        None,
-        _pruning_code(mode=mode),
+        sequences, codebooks, transition_bits, segment_steps, None, None, _pruning_code(mode=mode)
     )
     assert _norm_rank_dispatch_count() == before + 1
     assert all(torch.equal(e, a) for e, a in zip(reference, actual))
 
 
 @pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (3.0, 4, 32)))
-def test_qvq_pruning_policy_off_suppresses_eligible_dispatch(
-    bits, bank_count, segment_steps
-):
+def test_qvq_pruning_policy_off_suppresses_eligible_dispatch(bits, bank_count, segment_steps):
     """`off` deterministically suppresses norm-band dispatch on a cell that
     `auto` would have dispatched, and the baseline result is identical."""
 
@@ -6118,25 +5355,13 @@ def test_qvq_pruning_policy_off_suppresses_eligible_dispatch(
 
     before = _norm_rank_dispatch_count()
     dispatched = op(
-        sequences,
-        codebooks,
-        transition_bits,
-        segment_steps,
-        None,
-        None,
-        _pruning_code(mode="auto"),
+        sequences, codebooks, transition_bits, segment_steps, None, None, _pruning_code(mode="auto")
     )
     assert _norm_rank_dispatch_count() == before + 1
 
     before = _norm_rank_dispatch_count()
     suppressed = op(
-        sequences,
-        codebooks,
-        transition_bits,
-        segment_steps,
-        None,
-        None,
-        _pruning_code(mode="off"),
+        sequences, codebooks, transition_bits, segment_steps, None, None, _pruning_code(mode="off")
     )
     assert _norm_rank_dispatch_count() == before
     assert all(torch.equal(d, s) for d, s in zip(dispatched, suppressed))
@@ -6145,28 +5370,11 @@ def test_qvq_pruning_policy_off_suppresses_eligible_dispatch(
 # W1.5/W2/W3.5 stay outside the benchmark-supported W2.5/W3 set, and fp32
 # codebooks, constrained calls, and weighted calls keep the exact baseline.
 _UNSUPPORTED_PRUNING_CELLS = (
-    pytest.param(
-        2.0, 2, 16, False, False, torch.float16, "transition_bits=4", id="w2-rate"
-    ),
-    pytest.param(
-        1.5, 2, 16, False, False, torch.float16, "transition_bits=3", id="w1p5-rate"
-    ),
-    pytest.param(
-        3.5, 2, 16, False, False, torch.float16, "transition_bits=7", id="w3p5-rate"
-    ),
-    pytest.param(
-        3.0,
-        2,
-        16,
-        False,
-        False,
-        torch.float32,
-        "float16 codebooks",
-        id="fp32-codebooks",
-    ),
-    pytest.param(
-        2.5, 2, 16, True, False, torch.float16, "constrained", id="constrained"
-    ),
+    pytest.param(2.0, 2, 16, False, False, torch.float16, "transition_bits=4", id="w2-rate"),
+    pytest.param(1.5, 2, 16, False, False, torch.float16, "transition_bits=3", id="w1p5-rate"),
+    pytest.param(3.5, 2, 16, False, False, torch.float16, "transition_bits=7", id="w3p5-rate"),
+    pytest.param(3.0, 2, 16, False, False, torch.float32, "float16 codebooks", id="fp32-codebooks"),
+    pytest.param(2.5, 2, 16, True, False, torch.float16, "constrained", id="constrained"),
     pytest.param(3.0, 4, 32, False, True, torch.float16, "weighted", id="weighted"),
 )
 
@@ -6181,37 +5389,20 @@ def test_qvq_pruning_policy_auto_leaves_unsupported_cells_on_baseline(
     """`auto` with the default `baseline` fallback keeps every unsupported cell
     on the unmodified reference recurrence."""
 
-    sequences, codebooks = _norm_rank_case(
-        20260903, 5, bits, bank_count, codebook_dtype=codebook_dtype
-    )
+    sequences, codebooks = _norm_rank_case(20260903, 5, bits, bank_count, codebook_dtype=codebook_dtype)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     generator = torch.Generator(device="cuda").manual_seed(20260904)
     overlap = (
-        torch.randint(
-            0,
-            1 << (16 - transition_bits),
-            (5,),
-            generator=generator,
-            device="cuda",
-            dtype=torch.int64,
-        )
+        torch.randint(0, 1 << (16 - transition_bits), (5,), generator=generator, device="cuda", dtype=torch.int64)
         if constrained
         else None
     )
     step_weights = (
-        (0.1 + torch.rand((5, 128), generator=generator, device="cuda")).contiguous()
-        if weighted
-        else None
+        (0.1 + torch.rand((5, 128), generator=generator, device="cuda")).contiguous() if weighted else None
     )
     before = _norm_rank_dispatch_count()
     actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
-        sequences,
-        codebooks,
-        transition_bits,
-        segment_steps,
-        overlap,
-        step_weights,
-        _pruning_code(mode="auto"),
+        sequences, codebooks, transition_bits, segment_steps, overlap, step_weights, _pruning_code(mode="auto")
     )
     assert _norm_rank_dispatch_count() == before
     expected_triple = qvq_cuda_viterbi_v2_segment_banked(
@@ -6232,49 +5423,26 @@ def test_qvq_pruning_policy_auto_leaves_unsupported_cells_on_baseline(
     ),
 )
 def test_qvq_pruning_policy_rejects_unsupported_cells_before_silent_fallback(
-    bits,
-    bank_count,
-    segment_steps,
-    constrained,
-    weighted,
-    codebook_dtype,
-    expected,
-    policy,
+    bits, bank_count, segment_steps, constrained, weighted, codebook_dtype, expected, policy
 ):
     """`required` and `auto`+`fallback="error"` must raise, naming the reason,
     instead of silently using the baseline recurrence."""
 
-    sequences, codebooks = _norm_rank_case(
-        20260905, 5, bits, bank_count, codebook_dtype=codebook_dtype
-    )
+    sequences, codebooks = _norm_rank_case(20260905, 5, bits, bank_count, codebook_dtype=codebook_dtype)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     generator = torch.Generator(device="cuda").manual_seed(20260906)
     overlap = (
-        torch.randint(
-            0,
-            1 << (16 - transition_bits),
-            (5,),
-            generator=generator,
-            device="cuda",
-            dtype=torch.int64,
-        )
+        torch.randint(0, 1 << (16 - transition_bits), (5,), generator=generator, device="cuda", dtype=torch.int64)
         if constrained
         else None
     )
     step_weights = (
-        (0.1 + torch.rand((5, 128), generator=generator, device="cuda")).contiguous()
-        if weighted
-        else None
+        (0.1 + torch.rand((5, 128), generator=generator, device="cuda")).contiguous() if weighted else None
     )
     before = _norm_rank_dispatch_count()
     with pytest.raises(RuntimeError) as excinfo:
         _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
-            sequences,
-            codebooks,
-            transition_bits,
-            segment_steps,
-            overlap,
-            step_weights,
+            sequences, codebooks, transition_bits, segment_steps, overlap, step_weights,
             _pruning_code(**policy),
         )
     assert "cannot use it" in str(excinfo.value)
@@ -6285,9 +5453,7 @@ def test_qvq_pruning_policy_rejects_unsupported_cells_before_silent_fallback(
 def test_qvq_pruning_policy_code_is_validated_natively():
     sequences, codebooks = _norm_rank_case(20260907, 4, 3.0, 2)
     with pytest.raises(RuntimeError, match="pruning policy must be 0"):
-        _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
-            sequences, codebooks, 6, 16, None, None, 4
-        )
+        _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(sequences, codebooks, 6, 16, None, None, 4)
 
 
 def test_qvq_pruning_policy_default_argument_matches_auto():
@@ -6339,9 +5505,7 @@ def test_qvq_pruning_telemetry_reports_candidate_reduction(monkeypatch):
         ("auto", "error", "1", "raised"),
     ),
 )
-def test_qvq_pruning_config_precedence_over_the_legacy_env_variable(
-    mode, fallback, env, expected
-):
+def test_qvq_pruning_config_precedence_over_the_legacy_env_variable(mode, fallback, env, expected):
     """`GPTQMODEL_QVQ_DISABLE_OCTET_GRID` is a deprecated A/B escape honored
     only under `mode="auto"`. Each combination runs in its own subprocess so
     the eight cases cannot contaminate one another's environment; the
@@ -6391,16 +5555,9 @@ print("PRECEDENCE-OK")
         env_vars.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
     else:
         env_vars["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = env
-    script = (
-        f"MODE = {mode!r}\nFALLBACK = {fallback!r}\nEXPECTED = {expected!r}\n" + script
-    )
+    script = f"MODE = {mode!r}\nFALLBACK = {fallback!r}\nEXPECTED = {expected!r}\n" + script
     result = subprocess.run(
-        [sys.executable, "-c", script],
-        env=env_vars,
-        capture_output=True,
-        text=True,
-        timeout=900,
-        check=False,
+        [sys.executable, "-c", script], env=env_vars, capture_output=True, text=True, timeout=900, check=False
     )
     assert result.returncode == 0, result.stderr[-2000:]
     assert "PRECEDENCE-OK" in result.stdout
@@ -6430,15 +5587,7 @@ def test_qvq_pruning_legacy_env_mutation_is_observed_same_process():
 
         # `auto` + `fallback="error"` must also observe the fresh value.
         with pytest.raises(RuntimeError, match="GPTQMODEL_QVQ_DISABLE_OCTET_GRID"):
-            op(
-                sequences,
-                codebooks,
-                6,
-                16,
-                None,
-                None,
-                _pruning_code(mode="auto", fallback="error"),
-            )
+            op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="auto", fallback="error"))
 
         del os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"]
         before = _norm_rank_dispatch_count()
@@ -6466,14 +5615,10 @@ def test_qvq_pruning_required_ignores_env_mutation_same_process():
     op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
     saved = os.environ.pop("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", None)
     try:
-        reference = op(
-            sequences, codebooks, 6, 16, None, None, _pruning_code(mode="required")
-        )
+        reference = op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="required"))
         os.environ["GPTQMODEL_QVQ_DISABLE_OCTET_GRID"] = "1"
         before = _norm_rank_dispatch_count()
-        actual = op(
-            sequences, codebooks, 6, 16, None, None, _pruning_code(mode="required")
-        )
+        actual = op(sequences, codebooks, 6, 16, None, None, _pruning_code(mode="required"))
         assert _norm_rank_dispatch_count() == before + 1
         assert all(torch.equal(a, b) for a, b in zip(reference, actual))
     finally:

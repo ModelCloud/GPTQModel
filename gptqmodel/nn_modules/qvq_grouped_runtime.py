@@ -376,9 +376,12 @@ class QVQHopperGroupedRuntime:
         # A plain child may lazily build its own continuous-window cache.  Drop
         # the grouped window first so an unsupported prefill cannot make both
         # representations persistent at once.
-        if self._payload is not None and not (
-            self._payload.trellis.device.type == "cuda"
-            and torch.cuda.is_current_stream_capturing()
+        if (
+            self._payload is not None
+            and not (
+                self._payload.trellis.device.type == "cuda"
+                and torch.cuda.is_current_stream_capturing()
+            )
         ):
             self.invalidate()
 
@@ -446,10 +449,10 @@ class QVQHopperGroupedRuntime:
         self._h100_multiblock_input_hadamard_enabled = (
             self._h100_direct_padded_input_enabled
         )
-        self._h100_fp16_recovery_store_enabled = properties.name == "NVIDIA H100" and (
-            properties.major,
-            properties.minor,
-        ) == (9, 0)
+        self._h100_fp16_recovery_store_enabled = (
+            properties.name == "NVIDIA H100"
+            and (properties.major, properties.minor) == (9, 0)
+        )
         self._h100_w25_n128_gate_up_enabled = (
             self.category == "gate_up"
             and len(children) == 2
@@ -586,7 +589,11 @@ class QVQHopperGroupedRuntime:
         children = self._children()
         rows = x.numel() // children[0].in_features
         padded_rows = (
-            16 if rows <= 16 else 32 if rows <= 32 else ((rows + 63) // 64) * 64
+            16
+            if rows <= 16
+            else 32
+            if rows <= 32
+            else ((rows + 63) // 64) * 64
         )
         x_2d = x.reshape(rows, children[0].in_features).to(torch.float16)
         payload = self._ensure_payload()
@@ -681,19 +688,17 @@ class QVQHopperGroupedRuntime:
                 self._h100_fp16_recovery_store_enabled
                 and self.category == "qkv"
                 and children[0].in_features == 5120
-                and tuple(child.out_features for child in children) == (10240, 6144)
+                and tuple(child.out_features for child in children)
+                == (10240, 6144)
                 and qvq_transition_bits(
                     children[0].bits, vector_size=children[0].vector_size
                 )
                 <= 6
             ):
                 self.telemetry.h100_qwen_fixed_linear_grid_launches += 1
-                if (
-                    qvq_transition_bits(
-                        children[0].bits, vector_size=children[0].vector_size
-                    )
-                    != 5
-                ):
+                if qvq_transition_bits(
+                    children[0].bits, vector_size=children[0].vector_size
+                ) != 5:
                     self.telemetry.h100_qwen_linear_decode_prefetch_launches += 1
         if self._h100_w25_n128_gate_up_enabled:
             self.telemetry.h100_w25_n128_gate_up_launches += 1
@@ -756,7 +761,8 @@ class QVQHopperGroupedRuntime:
                 self._h100_fp16_recovery_store_enabled
                 and self.category == "qkv"
                 and children[0].in_features == 5120
-                and tuple(member.out_features for member in children) == (10240, 6144)
+                and tuple(member.out_features for member in children)
+                == (10240, 6144)
                 and rows <= 16
                 and child.output_hadamard
                 and inner.dtype == torch.float32
@@ -779,8 +785,12 @@ class QVQHopperGroupedRuntime:
                 recovered = qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
                     inner[:rows].contiguous(),
                     base=base,
-                    post_scale=child._cached_cast("SV", torch.float16, torch.float32),
-                    bias=child._cached_cast("bias", torch.float16, torch.float32),
+                    post_scale=child._cached_cast(
+                        "SV", torch.float16, torch.float32
+                    ),
+                    bias=child._cached_cast(
+                        "bias", torch.float16, torch.float32
+                    ),
                 )
                 self.telemetry.h100_qwen_linear_composite_recovery_launches += 1
                 self.telemetry.h100_qwen_linear_multiblock_recovery_launches += 1
@@ -863,15 +873,7 @@ class QVQHopperGroupedRuntime:
 
         rows = x.numel() // self._children()[0].in_features
         children = self._children()
-        qwen_folded_intermediate = (
-            self._mlp_activation_is_exact_silu
-            and not children[0].output_hadamard
-            and not children[1].output_hadamard
-            and not down.input_hadamard
-        )
-        if rows > 16 and (
-            qwen_folded_intermediate or not self._h100_multiblock_intermediate_enabled
-        ):
+        if rows > 16:
             # Large-M uses the exact generic module boundaries while sharing
             # gate/up input preparation and P32 decode. The ordinary down
             # module now owns the same M32/M64 row-reuse dispatch, so this
@@ -881,6 +883,12 @@ class QVQHopperGroupedRuntime:
             gate, up = self._execute(x)
             activated_gate = self._mlp_act_fn(gate)
             return down(activated_gate * up)
+        qwen_folded_intermediate = (
+            self._mlp_activation_is_exact_silu
+            and not children[0].output_hadamard
+            and not children[1].output_hadamard
+            and not down.input_hadamard
+        )
         if qwen_folded_intermediate:
             # Qwen3.8-27B has a 17*1024 intermediate width, for which no exact
             # composite Hadamard base exists.  Its model definition therefore
@@ -911,18 +919,10 @@ class QVQHopperGroupedRuntime:
                 )
                 transformed = qvq_cuda_folded_swiglu_precondition_ordered_fp32(
                     partials,
-                    gate_scale=children[0]._cached_cast(
-                        "SV", torch.float16, torch.float32
-                    ),
-                    up_scale=children[1]._cached_cast(
-                        "SV", torch.float16, torch.float32
-                    ),
-                    gate_bias=children[0]._cached_cast(
-                        "bias", torch.float16, torch.float32
-                    ),
-                    up_bias=children[1]._cached_cast(
-                        "bias", torch.float16, torch.float32
-                    ),
+                    gate_scale=children[0]._cached_cast("SV", torch.float16, torch.float32),
+                    up_scale=children[1]._cached_cast("SV", torch.float16, torch.float32),
+                    gate_bias=children[0]._cached_cast("bias", torch.float16, torch.float32),
+                    up_bias=children[1]._cached_cast("bias", torch.float16, torch.float32),
                     down_scale=down._cached_cast("SU", torch.float16),
                     split_count=gate_up_split_count,
                     logical_rows=rows,
@@ -939,35 +939,21 @@ class QVQHopperGroupedRuntime:
                 transformed = qvq_cuda_folded_swiglu_precondition_fp32(
                     inner_gate,
                     inner_up,
-                    gate_scale=children[0]._cached_cast(
-                        "SV", torch.float16, torch.float32
-                    ),
-                    up_scale=children[1]._cached_cast(
-                        "SV", torch.float16, torch.float32
-                    ),
-                    gate_bias=children[0]._cached_cast(
-                        "bias", torch.float16, torch.float32
-                    ),
-                    up_bias=children[1]._cached_cast(
-                        "bias", torch.float16, torch.float32
-                    ),
+                    gate_scale=children[0]._cached_cast("SV", torch.float16, torch.float32),
+                    up_scale=children[1]._cached_cast("SV", torch.float16, torch.float32),
+                    gate_bias=children[0]._cached_cast("bias", torch.float16, torch.float32),
+                    up_bias=children[1]._cached_cast("bias", torch.float16, torch.float32),
                     down_scale=down._cached_cast("SU", torch.float16),
                 )
                 self.telemetry.h100_folded_qwen_fused_precondition_launches += 1
             else:
                 inner_gate, inner_up = self._execute(x, recover=False)
-                gate = (
-                    children[0]
-                    ._qvq_recover_inference_output(inner_gate, torch.float16)
-                    .reshape(rows, down.in_features)
-                    .to(x.dtype)
-                )
-                up = (
-                    children[1]
-                    ._qvq_recover_inference_output(inner_up, torch.float16)
-                    .reshape(rows, down.in_features)
-                    .to(x.dtype)
-                )
+                gate = children[0]._qvq_recover_inference_output(
+                    inner_gate, torch.float16
+                ).reshape(rows, down.in_features).to(x.dtype)
+                up = children[1]._qvq_recover_inference_output(
+                    inner_up, torch.float16
+                ).reshape(rows, down.in_features).to(x.dtype)
                 activated_gate = self._mlp_act_fn(gate)
                 transformed = down._qvq_prepare_inference_input(
                     activated_gate * up,
@@ -990,8 +976,12 @@ class QVQHopperGroupedRuntime:
                 post_scale1=children[1]._cached_cast(
                     "SV", torch.float16, torch.float32
                 ),
-                bias0=children[0]._cached_cast("bias", torch.float16, torch.float32),
-                bias1=children[1]._cached_cast("bias", torch.float16, torch.float32),
+                bias0=children[0]._cached_cast(
+                    "bias", torch.float16, torch.float32
+                ),
+                bias1=children[1]._cached_cast(
+                    "bias", torch.float16, torch.float32
+                ),
                 pre_scale=down._cached_cast("SU", torch.float16),
                 scale_mode=3,
                 pad_to_16=direct_pad,
@@ -1059,8 +1049,7 @@ class QVQHopperGroupedRuntime:
                     down._cached_cast("SU", torch.float16),
                 )
         fused_down_recovery = (
-            rows <= 16
-            and self._h100_multiblock_intermediate_enabled
+            self._h100_multiblock_intermediate_enabled
             and down.output_hadamard
             and (down.in_features, down.out_features) == (8192, 2048)
         )
@@ -1071,7 +1060,9 @@ class QVQHopperGroupedRuntime:
             )
             recovered = qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
                 partials,
-                post_scale=down._cached_cast("SV", torch.float16, torch.float32),
+                post_scale=down._cached_cast(
+                    "SV", torch.float16, torch.float32
+                ),
                 bias=down._cached_cast("bias", torch.float16, torch.float32),
                 scale_mode=3,
                 logical_rows=rows,
@@ -1086,8 +1077,7 @@ class QVQHopperGroupedRuntime:
             down.bits, vector_size=down.vector_size
         )
         use_qwen_ordered_composite_recovery = (
-            rows <= 16
-            and self._h100_fp16_recovery_store_enabled
+            self._h100_fp16_recovery_store_enabled
             and down.output_hadamard
             and (down.in_features, down.out_features) == (17408, 5120)
             and qwen_transition_bits == 6
