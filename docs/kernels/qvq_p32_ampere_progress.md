@@ -3131,6 +3131,16 @@ four-rate geometric mean improves from `0.0659635` to `0.0657122 ms`
 This remains a shape-local progression; the full-matrix 10% target is still
 open.
 
+## v27 rejected M1 attention static split probe
+
+The M1 attention-out route `(K,N)=(6144,5120)` uses split 48, so I screened a
+matching compile-time split specialization.  It was reverted after the
+8,000-iteration run showed a severe W3 regression: dynamic medians were
+`0.040960/0.044032/0.043008/0.041984 ms`, while the static probe measured
+`0.040960/0.040960/0.281600/0.040960 ms` at W2/W2.5/W3/W3.5.  Outputs stayed
+exact (`max_abs <= 1.6e-5`), but the performance result is not acceptable.
+The failed diagnostic is `artifacts/a100_p32_window/v27_candidate_m1_attention_static48_8000.json`.
+
 ## Reproduction
 
 ```bash
