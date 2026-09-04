@@ -2910,6 +2910,131 @@ reducer's `0.032768/0.033792/0.034816/0.034816 ms`; it loses W2, W2.5, and
 W3.5. The 16-output reducer remains dispatched. Diagnostics are
 `v20_m16_fullkv_reduce32_{candidate,control}.json`.
 
+## v21 after merged PR #99
+
+The next optimization cycle started from freshly fetched `origin/main` at
+`631411ee3b07ed14c29fb21c0e959b0d811eb5cb` (the merge of PR #99). The fresh
+140-row Ampere baseline is `artifacts/a100_p32_window/v21_main_baseline_300.json`;
+its median-latency geometric mean is `0.0655313 ms` across M=1,2,4,8,16 and
+W2-W3.5. The full candidate screen is
+`artifacts/a100_p32_window/v21_candidate_full_300.json`.
+The current-tip refresh is `artifacts/a100_p32_window/v21_current_full_300.json`;
+against the fresh baseline its median-latency geometric mean is `0.9954x`
+(effectively unchanged at the 1.024-us CUDA-event tick), so no additional
+10% progression is claimed from this cycle.
+
+The first accepted v21 progression makes the split reducer compile-time for
+the two direct wide-Q waves that previously fell through the runtime loop:
+split 9 (M16 full-Q) and split 14 (M8 full-Q). The matched 3,000-iteration
+medians were exact and improved M8 W2/W2.5/W3 from
+`0.086016/0.090112/0.088064` to
+`0.084992/0.089088/0.087040 ms`; M16 W3/W3.5 improved from
+`0.090112/0.091136` to `0.089088/0.090112 ms`. Diagnostics are
+`v21_reducer_9_14_3000.json` and `v21_reducer_control_3000.json`.
+
+The same progression adds a three-stage scalar pipeline only for M1,
+K5120/N12288. Its matched 3,000-iteration medians were exact and improved
+W2/W2.5/W3 from `0.061440/0.068608/0.067584` to
+`0.060416/0.067584/0.066560 ms`, with W3.5 tied. Diagnostics are
+`v21_m1_fullq_stage3_3000.json` and `v21_m1_fullq_stage2_control_3000.json`.
+
+The following probes were rejected and reverted. M16 full-Q stage 2 and
+stage 4 regressed the three-stage control; a 64-thread Marlin-style CTA was
+50--65% slower and initially exposed an 8-byte bank-ID alignment hazard; a
+four-output vector reducer tied the scalar reducer; and a global
+`-maxrregcount=64` cap was mixed/one-tick-only. Broadening the M1 three-stage
+pipeline to N10240/N17408 regressed MLP-gate W3.5 to `0.092160 ms` (versus
+`0.090112 ms`). Diagnostics are `v21_m16_fullq_stage2_1000.json`,
+`v21_m16_fullq_cta64_safe_1000.json`, `v21_m16_fullq_vec4_1000.json`,
+`v21_m16_fullq_rreg64_{1000,3000}.json`, and
+`v21_m1_wide_stage3_1000.json`.
+
+Additional follow-up probes were rejected. Explicit M16 full-Q split 8 was
+about 9--13% slower than split 9; three N16 tiles per warp was about 50%
+slower; explicit PTX for the PGC16 multiply/bit extract regressed W3.5; and
+both packed and four-register lane-plan hoists tied or regressed after
+register/instruction trade-offs. A global 80-register cap was mixed across
+M1 MLP shapes. Diagnostics are `v21_m16_fullq_split8_1000.json`,
+`v21_m16_fullq_triplewide_1000.json`, `v21_m16_fullq_pgc_ptx_1000.json`,
+`v21_m16_fullq_laneplan_1000.json`,
+`v21_m16_fullq_laneplan_packed_1000.json`,
+`v21_m16_fullq_wordplan_1000.json`, and
+`v21_m1_rreg80_{1000,3000}.json`.
+
+The next probes were also rejected. A correctly scoped scalar bank-mask hoist
+for M16 full-Q W3.5 increased the matched 5,000-iteration median from
+`0.090112` to `0.091136 ms`; staging the 512-byte level table in shared
+memory tied W3.5 at `0.090112 ms` and showed no consistent W2-W3 benefit; and
+a fused adjacent-pair state extractor increased W3.5 to `0.091136 ms`.
+Enabling the in-process autotuner that is on by default for the three
+full-Q hard-coded routes selected noisier waves (including M16 split 10
+instead of the retained split 9) without improving the matched screen. A
+three-stage scalar M4 W3.5 probe regressed from `0.089088` to `0.092160 ms`.
+Replacing the constant-cache `__ldg` level loads with ordinary global loads
+also regressed M16/W3.5 from `0.090112` to `0.092160 ms`. All were reverted.
+Diagnostics are
+`v21_m16_fullq_hoistw35_{control,candidate}_5000.json`,
+`v21_m16_fullq_litew35_candidate_5000.json`,
+`v21_m16_fullq_sharedlevels_{w35_candidate_5000,w234_candidate_3000}.json`,
+`v21_m16_fullq_quad64_w35_candidate_5000.json`,
+`v21_fullq_autotune_1000.json`,
+`v21_m4_fullq_stage{2_control,3_w35}_5000.json`, and
+`v21_m16_fullq_globallevels_w35_candidate_5000.json`.
+
+A warp-level M1 full-Q split reducer was also rejected: with split 40 its
+matched 5,000-iteration medians were identical to the existing static
+reducer at all four rates. Diagnostics are
+`v21_m1_fullq_warpreduce_candidate_5000.json` and
+`v21_m1_fullq_staticreduce_control_5000.json`.
+
+Skipping the final WMMA handoff barrier (safe-looking because no later stage
+overwrites the buffer) was also rejected: M16/W3.5 moved from the matched
+`0.090112` to `0.091136 ms`. The barrier remains unconditional for the
+independent-thread-scheduling handoff contract. Diagnostic:
+`v21_m16_fullq_finalbarrier_candidate_5000.json`.
+
+Hoisting lane-invariant pair and shuffle coordinates out of the K-stage loop
+was neutral in the matched M16/W3.5 run (`0.090112 ms` control and
+candidate), so it was also reverted. Diagnostic:
+`v21_m16_fullq_lanehoist_w35_candidate_5000.json`.
+
+The Hopper-inspired byte-permute form of the PGC16 pre-mix was bit-identical
+but neutral on Ampere: M16/W3.5 measured `0.090112 ms`, the same as control,
+so the compiler's original shift/LOP3 form remains. Diagnostic:
+`v21_m16_fullq_pgc_byteperm_w35_candidate_5000.json`.
+
+## v22 after the next origin refresh
+
+The next cycle fetched `origin/main` again; it remains
+`631411ee3b07ed14c29fb21c0e959b0d811eb5cb`. The existing Ampere branch is
+still the open WIP PR #100, so this cycle does not claim a merged upstream
+baseline change.
+
+The M16 long-K MLP-down split sweep confirmed the retained split 24 policy:
+split 16 measured `0.141312/0.140288/0.142336/0.145408 ms`, split 24 measured
+`0.124928/0.124928/0.125952/0.129024 ms`, and split 32 measured
+`0.128000/0.128000/0.129024/0.131072 ms` for W2/W2.5/W3/W3.5. The split-24
+control remains the fastest; diagnostics are
+`v22_m16_mlpdown_split{16,24,32}_2000.json`.
+
+The following candidates were exact but did not improve a matched high-
+iteration control and were reverted: a native `__umul24` PGC16 multiply,
+static bank-alt-3 specialization, scalar M1 compile-time-K, a warp-parallel
+M16 MLP-down reducer, Hopper's `mad.lo.u16` PGC form, cache-at-all-levels
+activation copies, and a four-K16 M1 long-K static-N dispatch. Representative
+diagnostics are `v22_m16_fullq_umul24_candidate_{5000,w234_5000}.json`,
+`v22_m16_fullq_staticalt3_candidate_3000.json`,
+`v22_m1_fullq_statick_candidate_5000.json`,
+`v22_m16_mlpdown_warpreduce16_candidate_5000.json`,
+`v22_m16_fullq_pgc16u16_candidate_5000.json`,
+`v22_m16_fullq_input_ca16_candidate_5000.json`, and
+`v22_m1_mlpdown_staticn_stage4_candidate_5000.json`.
+
+The current full 140-row refresh remains the measured reference:
+`v21_current_full_300.json` has a `0.9954x` median-latency geometric mean
+versus `v21_main_baseline_300.json`, so no additional 10% Ampere progression
+is claimed from these probes.
+
 ## Reproduction
 
 ```bash

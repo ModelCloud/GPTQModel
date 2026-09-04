@@ -1746,7 +1746,23 @@ at::Tensor p32_window_ampere_impl(
   const auto* bank_ids_ptr = bank_ids.data_ptr<uint8_t>();
   auto* partial_output_ptr = partial_output.data_ptr<float>();
   auto* output_ptr = output.data_ptr<float>();
-  if (size_m == 1 && use_small_m_scalar &&
+  if (size_m == 1 && size_k == 5120 && size_n == 12288 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
+          kScalarTripleStageKTiles>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
+  } else if (size_m == 1 && use_small_m_scalar &&
       (size_n == 12288 || size_n == 1024 || size_n == 10240 || size_n == 6144 ||
        size_n == 17408 || size_n == 5120) &&
              launch_static_n_scalar_kernel<TransitionBits, 1>(
@@ -2520,11 +2536,17 @@ at::Tensor p32_window_ampere_impl(
            (size_k == 17408 && size_n == 5120))));
     if (use_static_reducer) {
       switch (split_count) {
+        case 9:
+          QVQ_LAUNCH_STATIC_REDUCER(9);
+          break;
         case 10:
           QVQ_LAUNCH_STATIC_REDUCER(10);
           break;
         case 12:
           QVQ_LAUNCH_STATIC_REDUCER(12);
+          break;
+        case 14:
+          QVQ_LAUNCH_STATIC_REDUCER(14);
           break;
         case 16:
           QVQ_LAUNCH_STATIC_REDUCER(16);
