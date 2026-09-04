@@ -344,17 +344,62 @@ on-demand FP16 at the same rate and M.
 
 | Rate | M x K x aggregate N | Phase-3 us | vs Phase 2 | vs Marlin W4 | vs Machete W4 | Better than last | Max error |
 | ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: |
-| W2 | 16384 x 2048 x 3072 | 505.920 | 1.469x | 1.255x | 0.943x | Yes | 5.821e-4 |
-| W2.5 | 16384 x 2048 x 3072 | 506.886 | 1.459x | 1.253x | 0.941x | Yes | 6.079e-4 |
-| W3 | 16384 x 2048 x 3072 | 507.011 | 1.469x | 1.253x | 0.941x | Yes | 6.215e-4 |
-| W3.5 | 16384 x 2048 x 3072 | 507.101 | 1.466x | 1.253x | 0.941x | Yes | 6.086e-4 |
+| W2 | 16384 x 2048 x 3072 | 505.597 | 1.474x | 1.258x | 0.935x | Yes | 5.821e-4 |
+| W2.5 | 16384 x 2048 x 3072 | 508.022 | 1.465x | 1.252x | 0.931x | Yes | 6.079e-4 |
+| W3 | 16384 x 2048 x 3072 | 512.662 | 1.455x | 1.241x | 0.922x | Yes | 6.215e-4 |
+| W3.5 | 16384 x 2048 x 3072 | 509.219 | 1.460x | 1.249x | 0.929x | Yes | 6.086e-4 |
 
-All four rates improve, with a 1.466x geometric speedup over Phase 2.  The path
-is about 25% faster than three Marlin W4 projections and about 6% slower than
+All four rates improve, with a 1.463x geometric speedup over Phase 2.  The path
+is about 25% faster than three Marlin W4 projections and about 7% slower than
 three Machete W4 projections.  A preliminary M8192 run improved by only about
 1%; that is too close to run-to-run variation, so the measured runtime gate is
 M >= 16384 and explicit opt-in through
 `QVQ_HOPPER_FP8_PREFILL_ON_DEMAND=1`.
+
+### Phase-3 NCU and generated-instruction analysis
+
+Nsight Compute 2026.2.1 collected 19 hardware-counter replay passes from the
+committed W3/M16384 CUDA Graph.  The report targets the new direct-E4M3 final
+N-axis stage; the operation is independent of activation M because it prepares
+one immutable effective weight per forward.
+
+| Metric | Phase-2 FP16 final stage | Phase-3 direct E4M3 final stage |
+|:--|--:|--:|
+| NCU duration | 139.072 us | 191.104 us |
+| Executed warp instructions | 81,788,928 | 89,492,092 |
+| Grid x block | 6144 x 1024 | 6144 x 1024 |
+| Registers/thread | 28 | 32 |
+| Shared memory/block | 9.472 KiB | 9.472 KiB |
+| DRAM throughput | 16.86% | 11.79% |
+| SM throughput | 56.30% | 44.63% |
+| Eligible warps/scheduler/cycle | 2.593 | 1.947 |
+| Active warps | 91.67% | 87.03% |
+| Warp latency/issued instruction | 24.69 cycles | 29.59 cycles |
+| Local spilling requests | 0 | 0 |
+
+The final kernel itself is deliberately heavier: it adds the second FP16
+rounding boundary, division by the calibrated scale, and E4M3 encoding.  Its
+whole-operation win comes from deleting a separate full-matrix transpose and
+quantization pass and replacing the large FP16 GEMM with FP8 tensor-core work.
+This is why isolated kernel time must not be mistaken for end-to-end prefill
+time.
+
+Source-correlated SASS accounts for 89.49M executed warp instructions.  The
+largest families are `ISETP` (10.49M), `BRA` (9.93M), `IMAD` (9.93M), `LEA`
+(7.31M), `BSYNC` (5.51M), `LOP3` (4.78M), `BSSY` (4.69M), `VIADD` (3.74M),
+`FADD` (2.85M), and 2.72M each of shared loads and stores.
+
+A follow-up constant-three-child specialization reduced the executed count to
+85.99M (`-3.92%`) but increased matched NCU duration from 191.104 to 192.192
+microseconds and worsened warp latency.  A two-dimensional grid also changed
+CTA issue locality and regressed CUDA-event latency.  Neither algebraic
+experiment is retained.  The next transform reduction must remove a material
+butterfly or memory boundary, not merely its small coordinate-recovery
+prologue.  Reports remain outside Git under:
+
+```text
+/root/qvq-profiler-artifacts/prefill-phase3/
+```
 
 ## Phase 4: on-chip FP8 execution
 
