@@ -3479,6 +3479,18 @@ at the other rates.  Diagnostics are
 and
 `artifacts/a100_p32_window/v26_candidate_m8_attention_static24_repeat20000.json`.
 
+## v59 M8 linear-Z static split specialization
+
+The M8 linear-Z route `(K,N)=(5120,6144)` uses the stable split-40 plan.  A
+guarded WMMA `StaticSplitCount=40` launch was exact in two matched 20,000-
+iteration candidate runs.  Fresh-main medians were
+`0.051200/0.051200/0.051200/0.052224 ms`; the candidate measured
+`0.050176/0.050176/0.051200/0.051200 ms` for W2/W2.5/W3/W3.5 in both runs.
+This is a repeatable one-event-tick improvement at W2, W2.5, and W3.5 with
+no loss at W3.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m8_linearz_static40_20000.json` and
+`artifacts/a100_p32_window/v26_candidate_m8_linearz_static40_repeat20000.json`.
+
 ## Reproduction
 
 ```bash
