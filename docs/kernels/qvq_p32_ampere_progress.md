@@ -3343,6 +3343,23 @@ with no compensating rate improvement.  The source change was reverted before
 retention.  Diagnostic:
 `artifacts/a100_p32_window/v46_candidate_m1_mlpdown_statick_8000.json`.
 
+## v47 M2 full-Q static split specialization
+
+The M2 full-Q route `(K,N)=(5120,12288)` autotunes to split 64 for W2/W2.5
+and split 40 for W3/W3.5 on this A100.  A guarded dispatch keyed by
+`TransitionBits` now passes those measured split counts as compile-time
+constants to the scalar kernel.  Two matched 8,000-iteration runs were exact
+(`max_abs <= 1.4e-5`): the dynamic medians were
+`0.067584/0.073728/0.073728/0.074752 ms`, while static medians were
+`0.066560/0.072704/0.072704/0.074752 ms` and
+`0.066560/0.073728/0.072704/0.074752 ms`.  Geometric mean improved from
+`0.0723907 ms` to `0.0716124/0.0718632 ms` (0.73--1.09% shape-local).
+The formal Ampere suite remains 56/56.  Diagnostics are
+`artifacts/a100_p32_window/v47_candidate_m2_fullq_static64_40_8000.json` and
+`artifacts/a100_p32_window/v47_candidate_m2_fullq_static64_40_repeat8000.json`;
+the v43 full sweep provides the dynamic control.  The full-matrix 10% target
+remains open.
+
 ## Reproduction
 
 ```bash
