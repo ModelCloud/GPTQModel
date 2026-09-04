@@ -50,8 +50,9 @@ class Glm5NextQModel(BaseQModel):
                 "indexer.wq_b:!",
                 "indexer.wk:!",
                 "indexer.weights_proj:!",
-                "q_b_proj:0:q",
-                "kv_b_proj:0:k:v",
+                # Post-LoRA Q and KV projections consume normalized latent inputs, not hidden_states.
+                "q_b_proj:0:q:input",
+                "kv_b_proj:0:k:v:input",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),

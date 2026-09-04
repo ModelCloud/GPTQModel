@@ -22,8 +22,21 @@ class LongCatFlashQModel(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": {
-                "0": ("q_a_proj:0", "q_b_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1"),
-                "1": ("q_a_proj:0", "q_b_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1")
+                # Each staged Q and KV expansion projection consumes a normalized latent input.
+                "0": (
+                    "q_a_proj:0",
+                    "q_b_proj:0:input",
+                    "kv_a_proj_with_mqa:0",
+                    "kv_b_proj:0:input",
+                    "o_proj:1",
+                ),
+                "1": (
+                    "q_a_proj:0",
+                    "q_b_proj:0:input",
+                    "kv_a_proj_with_mqa:0",
+                    "kv_b_proj:0:input",
+                    "o_proj:1",
+                ),
             },
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlps": {

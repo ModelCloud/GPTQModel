@@ -38,9 +38,10 @@ class DeepSeekV32QModel(BaseQModel):
                 "indexer.wk:0",
                 # DSA accumulates this projection's scores in float32; leave its weights unquantized.
                 "indexer.weights_proj:0:!",
-                "q_b_proj:1:q",
-                "kv_b_proj:1:k:v",
-                "indexer.wq_b:1",
+                # Q and the DSA query indexer consume the normalized Q latent; KV consumes its own latent.
+                "q_b_proj:1:q:input=q_latent",
+                "kv_b_proj:1:k:v:input",
+                "indexer.wq_b:1:input=q_latent",
                 "o_proj:2",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),

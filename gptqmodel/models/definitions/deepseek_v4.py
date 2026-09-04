@@ -19,7 +19,8 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
                 "q_a_norm:!",
                 "q_a_proj:0",
                 "q_b_norm:!",
-                "q_b_proj:0",
+                # The staged Q projection consumes the normalized Q latent from q_a_proj.
+                "q_b_proj:0:input",
                 "o_a_proj:!",
                 "o_b_proj:1",
                 "kv_norm:!",

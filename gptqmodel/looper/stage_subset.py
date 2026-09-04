@@ -32,6 +32,7 @@ from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
+from ..models.input_source import InputSourceId, group_input_sources
 from ..quantization.config import GcMode, ExpertsRoutingBypass, VramStrategy
 from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.device import get_device
@@ -81,6 +82,7 @@ class SubsetPlan:
     - how MoE groups are arranged for scheduling
     - which modules are pinned to specific forward devices
     - how uncovered calibration modules are handled
+    - which modules share one logical input activation
     """
 
     modules: Dict[str, NamedModule]
@@ -98,12 +100,19 @@ class SubsetPlan:
     module_chunks: List[Dict[str, NamedModule]]
     ordered_module_names: List[str] = field(default_factory=list)
     restore_forward_device_overrides: bool = True
+    input_sources: Dict[InputSourceId, List[NamedModule]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Freeze an explicit ordered module list for forward replay decisions."""
 
         if not self.ordered_module_names:
             self.ordered_module_names = list(self.modules.keys())
+        if not self.input_sources and self.modules:
+            self.input_sources = group_input_sources(
+                self.modules[name]
+                for name in self.ordered_module_names
+                if name in self.modules
+            )
 
     @property
     def subset_forward_serial(self) -> bool:
@@ -138,6 +147,7 @@ class SubsetPlan:
             modules=modules,
             ordered_module_names=ordered_names,
             module_chunks=[modules],
+            input_sources={},
         )
 
 

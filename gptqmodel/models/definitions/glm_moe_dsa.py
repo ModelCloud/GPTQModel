@@ -35,9 +35,10 @@ class GlmMoeDsaQModel(BaseQModel):
                 "q_a_proj:0",
                 "kv_a_proj_with_mqa:0",
                 "indexer.wk:0",
-                "q_b_proj:1",
-                "kv_b_proj:1",
-                "indexer.wq_b:1",
+                # Q and the DSA query indexer consume the normalized Q latent; KV consumes its own latent.
+                "q_b_proj:1:input=q_latent",
+                "kv_b_proj:1:input",
+                "indexer.wq_b:1:input=q_latent",
                 "o_proj:2",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),

@@ -1649,8 +1649,23 @@ class ModuleLooper():
 
             # gptq task is created and stored inside processor
             if not isinstance(subset[name], NamedModule):
+                tree_scope_id = None
+                subset_id = None
+                input_spec = None
+                if not is_lm_head_module:
+                    resolver = getattr(type(self.gptq_model), "resolve_module_tree_entry", None)
+                    entry = resolver(name) if resolver is not None else None
+                    if entry is not None:
+                        tree_scope_id = (
+                            f"{layers_prefix}.{entry.scope}"
+                            if entry.scope
+                            else layers_prefix
+                        )
+                        subset_id = entry.subset_id
+                        input_spec = entry.input_spec
                 named_module = NamedModule(subset[name], name=name, full_name=layer_name,
-                                           layer_index=layer_index)
+                                           layer_index=layer_index, tree_scope_id=tree_scope_id,
+                                           subset_id=subset_id, input_spec=input_spec)
                 if capture_only_flags.get(name, False):
                     named_module.state["capture_only"] = True
                 if isinstance(processor, EoraProcessor):

@@ -43,8 +43,9 @@ class AXK2QModel(BaseQModel):
             "self_attn": (
                 "q_a_proj:0:q",
                 "kv_a_proj_with_mqa:0:k:v",
-                "q_gate_proj:1:q",
-                "kv_b_proj:1:k:v",
+                # The fused Q/gate projection consumes the compressed Q latent pair.
+                "q_gate_proj:1:q:input",
+                "kv_b_proj:1:k:v:input",
                 "o_proj:2",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),

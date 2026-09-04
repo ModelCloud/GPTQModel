@@ -7,10 +7,12 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import threading
 import time
 from collections import defaultdict
 from contextlib import nullcontext
+from dataclasses import replace
 from itertools import count
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
 
@@ -98,6 +100,7 @@ from ._const import (
     META,
 )
 from .loader import ModelLoader, _setup_rotation_online_had
+from .input_source import InputSpec, ModuleTreeEntry, parse_input_flag
 from .writer import ModelWriter
 
 
@@ -469,11 +472,19 @@ class BaseQModel(nn.Module):
         Parse a module specification into module name and flags.
         Example: "gate:moe:!" -> ("gate", ["moe", "!"])
         """
+        name, flags, _ = cls._parse_module_spec(module_spec)
+        return name, flags
+
+    @classmethod
+    def _parse_module_spec(cls, module_spec: str) -> tuple[str, List[str], Optional[InputSpec]]:
+        """Parse a module specification into its name, flags, and input source."""
+
         parts = module_spec.split(":") if isinstance(module_spec, str) else []
         aliases = cls._parse_module_aliases(module_spec) if isinstance(module_spec, str) else [module_spec]
         name = aliases[0] if aliases else module_spec
-        flags = [p for p in parts[1:] if p]
-        return name, flags
+        flags = [part for part in parts[1:] if part]
+        input_spec, flags = parse_input_flag(flags)
+        return name, flags, input_spec
 
     @classmethod
     def has_moe_flag(cls, module_spec: str) -> bool:
@@ -2896,7 +2907,12 @@ class BaseQModel(nn.Module):
     #     else:
     #         log.info(f"{self.__class__.__name__}: `MODEL switching to eval mode.")
     @classmethod
-    def _build_layer_modules_for_tree(cls, tree, include_capture_only: bool = False):
+    def _build_layer_modules_for_tree(
+        cls,
+        tree,
+        include_capture_only: bool = False,
+        entries_out: Optional[Dict[str, ModuleTreeEntry]] = None,
+    ):
         """
         tree format:
           [<model_name>, <submodule>, "#", { parent_module: ( "child[:!][:grp]", ... ), ... }]
@@ -2925,8 +2941,8 @@ class BaseQModel(nn.Module):
         alias_seq = count()
         group_seq = count()
 
-        def _parse_token(token: str) -> tuple[str, List[str]]:
-            return cls._parse_module_flags(token)
+        def _parse_token(token: str) -> tuple[str, List[str], Optional[InputSpec]]:
+            return cls._parse_module_spec(token)
 
         def _group_from_flags(flags: List[str]) -> int:
             for flag in flags:
@@ -2946,7 +2962,7 @@ class BaseQModel(nn.Module):
             """Process entries recursively to handle nested dict structures for MoE"""
             groups: defaultdict[int, List[tuple]] = defaultdict(list)
 
-            parent_name, parent_flags = _parse_token(parent_token)
+            parent_name, parent_flags, parent_input_spec = _parse_token(parent_token)
             parent_rel_group = _group_from_flags(parent_flags)
             parent_group = parent_group_offset + parent_rel_group
             parent_has_bang = "!" in parent_flags
@@ -2959,11 +2975,42 @@ class BaseQModel(nn.Module):
             def _make_entry(full_path: str, has_bang: bool, capture_only: bool, *, alias_base: int, alias_rel: int, alias_scope: str | None) -> tuple:
                 return (full_path, has_bang, capture_only, alias_scope, (alias_base, alias_rel))
 
+            def _record_tree_entry(
+                full_path: str,
+                scope: str,
+                subset_id: int,
+                input_spec: Optional[InputSpec],
+                has_bang: bool,
+                capture_only: bool,
+            ) -> None:
+                if entries_out is None or (capture_only and not include_capture_only):
+                    return
+                entries_out.setdefault(
+                    full_path,
+                    ModuleTreeEntry(
+                        full_path=full_path,
+                        scope=scope,
+                        subset_id=subset_id,
+                        input_spec=input_spec,
+                        not_quantized=has_bang,
+                        capture_only=capture_only,
+                    ),
+                )
+
             child_group_offset = parent_group_offset
             add_parent = parent_has_bang or (parent_capture_only and include_capture_only)
             if add_parent:
                 alias_base = parent_rel_group if parent_has_numeric else parent_group
                 parent_entry_scope = f"{parent_alias_scope}.__parent__" if parent_alias_scope is not None else None
+                parent_scope = parent_name.rsplit(".", 1)[0] if "." in parent_name else ""
+                _record_tree_entry(
+                    parent_name,
+                    parent_scope,
+                    parent_rel_group,
+                    parent_input_spec,
+                    parent_has_bang,
+                    parent_capture_only,
+                )
                 groups[parent_group].append(
                     _make_entry(
                         parent_name,
@@ -2979,7 +3026,7 @@ class BaseQModel(nn.Module):
             # Handle tuple/list of strings (traditional format)
             if isinstance(entries, (tuple, list)):
                 for ent in entries:
-                    child_name, child_flags = _parse_token(ent)
+                    child_name, child_flags, child_input_spec = _parse_token(ent)
 
                     has_bang = "!" in child_flags
                     capture_only = "?" in child_flags
@@ -2997,6 +3044,14 @@ class BaseQModel(nn.Module):
 
                     if capture_only and not include_capture_only:
                         continue
+                    _record_tree_entry(
+                        full_path,
+                        parent_name,
+                        child_rel_group,
+                        child_input_spec,
+                        has_bang,
+                        capture_only,
+                    )
                     alias_scope = scope if parent_has_numeric else parent_name
                     alias_base = parent_rel_group if parent_has_numeric else grp
                     alias_rel = child_rel_group if parent_has_numeric else 0
@@ -3017,7 +3072,7 @@ class BaseQModel(nn.Module):
                 for sub_parent, sub_entries in entries.items():
                     if isinstance(sub_entries, (tuple, list)):
                         for ent in sub_entries:
-                            _, ent_flags = _parse_token(ent)
+                            _, ent_flags, _ = _parse_token(ent)
                             max_current_group = max(max_current_group, _group_from_flags(ent_flags))
 
                 # Process nested entries with appropriate group offset
@@ -3043,6 +3098,15 @@ class BaseQModel(nn.Module):
                             # For ("#",) or "#" format, use the template_parent directly with default group 0
                             alias_scope = scope if parent_has_numeric else template_parent
                             alias_base = parent_rel_group if parent_has_numeric else expert_offset
+                            template_scope = template_parent.rsplit(".", 1)[0] if "." in template_parent else ""
+                            _record_tree_entry(
+                                template_parent,
+                                template_scope,
+                                0,
+                                None,
+                                False,
+                                False,
+                            )
                             groups[expert_offset].append(
                                 _make_entry(
                                     template_parent,
@@ -3133,6 +3197,59 @@ class BaseQModel(nn.Module):
                 seen.add(key)
                 blocks.append(block)
         return blocks
+
+    @classmethod
+    def build_module_tree_entries(
+        cls,
+        tree=None,
+        include_capture_only: bool = True,
+    ) -> Dict[str, ModuleTreeEntry]:
+        """Build first-seen metadata for every module-tree path."""
+
+        entries: Dict[str, ModuleTreeEntry] = {}
+        for tree_variant in cls._iter_module_tree_variants(tree):
+            cls._build_layer_modules_for_tree(
+                tree_variant,
+                include_capture_only=include_capture_only,
+                entries_out=entries,
+            )
+        return entries
+
+    @classmethod
+    def resolve_module_tree_entry(cls, module_name: str) -> Optional[ModuleTreeEntry]:
+        """Resolve exact or expert-template module-tree metadata."""
+
+        cache = cls.__dict__.get("_module_tree_entries_cache")
+        if cache is None:
+            cache = {}
+            setattr(cls, "_module_tree_entries_cache", cache)
+        entries = cache.get(cls)
+        if entries is None:
+            entries = cls.build_module_tree_entries(cls.module_tree)
+            cache[cls] = entries
+
+        name = module_name
+        if name.endswith(CAPTURE_ONLY_FLAG):
+            name = name[:-len(CAPTURE_ONLY_FLAG)]
+        entry = entries.get(name)
+        if entry is not None:
+            return entry
+
+        for template, template_entry in entries.items():
+            if EXPERT_INDEX_PLACEHOLDER not in template:
+                continue
+            pieces = template.split(EXPERT_INDEX_PLACEHOLDER)
+            pattern = "^" + "(\\d+)".join(re.escape(piece) for piece in pieces) + "$"
+            match = re.match(pattern, name)
+            if match is None:
+                continue
+            concrete_index = match.group(1)
+            return replace(
+                template_entry,
+                full_path=template_entry.full_path.replace(EXPERT_INDEX_PLACEHOLDER, concrete_index),
+                scope=template_entry.scope.replace(EXPERT_INDEX_PLACEHOLDER, concrete_index),
+            )
+        return None
 
     @classmethod
     def get_modules_with_direct_meta_tensors(cls, model: nn.Module):

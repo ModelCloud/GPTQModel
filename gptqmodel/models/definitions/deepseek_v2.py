@@ -31,7 +31,15 @@ class DeepSeekV2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_a_proj:0", "q_b_proj:0", "q_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1"),
+            # The staged Q and KV expansion projections consume normalized latent inputs, not hidden_states.
+            "self_attn": (
+                "q_a_proj:0",
+                "q_b_proj:0:input",
+                "q_proj:0",
+                "kv_a_proj_with_mqa:0",
+                "kv_b_proj:0:input",
+                "o_proj:1",
+            ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "": ("gate_proj:0", "up_proj:0", "down_proj:1"),

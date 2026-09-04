@@ -11,6 +11,7 @@ from torch import Tensor, nn
 from torch.nn import Parameter
 from torch.nn.modules.conv import _ConvNd
 
+from ..models.input_source import InputSpec
 from ..utils.logger import setup_logger
 from ..utils.module_locks import get_parent_lock
 from ..utils.stream import stream_sync as stream_sync_events
@@ -23,7 +24,16 @@ log = setup_logger()
 class NamedModule(torch.nn.Module):
     """Thread-safe wrapper that adds stable names and scratch state to a module."""
 
-    def __init__(self, module: torch.nn.Module, name: str, full_name:str, layer_index: int) -> None:
+    def __init__(
+        self,
+        module: torch.nn.Module,
+        name: str,
+        full_name: str,
+        layer_index: int,
+        tree_scope_id: Optional[str] = None,
+        subset_id: Optional[int] = None,
+        input_spec: Optional[InputSpec] = None,
+    ) -> None:
         """Wraps a submodule with naming metadata used by the looper pipeline."""
 
         super().__init__()
@@ -34,6 +44,9 @@ class NamedModule(torch.nn.Module):
         self.name = name  # module name
         self.full_name = full_name  # full dotted path inside model
         self.layer_index = layer_index  # layer index for repeated blocks
+        self.tree_scope_id = tree_scope_id
+        self.subset_id = subset_id
+        self.input_spec = input_spec
 
         if hasattr(module, "module_name") and module.module_name is None:
             module.module_name = full_name
@@ -158,6 +171,9 @@ class NamedModule(torch.nn.Module):
             "name",
             "full_name",
             "layer_index",
+            "tree_scope_id",
+            "subset_id",
+            "input_spec",
             "state",
             "_parent_lock",
             "target_device",
