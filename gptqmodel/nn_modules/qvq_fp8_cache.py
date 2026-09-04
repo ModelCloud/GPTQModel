@@ -77,6 +77,15 @@ def _attention_mask_slice(
     )
 
 
+def _causal_mask(query_tokens: int, key_tokens: int, device: torch.device) -> torch.Tensor:
+    if query_tokens > key_tokens:
+        raise ValueError("QVQ causal attention cannot have more query than key tokens.")
+    query_positions = torch.arange(query_tokens, device=device).unsqueeze(1)
+    key_positions = torch.arange(key_tokens, device=device).unsqueeze(0)
+    cache_offset = key_tokens - query_tokens
+    return key_positions > query_positions + cache_offset
+
+
 def qvq_fp8_attention_forward(
     module: torch.nn.Module,
     query: torch.Tensor,
@@ -97,6 +106,10 @@ def qvq_fp8_attention_forward(
         dense_key = key.repeat_interleave(groups, dim=1)
         dense_value = value.repeat_interleave(groups, dim=1)
         dense_weights = torch.matmul(query, dense_key.transpose(2, 3)) * scaling
+        dense_weights.masked_fill_(
+            _causal_mask(query.shape[-2], key.shape[-2], query.device),
+            float("-inf"),
+        )
         if attention_mask is not None:
             dense_weights = dense_weights + attention_mask
         dense_weights = torch.softmax(dense_weights, dim=-1, dtype=torch.float32).to(
@@ -129,6 +142,7 @@ def qvq_fp8_attention_forward(
         raise ValueError("QVQ FP8 attention requires query heads divisible by KV heads.")
     groups = query_heads // kv_heads
     padded_keys = ((key_tokens + 15) // 16) * 16
+    causal_mask = _causal_mask(query_tokens, key_tokens, query.device)
     one = torch.ones((), dtype=torch.float32, device=query.device)
     outputs: list[torch.Tensor] = []
     weights: list[torch.Tensor] = []
@@ -160,6 +174,9 @@ def qvq_fp8_attention_forward(
             )[:, :key_tokens]
             logits = raw_logits * query_scale.float() * key_scale.T.float()
             logits.mul_(scaling)
+            logits.reshape(groups, query_tokens, key_tokens).masked_fill_(
+                causal_mask, float("-inf")
+            )
             if attention_mask is not None:
                 group_masks = [
                     _attention_mask_slice(
