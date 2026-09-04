@@ -267,7 +267,7 @@ whole-workload peaks; driver peak is sampled per-process NVML usage.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | dense BF16 | 183,755 | 22.29 / 23.03 | 31.84 | 31.29 / 31.82 | 2.710 / 2.795 | 3,558 | 2.303 | 130.50 |
 | W3.5A16 | 32,274 | 126.92 / 127.52 | 18.66 | 53.36 / 55.41 | 1.942 / 2.115 | 2,864 | 0.900 | 130.50 |
-| W3.5A8 | 6,659 | 615.11 / 620.14 | 16.62 | 60.09 / 60.78 | 3.083 / 3.416 | 4,180 | 0.900 | 72.25 |
+| W3.5A8 | 6,642 | 616.65 / 617.14 | 16.39 | 61.02 / 61.42 | 3.083 / 3.416 | 4,180 | 0.900 | 72.25 |
 
 The static A8 cache reserved 4,352 token slots for the 4,176-token logical
 sequence and still used 44.64% fewer retained bytes than the BF16 cache,
@@ -280,11 +280,11 @@ dense K/V prefix materializations.
 
 Relative to the earlier correctness baseline, M-grid launch collapsing raised
 A8 prefill from 803 to 3,993 tok/s (4.97x), decoded-weight row reuse then raised
-it to 6,659 tok/s (another 1.67x; 8.29x total), grouped attention raised A8
-decode from 11.28 to 16.62 tok/s (1.47x), and FP16 large-M row reuse raised A16
+it to 6,642 tok/s (another 1.66x; 8.27x total), grouped attention raised A8
+decode from 11.28 to 16.39 tok/s (1.45x), and FP16 large-M row reuse raised A16
 prefill from 5,225 to 32,274 tok/s (6.18x). Matching dense now requires another
-27.59x for A8 prefill or 5.69x for A16 prefill. A8 decode is 1.12x short of A16
-and 1.92x short of dense.
+27.66x for A8 prefill or 5.69x for A16 prefill. A8 decode is 1.14x short of A16
+and 1.94x short of dense.
 
 ### Phase 7 — FP8 decoded-weight row reuse (complete)
 
