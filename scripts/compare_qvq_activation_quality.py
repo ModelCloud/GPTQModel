@@ -347,8 +347,11 @@ def main(argv: list[str] | None = None) -> int:
         "no_full_precision_residual": True,
         "native_fp8_attention": True,
         "native_attention_calls": 0,
+        "native_grouped_attention_calls": 0,
         "native_qk_fp8_mm_calls": 0,
         "native_pv_fp8_mm_calls": 0,
+        "native_qk_fp8_launches": 0,
+        "native_pv_fp8_launches": 0,
         "dequantized_elements": 0,
         "dense_kv_prefix_materializations": 0,
     }
@@ -415,11 +418,20 @@ def main(argv: list[str] | None = None) -> int:
                 a8_cache_validation["native_attention_calls"] += telemetry[
                     "native_attention_calls"
                 ]
+                a8_cache_validation["native_grouped_attention_calls"] += telemetry[
+                    "native_grouped_attention_calls"
+                ]
                 a8_cache_validation["native_qk_fp8_mm_calls"] += telemetry[
                     "native_qk_fp8_mm_calls"
                 ]
                 a8_cache_validation["native_pv_fp8_mm_calls"] += telemetry[
                     "native_pv_fp8_mm_calls"
+                ]
+                a8_cache_validation["native_qk_fp8_launches"] += telemetry[
+                    "native_qk_fp8_launches"
+                ]
+                a8_cache_validation["native_pv_fp8_launches"] += telemetry[
+                    "native_pv_fp8_launches"
                 ]
             elif isinstance(cache, QVQFP8DynamicCache):
                 raise RuntimeError(f"{name} unexpectedly used the QVQ FP8 cache")

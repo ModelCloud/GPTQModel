@@ -523,9 +523,14 @@ def main(argv: list[str] | None = None) -> int:
                 not cache_after_decode["native_fp8_attention"]
                 or cache_after_decode["dequantized_elements"] != 0
                 or cache_after_decode["dense_kv_prefix_materializations"] != 0
+                or cache_after_decode["native_grouped_attention_calls"] == 0
+                or cache_after_decode["native_qk_fp8_launches"]
+                >= cache_after_decode["native_qk_fp8_mm_calls"]
+                or cache_after_decode["native_pv_fp8_launches"]
+                >= cache_after_decode["native_pv_fp8_mm_calls"]
             ):
                 raise RuntimeError(
-                    "A8 decode did not preserve native FP8 K/V consumption."
+                    "A8 decode did not preserve grouped native FP8 K/V consumption."
                 )
             if cache_after_decode["sequence_lengths"] != [
                 args.prompt_length + args.decode_warmup + args.decode_steps

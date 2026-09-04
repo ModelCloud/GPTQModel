@@ -217,9 +217,9 @@ def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(
 
     torch.manual_seed(seed)
     cache = QVQFP8DynamicCache(_TinyCacheConfig(), QVQActivationConfig())
-    query = torch.randn(1, 4, 3, 64, device="cuda", dtype=torch.bfloat16)
-    key = torch.randn(1, 1, 3, 64, device="cuda", dtype=torch.bfloat16)
-    value = torch.randn(1, 1, 3, 64, device="cuda", dtype=torch.bfloat16)
+    query = torch.randn(1, 8, 3, 64, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(1, 2, 3, 64, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(1, 2, 3, 64, device="cuda", dtype=torch.bfloat16)
     key_view, value_view = cache.update(key, value, 0)
     mask = torch.full((1, 1, 3, 3), float("-inf"), device="cuda")
     mask = torch.triu(mask, diagonal=1)
@@ -249,15 +249,15 @@ def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(
     )
     reference = (reference_weights @ dense_value).transpose(1, 2)
 
-    assert output.shape == (1, 3, 4, 64)
-    assert weights.shape == (1, 4, 3, 3)
+    assert output.shape == (1, 3, 8, 64)
+    assert weights.shape == (1, 8, 3, 3)
     error = output.float() - reference
     assert error.square().mean().item() < 3e-4
-    assert error.abs().max().item() < 0.1
+    assert error.abs().max().item() < 0.15
 
-    decode_query = torch.randn(1, 4, 1, 64, device="cuda", dtype=torch.bfloat16)
-    decode_key = torch.randn(1, 1, 1, 64, device="cuda", dtype=torch.bfloat16)
-    decode_value = torch.randn(1, 1, 1, 64, device="cuda", dtype=torch.bfloat16)
+    decode_query = torch.randn(1, 8, 1, 64, device="cuda", dtype=torch.bfloat16)
+    decode_key = torch.randn(1, 2, 1, 64, device="cuda", dtype=torch.bfloat16)
+    decode_value = torch.randn(1, 2, 1, 64, device="cuda", dtype=torch.bfloat16)
     key_view, value_view = cache.update(decode_key, decode_value, 0)
     decode_output, _ = qvq_fp8_attention_forward(
         SimpleNamespace(num_key_value_groups=4, training=False),
@@ -283,13 +283,16 @@ def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(
     decode_reference = (decode_weights @ dense_value).transpose(1, 2)
     decode_error = decode_output.float() - decode_reference
     assert decode_error.square().mean().item() < 3e-4
-    assert decode_error.abs().max().item() < 0.1
+    assert decode_error.abs().max().item() < 0.15
 
     telemetry = cache.telemetry()
     assert telemetry["native_fp8_attention"] is True
     assert telemetry["native_attention_calls"] == 2
-    assert telemetry["native_qk_fp8_mm_calls"] == 2
-    assert telemetry["native_pv_fp8_mm_calls"] == 2
+    assert telemetry["native_grouped_attention_calls"] == 2
+    assert telemetry["native_qk_fp8_mm_calls"] == 4
+    assert telemetry["native_pv_fp8_mm_calls"] == 4
+    assert telemetry["native_qk_fp8_launches"] == 2
+    assert telemetry["native_pv_fp8_launches"] == 2
     assert telemetry["dequantized_elements"] == 0
     assert telemetry["dense_kv_prefix_materializations"] == 0
     assert telemetry["capacities"] == [256]

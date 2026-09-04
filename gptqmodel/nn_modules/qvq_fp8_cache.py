@@ -81,6 +81,153 @@ def _causal_mask(query_tokens: int, key_tokens: int, device: torch.device) -> to
     return key_positions > query_positions + cache_offset
 
 
+def _normalized_attention_mask(
+    attention_mask: torch.Tensor | None,
+    *,
+    batch_size: int,
+    query_heads: int,
+    kv_heads: int,
+    groups: int,
+    query_tokens: int,
+    key_tokens: int,
+) -> torch.Tensor | None:
+    if attention_mask is None:
+        return None
+    if attention_mask.shape[0] != batch_size:
+        raise ValueError("QVQ FP8 attention mask batch dimension differs from query.")
+    if attention_mask.ndim == 2:
+        return attention_mask[:, None, None, None, :key_tokens]
+    if attention_mask.ndim == 3:
+        return attention_mask[:, None, None, :query_tokens, :key_tokens]
+    if attention_mask.ndim != 4:
+        raise ValueError(
+            f"QVQ FP8 attention requires a 2D--4D attention mask, got {attention_mask.ndim}D."
+        )
+    sliced = attention_mask[..., :query_tokens, :key_tokens]
+    if sliced.shape[1] == 1:
+        return sliced[:, :, None]
+    if sliced.shape[1] != query_heads:
+        raise ValueError(
+            "QVQ FP8 attention mask head dimension must be one or match query heads."
+        )
+    return sliced.reshape(batch_size, kv_heads, groups, query_tokens, key_tokens)
+
+
+def _qvq_fp8_grouped_attention(
+    query: torch.Tensor,
+    key: QVQFP8KVView,
+    value: QVQFP8KVView,
+    attention_mask: torch.Tensor | None,
+    *,
+    scaling: float,
+    dropout: float,
+    training: bool,
+    output_attentions: bool,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Use one grouped cuBLASLt launch each for all decode QK and PV GEMMs."""
+
+    batch_size, query_heads, query_tokens, width = query.shape
+    _, kv_heads, _, _ = key.payload.shape
+    groups = query_heads // kv_heads
+    gemm_groups = batch_size * kv_heads
+    matrix_rows = groups * query_tokens
+    key_tokens = key.sequence_length
+    padded_keys = ((key_tokens + 15) // 16) * 16
+
+    query_matrix = query.reshape(
+        batch_size, kv_heads, groups, query_tokens, width
+    ).reshape(gemm_groups, matrix_rows, width)
+    query_fp8, query_scale = quantize_qvq_fp8_activation(
+        query_matrix,
+        format=QVQ_FP8_ACTIVATION_FORMAT,
+        scale_method="dynamic_per_token",
+        validate=False,
+    )
+    key_matrix = key.payload[..., :padded_keys, :].transpose(-1, -2).reshape(
+        gemm_groups, width, padded_keys
+    )
+    key_scale = key.scales[..., :key_tokens, 0].reshape(gemm_groups, key_tokens)
+    if padded_keys != key_tokens:
+        key_scale = F.pad(key_scale, (0, padded_keys - key_tokens))
+    raw_logits = torch._scaled_grouped_mm(
+        query_fp8,
+        key_matrix,
+        query_scale.squeeze(-1),
+        key_scale,
+        out_dtype=torch.bfloat16,
+        use_fast_accum=False,
+    )[..., :key_tokens]
+    logits = raw_logits.float()
+    logits.mul_(scaling)
+    logits = logits.reshape(
+        batch_size, kv_heads, groups, query_tokens, key_tokens
+    )
+    logits.masked_fill_(
+        _causal_mask(query_tokens, key_tokens, query.device)[None, None, None],
+        float("-inf"),
+    )
+    normalized_mask = _normalized_attention_mask(
+        attention_mask,
+        batch_size=batch_size,
+        query_heads=query_heads,
+        kv_heads=kv_heads,
+        groups=groups,
+        query_tokens=query_tokens,
+        key_tokens=key_tokens,
+    )
+    if normalized_mask is not None:
+        logits.add_(normalized_mask.float())
+    probabilities = torch.softmax(logits, dim=-1, dtype=torch.float32)
+    probabilities = F.dropout(probabilities, p=dropout, training=training)
+    weights = (
+        probabilities.reshape(batch_size, query_heads, query_tokens, key_tokens).to(
+            query.dtype
+        )
+        if output_attentions
+        else None
+    )
+
+    probability_matrix = probabilities.reshape(gemm_groups, matrix_rows, key_tokens)
+    value_scale = value.scales[..., :key_tokens, 0].reshape(
+        gemm_groups, 1, key_tokens
+    )
+    scaled_probabilities = probability_matrix * value_scale.float()
+    probability_fp8, probability_scale = quantize_qvq_fp8_activation(
+        scaled_probabilities,
+        format=QVQ_FP8_ACTIVATION_FORMAT,
+        scale_method="dynamic_per_token",
+        validate=False,
+    )
+    if padded_keys != key_tokens:
+        probability_fp8 = F.pad(probability_fp8, (0, padded_keys - key_tokens))
+    value_matrix = value.payload[..., :padded_keys, :].reshape(
+        gemm_groups, padded_keys, width
+    )
+    one_value = torch.ones(
+        (gemm_groups, width), dtype=torch.float32, device=query.device
+    )
+    raw_output = torch._scaled_grouped_mm(
+        probability_fp8,
+        value_matrix,
+        probability_scale.squeeze(-1),
+        one_value,
+        out_dtype=torch.bfloat16,
+        use_fast_accum=False,
+    )
+    output = raw_output.float().reshape(
+        batch_size, query_heads, query_tokens, width
+    )
+
+    key.layer.native_attention_calls += 1
+    key.layer.native_grouped_attention_calls += 1
+    key.layer.native_qk_fp8_mm_calls += gemm_groups
+    key.layer.native_pv_fp8_mm_calls += gemm_groups
+    key.layer.native_qk_fp8_launches += 1
+    key.layer.native_pv_fp8_launches += 1
+    key.layer.native_attention_query_tokens += batch_size * query_heads * query_tokens
+    return output.transpose(1, 2).to(query.dtype).contiguous(), weights
+
+
 def qvq_fp8_attention_forward(
     module: torch.nn.Module,
     query: torch.Tensor,
@@ -139,6 +286,17 @@ def qvq_fp8_attention_forward(
     if query_heads % kv_heads:
         raise ValueError("QVQ FP8 attention requires query heads divisible by KV heads.")
     groups = query_heads // kv_heads
+    if query_tokens <= 16:
+        return _qvq_fp8_grouped_attention(
+            query,
+            key,
+            value,
+            attention_mask,
+            scaling=scaling,
+            dropout=dropout,
+            training=module.training,
+            output_attentions=output_attentions,
+        )
     padded_keys = ((key_tokens + 15) // 16) * 16
     causal_mask = _causal_mask(query_tokens, key_tokens, query.device)
     one = torch.ones((), dtype=torch.float32, device=query.device)
@@ -233,6 +391,8 @@ def qvq_fp8_attention_forward(
     key.layer.native_attention_calls += 1
     key.layer.native_qk_fp8_mm_calls += batch_size * kv_heads
     key.layer.native_pv_fp8_mm_calls += batch_size * kv_heads
+    key.layer.native_qk_fp8_launches += batch_size * kv_heads
+    key.layer.native_pv_fp8_launches += batch_size * kv_heads
     key.layer.native_attention_query_tokens += batch_size * query_heads * query_tokens
     output = torch.stack(outputs, dim=0).transpose(1, 2).contiguous()
     return output, torch.stack(weights, dim=0) if output_attentions else None
@@ -270,8 +430,11 @@ class QVQFP8CacheLayer(DynamicLayer):
         self.quantized_elements = 0
         self.dequantized_elements = 0
         self.native_attention_calls = 0
+        self.native_grouped_attention_calls = 0
         self.native_qk_fp8_mm_calls = 0
         self.native_pv_fp8_mm_calls = 0
+        self.native_qk_fp8_launches = 0
+        self.native_pv_fp8_launches = 0
         self.native_attention_query_tokens = 0
 
     def _rounded_capacity(self, required: int) -> int:
@@ -291,19 +454,19 @@ class QVQFP8CacheLayer(DynamicLayer):
         fp8_dtype = getattr(torch, self.activation_quantization.format)
         prefix = key_states.shape[:-2]
         width = key_states.shape[-1]
-        new_keys = torch.empty(
+        new_keys = torch.zeros(
             (*prefix, capacity, width), dtype=fp8_dtype, device=self.device
         )
         # Storing V through a transposed contiguous backing makes every
         # [tokens, width] head view column-major for cuBLASLt FP8 PV GEMMs.
-        new_values = torch.empty(
+        new_values = torch.zeros(
             (*prefix, width, capacity), dtype=fp8_dtype, device=self.device
         ).transpose(-1, -2)
         scale_shape = (*prefix, capacity, 1)
-        new_key_scales = torch.empty(
+        new_key_scales = torch.zeros(
             scale_shape, dtype=torch.float32, device=self.device
         )
-        new_value_scales = torch.empty(
+        new_value_scales = torch.zeros(
             scale_shape, dtype=torch.float32, device=self.device
         )
         if self.sequence_length:
@@ -578,10 +741,13 @@ class QVQFP8CacheLayer(DynamicLayer):
             "quantized_elements": self.quantized_elements,
             "dequantized_elements": self.dequantized_elements,
             "native_attention_calls": self.native_attention_calls,
+            "native_grouped_attention_calls": self.native_grouped_attention_calls,
             "native_qk_fp8_mm_calls": self.native_qk_fp8_mm_calls,
             "native_pv_fp8_mm_calls": self.native_pv_fp8_mm_calls,
+            "native_qk_fp8_launches": self.native_qk_fp8_launches,
+            "native_pv_fp8_launches": self.native_pv_fp8_launches,
             "native_attention_query_tokens": self.native_attention_query_tokens,
-            "native_attention_backend": "torch._scaled_mm_cublaslt_fp8",
+            "native_attention_backend": "torch._scaled_grouped_mm_and_scaled_mm_cublaslt_fp8",
             "dense_kv_prefix_materializations": 0
             if self.keys.device.type == "cuda"
             else self.update_calls,
@@ -639,6 +805,15 @@ class QVQFP8DynamicCache(Cache):
         native_pv_fp8_mm_calls = sum(
             layer["native_pv_fp8_mm_calls"] for layer in initialized
         )
+        native_grouped_attention_calls = sum(
+            layer["native_grouped_attention_calls"] for layer in initialized
+        )
+        native_qk_fp8_launches = sum(
+            layer["native_qk_fp8_launches"] for layer in initialized
+        )
+        native_pv_fp8_launches = sum(
+            layer["native_pv_fp8_launches"] for layer in initialized
+        )
         dequantized_elements = sum(
             layer["dequantized_elements"] for layer in initialized
         )
@@ -677,10 +852,13 @@ class QVQFP8DynamicCache(Cache):
             "all_payloads_fp8": payload_dtypes
             in ([], [f"torch.{QVQ_FP8_ACTIVATION_FORMAT}"]),
             "no_full_precision_residual": True,
-            "native_attention_backend": "torch._scaled_mm_cublaslt_fp8",
+            "native_attention_backend": "torch._scaled_grouped_mm_and_scaled_mm_cublaslt_fp8",
             "native_attention_calls": native_attention_calls,
+            "native_grouped_attention_calls": native_grouped_attention_calls,
             "native_qk_fp8_mm_calls": native_qk_fp8_mm_calls,
             "native_pv_fp8_mm_calls": native_pv_fp8_mm_calls,
+            "native_qk_fp8_launches": native_qk_fp8_launches,
+            "native_pv_fp8_launches": native_pv_fp8_launches,
             "dequantized_elements": dequantized_elements,
             "dense_kv_prefix_materializations": dense_kv_prefix_materializations,
             "native_fp8_attention": bool(initialized)
