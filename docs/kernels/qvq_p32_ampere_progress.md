@@ -3711,6 +3711,23 @@ mean versus fetched `origin/main` (minimum 1.458x, maximum 2.826x), and
 2.5x main-relative throughput; the additional grouping pass is still being
 screened for the requested 50% step over the prior commit.
 
+## v77 shape-aware eight-row reuse
+
+For fixed widths other than `N=1024`, stages 1--3 now reuse one packed tile
+across eight adjacent 16-row groups (128 rows per 128-thread CTA).  `N=1024`
+continues to use the four-row kernel because its smaller workload makes the
+larger accumulator footprint slower; stage 4 also remains on four-row reuse
+to stay below Ampere's static shared-memory limit.  The eight-row probe is
+exact for transition bits 4--7.  Its fixed `N=1024,K=5120,StageKTiles=1`
+resource entry is 127 registers/thread, 8,712 B shared memory, and no local
+memory spill.
+
+The full 24-case stage-1 sweep measured 3.106x geometric mean versus fetched
+`origin/main` (minimum 1.458x, maximum 3.663x), or 1.211x over the preceding
+four-row commit.  The extra 50% step is therefore not uniform per commit, but
+the cumulative result is now over 3x main-relative throughput on this A100
+matrix.
+
 ## Reproduction
 
 ```bash
