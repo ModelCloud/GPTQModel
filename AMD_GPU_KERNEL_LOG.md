@@ -76,6 +76,9 @@ engineering comparison but is never presented as an official result.
 | PASS, REJECTED AS PRIMARY PATH | Full 91-case cached-GEMM dispatch/layout/split sweep | Every supported candidate matched the current FP32-output GEMM within `2e-3` | Across seven Qwen3.8-27B K/N geometries and all 13 requested M values, the independent repeat found only 1.000x minimum, 1.03801x geometric mean, and 1.27511x maximum best-per-shape speedup. Physical K-by-N caches, forced default/hipBLAS/hipBLASLt/CK selection, and 2/4/8/16-way M/N batched splits cannot provide the requested 1.5x geometric gain. |
 | PASS (profiled) | Nine-regime `rocprofv3` runtime/kernel trace plus exact selected-symbol gfx950 disassembly | No numerical path changed | Layout gains come from different hipBLASLt macro-tiles: M32/full-Q changes 16x32x1024 to 64x32x256, while M128/QKV changes 64x128x128 to 192x128x64. Every selected kernel has zero scratch. The steady pass contains no P32 extraction, bank, hash, or lookup algebra; static universal hipBLASLt symbols contain guarded edge/activation paths and are not treated as dynamic instruction counts. Direct counter injection again hit the duplicate LLVM `spirv-expand-step` failure before dispatch, so no new BLAS PMCs are claimed. |
 | PASS (ceiling and numeric probe) | Fold immutable QVQ axes into the persistent dense cache | Synthetic target-dimension FP16-cache probe passed `2e-3`; worst maximum absolute error was `0.001476735` at M4096/K17408/N5120 | The architecture-aware 91-case stage sweep folds `diag(SU) * H_K * W_inner * H_N * diag(SV)`, omitting disabled axes. Removing online input/output recovery has a 1.9442x minimum, 14.8003x geometric-mean, and 43.9830x maximum ceiling; all 91 cases exceed 1.5x. This is selected as the next implementation path, subject to all-rate canonical full-layer oracle testing on real Qwen3.8 payloads and cold-cache/break-even measurement. |
+| PASS, PARTIALLY SELECTED | Real-payload transform-folding exploration over the complete Qwen3.8-27B matrix | 314/364 cases passed the `2e-3` FP32-oracle gate | The unrestricted path measured 1.8257x minimum, 10.1204x geometric mean, and 17.5133x maximum, but `attn_out`, `mlp_gate_up`, and `mlp_down` contained seed- or shape-sensitive FP16-folding failures up to `0.0030313`. Those three geometries were rejected as a unit rather than accepting optimistic per-M or per-seed exceptions. |
+| PASS (certified) | Fail-closed full-layer folded cache versus the exact prior public forward | All 364 cases passed: 208 selected cases stayed below `2e-3` (worst `0.001853943`), and all 156 fallback cases were bitwise identical to the prior path | Four measured geometries are enabled: full Q/gate, full KV, linear QKV, and linear Z. Enabled cases measured 5.1052x minimum, **14.2855x geometric mean**, and 19.4969x maximum. Including the three exact fallbacks, the complete 364-case target matrix measured **4.53369x geometric mean**; every requested M has a 3.1168x-5.1279x geometric mean. This exceeds the requested additional 50% at every M. |
+| PASS | Folded-cache construction, amortization, and residency | The folded operand reuses one contiguous allocation and the temporary predecode cache is released; 235/235 AMD tests passed | At W3/M1, JIT-warm construction was 1.88-10.56 ms across the four enabled geometries and retained 10-126 MiB per projection, the same dense-FP16 cache class as the prior fast path rather than two copies. M1 amortization is about 2.4-13.3 calls. The process-first full-Q case also records the real 3.53 s one-time Triton JIT cost; subsequent same-process construction is 10.56 ms. |
 
 The initial exploratory sweep is stored in
 `artifacts/mi355x_p32/initial_gfx950.json`. The expanded sweep is stored in
@@ -117,6 +120,11 @@ trace/ISA/SSA decision record are stored as
 remain local profiling artifacts and are not intended for source-control
 commits.
 
+The full-layer folded-cache certification and cold-construction breakdown are
+stored as `qwen38_27b_folded_full_certified_gfx950.json` and
+`qwen38_27b_folded_cold_final_gfx950.json`. The unrestricted exploratory result
+is retained locally but is not a production acceptance artifact.
+
 ## Implementation notes
 
 The default gfx950 path decodes the storage-neutral continuous-window P32
@@ -136,3 +144,11 @@ limited to ROCm `gfx950`,
 inference mode, FP16 input, V2B2-P32 vector size 2, and transition widths 4
 through 7. Unsupported devices and formats retain the existing reference or
 CUDA paths.
+
+For the four certified Qwen3.8-27B geometries, the gfx950 module path also folds
+both enabled Hadamard axes and SU/SV into that same mutation-aware dense cache.
+Steady inference becomes one FP32-output GEMM plus the final model-dtype cast
+and optional bias. Unsafe geometries stay on the prior path exactly. Rebuilding
+the folded entry discards the ordinary predecode intermediate, and a later
+folded cache hit also clears an ordinary dense cache created through a
+pretransformed caller, preventing persistent duplicate dense copies.

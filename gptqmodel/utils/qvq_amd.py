@@ -19,6 +19,14 @@ from ..quantization.qvq_rates import (
 
 _P32_RATES = (2.0, 2.5, 3.0, 3.5)
 _GFX950_ARCH = "gfx950"
+_QWEN38_27B_FOLDED_SHAPES = frozenset(
+    {
+        (5120, 12288),
+        (5120, 1024),
+        (5120, 10240),
+        (5120, 6144),
+    }
+)
 
 
 def qvq_p32_amd_supported(device: torch.device | str) -> bool:
@@ -32,6 +40,12 @@ def qvq_p32_amd_supported(device: torch.device | str) -> bool:
     except (AssertionError, RuntimeError):
         return False
     return str(getattr(properties, "gcnArchName", "")).split(":", 1)[0] == _GFX950_ARCH
+
+
+def qvq_p32_amd_folded_shape_supported(in_features: int, out_features: int) -> bool:
+    """Return whether the full-layer folded cache is measured for this geometry."""
+
+    return (in_features, out_features) in _QWEN38_27B_FOLDED_SHAPES
 
 
 def _bank_mask(transition_bits: int, bank_alt_id: int) -> int:
@@ -218,6 +232,87 @@ def _qvq_p32_predecoded_weight(
     )
     window._qvq_p32_amd_dense_cache = (key, dense, dense.T)
     return dense
+
+
+def _qvq_p32_folded_weight(
+    window: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    su: torch.Tensor,
+    sv: torch.Tensor,
+    *,
+    bits: float,
+    size_k: int,
+    size_n: int,
+    transition_bits: int,
+    words_per_tile: int,
+    bank_alt_id: int,
+    input_hadamard: bool,
+    output_hadamard: bool,
+) -> torch.Tensor:
+    """Fold immutable QVQ axes into one mutation-aware N-by-K FP16 cache."""
+
+    key = (
+        window._version,
+        levels,
+        levels._version,
+        bank_ids,
+        bank_ids._version,
+        bits,
+        size_k,
+        size_n,
+        bank_alt_id,
+        su,
+        su._version,
+        sv,
+        sv._version,
+        input_hadamard,
+        output_hadamard,
+    )
+    cached = getattr(window, "_qvq_p32_amd_folded_cache", None)
+    if cached is not None:
+        cached_key, _, operand = cached
+        if all(
+            current is recorded
+            if isinstance(current, torch.Tensor)
+            else current == recorded
+            for current, recorded in zip(key, cached_key, strict=True)
+        ):
+            # A caller may have populated the ordinary predecode cache through
+            # forward_pretransformed after this folded entry was built.
+            window._qvq_p32_amd_dense_cache = None
+            return operand
+
+    dense = _qvq_p32_predecoded_weight(
+        window,
+        levels,
+        bank_ids,
+        bits=bits,
+        size_k=size_k,
+        size_n=size_n,
+        transition_bits=transition_bits,
+        words_per_tile=words_per_tile,
+        bank_alt_id=bank_alt_id,
+    )
+    folded = dense.to(torch.float32)
+    if input_hadamard or output_hadamard:
+        from ..quantization.rotation.hadamard_utils import matmul_hadU
+
+        # dense is W^T. Input folding right-multiplies it by H_K^T;
+        # output folding transposes around the row-oriented H_N helper.
+        if input_hadamard:
+            folded = matmul_hadU(folded, transpose=True)
+        if output_hadamard:
+            folded = matmul_hadU(folded.T.contiguous()).T.contiguous()
+    folded.mul_(sv.to(torch.float32)[:, None])
+    folded.mul_(su.to(torch.float32)[None, :])
+    folded = folded.to(torch.float16).contiguous()
+    operand = folded.T
+    # The predecoded matrix is only a construction intermediate here. Keeping
+    # it would double the persistent dense-cache footprint for every layer.
+    window._qvq_p32_amd_dense_cache = None
+    window._qvq_p32_amd_folded_cache = (key, folded, operand)
+    return operand
 
 
 @triton.jit
@@ -572,4 +667,88 @@ def qvq_p32_amd(
     return output
 
 
-__all__ = ["qvq_p32_amd", "qvq_p32_amd_supported"]
+def qvq_p32_amd_folded(
+    x: torch.Tensor,
+    window: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    su: torch.Tensor,
+    sv: torch.Tensor,
+    bits: float,
+    *,
+    out_features: int,
+    bank_alt_id: int,
+    input_hadamard: bool,
+    output_hadamard: bool,
+) -> torch.Tensor:
+    """Apply a complete linear QVQ layer through one folded-cache GEMM."""
+
+    bits = normalize_qvq_rate(bits)
+    if bits not in _P32_RATES:
+        raise ValueError("AMD folded P32 supports rates W2, W2.5, W3, and W3.5")
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    out_features = _integer_argument("out_features", out_features)
+    bank_alt_id = _integer_argument("bank_alt_id", bank_alt_id)
+    if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
+        raise TypeError("AMD folded P32 transform-axis flags must be boolean")
+    if not qvq_p32_amd_supported(x.device):
+        raise RuntimeError("AMD folded P32 requires a ROCm gfx950 device")
+    if x.ndim != 2 or window.ndim != 2:
+        raise ValueError("AMD folded P32 expects 2D input and window tensors")
+    if x.dtype != torch.float16:
+        raise TypeError("AMD folded P32 currently requires float16 input")
+    if window.dtype != torch.int32:
+        raise TypeError("AMD folded P32 requires int32 continuous-window words")
+    if levels.dtype != torch.float16 or tuple(levels.shape) != (256,):
+        raise TypeError("AMD folded P32 requires the canonical 256-entry float16 PGC16 table")
+    if bank_ids.dtype != torch.uint8 or bank_ids.ndim != 1:
+        raise TypeError("AMD folded P32 requires packed uint8 binary bank selectors")
+    if su.dtype != torch.float16 or tuple(su.shape) != (x.shape[1],):
+        raise TypeError("AMD folded P32 requires one float16 SU value per input feature")
+    if sv.dtype != torch.float16 or tuple(sv.shape) != (out_features,):
+        raise TypeError("AMD folded P32 requires one float16 SV value per output feature")
+    if any(tensor.device != x.device for tensor in (window, levels, bank_ids, su, sv)):
+        raise ValueError("AMD folded P32 tensors must share one device")
+    if any(not tensor.is_contiguous() for tensor in (x, window, levels, bank_ids, su, sv)):
+        raise ValueError("AMD folded P32 tensors must be contiguous")
+    if not 1 <= bank_alt_id <= 3:
+        raise ValueError("AMD folded P32 alternative bank ID must be in [1, 3]")
+
+    m, k = x.shape
+    n = out_features
+    if not m or k <= 0 or n <= 0 or k % 16 or n % 16:
+        raise ValueError(
+            f"AMD folded P32 requires positive M and positive K/N divisible by 16, got M={m}, K={k}, N={n}"
+        )
+    tile_count = (k // 16) * (n // 16)
+    words_per_tile = qvq_words_per_tile(bits, vector_size=2)
+    expected_window = (tile_count, words_per_tile)
+    if tuple(window.shape) != expected_window:
+        raise ValueError(f"AMD folded P32 window must have shape {expected_window}")
+    if tuple(bank_ids.shape) != (tile_count,):
+        raise ValueError(f"AMD folded P32 selectors must have shape {(tile_count,)}")
+
+    operand = _qvq_p32_folded_weight(
+        window,
+        levels,
+        bank_ids,
+        su,
+        sv,
+        bits=bits,
+        size_k=k,
+        size_n=n,
+        transition_bits=transition_bits,
+        words_per_tile=words_per_tile,
+        bank_alt_id=bank_alt_id,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+    )
+    return torch.mm(x, operand, out_dtype=torch.float32)
+
+
+__all__ = [
+    "qvq_p32_amd",
+    "qvq_p32_amd_folded",
+    "qvq_p32_amd_folded_shape_supported",
+    "qvq_p32_amd_supported",
+]

@@ -19,10 +19,13 @@ from gptqmodel.quantization.qvq_codecs import (
     pgc16_levels_for_version,
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
+from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
 from gptqmodel.utils.qvq_amd import (
     _launch_config,
     _use_gemv,
     qvq_p32_amd,
+    qvq_p32_amd_folded,
+    qvq_p32_amd_folded_shape_supported,
     qvq_p32_amd_supported,
 )
 from scripts.benchmark_qvq_p32_amd import _target_process_ids
@@ -94,6 +97,13 @@ def test_qvq_p32_amd_support_is_rocm_gfx950_only():
     ):
         assert not qvq_p32_amd_supported("cuda:0")
     assert not qvq_p32_amd_supported("cpu")
+
+
+def test_qvq_p32_amd_folded_shape_gate_is_fail_closed():
+    for shape in ((5120, 12288), (5120, 1024), (5120, 10240), (5120, 6144)):
+        assert qvq_p32_amd_folded_shape_supported(*shape)
+    for shape in ((6144, 5120), (5120, 17408), (17408, 5120), (256, 256)):
+        assert not qvq_p32_amd_folded_shape_supported(*shape)
 
 
 @pytest.mark.parametrize(
@@ -415,3 +425,138 @@ def test_qvq_p32_amd_cache_reuses_and_invalidates_on_selector_mutation():
     assert second_dense is not first_dense
     reference = x.float() @ second_dense.float().T
     torch.testing.assert_close(changed, reference, rtol=0.0, atol=2e-3)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not _gfx950_available(), reason="requires a ROCm gfx950 GPU")
+@pytest.mark.parametrize("bits", P32_RATES)
+@pytest.mark.parametrize(
+    ("input_hadamard", "output_hadamard"),
+    ((True, True), (True, False), (False, True)),
+)
+@pytest.mark.parametrize("m", (1, 32))
+def test_qvq_p32_amd_folded_full_layer_matches_fp32_oracle(
+    bits,
+    input_hadamard,
+    output_hadamard,
+    m,
+):
+    x, planar, window, levels, bank_ids, bank_alt_id = _case(bits, m, seed=8950)
+    x = x * 0.1
+    su = torch.linspace(0.75, 1.25, 256, dtype=torch.float32, device="cuda")
+    sv = torch.linspace(1.25, 0.75, 256, dtype=torch.float32, device="cuda")
+    su_half = su.half()
+    sv_half = sv.half()
+    inner = reconstruct_qvq_inner_weight(
+        planar,
+        bits=bits,
+        in_features=256,
+        out_features=256,
+        bank_ids=bank_ids,
+        v2b2_p32=True,
+        bank_alt_id=bank_alt_id,
+    )
+    reference = x.float() * su
+    if input_hadamard:
+        reference = matmul_hadU(reference)
+    reference = reference @ inner
+    if output_hadamard:
+        reference = matmul_hadU(reference)
+    reference = reference * sv
+
+    actual = qvq_p32_amd_folded(
+        x,
+        window,
+        levels,
+        bank_ids,
+        su_half,
+        sv_half,
+        bits,
+        out_features=256,
+        bank_alt_id=3,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+    )
+    repeated = qvq_p32_amd_folded(
+        x,
+        window,
+        levels,
+        bank_ids,
+        su_half,
+        sv_half,
+        bits,
+        out_features=256,
+        bank_alt_id=3,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+    )
+    torch.testing.assert_close(actual, reference, rtol=0.0, atol=2e-3)
+    torch.testing.assert_close(repeated, reference, rtol=0.0, atol=2e-3)
+    assert window._qvq_p32_amd_dense_cache is None
+
+    qvq_p32_amd(
+        x,
+        window,
+        levels,
+        bank_ids,
+        bits,
+        out_features=256,
+        bank_alt_id=3,
+    )
+    assert window._qvq_p32_amd_dense_cache is not None
+    qvq_p32_amd_folded(
+        x,
+        window,
+        levels,
+        bank_ids,
+        su_half,
+        sv_half,
+        bits,
+        out_features=256,
+        bank_alt_id=3,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
+    )
+    assert window._qvq_p32_amd_dense_cache is None
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not _gfx950_available(), reason="requires a ROCm gfx950 GPU")
+def test_qvq_linear_amd_folded_cache_reuses_and_invalidates_auxiliary_mutation():
+    bits = 3.0
+    k, n = 5120, 1024
+    x, planar, _, _, bank_ids, bank_alt_id = _case(bits, 7, k=k, n=n, seed=9950)
+    x = x * 0.1
+    layer = QVQLinear(
+        bits=bits,
+        in_features=k,
+        out_features=n,
+        bank_count=2,
+        v2b2_p32=True,
+        input_hadamard=True,
+        output_hadamard=True,
+        tensors={
+            "trellis": planar,
+            "SU": torch.ones(k, dtype=torch.float32, device="cuda"),
+            "SV": torch.ones(n, dtype=torch.float32, device="cuda"),
+            "bias": torch.linspace(-0.01, 0.01, n, dtype=torch.float16, device="cuda"),
+            "bank_ids": bank_ids,
+            "bank_alt_id": bank_alt_id,
+        },
+    ).eval()
+
+    first = layer(x)
+    window = layer._qvq_cuda_window_cache[3]
+    first_folded = window._qvq_p32_amd_folded_cache[1]
+    repeated = layer(x)
+    assert window._qvq_p32_amd_folded_cache[1] is first_folded
+    assert torch.equal(first, repeated)
+
+    layer.SU.mul_(0.875)
+    changed = layer(x)
+    second_folded = window._qvq_p32_amd_folded_cache[1]
+    assert second_folded is not first_folded
+    inner = layer.get_inner_weight_tensor()
+    reference = matmul_hadU(x.float() * layer.SU) @ inner
+    reference = matmul_hadU(reference) * layer.SV + layer.bias.float()
+    torch.testing.assert_close(changed.float(), reference, rtol=0.0, atol=2e-3)
