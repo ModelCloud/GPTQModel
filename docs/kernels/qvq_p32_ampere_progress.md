@@ -3658,6 +3658,32 @@ randomized `M=32,N=6144,split=8` comparison remained bit-for-bit identical for
 all four transition-bit values, covering the global partial-layout and single
 reduction changes across every supported rate.
 
+## v74 large-M two-row CTA reuse (WIP)
+
+The next probe reuses each packed trellis/bank-ID tile across two adjacent
+16-row groups in a 128-thread CTA.  The input staging tile and accumulator
+fragments are doubled, while the four-warp N layout and one native reduction
+are unchanged.  This removes the repeated trellis decode and global tile loads
+that dominate large M.  Fixed `K=5120` and fixed model N dispatches are used;
+the existing one-row path remains available for other thread counts and
+non-specialized shapes.
+
+The corrected probe matched the merged `origin/main` output bit-for-bit for
+transition bits 4, 5, 6, and 7 on randomized `M=32,N=6144,split=8` data.  On
+the A100, `K=5120`, block variant, native reduction, `threads=128`,
+`StageKTiles=1`, and ten warmups/50 timed iterations, the 24-case
+`M=512/1024/2048/4096` by `N=1024/5120/6144/10240/12288/17408` sweep gave a
+1.782x geometric-mean speedup versus the fetched `origin/main` shared-ABI
+baseline (minimum 1.373x, maximum 1.858x).  Per-N means were
+1.635x/1.785x/1.797x/1.824x/1.835x/1.835x; per-M means were
+1.697x/1.799x/1.804x/1.841x.  This exceeds the current 20% target on every
+reported aggregate, but still needs the post-commit NCU/SASS pass below.
+
+An initial build returned `-1` because the new stage-dispatch macro was defined
+but not invoked; that control-flow bug was fixed before collecting these
+numbers.  The first vector-store predicate was also narrowed to static-N
+launches so generic/non-specialized N remains boundary-safe.
+
 ## Reproduction
 
 ```bash

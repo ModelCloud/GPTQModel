@@ -309,7 +309,8 @@ template <
     int StageKTiles = kStageKTiles,
     bool HoistBankMasks = false,
     bool UpperRowsOnly = false,
-    int StaticK = 0>
+    int StaticK = 0,
+    int RowGroups = 1>
 __device__ __forceinline__ void p32_window_ampere_kernel_body(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -333,7 +334,8 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
   constexpr int kWordsPerTile = 4 * TransitionBits;
   constexpr int kStageColumnsForKernel = StageKTiles * kTileRows;
-  __shared__ __align__(32) half input_tile[2][kRows * kStageColumnsForKernel];
+  constexpr int kRowsPerBlock = kRows * RowGroups;
+  __shared__ __align__(32) half input_tile[2][kRowsPerBlock * kStageColumnsForKernel];
   __shared__ __align__(16) uint32_t packed_words[
       2][StageKTiles][TilesPerBlock][kWordsPerTile];
   __shared__ __align__(4) uint8_t packed_bank_ids[2][StageKTiles][TilesPerBlock];
@@ -354,7 +356,7 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
 
   auto stage = [&](int k_tile_base, int destination) {
     auto* input_vectors = reinterpret_cast<uint4*>(input_tile[destination]);
-    for (int index = thread; index < kRows * kStageColumnsForKernel / 8; index += Threads) {
+    for (int index = thread; index < kRowsPerBlock * kStageColumnsForKernel / 8; index += Threads) {
       const int row = index / (kStageColumnsForKernel / 8);
       const int vector = index - row * (kStageColumnsForKernel / 8);
       const int source_column = k_tile_base * kTileRows + vector * 8;
@@ -416,7 +418,7 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
     }
     if constexpr (
         StaticN > 0 && TilesPerBlock == 4 &&
-        ((StaticN != 1024 && FullRows) || ActiveRows == 8)) {
+        (FullRows || ActiveRows == 8)) {
       if (thread < StageKTiles) {
         const int k_tile = k_tile_base + thread;
         auto* destination_ids = reinterpret_cast<uint32_t*>(
@@ -453,8 +455,8 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
 
   static_assert(!UpperRowsOnly || (!FullRows && ActiveRows == 8));
   constexpr bool kUpperRowsOnly = UpperRowsOnly;
-  MmaAccumulator<kUpperRowsOnly> accumulator_0 = {};
-  MmaAccumulator<kUpperRowsOnly> accumulator_1 = {};
+  MmaAccumulator<kUpperRowsOnly> accumulator_0[RowGroups] = {};
+  MmaAccumulator<kUpperRowsOnly> accumulator_1[RowGroups] = {};
 
   stage(k_tile_begin, 0);
   int parity = 0;
@@ -530,26 +532,31 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
         weight_fragment_1.values[0] = select_high ? high_01_1 : low_01_1;
         weight_fragment_1.values[1] = select_high ? high_89_1 : low_89_1;
 
-        MmaFragmentA input_fragment;
-        if constexpr (kUpperRowsOnly) {
-          const int address_row = lane & 7;
-          const int address_column = ((lane >> 3) & 1) * 8;
-          load_mma_fragment_a_upper(
-              input_fragment,
-              input_tile[parity] +
-                  address_row * kStageColumnsForKernel +
-                  stage_k_tile * kTileRows + address_column);
-        } else {
-          const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
-          const int address_column = (lane >> 4) * 8;
-          load_mma_fragment_a(
-              input_fragment,
-              input_tile[parity] +
-                  address_row * kStageColumnsForKernel +
-                  stage_k_tile * kTileRows + address_column);
+        #pragma unroll
+        for (int row_group = 0; row_group < RowGroups; ++row_group) {
+          MmaFragmentA input_fragment;
+          if constexpr (kUpperRowsOnly) {
+            const int address_row = lane & 7;
+            const int address_column = ((lane >> 3) & 1) * 8;
+            load_mma_fragment_a_upper(
+                input_fragment,
+                input_tile[parity] + row_group * kRows * kStageColumnsForKernel +
+                    address_row * kStageColumnsForKernel +
+                    stage_k_tile * kTileRows + address_column);
+          } else {
+            const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
+            const int address_column = (lane >> 4) * 8;
+            load_mma_fragment_a(
+                input_fragment,
+                input_tile[parity] + row_group * kRows * kStageColumnsForKernel +
+                    address_row * kStageColumnsForKernel +
+                    stage_k_tile * kTileRows + address_column);
+          }
+          mma_m16n8k16(
+              input_fragment, weight_fragment_0, accumulator_0[row_group]);
+          mma_m16n8k16(
+              input_fragment, weight_fragment_1, accumulator_1[row_group]);
         }
-        mma_m16n8k16(input_fragment, weight_fragment_0, accumulator_0);
-        mma_m16n8k16(input_fragment, weight_fragment_1, accumulator_1);
       }
     }
     __syncthreads();
@@ -569,54 +576,59 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
     const int output_row_1 = output_row_0 + 8;
     const int output_column = n_tile_base * kTileColumns +
         warp * kTileColumns + (lane & 3) * 2;
-    if constexpr (FullRows) {
-      store_output_pair<StaticN != 1024>(
-          target + static_cast<int64_t>(output_row_0) * target_stride + output_column,
-          accumulator_0.values[0], accumulator_0.values[1]);
-      store_output_pair<StaticN != 1024>(
-          target + static_cast<int64_t>(output_row_1) * target_stride + output_column,
-          accumulator_0.values[2], accumulator_0.values[3]);
-      store_output_pair<StaticN != 1024>(
-          target + static_cast<int64_t>(output_row_0) * target_stride + output_column + 8,
-          accumulator_1.values[0], accumulator_1.values[1]);
-      store_output_pair<StaticN != 1024>(
-          target + static_cast<int64_t>(output_row_1) * target_stride + output_column + 8,
-          accumulator_1.values[2], accumulator_1.values[3]);
-    } else if constexpr (ActiveRows > 0) {
-      if (output_row_0 < ActiveRows) {
-        store_output_pair<StaticN != 1024>(
-            target + static_cast<int64_t>(output_row_0) * target_stride + output_column,
-            accumulator_0.values[0], accumulator_0.values[1]);
-        store_output_pair<StaticN != 1024>(
-            target + static_cast<int64_t>(output_row_0) * target_stride + output_column + 8,
-            accumulator_1.values[0], accumulator_1.values[1]);
-      }
-      if constexpr (!kUpperRowsOnly) {
-        if (output_row_1 < ActiveRows) {
+    #pragma unroll
+    for (int row_group = 0; row_group < RowGroups; ++row_group) {
+      float* row_target = target +
+          static_cast<int64_t>(row_group) * kRows * target_stride;
+      if constexpr (FullRows) {
+        store_output_pair<StaticN != 1024 || (FullRows && StaticN > 0)>(
+            row_target + static_cast<int64_t>(output_row_0) * target_stride + output_column,
+            accumulator_0[row_group].values[0], accumulator_0[row_group].values[1]);
+        store_output_pair<StaticN != 1024 || (FullRows && StaticN > 0)>(
+            row_target + static_cast<int64_t>(output_row_1) * target_stride + output_column,
+            accumulator_0[row_group].values[2], accumulator_0[row_group].values[3]);
+        store_output_pair<StaticN != 1024 || (FullRows && StaticN > 0)>(
+            row_target + static_cast<int64_t>(output_row_0) * target_stride + output_column + 8,
+            accumulator_1[row_group].values[0], accumulator_1[row_group].values[1]);
+        store_output_pair<StaticN != 1024 || (FullRows && StaticN > 0)>(
+            row_target + static_cast<int64_t>(output_row_1) * target_stride + output_column + 8,
+            accumulator_1[row_group].values[2], accumulator_1[row_group].values[3]);
+      } else if constexpr (ActiveRows > 0) {
+        if (output_row_0 < ActiveRows) {
           store_output_pair<StaticN != 1024>(
-              target + static_cast<int64_t>(output_row_1) * target_stride + output_column,
-              accumulator_0.values[2], accumulator_0.values[3]);
+              row_target + static_cast<int64_t>(output_row_0) * target_stride + output_column,
+              accumulator_0[row_group].values[0], accumulator_0[row_group].values[1]);
           store_output_pair<StaticN != 1024>(
-              target + static_cast<int64_t>(output_row_1) * target_stride + output_column + 8,
-              accumulator_1.values[2], accumulator_1.values[3]);
+              row_target + static_cast<int64_t>(output_row_0) * target_stride + output_column + 8,
+              accumulator_1[row_group].values[0], accumulator_1[row_group].values[1]);
         }
-      }
-    } else {
-      if (output_row_0 < size_m) {
-        store_output_pair<false>(
-            target + static_cast<int64_t>(output_row_0) * target_stride + output_column,
-            accumulator_0.values[0], accumulator_0.values[1]);
-        store_output_pair<false>(
-            target + static_cast<int64_t>(output_row_0) * target_stride + output_column + 8,
-            accumulator_1.values[0], accumulator_1.values[1]);
-      }
-      if (output_row_1 < size_m) {
-        store_output_pair<false>(
-            target + static_cast<int64_t>(output_row_1) * target_stride + output_column,
-            accumulator_0.values[2], accumulator_0.values[3]);
-        store_output_pair<false>(
-            target + static_cast<int64_t>(output_row_1) * target_stride + output_column + 8,
-            accumulator_1.values[2], accumulator_1.values[3]);
+        if constexpr (!kUpperRowsOnly) {
+          if (output_row_1 < ActiveRows) {
+            store_output_pair<StaticN != 1024>(
+                row_target + static_cast<int64_t>(output_row_1) * target_stride + output_column,
+                accumulator_0[row_group].values[2], accumulator_0[row_group].values[3]);
+            store_output_pair<StaticN != 1024>(
+                row_target + static_cast<int64_t>(output_row_1) * target_stride + output_column + 8,
+                accumulator_1[row_group].values[2], accumulator_1[row_group].values[3]);
+          }
+        }
+      } else {
+        if (output_row_0 < size_m) {
+          store_output_pair<false>(
+              row_target + static_cast<int64_t>(output_row_0) * target_stride + output_column,
+              accumulator_0[row_group].values[0], accumulator_0[row_group].values[1]);
+          store_output_pair<false>(
+              row_target + static_cast<int64_t>(output_row_0) * target_stride + output_column + 8,
+              accumulator_1[row_group].values[0], accumulator_1[row_group].values[1]);
+        }
+        if (output_row_1 < size_m) {
+          store_output_pair<false>(
+              row_target + static_cast<int64_t>(output_row_1) * target_stride + output_column,
+              accumulator_0[row_group].values[2], accumulator_0[row_group].values[3]);
+          store_output_pair<false>(
+              row_target + static_cast<int64_t>(output_row_1) * target_stride + output_column + 8,
+              accumulator_1[row_group].values[2], accumulator_1[row_group].values[3]);
+        }
       }
     }
   }
@@ -1191,7 +1203,8 @@ template <
     int TransitionBits,
     int Threads,
     int StageKTiles,
-    int StaticN = 0>
+    int StaticN = 0,
+    int StaticK = 0>
 __global__ __launch_bounds__(Threads) void p32_window_ampere_large_m_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -1213,7 +1226,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_large_m_kernel(
 #define QVQ_LARGE_M_BODY(FULL_ROWS) \
   p32_window_ampere_kernel_body< \
       TransitionBits, FULL_ROWS, 0, StaticN, Threads, Threads / 32, \
-      StageKTiles>( \
+      StageKTiles, false, false, StaticK>( \
       input + static_cast<int64_t>(row_offset) * size_k, \
       trellis, levels, bank_ids, partial_output, \
       output + static_cast<int64_t>(row_offset) * size_n, local_m, size_k, \
@@ -1223,6 +1236,40 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_large_m_kernel(
   if (local_m == kRows) QVQ_LARGE_M_BODY(true);
   else QVQ_LARGE_M_BODY(false);
 #undef QVQ_LARGE_M_BODY
+}
+
+// Reuse one packed N-tile set across two adjacent 16-row groups.  Each warp
+// keeps two accumulator fragments, so the second row group avoids repeating
+// trellis loads and state decoding while retaining the four-warp N layout.
+template <int TransitionBits, int StaticN, int StaticK = 0,
+          int StageKTiles = 1>
+__global__ __launch_bounds__(128) void p32_window_ampere_large_m2_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int split_count,
+    const uint8_t* __restrict__ bank_alt_id) {
+  const int row_offset = static_cast<int>(blockIdx.y) * (2 * kRows);
+  const int local_m = min(2 * kRows, size_m - row_offset);
+  if (local_m < 2 * kRows) return;
+  const int n_tiles = size_n / kTileColumns;
+  const int n_block = static_cast<int>(blockIdx.x);
+  const int split = static_cast<int>(blockIdx.z);
+  p32_window_ampere_kernel_body<
+      TransitionBits, true, 0, StaticN, 128, 4, StageKTiles,
+      false, false, StaticK, 2>(
+      input + static_cast<int64_t>(row_offset) * size_k,
+      trellis, levels, bank_ids, partial_output,
+      output + static_cast<int64_t>(row_offset) * size_n, local_m, size_k,
+      size_n, split_count, bank_alt_id, n_block, split, n_tiles, 0, 0,
+      size_n, static_cast<int64_t>(row_offset) * size_n,
+      static_cast<int64_t>(size_m) * size_n);
 }
 
 constexpr int kMaxGroupedP32Segments = 3;
@@ -2650,7 +2697,8 @@ int launch_p32_config(
 // reduction is safe here because each chunk owns a disjoint output and partial
 // workspace range. Graph-visible partials retain the canonical [S,M,N] layout and
 // therefore continue to use explicit framework-owned row chunking.
-template <int TransitionBits, int Threads, int StageKTiles, int StaticN>
+template <int TransitionBits, int Threads, int StageKTiles, int StaticN,
+          int StaticK = 0>
 int launch_p32_large_m_grid(
     const half* input,
     const uint32_t* trellis,
@@ -2670,7 +2718,8 @@ int launch_p32_large_m_grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
       static_cast<unsigned>((size_m + kRows - 1) / kRows),
       static_cast<unsigned>(split_count));
-  p32_window_ampere_large_m_kernel<TransitionBits, Threads, StageKTiles, StaticN>
+  p32_window_ampere_large_m_kernel<
+      TransitionBits, Threads, StageKTiles, StaticN, StaticK>
       <<<grid, Threads, 0, stream>>>(
       input, trellis, levels, bank_ids, partial_output, output, size_m, size_k,
       size_n, split_count, bank_alt_id);
@@ -2701,12 +2750,32 @@ int launch_p32_large_m_grid_dispatch(
     int split_count,
     bool static_n,
     cudaStream_t stream) {
+  if (static_n && size_k == 5120) {
+    switch (size_n) {
+#define QVQ_LARGE_M_STATIC_N(N) \
+      case N: \
+        return launch_p32_large_m_grid< \
+            TransitionBits, Threads, StageKTiles, N, 5120>( \
+            input, trellis, levels, bank_ids, bank_alt_id, output, \
+            partial_output, size_m, size_k, size_n, split_count, stream)
+      QVQ_LARGE_M_STATIC_N(1024);
+      QVQ_LARGE_M_STATIC_N(5120);
+      QVQ_LARGE_M_STATIC_N(6144);
+      QVQ_LARGE_M_STATIC_N(10240);
+      QVQ_LARGE_M_STATIC_N(12288);
+      QVQ_LARGE_M_STATIC_N(17408);
+#undef QVQ_LARGE_M_STATIC_N
+      default:
+        set_last_error("QVQ P32 large-M static_n does not support this N");
+        return -1;
+    }
+  }
   if (static_n) {
     switch (size_n) {
 #define QVQ_LARGE_M_STATIC_N(N) \
       case N: \
         return launch_p32_large_m_grid< \
-            TransitionBits, Threads, StageKTiles, N>( \
+            TransitionBits, Threads, StageKTiles, N, 0>( \
             input, trellis, levels, bank_ids, bank_alt_id, output, \
             partial_output, size_m, size_k, size_n, split_count, stream)
       QVQ_LARGE_M_STATIC_N(1024);
@@ -2723,6 +2792,102 @@ int launch_p32_large_m_grid_dispatch(
   }
   return launch_p32_large_m_grid<
       TransitionBits, Threads, StageKTiles, 0>(
+      input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
+      size_m, size_k, size_n, split_count, stream);
+}
+
+template <int TransitionBits, int StageKTiles, int StaticN, int StaticK = 0>
+int launch_p32_large_m2_grid(
+    const half* input,
+    const uint32_t* trellis,
+    const half* levels,
+    const uint8_t* bank_ids,
+    const uint8_t* bank_alt_id,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int split_count,
+    cudaStream_t stream) {
+  constexpr int tiles_per_block = 4;
+  const int n_tiles = size_n / kTileColumns;
+  const dim3 grid(
+      static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
+      static_cast<unsigned>(size_m / (2 * kRows)),
+      static_cast<unsigned>(split_count));
+  p32_window_ampere_large_m2_kernel<TransitionBits, StaticN, StaticK, StageKTiles>
+      <<<grid, 128, 0, stream>>>(
+      input, trellis, levels, bank_ids, partial_output, output, size_m, size_k,
+      size_n, split_count, bank_alt_id);
+  if (split_count > 1) {
+    launch_split_reduction(
+        partial_output, output, size_m, size_k, size_n, split_count, stream);
+  }
+  const cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    set_last_error(cudaGetErrorString(error));
+    return static_cast<int>(error);
+  }
+  return 0;
+}
+
+template <int TransitionBits, int StageKTiles>
+int launch_p32_large_m2_grid_dispatch(
+    const half* input,
+    const uint32_t* trellis,
+    const half* levels,
+    const uint8_t* bank_ids,
+    const uint8_t* bank_alt_id,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int split_count,
+    bool static_n,
+    cudaStream_t stream) {
+  if (static_n && size_k == 5120) {
+    switch (size_n) {
+#define QVQ_LARGE_M2_STATIC_N(N) \
+      case N: \
+        return launch_p32_large_m2_grid< \
+            TransitionBits, StageKTiles, N, 5120>( \
+            input, trellis, levels, bank_ids, bank_alt_id, output, \
+            partial_output, size_m, size_k, size_n, split_count, stream)
+      QVQ_LARGE_M2_STATIC_N(1024);
+      QVQ_LARGE_M2_STATIC_N(5120);
+      QVQ_LARGE_M2_STATIC_N(6144);
+      QVQ_LARGE_M2_STATIC_N(10240);
+      QVQ_LARGE_M2_STATIC_N(12288);
+      QVQ_LARGE_M2_STATIC_N(17408);
+#undef QVQ_LARGE_M2_STATIC_N
+      default:
+        set_last_error("QVQ P32 large-M2 static_n does not support this N");
+        return -1;
+    }
+  }
+  if (static_n) {
+    switch (size_n) {
+#define QVQ_LARGE_M2_STATIC_N(N) \
+      case N: \
+        return launch_p32_large_m2_grid< \
+            TransitionBits, StageKTiles, N, 0>( \
+            input, trellis, levels, bank_ids, bank_alt_id, output, \
+            partial_output, size_m, size_k, size_n, split_count, stream)
+      QVQ_LARGE_M2_STATIC_N(1024);
+      QVQ_LARGE_M2_STATIC_N(5120);
+      QVQ_LARGE_M2_STATIC_N(6144);
+      QVQ_LARGE_M2_STATIC_N(10240);
+      QVQ_LARGE_M2_STATIC_N(12288);
+      QVQ_LARGE_M2_STATIC_N(17408);
+#undef QVQ_LARGE_M2_STATIC_N
+      default:
+        set_last_error("QVQ P32 large-M2 static_n does not support this N");
+        return -1;
+    }
+  }
+  return launch_p32_large_m2_grid<TransitionBits, StageKTiles, 0, 0>(
       input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
       size_m, size_k, size_n, split_count, stream);
 }
@@ -2763,6 +2928,41 @@ int launch_p32_large_m(
       size_n == 1024 || size_n == 5120 || size_n == 6144 ||
       size_n == 10240 || size_n == 12288 || size_n == 17408;
   int status = -1;
+  if (config.threads == 128 && size_m % (2 * kRows) == 0) {
+#define QVQ_LARGE_M2_STAGE \
+    switch (config.stage_k_tiles) { \
+      case 1: \
+        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 1>( \
+            input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+            output, partial_output, size_m, size_k, size_n, config.split_count, \
+            use_static_n, cuda_stream); \
+        break; \
+      case 2: \
+        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 2>( \
+            input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+            output, partial_output, size_m, size_k, size_n, config.split_count, \
+            use_static_n, cuda_stream); \
+        break; \
+      case 3: \
+        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 3>( \
+            input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+            output, partial_output, size_m, size_k, size_n, config.split_count, \
+            use_static_n, cuda_stream); \
+        break; \
+      case 4: \
+        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 4>( \
+            input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+            output, partial_output, size_m, size_k, size_n, config.split_count, \
+            use_static_n, cuda_stream); \
+        break; \
+      default: \
+        set_last_error("QVQ P32 large-M2 stage_k_tiles must be in [1, 4]"); \
+        return -1; \
+    }
+    QVQ_LARGE_M2_STAGE
+    return status;
+#undef QVQ_LARGE_M2_STAGE
+  }
 #define QVQ_LARGE_M_STAGE(THREADS) \
   switch (config.stage_k_tiles) { \
     case 1: \
