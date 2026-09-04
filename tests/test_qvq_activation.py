@@ -114,6 +114,8 @@ def test_qvq_fp8_dynamic_cache_has_no_full_precision_residual():
     assert layer.keys.dtype == layer.values.dtype == torch.float8_e4m3fn
     assert layer.key_scales.dtype == layer.value_scales.dtype == torch.float32
     assert layer.keys.shape[-2] == layer.key_scales.shape[-2] == 4
+    assert layer.keys.stride(-1) == 1
+    assert layer.values.stride(-2) == 1
     torch.testing.assert_close(returned_key, key, atol=0.0, rtol=0.065)
     torch.testing.assert_close(returned_value, value, atol=0.0, rtol=0.065)
 
@@ -124,6 +126,31 @@ def test_qvq_fp8_dynamic_cache_has_no_full_precision_residual():
     assert telemetry["no_full_precision_residual"] is True
     assert telemetry["storage_bytes"] == expected_payload_bytes + expected_scale_bytes
     assert telemetry["storage_ratio_vs_dense"] == pytest.approx(0.625)
+
+
+def test_qvq_fp8_static_cache_preallocates_and_enforces_maximum():
+    cache = QVQFP8DynamicCache(
+        _TinyCacheConfig(), QVQActivationConfig(), max_cache_length=8
+    )
+    key = torch.randn(1, 1, 3, 16, dtype=torch.bfloat16)
+    value = torch.randn(1, 1, 3, 16, dtype=torch.bfloat16)
+    cache.update(key, value, 0)
+    cache.update(key, value, 0)
+    layer = cache.layers[0]
+
+    assert layer.get_seq_length() == 6
+    assert layer.get_max_cache_shape() == 8
+    assert layer.capacity == 8
+    assert layer.allocations == 1
+    assert layer.reallocations == 0
+    assert layer.values.stride(-2) == 1
+    telemetry = cache.telemetry()
+    assert telemetry["allocation_strategy"] == "static"
+    assert telemetry["capacities"] == [8]
+    assert telemetry["reallocations"] == 0
+
+    with pytest.raises(ValueError, match="exceeds configured maximum"):
+        cache.update(key, value, 0)
 
 
 def test_qvq_a8_runtime_injects_fp8_cache_and_rejects_dense_cache():
@@ -207,8 +234,13 @@ def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(
         output_attentions=True,
     )
     layer = cache.layers[0]
-    dense_key = (layer.keys.float() * layer.key_scales).repeat_interleave(4, dim=1)
-    dense_value = (layer.values.float() * layer.value_scales).repeat_interleave(
+    length = layer.get_seq_length()
+    dense_key = (
+        layer.keys[..., :length, :].float() * layer.key_scales[..., :length, :]
+    ).repeat_interleave(4, dim=1)
+    dense_value = (
+        layer.values[..., :length, :].float() * layer.value_scales[..., :length, :]
+    ).repeat_interleave(
         4, dim=1
     )
     reference_weights = torch.softmax(
@@ -235,8 +267,13 @@ def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(
         None,
         scaling=0.125,
     )
-    dense_key = (layer.keys.float() * layer.key_scales).repeat_interleave(4, dim=1)
-    dense_value = (layer.values.float() * layer.value_scales).repeat_interleave(
+    length = layer.get_seq_length()
+    dense_key = (
+        layer.keys[..., :length, :].float() * layer.key_scales[..., :length, :]
+    ).repeat_interleave(4, dim=1)
+    dense_value = (
+        layer.values[..., :length, :].float() * layer.value_scales[..., :length, :]
+    ).repeat_interleave(
         4, dim=1
     )
     decode_weights = torch.softmax(
@@ -255,6 +292,10 @@ def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(
     assert telemetry["native_pv_fp8_mm_calls"] == 2
     assert telemetry["dequantized_elements"] == 0
     assert telemetry["dense_kv_prefix_materializations"] == 0
+    assert telemetry["capacities"] == [256]
+    assert telemetry["allocations"] == 1
+    assert telemetry["reallocations"] == 0
+    assert layer.values.stride(-2) == 1
 
 
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))

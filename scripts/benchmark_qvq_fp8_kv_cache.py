@@ -407,9 +407,19 @@ def main(argv: list[str] | None = None) -> int:
 
     @torch.inference_mode()
     def run_prefill():
+        cache = None
+        if args.arm == "w35-a8":
+            cache = QVQFP8DynamicCache(
+                model.config,
+                qvq_named_layers[0][1].activation_quantization,
+                max_cache_length=(
+                    args.prompt_length + args.decode_warmup + args.decode_steps
+                ),
+            )
         return model(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            past_key_values=cache,
             use_cache=True,
             logits_to_keep=1,
         )

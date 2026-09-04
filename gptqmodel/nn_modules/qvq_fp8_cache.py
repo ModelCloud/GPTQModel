@@ -45,14 +45,9 @@ class QVQFP8KVView:
     payload: torch.Tensor
     scales: torch.Tensor
     source_dtype: torch.dtype
-    layer: "QVQFP8CacheLayer"
+    layer: QVQFP8CacheLayer
     kind: str
-
-
-def _pad_fp8_rows(tensor: torch.Tensor, rows: int) -> torch.Tensor:
-    if tensor.shape[0] == rows:
-        return tensor
-    return F.pad(tensor, (0, 0, 0, rows - tensor.shape[0]))
+    sequence_length: int
 
 
 def _attention_mask_slice(
@@ -137,7 +132,10 @@ def qvq_fp8_attention_forward(
         raise ValueError("QVQ FP8 attention query and cache geometry differ.")
 
     batch_size, query_heads, query_tokens, _ = query.shape
-    _, kv_heads, key_tokens, _ = key.payload.shape
+    _, kv_heads, storage_capacity, _ = key.payload.shape
+    key_tokens = key.sequence_length
+    if value.sequence_length != key_tokens or key_tokens > storage_capacity:
+        raise ValueError("QVQ FP8 attention received invalid K/V logical lengths.")
     if query_heads % kv_heads:
         raise ValueError("QVQ FP8 attention requires query heads divisible by KV heads.")
     groups = query_heads // kv_heads
@@ -160,10 +158,8 @@ def qvq_fp8_attention_forward(
                 scale_method="dynamic_per_token",
                 validate=False,
             )
-            key_fp8 = key.payload[batch, kv_head]
-            key_scale = key.scales[batch, kv_head]
-            if padded_keys != key_tokens:
-                key_fp8 = _pad_fp8_rows(key_fp8, padded_keys)
+            key_fp8 = key.payload[batch, kv_head, :padded_keys]
+            key_scale = key.scales[batch, kv_head, :key_tokens]
             raw_logits = torch._scaled_mm(
                 query_fp8,
                 key_fp8.T,
@@ -204,7 +200,7 @@ def qvq_fp8_attention_forward(
             # The second native E4M3 GEMM can then consume the cached V payload
             # directly without ever constructing a BF16/FP16 V prefix.
             scaled_probabilities = probabilities * value.scales[
-                batch, kv_head, :, 0
+                batch, kv_head, :key_tokens, 0
             ].float().unsqueeze(0)
             probability_fp8, probability_scale = quantize_qvq_fp8_activation(
                 scaled_probabilities,
@@ -212,18 +208,14 @@ def qvq_fp8_attention_forward(
                 scale_method="dynamic_per_token",
                 validate=False,
             )
-            value_fp8 = value.payload[batch, kv_head]
+            value_fp8 = value.payload[batch, kv_head, :padded_keys]
             if padded_keys != key_tokens:
                 probability_fp8 = F.pad(
                     probability_fp8, (0, padded_keys - key_tokens)
                 )
-                value_fp8 = _pad_fp8_rows(value_fp8, padded_keys)
-            # cuBLASLt FP8 accepts row-major A and column-major B. This
-            # transpose-copy-transpose remains FP8 and is not a dense K/V copy.
-            value_column_major = value_fp8.T.contiguous().T
             raw_output = torch._scaled_mm(
                 probability_fp8,
-                value_column_major,
+                value_fp8,
                 one,
                 one,
                 out_dtype=torch.float32,
@@ -247,11 +239,30 @@ def qvq_fp8_attention_forward(
 
 
 class QVQFP8CacheLayer(DynamicLayer):
-    """Dynamic cache layer with no full-precision persistent K/V residual."""
+    """Page-allocated FP8 cache with row-major K and column-major V storage."""
 
-    def __init__(self, activation_quantization: QVQActivationConfig | dict[str, Any]):
+    def __init__(
+        self,
+        activation_quantization: QVQActivationConfig | dict[str, Any],
+        *,
+        max_cache_length: int | None = None,
+        page_size: int = 256,
+    ):
         super().__init__()
         self.activation_quantization = _activation_config(activation_quantization)
+        if max_cache_length is not None:
+            max_cache_length = int(max_cache_length)
+        if max_cache_length is not None and max_cache_length < 1:
+            raise ValueError("QVQ FP8 max_cache_length must be positive when set.")
+        if page_size < 16 or page_size % 16:
+            raise ValueError("QVQ FP8 cache page_size must be a positive multiple of 16.")
+        self.max_cache_length = max_cache_length
+        self.page_size = page_size
+        self.capacity = 0
+        self.sequence_length = 0
+        self.allocations = 0
+        self.reallocations = 0
+        self.reallocated_elements_copied = 0
         self.key_scales: torch.Tensor | None = None
         self.value_scales: torch.Tensor | None = None
         self.source_dtype: torch.dtype | None = None
@@ -262,6 +273,62 @@ class QVQFP8CacheLayer(DynamicLayer):
         self.native_qk_fp8_mm_calls = 0
         self.native_pv_fp8_mm_calls = 0
         self.native_attention_query_tokens = 0
+
+    def _rounded_capacity(self, required: int) -> int:
+        page_size = 1 if self.device.type == "cpu" else self.page_size
+        capacity = ((required + page_size - 1) // page_size) * page_size
+        if self.max_cache_length is not None:
+            if required > self.max_cache_length:
+                raise ValueError(
+                    f"QVQ FP8 cache length {required} exceeds configured maximum "
+                    f"{self.max_cache_length}."
+                )
+            configured = ((self.max_cache_length + page_size - 1) // page_size) * page_size
+            capacity = max(capacity, configured)
+        return capacity
+
+    def _allocate(self, capacity: int, key_states: torch.Tensor) -> None:
+        fp8_dtype = getattr(torch, self.activation_quantization.format)
+        prefix = key_states.shape[:-2]
+        width = key_states.shape[-1]
+        new_keys = torch.empty(
+            (*prefix, capacity, width), dtype=fp8_dtype, device=self.device
+        )
+        # Storing V through a transposed contiguous backing makes every
+        # [tokens, width] head view column-major for cuBLASLt FP8 PV GEMMs.
+        new_values = torch.empty(
+            (*prefix, width, capacity), dtype=fp8_dtype, device=self.device
+        ).transpose(-1, -2)
+        scale_shape = (*prefix, capacity, 1)
+        new_key_scales = torch.empty(
+            scale_shape, dtype=torch.float32, device=self.device
+        )
+        new_value_scales = torch.empty(
+            scale_shape, dtype=torch.float32, device=self.device
+        )
+        if self.sequence_length:
+            length = self.sequence_length
+            new_keys[..., :length, :].copy_(self.keys[..., :length, :])
+            new_values[..., :length, :].copy_(self.values[..., :length, :])
+            new_key_scales[..., :length, :].copy_(
+                self.key_scales[..., :length, :]
+            )
+            new_value_scales[..., :length, :].copy_(
+                self.value_scales[..., :length, :]
+            )
+            self.reallocated_elements_copied += (
+                2 * self.keys[..., :length, :].numel()
+                + self.key_scales[..., :length, :].numel()
+                + self.value_scales[..., :length, :].numel()
+            )
+        was_allocated = self.capacity > 0
+        self.keys = new_keys
+        self.values = new_values
+        self.key_scales = new_key_scales
+        self.value_scales = new_value_scales
+        self.capacity = capacity
+        self.allocations += 1
+        self.reallocations += int(was_allocated)
 
     def lazy_initialization(
         self, key_states: torch.Tensor, value_states: torch.Tensor
@@ -291,24 +358,7 @@ class QVQFP8CacheLayer(DynamicLayer):
         self.dtype = key_states.dtype
         self.source_dtype = key_states.dtype
         self.device = key_states.device
-        fp8_dtype = getattr(torch, self.activation_quantization.format)
-        self.keys = torch.empty(
-            (*key_states.shape[:-2], 0, key_states.shape[-1]),
-            dtype=fp8_dtype,
-            device=self.device,
-        )
-        self.values = torch.empty(
-            (*value_states.shape[:-2], 0, value_states.shape[-1]),
-            dtype=fp8_dtype,
-            device=self.device,
-        )
-        scale_shape = (*key_states.shape[:-2], 0, 1)
-        self.key_scales = torch.empty(
-            scale_shape, dtype=torch.float32, device=self.device
-        )
-        self.value_scales = torch.empty(
-            scale_shape, dtype=torch.float32, device=self.device
-        )
+        self._allocate(self._rounded_capacity(key_states.shape[-2]), key_states)
         self.is_initialized = True
 
     def update(
@@ -343,29 +393,51 @@ class QVQFP8CacheLayer(DynamicLayer):
             scale_method=self.activation_quantization.scale_method,
             validate=validate,
         )
-        self.keys = torch.cat((self.keys, quantized_keys), dim=-2)
-        self.values = torch.cat((self.values, quantized_values), dim=-2)
-        self.key_scales = torch.cat((self.key_scales, key_scales), dim=-2)
-        self.value_scales = torch.cat((self.value_scales, value_scales), dim=-2)
+        old_length = self.sequence_length
+        new_length = old_length + key_states.shape[-2]
+        if new_length > self.capacity:
+            self._allocate(self._rounded_capacity(new_length), key_states)
+        target = slice(old_length, new_length)
+        self.keys[..., target, :].copy_(quantized_keys)
+        self.values[..., target, :].copy_(quantized_values)
+        self.key_scales[..., target, :].copy_(key_scales)
+        self.value_scales[..., target, :].copy_(value_scales)
+        self.sequence_length = new_length
         self.update_calls += 1
         self.quantized_elements += key_states.numel() + value_states.numel()
         self.assert_fp8_storage()
 
         if key_states.device.type == "cuda":
             return (
-                QVQFP8KVView(self.keys, self.key_scales, self.source_dtype, self, "key"),
                 QVQFP8KVView(
-                    self.values, self.value_scales, self.source_dtype, self, "value"
+                    self.keys,
+                    self.key_scales,
+                    self.source_dtype,
+                    self,
+                    "key",
+                    self.sequence_length,
+                ),
+                QVQFP8KVView(
+                    self.values,
+                    self.value_scales,
+                    self.source_dtype,
+                    self,
+                    "value",
+                    self.sequence_length,
                 ),
             )
 
         # CPU remains a portable reference path for cache unit tests. CUDA A8
         # is fail-closed on the registered native FP8 attention consumer.
         keys = dequantize_qvq_fp8_activation(
-            self.keys, self.key_scales, dtype=self.source_dtype
+            self.keys[..., :new_length, :].contiguous(),
+            self.key_scales[..., :new_length, :].contiguous(),
+            dtype=self.source_dtype,
         )
         values = dequantize_qvq_fp8_activation(
-            self.values, self.value_scales, dtype=self.source_dtype
+            self.values[..., :new_length, :].contiguous(),
+            self.value_scales[..., :new_length, :].contiguous(),
+            dtype=self.source_dtype,
         )
         self.dequantized_elements += keys.numel() + values.numel()
         return keys, values
@@ -393,24 +465,33 @@ class QVQFP8CacheLayer(DynamicLayer):
             or self.value_scales.shape[-1] != 1
         ):
             raise RuntimeError("QVQ A8 value payload and scale geometry differ.")
+        if self.keys.stride(-1) != 1:
+            raise RuntimeError("QVQ A8 K cache must remain row-major.")
+        if self.values.stride(-2) != 1:
+            raise RuntimeError("QVQ A8 V cache must remain column-major in token/width.")
 
     def crop(self, max_length: int) -> None:
         if max_length < 0:
             max_length = self.get_seq_length() - abs(max_length)
         if self.get_seq_length() <= max_length:
             return
-        self.keys = self.keys[..., :max_length, :]
-        self.values = self.values[..., :max_length, :]
-        self.key_scales = self.key_scales[..., :max_length, :]
-        self.value_scales = self.value_scales[..., :max_length, :]
+        self.sequence_length = max(0, max_length)
 
     def reset(self) -> None:
         if not self.is_initialized:
             return
-        self.keys = self.keys[..., :0, :]
-        self.values = self.values[..., :0, :]
-        self.key_scales = self.key_scales[..., :0, :]
-        self.value_scales = self.value_scales[..., :0, :]
+        length = self.sequence_length
+        self.keys[..., :length, :].zero_()
+        self.values[..., :length, :].zero_()
+        self.key_scales[..., :length, :].zero_()
+        self.value_scales[..., :length, :].zero_()
+        self.sequence_length = 0
+
+    def get_seq_length(self) -> int:
+        return self.sequence_length if self.is_initialized else 0
+
+    def get_max_cache_shape(self) -> int:
+        return self.max_cache_length if self.max_cache_length is not None else -1
 
     def reorder_cache(self, beam_idx: torch.LongTensor) -> None:
         if self.get_seq_length() < 1:
@@ -418,6 +499,7 @@ class QVQFP8CacheLayer(DynamicLayer):
         index = beam_idx.to(self.device)
         self.keys = self.keys.index_select(0, index)
         self.values = self.values.index_select(0, index)
+        self.values = self.values.transpose(-1, -2).contiguous().transpose(-1, -2)
         self.key_scales = self.key_scales.index_select(0, index)
         self.value_scales = self.value_scales.index_select(0, index)
 
@@ -426,6 +508,7 @@ class QVQFP8CacheLayer(DynamicLayer):
             return
         self.keys = self.keys.repeat_interleave(repeats, dim=0)
         self.values = self.values.repeat_interleave(repeats, dim=0)
+        self.values = self.values.transpose(-1, -2).contiguous().transpose(-1, -2)
         self.key_scales = self.key_scales.repeat_interleave(repeats, dim=0)
         self.value_scales = self.value_scales.repeat_interleave(repeats, dim=0)
 
@@ -434,6 +517,7 @@ class QVQFP8CacheLayer(DynamicLayer):
             return
         self.keys = self.keys[indices, ...]
         self.values = self.values[indices, ...]
+        self.values = self.values.transpose(-1, -2).contiguous().transpose(-1, -2)
         self.key_scales = self.key_scales[indices, ...]
         self.value_scales = self.value_scales[indices, ...]
 
@@ -459,16 +543,30 @@ class QVQFP8CacheLayer(DynamicLayer):
                 "storage_bytes": 0,
             }
         self.assert_fp8_storage()
+        logical_keys = self.keys[..., : self.sequence_length, :]
+        logical_values = self.values[..., : self.sequence_length, :]
         payload_bytes = _tensor_bytes(self.keys) + _tensor_bytes(self.values)
         scale_bytes = _tensor_bytes(self.key_scales) + _tensor_bytes(self.value_scales)
-        dense_bytes = (self.keys.numel() + self.values.numel()) * torch.empty(
+        dense_bytes = (logical_keys.numel() + logical_values.numel()) * torch.empty(
             (), dtype=self.source_dtype
         ).element_size()
         return {
             "initialized": True,
             "sequence_length": self.get_seq_length(),
-            "key_shape": list(self.keys.shape),
-            "value_shape": list(self.values.shape),
+            "key_shape": list(logical_keys.shape),
+            "value_shape": list(logical_values.shape),
+            "allocated_key_shape": list(self.keys.shape),
+            "allocated_value_shape": list(self.values.shape),
+            "capacity": self.capacity,
+            "page_size": self.page_size if self.device.type == "cuda" else 1,
+            "allocation_strategy": "static"
+            if self.max_cache_length is not None
+            else "paged_dynamic",
+            "allocations": self.allocations,
+            "reallocations": self.reallocations,
+            "reallocated_elements_copied": self.reallocated_elements_copied,
+            "key_layout": "row_major",
+            "value_layout": "column_major_tokens_width",
             "payload_dtype": str(self.keys.dtype),
             "scale_dtype": str(self.key_scales.dtype),
             "source_dtype": str(self.source_dtype),
@@ -491,10 +589,15 @@ class QVQFP8CacheLayer(DynamicLayer):
 
 
 class QVQFP8DynamicCache(Cache):
-    """Full-layer FP8 cache automatically required by QVQ A8 models."""
+    """Full-layer page-allocated FP8 cache automatically required by A8 models."""
 
     def __init__(
-        self, config, activation_quantization: QVQActivationConfig | dict[str, Any]
+        self,
+        config,
+        activation_quantization: QVQActivationConfig | dict[str, Any],
+        *,
+        max_cache_length: int | None = None,
+        page_size: int = 256,
     ):
         activation_quantization = _activation_config(activation_quantization)
         text_config = config.get_text_config(decoder=True)
@@ -503,11 +606,17 @@ class QVQFP8DynamicCache(Cache):
                 "QVQ A8 FP8 KV cache currently supports decoder-only models."
             )
         layers = [
-            QVQFP8CacheLayer(activation_quantization)
+            QVQFP8CacheLayer(
+                activation_quantization,
+                max_cache_length=max_cache_length,
+                page_size=page_size,
+            )
             for _ in range(text_config.num_hidden_layers)
         ]
         super().__init__(layers=layers)
         self.activation_quantization = activation_quantization
+        self.max_cache_length = max_cache_length
+        self.page_size = page_size
 
     def assert_fp8_storage(self) -> None:
         for layer in self.layers:
@@ -536,6 +645,12 @@ class QVQFP8DynamicCache(Cache):
         dense_kv_prefix_materializations = sum(
             layer["dense_kv_prefix_materializations"] for layer in initialized
         )
+        capacities = sorted({layer["capacity"] for layer in initialized})
+        allocations = sum(layer["allocations"] for layer in initialized)
+        reallocations = sum(layer["reallocations"] for layer in initialized)
+        reallocated_elements_copied = sum(
+            layer["reallocated_elements_copied"] for layer in initialized
+        )
         return {
             "schema": "qvq.fp8-kv-cache.v1",
             "format": self.activation_quantization.format,
@@ -544,6 +659,14 @@ class QVQFP8DynamicCache(Cache):
             "layer_count": len(layers),
             "initialized_layer_count": len(initialized),
             "sequence_lengths": sequence_lengths,
+            "capacities": capacities,
+            "page_size": self.page_size,
+            "allocation_strategy": "static"
+            if self.max_cache_length is not None
+            else "paged_dynamic",
+            "allocations": allocations,
+            "reallocations": reallocations,
+            "reallocated_elements_copied": reallocated_elements_copied,
             "payload_dtypes": payload_dtypes,
             "scale_dtypes": scale_dtypes,
             "storage_bytes": storage_bytes,
@@ -655,7 +778,7 @@ def install_qvq_fp8_kv_cache(model: torch.nn.Module, activation_quantization) ->
             batch_size,
             max_cache_length,
         ):
-            del generation_mode, batch_size, max_cache_length
+            del generation_mode, batch_size
             existing = model_kwargs.get("past_key_values")
             requested = generation_config.cache_implementation
             if existing is not None:
@@ -683,6 +806,7 @@ def install_qvq_fp8_kv_cache(model: torch.nn.Module, activation_quantization) ->
             model_kwargs["past_key_values"] = QVQFP8DynamicCache(
                 this.config,
                 activation_quantization,
+                max_cache_length=max_cache_length,
             )
             return
 
