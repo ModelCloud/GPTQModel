@@ -38,6 +38,7 @@ from ..utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_grouped_ordered_partials_packed,
     qvq_p32_window_wgmma_grouped_packed,
     qvq_p32_window_wgmma_grouped_reuse2_packed,
+    qvq_p32_window_wgmma_grouped_reuse4_packed,
 )
 from .qlinear.qvq import QVQLinear
 
@@ -656,7 +657,9 @@ class QVQHopperGroupedRuntime:
             self.telemetry.ordered_split_launches += 1
             return partials
 
-        if padded.shape[0] >= 32 and padded.shape[0] % 32 == 0:
+        if padded.shape[0] >= 64 and padded.shape[0] % 64 == 0:
+            grouped_inner = qvq_p32_window_wgmma_grouped_reuse4_packed
+        elif padded.shape[0] >= 32 and padded.shape[0] % 32 == 0:
             grouped_inner = qvq_p32_window_wgmma_grouped_reuse2_packed
         else:
             grouped_inner = (
@@ -672,6 +675,7 @@ class QVQHopperGroupedRuntime:
         if grouped_inner in (
             qvq_p32_window_wgmma_grouped_ordered_packed,
             qvq_p32_window_wgmma_grouped_reuse2_packed,
+            qvq_p32_window_wgmma_grouped_reuse4_packed,
         ) and any(segment.split_count != 1 for segment in payload.plan.segments):
             self.telemetry.ordered_split_launches += 1
             if (

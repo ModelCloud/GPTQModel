@@ -142,3 +142,20 @@ speedup is `1.213x`, with individual improvements from `1.123x` through
 
 Across this matrix, mean absolute error remains below `1.91e-6` and maximum
 absolute error remains below `1.75e-5` versus the dense P32 Torch oracle.
+
+## Reuse-4 acceptance
+
+Reuse-4 keeps four independent M16 accumulator fragments in one CTA and uses
+each decoded P32 weight fragment four times.  The first W3 gate is:
+
+| Rate | Site | M x K x aggregate N | QVQ us | vs reuse-2 | vs Marlin W4 | vs Machete W4 | Better than last |
+| ---: | :--- | ---: | ---: | ---: | ---: | ---: | :---: |
+| W3 | QKV | 64 x 2048 x 3072 | 42.349 | 1.042x | 3.298x | 0.917x | Yes |
+| W3 | QKV | 128 x 2048 x 3072 | 51.632 | 1.172x | 2.330x | 0.802x | Yes |
+| W3 | gate/up | 64 x 2048 x 16384 | 54.491 | 1.522x | 0.711x | 0.656x | Yes |
+| W3 | gate/up | 128 x 2048 x 16384 | 95.114 | 1.403x | 0.407x | 0.386x | Yes |
+
+All W2 through W3.5 low-level cases at M64, M128, and M256 are bit-exact to
+reuse-2, the ordinary row grid, and tiled M16.  CUDA Graph replay is exact.
+Reuse-4 is therefore promoted for row counts divisible by 64; reuse-2 remains
+the M32 path.
