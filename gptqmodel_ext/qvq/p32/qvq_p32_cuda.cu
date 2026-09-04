@@ -328,7 +328,8 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
     int payload_n_tile_offset,
     int64_t output_n_offset,
     int output_stride,
-    int64_t partial_segment_offset) {
+    int64_t partial_segment_offset,
+    int64_t partial_split_stride = 0) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
   constexpr int kWordsPerTile = 4 * TransitionBits;
   constexpr int kStageColumnsForKernel = StageKTiles * kTileRows;
@@ -555,10 +556,13 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
     parity ^= 1;
   }
 
+  const int64_t split_stride = partial_split_stride > 0
+      ? partial_split_stride
+      : static_cast<int64_t>(size_m) * size_n;
   float* target = split_count == 1
       ? output + output_n_offset
       : partial_output + partial_segment_offset +
-          static_cast<int64_t>(split) * size_m * size_n;
+          static_cast<int64_t>(split) * split_stride;
   const int target_stride = split_count == 1 ? output_stride : size_n;
   if (active_tile) {
     const int output_row_0 = lane >> 2;
@@ -1178,6 +1182,47 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_kernel(
       0,
       size_n,
       0);
+}
+
+// Large prefills share one 2-D grid across all 16-row tiles.  This keeps the
+// ABI's global [split, M, N] workspace layout while avoiding one host launch
+// (and one reduction) per row chunk.
+template <
+    int TransitionBits,
+    int Threads,
+    int StageKTiles,
+    int StaticN = 0>
+__global__ __launch_bounds__(Threads) void p32_window_ampere_large_m_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int split_count,
+    const uint8_t* __restrict__ bank_alt_id) {
+  const int row_offset = static_cast<int>(blockIdx.y) * kRows;
+  const int local_m = min(kRows, size_m - row_offset);
+  if (local_m <= 0) return;
+  const int n_tiles = size_n / kTileColumns;
+  const int n_block = static_cast<int>(blockIdx.x);
+  const int split = static_cast<int>(blockIdx.z);
+#define QVQ_LARGE_M_BODY(FULL_ROWS) \
+  p32_window_ampere_kernel_body< \
+      TransitionBits, FULL_ROWS, 0, StaticN, Threads, Threads / 32, \
+      StageKTiles>( \
+      input + static_cast<int64_t>(row_offset) * size_k, \
+      trellis, levels, bank_ids, partial_output, \
+      output + static_cast<int64_t>(row_offset) * size_n, local_m, size_k, \
+      size_n, split_count, bank_alt_id, n_block, split, n_tiles, 0, 0, \
+      size_n, static_cast<int64_t>(row_offset) * size_n, \
+      static_cast<int64_t>(size_m) * size_n)
+  if (local_m == kRows) QVQ_LARGE_M_BODY(true);
+  else QVQ_LARGE_M_BODY(false);
+#undef QVQ_LARGE_M_BODY
 }
 
 constexpr int kMaxGroupedP32Segments = 3;
@@ -2605,6 +2650,83 @@ int launch_p32_config(
 // reduction is safe here because each chunk owns a disjoint output and partial
 // workspace range. Graph-visible partials retain the canonical [S,M,N] layout and
 // therefore continue to use explicit framework-owned row chunking.
+template <int TransitionBits, int Threads, int StageKTiles, int StaticN>
+int launch_p32_large_m_grid(
+    const half* input,
+    const uint32_t* trellis,
+    const half* levels,
+    const uint8_t* bank_ids,
+    const uint8_t* bank_alt_id,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int split_count,
+    cudaStream_t stream) {
+  constexpr int tiles_per_block = Threads / 32;
+  const int n_tiles = size_n / kTileColumns;
+  const dim3 grid(
+      static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
+      static_cast<unsigned>((size_m + kRows - 1) / kRows),
+      static_cast<unsigned>(split_count));
+  p32_window_ampere_large_m_kernel<TransitionBits, Threads, StageKTiles, StaticN>
+      <<<grid, Threads, 0, stream>>>(
+      input, trellis, levels, bank_ids, partial_output, output, size_m, size_k,
+      size_n, split_count, bank_alt_id);
+  if (split_count > 1) {
+    launch_split_reduction(
+        partial_output, output, size_m, size_k, size_n, split_count, stream);
+  }
+  const cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    set_last_error(cudaGetErrorString(error));
+    return static_cast<int>(error);
+  }
+  return 0;
+}
+
+template <int TransitionBits, int Threads, int StageKTiles>
+int launch_p32_large_m_grid_dispatch(
+    const half* input,
+    const uint32_t* trellis,
+    const half* levels,
+    const uint8_t* bank_ids,
+    const uint8_t* bank_alt_id,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int split_count,
+    bool static_n,
+    cudaStream_t stream) {
+  if (static_n) {
+    switch (size_n) {
+#define QVQ_LARGE_M_STATIC_N(N) \
+      case N: \
+        return launch_p32_large_m_grid< \
+            TransitionBits, Threads, StageKTiles, N>( \
+            input, trellis, levels, bank_ids, bank_alt_id, output, \
+            partial_output, size_m, size_k, size_n, split_count, stream)
+      QVQ_LARGE_M_STATIC_N(1024);
+      QVQ_LARGE_M_STATIC_N(5120);
+      QVQ_LARGE_M_STATIC_N(6144);
+      QVQ_LARGE_M_STATIC_N(10240);
+      QVQ_LARGE_M_STATIC_N(12288);
+      QVQ_LARGE_M_STATIC_N(17408);
+#undef QVQ_LARGE_M_STATIC_N
+      default:
+        set_last_error("QVQ P32 large-M static_n does not support this N");
+        return -1;
+    }
+  }
+  return launch_p32_large_m_grid<
+      TransitionBits, Threads, StageKTiles, 0>(
+      input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
+      size_m, size_k, size_n, split_count, stream);
+}
+
 template <int TransitionBits>
 int launch_p32_large_m(
     const void* input,
@@ -2624,20 +2746,69 @@ int launch_p32_large_m(
     return -1;
   }
 
-  const auto* input_half = reinterpret_cast<const half*>(input);
-  for (int row = 0; row < size_m; row += kRows) {
-    const int chunk_m = min(kRows, size_m - row);
-    const int64_t row_offset = static_cast<int64_t>(row) * size_n;
-    const int64_t partial_offset = row_offset * config.split_count;
-    const int status = launch_p32_config<TransitionBits>(
-        input_half + static_cast<int64_t>(row) * size_k,
-        trellis, levels, bank_ids, bank_alt_id,
-        output + row_offset,
-        partial_output + partial_offset,
-        chunk_m, size_k, size_n, config, stream);
-    if (status != 0) return status;
+  if (config.kernel_variant != QVQ_P32_VARIANT_BLOCK) {
+    set_last_error("QVQ P32 large-M batching requires block variant");
+    return -1;
   }
-  return 0;
+  const auto* input_half = reinterpret_cast<const half*>(input);
+  const auto* trellis_words = reinterpret_cast<const uint32_t*>(trellis);
+  const auto* levels_half = reinterpret_cast<const half*>(levels);
+  const auto* bank_bytes = reinterpret_cast<const uint8_t*>(bank_ids);
+  const auto* bank_alt_byte = reinterpret_cast<const uint8_t*>(bank_alt_id);
+  const auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+  // Every supported model projection has a fixed N tile count.  Large-M
+  // launches use that specialization by default; callers can still pass
+  // static_n=0 for nonstandard N values, which take the generic path.
+  const bool use_static_n = config.static_n != 0 ||
+      size_n == 1024 || size_n == 5120 || size_n == 6144 ||
+      size_n == 10240 || size_n == 12288 || size_n == 17408;
+  int status = -1;
+#define QVQ_LARGE_M_STAGE(THREADS) \
+  switch (config.stage_k_tiles) { \
+    case 1: \
+      status = launch_p32_large_m_grid_dispatch<TransitionBits, THREADS, 1>( \
+          input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+          output, partial_output, size_m, size_k, size_n, config.split_count, \
+          use_static_n, cuda_stream); \
+      break; \
+    case 2: \
+      status = launch_p32_large_m_grid_dispatch<TransitionBits, THREADS, 2>( \
+          input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+          output, partial_output, size_m, size_k, size_n, config.split_count, \
+          use_static_n, cuda_stream); \
+      break; \
+    case 3: \
+      status = launch_p32_large_m_grid_dispatch<TransitionBits, THREADS, 3>( \
+          input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+          output, partial_output, size_m, size_k, size_n, config.split_count, \
+          use_static_n, cuda_stream); \
+      break; \
+    case 4: \
+      status = launch_p32_large_m_grid_dispatch<TransitionBits, THREADS, 4>( \
+          input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+          output, partial_output, size_m, size_k, size_n, config.split_count, \
+          use_static_n, cuda_stream); \
+      break; \
+    default: \
+      set_last_error("QVQ P32 large-M stage_k_tiles must be in [1, 4]"); \
+      return -1; \
+  }
+  switch (config.threads) {
+    case 64:
+      QVQ_LARGE_M_STAGE(64);
+      break;
+    case 128:
+      QVQ_LARGE_M_STAGE(128);
+      break;
+    case 256:
+      QVQ_LARGE_M_STAGE(256);
+      break;
+    default:
+      set_last_error("QVQ P32 large-M threads must be one of 64, 128, or 256");
+      return -1;
+  }
+#undef QVQ_LARGE_M_STAGE
+  return status;
 }
 
 }  // namespace
@@ -2774,7 +2945,12 @@ extern "C" int qvq_p32_window(
       (size_m == 8 || size_m == 16) &&
       (size_n == 1024 || size_n == 5120 || size_n == 6144 ||
        size_n == 10240 || size_n == 12288 || size_n == 17408);
-  if (static_n != 0 && !scalar_static_n && !block_static_n) {
+  const bool large_m_static_n =
+      kernel_variant == QVQ_P32_VARIANT_BLOCK && size_m > 16 &&
+      (size_n == 1024 || size_n == 5120 || size_n == 6144 ||
+       size_n == 10240 || size_n == 12288 || size_n == 17408);
+  if (static_n != 0 && !scalar_static_n && !block_static_n &&
+      !large_m_static_n) {
     set_last_error("QVQ P32 static_n is unsupported for this shape/config");
     return -1;
   }
