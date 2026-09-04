@@ -577,6 +577,16 @@ print(f"Result: {result}")
 
 Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as a guide for PRs to add new models. Most models follow the same pattern.
 
+#### Shared-input metadata (`:in=<tag>`) 🔗
+
+Modules that consume the *same* activation tensor (e.g. `q_proj`/`k_proj`/`v_proj` after `input_layernorm`) produce identical GPTQ Hessians (`H = XᵀX`), so the Hessian only needs to be collected once per group. `BaseQModel.shared_input_plan(model_config, quantize_config)` derives these groups from `module_tree`:
+
+- Default: quantizable leaves under the same parent that land in the same subset block are assumed to share an input (`q_proj:0`, `k_proj:0`, `v_proj:0` -> one group; `gate_proj:0`, `up_proj:0` -> one group).
+- Override with `:in=<tag>` when the default is wrong. Leaves with the same tag share; leaves with different tags never do, even in the same subset. Example (MLA): `"q_b_proj:1:in=q_a", "kv_b_proj:1:in=kv_a"` keeps the two `_b_proj` modules apart because they read different latents. Tags may span subsets.
+- `:!` / `:?` leaves and `:in=` tags never change the emitted subset blocks or quantization order.
+
+Verify a definition against a real (tiny, CPU) model with `gptqmodel.models.shared_input.probe_shared_inputs(layer, plan, forward)`; it hooks every planned module, runs `forward`, and reports groups whose inputs differ, undeclared identical inputs, and modules that never ran (e.g. un-routed experts). See `tests/module_tree/test_shared_input*.py`.
+
 ### Pair with Evaluation for post-quantization LLM Benchmarks 📊
 
 GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a modern benchmarking toolkit with 153 of the world's most widely used benchmark suites.

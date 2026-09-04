@@ -38,8 +38,8 @@ class DeepSeekV32QModel(BaseQModel):
                 "indexer.wk:0",
                 # DSA accumulates this projection's scores in float32; leave its weights unquantized.
                 "indexer.weights_proj:0:!",
-                "q_b_proj:1:q",
-                "kv_b_proj:1:k:v",
+                "q_b_proj:1:q:in=q_a",
+                "kv_b_proj:1:k:v:in=kv_a",
                 "indexer.wq_b:1",
                 "o_proj:2",
             ),

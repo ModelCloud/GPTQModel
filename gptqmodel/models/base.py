@@ -98,6 +98,7 @@ from ._const import (
     META,
 )
 from .loader import ModelLoader, _setup_rotation_online_had
+from .shared_input import SharedInputPlan, build_shared_input_plan
 from .writer import ModelWriter
 
 
@@ -753,6 +754,23 @@ class BaseQModel(nn.Module):
 
         # print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
+
+    @classmethod
+    def shared_input_plan(
+        cls,
+        model_config=None,
+        quantize_config=None,
+        is_awq_quantize: bool = False,
+    ) -> SharedInputPlan:
+        """
+        Group the quantizable modules of one decoder layer by shared input tensor.
+
+        Modules in the same group consume identical activations, so Hessian (X^T X)
+        collection only needs to run for the group leader. Grouping defaults to
+        (parent module, subset tag) and can be overridden per leaf with `:in=<tag>`.
+        """
+        layer_modules = cls.simple_layer_modules(model_config, quantize_config, is_awq_quantize=is_awq_quantize)
+        return build_shared_input_plan(cls.module_tree, layer_modules)
 
     @classmethod
     def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False, include_capture_only: bool = False):
@@ -2904,7 +2922,9 @@ class BaseQModel(nn.Module):
           - ':!' means participates in inference but is NOT quantized; keep this marker in output.
           - ':?' marks capture-only nodes; activations are recorded but the module is not quantized.
           - ':<digit>' means grouping; children with the same group id are emitted in the same block.
-          - Both can appear together, e.g. 'module_name:!:2'.
+          - ':in=<tag>' declares which sibling children consume the same input tensor (see shared_input.py);
+            it does not affect the emitted blocks.
+          - Flags can be combined, e.g. 'module_name:!:2' or 'module_name:1:in=q'.
           - Supports nested dict structures for MoE models with experts.
           - Special key "#" in nested dicts means direct children under parent (no additional nesting).
           - EXPERT_INDEX_PLACEHOLDER in keys will be handled by simple_layer_modules for MoE expansion.
