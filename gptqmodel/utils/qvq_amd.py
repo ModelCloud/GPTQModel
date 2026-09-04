@@ -189,7 +189,7 @@ def _qvq_p32_predecoded_weight(
     )
     cached = getattr(window, "_qvq_p32_amd_dense_cache", None)
     if cached is not None:
-        cached_key, dense = cached
+        cached_key, dense, _ = cached
         if all(
             current is recorded
             if isinstance(current, torch.Tensor)
@@ -216,7 +216,7 @@ def _qvq_p32_predecoded_weight(
         num_stages=1,
         waves_per_eu=0,
     )
-    window._qvq_p32_amd_dense_cache = (key, dense)
+    window._qvq_p32_amd_dense_cache = (key, dense, dense.T)
     return dense
 
 
@@ -431,6 +431,43 @@ def qvq_p32_amd(
         raise TypeError("output_fp32 must be boolean")
     if not isinstance(cache_weight, bool):
         raise TypeError("cache_weight must be boolean")
+
+    # The first invocation performs the complete public-API validation below.
+    # Repeated inference calls can safely avoid device-property queries, shape
+    # reconstruction, and a fresh transpose view when the mutation-aware cache
+    # still describes every fixed operand. HIP events include the host launch
+    # gap, so keeping this path lean materially improves small-M latency.
+    cached = getattr(window, "_qvq_p32_amd_dense_cache", None)
+    if (
+        cache_weight
+        and isinstance(cached, tuple)
+        and len(cached) == 3
+        and type(bits) in (int, float)
+        and not isinstance(bits, bool)
+        and type(out_features) is int
+        and type(bank_alt_id) is int
+        and x.ndim == 2
+        and x.dtype == torch.float16
+        and x.is_contiguous()
+    ):
+        cached_key, _, operand = cached
+        if (
+            isinstance(cached_key, tuple)
+            and len(cached_key) == 9
+            and x.device == window.device
+            and cached_key[0] == window._version
+            and cached_key[1] is levels
+            and cached_key[2] == levels._version
+            and cached_key[3] is bank_ids
+            and cached_key[4] == bank_ids._version
+            and cached_key[5] == bits
+            and cached_key[6] == x.shape[1]
+            and cached_key[7] == out_features
+            and cached_key[8] == bank_alt_id
+        ):
+            output_dtype = torch.float32 if output_fp32 else x.dtype
+            return torch.mm(x, operand, out_dtype=output_dtype)
+
     if not qvq_p32_amd_supported(x.device):
         raise RuntimeError("AMD P32 requires a ROCm gfx950 device")
     if x.ndim != 2 or window.ndim != 2:
