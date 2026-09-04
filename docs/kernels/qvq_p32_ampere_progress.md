@@ -3141,6 +3141,21 @@ matching compile-time split specialization.  It was reverted after the
 exact (`max_abs <= 1.6e-5`), but the performance result is not acceptable.
 The failed diagnostic is `artifacts/a100_p32_window/v27_candidate_m1_attention_static48_8000.json`.
 
+## v28 M1 full-KV static split specialization
+
+The M1 full-KV route `(K,N)=(5120,1024)` uses split 56.  A guarded
+`StaticSplitCount=56` launch removes the split-count divisions while leaving
+other plans on the dynamic static-N launcher.  A matched 20,000-iteration
+control/candidate run measured dynamic medians
+`0.033792/0.035840/0.035840/0.033792 ms` versus static
+`0.032768/0.034816/0.034816/0.032768 ms` at W2/W2.5/W3/W3.5, a repeatable
+`1.0303x` (3.03%) four-rate geometric-mean improvement.  Outputs remained
+exact (`max_abs <= 1.1e-5`), and the formal suite passes 56/56.  The
+diagnostics are `artifacts/a100_p32_window/v28_candidate_m1_fullkv_dynamic_20000.json`
+and `artifacts/a100_p32_window/v28_candidate_m1_fullkv_static56_20000.json`
+(the shorter 8,000-iteration screen is also retained alongside them).
+This is another shape-local gain; the full-matrix 10% target remains open.
+
 ## Reproduction
 
 ```bash
