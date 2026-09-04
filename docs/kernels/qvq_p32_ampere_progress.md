@@ -3637,11 +3637,11 @@ The implementation was checked against latest `origin/main` commit
 `4ef2089f` on A100 (SM80), with `K=5120`, transition bits 4, split 1, block
 variant, 128 threads, and one K tile per stage.  Ten warmups and 50 timed
 iterations covered every `M` in `512/1024/2048/4096` and every `N` in
-`1024/6144/10240/12288/17408`.  Candidate output matched main bit-for-bit on
+`1024/5120/6144/10240/12288/17408`.  Candidate output matched main bit-for-bit on
 a randomized `M=32,N=6144,split=8` comparison.  Candidate/main geometric
-mean speedups by N were 1.090x, 1.166x, 1.165x, 1.166x, and 1.180x
-respectively (1.153x over all 20 cases).  Per-M geometric means were
-1.160x, 1.156x, 1.148x, and 1.149x for `M=512/1024/2048/4096`.
+mean speedups by N were 1.091x, 1.146x, 1.164x, 1.165x, 1.165x, and
+1.179x respectively (1.151x over all 24 cases).  Per-M geometric means were
+1.161x, 1.154x, 1.146x, and 1.144x for `M=512/1024/2048/4096`.
 
 This is a direct main-relative improvement for the expanded-M target; the
 smaller 1.090x full-KV result is retained without claiming a uniform 10%
