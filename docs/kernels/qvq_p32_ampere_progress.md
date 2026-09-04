@@ -3106,6 +3106,13 @@ and `artifacts/a100_p32_window/v24_candidate_splitstatic_m1_mlpdown_repeat8000.j
 The full-matrix 10% target remains open; no broad gain is claimed from this
 shape-local specialization alone.
 
+The analogous M2 long-K `StaticSplitCount=96` probe was rejected.  Its
+8,000-iteration medians were `0.089088/0.098304/0.098304/0.102400 ms`, while
+the dynamic-dispatch control was `0.089088/0.098304/0.099328/0.100352 ms`.
+Autotune also changed the W3.5 plan from split 48 to 96 between runs, so the
+probe provided no repeatable same-plan improvement and was reverted.  The
+diagnostic is `artifacts/a100_p32_window/v25_candidate_m2_mlpdown_static96_8000.json`.
+
 ## Reproduction
 
 ```bash
