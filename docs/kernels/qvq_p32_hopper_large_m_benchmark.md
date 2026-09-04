@@ -159,3 +159,35 @@ All W2 through W3.5 low-level cases at M64, M128, and M256 are bit-exact to
 reuse-2, the ordinary row grid, and tiled M16.  CUDA Graph replay is exact.
 Reuse-4 is therefore promoted for row counts divisible by 64; reuse-2 remains
 the M32 path.
+
+### Full reuse-4 matrix
+
+| Rate | Site | M x K x aggregate N | QVQ us | vs reuse-2 | vs Marlin W4 | vs Machete W4 | Better than last |
+| ---: | :--- | ---: | ---: | ---: | ---: | ---: | :---: |
+| W2 | QKV | 64 x 2048 x 3072 | 41.670 | 1.045x | 3.362x | 0.906x | Yes |
+| W2 | QKV | 128 x 2048 x 3072 | 51.231 | 1.131x | 2.346x | 0.798x | Yes |
+| W2 | QKV | 256 x 2048 x 3072 | 84.418 | 1.113x | 1.345x | 0.543x | Yes |
+| W2 | gate/up | 64 x 2048 x 16384 | 53.674 | 1.334x | 0.720x | 0.663x | Yes |
+| W2 | gate/up | 128 x 2048 x 16384 | 92.419 | 1.308x | 0.416x | 0.393x | Yes |
+| W2 | gate/up | 256 x 2048 x 16384 | 174.541 | 1.289x | 0.304x | 0.248x | Yes |
+| W2.5 | QKV | 64 x 2048 x 3072 | 42.325 | 1.045x | 3.310x | 0.892x | Yes |
+| W2.5 | QKV | 128 x 2048 x 3072 | 51.734 | 1.176x | 2.323x | 0.791x | Yes |
+| W2.5 | QKV | 256 x 2048 x 3072 | 85.322 | 1.181x | 1.331x | 0.537x | Yes |
+| W2.5 | gate/up | 64 x 2048 x 16384 | 54.245 | 1.512x | 0.712x | 0.656x | Yes |
+| W2.5 | gate/up | 128 x 2048 x 16384 | 95.118 | 1.400x | 0.404x | 0.382x | Yes |
+| W2.5 | gate/up | 256 x 2048 x 16384 | 176.417 | 1.423x | 0.301x | 0.245x | Yes |
+| W3 | QKV | 64 x 2048 x 3072 | 42.310 | 1.043x | 3.311x | 0.892x | Yes |
+| W3 | QKV | 128 x 2048 x 3072 | 51.414 | 1.177x | 2.338x | 0.795x | Yes |
+| W3 | QKV | 256 x 2048 x 3072 | 85.169 | 1.188x | 1.334x | 0.538x | Yes |
+| W3 | gate/up | 64 x 2048 x 16384 | 54.649 | 1.518x | 0.707x | 0.651x | Yes |
+| W3 | gate/up | 128 x 2048 x 16384 | 94.990 | 1.405x | 0.405x | 0.382x | Yes |
+| W3 | gate/up | 256 x 2048 x 16384 | 180.027 | 1.399x | 0.295x | 0.240x | Yes |
+| W3.5 | QKV | 64 x 2048 x 3072 | 42.550 | 1.035x | 3.293x | 0.887x | Yes |
+| W3.5 | QKV | 128 x 2048 x 3072 | 52.124 | 1.174x | 2.306x | 0.785x | Yes |
+| W3.5 | QKV | 256 x 2048 x 3072 | 85.617 | 1.168x | 1.327x | 0.535x | Yes |
+| W3.5 | gate/up | 64 x 2048 x 16384 | 57.835 | 1.411x | 0.668x | 0.615x | Yes |
+| W3.5 | gate/up | 128 x 2048 x 16384 | 102.139 | 1.281x | 0.376x | 0.355x | Yes |
+| W3.5 | gate/up | 256 x 2048 x 16384 | 194.393 | 1.276x | 0.273x | 0.223x | Yes |
+
+All 24 cells improve over reuse-2.  Geometric mean speedup is `1.243x`,
+with a `1.035x` to `1.518x` range.
