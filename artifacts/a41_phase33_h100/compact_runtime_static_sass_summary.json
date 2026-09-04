@@ -1,0 +1,27 @@
+{
+  "production_commit": "e43f3405",
+  "candidate": "compact fixed-kernel runtime scalar ABI",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "kernel": "grouped W2 gate/up P32 TMA RS-WGMMA",
+  "production": {
+    "extension_cache_key": "28c1b51e1aa0aa5d",
+    "static_sass_instructions": 1736,
+    "registers_per_thread": 48,
+    "stack_bytes": 8,
+    "constant0_bytes": 1448,
+    "shared_bytes": 27264
+  },
+  "candidate": {
+    "extension_cache_key": "555172959bc8ece4",
+    "static_sass_instructions": 1736,
+    "registers_per_thread": 48,
+    "stack_bytes": 8,
+    "constant0_bytes": 1436,
+    "shared_bytes": 27264
+  },
+  "decision": "rejected; source fully removed"
+}

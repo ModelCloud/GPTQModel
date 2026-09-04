@@ -1,0 +1,55 @@
+{
+  "decision": "rejected",
+  "device": {
+    "name": "NVIDIA H100",
+    "pci_bus_id": "00000000:44:00.0",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "fused_state_level_lookup": {
+    "candidate_static_sass": {
+      "instructions": 1472,
+      "ldg": 64,
+      "lds": 144,
+      "prmt": 65
+    },
+    "lookup_bytes": 1048576,
+    "m1_ncu": {
+      "active_warps_per_scheduler": 2.428536,
+      "dram_bytes_read": 13591808,
+      "duration_us": 118.464,
+      "eligible_warps_per_scheduler": 0.071489,
+      "executed_warp_instructions": 7570888,
+      "global_load_l1_sectors": 16757782,
+      "global_load_l1_sector_hits": 389151,
+      "l2_read_sectors": 16697210,
+      "l2_read_sector_hits": 16282939,
+      "shared_load_bank_conflicts": 0,
+      "wavefronts": 11183522
+    },
+    "production_m1_ncu": {
+      "duration_us": 28.192,
+      "eligible_warps_per_scheduler": 0.587647,
+      "executed_warp_instructions": 10792258,
+      "shared_load_bank_conflicts": 1050805,
+      "wavefronts": 3350926
+    }
+  },
+  "high_byte_bfe_control": {
+    "candidate_sass_bfe": 0,
+    "candidate_sass_instructions": 1947,
+    "candidate_sass_prmt": 198,
+    "candidate_warp_instructions": 10792258,
+    "conclusion": "ptxas lowered explicit bfe.u32 to the same PRMT sequence as __byte_perm",
+    "production_sass_bfe": 0,
+    "production_sass_instructions": 1947,
+    "production_sass_prmt": 198,
+    "production_warp_instructions": 10792258
+  },
+  "timing_contract": {
+    "event_benchmarks": "warmed CUDA Graph replay timed by CUDA events",
+    "formal_idle_memory_mib": 0,
+    "ncu_idle_memory_mib": 4,
+    "ncu_version": "2026.2.1"
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "device": {
+    "name": "NVIDIA H100",
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348",
+    "compute_capability": "9.0",
+    "sm_count": 132
+  },
+  "workload": "M1 grouped gate/up inner P32, K=2048, N=(8192,8192)",
+  "rates": {
+    "2.0": {
+      "baseline": {
+        "commit": "16ac6730",
+        "duration_us": 25.184,
+        "instructions": 10394892,
+        "shared_load_instructions": 1966080,
+        "shared_load_bank_conflicts": 1052585,
+        "shared_load_wavefronts": 3394571,
+        "eligible_warps_per_cycle": 0.656,
+        "long_scoreboard_cycles_per_instruction": 1.312,
+        "registers_per_thread": 53,
+        "shared_memory_bytes": 42752
+      },
+      "candidate": {
+        "commit": "a70ca917",
+        "duration_us": 23.904,
+        "instructions": 10234392,
+        "shared_load_instructions": 1966080,
+        "shared_load_bank_conflicts": 1048952,
+        "shared_load_wavefronts": 3397803,
+        "eligible_warps_per_cycle": 0.709633,
+        "long_scoreboard_cycles_per_instruction": 1.244948,
+        "wait_stall_ratio": 0.838303,
+        "registers_per_thread": 66,
+        "shared_memory_bytes": 42752
+      }
+    },
+    "3.5": {
+      "baseline": {
+        "commit": "6a272904",
+        "duration_us": 26.976,
+        "instructions": 10800390,
+        "shared_load_instructions": 2228224,
+        "shared_load_bank_conflicts": 1051001,
+        "shared_load_wavefronts": 3386057,
+        "eligible_warps_per_cycle": 0.608,
+        "long_scoreboard_cycles_per_instruction": 1.324,
+        "registers_per_thread": 57,
+        "shared_memory_bytes": 48896
+      },
+      "candidate": {
+        "commit": "a70ca917",
+        "duration_us": 24.736,
+        "instructions": 10667544,
+        "shared_load_instructions": 2228224,
+        "shared_load_bank_conflicts": 1048556,
+        "shared_load_wavefronts": 3392279,
+        "eligible_warps_per_cycle": 0.702600,
+        "long_scoreboard_cycles_per_instruction": 1.258398,
+        "wait_stall_ratio": 0.984864,
+        "registers_per_thread": 71,
+        "shared_memory_bytes": 48896
+      }
+    }
+  },
+  "reports": "/root/qvq-profiler-artifacts/phase53-all-rate-prefetch/",
+  "decision": "promote_packed_register_prefetch_for_all_grouped_gate_up_rates"
+}

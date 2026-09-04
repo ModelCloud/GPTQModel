@@ -1,0 +1,59 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "f6c0083496a551c94a3814867d72a6af4b6f354f",
+  "rows": [
+    {
+      "baseline_grouped_split1": {
+        "max_ms": 0.034493439197540283,
+        "mean_ms": 0.033470461885134375,
+        "median_ms": 0.033137919902801516,
+        "min_ms": 0.033077759742736815,
+        "p95_ms": 0.034377601146697995
+      },
+      "bits": 3.0,
+      "child_n": [
+        8192,
+        8192
+      ],
+      "cuda_graph_stable": true,
+      "inner_max_abs_vs_dense": 1.0728836059570312e-05,
+      "k": 2048,
+      "logical_effective_tflops": 2.0251380954761298,
+      "m": 1,
+      "recovered_bit_exact_vs_split1": true,
+      "recovered_changed_values_vs_split1": 0,
+      "recovered_max_abs_vs_split1": 0.0,
+      "repeatable": true,
+      "speedup_vs_grouped_split1": 1.0,
+      "split_counts": [
+        1,
+        1
+      ],
+      "timing": {
+        "max_ms": 0.034493439197540283,
+        "mean_ms": 0.033470461885134375,
+        "median_ms": 0.033137919902801516,
+        "min_ms": 0.033077759742736815,
+        "p95_ms": 0.034377601146697995
+      },
+      "transient_partial_bytes": 0,
+      "useful_thread_blocks": 256,
+      "variant": "n64_split1"
+    }
+  ],
+  "source_fingerprint": "fdaf83736e8fb7cba64d171a2c807f2c399ca47e2d0fc2d1bf43d73e7e35c39f",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 300,
+    "warmup": 30
+  },
+  "workload": "Llama 3.2 1B grouped gate/up inner P32 plus exact paired recovery"
+}

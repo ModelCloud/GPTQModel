@@ -1,0 +1,541 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "c861b0a088203804d63ff5222f2ab8ab4c179288",
+  "rows": [
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 2,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.020271360874176025,
+        "mean_ms": 0.02008192002773285,
+        "median_ms": 0.019967359900474546,
+        "min_ms": 0.01992511987686157,
+        "p95_ms": 0.02023103952407837
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 1,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.0230841588973999,
+        "mean_ms": 0.022794649624824522,
+        "median_ms": 0.022983040809631348,
+        "min_ms": 0.022524800300598145,
+        "p95_ms": 0.023001599311828613
+      },
+      "speedup_vs_separate": 1.1510305280311561,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 2,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.01994752049446106,
+        "mean_ms": 0.01991657602787018,
+        "median_ms": 0.01991935968399048,
+        "min_ms": 0.019865599870681764,
+        "p95_ms": 0.01993664026260376
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 2,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.022366719245910646,
+        "mean_ms": 0.022267622494697572,
+        "median_ms": 0.022254080772399903,
+        "min_ms": 0.02222912073135376,
+        "p95_ms": 0.0223142409324646
+      },
+      "speedup_vs_separate": 1.117208641515012,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 2,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.019941120147705077,
+        "mean_ms": 0.01989386876821518,
+        "median_ms": 0.019894079566001893,
+        "min_ms": 0.019875839948654175,
+        "p95_ms": 0.019905279874801635
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 4,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.022143359184265136,
+        "mean_ms": 0.022024684858322145,
+        "median_ms": 0.022014720439910887,
+        "min_ms": 0.02199295997619629,
+        "p95_ms": 0.02209280014038086
+      },
+      "speedup_vs_separate": 1.1065965815042318,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 2,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.020090880393981932,
+        "mean_ms": 0.02004239361286163,
+        "median_ms": 0.02004159927368164,
+        "min_ms": 0.020024960041046144,
+        "p95_ms": 0.020055038928985594
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 8,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.022145919799804688,
+        "mean_ms": 0.022029504013061522,
+        "median_ms": 0.02202752113342285,
+        "min_ms": 0.022008960247039796,
+        "p95_ms": 0.022042241096496582
+      },
+      "speedup_vs_separate": 1.0990899894076365,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 2,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.020187520980834962,
+        "mean_ms": 0.02014789113998413,
+        "median_ms": 0.020149439573287964,
+        "min_ms": 0.020113921165466307,
+        "p95_ms": 0.020163838863372804
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 16,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.02218816041946411,
+        "mean_ms": 0.02214620168209076,
+        "median_ms": 0.02214656114578247,
+        "min_ms": 0.022116479873657228,
+        "p95_ms": 0.022161920070648194
+      },
+      "speedup_vs_separate": 1.0991154897996311,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 2.5,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.019987200498580934,
+        "mean_ms": 0.019934752011299132,
+        "median_ms": 0.01993439972400665,
+        "min_ms": 0.01991871953010559,
+        "p95_ms": 0.01994688034057617
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 1,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.02234623908996582,
+        "mean_ms": 0.02228117756843567,
+        "median_ms": 0.022279360294342042,
+        "min_ms": 0.022257919311523437,
+        "p95_ms": 0.022305920124053955
+      },
+      "speedup_vs_separate": 1.117633869231156,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 2.5,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.02007744073867798,
+        "mean_ms": 0.02004059519767761,
+        "median_ms": 0.020040318965911866,
+        "min_ms": 0.020023040771484375,
+        "p95_ms": 0.020055680274963378
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 2,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.02241472005844116,
+        "mean_ms": 0.02236256637573242,
+        "median_ms": 0.022363200187683105,
+        "min_ms": 0.022344961166381835,
+        "p95_ms": 0.02237504005432129
+      },
+      "speedup_vs_separate": 1.1159103917319084,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 2.5,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.020014719963073732,
+        "mean_ms": 0.019943871998786927,
+        "median_ms": 0.01994271993637085,
+        "min_ms": 0.01991487979888916,
+        "p95_ms": 0.01995519995689392
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 4,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.022376320362091064,
+        "mean_ms": 0.022328684735298157,
+        "median_ms": 0.022328319549560546,
+        "min_ms": 0.022309119701385497,
+        "p95_ms": 0.02234623908996582
+      },
+      "speedup_vs_separate": 1.1196225801094926,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 2.5,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.020283520221710205,
+        "mean_ms": 0.02022174723148346,
+        "median_ms": 0.020221439599990843,
+        "min_ms": 0.020193281173706053,
+        "p95_ms": 0.020241920948028565
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 8,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.022442240715026856,
+        "mean_ms": 0.02239972479343414,
+        "median_ms": 0.02239936113357544,
+        "min_ms": 0.02237312078475952,
+        "p95_ms": 0.022418560981750487
+      },
+      "speedup_vs_separate": 1.1077035847430754,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 2.5,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.02035775899887085,
+        "mean_ms": 0.02029041278362274,
+        "median_ms": 0.0202892804145813,
+        "min_ms": 0.020279040336608888,
+        "p95_ms": 0.020300800800323485
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 16,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.02237567901611328,
+        "mean_ms": 0.022333830356597903,
+        "median_ms": 0.02233407974243164,
+        "min_ms": 0.02229504108428955,
+        "p95_ms": 0.022355198860168457
+      },
+      "speedup_vs_separate": 1.100782249841685,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 3,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.01906048059463501,
+        "mean_ms": 0.019019040036201477,
+        "median_ms": 0.01901600003242493,
+        "min_ms": 0.018996479511260985,
+        "p95_ms": 0.019040000438690186
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 1,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.021454720497131347,
+        "mean_ms": 0.021410969591140746,
+        "median_ms": 0.021409599781036376,
+        "min_ms": 0.021383039951324463,
+        "p95_ms": 0.021430399417877197
+      },
+      "speedup_vs_separate": 1.1258729356610238,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 3,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.019251199960708617,
+        "mean_ms": 0.019153593575954437,
+        "median_ms": 0.019151999950408935,
+        "min_ms": 0.019118720293045045,
+        "p95_ms": 0.01917312026023865
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 2,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.021480960845947264,
+        "mean_ms": 0.02144490885734558,
+        "median_ms": 0.021446080207824708,
+        "min_ms": 0.021411840915679933,
+        "p95_ms": 0.021461760997772215
+      },
+      "speedup_vs_separate": 1.1197828040599378,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 3,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.019096959829330445,
+        "mean_ms": 0.019030015993118286,
+        "median_ms": 0.01902880012989044,
+        "min_ms": 0.019002879858016967,
+        "p95_ms": 0.019052159786224366
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 4,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.021429119110107423,
+        "mean_ms": 0.021380543971061705,
+        "median_ms": 0.021378879547119138,
+        "min_ms": 0.021356160640716552,
+        "p95_ms": 0.021400959491729737
+      },
+      "speedup_vs_separate": 1.1235011877358043,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 3,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.01935744047164917,
+        "mean_ms": 0.01932093439102173,
+        "median_ms": 0.01932096004486084,
+        "min_ms": 0.019290239810943605,
+        "p95_ms": 0.019345279932022095
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 8,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.02143359899520874,
+        "mean_ms": 0.021392172789573668,
+        "median_ms": 0.021391040086746214,
+        "min_ms": 0.0213702392578125,
+        "p95_ms": 0.02140671968460083
+      },
+      "speedup_vs_separate": 1.1071416760388153,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 3,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.019477119445800783,
+        "mean_ms": 0.019405376029014588,
+        "median_ms": 0.019405760169029236,
+        "min_ms": 0.01937664031982422,
+        "p95_ms": 0.019427839517593384
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 16,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.02150912046432495,
+        "mean_ms": 0.02143503370285034,
+        "median_ms": 0.02143455982208252,
+        "min_ms": 0.02140671968460083,
+        "p95_ms": 0.021451520919799804
+      },
+      "speedup_vs_separate": 1.104546260253755,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 3.5,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.02014591932296753,
+        "mean_ms": 0.020105459189414976,
+        "median_ms": 0.02010495901107788,
+        "min_ms": 0.020079360008239747,
+        "p95_ms": 0.020124800205230713
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 1,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.022245121002197266,
+        "mean_ms": 0.022196460914611818,
+        "median_ms": 0.02219615936279297,
+        "min_ms": 0.02216831922531128,
+        "p95_ms": 0.022213759422302245
+      },
+      "speedup_vs_separate": 1.104014156435874,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 3.5,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.020059518814086914,
+        "mean_ms": 0.0200083327293396,
+        "median_ms": 0.02000704050064087,
+        "min_ms": 0.019996800422668458,
+        "p95_ms": 0.020018560886383055
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 2,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.022296960353851317,
+        "mean_ms": 0.022241363239288332,
+        "median_ms": 0.022239999771118166,
+        "min_ms": 0.022227840423583986,
+        "p95_ms": 0.022252800464630126
+      },
+      "speedup_vs_separate": 1.1116086744766558,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 3.5,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.020073599815368652,
+        "mean_ms": 0.020030649495124817,
+        "median_ms": 0.020030399560928343,
+        "min_ms": 0.020010879039764406,
+        "p95_ms": 0.020044798851013183
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 4,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.022463359832763673,
+        "mean_ms": 0.022424332833290102,
+        "median_ms": 0.02242432117462158,
+        "min_ms": 0.022392959594726564,
+        "p95_ms": 0.02244096040725708
+      },
+      "speedup_vs_separate": 1.119514421387922,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 3.5,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.020197761058807374,
+        "mean_ms": 0.020153459215164187,
+        "median_ms": 0.020153601169586182,
+        "min_ms": 0.020120959281921386,
+        "p95_ms": 0.02017535924911499
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 8,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.02244352102279663,
+        "mean_ms": 0.02241498878002167,
+        "median_ms": 0.022415359020233155,
+        "min_ms": 0.0223852801322937,
+        "p95_ms": 0.022432000637054444
+      },
+      "speedup_vs_separate": 1.1122259903634588,
+      "split_count": 16
+    },
+    {
+      "better_than_separate": true,
+      "bit_exact": true,
+      "bits": 3.5,
+      "fp32_intermediate_bytes_eliminated": 131072,
+      "fused": {
+        "max_ms": 0.02044543981552124,
+        "mean_ms": 0.020392959904670716,
+        "median_ms": 0.020392959117889405,
+        "min_ms": 0.020376319885253905,
+        "p95_ms": 0.020402560234069823
+      },
+      "k": 8192,
+      "kernel_launches_eliminated": 1,
+      "m": 16,
+      "n": 2048,
+      "separate": {
+        "max_ms": 0.02266239881515503,
+        "mean_ms": 0.022588352012634275,
+        "median_ms": 0.02258687973022461,
+        "min_ms": 0.022567040920257568,
+        "p95_ms": 0.022602241039276123
+      },
+      "speedup_vs_separate": 1.1075822591342628,
+      "split_count": 16
+    }
+  ],
+  "source_fingerprint": "cb51d64684d6ea9c7d5b28e36c51d25a7a91b2dbe8c5047c3731e23894a6f6ea",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 100,
+    "warmup": 30
+  },
+  "workload": "H100 Llama 3.2 1B P32 down decode, ordered split-16 reduction, and exact FP16 output recovery"
+}

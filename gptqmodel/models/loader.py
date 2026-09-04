@@ -1943,10 +1943,17 @@ def ModelLoader(cls):
         model.eval()
 
         if qcfg.method == METHOD.QVQ and backend != BACKEND.MLX:
+            from ..quantization.qvq_axis_policy import (
+                apply_qvq_transform_axis_overrides,
+                qvq_transform_axis_overrides_from_config,
+            )
             from ..quantization.qvq_transform_runtime import (
                 install_qvq_grouped_p32_runtime_from_config,
             )
 
+            apply_qvq_transform_axis_overrides(
+                model, qvq_transform_axis_overrides_from_config(qcfg)
+            )
             grouped_p32_runtime = install_qvq_grouped_p32_runtime_from_config(
                 model, qcfg
             )

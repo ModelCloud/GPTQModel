@@ -81,6 +81,8 @@ def _qvq_hadamard_fused(
     post_scale: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
     scale_mode: int = 0,
+    pad_to_16: bool = False,
+    output_fp16: bool = False,
 ) -> torch.Tensor:
     """One fused Hadamard launch (CUDA or CPU AVX-512); Python butterfly fallback otherwise.
 
@@ -129,7 +131,17 @@ def _qvq_hadamard_fused(
             if scale_mode >= 2 or x.dtype == torch.float32
             else (0 if n >= _FP16_STABLE_HADAMARD_MIN_WIDTH else 1)
         )
-        return qvq_cuda_hadamard(x, pre_scale=pre_scale, post_scale=post_scale, bias=bias, scale_mode=mode)
+        return qvq_cuda_hadamard(
+            x,
+            pre_scale=pre_scale,
+            post_scale=post_scale,
+            bias=bias,
+            scale_mode=mode,
+            pad_to_16=pad_to_16,
+            output_fp16=output_fp16,
+        )
+    if pad_to_16 or output_fp16:
+        raise RuntimeError("requested QVQ Hadamard output specialization requires the native CUDA path")
     if x.device.type == "cuda" and x.dtype == torch.float32 and scale_mode in (3, 4):
         return _qvq_fp16_emulated_hadamard_fallback(
             x,
@@ -548,6 +560,8 @@ class QVQLinear(BaseQuantLinear):
         dual_v2: bool = False,
         v2b4_p64: bool = False,
         v2b2_p32: bool = False,
+        input_hadamard: bool = True,
+        output_hadamard: bool = True,
     ) -> QVQLinear:
         return cls(
             bits=bits,
@@ -562,6 +576,8 @@ class QVQLinear(BaseQuantLinear):
             dual_v2=dual_v2,
             v2b4_p64=v2b4_p64,
             v2b2_p32=v2b2_p32,
+            input_hadamard=input_hadamard,
+            output_hadamard=output_hadamard,
         )
 
     def _validate_tensors(self) -> None:
@@ -679,6 +695,13 @@ class QVQLinear(BaseQuantLinear):
                 self._qvq_mps_bank_ids = self._prepare_mps_bank_ids(self.trellis.device)
 
     def _apply(self, fn):
+        grouped_runtime = getattr(self, "_gptqmodel_qvq_grouped_runtime", None)
+        if grouped_runtime is not None:
+            # The grouped Hopper payload is transient state outside the module
+            # tree.  Invalidate it before Module._apply replaces any canonical
+            # child buffers so a device/dtype move cannot retain VRAM on the
+            # previous device or publish a payload under stale source keys.
+            grouped_runtime.invalidate()
         self._qvq_mps_compander = None
         self._qvq_mps_bank_ids = None
         self._qvq_mps_bank_ids_cache = None
@@ -773,7 +796,34 @@ class QVQLinear(BaseQuantLinear):
         inner = self.get_inner_weight_tensor(dtype=x.dtype)
         return x @ inner
 
-    def _inner_forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _inner_forward(
+        self,
+        x: torch.Tensor,
+        *,
+        return_ordered_partials: bool = False,
+    ) -> torch.Tensor:
+        if return_ordered_partials:
+            if (
+                x.device.type != "cuda"
+                or self.trellis_window != 16
+                or self.dual_v2
+                or not self.v2b2_p32
+                or self.vector_size != 2
+                or x.dtype != torch.float16
+                or not 0 < x.shape[0] <= 16
+                or (self.in_features, self.out_features) != (8192, 2048)
+            ):
+                raise RuntimeError(
+                    "ordered partial output requires the H100 Llama down P32 path"
+                )
+            properties = torch.cuda.get_device_properties(x.device)
+            if (
+                properties.name != "NVIDIA H100"
+                or (properties.major, properties.minor) != (9, 0)
+            ):
+                raise RuntimeError(
+                    "ordered partial output requires the measured physical H100"
+                )
         if self.bank_count in (2, 4) and (
             not self._bank_ids_loaded or self.bank_ids is None or self.bank_ids.device.type == "meta"
         ):
@@ -958,9 +1008,16 @@ class QVQLinear(BaseQuantLinear):
                 and qvq_transition_bits(self.bits, vector_size=2) in (4, 5, 6, 7)
             ):
                 properties = torch.cuda.get_device_properties(x.device)
-                if properties.major == 9 and properties.minor == 0 and "H200" in properties.name:
+                if properties.major == 9 and properties.minor == 0 and (
+                    "H100" in properties.name or "H200" in properties.name
+                ):
                     from ...utils.qvq_cuda import _pgc16_levels
-                    from ...utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_m16_tma
+                    from ...utils.qvq_wgmma_cuda import (
+                        qvq_h100_ordered_split_count,
+                        qvq_p32_window_wgmma_m16_tma,
+                        qvq_p32_window_wgmma_m16_tma_ordered_partials,
+                        qvq_p32_window_wgmma_m16_tma_ordered_split,
+                    )
 
                     with self._qvq_cuda_bank_cache_lock:
                         window = self._prepare_hopper_p32_window(x.device)
@@ -973,7 +1030,29 @@ class QVQLinear(BaseQuantLinear):
                         )
                         padded[: wgmma_input.shape[0]].copy_(wgmma_input)
                         wgmma_input = padded
-                    output = qvq_p32_window_wgmma_m16_tma(
+                    transition_bits = qvq_transition_bits(self.bits, vector_size=2)
+                    ordered_split = qvq_h100_ordered_split_count(
+                        device_name=properties.name,
+                        compute_capability=(properties.major, properties.minor),
+                        logical_rows=int(x.shape[0]),
+                        in_features=self.in_features,
+                        out_features=self.out_features,
+                        transition_bits=transition_bits,
+                    )
+                    if return_ordered_partials:
+                        if ordered_split != 16:
+                            raise RuntimeError(
+                                "ordered partial output requires the measured split-16 policy"
+                            )
+                        kernel = qvq_p32_window_wgmma_m16_tma_ordered_partials
+                    else:
+                        kernel = (
+                            qvq_p32_window_wgmma_m16_tma_ordered_split
+                            if ordered_split
+                            else qvq_p32_window_wgmma_m16_tma
+                        )
+                    kernel_kwargs = {"split_count": ordered_split} if ordered_split else {}
+                    output = kernel(
                         wgmma_input,
                         window,
                         _pgc16_levels(x.device, self.codebook_version),
@@ -981,8 +1060,9 @@ class QVQLinear(BaseQuantLinear):
                         self.bits,
                         out_features=self.out_features,
                         bank_alt_id=cuda_bank_alt_id,
+                        **kernel_kwargs,
                     )
-                    return output[: x.shape[0]]
+                    return output if return_ordered_partials else output[: x.shape[0]]
 
             return qvq_cuda_gemv(
                 x.contiguous(),
@@ -1267,6 +1347,64 @@ class QVQLinear(BaseQuantLinear):
         cached_bias = self._cached_cast("bias", compute_dtype, output_dtype)
         return output if cached_bias is None else output + cached_bias
 
+    def _qvq_prepare_inference_input(
+        self,
+        x_2d: torch.Tensor,
+        compute_dtype: torch.dtype,
+        *,
+        pad_to_16: bool = False,
+    ) -> torch.Tensor:
+        """Apply the exact inference-side ``SU -> Hadamard`` transform.
+
+        Grouped execution calls this method once on the first child after R0
+        has proved that every sibling owns a bit-identical ``SU``.  Keeping the
+        operation here prevents the production coordinator from duplicating
+        or subtly reordering QVQLinear's numerical contract.
+        """
+
+        if not self.input_hadamard:
+            if pad_to_16:
+                raise RuntimeError("direct padded input requires an input Hadamard")
+            return x_2d * self._cached_cast("SU", compute_dtype)
+        return _qvq_hadamard_fused(
+            x_2d,
+            pre_scale=self._cached_cast("SU", compute_dtype),
+            scale_mode=(
+                2
+                if compute_dtype == torch.float16
+                and self.in_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                else 1
+            ),
+            pad_to_16=pad_to_16,
+        )
+
+    def _qvq_recover_inference_output(
+        self,
+        output: torch.Tensor,
+        compute_dtype: torch.dtype,
+        *,
+        output_fp16: bool = False,
+    ) -> torch.Tensor:
+        """Apply the exact child-local ``Hadamard -> SV -> bias`` epilogue."""
+
+        output_dtype = output.dtype
+        if self.output_hadamard:
+            return _qvq_hadamard_fused(
+                output,
+                post_scale=self._cached_cast("SV", compute_dtype, output_dtype),
+                bias=self._cached_cast("bias", compute_dtype, output_dtype),
+                scale_mode=(
+                    3
+                    if output_dtype == torch.float32
+                    and self.out_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
+                    else 4 if output_dtype == torch.float32 else 0
+                ),
+                output_fp16=output_fp16,
+            )
+        output = output * self._cached_cast("SV", compute_dtype, output_dtype)
+        cached_bias = self._cached_cast("bias", compute_dtype, output_dtype)
+        return output if cached_bias is None else output + cached_bias
+
 
 def qvq_dense_oracle_forward(
     layer: QVQLinear,
@@ -1348,7 +1486,14 @@ class QVQReferenceLinear(QVQLinear):
         # attribute solely to construct the reference oracle.
         QVQLinear.verify_supports_params()
 
-    def _inner_forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _inner_forward(
+        self,
+        x: torch.Tensor,
+        *,
+        return_ordered_partials: bool = False,
+    ) -> torch.Tensor:
+        if return_ordered_partials:
+            raise RuntimeError("reference QVQ execution does not expose split partials")
         return self._reference_inner_forward(x)
 
 

@@ -51,6 +51,7 @@ from gptqmodel.quantization.qvq_pruning import viterbi_pruning_dispatch_code
 from gptqmodel.quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
 from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
 from gptqmodel.quantization.rotation.hadamard_utils import (
+    get_hadK,
     matmul_hadU,
     matmul_hadU_stable,
 )
@@ -68,7 +69,14 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_yaqa_feedback_update_op,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
+    qvq_cuda_hadamard_input_fp16_padded_multiblock,
+    qvq_cuda_hadamard_ordered_split16_fp32_to_fp16,
+    qvq_cuda_hadamard_pair_fp32_to_fp16,
+    qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock,
+    qvq_cuda_hadamard_pair_swiglu_precondition_multiblock,
     qvq_cuda_supported,
+    qvq_cuda_swiglu_precondition,
+    qvq_cuda_swiglu_precondition_multiblock,
     qvq_cuda_viterbi,
     qvq_cuda_viterbi_banked,
     qvq_cuda_viterbi_v2_segment_banked,
@@ -388,6 +396,109 @@ def test_qvq_cuda_range_safe_hadamard_is_bitwise_identical_when_prescale_fits_fp
     assert torch.equal(range_safe, original)
 
 
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_hadamard_direct_padding_is_exact_and_graph_stable(m):
+    n = 2048
+    generator = torch.Generator(device="cuda").manual_seed(20261800 + m)
+    x = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float16
+    )
+    pre_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    expected = qvq_cuda_hadamard(x, pre_scale=pre_scale, scale_mode=2)
+    actual = qvq_cuda_hadamard(
+        x,
+        pre_scale=pre_scale,
+        scale_mode=2,
+        pad_to_16=True,
+    )
+    assert actual.shape == (16, n)
+    assert torch.equal(actual[:m].view(torch.int16), expected.view(torch.int16))
+    assert torch.count_nonzero(actual[m:]).item() == 0
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard(
+            x,
+            pre_scale=pre_scale,
+            scale_mode=2,
+            pad_to_16=True,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
+def test_qvq_cuda_hadamard_direct_padding_guards():
+    x = torch.ones((1, 2048), device="cuda", dtype=torch.float16)
+    with pytest.raises(TypeError, match="pad_to_16"):
+        qvq_cuda_hadamard(x, pad_to_16=1)
+    with pytest.raises(ValueError, match="nonempty 2D"):
+        qvq_cuda_hadamard(x.expand(17, -1).contiguous(), pad_to_16=True)
+    with pytest.raises(ValueError, match="nonempty 2D"):
+        qvq_cuda_hadamard(x.reshape(1, 1, 2048), pad_to_16=True)
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_hadamard_multiblock_input_is_exact_and_graph_stable(m):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 Phase-26 path")
+
+    generator = torch.Generator(device="cuda").manual_seed(20262600 + m)
+    x = torch.randn(
+        (m, 2048), generator=generator, device="cuda", dtype=torch.float16
+    )
+    pre_scale = torch.randn(
+        (2048,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    expected = qvq_cuda_hadamard(
+        x, pre_scale=pre_scale, scale_mode=2, pad_to_16=True
+    )
+    actual = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+        x, pre_scale=pre_scale
+    )
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+            x, pre_scale=pre_scale
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
+
+
+def test_qvq_cuda_hadamard_multiblock_input_rescues_prescale_overflow_on_stream():
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 Phase-26 path")
+
+    x = torch.zeros((1, 2048), device="cuda", dtype=torch.float16)
+    pre_scale = torch.ones((2048,), device="cuda", dtype=torch.float16)
+    x[0, :2] = 60000
+    pre_scale[:2] = 2
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        expected = qvq_cuda_hadamard(
+            x, pre_scale=pre_scale, scale_mode=2, pad_to_16=True
+        )
+        actual = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+            x, pre_scale=pre_scale
+        )
+    stream.synchronize()
+    assert torch.isfinite(actual).all()
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+
 def test_qvq_cuda_float32_hadamard_preserves_postscale_and_bias_precision():
     generator = torch.Generator().manual_seed(20260813)
     x = torch.randn((3, 32), generator=generator, dtype=torch.float32).cuda()
@@ -410,10 +521,859 @@ def test_qvq_cuda_fp16_emulation_rescues_late_butterfly_and_sv_overflow():
     reference = matmul_hadU(x) * post_scale + bias
 
     actual = qvq_cuda_hadamard(x, post_scale=post_scale, bias=bias, scale_mode=4)
+    direct_fp16 = qvq_cuda_hadamard(
+        x,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=4,
+        output_fp16=True,
+    )
 
     assert not torch.isfinite(historical).all()
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, reference, rtol=2e-3, atol=16.0)
+    assert torch.equal(direct_fp16.view(torch.int16), actual.half().view(torch.int16))
+
+
+@pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_hadamard_fp16_final_store_is_bit_exact_and_graph_stable(
+    scale_mode, m
+):
+    n = 2048
+    generator = torch.Generator(device="cuda").manual_seed(
+        20261900 + 10 * scale_mode + m
+    )
+    x = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float32
+    )
+    post_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float32
+    )
+    bias = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float32
+    )
+    expected = qvq_cuda_hadamard(
+        x,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=scale_mode,
+    ).to(torch.float16)
+    actual = qvq_cuda_hadamard(
+        x,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=scale_mode,
+        output_fp16=True,
+    )
+    assert actual.dtype == torch.float16
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard(
+            x,
+            post_scale=post_scale,
+            bias=bias,
+            scale_mode=scale_mode,
+            output_fp16=True,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
+
+
+def test_qvq_cuda_hadamard_fp16_final_store_guards():
+    fp16 = torch.ones((1, 32), device="cuda", dtype=torch.float16)
+    fp32 = fp16.float()
+    with pytest.raises(TypeError, match="output_fp16"):
+        qvq_cuda_hadamard(fp32, scale_mode=4, output_fp16=1)
+    with pytest.raises(TypeError, match="require float32"):
+        qvq_cuda_hadamard(fp16, scale_mode=4, output_fp16=True)
+    with pytest.raises(ValueError, match="scale mode 3/4"):
+        qvq_cuda_hadamard(fp32, scale_mode=1, output_fp16=True)
+    with pytest.raises(ValueError, match="no padding"):
+        qvq_cuda_hadamard(
+            fp32,
+            scale_mode=4,
+            pad_to_16=True,
+            output_fp16=True,
+        )
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("bias_enabled", (False, True))
+def test_qvq_cuda_ordered_split16_recovery_is_bit_exact_and_graph_stable(
+    m, scale_mode, bias_enabled
+):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 Phase-25 path")
+
+    generator = torch.Generator(device="cuda").manual_seed(20262300 + m)
+    partials = (
+        torch.randn(
+            (16, 16, 2048),
+            generator=generator,
+            device="cuda",
+            dtype=torch.float32,
+        )
+        * 0.02
+    )
+    post_scale = torch.randn(
+        (2048,), generator=generator, device="cuda", dtype=torch.float32
+    )
+    bias = (
+        torch.randn(
+            (2048,), generator=generator, device="cuda", dtype=torch.float32
+        )
+        if bias_enabled
+        else None
+    )
+    reduced = torch.zeros_like(partials[0])
+    for split in range(16):
+        reduced = reduced + partials[split]
+    expected = qvq_cuda_hadamard(
+        reduced[:m],
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=scale_mode,
+        output_fp16=True,
+    )
+    actual = qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+        partials,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=scale_mode,
+        logical_rows=m,
+    )
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+    actual_multiblock = qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+        partials,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=scale_mode,
+        logical_rows=m,
+        multiblock=True,
+    )
+    assert torch.equal(
+        actual_multiblock.view(torch.int16), expected.view(torch.int16)
+    )
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+            partials,
+            post_scale=post_scale,
+            bias=bias,
+            scale_mode=scale_mode,
+            logical_rows=m,
+            multiblock=True,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
+
+    with pytest.raises(TypeError, match="multiblock"):
+        qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+            partials,
+            post_scale=post_scale,
+            bias=bias,
+            scale_mode=scale_mode,
+            logical_rows=m,
+            multiblock=1,
+        )
+
+
+def test_qvq_cuda_multiblock_ordered_split16_preserves_late_overflow_on_stream():
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 Phase-25 path")
+
+    partials = torch.zeros((16, 16, 2048), device="cuda", dtype=torch.float32)
+    partials[0, 0, 0] = 60000.0
+    partials[0, 0, 1] = 60000.0
+    post_scale = torch.full((2048,), 0.001, device="cuda", dtype=torch.float32)
+    reduced = torch.zeros_like(partials[0])
+    for split in range(16):
+        reduced = reduced + partials[split]
+    expected = qvq_cuda_hadamard(
+        reduced[:1],
+        post_scale=post_scale,
+        scale_mode=4,
+        output_fp16=True,
+    )
+
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        actual = qvq_cuda_hadamard_ordered_split16_fp32_to_fp16(
+            partials,
+            post_scale=post_scale,
+            scale_mode=4,
+            logical_rows=1,
+            multiblock=True,
+        )
+    stream.synchronize()
+    assert torch.isfinite(actual).all()
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("seed", (20260901, 20260902, 20260903))
+def test_qvq_cuda_paired_output_recovery_is_bit_exact_and_repeatable(m, seed):
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    input0 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    input1 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    scale0 = torch.randn((n,), generator=generator, device="cuda")
+    scale1 = torch.randn((n,), generator=generator, device="cuda")
+    bias0 = torch.randn((n,), generator=generator, device="cuda")
+    bias1 = torch.randn((n,), generator=generator, device="cuda")
+    expected = (
+        qvq_cuda_hadamard(
+            input0, post_scale=scale0, bias=bias0, scale_mode=3
+        ).half(),
+        qvq_cuda_hadamard(
+            input1, post_scale=scale1, bias=bias1, scale_mode=3
+        ).half(),
+    )
+
+    for _ in range(10):
+        actual = qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0,
+            input1,
+            post_scale0=scale0,
+            post_scale1=scale1,
+            bias0=bias0,
+            bias1=bias1,
+        )
+        assert actual[0].dtype == torch.float16
+        assert actual[1].dtype == torch.float16
+        assert torch.equal(actual[0], expected[0])
+        assert torch.equal(actual[1], expected[1])
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("seed", (20260921, 20260922, 20260923))
+@pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("warp_low", (False, True))
+def test_qvq_cuda_multiblock_paired_recovery_is_bit_exact_and_repeatable(
+    m, seed, scale_mode, warp_low
+):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("experimental multiblock recovery requires Hopper")
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    input0 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    input1 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    scale0 = torch.randn((n,), generator=generator, device="cuda")
+    scale1 = torch.randn((n,), generator=generator, device="cuda")
+    bias0 = torch.randn((n,), generator=generator, device="cuda")
+    expected = qvq_cuda_hadamard_pair_fp32_to_fp16(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        bias0=bias0,
+        scale_mode=scale_mode,
+    )
+
+    for _ in range(10):
+        actual = qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+            input0,
+            input1,
+            post_scale0=scale0,
+            post_scale1=scale1,
+            bias0=bias0,
+            scale_mode=scale_mode,
+            warp_low=warp_low,
+        )
+        assert torch.equal(actual[0], expected[0])
+        assert torch.equal(actual[1], expected[1])
+
+
+@pytest.mark.parametrize("warp_low", (False, True))
+def test_qvq_cuda_multiblock_paired_recovery_graph_and_contract_guards(warp_low):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("experimental multiblock recovery requires Hopper")
+    n = 8192
+    input0 = torch.randn((1, n), device="cuda")
+    input1 = torch.randn((1, n), device="cuda")
+    scale = torch.ones((n,), device="cuda")
+    expected = qvq_cuda_hadamard_pair_fp32_to_fp16(
+        input0,
+        input1,
+        post_scale0=scale,
+        post_scale1=scale,
+    )
+    qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+        input0,
+        input1,
+        post_scale0=scale,
+        post_scale1=scale,
+        warp_low=warp_low,
+    )
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+            input0,
+            input1,
+            post_scale0=scale,
+            post_scale1=scale,
+            warp_low=warp_low,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured[0], expected[0])
+    assert torch.equal(captured[1], expected[1])
+
+    with pytest.raises(ValueError, match="last dimension 8192"):
+        qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+            input0[:, :4096],
+            input1[:, :4096],
+            post_scale0=scale[:4096],
+            post_scale1=scale[:4096],
+            warp_low=warp_low,
+        )
+    with pytest.raises(TypeError, match="warp_low"):
+        qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+            input0,
+            input1,
+            post_scale0=scale,
+            post_scale1=scale,
+            warp_low=1,
+        )
+
+
+@pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("warp_low", (False, True))
+def test_qvq_cuda_multiblock_paired_recovery_preserves_overflow_rounding_bits(
+    scale_mode, warp_low
+):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("experimental multiblock recovery requires Hopper")
+    n = 8192
+    input0 = torch.full((1, n), 60000.0, device="cuda")
+    input1 = torch.empty((1, n), device="cuda")
+    input1[:, 0::2] = 60000.0
+    input1[:, 1::2] = -60000.0
+    scale0 = torch.full((n,), 1.0e-4, device="cuda")
+    scale1 = torch.full((n,), -1.0e-4, device="cuda")
+    bias0 = torch.linspace(-0.125, 0.125, n, device="cuda")
+    expected = qvq_cuda_hadamard_pair_fp32_to_fp16(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        bias0=bias0,
+        scale_mode=scale_mode,
+    )
+
+    for _ in range(10):
+        actual = qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+            input0,
+            input1,
+            post_scale0=scale0,
+            post_scale1=scale1,
+            bias0=bias0,
+            scale_mode=scale_mode,
+            warp_low=warp_low,
+        )
+        assert torch.equal(actual[0].view(torch.int16), expected[0].view(torch.int16))
+        assert torch.equal(actual[1].view(torch.int16), expected[1].view(torch.int16))
+
+
+def test_qvq_cuda_paired_output_recovery_handles_overflow_optional_bias_and_stream():
+    n = 32
+    input0 = torch.zeros((1, n), device="cuda")
+    input1 = torch.zeros((1, n), device="cuda")
+    input0[0, :2] = 40000
+    input1[0, 0] = -40000
+    scale0 = torch.full((n,), 2.0, device="cuda")
+    scale1 = torch.full((n,), 0.25, device="cuda")
+    bias0 = torch.full((n,), -60000.0, device="cuda")
+    expected = (
+        qvq_cuda_hadamard(
+            input0, post_scale=scale0, bias=bias0, scale_mode=4
+        ).half(),
+        qvq_cuda_hadamard(input1, post_scale=scale1, scale_mode=4).half(),
+    )
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        actual = qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0,
+            input1,
+            post_scale0=scale0,
+            post_scale1=scale1,
+            bias0=bias0,
+            scale_mode=4,
+        )
+    stream.synchronize()
+
+    assert torch.equal(actual[0], expected[0])
+    assert torch.equal(actual[1], expected[1])
+
+
+def test_qvq_cuda_paired_output_recovery_empty_graph_and_contract_guards():
+    n = 32
+    empty = torch.empty((0, n), device="cuda")
+    scale = torch.ones(n, device="cuda")
+    outputs = qvq_cuda_hadamard_pair_fp32_to_fp16(
+        empty, empty, post_scale0=scale, post_scale1=scale
+    )
+    assert tuple(output.shape for output in outputs) == ((0, n), (0, n))
+    assert all(output.dtype == torch.float16 for output in outputs)
+
+    input0 = torch.randn((1, n), device="cuda")
+    input1 = torch.randn((1, n), device="cuda")
+    qvq_cuda_hadamard_pair_fp32_to_fp16(
+        input0, input1, post_scale0=scale, post_scale1=scale
+    )
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0, input1, post_scale0=scale, post_scale1=scale
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    reference = (
+        qvq_cuda_hadamard(input0, post_scale=scale, scale_mode=3).half(),
+        qvq_cuda_hadamard(input1, post_scale=scale, scale_mode=3).half(),
+    )
+    assert torch.equal(captured[0], reference[0])
+    assert torch.equal(captured[1], reference[1])
+
+    with pytest.raises(TypeError, match="float32"):
+        qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0.half(), input1.half(), post_scale0=scale, post_scale1=scale
+        )
+    with pytest.raises(ValueError, match="identical shapes"):
+        qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0, input1[:, :-1], post_scale0=scale, post_scale1=scale
+        )
+    with pytest.raises(ValueError, match="scale_mode"):
+        qvq_cuda_hadamard_pair_fp32_to_fp16(
+            input0,
+            input1,
+            post_scale0=scale,
+            post_scale1=scale,
+            scale_mode=2,
+        )
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("seed", (20260911, 20260912, 20260913))
+def test_qvq_cuda_swiglu_precondition_is_bit_exact_and_repeatable(m, seed):
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    gate = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
+    up = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
+    pre_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    activated_gate = torch.nn.functional.silu(gate)
+    reference = qvq_cuda_hadamard(
+        activated_gate * up,
+        pre_scale=pre_scale,
+        scale_mode=2,
+    )
+
+    for _ in range(10):
+        actual = qvq_cuda_swiglu_precondition(activated_gate, up, pre_scale)
+        assert actual.dtype == torch.float16
+        assert torch.equal(actual, reference)
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("seed", (20260931, 20260932, 20260933))
+@pytest.mark.parametrize("half2_high", (False, True))
+@pytest.mark.parametrize("fuse_silu", (False, True))
+@pytest.mark.parametrize("half2_low", (False, True))
+def test_qvq_cuda_multiblock_swiglu_precondition_is_bit_exact_and_repeatable(
+    m, seed, half2_high, fuse_silu, half2_low
+):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("multiblock SwiGLU precondition requires Hopper")
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+    gate = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float16
+    )
+    up = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.float16
+    )
+    pre_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    activated_gate = torch.nn.functional.silu(gate)
+    expected = qvq_cuda_swiglu_precondition(activated_gate, up, pre_scale)
+    gate_input = gate if fuse_silu else activated_gate
+
+    for _ in range(10):
+        actual = qvq_cuda_swiglu_precondition_multiblock(
+            gate_input,
+            up,
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=fuse_silu,
+            half2_low=half2_low,
+        )
+        assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("half2_high", (False, True))
+@pytest.mark.parametrize("fuse_silu", (False, True))
+@pytest.mark.parametrize("half2_low", (False, True))
+def test_qvq_cuda_multiblock_swiglu_precondition_graph_and_guards(
+    half2_high, fuse_silu, half2_low
+):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("multiblock SwiGLU precondition requires Hopper")
+    n = 8192
+    gate = torch.randn((1, n), device="cuda", dtype=torch.float16)
+    up = torch.randn((1, n), device="cuda", dtype=torch.float16)
+    pre_scale = torch.ones((n,), device="cuda", dtype=torch.float16)
+    activated_gate = torch.nn.functional.silu(gate) if fuse_silu else gate
+    expected = qvq_cuda_swiglu_precondition(activated_gate, up, pre_scale)
+    qvq_cuda_swiglu_precondition_multiblock(
+        gate,
+        up,
+        pre_scale,
+        half2_high=half2_high,
+        fuse_silu=fuse_silu,
+        half2_low=half2_low,
+    )
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_swiglu_precondition_multiblock(
+            gate,
+            up,
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=fuse_silu,
+            half2_low=half2_low,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured, expected)
+
+    with pytest.raises(ValueError, match="N=8192"):
+        qvq_cuda_swiglu_precondition_multiblock(
+            gate[:, :4096],
+            up[:, :4096],
+            pre_scale[:4096],
+            half2_high=half2_high,
+            fuse_silu=fuse_silu,
+            half2_low=half2_low,
+        )
+    with pytest.raises(TypeError, match="fuse_silu"):
+        qvq_cuda_swiglu_precondition_multiblock(
+            gate,
+            up,
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=1,
+            half2_low=half2_low,
+        )
+    with pytest.raises(TypeError, match="half2_low"):
+        qvq_cuda_swiglu_precondition_multiblock(
+            gate,
+            up,
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=fuse_silu,
+            half2_low=1,
+        )
+    with pytest.raises(TypeError, match="pad_to_16"):
+        qvq_cuda_swiglu_precondition_multiblock(
+            gate,
+            up,
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=fuse_silu,
+            half2_low=half2_low,
+            pad_to_16=1,
+        )
+    with pytest.raises(ValueError, match="at most 16 rows"):
+        qvq_cuda_swiglu_precondition_multiblock(
+            gate.expand(17, -1).contiguous(),
+            up.expand(17, -1).contiguous(),
+            pre_scale,
+            half2_high=half2_high,
+            fuse_silu=fuse_silu,
+            half2_low=half2_low,
+            pad_to_16=True,
+        )
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_multiblock_swiglu_precondition_direct_padding_is_exact_and_graph_stable(m):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("multiblock SwiGLU precondition requires Hopper")
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(20261700 + m)
+    gate = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
+    up = torch.randn((m, n), generator=generator, device="cuda", dtype=torch.float16)
+    pre_scale = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
+    expected = qvq_cuda_swiglu_precondition_multiblock(
+        gate,
+        up,
+        pre_scale,
+        half2_high=True,
+        fuse_silu=True,
+        half2_low=True,
+    )
+    actual = qvq_cuda_swiglu_precondition_multiblock(
+        gate,
+        up,
+        pre_scale,
+        half2_high=True,
+        fuse_silu=True,
+        half2_low=True,
+        pad_to_16=True,
+    )
+    assert actual.shape == (16, n)
+    assert torch.equal(actual[:m], expected)
+    assert torch.count_nonzero(actual[m:]).item() == 0
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_swiglu_precondition_multiblock(
+            gate,
+            up,
+            pre_scale,
+            half2_high=True,
+            fuse_silu=True,
+            half2_low=True,
+            pad_to_16=True,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured[:m], expected)
+    assert torch.count_nonzero(captured[m:]).item() == 0
+
+
+def test_qvq_cuda_multiblock_fused_silu_covers_every_finite_fp16_value():
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("multiblock SwiGLU precondition requires Hopper")
+    n = 8192
+    all_bits = torch.arange(1 << 16, dtype=torch.int32).to(torch.int16).view(torch.float16)
+    finite = all_bits[torch.isfinite(all_bits)]
+    gate = torch.zeros((8, n), device="cuda", dtype=torch.float16)
+    gate.view(-1)[: finite.numel()].copy_(finite.to(device="cuda"))
+    up = torch.ones_like(gate)
+    pre_scale = torch.full((n,), 0.125, device="cuda", dtype=torch.float16)
+    expected = qvq_cuda_swiglu_precondition_multiblock(
+        torch.nn.functional.silu(gate),
+        up,
+        pre_scale,
+        half2_high=True,
+    )
+    actual = qvq_cuda_swiglu_precondition_multiblock(
+        gate,
+        up,
+        pre_scale,
+        half2_high=True,
+        fuse_silu=True,
+        half2_low=True,
+    )
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.parametrize("m", (1, 8, 16))
+@pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("pad_to_16", (False, True))
+@pytest.mark.parametrize("pair_tiles", (False, True))
+@pytest.mark.parametrize("bounded_rounding", (False, True))
+def test_qvq_cuda_fused_recovery_to_precondition_is_bit_exact_and_graph_stable(
+    m, scale_mode, pad_to_16, pair_tiles, bounded_rounding
+):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("fused recovery/precondition requires Hopper")
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(20262000 + m)
+    input0 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    input1 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    scale0 = torch.randn((n,), generator=generator, device="cuda")
+    scale1 = torch.randn((n,), generator=generator, device="cuda")
+    bias0 = torch.randn((n,), generator=generator, device="cuda")
+    pre_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    gate, up = qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        bias0=bias0,
+        scale_mode=scale_mode,
+        warp_low=True,
+    )
+    expected = qvq_cuda_swiglu_precondition_multiblock(
+        gate,
+        up,
+        pre_scale,
+        half2_high=True,
+        fuse_silu=True,
+        half2_low=True,
+        pad_to_16=pad_to_16,
+    )
+    actual = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        bias0=bias0,
+        pre_scale=pre_scale,
+        scale_mode=scale_mode,
+        pad_to_16=pad_to_16,
+        pair_tiles=pair_tiles,
+        bounded_rounding=bounded_rounding,
+    )
+    assert torch.equal(actual, expected)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+            input0,
+            input1,
+            post_scale0=scale0,
+            post_scale1=scale1,
+            bias0=bias0,
+            pre_scale=pre_scale,
+            scale_mode=scale_mode,
+            pad_to_16=pad_to_16,
+            pair_tiles=pair_tiles,
+            bounded_rounding=bounded_rounding,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured, expected)
+
+
+def test_qvq_cuda_bounded_recovery_rounding_preserves_high_magnitude_fallback():
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("bounded fused recovery requires Hopper")
+    m, n = 16, 8192
+    generator = torch.Generator(device="cuda").manual_seed(20267067)
+    input0 = torch.randn((m, n), generator=generator, device="cuda") * 5000
+    input1 = torch.randn((m, n), generator=generator, device="cuda") * 5000
+    scale0 = torch.full((n,), 2e-5, device="cuda")
+    scale1 = torch.full((n,), 2e-5, device="cuda")
+    pre_scale = torch.full((n,), 0.01, device="cuda", dtype=torch.float16)
+    shared = dict(
+        post_scale0=scale0,
+        post_scale1=scale1,
+        pre_scale=pre_scale,
+        pair_tiles=True,
+    )
+    expected = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+        input0,
+        input1,
+        **shared,
+        bounded_rounding=False,
+    )
+    actual = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+        input0,
+        input1,
+        **shared,
+        bounded_rounding=True,
+        packed_gate_up=True,
+    )
+    assert torch.isfinite(actual).all()
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.parametrize("scale_mode", (3, 4))
+@pytest.mark.parametrize("with_bias", (False, True))
+def test_qvq_cuda_packed_gate_up_recovery_is_bit_exact_and_graph_stable(
+    scale_mode, with_bias
+):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("packed fused recovery requires Hopper")
+    m, n = 16, 8192
+    generator = torch.Generator(device="cuda").manual_seed(20268068 + scale_mode)
+    input0 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    input1 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    scale0 = torch.randn((n,), generator=generator, device="cuda")
+    scale1 = torch.randn((n,), generator=generator, device="cuda")
+    bias0 = (
+        torch.randn((n,), generator=generator, device="cuda")
+        if with_bias
+        else None
+    )
+    bias1 = (
+        torch.randn((n,), generator=generator, device="cuda")
+        if with_bias
+        else None
+    )
+    pre_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    shared = {
+        "post_scale0": scale0,
+        "post_scale1": scale1,
+        "bias0": bias0,
+        "bias1": bias1,
+        "pre_scale": pre_scale,
+        "scale_mode": scale_mode,
+        "pair_tiles": True,
+        "bounded_rounding": True,
+    }
+    expected = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+        input0, input1, **shared
+    )
+    actual = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+        input0, input1, **shared, packed_gate_up=True
+    )
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+            input0, input1, **shared, packed_gate_up=True
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
+
+
+def test_qvq_cuda_swiglu_precondition_graph_stream_overflow_and_guards():
+    n = 32
+    gate = torch.zeros((1, n), device="cuda", dtype=torch.float16)
+    up = torch.ones((1, n), device="cuda", dtype=torch.float16)
+    gate[0, :2] = 40000
+    up[0, :2] = 2
+    pre_scale = torch.full((n,), 0.25, device="cuda", dtype=torch.float16)
+    reference = qvq_cuda_hadamard(
+        gate * up,
+        pre_scale=pre_scale,
+        scale_mode=2,
+    )
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        actual = qvq_cuda_swiglu_precondition(gate, up, pre_scale)
+    stream.synchronize()
+    assert torch.equal(actual.view(torch.int16), reference.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_swiglu_precondition(gate, up, pre_scale)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), reference.view(torch.int16))
+
+    empty = qvq_cuda_swiglu_precondition(gate[:0], up[:0], pre_scale)
+    assert empty.shape == (0, n)
+    with pytest.raises(TypeError, match="float16"):
+        qvq_cuda_swiglu_precondition(gate.float(), up.float(), pre_scale.float())
+    with pytest.raises(ValueError, match="identical shapes"):
+        qvq_cuda_swiglu_precondition(gate, up[:, :-1], pre_scale)
 
 
 @pytest.mark.parametrize("bits", QVQ_CUDA_BITS)
@@ -3130,6 +4090,76 @@ def test_qvq_stable_fp16_hadamard_avoids_delayed_normalization_overflow(width):
     assert not torch.isfinite(delayed).all()
     assert torch.isfinite(stable).all()
     torch.testing.assert_close(stable.float(), reference, rtol=3e-3, atol=2e-2)
+
+
+def test_qvq_stable_composite_hadamard_is_cuda_graph_replay_safe():
+    """Qwen's K=20 base and normalization scalar must stay on device."""
+
+    static = torch.randn((2, 5120), device="cuda", dtype=torch.float16) * 0.02
+    eager = matmul_hadU_stable(static).clone()
+    torch.cuda.synchronize()
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = matmul_hadU_stable(static)
+    graph.replay()
+    torch.cuda.synchronize()
+
+    assert torch.equal(captured, eager)
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16, torch.float32))
+@pytest.mark.parametrize("width", (5120, 6144, 10240, 12288))
+@pytest.mark.parametrize("rows", (1, 16))
+def test_qvq_composite_cuda_stage_is_bit_exact_to_torch_butterfly(
+    dtype, width, rows
+):
+    """Qwen K=12/K=20 transforms may collapse only their power-of-two stage."""
+
+    generator = torch.Generator(device="cuda").manual_seed(
+        20260904 + width + rows
+    )
+    source = (
+        torch.randn((rows, width), generator=generator, device="cuda") * 0.02
+    ).to(dtype)
+
+    def torch_reference(stable: bool):
+        hadK, K = get_hadK(width)
+        hadK = hadK.to(source)
+        values = (
+            source / source.new_full((), float(width)).sqrt()
+            if stable
+            else source
+        ).clone().view(-1, width, 1)
+        scratch = values.clone()
+        while values.shape[1] > K:
+            values = values.view(
+                values.shape[0], values.shape[1] // 2, 2, values.shape[2]
+            )
+            scratch = scratch.view(values.shape)
+            scratch[:, :, 0, :] = values[:, :, 0, :] + values[:, :, 1, :]
+            scratch[:, :, 1, :] = values[:, :, 0, :] - values[:, :, 1, :]
+            scratch = scratch.view(values.shape[0], values.shape[1], -1)
+            values, scratch = scratch, values
+        values = hadK.view(1, K, K) @ values
+        result = values.view(source.shape)
+        return result if stable else result / torch.tensor(width).sqrt()
+
+    expected_end = torch_reference(False)
+    expected_stable = torch_reference(True)
+    actual_end = matmul_hadU(source)
+    actual_stable = matmul_hadU_stable(source)
+    assert torch.equal(actual_end, expected_end)
+    assert torch.equal(actual_stable, expected_stable)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_end = matmul_hadU(source)
+        captured_stable = matmul_hadU_stable(source)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured_end, expected_end)
+    assert torch.equal(captured_stable, expected_stable)
 
 
 

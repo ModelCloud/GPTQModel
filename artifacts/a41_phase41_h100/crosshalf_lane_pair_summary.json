@@ -1,0 +1,22 @@
+{
+  "baseline_commit": "9cc1e48f",
+  "device": {
+    "compute_capability": "9.0",
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "geomean_speedup_by_rate": {
+    "2.0": 0.9956155517,
+    "2.5": 0.9982153765,
+    "3.0": 0.9988488886,
+    "3.5": 0.9956498422
+  },
+  "promoted": false,
+  "timing": {
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 200,
+    "warmup": 30
+  }
+}

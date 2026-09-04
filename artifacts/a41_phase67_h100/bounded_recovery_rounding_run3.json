@@ -1,0 +1,175 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "e36cd07f838c226bddaefa8e2f5986a9c6f8e03e",
+  "rows": [
+    {
+      "better_than_phase64": true,
+      "bit_exact": true,
+      "candidate": {
+        "max_ms": 0.007810559868812561,
+        "mean_ms": 0.007597631961107254,
+        "median_ms": 0.007596799731254577,
+        "min_ms": 0.0075833600759506225,
+        "p95_ms": 0.007601919770240784
+      },
+      "candidate_local_bytes": 0,
+      "candidate_registers_paired": 45,
+      "candidate_registers_unpaired": 44,
+      "candidate_stack_bytes": 0,
+      "control": {
+        "max_ms": 0.007880319952964782,
+        "mean_ms": 0.007764145096143086,
+        "median_ms": 0.007764480113983154,
+        "min_ms": 0.007754240036010742,
+        "p95_ms": 0.007768959999084473
+      },
+      "fast_path_abs_sum_limit": 64000.0,
+      "m": 1,
+      "matrix_shape": [
+        1,
+        2048,
+        8192
+      ],
+      "pair_tiles": false,
+      "speedup_vs_phase64": 1.022072502719627
+    },
+    {
+      "better_than_phase64": true,
+      "bit_exact": true,
+      "candidate": {
+        "max_ms": 0.007856640219688415,
+        "mean_ms": 0.007795103977123897,
+        "median_ms": 0.007794560194015503,
+        "min_ms": 0.007784960269927979,
+        "p95_ms": 0.007799040079116821
+      },
+      "candidate_local_bytes": 0,
+      "candidate_registers_paired": 45,
+      "candidate_registers_unpaired": 44,
+      "candidate_stack_bytes": 0,
+      "control": {
+        "max_ms": 0.007954559922218322,
+        "mean_ms": 0.007897838920354843,
+        "median_ms": 0.007898240089416505,
+        "min_ms": 0.007859839797019959,
+        "p95_ms": 0.00791808009147644
+      },
+      "fast_path_abs_sum_limit": 64000.0,
+      "m": 2,
+      "matrix_shape": [
+        2,
+        2048,
+        8192
+      ],
+      "pair_tiles": false,
+      "speedup_vs_phase64": 1.0133015709443882
+    },
+    {
+      "better_than_phase64": true,
+      "bit_exact": true,
+      "candidate": {
+        "max_ms": 0.008050559759140015,
+        "mean_ms": 0.007994252814849218,
+        "median_ms": 0.007994239926338196,
+        "min_ms": 0.007985280156135558,
+        "p95_ms": 0.007997440099716186
+      },
+      "candidate_local_bytes": 0,
+      "candidate_registers_paired": 45,
+      "candidate_registers_unpaired": 44,
+      "candidate_stack_bytes": 0,
+      "control": {
+        "max_ms": 0.008078719973564148,
+        "mean_ms": 0.008005749318997066,
+        "median_ms": 0.008005759716033935,
+        "min_ms": 0.007995520234107972,
+        "p95_ms": 0.008008959889411926
+      },
+      "fast_path_abs_sum_limit": 64000.0,
+      "m": 4,
+      "matrix_shape": [
+        4,
+        2048,
+        8192
+      ],
+      "pair_tiles": false,
+      "speedup_vs_phase64": 1.0014410112533383
+    },
+    {
+      "better_than_phase64": true,
+      "bit_exact": true,
+      "candidate": {
+        "max_ms": 0.008712959885597229,
+        "mean_ms": 0.008657629849513373,
+        "median_ms": 0.008655999898910522,
+        "min_ms": 0.008637440204620362,
+        "p95_ms": 0.008672639727592468
+      },
+      "candidate_local_bytes": 0,
+      "candidate_registers_paired": 45,
+      "candidate_registers_unpaired": 44,
+      "candidate_stack_bytes": 0,
+      "control": {
+        "max_ms": 0.00890496015548706,
+        "mean_ms": 0.008860465097427368,
+        "median_ms": 0.008860160112380982,
+        "min_ms": 0.008851839900016785,
+        "p95_ms": 0.0088646399974823
+      },
+      "fast_path_abs_sum_limit": 64000.0,
+      "m": 8,
+      "matrix_shape": [
+        8,
+        2048,
+        8192
+      ],
+      "pair_tiles": false,
+      "speedup_vs_phase64": 1.0235859768778597
+    },
+    {
+      "better_than_phase64": true,
+      "bit_exact": true,
+      "candidate": {
+        "max_ms": 0.009849600195884704,
+        "mean_ms": 0.009810350934664409,
+        "median_ms": 0.009811199903488159,
+        "min_ms": 0.009767680168151856,
+        "p95_ms": 0.009833599925041198
+      },
+      "candidate_local_bytes": 0,
+      "candidate_registers_paired": 45,
+      "candidate_registers_unpaired": 44,
+      "candidate_stack_bytes": 0,
+      "control": {
+        "max_ms": 0.009991679787635804,
+        "mean_ms": 0.009960211207469306,
+        "median_ms": 0.009960960149765014,
+        "min_ms": 0.009927679896354675,
+        "p95_ms": 0.009975680112838746
+      },
+      "fast_path_abs_sum_limit": 64000.0,
+      "m": 16,
+      "matrix_shape": [
+        16,
+        2048,
+        8192
+      ],
+      "pair_tiles": true,
+      "speedup_vs_phase64": 1.015264213118684
+    }
+  ],
+  "source_fingerprint": "e681b31acde4035bcdc06f720de2d1e29db5d65567a9657227a54262fe9215f1",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 300,
+    "warmup": 30
+  }
+}

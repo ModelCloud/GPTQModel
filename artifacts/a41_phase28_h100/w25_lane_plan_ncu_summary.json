@@ -1,0 +1,58 @@
+{
+  "baseline_commit": "90a2d214",
+  "candidate_commit": "baf71282",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "kernel": "grouped W2.5 gate/up P32 TMA RS-WGMMA",
+  "m": 1,
+  "k": 2048,
+  "child_n": [8192, 8192],
+  "baseline": {
+    "ncu_duration_us": 29.76,
+    "executed_warp_instructions": 10721020,
+    "registers_per_thread": 55,
+    "static_shared_memory_kib": 28.288,
+    "achieved_occupancy_percent": 15.307838,
+    "eligible_warps_per_scheduler_cycle": 0.518649,
+    "long_scoreboard_per_issue_active": 1.383965,
+    "dram_throughput_percent": 14.731238
+  },
+  "candidate": {
+    "ncu_duration_us": 29.728,
+    "executed_warp_instructions": 10663544,
+    "registers_per_thread": 55,
+    "static_shared_memory_kib": 28.288,
+    "achieved_occupancy_percent": 15.191435,
+    "eligible_warps_per_scheduler_cycle": 0.514838,
+    "long_scoreboard_per_issue_active": 1.381201,
+    "dram_throughput_percent": 14.762469
+  },
+  "dynamic_opcode_counts": {
+    "baseline": {
+      "IMAD": 2731142,
+      "LDS": 2228224,
+      "PRMT": 1581056,
+      "LOP3": 1391616,
+      "SHF": 1353984,
+      "LEA": 70400,
+      "ISETP": 68096,
+      "SEL": 44032,
+      "VIADD": 180480
+    },
+    "candidate": {
+      "IMAD": 2698406,
+      "LDS": 2228224,
+      "PRMT": 1581056,
+      "LOP3": 1383424,
+      "SHF": 1362176,
+      "LEA": 54016,
+      "ISETP": 59904,
+      "SEL": 35840,
+      "VIADD": 188672
+    }
+  },
+  "profiler": "Nsight Compute 2026.2.1, 19 replay passes, source-correlated SASS"
+}

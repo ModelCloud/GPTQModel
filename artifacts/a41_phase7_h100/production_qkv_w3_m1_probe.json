@@ -1,0 +1,78 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "e018677a4e945cb6e362eb94529002874d753e2d",
+  "previous_benchmark": {
+    "git_base_commit": "566cc4271f09a2f24316dd757727f3862795bf35",
+    "git_ref": "HEAD",
+    "source_fingerprint": "9f46651bc80ee74148b7c0120d50871fbd77d43da9a3a65d0834a98a5d36ab78"
+  },
+  "rows": [
+    {
+      "aggregate_n": 3072,
+      "better_than_plain_qvq": true,
+      "better_than_previous_benchmark": true,
+      "bits": 3.0,
+      "child_n": [
+        2048,
+        512,
+        512
+      ],
+      "group": "qkv",
+      "grouped_effective_tflops": 0.3311153222628515,
+      "grouped_qvq": {
+        "max_ms": 0.03827199935913086,
+        "mean_ms": 0.0380190397799015,
+        "median_ms": 0.038001599907875064,
+        "min_ms": 0.03798399865627289,
+        "p95_ms": 0.038047999143600464
+      },
+      "k": 2048,
+      "m": 1,
+      "machete_effective_tflops": 0.3563433725874656,
+      "machete_w4": {
+        "max_ms": 0.03723680078983307,
+        "mean_ms": 0.03544336020946502,
+        "median_ms": 0.035311199724674225,
+        "min_ms": 0.03516960144042969,
+        "p95_ms": 0.03643360137939453
+      },
+      "marlin_effective_tflops": 0.2522636680157479,
+      "marlin_w4": {
+        "max_ms": 0.050102400779724124,
+        "mean_ms": 0.04988784000277519,
+        "median_ms": 0.04988000094890595,
+        "min_ms": 0.04976480007171631,
+        "p95_ms": 0.04999040067195892
+      },
+      "max_abs_vs_previous_split1": 0.001953125,
+      "plain_effective_tflops": 0.12406834390811386,
+      "plain_qvq": {
+        "max_ms": 0.10192960500717163,
+        "mean_ms": 0.10144944012165069,
+        "median_ms": 0.10141919851303101,
+        "min_ms": 0.10138399600982666,
+        "p95_ms": 0.10148160457611084
+      },
+      "previous_grouped_qvq_median_ms": 0.04387279897928238,
+      "repeatable": true,
+      "speedup_vs_machete_w4": 0.9292029759346183,
+      "speedup_vs_marlin_w4": 1.3125763407284683,
+      "speedup_vs_plain": 2.668813912016739
+    }
+  ],
+  "source_fingerprint": "af3bd82f8b1a92c2d0f6e449d35c16b07f7a7d21f277434ddb6655806a1f88eb",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 20,
+    "samples": 20,
+    "warmup": 10
+  },
+  "workload": "Llama 3.2 1B grouped QKV and gate/up full projection forwards"
+}

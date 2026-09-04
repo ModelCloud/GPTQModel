@@ -1,0 +1,27 @@
+{
+  "production_commit": "42c90b1f",
+  "candidate": "two fixed W2 child launches",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "production": {
+    "launches": 1,
+    "grid": [128, 2, 1],
+    "static_sass_instructions_per_kernel": 1736,
+    "stack_bytes": 8,
+    "registers_per_thread": 48,
+    "shared_bytes": 27264
+  },
+  "candidate": {
+    "launches": 2,
+    "grid_per_launch": [128, 1, 1],
+    "static_sass_instructions_per_kernel": 1728,
+    "stack_bytes": 0,
+    "registers_per_thread": 48,
+    "shared_bytes": 27264
+  },
+  "geomean_speedup": 0.7322315365517051,
+  "decision": "rejected; source fully removed"
+}

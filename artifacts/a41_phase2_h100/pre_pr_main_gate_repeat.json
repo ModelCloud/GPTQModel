@@ -1,0 +1,209 @@
+{
+  "commit": "c04690043422495c20b9d59959663f3298a88a74",
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "dtype": "float16 input/levels, float32 accumulation/output",
+  "label": "pre_pr_main_gate_repeat",
+  "mode": "plain",
+  "repo_root": "/tmp/qvq-phase2-main-baseline",
+  "rows": [
+    {
+      "bits": 2.0,
+      "checksum": 903.07666015625,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "m": 2,
+      "split_counts": [
+        32,
+        32
+      ],
+      "timing": {
+        "max_ms": 0.030291199684143066,
+        "mean_ms": 0.03008986665805181,
+        "median_ms": 0.030087467034657797,
+        "min_ms": 0.030061866839726767,
+        "p95_ms": 0.03010666569073995
+      },
+      "total_n": 16384
+    },
+    {
+      "bits": 2.0,
+      "checksum": 92.28515625,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "m": 4,
+      "split_counts": [
+        40,
+        40
+      ],
+      "timing": {
+        "max_ms": 0.03610560099283854,
+        "mean_ms": 0.03592407464981079,
+        "median_ms": 0.03592373331387838,
+        "min_ms": 0.03579733371734619,
+        "p95_ms": 0.03597653309504191
+      },
+      "total_n": 16384
+    },
+    {
+      "bits": 2.5,
+      "checksum": 532.7552719116211,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "m": 2,
+      "split_counts": [
+        32,
+        32
+      ],
+      "timing": {
+        "max_ms": 0.035428265730539955,
+        "mean_ms": 0.035264789104461666,
+        "median_ms": 0.03526080052057902,
+        "min_ms": 0.035240534941355386,
+        "p95_ms": 0.03528639872868856
+      },
+      "total_n": 16384
+    },
+    {
+      "bits": 2.5,
+      "checksum": -1005.6017303466797,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "m": 4,
+      "split_counts": [
+        40,
+        40
+      ],
+      "timing": {
+        "max_ms": 0.040904533863067624,
+        "mean_ms": 0.04072197329998017,
+        "median_ms": 0.04071946740150452,
+        "min_ms": 0.040649600823720294,
+        "p95_ms": 0.04077013333638509
+      },
+      "total_n": 16384
+    },
+    {
+      "bits": 3.0,
+      "checksum": 541.6344604492188,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "m": 2,
+      "split_counts": [
+        32,
+        32
+      ],
+      "timing": {
+        "max_ms": 0.03493013381958008,
+        "mean_ms": 0.034697941382726034,
+        "median_ms": 0.03469333251317342,
+        "min_ms": 0.034663466612497966,
+        "p95_ms": 0.03472746610641479
+      },
+      "total_n": 16384
+    },
+    {
+      "bits": 3.0,
+      "checksum": -1099.35498046875,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "m": 4,
+      "split_counts": [
+        40,
+        40
+      ],
+      "timing": {
+        "max_ms": 0.04267946481704712,
+        "mean_ms": 0.04251067737738292,
+        "median_ms": 0.04250506560007731,
+        "min_ms": 0.042414931456247966,
+        "p95_ms": 0.042565333843231204
+      },
+      "total_n": 16384
+    },
+    {
+      "bits": 3.5,
+      "checksum": 141.72079467773438,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "m": 2,
+      "split_counts": [
+        32,
+        32
+      ],
+      "timing": {
+        "max_ms": 0.036022400856018065,
+        "mean_ms": 0.03583225615819295,
+        "median_ms": 0.03583093285560608,
+        "min_ms": 0.03579093217849731,
+        "p95_ms": 0.03585600058237712
+      },
+      "total_n": 16384
+    },
+    {
+      "bits": 3.5,
+      "checksum": -1801.2919921875,
+      "child_ns": [
+        8192,
+        8192
+      ],
+      "group": "gate_up",
+      "k": 2048,
+      "m": 4,
+      "split_counts": [
+        40,
+        40
+      ],
+      "timing": {
+        "max_ms": 0.04126079877217611,
+        "mean_ms": 0.04110104544957479,
+        "median_ms": 0.0410863995552063,
+        "min_ms": 0.04103680054346721,
+        "p95_ms": 0.0412224014600118
+      },
+      "total_n": 16384
+    }
+  ],
+  "source_fingerprint": "f509419647b9d613f621c9c2e85aed6766c80c03f047498aa6c47b1fc57029aa",
+  "timing": {
+    "method": "CUDA Graph replay bracketed by CUDA events",
+    "replays_per_sample": 30,
+    "samples": 100,
+    "warmup": 20
+  },
+  "torch": "2.15.0.dev20260828+cu130",
+  "torch_cuda": "13.0"
+}

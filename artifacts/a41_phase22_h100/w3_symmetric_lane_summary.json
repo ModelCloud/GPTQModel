@@ -1,0 +1,47 @@
+{
+  "decision": "rejected",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "five_instruction_ptx_candidate": {
+    "full_mlp_artifact": "rejected_w3_symmetric_lane_full_mlp.json",
+    "m1_grouped_gate_up_us": 47.326,
+    "registers_per_thread": 65,
+    "static_sass_instructions": 2552
+  },
+  "production": {
+    "m1_grouped_gate_up_us": 31.693,
+    "registers_per_thread": 58,
+    "static_sass_instructions": 1947
+  },
+  "seven_instruction_ptx_candidate": {
+    "m1_grouped_gate_up_us": 44.622,
+    "registers_per_thread": 69,
+    "static_sass_instructions": 2552
+  },
+  "source_expression_candidate": {
+    "m1_grouped_gate_up_us": 52.920,
+    "m1_ncu": {
+      "active_warps_per_scheduler": 2.219637,
+      "duration_us": 40.640,
+      "eligible_warps_per_scheduler": 0.735505,
+      "executed_warp_instructions": 18621514,
+      "shared_load_bank_conflicts": 0,
+      "wavefronts": 2581327
+    },
+    "registers_per_thread": 75,
+    "static_sass_instructions": 2880
+  },
+  "storage": {
+    "checkpoint_bytes_added": 0,
+    "persistent_vram_bytes_added": 0,
+    "w3_shared_level_bytes": 16384
+  },
+  "timing_contract": {
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "ncu_version": "2026.2.1",
+    "strict_idle_memory_mib": 0
+  }
+}

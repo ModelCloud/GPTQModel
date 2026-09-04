@@ -1,0 +1,191 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "c55cc361da9f89b085c855c186bda701fe932359",
+  "rows": [
+    {
+      "better_than_shared_low": true,
+      "bit_exact": true,
+      "gpu_launches": {
+        "shared_low": 2,
+        "warp_low": 2
+      },
+      "low_stage_geometry": {
+        "blocks": 64,
+        "shared_butterfly_stages": {
+          "shared_low": 8,
+          "warp_low": 3
+        },
+        "threads_per_block": 256
+      },
+      "m": 1,
+      "n": 8192,
+      "shared_low_recovery": {
+        "max_ms": 0.0062681597471237185,
+        "mean_ms": 0.006167690664529801,
+        "median_ms": 0.006166399717330933,
+        "min_ms": 0.006128640174865723,
+        "p95_ms": 0.006181759834289551
+      },
+      "speedup_vs_shared_low": 1.067235239728398,
+      "warp_low_recovery": {
+        "max_ms": 0.00590719997882843,
+        "mean_ms": 0.005779031469424566,
+        "median_ms": 0.005777919888496399,
+        "min_ms": 0.005763840079307556,
+        "p95_ms": 0.005790079832077026
+      },
+      "workspace_bytes": 65536
+    },
+    {
+      "better_than_shared_low": true,
+      "bit_exact": true,
+      "gpu_launches": {
+        "shared_low": 2,
+        "warp_low": 2
+      },
+      "low_stage_geometry": {
+        "blocks": 128,
+        "shared_butterfly_stages": {
+          "shared_low": 8,
+          "warp_low": 3
+        },
+        "threads_per_block": 256
+      },
+      "m": 2,
+      "n": 8192,
+      "shared_low_recovery": {
+        "max_ms": 0.006305279731750488,
+        "mean_ms": 0.0062205269614855445,
+        "median_ms": 0.006220160126686096,
+        "min_ms": 0.0062137597799301145,
+        "p95_ms": 0.006224640011787415
+      },
+      "speedup_vs_shared_low": 1.0281392828293685,
+      "warp_low_recovery": {
+        "max_ms": 0.006068480014801025,
+        "mean_ms": 0.006049166897932688,
+        "median_ms": 0.006049919724464416,
+        "min_ms": 0.005968639850616455,
+        "p95_ms": 0.006056960225105285
+      },
+      "workspace_bytes": 131072
+    },
+    {
+      "better_than_shared_low": true,
+      "bit_exact": true,
+      "gpu_launches": {
+        "shared_low": 2,
+        "warp_low": 2
+      },
+      "low_stage_geometry": {
+        "blocks": 256,
+        "shared_butterfly_stages": {
+          "shared_low": 8,
+          "warp_low": 3
+        },
+        "threads_per_block": 256
+      },
+      "m": 4,
+      "n": 8192,
+      "shared_low_recovery": {
+        "max_ms": 0.006383360028266906,
+        "mean_ms": 0.006320526925722758,
+        "median_ms": 0.006320639848709107,
+        "min_ms": 0.006274560093879699,
+        "p95_ms": 0.006330239772796631
+      },
+      "speedup_vs_shared_low": 1.0249065971196656,
+      "warp_low_recovery": {
+        "max_ms": 0.006216959953308105,
+        "mean_ms": 0.00616725545724233,
+        "median_ms": 0.00616703987121582,
+        "min_ms": 0.006137599945068359,
+        "p95_ms": 0.006172159910202027
+      },
+      "workspace_bytes": 262144
+    },
+    {
+      "better_than_shared_low": true,
+      "bit_exact": true,
+      "gpu_launches": {
+        "shared_low": 2,
+        "warp_low": 2
+      },
+      "low_stage_geometry": {
+        "blocks": 512,
+        "shared_butterfly_stages": {
+          "shared_low": 8,
+          "warp_low": 3
+        },
+        "threads_per_block": 256
+      },
+      "m": 8,
+      "n": 8192,
+      "shared_low_recovery": {
+        "max_ms": 0.006986879706382751,
+        "mean_ms": 0.006859528511762619,
+        "median_ms": 0.006858879923820496,
+        "min_ms": 0.0068524801731109615,
+        "p95_ms": 0.006863359808921814
+      },
+      "speedup_vs_shared_low": 1.07137862095542,
+      "warp_low_recovery": {
+        "max_ms": 0.006513280272483826,
+        "mean_ms": 0.0064023743887742365,
+        "median_ms": 0.006401919722557068,
+        "min_ms": 0.006381440162658692,
+        "p95_ms": 0.006414719820022583
+      },
+      "workspace_bytes": 524288
+    },
+    {
+      "better_than_shared_low": true,
+      "bit_exact": true,
+      "gpu_launches": {
+        "shared_low": 2,
+        "warp_low": 2
+      },
+      "low_stage_geometry": {
+        "blocks": 1024,
+        "shared_butterfly_stages": {
+          "shared_low": 8,
+          "warp_low": 3
+        },
+        "threads_per_block": 256
+      },
+      "m": 16,
+      "n": 8192,
+      "shared_low_recovery": {
+        "max_ms": 0.007857279777526855,
+        "mean_ms": 0.007796087473630905,
+        "median_ms": 0.007794560194015503,
+        "min_ms": 0.007774080038070679,
+        "p95_ms": 0.007812479734420777
+      },
+      "speedup_vs_shared_low": 1.0965157784849133,
+      "warp_low_recovery": {
+        "max_ms": 0.007206400036811829,
+        "mean_ms": 0.007110342415173848,
+        "median_ms": 0.007108479738235474,
+        "min_ms": 0.007093759775161743,
+        "p95_ms": 0.0071263998746871945
+      },
+      "workspace_bytes": 1048576
+    }
+  ],
+  "source_fingerprint": "2cedf0677e14f315bb59281eab26b844f43e5f43bd30431f691279008bb896ed",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 300,
+    "warmup": 30
+  },
+  "workload": "exact paired FP32-to-FP16 N=8192 QVQ output recovery"
+}

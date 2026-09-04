@@ -1,0 +1,141 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "d86d5b03760bffced4b462cf4696bca8dac668b4",
+  "rows": [
+    {
+      "better_than_last_benchmark": false,
+      "bit_exact": true,
+      "k": 2048,
+      "m": 1,
+      "persistent_bytes_added": 0,
+      "phase26_multiblock": {
+        "max_ms": 0.0038124799728393556,
+        "mean_ms": 0.003646614374220371,
+        "median_ms": 0.0036454400420188903,
+        "min_ms": 0.003638400137424469,
+        "p95_ms": 0.003649280071258545
+      },
+      "phase27_cluster": {
+        "max_ms": 0.0038681599497795106,
+        "mean_ms": 0.0037363520219922063,
+        "median_ms": 0.003733760118484497,
+        "min_ms": 0.0037273600697517394,
+        "p95_ms": 0.0037427198886871337
+      },
+      "regression": true,
+      "speedup_vs_phase26": 0.976345540778486,
+      "transient_bytes_added": 0
+    },
+    {
+      "better_than_last_benchmark": true,
+      "bit_exact": true,
+      "k": 2048,
+      "m": 2,
+      "persistent_bytes_added": 0,
+      "phase26_multiblock": {
+        "max_ms": 0.00377920001745224,
+        "mean_ms": 0.0037467039942741392,
+        "median_ms": 0.0037465599179267884,
+        "min_ms": 0.0037382400035858156,
+        "p95_ms": 0.0037497600913047793
+      },
+      "phase27_cluster": {
+        "max_ms": 0.003840639889240265,
+        "mean_ms": 0.003734374438226223,
+        "median_ms": 0.0037331199645996094,
+        "min_ms": 0.003724159896373749,
+        "p95_ms": 0.0037376001477241517
+      },
+      "regression": false,
+      "speedup_vs_phase26": 1.0036001932578185,
+      "transient_bytes_added": 0
+    },
+    {
+      "better_than_last_benchmark": false,
+      "bit_exact": true,
+      "k": 2048,
+      "m": 4,
+      "persistent_bytes_added": 0,
+      "phase26_multiblock": {
+        "max_ms": 0.0039392000436782836,
+        "mean_ms": 0.0037347840443253517,
+        "median_ms": 0.003733760118484497,
+        "min_ms": 0.003724159896373749,
+        "p95_ms": 0.0037376001477241517
+      },
+      "phase27_cluster": {
+        "max_ms": 0.0038598400354385378,
+        "mean_ms": 0.0038535872012376788,
+        "median_ms": 0.0038540801405906678,
+        "min_ms": 0.003790720105171204,
+        "p95_ms": 0.0038579198718070983
+      },
+      "regression": true,
+      "speedup_vs_phase26": 0.9687811312383009,
+      "transient_bytes_added": 0
+    },
+    {
+      "better_than_last_benchmark": true,
+      "bit_exact": true,
+      "k": 2048,
+      "m": 8,
+      "persistent_bytes_added": 0,
+      "phase26_multiblock": {
+        "max_ms": 0.004019199907779694,
+        "mean_ms": 0.003966035194694996,
+        "median_ms": 0.0039660799503326415,
+        "min_ms": 0.003927040100097656,
+        "p95_ms": 0.003985919952392578
+      },
+      "phase27_cluster": {
+        "max_ms": 0.0037779200077056887,
+        "mean_ms": 0.0036725280031561854,
+        "median_ms": 0.0036723199486732483,
+        "min_ms": 0.0036550399661064146,
+        "p95_ms": 0.003680639863014221
+      },
+      "regression": false,
+      "speedup_vs_phase26": 1.0799930304998409,
+      "transient_bytes_added": 0
+    },
+    {
+      "better_than_last_benchmark": true,
+      "bit_exact": true,
+      "k": 2048,
+      "m": 16,
+      "persistent_bytes_added": 0,
+      "phase26_multiblock": {
+        "max_ms": 0.0039814400672912595,
+        "mean_ms": 0.0038903328016400337,
+        "median_ms": 0.0038886401057243347,
+        "min_ms": 0.003877759873867035,
+        "p95_ms": 0.0039020800590515137
+      },
+      "phase27_cluster": {
+        "max_ms": 0.003965440094470978,
+        "mean_ms": 0.0038879616215825082,
+        "median_ms": 0.0038870400190353393,
+        "min_ms": 0.0038764798641204835,
+        "p95_ms": 0.0038944000005722047
+      },
+      "regression": false,
+      "speedup_vs_phase26": 1.00041164656941,
+      "transient_bytes_added": 0
+    }
+  ],
+  "source_fingerprint": "661d22552de5cb8055ae75954b398fa45d52567cb1d651f7831e798f43be7cec",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 200,
+    "warmup": 30
+  },
+  "workload": "exact Mx2048 SU/Hadamard transform into padded M16 storage"
+}

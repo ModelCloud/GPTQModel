@@ -1,0 +1,24 @@
+{
+  "candidate_commit": "92ad391a",
+  "device": {
+    "compute_capability": "9.0",
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "down_split16_geomean_speedup": 1.0023533298,
+  "qkv_split888_geomean_speedup": 1.0121284774,
+  "rows": [
+    {"m": 1, "qkv_depth2_us": 13.231, "qkv_depth3_us": 13.116, "down_depth2_us": 14.955, "down_depth3_us": 14.919},
+    {"m": 2, "qkv_depth2_us": 13.261, "qkv_depth3_us": 13.060, "down_depth2_us": 15.040, "down_depth3_us": 14.997},
+    {"m": 4, "qkv_depth2_us": 13.179, "qkv_depth3_us": 12.980, "down_depth2_us": 14.991, "down_depth3_us": 14.996},
+    {"m": 8, "qkv_depth2_us": 13.126, "qkv_depth3_us": 12.973, "down_depth2_us": 14.952, "down_depth3_us": 14.888},
+    {"m": 16, "qkv_depth2_us": 13.276, "qkv_depth3_us": 13.152, "down_depth2_us": 14.950, "down_depth3_us": 14.913}
+  ],
+  "timing": {
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 200,
+    "warmup": 30
+  }
+}

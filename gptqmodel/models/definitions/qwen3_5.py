@@ -29,6 +29,32 @@ class Qwen3_5QModel(LlamaQModel):
     # can also ship mtp.* tensors in auxiliary safetensors files.
     out_of_model_tensors = {"prefixes": ["mtp"]}
 
+    # The full-attention projections and the two large linear-attention input
+    # projections consume the same activation.  Declare both groups here so
+    # QVQ can share one input rotation and retain child-local split schedules;
+    # the generic grouped runtime remains architecture- and role-agnostic.
+    qvq_grouped_p32_candidates = {
+        "qkv": (
+            ("q_proj", "k_proj", "v_proj"),
+            ("in_proj_qkv", "in_proj_z"),
+        ),
+        "gate_up": (("gate_proj", "up_proj"),),
+    }
+
+    # Canonical A41 omits V's module-local output transform.  Qwen3.8-27B's
+    # 17,408-wide intermediate dimension also has no supported exact
+    # composite Hadamard base (17 * 1024).  Keep gate/up in their native output
+    # basis and quantize down in that same native input basis.  This is not a
+    # transform moved through SwiGLU: each P32 linear independently encodes its
+    # dense weight under the declared axes, so the nonlinear boundary and its
+    # FP16 rounding semantics remain unchanged.
+    qvq_transform_axis_overrides = {
+        "self_attn.v_proj": (True, False),
+        "mlp.gate_proj": (True, False),
+        "mlp.up_proj": (True, False),
+        "mlp.down_proj": (False, True),
+    }
+
     module_tree = [
         "model",
         "language_model",

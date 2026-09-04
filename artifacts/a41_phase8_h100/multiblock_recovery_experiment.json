@@ -1,0 +1,131 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "2bef3120306f6d3c2688e939119febe44eb15009",
+  "rows": [
+    {
+      "better_than_single_cta": true,
+      "bit_exact": true,
+      "m": 1,
+      "multiblock": {
+        "max_ms": 0.006111360192298889,
+        "mean_ms": 0.006039660799503327,
+        "median_ms": 0.006039040088653564,
+        "min_ms": 0.006024320125579834,
+        "p95_ms": 0.006046720147132874
+      },
+      "n": 8192,
+      "single_cta": {
+        "max_ms": 0.028064000606536865,
+        "mean_ms": 0.019581574368476868,
+        "median_ms": 0.019494720101356507,
+        "min_ms": 0.01948032021522522,
+        "p95_ms": 0.01951040029525757
+      },
+      "speedup": 3.2281156963975306,
+      "workspace_bytes": 65536
+    },
+    {
+      "better_than_single_cta": true,
+      "bit_exact": true,
+      "m": 2,
+      "multiblock": {
+        "max_ms": 0.006321920156478882,
+        "mean_ms": 0.006213529598712921,
+        "median_ms": 0.0062118399143219,
+        "min_ms": 0.006206079721450806,
+        "p95_ms": 0.006217600107192993
+      },
+      "n": 8192,
+      "single_cta": {
+        "max_ms": 0.01960576057434082,
+        "mean_ms": 0.019538316762447355,
+        "median_ms": 0.019538559913635255,
+        "min_ms": 0.019514880180358886,
+        "p95_ms": 0.019553920030593874
+      },
+      "speedup": 3.145374024946703,
+      "workspace_bytes": 131072
+    },
+    {
+      "better_than_single_cta": true,
+      "bit_exact": true,
+      "m": 4,
+      "multiblock": {
+        "max_ms": 0.006385279893875122,
+        "mean_ms": 0.006280979222059249,
+        "median_ms": 0.006279039978981018,
+        "min_ms": 0.006271359920501709,
+        "p95_ms": 0.00628928005695343
+      },
+      "n": 8192,
+      "single_cta": {
+        "max_ms": 0.019566080570220946,
+        "mean_ms": 0.01946788479089737,
+        "median_ms": 0.01946656048297882,
+        "min_ms": 0.01943168044090271,
+        "p95_ms": 0.019493759870529176
+      },
+      "speedup": 3.1002447106791498,
+      "workspace_bytes": 262144
+    },
+    {
+      "better_than_single_cta": true,
+      "bit_exact": true,
+      "m": 8,
+      "multiblock": {
+        "max_ms": 0.006922879815101623,
+        "mean_ms": 0.006813484793901443,
+        "median_ms": 0.006812800168991089,
+        "min_ms": 0.006785280108451843,
+        "p95_ms": 0.006830080151557922
+      },
+      "n": 8192,
+      "single_cta": {
+        "max_ms": 0.0196288001537323,
+        "mean_ms": 0.01955711363554001,
+        "median_ms": 0.019556480050086977,
+        "min_ms": 0.019530240297317505,
+        "p95_ms": 0.019578239917755126
+      },
+      "speedup": 2.8705494899292057,
+      "workspace_bytes": 524288
+    },
+    {
+      "better_than_single_cta": true,
+      "bit_exact": true,
+      "m": 16,
+      "multiblock": {
+        "max_ms": 0.007839999794960022,
+        "mean_ms": 0.00774334716796875,
+        "median_ms": 0.007742720246315002,
+        "min_ms": 0.007726719975471497,
+        "p95_ms": 0.007757440209388733
+      },
+      "n": 8192,
+      "single_cta": {
+        "max_ms": 0.0197708797454834,
+        "mean_ms": 0.019679097616672515,
+        "median_ms": 0.019677760004997255,
+        "min_ms": 0.01966976046562195,
+        "p95_ms": 0.019685120582580568
+      },
+      "speedup": 2.5414530525447443,
+      "workspace_bytes": 1048576
+    }
+  ],
+  "source_fingerprint": "b9ce926e69436d3e4e7bd79ebe32c0a20f59a644b54ca5fe4582272473796170",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 100,
+    "warmup": 30
+  },
+  "workload": "exact paired FP32-to-FP16 N=8192 QVQ output recovery"
+}

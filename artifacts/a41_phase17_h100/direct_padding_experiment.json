@@ -1,0 +1,131 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "71a3f94705a9df9b8ff90fd8df15b3013dfaf438",
+  "rows": [
+    {
+      "better_than_separate_padding": true,
+      "bit_exact": true,
+      "direct_padding": {
+        "max_ms": 0.004488320052623749,
+        "mean_ms": 0.0042103903949260715,
+        "median_ms": 0.004210560023784638,
+        "min_ms": 0.004152320027351379,
+        "p95_ms": 0.0042271998524665835
+      },
+      "eliminated_transient_bytes": 16384,
+      "m": 1,
+      "n": 8192,
+      "separate_padding": {
+        "max_ms": 0.007200639843940735,
+        "mean_ms": 0.007100499248504639,
+        "median_ms": 0.0070995199680328365,
+        "min_ms": 0.007093120217323303,
+        "p95_ms": 0.007105919718742371
+      },
+      "speedup_vs_separate_padding": 1.6861224939031918
+    },
+    {
+      "better_than_separate_padding": true,
+      "bit_exact": true,
+      "direct_padding": {
+        "max_ms": 0.004368000030517578,
+        "mean_ms": 0.004303318418562413,
+        "median_ms": 0.00430400013923645,
+        "min_ms": 0.004252800047397614,
+        "p95_ms": 0.00430976003408432
+      },
+      "eliminated_transient_bytes": 32768,
+      "m": 2,
+      "n": 8192,
+      "separate_padding": {
+        "max_ms": 0.007313920259475708,
+        "mean_ms": 0.007210553556680679,
+        "median_ms": 0.007210239768028259,
+        "min_ms": 0.007205119729042054,
+        "p95_ms": 0.00721343994140625
+      },
+      "speedup_vs_separate_padding": 1.675241527596091
+    },
+    {
+      "better_than_separate_padding": true,
+      "bit_exact": true,
+      "direct_padding": {
+        "max_ms": 0.004562560021877288,
+        "mean_ms": 0.004508835206925869,
+        "median_ms": 0.004511359930038452,
+        "min_ms": 0.004414080083370209,
+        "p95_ms": 0.004515840113162995
+      },
+      "eliminated_transient_bytes": 65536,
+      "m": 4,
+      "n": 8192,
+      "separate_padding": {
+        "max_ms": 0.007454720139503479,
+        "mean_ms": 0.007404713618755341,
+        "median_ms": 0.007406719923019409,
+        "min_ms": 0.007360640168190003,
+        "p95_ms": 0.007423359751701355
+      },
+      "speedup_vs_separate_padding": 1.6417931705476398
+    },
+    {
+      "better_than_separate_padding": true,
+      "bit_exact": true,
+      "direct_padding": {
+        "max_ms": 0.00446016013622284,
+        "mean_ms": 0.004432976026833057,
+        "median_ms": 0.004435200095176697,
+        "min_ms": 0.004375680088996887,
+        "p95_ms": 0.004439679980278015
+      },
+      "eliminated_transient_bytes": 131072,
+      "m": 8,
+      "n": 8192,
+      "separate_padding": {
+        "max_ms": 0.007473919987678528,
+        "mean_ms": 0.007349219200015068,
+        "median_ms": 0.007348480224609375,
+        "min_ms": 0.007343360185623169,
+        "p95_ms": 0.007353600263595581
+      },
+      "speedup_vs_separate_padding": 1.6568542719416166
+    },
+    {
+      "better_than_separate_padding": true,
+      "bit_exact": true,
+      "direct_padding": {
+        "max_ms": 0.0047942399978637695,
+        "mean_ms": 0.0047071391850709915,
+        "median_ms": 0.004705280065536499,
+        "min_ms": 0.004699519872665405,
+        "p95_ms": 0.004724479913711548
+      },
+      "eliminated_transient_bytes": 0,
+      "m": 16,
+      "n": 8192,
+      "separate_padding": {
+        "max_ms": 0.0048518401384353635,
+        "mean_ms": 0.00479249921143055,
+        "median_ms": 0.004792959988117218,
+        "min_ms": 0.004747520089149475,
+        "p95_ms": 0.004798080027103424
+      },
+      "speedup_vs_separate_padding": 1.0186343684880574
+    }
+  ],
+  "source_fingerprint": "4d72a2dae134a8c63e86338e4e2561930ce588b589f2b80e49776fac49e13dc6",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 200,
+    "warmup": 30
+  },
+  "workload": "exact N=8192 SwiGLU/down precondition direct-padding experiment"
+}

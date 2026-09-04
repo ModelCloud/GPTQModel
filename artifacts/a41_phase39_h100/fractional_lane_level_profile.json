@@ -1,0 +1,62 @@
+{
+  "candidate_commit": "374b020b",
+  "device": {
+    "compute_capability": "9.0",
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "profiler": "Nsight Compute 2026.2.1",
+  "rows": [
+    {
+      "bits": 2.5,
+      "baseline": {
+        "duration_us": 29.920,
+        "eligible_warps_per_cycle": 0.51,
+        "executed_instructions": 10663520,
+        "long_scoreboard_per_issue_active": 1.39,
+        "registers_per_thread": 55,
+        "shared_load_bank_conflicts": 1871010,
+        "shared_load_instructions": 2228224,
+        "shared_load_wavefronts": 4175437,
+        "shared_memory_bytes_per_block": 29312
+      },
+      "lane_pair": {
+        "duration_us": 28.640,
+        "eligible_warps_per_cycle": 0.58,
+        "executed_instructions": 10800426,
+        "long_scoreboard_per_issue_active": 1.36,
+        "registers_per_thread": 53,
+        "shared_load_bank_conflicts": 1051853,
+        "shared_load_instructions": 2228224,
+        "shared_load_wavefronts": 3337238,
+        "shared_memory_bytes_per_block": 44800
+      }
+    },
+    {
+      "bits": 3.5,
+      "baseline": {
+        "duration_us": 30.144,
+        "eligible_warps_per_cycle": 0.51,
+        "executed_instructions": 10667406,
+        "long_scoreboard_per_issue_active": 1.44,
+        "registers_per_thread": 55,
+        "shared_load_bank_conflicts": 1871494,
+        "shared_load_instructions": 2228224,
+        "shared_load_wavefronts": 4164789,
+        "shared_memory_bytes_per_block": 33408
+      },
+      "lane_pair": {
+        "duration_us": 27.424,
+        "eligible_warps_per_cycle": 0.59,
+        "executed_instructions": 10800468,
+        "long_scoreboard_per_issue_active": 1.37,
+        "registers_per_thread": 56,
+        "shared_load_bank_conflicts": 1050858,
+        "shared_load_instructions": 2228224,
+        "shared_load_wavefronts": 3363274,
+        "shared_memory_bytes_per_block": 48896
+      }
+    }
+  ]
+}

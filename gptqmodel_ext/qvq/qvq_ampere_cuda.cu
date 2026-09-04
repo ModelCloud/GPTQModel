@@ -13,7 +13,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdlib>
 #include <cstdint>
+#include <vector>
 
 namespace {
 
@@ -53,6 +55,19 @@ int cached_device_capability(int device_index) {
     }
   }
   return encoded_capability - 1;
+}
+
+bool ampere_execution_capability_supported(int capability) {
+  if (capability == 80) {
+    return true;
+  }
+  // CI and development hosts may expose only an H100.  The extension embeds
+  // compute_80 PTX, which the Hopper driver can JIT without changing the
+  // Ampere instruction/reduction math.  Keep this opt-in so production Hopper
+  // routing continues to use its dedicated SM90a kernel.
+  const char* allow_sm90 = std::getenv("QVQ_AMPERE_ALLOW_SM90_VALIDATION");
+  return capability == 90 && allow_sm90 != nullptr && allow_sm90[0] == '1' &&
+      allow_sm90[1] == '\0';
 }
 
 __device__ __forceinline__ uint32_t pgc16_mix(uint32_t state) {
@@ -369,7 +384,7 @@ template <
     bool WideNTiles = false,
     bool UseWideBankIdCopy = false,
     int StageKTiles = kStageKTiles>
-__global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
+__device__ __forceinline__ void p32_window_ampere_kernel_body(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
     const half* __restrict__ levels,
@@ -380,7 +395,14 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     int size_k,
     int size_n,
     int split_count,
-    int bank_alt_id) {
+    int bank_alt_id,
+    int n_block,
+    int split,
+    int payload_n_tiles,
+    int payload_n_tile_offset,
+    int output_n_offset,
+    int output_stride,
+    int64_t partial_segment_offset) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
   constexpr int kWordsPerTile = 4 * TransitionBits;
   // The wide specialization follows Marlin's output-reuse principle: each
@@ -401,9 +423,8 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   constexpr int kStaticNTiles = StaticN > 0 ? StaticN / kTileColumns : 0;
   constexpr int kStaticKTiles = StaticK > 0 ? StaticK / kTileRows : 0;
   const int n_tiles = StaticN > 0 ? kStaticNTiles : size_n / kTileColumns;
-  const int n_tile_base = static_cast<int>(blockIdx.x) * kBlockNTiles;
+  const int n_tile_base = n_block * kBlockNTiles;
   const bool active_tile = StaticN > 0 || n_tile_base + warp < n_tiles;
-  const int split = static_cast<int>(blockIdx.z);
   const int k_tiles = StaticK > 0 ? kStaticKTiles : size_k / kTileRows;
   const int input_stride = StaticK > 0 ? StaticK : size_k;
   const int k_tile_begin = (k_tiles * split) / split_count;
@@ -454,7 +475,8 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       const int k_tile = k_tile_base + stage_k_tile;
       if constexpr (StaticN > 0) {
         if (k_tile < k_tiles) {
-          const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
+          const int64_t global_tile = static_cast<int64_t>(k_tile) * payload_n_tiles +
+              payload_n_tile_offset + n_tile;
           const auto* source_vectors = reinterpret_cast<const uint4*>(
               trellis + global_tile * kWordsPerTile);
           copy_async_cg_16(destination_vectors + index, source_vectors + vector);
@@ -462,7 +484,8 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
           destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
         }
       } else if (n_tile < n_tiles && k_tile < k_tiles) {
-        const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
+        const int64_t global_tile = static_cast<int64_t>(k_tile) * payload_n_tiles +
+            payload_n_tile_offset + n_tile;
         const auto* source_vectors = reinterpret_cast<const uint4*>(
             trellis + global_tile * kWordsPerTile);
         copy_async_cg_16(destination_vectors + index, source_vectors + vector);
@@ -512,7 +535,8 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
           copy_async_ca_4(
               destination_ids,
               reinterpret_cast<const uint32_t*>(
-                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + n_tile_base));
+                  bank_ids + static_cast<int64_t>(k_tile) * payload_n_tiles +
+                      payload_n_tile_offset + n_tile_base));
         } else {
           *destination_ids = 0u;
         }
@@ -526,7 +550,8 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
           copy_async_ca_4(
               destination_ids,
               reinterpret_cast<const uint32_t*>(
-                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + n_tile_base));
+                  bank_ids + static_cast<int64_t>(k_tile) * payload_n_tiles +
+                      payload_n_tile_offset + n_tile_base));
         } else {
           *destination_ids = 0u;
         }
@@ -537,7 +562,8 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       const int n_tile = n_tile_base + tile;
       const int k_tile = k_tile_base + stage_k_tile;
       packed_bank_ids[destination][stage_k_tile][tile] = n_tile < n_tiles && k_tile < k_tiles
-          ? bank_ids[static_cast<int64_t>(k_tile) * n_tiles + n_tile]
+          ? bank_ids[static_cast<int64_t>(k_tile) * payload_n_tiles +
+              payload_n_tile_offset + n_tile]
           : 0;
     }
     __pipeline_commit();
@@ -694,8 +720,10 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   }
 
   float* target = split_count == 1
-      ? output
-      : partial_output + static_cast<int64_t>(split) * size_m * size_n;
+      ? output + output_n_offset
+      : partial_output + partial_segment_offset +
+          static_cast<int64_t>(split) * size_m * size_n;
+  const int target_stride = split_count == 1 ? output_stride : size_n;
   if (active_tile) {
     const int output_row_0 = lane >> 2;
     const int output_row_1 = output_row_0 + 8;
@@ -706,40 +734,40 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
           (lane & 3) * 2;
       if constexpr (FullRows) {
         store_output_pair<true>(
-            target + static_cast<int64_t>(output_row_0) * size_n + output_column,
+            target + static_cast<int64_t>(output_row_0) * target_stride + output_column,
             accumulator_0[warp_n_tile].values[0],
             accumulator_0[warp_n_tile].values[1]);
         store_output_pair<true>(
-            target + static_cast<int64_t>(output_row_1) * size_n + output_column,
+            target + static_cast<int64_t>(output_row_1) * target_stride + output_column,
             accumulator_0[warp_n_tile].values[2],
             accumulator_0[warp_n_tile].values[3]);
         store_output_pair<true>(
-            target + static_cast<int64_t>(output_row_0) * size_n + output_column + 8,
+            target + static_cast<int64_t>(output_row_0) * target_stride + output_column + 8,
             accumulator_1[warp_n_tile].values[0],
             accumulator_1[warp_n_tile].values[1]);
         store_output_pair<true>(
-            target + static_cast<int64_t>(output_row_1) * size_n + output_column + 8,
+            target + static_cast<int64_t>(output_row_1) * target_stride + output_column + 8,
             accumulator_1[warp_n_tile].values[2],
             accumulator_1[warp_n_tile].values[3]);
       } else if constexpr (ActiveRows > 0) {
         if (output_row_0 < ActiveRows) {
           store_output_pair<StaticN != 1024>(
-              target + static_cast<int64_t>(output_row_0) * size_n + output_column,
+              target + static_cast<int64_t>(output_row_0) * target_stride + output_column,
               accumulator_0[warp_n_tile].values[0],
               accumulator_0[warp_n_tile].values[1]);
           store_output_pair<StaticN != 1024>(
-              target + static_cast<int64_t>(output_row_0) * size_n + output_column + 8,
+              target + static_cast<int64_t>(output_row_0) * target_stride + output_column + 8,
               accumulator_1[warp_n_tile].values[0],
               accumulator_1[warp_n_tile].values[1]);
         }
         if constexpr (!kUpperRowsOnly) {
           if (output_row_1 < ActiveRows) {
             store_output_pair<StaticN != 1024>(
-                target + static_cast<int64_t>(output_row_1) * size_n + output_column,
+                target + static_cast<int64_t>(output_row_1) * target_stride + output_column,
                 accumulator_0[warp_n_tile].values[2],
                 accumulator_0[warp_n_tile].values[3]);
             store_output_pair<StaticN != 1024>(
-                target + static_cast<int64_t>(output_row_1) * size_n + output_column + 8,
+                target + static_cast<int64_t>(output_row_1) * target_stride + output_column + 8,
                 accumulator_1[warp_n_tile].values[2],
                 accumulator_1[warp_n_tile].values[3]);
           }
@@ -747,21 +775,21 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
       } else {
         if (output_row_0 < size_m) {
           store_output_pair<false>(
-              target + static_cast<int64_t>(output_row_0) * size_n + output_column,
+              target + static_cast<int64_t>(output_row_0) * target_stride + output_column,
               accumulator_0[warp_n_tile].values[0],
               accumulator_0[warp_n_tile].values[1]);
           store_output_pair<false>(
-              target + static_cast<int64_t>(output_row_0) * size_n + output_column + 8,
+              target + static_cast<int64_t>(output_row_0) * target_stride + output_column + 8,
               accumulator_1[warp_n_tile].values[0],
               accumulator_1[warp_n_tile].values[1]);
         }
         if (output_row_1 < size_m) {
           store_output_pair<false>(
-              target + static_cast<int64_t>(output_row_1) * size_n + output_column,
+              target + static_cast<int64_t>(output_row_1) * target_stride + output_column,
               accumulator_0[warp_n_tile].values[2],
               accumulator_0[warp_n_tile].values[3]);
           store_output_pair<false>(
-              target + static_cast<int64_t>(output_row_1) * size_n + output_column + 8,
+              target + static_cast<int64_t>(output_row_1) * target_stride + output_column + 8,
               accumulator_1[warp_n_tile].values[2],
               accumulator_1[warp_n_tile].values[3]);
         }
@@ -769,6 +797,55 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     }
   }
 #endif
+}
+
+template <
+    int TransitionBits,
+    bool FullRows,
+    int ActiveRows = 0,
+    int StaticN = 0,
+    bool HoistBankMasks = false,
+    bool UpperRowsOnly = false,
+    int StaticK = 0,
+    bool UsePairWrapPredicate = false,
+    bool UsePowerOfTwoWrap = false,
+    bool WideNTiles = false,
+    bool UseWideBankIdCopy = false,
+    int StageKTiles = kStageKTiles>
+__global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int split_count,
+    int bank_alt_id) {
+  p32_window_ampere_kernel_body<
+      TransitionBits, FullRows, ActiveRows, StaticN, HoistBankMasks,
+      UpperRowsOnly, StaticK, UsePairWrapPredicate, UsePowerOfTwoWrap,
+      WideNTiles, UseWideBankIdCopy, StageKTiles>(
+      input,
+      trellis,
+      levels,
+      bank_ids,
+      partial_output,
+      output,
+      size_m,
+      size_k,
+      size_n,
+      split_count,
+      bank_alt_id,
+      static_cast<int>(blockIdx.x),
+      static_cast<int>(blockIdx.z),
+      size_n / kTileColumns,
+      0,
+      0,
+      size_n,
+      0);
 }
 
 // M=1 is a distinct workload on Ampere.  The WMMA path above must carry a
@@ -785,7 +862,7 @@ template <
     int TilesPerBlock = kM1TilesPerBlock,
     int StageKTiles = kStageKTiles,
     int StaticN = 0>
-__global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
+__device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
     const half* __restrict__ levels,
@@ -795,7 +872,14 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     int size_k,
     int size_n,
     int split_count,
-    int bank_alt_id) {
+    int bank_alt_id,
+    int n_block,
+    int split,
+    int payload_n_tiles,
+    int payload_n_tile_offset,
+    int output_n_offset,
+    int output_stride,
+    int64_t partial_segment_offset) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
   constexpr int kWordsPerTile = 4 * TransitionBits;
   static_assert(Rows >= 1 && Rows <= 8);
@@ -809,9 +893,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
   const int lane = thread & 31;
   constexpr int kStaticNTiles = StaticN > 0 ? StaticN / kTileColumns : 0;
   const int n_tiles = StaticN > 0 ? kStaticNTiles : size_n / kTileColumns;
-  const int block_n_tile_base = static_cast<int>(blockIdx.x) * TilesPerBlock;
+  const int block_n_tile_base = n_block * TilesPerBlock;
   const int n_tile_base = block_n_tile_base + warp * 4;
-  const int split = static_cast<int>(blockIdx.z);
   const int k_tiles = size_k / kTileRows;
   const int k_tile_begin = (k_tiles * split) / split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
@@ -871,7 +954,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
       const int k_tile = k_tile_base + stage_k_tile;
       if constexpr (StaticN > 0) {
         if (k_tile < k_tiles) {
-          const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
+          const int64_t global_tile = static_cast<int64_t>(k_tile) * payload_n_tiles +
+              payload_n_tile_offset + n_tile;
           const auto* source_vectors = reinterpret_cast<const uint4*>(
               trellis + global_tile * kWordsPerTile);
           copy_async_cg_16(destination_vectors + index, source_vectors + vector);
@@ -879,7 +963,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
           destination_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
         }
       } else if (n_tile < n_tiles && k_tile < k_tiles) {
-        const int64_t global_tile = static_cast<int64_t>(k_tile) * n_tiles + n_tile;
+        const int64_t global_tile = static_cast<int64_t>(k_tile) * payload_n_tiles +
+            payload_n_tile_offset + n_tile;
         const auto* source_vectors = reinterpret_cast<const uint4*>(
             trellis + global_tile * kWordsPerTile);
         copy_async_cg_16(destination_vectors + index, source_vectors + vector);
@@ -897,8 +982,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
             packed_bank_ids[destination][stage_k_tile]);
         destination_ids[word] = k_tile < k_tiles
             ? __ldg(reinterpret_cast<const uint32_t*>(
-                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles +
-                      block_n_tile_base) + word)
+                  bank_ids + static_cast<int64_t>(k_tile) * payload_n_tiles +
+                      payload_n_tile_offset + block_n_tile_base) + word)
             : 0u;
       }
     } else if constexpr (
@@ -914,7 +999,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
           copy_async_ca_16(
               destination_ids,
               reinterpret_cast<const uint4*>(
-                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + block_n_tile_base));
+                  bank_ids + static_cast<int64_t>(k_tile) * payload_n_tiles +
+                      payload_n_tile_offset + block_n_tile_base));
         } else {
           *destination_ids = make_uint4(0u, 0u, 0u, 0u);
         }
@@ -932,14 +1018,16 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
             copy_async_ca_16(
                 destination_ids,
                 reinterpret_cast<const uint4*>(
-                    bank_ids + static_cast<int64_t>(k_tile) * n_tiles + block_n_tile_base));
+                    bank_ids + static_cast<int64_t>(k_tile) * payload_n_tiles +
+                        payload_n_tile_offset + block_n_tile_base));
           } else {
             *destination_ids = make_uint4(0u, 0u, 0u, 0u);
           }
         } else {
           *destination_ids = k_tile < k_tiles
               ? __ldg(reinterpret_cast<const uint4*>(
-                    bank_ids + static_cast<int64_t>(k_tile) * n_tiles + block_n_tile_base))
+                    bank_ids + static_cast<int64_t>(k_tile) * payload_n_tiles +
+                        payload_n_tile_offset + block_n_tile_base))
               : make_uint4(0u, 0u, 0u, 0u);
         }
       }
@@ -953,7 +1041,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
           copy_async_ca_16(
               destination_ids,
               reinterpret_cast<const uint4*>(
-                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + block_n_tile_base));
+                  bank_ids + static_cast<int64_t>(k_tile) * payload_n_tiles +
+                      payload_n_tile_offset + block_n_tile_base));
         } else {
           *destination_ids = make_uint4(0u, 0u, 0u, 0u);
         }
@@ -965,11 +1054,15 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
       const int k_tile = k_tile_base + stage_k_tile;
       if constexpr (StaticN > 0) {
         packed_bank_ids[destination][stage_k_tile][tile] =
-            k_tile < k_tiles ? bank_ids[static_cast<int64_t>(k_tile) * n_tiles + n_tile] : 0;
+            k_tile < k_tiles
+                ? bank_ids[static_cast<int64_t>(k_tile) * payload_n_tiles +
+                    payload_n_tile_offset + n_tile]
+                : 0;
       } else {
         packed_bank_ids[destination][stage_k_tile][tile] =
             n_tile < n_tiles && k_tile < k_tiles
-                ? bank_ids[static_cast<int64_t>(k_tile) * n_tiles + n_tile]
+                ? bank_ids[static_cast<int64_t>(k_tile) * payload_n_tiles +
+                    payload_n_tile_offset + n_tile]
                 : 0;
       }
     }
@@ -1263,14 +1356,16 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
   }
 
   float* target = split_count == 1
-      ? output
-      : partial_output + static_cast<int64_t>(split) * Rows * size_n;
+      ? output + output_n_offset
+      : partial_output + partial_segment_offset +
+          static_cast<int64_t>(split) * Rows * size_n;
+  const int target_stride = split_count == 1 ? output_stride : size_n;
   const int n_tile = n_tile_base + (lane >> 3);
   if ((StaticN > 0 || n_tile < n_tiles) && (lane & 7) < 8) {
     const int output_column = n_tile * kTileColumns + (lane & 7) * 2;
 #pragma unroll
     for (int output_row = 0; output_row < Rows; ++output_row) {
-      float* row_target = target + static_cast<int64_t>(output_row) * size_n;
+      float* row_target = target + static_cast<int64_t>(output_row) * target_stride;
       store_output_pair<(Rows == 1 && StaticN == 1024)>(
           row_target + output_column,
           accumulator_0[output_row],
@@ -1278,6 +1373,151 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     }
   }
 #endif
+}
+
+template <
+    int TransitionBits,
+    int Rows,
+    int Threads = kM1Threads,
+    int TilesPerBlock = kM1TilesPerBlock,
+    int StageKTiles = kStageKTiles,
+    int StaticN = 0>
+__global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int size_k,
+    int size_n,
+    int split_count,
+    int bank_alt_id) {
+  p32_window_ampere_m1_kernel_body<
+      TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, StaticN>(
+      input,
+      trellis,
+      levels,
+      bank_ids,
+      partial_output,
+      output,
+      size_k,
+      size_n,
+      split_count,
+      bank_alt_id,
+      static_cast<int>(blockIdx.x),
+      static_cast<int>(blockIdx.z),
+      size_n / kTileColumns,
+      0,
+      0,
+      size_n,
+      0);
+}
+
+constexpr int kMaxGroupedP32Segments = 3;
+
+struct GroupedP32LaunchParams {
+  int segment_count;
+  int n_tile_start[kMaxGroupedP32Segments];
+  int n_tiles[kMaxGroupedP32Segments];
+  int bank_alt_id[kMaxGroupedP32Segments];
+  int split_count[kMaxGroupedP32Segments];
+  int64_t output_offset[kMaxGroupedP32Segments];
+  int64_t partial_offset[kMaxGroupedP32Segments];
+};
+
+template <
+    int TransitionBits,
+    int Rows,
+    int StageKTiles = kStageKTiles>
+__global__ __launch_bounds__(kM1Threads) void p32_window_ampere_grouped_scalar_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    GroupedP32LaunchParams params,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int segment_count,
+    int size_k,
+    int total_n_tiles) {
+  const int segment = static_cast<int>(blockIdx.y);
+  if (segment >= segment_count || segment >= params.segment_count) {
+    return;
+  }
+  const int n_tile_start = params.n_tile_start[segment];
+  const int n_tiles = params.n_tiles[segment];
+  const int split_count = params.split_count[segment];
+  const int n_block = static_cast<int>(blockIdx.x);
+  const int split = static_cast<int>(blockIdx.z);
+  if (n_block * kM1TilesPerBlock >= n_tiles || split >= split_count) {
+    return;
+  }
+  p32_window_ampere_m1_kernel_body<
+      TransitionBits, Rows, kM1Threads, kM1TilesPerBlock, StageKTiles, 0>(
+      input,
+      trellis,
+      levels,
+      bank_ids,
+      partial_output,
+      output,
+      size_k,
+      n_tiles * kTileColumns,
+      split_count,
+      params.bank_alt_id[segment],
+      n_block,
+      split,
+      total_n_tiles,
+      n_tile_start,
+      static_cast<int>(params.output_offset[segment]),
+      n_tiles * kTileColumns,
+      params.partial_offset[segment]);
+}
+
+template <int TransitionBits, bool FullRows, int ActiveRows = 0>
+__global__ __launch_bounds__(kThreads) void p32_window_ampere_grouped_wmma_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    GroupedP32LaunchParams params,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int segment_count,
+    int size_m,
+    int size_k,
+    int total_n_tiles) {
+  const int segment = static_cast<int>(blockIdx.y);
+  if (segment >= segment_count || segment >= params.segment_count) {
+    return;
+  }
+  const int n_tile_start = params.n_tile_start[segment];
+  const int n_tiles = params.n_tiles[segment];
+  const int split_count = params.split_count[segment];
+  const int n_block = static_cast<int>(blockIdx.x);
+  const int split = static_cast<int>(blockIdx.z);
+  if (n_block * kTilesPerBlock >= n_tiles || split >= split_count) {
+    return;
+  }
+  p32_window_ampere_kernel_body<TransitionBits, FullRows, ActiveRows>(
+      input,
+      trellis,
+      levels,
+      bank_ids,
+      partial_output,
+      output,
+      size_m,
+      size_k,
+      n_tiles * kTileColumns,
+      split_count,
+      params.bank_alt_id[segment],
+      n_block,
+      split,
+      total_n_tiles,
+      n_tile_start,
+      static_cast<int>(params.output_offset[segment]),
+      n_tiles * kTileColumns,
+      params.partial_offset[segment]);
 }
 
 template <
@@ -1335,6 +1575,49 @@ __global__ void reduce_split_kernel(
        split < (StaticSplitCount > 0 ? StaticSplitCount : split_count);
        ++split) {
     accumulator += partial_output[static_cast<int64_t>(split) * output_values + index];
+  }
+  output[index] = accumulator;
+}
+
+__global__ void reduce_grouped_split_kernel(
+    const float* __restrict__ partial_output,
+    float* __restrict__ output,
+    GroupedP32LaunchParams params,
+    int segment_count,
+    int size_m,
+    int total_n) {
+  const int index = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int output_values = size_m * total_n;
+  if (index >= output_values) {
+    return;
+  }
+  int segment = 0;
+  for (; segment < segment_count; ++segment) {
+    const int64_t start = params.output_offset[segment];
+    const int64_t count = static_cast<int64_t>(size_m) *
+        params.n_tiles[segment] * kTileColumns;
+    if (index >= start && index < start + count) {
+      break;
+    }
+  }
+  if (segment == segment_count) {
+    return;
+  }
+  const int split_count = params.split_count[segment];
+  if (split_count == 1) {
+    return;
+  }
+  const int segment_n = params.n_tiles[segment] * kTileColumns;
+  const int64_t local_index = index - params.output_offset[segment];
+  const int64_t split_stride = static_cast<int64_t>(size_m) * segment_n;
+  const float* segment_partials =
+      partial_output + params.partial_offset[segment];
+  float accumulator = 0.0f;
+  // Match reduce_split_kernel exactly: increasing split index and one FP32
+  // addition per partial.  This is the native exactness contract.
+  for (int split = 0; split < split_count; ++split) {
+    accumulator += segment_partials[static_cast<int64_t>(split) * split_stride +
+        local_index];
   }
   output[index] = accumulator;
 }
@@ -1414,7 +1697,7 @@ at::Tensor p32_window_ampere_impl(
   const c10::cuda::CUDAGuard device_guard(input.device());
   const int capability = cached_device_capability(input.get_device());
   TORCH_CHECK(
-      capability == 80,
+      ampere_execution_capability_supported(capability),
       "QVQ P32 Ampere WMMA requires compute capability 8.0, got ",
       capability / 10,
       ".",
@@ -2318,12 +2601,307 @@ at::Tensor p32_window_ampere(
   }
 }
 
+template <int TransitionBits>
+at::Tensor p32_window_ampere_grouped_fused_impl(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef split_counts) {
+  constexpr int kWordsPerTile = 4 * TransitionBits;
+  const int64_t segment_count = static_cast<int64_t>(out_features.size());
+  TORCH_CHECK(
+      segment_count >= 1 && segment_count <= kMaxGroupedP32Segments,
+      "QVQ P32 Ampere fused groups require one to three segments");
+  TORCH_CHECK(
+      static_cast<int64_t>(bank_alt_ids.size()) == segment_count &&
+          static_cast<int64_t>(split_counts.size()) == segment_count,
+      "QVQ P32 Ampere grouped segment metadata lengths must match");
+  TORCH_CHECK(input.is_cuda(), "QVQ P32 Ampere input must be CUDA");
+  TORCH_CHECK(
+      trellis.device() == input.device() && levels.device() == input.device() &&
+          bank_ids.device() == input.device(),
+      "QVQ P32 Ampere grouped tensors must share one CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf && levels.scalar_type() == at::kHalf,
+      "QVQ P32 Ampere input and levels must be float16");
+  TORCH_CHECK(trellis.scalar_type() == at::kInt, "QVQ P32 Ampere trellis must be int32");
+  TORCH_CHECK(bank_ids.scalar_type() == at::kByte, "QVQ P32 Ampere bank ids must be uint8");
+  TORCH_CHECK(
+      input.is_contiguous() && trellis.is_contiguous() && levels.is_contiguous() &&
+          bank_ids.is_contiguous(),
+      "QVQ P32 Ampere grouped tensors must be contiguous");
+  TORCH_CHECK(
+      input.dim() == 2 && input.size(0) >= 1 && input.size(0) <= kRows,
+      "QVQ P32 Ampere input must have between 1 and 16 rows");
+  TORCH_CHECK(
+      input.size(1) > 0 && input.size(1) % kTileRows == 0,
+      "QVQ P32 Ampere K must be positive and divisible by 16");
+  TORCH_CHECK(levels.numel() == kLevels, "QVQ P32 Ampere requires 256 PGC16 levels");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const int capability = cached_device_capability(input.get_device());
+  TORCH_CHECK(
+      ampere_execution_capability_supported(capability),
+      "QVQ P32 Ampere WMMA requires compute capability 8.0, got ",
+      capability / 10,
+      ".",
+      capability % 10);
+
+  const int size_m = static_cast<int>(input.size(0));
+  const int size_k = static_cast<int>(input.size(1));
+  const int k_tiles = size_k / kTileRows;
+  GroupedP32LaunchParams params{};
+  params.segment_count = static_cast<int>(segment_count);
+  int total_n_tiles = 0;
+  int max_split_count = 1;
+  int max_n_blocks_scalar = 1;
+  int max_n_blocks_wmma = 1;
+  int64_t output_values = 0;
+  int64_t partial_values = 0;
+  bool needs_reduction = false;
+  for (int segment = 0; segment < segment_count; ++segment) {
+    const int size_n = static_cast<int>(out_features[segment]);
+    const int split_count = static_cast<int>(split_counts[segment]);
+    const int bank_alt_id = static_cast<int>(bank_alt_ids[segment]);
+    TORCH_CHECK(
+        size_n > 0 && size_n % kTileColumns == 0,
+        "QVQ P32 Ampere grouped N must be positive and divisible by 16");
+    TORCH_CHECK(
+        split_count >= 1 && split_count <= 128 && split_count <= k_tiles,
+        "QVQ P32 Ampere grouped split count is invalid");
+    TORCH_CHECK(
+        bank_alt_id >= 0 && bank_alt_id <= 3,
+        "QVQ P32 Ampere grouped bank ID must be in [0, 3]");
+    const int n_tiles = size_n / kTileColumns;
+    params.n_tile_start[segment] = total_n_tiles;
+    params.n_tiles[segment] = n_tiles;
+    params.bank_alt_id[segment] = bank_alt_id;
+    params.split_count[segment] = split_count;
+    params.output_offset[segment] = output_values;
+    params.partial_offset[segment] = partial_values;
+    if (split_count > 1) {
+      partial_values += static_cast<int64_t>(split_count) * size_m * size_n;
+      needs_reduction = true;
+    }
+    output_values += static_cast<int64_t>(size_m) * size_n;
+    total_n_tiles += n_tiles;
+    max_split_count = std::max(max_split_count, split_count);
+    max_n_blocks_scalar = std::max(
+        max_n_blocks_scalar,
+        (n_tiles + kM1TilesPerBlock - 1) / kM1TilesPerBlock);
+    max_n_blocks_wmma = std::max(
+        max_n_blocks_wmma,
+        (n_tiles + kTilesPerBlock - 1) / kTilesPerBlock);
+  }
+  const int total_n = total_n_tiles * kTileColumns;
+  const int64_t expected_tiles = static_cast<int64_t>(k_tiles) * total_n_tiles;
+  TORCH_CHECK(
+      trellis.numel() == expected_tiles * kWordsPerTile,
+      "QVQ P32 Ampere grouped trellis has the wrong word count");
+  TORCH_CHECK(
+      bank_ids.numel() == expected_tiles,
+      "QVQ P32 Ampere grouped bank ids have the wrong length");
+
+  auto output = at::empty({output_values}, input.options().dtype(at::kFloat));
+  auto partial_output = partial_values > 0
+      ? at::empty({partial_values}, input.options().dtype(at::kFloat))
+      : at::empty({0}, input.options().dtype(at::kFloat));
+  const cudaStream_t stream = c10::cuda::getCurrentCUDAStream(input.get_device());
+  const auto* input_ptr = reinterpret_cast<const half*>(input.data_ptr<at::Half>());
+  const auto* trellis_ptr = reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>());
+  const auto* levels_ptr = reinterpret_cast<const half*>(levels.data_ptr<at::Half>());
+  const auto* bank_ids_ptr = bank_ids.data_ptr<uint8_t>();
+  auto* partial_output_ptr = partial_output.data_ptr<float>();
+  auto* output_ptr = output.data_ptr<float>();
+
+  // Legal A41 groups are Q/K/V or gate/up siblings and therefore use the
+  // common short-K scalar route for M<=4.  Long-K grouped shapes deliberately
+  // remain on the ordinary exact dispatcher until a matching route exists.
+  const bool use_small_m_scalar = size_m <= 4 && size_k <= 6144;
+  if (use_small_m_scalar) {
+    const dim3 grid(
+        static_cast<unsigned>(max_n_blocks_scalar),
+        static_cast<unsigned>(segment_count),
+        static_cast<unsigned>(max_split_count));
+    if (size_m == 1) {
+      p32_window_ampere_grouped_scalar_kernel<TransitionBits, 1>
+          <<<grid, kM1Threads, 0, stream>>>(
+              input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+              partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+              size_k, total_n_tiles);
+    } else if (size_m == 2) {
+      p32_window_ampere_grouped_scalar_kernel<
+          TransitionBits, 2, kScalarTripleStageKTiles>
+          <<<grid, kM1Threads, 0, stream>>>(
+              input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+              partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+              size_k, total_n_tiles);
+    } else if (size_m == 3) {
+      p32_window_ampere_grouped_scalar_kernel<TransitionBits, 3>
+          <<<grid, kM1Threads, 0, stream>>>(
+              input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+              partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+              size_k, total_n_tiles);
+    } else {
+      constexpr int kM4StageKTiles = TransitionBits == 4
+          ? kScalarLongStageKTiles
+          : TransitionBits == 6 ? kScalarTripleStageKTiles : kStageKTiles;
+      p32_window_ampere_grouped_scalar_kernel<
+          TransitionBits, 4, kM4StageKTiles>
+          <<<grid, kM1Threads, 0, stream>>>(
+              input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+              partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+              size_k, total_n_tiles);
+    }
+  } else {
+    const dim3 grid(
+        static_cast<unsigned>(max_n_blocks_wmma),
+        static_cast<unsigned>(segment_count),
+        static_cast<unsigned>(max_split_count));
+    if (size_m == kRows) {
+      p32_window_ampere_grouped_wmma_kernel<TransitionBits, true>
+          <<<grid, kThreads, 0, stream>>>(
+              input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+              partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+              size_m, size_k, total_n_tiles);
+    } else if (size_m == 8) {
+      p32_window_ampere_grouped_wmma_kernel<TransitionBits, false, 8>
+          <<<grid, kThreads, 0, stream>>>(
+              input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+              partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+              size_m, size_k, total_n_tiles);
+    } else {
+      p32_window_ampere_grouped_wmma_kernel<TransitionBits, false>
+          <<<grid, kThreads, 0, stream>>>(
+              input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+              partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+              size_m, size_k, total_n_tiles);
+    }
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  if (needs_reduction) {
+    constexpr int kReductionThreads = 256;
+    const int output_value_count = size_m * total_n;
+    const int blocks =
+        (output_value_count + kReductionThreads - 1) / kReductionThreads;
+    reduce_grouped_split_kernel<<<blocks, kReductionThreads, 0, stream>>>(
+        partial_output_ptr,
+        output_ptr,
+        params,
+        static_cast<int>(segment_count),
+        size_m,
+        total_n);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  return output;
+}
+
+at::Tensor p32_window_ampere_grouped_fused(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t transition_bits,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef split_counts) {
+  switch (transition_bits) {
+    case 4:
+      return p32_window_ampere_grouped_fused_impl<4>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 5:
+      return p32_window_ampere_grouped_fused_impl<5>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 6:
+      return p32_window_ampere_grouped_fused_impl<6>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 7:
+      return p32_window_ampere_grouped_fused_impl<7>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    default:
+      TORCH_CHECK(false, "QVQ P32 Ampere transition bits must be in [4, 7]");
+  }
+}
+
+template <int TransitionBits>
+std::vector<at::Tensor> p32_window_ampere_grouped_impl(
+    const at::Tensor& input,
+    at::TensorList trellises,
+    const at::Tensor& levels,
+    at::TensorList bank_ids,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef split_counts) {
+  const int64_t segment_count = static_cast<int64_t>(trellises.size());
+  TORCH_CHECK(segment_count > 0, "QVQ P32 Ampere grouped execution requires at least one segment");
+  TORCH_CHECK(
+      static_cast<int64_t>(bank_ids.size()) == segment_count &&
+          static_cast<int64_t>(out_features.size()) == segment_count &&
+          static_cast<int64_t>(bank_alt_ids.size()) == segment_count &&
+          static_cast<int64_t>(split_counts.size()) == segment_count,
+      "QVQ P32 Ampere grouped segment metadata lengths must match");
+
+  std::vector<at::Tensor> outputs;
+  outputs.reserve(segment_count);
+  // This correctness-first native dispatcher deliberately invokes the same
+  // child implementation used by an independent projection.  Consequently
+  // every segment retains its scalar/WMMA route, K partition, specialized
+  // reducer, and left-to-right FP32 addition order.  The shared activation is
+  // passed by reference and is never copied or transformed here.
+  for (int64_t segment = 0; segment < segment_count; ++segment) {
+    outputs.push_back(p32_window_ampere_impl<TransitionBits>(
+        input,
+        trellises[segment],
+        levels,
+        bank_ids[segment],
+        out_features[segment],
+        bank_alt_ids[segment],
+        split_counts[segment]));
+  }
+  return outputs;
+}
+
+std::vector<at::Tensor> p32_window_ampere_grouped(
+    const at::Tensor& input,
+    at::TensorList trellises,
+    const at::Tensor& levels,
+    at::TensorList bank_ids,
+    int64_t transition_bits,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef split_counts) {
+  switch (transition_bits) {
+    case 4:
+      return p32_window_ampere_grouped_impl<4>(
+          input, trellises, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 5:
+      return p32_window_ampere_grouped_impl<5>(
+          input, trellises, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 6:
+      return p32_window_ampere_grouped_impl<6>(
+          input, trellises, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 7:
+      return p32_window_ampere_grouped_impl<7>(
+          input, trellises, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    default:
+      TORCH_CHECK(false, "QVQ P32 Ampere transition bits must be in [4, 7]");
+  }
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_ampere, m) {
   m.def("p32_window(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
+  m.def("p32_window_grouped(Tensor input, Tensor[] trellises, Tensor levels, Tensor[] bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor[]");
+  m.def("p32_window_grouped_fused(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_ampere, CUDA, m) {
   m.impl("p32_window", p32_window_ampere);
+  m.impl("p32_window_grouped", p32_window_ampere_grouped);
+  m.impl("p32_window_grouped_fused", p32_window_ampere_grouped_fused);
 }

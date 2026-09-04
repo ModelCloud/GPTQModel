@@ -1,0 +1,27 @@
+{
+  "production_commit": "216144dc",
+  "candidate": "packed fixed W2 child bank identifiers",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "production": {
+    "parameter_bytes": 8,
+    "static_sass_instructions": 1736,
+    "stack_bytes": 8,
+    "constant0_bytes": 1448,
+    "registers_per_thread": 48,
+    "shared_bytes": 27264
+  },
+  "candidate": {
+    "parameter_bytes": 4,
+    "static_sass_instructions": 1736,
+    "stack_bytes": 0,
+    "constant0_bytes": 1444,
+    "registers_per_thread": 48,
+    "shared_bytes": 27264
+  },
+  "geomean_speedup": 0.9973666401565922,
+  "decision": "rejected; source fully removed"
+}

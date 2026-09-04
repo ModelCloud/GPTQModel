@@ -23,12 +23,94 @@ from gptqmodel.quantization.qvq_codecs import (
     pgc16_levels_for_version,
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
-from gptqmodel.utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_m16_tma
+from gptqmodel.utils.qvq_wgmma_cuda import (
+    qvq_h100_grouped_ordered_split_counts,
+    qvq_h100_ordered_split_count,
+    qvq_p32_window_wgmma_m16_tma,
+    qvq_p32_window_wgmma_m16_tma_ordered_split,
+)
 
 P32_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
 
 
-def _random_planar_words(bits: float, *, tiles: int, device: torch.device | str = "cpu") -> torch.Tensor:
+@pytest.mark.parametrize("transition_bits", (4, 5, 6, 7))
+@pytest.mark.parametrize("logical_rows", (1, 2, 4, 8, 16))
+def test_h100_llama_down_uses_measured_ordered_split(transition_bits, logical_rows):
+    assert (
+        qvq_h100_ordered_split_count(
+            device_name="NVIDIA H100 80GB HBM3",
+            compute_capability=(9, 0),
+            logical_rows=logical_rows,
+            in_features=8192,
+            out_features=2048,
+            transition_bits=transition_bits,
+        )
+        == 16
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides"),
+    (
+        {"device_name": "NVIDIA H200"},
+        {"compute_capability": (8, 0)},
+        {"logical_rows": 3},
+        {"logical_rows": 17},
+        {"in_features": 2048},
+        {"out_features": 8192},
+        {"transition_bits": 3},
+    ),
+)
+def test_ordered_split_policy_fails_closed(overrides):
+    arguments = {
+        "device_name": "NVIDIA H100 80GB HBM3",
+        "compute_capability": (9, 0),
+        "logical_rows": 1,
+        "in_features": 8192,
+        "out_features": 2048,
+        "transition_bits": 6,
+    }
+    arguments.update(overrides)
+    assert qvq_h100_ordered_split_count(**arguments) == 0
+
+
+@pytest.mark.parametrize("transition_bits", (4, 5, 6, 7))
+def test_h100_llama_qkv_uses_measured_grouped_ordered_splits(transition_bits):
+    assert qvq_h100_grouped_ordered_split_counts(
+        device_name="NVIDIA H100 80GB HBM3",
+        compute_capability=(9, 0),
+        in_features=2048,
+        out_features=(2048, 512, 512),
+        transition_bits=transition_bits,
+    ) == (8, 8, 8)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"device_name": "NVIDIA H200"},
+        {"compute_capability": (8, 0)},
+        {"in_features": 4096},
+        {"out_features": (2048, 512)},
+        {"out_features": (2048, 512, 1024)},
+        {"transition_bits": 3},
+    ),
+)
+def test_grouped_ordered_split_policy_fails_closed(overrides):
+    arguments = {
+        "device_name": "NVIDIA H100 80GB HBM3",
+        "compute_capability": (9, 0),
+        "in_features": 2048,
+        "out_features": (2048, 512, 512),
+        "transition_bits": 6,
+    }
+    arguments.update(overrides)
+    assert qvq_h100_grouped_ordered_split_counts(**arguments) is None
+
+
+def _random_planar_words(
+    bits: float, *, tiles: int, device: torch.device | str = "cpu"
+) -> torch.Tensor:
     generator = torch.Generator(device=device).manual_seed(20260831 + int(bits * 10))
     words_per_tile = qvq_words_per_tile(bits, weight_count=256, vector_size=2)
     return torch.randint(
@@ -51,7 +133,10 @@ def test_p32_window_repack_is_bit_exact_and_storage_neutral(bits):
     assert window.shape == planar.shape
     assert window.nbytes == planar.nbytes
     assert torch.equal(repack_p32_window_to_planar(window, bits=bits), planar)
-    assert torch.equal(unpack_p32_window_states(window, bits=bits), unpack_trellis_states(planar, bits=bits))
+    assert torch.equal(
+        unpack_p32_window_states(window, bits=bits),
+        unpack_trellis_states(planar, bits=bits),
+    )
 
 
 @pytest.mark.parametrize("bits", P32_RATES)
@@ -137,7 +222,9 @@ def test_p32_window_cuda_matches_cpu_words_and_states(bits):
 
     assert torch.equal(actual_window.cpu(), expected_window)
     assert torch.equal(actual_states.cpu(), expected_states)
-    assert torch.equal(repack_p32_window_to_planar(actual_window, bits=bits), planar_cuda)
+    assert torch.equal(
+        repack_p32_window_to_planar(actual_window, bits=bits), planar_cuda
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
@@ -163,7 +250,9 @@ def test_p32_window_tma_wgmma_matches_exact_matrix(bits):
     bank_ids = pack_qvq_binary_bank_ids(selectors)
     bank_alt_id = torch.tensor(3, dtype=torch.uint8, device="cuda")
     levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
-    x = (torch.randn((16, in_features), generator=generator, device="cuda") * 0.1).half()
+    x = (
+        torch.randn((16, in_features), generator=generator, device="cuda") * 0.1
+    ).half()
 
     dense = reconstruct_p32_window_inner_weight(
         window,
@@ -188,10 +277,71 @@ def test_p32_window_tma_wgmma_matches_exact_matrix(bits):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
+def test_p32_window_tma_wgmma_ordered_split_is_repeatable(bits):
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (9, 0):
+        pytest.skip("P32 TMA RS-WGMMA requires SM90")
+
+    in_features = 512
+    out_features = 256
+    split_count = 2
+    tile_count = (in_features // 16) * (out_features // 16)
+    planar = _random_planar_words(bits, tiles=tile_count, device="cuda")
+    window = repack_p32_planar_to_window(planar, bits=bits)
+    generator = torch.Generator(device="cuda").manual_seed(20260921 + int(bits * 10))
+    selectors = torch.randint(
+        0,
+        2,
+        (tile_count * 8,),
+        generator=generator,
+        device="cuda",
+        dtype=torch.uint8,
+    )
+    bank_ids = pack_qvq_binary_bank_ids(selectors)
+    bank_alt_id = torch.tensor(3, dtype=torch.uint8, device="cuda")
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
+    x = (
+        torch.randn((16, in_features), generator=generator, device="cuda") * 0.1
+    ).half()
+
+    dense = reconstruct_p32_window_inner_weight(
+        window,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=bank_ids,
+        bank_alt_id=bank_alt_id,
+    )
+    expected = x.float() @ dense
+
+    def run():
+        return qvq_p32_window_wgmma_m16_tma_ordered_split(
+            x,
+            window,
+            levels,
+            bank_ids,
+            bits,
+            out_features=out_features,
+            bank_alt_id=3,
+            split_count=split_count,
+        )
+
+    actual = run()
+    torch.cuda.synchronize()
+    for _ in range(5):
+        assert torch.equal(run(), actual)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache():
     properties = torch.cuda.get_device_properties(0)
-    if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
-        pytest.skip("Hopper P32 QVQLinear dispatch is H200-specific")
+    if (properties.major, properties.minor) != (9, 0) or not (
+        "H100" in properties.name or "H200" in properties.name
+    ):
+        pytest.skip("Hopper P32 QVQLinear dispatch requires H100 or H200 SM90")
     bits = 3.0
     in_features = out_features = 256
     tile_count = (in_features // 16) * (out_features // 16)
@@ -216,7 +366,9 @@ def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache():
         bank_count=2,
         v2b2_p32=True,
     ).eval()
-    x = torch.randn((3, in_features), generator=generator, device="cuda", dtype=torch.float16)
+    x = torch.randn(
+        (3, in_features), generator=generator, device="cuda", dtype=torch.float16
+    )
     dense = reconstruct_qvq_inner_weight(
         planar,
         bits=bits,

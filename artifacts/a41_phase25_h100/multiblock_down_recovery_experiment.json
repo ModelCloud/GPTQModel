@@ -1,0 +1,843 @@
+{
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_base_commit": "10d0ee3228c14095c593398f3f4f56c1b54fa761",
+  "recovery_geomean_speedup": 1.5246559683522218,
+  "rows": [
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 2,
+      "k": 8192,
+      "m": 1,
+      "multiblock_recovery": {
+        "max_ms": 0.004533120095729828,
+        "mean_ms": 0.004464249578118324,
+        "median_ms": 0.0044627198576927185,
+        "min_ms": 0.00445248007774353,
+        "p95_ms": 0.004467839896678924
+      },
+      "multiblock_site": {
+        "max_ms": 0.017946239709854126,
+        "mean_ms": 0.017849753618240358,
+        "median_ms": 0.017876799702644348,
+        "min_ms": 0.017630079984664915,
+        "p95_ms": 0.01790784001350403
+      },
+      "n": 2048,
+      "recovery_speedup": 1.6384626485610145,
+      "scalar_recovery": {
+        "max_ms": 0.007346559762954712,
+        "mean_ms": 0.0073125376343727115,
+        "median_ms": 0.007311999797821045,
+        "min_ms": 0.007303680181503296,
+        "p95_ms": 0.007318400144577027
+      },
+      "scalar_site": {
+        "max_ms": 0.02097088098526001,
+        "mean_ms": 0.02080093445777893,
+        "median_ms": 0.02091423988342285,
+        "min_ms": 0.02032383918762207,
+        "p95_ms": 0.020925440788269044
+      },
+      "site_speedup": 1.1699096164471319,
+      "split_count": 16,
+      "transient_workspace_bytes": 8192
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 2,
+      "k": 8192,
+      "m": 2,
+      "multiblock_recovery": {
+        "max_ms": 0.004627200067043305,
+        "mean_ms": 0.0045116736084222795,
+        "median_ms": 0.004510079920291901,
+        "min_ms": 0.004497919976711273,
+        "p95_ms": 0.004515840113162995
+      },
+      "multiblock_site": {
+        "max_ms": 0.017950079441070556,
+        "mean_ms": 0.017707526445388793,
+        "median_ms": 0.01769279956817627,
+        "min_ms": 0.017676160335540772,
+        "p95_ms": 0.01790079951286316
+      },
+      "n": 2048,
+      "recovery_speedup": 1.5223499250032229,
+      "scalar_recovery": {
+        "max_ms": 0.0069606399536132815,
+        "mean_ms": 0.006866700845956803,
+        "median_ms": 0.006865919828414917,
+        "min_ms": 0.006855679750442505,
+        "p95_ms": 0.006869760155677795
+      },
+      "scalar_site": {
+        "max_ms": 0.02044543981552124,
+        "mean_ms": 0.02040019838809967,
+        "median_ms": 0.020429439544677734,
+        "min_ms": 0.020115840435028075,
+        "p95_ms": 0.020437760353088377
+      },
+      "site_speedup": 1.1546753506112064,
+      "split_count": 16,
+      "transient_workspace_bytes": 16384
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 2,
+      "k": 8192,
+      "m": 4,
+      "multiblock_recovery": {
+        "max_ms": 0.0046572801470756535,
+        "mean_ms": 0.004547718378901482,
+        "median_ms": 0.004545919895172119,
+        "min_ms": 0.00453247994184494,
+        "p95_ms": 0.004551680088043213
+      },
+      "multiblock_site": {
+        "max_ms": 0.01781376004219055,
+        "mean_ms": 0.017701919996738435,
+        "median_ms": 0.017742079496383668,
+        "min_ms": 0.01758911967277527,
+        "p95_ms": 0.017774720191955567
+      },
+      "n": 2048,
+      "recovery_speedup": 1.5378713162080813,
+      "scalar_recovery": {
+        "max_ms": 0.007044479846954345,
+        "mean_ms": 0.006964601582288742,
+        "median_ms": 0.00699103981256485,
+        "min_ms": 0.006899840235710144,
+        "p95_ms": 0.007011839747428894
+      },
+      "scalar_site": {
+        "max_ms": 0.020273919105529784,
+        "mean_ms": 0.020175795197486877,
+        "median_ms": 0.02012415885925293,
+        "min_ms": 0.02010240077972412,
+        "p95_ms": 0.020263040065765382
+      },
+      "site_speedup": 1.1342615651877106,
+      "split_count": 16,
+      "transient_workspace_bytes": 32768
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 2,
+      "k": 8192,
+      "m": 8,
+      "multiblock_recovery": {
+        "max_ms": 0.004843519926071167,
+        "mean_ms": 0.004828326427936554,
+        "median_ms": 0.004828160107135773,
+        "min_ms": 0.004815360009670258,
+        "p95_ms": 0.004832639992237091
+      },
+      "multiblock_site": {
+        "max_ms": 0.01819584012031555,
+        "mean_ms": 0.018081792032718657,
+        "median_ms": 0.01814079999923706,
+        "min_ms": 0.017897599935531618,
+        "p95_ms": 0.01815232038497925
+      },
+      "n": 2048,
+      "recovery_speedup": 1.4483695281482178,
+      "scalar_recovery": {
+        "max_ms": 0.007079039812088013,
+        "mean_ms": 0.006993260771036148,
+        "median_ms": 0.006992959976196289,
+        "min_ms": 0.00697983980178833,
+        "p95_ms": 0.006996480226516724
+      },
+      "scalar_site": {
+        "max_ms": 0.02042112112045288,
+        "mean_ms": 0.0203835711479187,
+        "median_ms": 0.020382719039916994,
+        "min_ms": 0.020364160537719726,
+        "p95_ms": 0.020397439002990722
+      },
+      "site_speedup": 1.1235843535441778,
+      "split_count": 16,
+      "transient_workspace_bytes": 65536
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 2,
+      "k": 8192,
+      "m": 16,
+      "multiblock_recovery": {
+        "max_ms": 0.004867840111255645,
+        "mean_ms": 0.004853158408403397,
+        "median_ms": 0.004853120148181915,
+        "min_ms": 0.0048364800214767455,
+        "p95_ms": 0.0048640000820159915
+      },
+      "multiblock_site": {
+        "max_ms": 0.018206080198287965,
+        "mean_ms": 0.017999020791053772,
+        "median_ms": 0.01798848032951355,
+        "min_ms": 0.017972480058670044,
+        "p95_ms": 0.018093440532684326
+      },
+      "n": 2048,
+      "recovery_speedup": 1.4872740847373331,
+      "scalar_recovery": {
+        "max_ms": 0.007241600155830383,
+        "mean_ms": 0.007217382407188415,
+        "median_ms": 0.007217919826507569,
+        "min_ms": 0.0071968001127243044,
+        "p95_ms": 0.007231360077857971
+      },
+      "scalar_site": {
+        "max_ms": 0.020566399097442626,
+        "mean_ms": 0.0205366144657135,
+        "median_ms": 0.020556800365448,
+        "min_ms": 0.020327041149139403,
+        "p95_ms": 0.020563840866088867
+      },
+      "site_speedup": 1.1427758203521299,
+      "split_count": 16,
+      "transient_workspace_bytes": 131072
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 2.5,
+      "k": 8192,
+      "m": 1,
+      "multiblock_recovery": {
+        "max_ms": 0.004525440037250519,
+        "mean_ms": 0.004371897575259209,
+        "median_ms": 0.004368639886379242,
+        "min_ms": 0.00435584008693695,
+        "p95_ms": 0.004377599954605103
+      },
+      "multiblock_site": {
+        "max_ms": 0.01772608041763306,
+        "mean_ms": 0.01765221757888794,
+        "median_ms": 0.017662080526351927,
+        "min_ms": 0.01760319948196411,
+        "p95_ms": 0.01769215941429138
+      },
+      "n": 2048,
+      "recovery_speedup": 1.5696601948205173,
+      "scalar_recovery": {
+        "max_ms": 0.006977279782295227,
+        "mean_ms": 0.006858764791488647,
+        "median_ms": 0.0068572801351547245,
+        "min_ms": 0.006832000017166138,
+        "p95_ms": 0.006872959733009339
+      },
+      "scalar_site": {
+        "max_ms": 0.02025536060333252,
+        "mean_ms": 0.020198668837547302,
+        "median_ms": 0.020204799175262453,
+        "min_ms": 0.020142719745635987,
+        "p95_ms": 0.020243840217590334
+      },
+      "site_speedup": 1.143964842936639,
+      "split_count": 16,
+      "transient_workspace_bytes": 8192
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 2.5,
+      "k": 8192,
+      "m": 2,
+      "multiblock_recovery": {
+        "max_ms": 0.004654079973697663,
+        "mean_ms": 0.004590060797333717,
+        "median_ms": 0.004583680033683777,
+        "min_ms": 0.004528639912605286,
+        "p95_ms": 0.004651519954204559
+      },
+      "multiblock_site": {
+        "max_ms": 0.01779968023300171,
+        "mean_ms": 0.017716627156734464,
+        "median_ms": 0.017716160416603087,
+        "min_ms": 0.017701760530471802,
+        "p95_ms": 0.0177292799949646
+      },
+      "n": 2048,
+      "recovery_speedup": 1.5328120857113248,
+      "scalar_recovery": {
+        "max_ms": 0.007035520076751709,
+        "mean_ms": 0.007026035189628601,
+        "median_ms": 0.007025920152664185,
+        "min_ms": 0.007014399766921997,
+        "p95_ms": 0.007033600211143493
+      },
+      "scalar_site": {
+        "max_ms": 0.020513279438018797,
+        "mean_ms": 0.020439910364151,
+        "median_ms": 0.02045504093170166,
+        "min_ms": 0.020213119983673096,
+        "p95_ms": 0.02046720027923584
+      },
+      "site_speedup": 1.1545978615395565,
+      "split_count": 16,
+      "transient_workspace_bytes": 16384
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 2.5,
+      "k": 8192,
+      "m": 4,
+      "multiblock_recovery": {
+        "max_ms": 0.004717440009117126,
+        "mean_ms": 0.004665081587433815,
+        "median_ms": 0.004664959907531738,
+        "min_ms": 0.00465472012758255,
+        "p95_ms": 0.004668160080909729
+      },
+      "multiblock_site": {
+        "max_ms": 0.017964799404144288,
+        "mean_ms": 0.01784252165555954,
+        "median_ms": 0.017816320061683655,
+        "min_ms": 0.01778815984725952,
+        "p95_ms": 0.01790976047515869
+      },
+      "n": 2048,
+      "recovery_speedup": 1.4735217665511957,
+      "scalar_recovery": {
+        "max_ms": 0.006967039704322815,
+        "mean_ms": 0.006875776010751724,
+        "median_ms": 0.006873919963836669,
+        "min_ms": 0.006844159960746765,
+        "p95_ms": 0.006894720196723938
+      },
+      "scalar_site": {
+        "max_ms": 0.020307199954986574,
+        "mean_ms": 0.020221363282203676,
+        "median_ms": 0.020253119468688963,
+        "min_ms": 0.020127999782562255,
+        "p95_ms": 0.020280959606170653
+      },
+      "site_speedup": 1.1367734413486412,
+      "split_count": 16,
+      "transient_workspace_bytes": 32768
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 2.5,
+      "k": 8192,
+      "m": 8,
+      "multiblock_recovery": {
+        "max_ms": 0.004791679978370667,
+        "mean_ms": 0.004773817607760429,
+        "median_ms": 0.004773760139942169,
+        "min_ms": 0.0047532799839973446,
+        "p95_ms": 0.004776960015296936
+      },
+      "multiblock_site": {
+        "max_ms": 0.01808127999305725,
+        "mean_ms": 0.01802588802576065,
+        "median_ms": 0.018036159873008727,
+        "min_ms": 0.01791167974472046,
+        "p95_ms": 0.018056960105895997
+      },
+      "n": 2048,
+      "recovery_speedup": 1.488202113599001,
+      "scalar_recovery": {
+        "max_ms": 0.007158399820327759,
+        "mean_ms": 0.007104051220417022,
+        "median_ms": 0.007104319930076599,
+        "min_ms": 0.00707647979259491,
+        "p95_ms": 0.007116159796714783
+      },
+      "scalar_site": {
+        "max_ms": 0.02050879955291748,
+        "mean_ms": 0.020441619205474854,
+        "median_ms": 0.02044960021972656,
+        "min_ms": 0.020366079807281494,
+        "p95_ms": 0.02046911954879761
+      },
+      "site_speedup": 1.1338112083564733,
+      "split_count": 16,
+      "transient_workspace_bytes": 65536
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 2.5,
+      "k": 8192,
+      "m": 16,
+      "multiblock_recovery": {
+        "max_ms": 0.004961920082569122,
+        "mean_ms": 0.004955635178089141,
+        "median_ms": 0.004956159889698029,
+        "min_ms": 0.004942080080509186,
+        "p95_ms": 0.004959999918937683
+      },
+      "multiblock_site": {
+        "max_ms": 0.018358399868011476,
+        "mean_ms": 0.018197388803958894,
+        "median_ms": 0.018177600502967836,
+        "min_ms": 0.018122880458831786,
+        "p95_ms": 0.01831168055534363
+      },
+      "n": 2048,
+      "recovery_speedup": 1.4416322967859567,
+      "scalar_recovery": {
+        "max_ms": 0.007234560251235962,
+        "mean_ms": 0.007146764773130417,
+        "median_ms": 0.007144960165023803,
+        "min_ms": 0.007121919989585877,
+        "p95_ms": 0.007167999744415283
+      },
+      "scalar_site": {
+        "max_ms": 0.020534400939941407,
+        "mean_ms": 0.020469017601013183,
+        "median_ms": 0.020495359897613526,
+        "min_ms": 0.020310399532318116,
+        "p95_ms": 0.02052544116973877
+      },
+      "site_speedup": 1.1275063446502342,
+      "split_count": 16,
+      "transient_workspace_bytes": 131072
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 3,
+      "k": 8192,
+      "m": 1,
+      "multiblock_recovery": {
+        "max_ms": 0.0045888000726699825,
+        "mean_ms": 0.004576550400257111,
+        "median_ms": 0.004577279984951019,
+        "min_ms": 0.004548479914665222,
+        "p95_ms": 0.00458624005317688
+      },
+      "multiblock_site": {
+        "max_ms": 0.016936960220336913,
+        "mean_ms": 0.016863839924335478,
+        "median_ms": 0.01689567983150482,
+        "min_ms": 0.016722559928894043,
+        "p95_ms": 0.016919039487838745
+      },
+      "n": 2048,
+      "recovery_speedup": 1.5113254594124295,
+      "scalar_recovery": {
+        "max_ms": 0.006944640278816223,
+        "mean_ms": 0.006918054413795472,
+        "median_ms": 0.0069177597761154175,
+        "min_ms": 0.006908159852027893,
+        "p95_ms": 0.006924160122871399
+      },
+      "scalar_site": {
+        "max_ms": 0.01939903974533081,
+        "mean_ms": 0.019315814411640167,
+        "median_ms": 0.019284799695014954,
+        "min_ms": 0.019251840114593508,
+        "p95_ms": 0.01939584016799927
+      },
+      "site_speedup": 1.141404186593026,
+      "split_count": 16,
+      "transient_workspace_bytes": 8192
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 3,
+      "k": 8192,
+      "m": 2,
+      "multiblock_recovery": {
+        "max_ms": 0.004566400051116943,
+        "mean_ms": 0.004472524788975716,
+        "median_ms": 0.0044700799882411955,
+        "min_ms": 0.004430719912052155,
+        "p95_ms": 0.004500479996204376
+      },
+      "multiblock_site": {
+        "max_ms": 0.017084800004959107,
+        "mean_ms": 0.01685087364912033,
+        "median_ms": 0.016812800168991088,
+        "min_ms": 0.016782079935073854,
+        "p95_ms": 0.017015680074691772
+      },
+      "n": 2048,
+      "recovery_speedup": 1.539122398647999,
+      "scalar_recovery": {
+        "max_ms": 0.006973440051078797,
+        "mean_ms": 0.006880851209163665,
+        "median_ms": 0.0068800002336502075,
+        "min_ms": 0.006865919828414917,
+        "p95_ms": 0.006887040138244629
+      },
+      "scalar_site": {
+        "max_ms": 0.01931839942932129,
+        "mean_ms": 0.019253203141689303,
+        "median_ms": 0.019287360310554506,
+        "min_ms": 0.019041919708251955,
+        "p95_ms": 0.019312000274658202
+      },
+      "site_speedup": 1.1471831055321413,
+      "split_count": 16,
+      "transient_workspace_bytes": 16384
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 3,
+      "k": 8192,
+      "m": 4,
+      "multiblock_recovery": {
+        "max_ms": 0.004558080136775971,
+        "mean_ms": 0.004510911998152733,
+        "median_ms": 0.004510079920291901,
+        "min_ms": 0.004497280120849609,
+        "p95_ms": 0.004515199959278107
+      },
+      "multiblock_site": {
+        "max_ms": 0.016934399604797364,
+        "mean_ms": 0.016872595262527466,
+        "median_ms": 0.016882880330085753,
+        "min_ms": 0.016775039434432985,
+        "p95_ms": 0.016904319524765014
+      },
+      "n": 2048,
+      "recovery_speedup": 1.549737443549223,
+      "scalar_recovery": {
+        "max_ms": 0.007011839747428894,
+        "mean_ms": 0.006989721548557282,
+        "median_ms": 0.006989439725875854,
+        "min_ms": 0.006967679858207703,
+        "p95_ms": 0.006999040246009827
+      },
+      "scalar_site": {
+        "max_ms": 0.0192742395401001,
+        "mean_ms": 0.01921263356208801,
+        "median_ms": 0.01920192003250122,
+        "min_ms": 0.019157119989395142,
+        "p95_ms": 0.01926527976989746
+      },
+      "site_speedup": 1.1373604300376918,
+      "split_count": 16,
+      "transient_workspace_bytes": 32768
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 3,
+      "k": 8192,
+      "m": 8,
+      "multiblock_recovery": {
+        "max_ms": 0.004719359874725342,
+        "mean_ms": 0.004589203196763992,
+        "median_ms": 0.0045868799090385435,
+        "min_ms": 0.004576640129089355,
+        "p95_ms": 0.004592640101909637
+      },
+      "multiblock_site": {
+        "max_ms": 0.01728448033332825,
+        "mean_ms": 0.01717449607849121,
+        "median_ms": 0.01715839982032776,
+        "min_ms": 0.01712512016296387,
+        "p95_ms": 0.017238399982452392
+      },
+      "n": 2048,
+      "recovery_speedup": 1.5272080496315545,
+      "scalar_recovery": {
+        "max_ms": 0.007080960273742676,
+        "mean_ms": 0.00700559361577034,
+        "median_ms": 0.007005119919776917,
+        "min_ms": 0.006988800168037415,
+        "p95_ms": 0.00701312005519867
+      },
+      "scalar_site": {
+        "max_ms": 0.019425920248031615,
+        "mean_ms": 0.01936321920156479,
+        "median_ms": 0.019396160244941712,
+        "min_ms": 0.019234559535980224,
+        "p95_ms": 0.01941632032394409
+      },
+      "site_speedup": 1.1304177806815559,
+      "split_count": 16,
+      "transient_workspace_bytes": 65536
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 3,
+      "k": 8192,
+      "m": 16,
+      "multiblock_recovery": {
+        "max_ms": 0.004782080054283142,
+        "mean_ms": 0.004746963208913803,
+        "median_ms": 0.004746240079402924,
+        "min_ms": 0.004734080135822296,
+        "p95_ms": 0.00475136011838913
+      },
+      "multiblock_site": {
+        "max_ms": 0.0172160005569458,
+        "mean_ms": 0.01715212162733078,
+        "median_ms": 0.017156800031661985,
+        "min_ms": 0.017068159580230714,
+        "p95_ms": 0.01717632055282593
+      },
+      "n": 2048,
+      "recovery_speedup": 1.5140236820407516,
+      "scalar_recovery": {
+        "max_ms": 0.007227519750595093,
+        "mean_ms": 0.007185433596372605,
+        "median_ms": 0.007185919880867004,
+        "min_ms": 0.007168639898300171,
+        "p95_ms": 0.007193599939346314
+      },
+      "scalar_site": {
+        "max_ms": 0.019451520442962646,
+        "mean_ms": 0.0193819008231163,
+        "median_ms": 0.019381120204925537,
+        "min_ms": 0.019347840547561647,
+        "p95_ms": 0.019399679899215698
+      },
+      "site_speedup": 1.1296465639955402,
+      "split_count": 16,
+      "transient_workspace_bytes": 131072
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 3.5,
+      "k": 8192,
+      "m": 1,
+      "multiblock_recovery": {
+        "max_ms": 0.0042982399463653564,
+        "mean_ms": 0.004291225582361221,
+        "median_ms": 0.004293119907379151,
+        "min_ms": 0.0042284798622131345,
+        "p95_ms": 0.004296959936618805
+      },
+      "multiblock_site": {
+        "max_ms": 0.01798848032951355,
+        "mean_ms": 0.017752492809295653,
+        "median_ms": 0.01769695997238159,
+        "min_ms": 0.017669119834899903,
+        "p95_ms": 0.01794047951698303
+      },
+      "n": 2048,
+      "recovery_speedup": 1.6073345125273162,
+      "scalar_recovery": {
+        "max_ms": 0.006989439725875854,
+        "mean_ms": 0.006901369601488113,
+        "median_ms": 0.006900479793548584,
+        "min_ms": 0.006887040138244629,
+        "p95_ms": 0.0069062399864196775
+      },
+      "scalar_site": {
+        "max_ms": 0.020292479991912842,
+        "mean_ms": 0.02020526722669601,
+        "median_ms": 0.020270400047302246,
+        "min_ms": 0.019975039958953857,
+        "p95_ms": 0.020288000106811522
+      },
+      "site_speedup": 1.1454170704424287,
+      "split_count": 16,
+      "transient_workspace_bytes": 8192
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 3.5,
+      "k": 8192,
+      "m": 2,
+      "multiblock_recovery": {
+        "max_ms": 0.004531199932098389,
+        "mean_ms": 0.004510099193453789,
+        "median_ms": 0.004511359930038452,
+        "min_ms": 0.004446719884872437,
+        "p95_ms": 0.004517120122909546
+      },
+      "multiblock_site": {
+        "max_ms": 0.01769727945327759,
+        "mean_ms": 0.017651443147659304,
+        "median_ms": 0.017653759717941284,
+        "min_ms": 0.017598719596862794,
+        "p95_ms": 0.01767807960510254
+      },
+      "n": 2048,
+      "recovery_speedup": 1.5261740094804914,
+      "scalar_recovery": {
+        "max_ms": 0.006900479793548584,
+        "mean_ms": 0.006884300792217255,
+        "median_ms": 0.006885120272636413,
+        "min_ms": 0.006848000288009644,
+        "p95_ms": 0.006897919774055481
+      },
+      "scalar_site": {
+        "max_ms": 0.02012415885925293,
+        "mean_ms": 0.020079782366752626,
+        "median_ms": 0.02007519960403442,
+        "min_ms": 0.020054399967193604,
+        "p95_ms": 0.02011647939682007
+      },
+      "site_speedup": 1.1371628437670567,
+      "split_count": 16,
+      "transient_workspace_bytes": 16384
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 3.5,
+      "k": 8192,
+      "m": 4,
+      "multiblock_recovery": {
+        "max_ms": 0.0045036798715591434,
+        "mean_ms": 0.004451814410090447,
+        "median_ms": 0.00445248007774353,
+        "min_ms": 0.004387840032577515,
+        "p95_ms": 0.004456320106983185
+      },
+      "multiblock_site": {
+        "max_ms": 0.01801535964012146,
+        "mean_ms": 0.017905388796329497,
+        "median_ms": 0.017888960242271424,
+        "min_ms": 0.017866239547729493,
+        "p95_ms": 0.017991039752960205
+      },
+      "n": 2048,
+      "recovery_speedup": 1.5311916082710333,
+      "scalar_recovery": {
+        "max_ms": 0.006866559982299804,
+        "mean_ms": 0.006817331206798553,
+        "median_ms": 0.006817600131034851,
+        "min_ms": 0.006796799898147583,
+        "p95_ms": 0.006828799843788147
+      },
+      "scalar_site": {
+        "max_ms": 0.02027008056640625,
+        "mean_ms": 0.020220358633995055,
+        "median_ms": 0.02024127960205078,
+        "min_ms": 0.0201094388961792,
+        "p95_ms": 0.02026047945022583
+      },
+      "site_speedup": 1.1314955887833464,
+      "split_count": 16,
+      "transient_workspace_bytes": 32768
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 3.5,
+      "k": 8192,
+      "m": 8,
+      "multiblock_recovery": {
+        "max_ms": 0.004581759870052338,
+        "mean_ms": 0.004495596805214882,
+        "median_ms": 0.004492799937725067,
+        "min_ms": 0.0044787201285362245,
+        "p95_ms": 0.004504320025444031
+      },
+      "multiblock_site": {
+        "max_ms": 0.01808832049369812,
+        "mean_ms": 0.017997875225543976,
+        "median_ms": 0.018014400005340575,
+        "min_ms": 0.017923200130462648,
+        "p95_ms": 0.018039040565490723
+      },
+      "n": 2048,
+      "recovery_speedup": 1.5515669801035932,
+      "scalar_recovery": {
+        "max_ms": 0.007018880248069763,
+        "mean_ms": 0.0069711615860462185,
+        "median_ms": 0.006970880031585694,
+        "min_ms": 0.0069606399536132815,
+        "p95_ms": 0.006977279782295227
+      },
+      "scalar_site": {
+        "max_ms": 0.020391039848327637,
+        "mean_ms": 0.020353184032440182,
+        "median_ms": 0.02034816026687622,
+        "min_ms": 0.020312960147857665,
+        "p95_ms": 0.020385921001434326
+      },
+      "site_speedup": 1.1295497080582075,
+      "split_count": 16,
+      "transient_workspace_bytes": 65536
+    },
+    {
+      "additional_kernel_launches": 1,
+      "better_than_phase23_site": true,
+      "bit_exact": true,
+      "bits": 3.5,
+      "k": 8192,
+      "m": 16,
+      "multiblock_recovery": {
+        "max_ms": 0.004779520034790039,
+        "mean_ms": 0.004712787202000618,
+        "median_ms": 0.004713599979877472,
+        "min_ms": 0.004675840139389038,
+        "p95_ms": 0.00472896009683609
+      },
+      "multiblock_site": {
+        "max_ms": 0.01839743971824646,
+        "mean_ms": 0.018307520020008086,
+        "median_ms": 0.01830656051635742,
+        "min_ms": 0.018284159898757934,
+        "p95_ms": 0.01831936001777649
+      },
+      "n": 2048,
+      "recovery_speedup": 1.5090292451096237,
+      "scalar_recovery": {
+        "max_ms": 0.007152000069618225,
+        "mean_ms": 0.007114035189151764,
+        "median_ms": 0.00711296021938324,
+        "min_ms": 0.007056000232696533,
+        "p95_ms": 0.007137280106544495
+      },
+      "scalar_site": {
+        "max_ms": 0.020616319179534912,
+        "mean_ms": 0.020583807969093326,
+        "median_ms": 0.02058848023414612,
+        "min_ms": 0.02040895938873291,
+        "p95_ms": 0.02060800075531006
+      },
+      "site_speedup": 1.1246503796138951,
+      "split_count": 16,
+      "transient_workspace_bytes": 131072
+    }
+  ],
+  "site_geomean_speedup": 1.1387520158675284,
+  "source_fingerprint": "1d42a98c4fb6ea0740013f385e90dd2ff9c33734875b225939d5b71689135798",
+  "timing": {
+    "host_launch_gaps_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 50,
+    "samples": 100,
+    "warmup": 30
+  },
+  "workload": "H100 Llama 3.2 1B P32 down decode and exact split-16 FP16 recovery"
+}

@@ -54,6 +54,12 @@ from ..nn_modules.qlinear.qvq import QVQLinear
 from ..quantization.config import FORMAT, METHOD, GPTQConfig, HessianConfig, QVQConfig
 from ..quantization.gptq import GPTQ
 from ..quantization.qvq import QVQQuantizationTelemetry, quantize_qvq_linear
+from ..quantization.qvq_axis_policy import (
+    qvq_shared_input_seed,
+    resolve_qvq_transform_axes,
+    set_qvq_transform_axis_metadata,
+    validate_qvq_transform_axis_overrides,
+)
 from ..quantization.swiglu import (
     apply_swiglu_reparameterization,
     choose_swiglu_scales,
@@ -129,6 +135,8 @@ class QVQProcessor(LoopProcessor):
         require_fwd: bool = True,
         calibration_concat_separator: Optional[str] = None,
         execution_config: Optional[ExecutionConfig] = None,
+        grouped_p32_candidates: object = None,
+        transform_axis_overrides: object = None,
     ):
         """Initialize QVQ lifecycle state and validate currently supported capture modes."""
 
@@ -188,6 +196,14 @@ class QVQProcessor(LoopProcessor):
         self._atomic_swiglu_inputs: Dict[str, torch.Tensor] = {}
         self._atomic_swiglu_candidates: Dict[str, Dict[str, Any]] = {}
         self._atomic_swiglu_lock = threading.RLock()
+        # Architecture definitions own topology.  The generic quantizer only
+        # consumes relative sibling declarations and per-module transform-axis
+        # flags; it never names Qwen, attention roles, or projection classes.
+        self._grouped_p32_candidates = copy.deepcopy(grouped_p32_candidates)
+        self._transform_axis_overrides = validate_qvq_transform_axis_overrides(
+            transform_axis_overrides
+        )
+        set_qvq_transform_axis_metadata(qcfg, self._transform_axis_overrides)
 
     @property
     def smooth_swiglu_stats(self) -> Dict[str, Dict[str, Any]]:
@@ -683,6 +699,9 @@ class QVQProcessor(LoopProcessor):
         module_full_name: str,
         module_qcfg: QVQConfig,
         serialized_tensors: Dict[str, torch.Tensor],
+        *,
+        input_hadamard: bool = True,
+        output_hadamard: bool = True,
     ) -> QVQLinear:
         tensors = {
             name: value.detach().to(device=original.weight.device)
@@ -704,6 +723,8 @@ class QVQProcessor(LoopProcessor):
             dual_v2=module_qcfg.format == FORMAT.QVQ_DUAL_V2,
             v2b4_p64=module_qcfg.format == FORMAT.QVQ_V2B4_P64,
             v2b2_p32=module_qcfg.format == FORMAT.QVQ_V2B2_P32,
+            input_hadamard=input_hadamard,
+            output_hadamard=output_hadamard,
         ).eval()
         candidate.post_init()
         return candidate
@@ -720,6 +741,8 @@ class QVQProcessor(LoopProcessor):
             module_full_name,
             module_qcfg,
             result.serialized_tensors(),
+            input_hadamard=result.input_hadamard,
+            output_hadamard=result.output_hadamard,
         )
 
     def _select_module_granular_replay_candidate(
@@ -982,6 +1005,8 @@ class QVQProcessor(LoopProcessor):
                     name: tensor.detach().to(device="cpu", copy=True).contiguous()
                     for name, tensor in result.serialized_tensors().items()
                 },
+                "input_hadamard": result.input_hadamard,
+                "output_hadamard": result.output_hadamard,
             }
         with self._atomic_swiglu_lock:
             self._atomic_swiglu_candidates[module.full_name] = {
@@ -1082,6 +1107,12 @@ class QVQProcessor(LoopProcessor):
                     role_names[role],
                     records[role]["module_qcfg"],
                     records[role]["candidates"][candidate_id]["serialized_tensors"],
+                    input_hadamard=records[role]["candidates"][candidate_id][
+                        "input_hadamard"
+                    ],
+                    output_hadamard=records[role]["candidates"][candidate_id][
+                        "output_hadamard"
+                    ],
                 )
                 setattr(model.get_submodule(parents[role]), role_names[role].rsplit(".", 1)[-1], candidate)
 
@@ -1938,6 +1969,12 @@ class QVQProcessor(LoopProcessor):
 
             canonical_weight = capture.clone_module(copy=True, device=target_device)
             seed = zlib.crc32(module.full_name.encode("utf-8")) & 0x7FFFFFFF
+            input_sign_seed = qvq_shared_input_seed(
+                module.full_name, self._grouped_p32_candidates
+            )
+            input_hadamard, output_hadamard = resolve_qvq_transform_axes(
+                module.full_name, self._transform_axis_overrides
+            )
             damp_percent = module_qcfg.yaqa.regularization if module_qcfg.rounding == "yaqa" else 0.01
             telemetry = (
                 QVQQuantizationTelemetry()
@@ -1964,6 +2001,12 @@ class QVQProcessor(LoopProcessor):
                 "output_hessian": output_hessian,
                 "bias": None if module.bias is None else module.bias.detach().to(target_device),
                 "seed": seed,
+                "input_sign_seed": input_sign_seed,
+                "input_hadamard": input_hadamard,
+                "output_hadamard": output_hadamard,
+                "allow_folded_axis_serialization": bool(
+                    self._transform_axis_overrides
+                ),
                 "damp_percent": damp_percent,
                 "codebook_version": module_qcfg.codebook,
                 "vector_size": module_qcfg.vector_size,
@@ -2053,6 +2096,8 @@ class QVQProcessor(LoopProcessor):
                     module_qcfg.format == FORMAT.QVQ_DUAL_V2,
                     module_qcfg.format == FORMAT.QVQ_V2B4_P64,
                     module_qcfg.format == FORMAT.QVQ_V2B2_P32,
+                    result.input_hadamard,
+                    result.output_hadamard,
                 )
             restored_weight = self._restore_module_weight(module, result.weight)
             module.weight.data = restored_weight.to(dtype=module.weight.dtype)
@@ -2213,6 +2258,8 @@ class QVQProcessor(LoopProcessor):
                 dual_v2 = runtime_config[5] if len(runtime_config) > 5 else False
                 v2b4_p64 = runtime_config[6] if len(runtime_config) > 6 else False
                 v2b2_p32 = runtime_config[7] if len(runtime_config) > 7 else False
+                input_hadamard = runtime_config[8] if len(runtime_config) > 8 else True
+                output_hadamard = runtime_config[9] if len(runtime_config) > 9 else True
                 for tensor_name in ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"):
                     tensor = module.state.get(tensor_name)
                     if tensor is not None:
@@ -2241,6 +2288,8 @@ class QVQProcessor(LoopProcessor):
                 dual_v2=dual_v2,
                 v2b4_p64=v2b4_p64,
                 v2b2_p32=v2b2_p32,
+                input_hadamard=input_hadamard,
+                output_hadamard=output_hadamard,
             )
             # Materialized layer leaves may be freshly constructed with
             # ``training=True`` even while the authoritative model is in eval

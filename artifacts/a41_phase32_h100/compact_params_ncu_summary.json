@@ -1,0 +1,44 @@
+{
+  "baseline_commit": "a85e71d6",
+  "candidate_commit": "0835f041",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "kernel": "grouped W2 gate/up P32 TMA RS-WGMMA",
+  "m": 1,
+  "k": 2048,
+  "child_n": [8192, 8192],
+  "baseline": {
+    "launch_params_type": "HopperGroupedP32LaunchParams",
+    "launch_params_bytes": 128,
+    "ncu_duration_us": 28.960,
+    "executed_warp_instructions": 10290194,
+    "static_sass_instructions": 1760,
+    "registers_per_thread": 48,
+    "stack_bytes_cuobjdump": 112,
+    "constant0_bytes": 1552,
+    "static_shared_memory_kib": 26.240,
+    "eligible_warps_per_scheduler_cycle": 0.524327,
+    "long_scoreboard_per_issue_active": 1.384487,
+    "wait_stall_per_issue_active": 0.804993,
+    "dram_throughput_percent": 12.169
+  },
+  "candidate": {
+    "launch_params_type": "HopperFixedGateUpLaunchParams",
+    "launch_params_bytes": 8,
+    "ncu_duration_us": 28.960,
+    "executed_warp_instructions": 10256914,
+    "static_sass_instructions": 1736,
+    "registers_per_thread": 48,
+    "stack_bytes_cuobjdump": 8,
+    "constant0_bytes": 1448,
+    "static_shared_memory_kib": 26.240,
+    "eligible_warps_per_scheduler_cycle": 0.524589,
+    "long_scoreboard_per_issue_active": 1.399246,
+    "wait_stall_per_issue_active": 0.797651,
+    "dram_throughput_percent": 12.180081
+  },
+  "profiler": "Nsight Compute 2026.2.1, 19 replay passes; CUDA cuobjdump static SASS and resource usage"
+}

@@ -1,0 +1,36 @@
+{
+  "baseline_commit": "ace9b512",
+  "candidate": "uncommitted exact W2 lane-static extraction",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "kernel": "grouped W2 gate/up P32 TMA RS-WGMMA",
+  "m": 1,
+  "k": 2048,
+  "child_n": [8192, 8192],
+  "baseline": {
+    "ncu_duration_us": 29.376,
+    "executed_warp_instructions": 10408466,
+    "registers_per_thread": 48,
+    "static_shared_memory_kib": 26.24,
+    "achieved_occupancy_percent": 15.0527,
+    "eligible_warps_per_scheduler_cycle": 0.499214,
+    "long_scoreboard_per_issue_active": 1.423934,
+    "wait_stall_per_issue_active": 0.95241,
+    "dram_throughput_percent": 12.01163
+  },
+  "candidate": {
+    "ncu_duration_us": 30.816,
+    "executed_warp_instructions": 10408478,
+    "registers_per_thread": 48,
+    "static_shared_memory_kib": 26.24,
+    "achieved_occupancy_percent": 15.238332,
+    "eligible_warps_per_scheduler_cycle": 0.476497,
+    "long_scoreboard_per_issue_active": 1.475572,
+    "wait_stall_per_issue_active": 1.108387,
+    "dram_throughput_percent": 11.44802
+  },
+  "profiler": "Nsight Compute 2026.2.1, 19 replay passes, source-correlated SASS"
+}
