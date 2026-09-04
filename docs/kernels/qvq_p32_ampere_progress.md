@@ -3684,6 +3684,17 @@ but not invoked; that control-flow bug was fixed before collecting these
 numbers.  The first vector-store predicate was also narrowed to static-N
 launches so generic/non-specialized N remains boundary-safe.
 
+## v75 rejected Static-N/Static-K stride folding
+
+The post-commit SASS pass attempted to replace the m2 kernel's runtime
+`size_n/size_k` stride arguments with compile-time `StaticN/StaticK` values.
+The generated specialization remained exact for all four transition widths,
+but regressed the `N=1024,M=512` timing from about `0.265 ms` to `0.289 ms`
+and similarly slowed the first wide-N cases.  The change was reverted; the
+committed row-reuse path retains the compiler's existing SSA treatment of these
+values.  NCU for the retained commit reported no local/shared spills, so no
+register-pressure workaround was needed.
+
 ## Reproduction
 
 ```bash
