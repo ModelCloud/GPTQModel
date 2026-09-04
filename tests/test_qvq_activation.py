@@ -204,6 +204,7 @@ def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(
         value_view,
         mask,
         scaling=0.125,
+        output_attentions=True,
     )
     layer = cache.layers[0]
     dense_key = (layer.keys.float() * layer.key_scales).repeat_interleave(4, dim=1)

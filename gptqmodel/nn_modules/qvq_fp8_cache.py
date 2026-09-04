@@ -89,7 +89,7 @@ def qvq_fp8_attention_forward(
 ):
     """Consume per-token-scaled E4M3 K/V without a dense prefix materialization."""
 
-    del kwargs
+    output_attentions = bool(kwargs.get("output_attentions", False))
     if isinstance(key, torch.Tensor) and isinstance(value, torch.Tensor):
         # `use_cache=False` has no retained prefix to consume. Keep that valid
         # without weakening the cache-enabled A8 contract below.
@@ -176,9 +176,12 @@ def qvq_fp8_attention_forward(
             probabilities = F.dropout(
                 probabilities, p=dropout, training=module.training
             )
-            batch_weights.append(
-                probabilities.reshape(groups, query_tokens, key_tokens).to(query.dtype)
-            )
+            if output_attentions:
+                batch_weights.append(
+                    probabilities.reshape(groups, query_tokens, key_tokens).to(
+                        query.dtype
+                    )
+                )
 
             # Absorb each V row's dynamic scale into the probability column.
             # The second native E4M3 GEMM can then consume the cached V payload
@@ -215,14 +218,15 @@ def qvq_fp8_attention_forward(
                 .to(query.dtype)
             )
         outputs.append(torch.cat(batch_outputs, dim=0))
-        weights.append(torch.cat(batch_weights, dim=0))
+        if output_attentions:
+            weights.append(torch.cat(batch_weights, dim=0))
 
     key.layer.native_attention_calls += 1
     key.layer.native_qk_fp8_mm_calls += batch_size * kv_heads
     key.layer.native_pv_fp8_mm_calls += batch_size * kv_heads
     key.layer.native_attention_query_tokens += batch_size * query_heads * query_tokens
     output = torch.stack(outputs, dim=0).transpose(1, 2).contiguous()
-    return output, torch.stack(weights, dim=0)
+    return output, torch.stack(weights, dim=0) if output_attentions else None
 
 
 class QVQFP8CacheLayer(DynamicLayer):
