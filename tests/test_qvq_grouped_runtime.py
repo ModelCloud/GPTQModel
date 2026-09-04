@@ -111,9 +111,9 @@ def test_exact_silu_activation_recognition_is_narrow():
 @pytest.mark.parametrize(
     ("transition_bits", "expected"),
     (
-        (4, ((10, 20, 20), (10, 20), (10, 10))),
-        (5, ((10, 20, 20), (10, 20), (10, 10))),
-        (6, ((10, 20, 20), (4, 20), (10, 10))),
+        (4, ((10, 20, 20), (10, 20), (5, 5))),
+        (5, ((10, 20, 20), (10, 20), (5, 5))),
+        (6, ((10, 20, 20), (4, 20), (5, 5))),
         (7, ((4, 20, 20), (4, 4), (5, 5))),
     ),
 )
@@ -684,7 +684,7 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_replay_exact():
     assert torch.equal(captured, eager)
     torch.testing.assert_close(eager, plain, rtol=0, atol=2e-3)
     telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
-    assert telemetry["active_split_counts"] == (10, 10)
+    assert telemetry["active_split_counts"] == (5, 5)
     assert telemetry["fused_mlp_launches"] == 2
     assert telemetry["h100_folded_qwen_mlp_launches"] == 2
     assert telemetry["h100_folded_qwen_fused_precondition_launches"] == 2

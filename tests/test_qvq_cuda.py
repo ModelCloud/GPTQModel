@@ -1443,11 +1443,13 @@ def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(m, w
 
 @pytest.mark.parametrize("m", (1, 16))
 @pytest.mark.parametrize("with_bias", (False, True))
-def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(m, with_bias):
+@pytest.mark.parametrize("split_count", (5, 10))
+def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
+    m, with_bias, split_count
+):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("ordered folded SwiGLU precondition requires Hopper")
     n = 17408
-    split_count = 10
     generator = torch.Generator(device="cuda").manual_seed(20260960 + m)
     partials = torch.randn(
         (2, split_count, 16, n), generator=generator, device="cuda"

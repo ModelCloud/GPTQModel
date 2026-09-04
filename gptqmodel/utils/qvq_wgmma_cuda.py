@@ -262,9 +262,13 @@ def qvq_h100_grouped_ordered_split_counts(
                 7: (4, 4),
             },
             (17408, 17408): {
-                4: (10, 10),
-                5: (10, 10),
-                6: (10, 10),
+                # The complete fused-MLP sweep found split five faster than
+                # split ten at every M1--M16 row count.  Four K256 stages per
+                # CTA amortize the grouped decoder setup better than the
+                # previous two-stage split-ten schedule.
+                4: (5, 5),
+                5: (5, 5),
+                6: (5, 5),
                 7: (5, 5),
             },
         }

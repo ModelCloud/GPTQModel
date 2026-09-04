@@ -2805,8 +2805,8 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
   TORCH_CHECK(partials.is_cuda() && partials.scalar_type() == at::kFloat &&
                   partials.is_contiguous(),
               "ordered folded SwiGLU partials must be contiguous CUDA float32");
-  TORCH_CHECK(split_count == 10,
-              "ordered folded SwiGLU currently requires split count ten");
+  TORCH_CHECK(split_count == 5 || split_count == 10,
+              "ordered folded SwiGLU requires split count five or ten");
   TORCH_CHECK(logical_rows >= 1 && logical_rows <= 16,
               "ordered folded SwiGLU requires one through sixteen logical rows");
   const int64_t n64 = gate_scale.numel();
@@ -2865,9 +2865,10 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
   const float* up_bias_ptr = up_bias.has_value()
       ? up_bias->const_data_ptr<float>()
       : nullptr;
-#define QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(HAS_GATE_BIAS, HAS_UP_BIAS)           \
+#define QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(                               \
+    SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS)                                  \
   qvq_folded_swiglu_precondition_ordered_fp32_kernel<                           \
-      10, HAS_GATE_BIAS, HAS_UP_BIAS><<<blocks, kThreads, 0, stream>>>(         \
+      SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS><<<blocks, kThreads, 0, stream>>>(\
       partials.const_data_ptr<float>(),                                         \
       gate_scale.const_data_ptr<float>(),                                       \
       up_scale.const_data_ptr<float>(),                                         \
@@ -2877,16 +2878,25 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
       reinterpret_cast<half*>(output.mutable_data_ptr<at::Half>()),             \
       logical_values,                                                           \
       n)
-  if (gate_bias.has_value() && up_bias.has_value()) {
-    QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(true, true);
-  } else if (gate_bias.has_value()) {
-    QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(true, false);
-  } else if (up_bias.has_value()) {
-    QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(false, true);
+#define QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(SPLIT_COUNT)                         \
+  do {                                                                          \
+    if (gate_bias.has_value() && up_bias.has_value()) {                         \
+      QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(SPLIT_COUNT, true, true);          \
+    } else if (gate_bias.has_value()) {                                         \
+      QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(SPLIT_COUNT, true, false);         \
+    } else if (up_bias.has_value()) {                                           \
+      QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(SPLIT_COUNT, false, true);         \
+    } else {                                                                    \
+      QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(SPLIT_COUNT, false, false);        \
+    }                                                                           \
+  } while (false)
+  if (split_count == 5) {
+    QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(5);
   } else {
-    QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(false, false);
+    QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(10);
   }
 #undef QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU
+#undef QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }

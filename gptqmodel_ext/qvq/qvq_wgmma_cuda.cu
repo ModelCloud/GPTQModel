@@ -1661,7 +1661,8 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
   const bool use_h100_qwen_ordered_prefetch =
       OrderedSplit && size_k == 5120 && segment_count == 2 &&
       out_features[0] == 17408 && out_features[1] == 17408 &&
-      split_counts[0] == 10 && split_counts[1] == 10 &&
+      split_counts[0] == split_counts[1] &&
+      (split_counts[0] == 5 || split_counts[0] == 10) &&
       TransitionBits == kW3TransitionBits &&
       std::strcmp(properties.name, "NVIDIA H100") == 0;
   if (use_wide_gate_up) {

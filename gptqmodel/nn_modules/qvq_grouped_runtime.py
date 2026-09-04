@@ -799,9 +799,11 @@ class QVQHopperGroupedRuntime:
             )
             use_ordered_reduction_fusion = (
                 use_h100_folded_fusion
-                and all(segment.split_count == 10 for segment in payload.plan.segments)
+                and len({segment.split_count for segment in payload.plan.segments}) == 1
+                and payload.plan.segments[0].split_count in (5, 10)
             )
             if use_ordered_reduction_fusion:
+                gate_up_split_count = payload.plan.segments[0].split_count
                 partials = self._execute(
                     x,
                     recover=False,
@@ -814,7 +816,7 @@ class QVQHopperGroupedRuntime:
                     gate_bias=children[0]._cached_cast("bias", torch.float16, torch.float32),
                     up_bias=children[1]._cached_cast("bias", torch.float16, torch.float32),
                     down_scale=down._cached_cast("SU", torch.float16),
-                    split_count=10,
+                    split_count=gate_up_split_count,
                     logical_rows=rows,
                 )
                 self.telemetry.h100_folded_qwen_fused_precondition_launches += 1
