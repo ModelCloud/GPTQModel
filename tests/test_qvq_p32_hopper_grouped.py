@@ -23,6 +23,7 @@ from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_grouped_ordered_packed,
     qvq_p32_window_wgmma_grouped_ordered_partials_packed,
     qvq_p32_window_wgmma_grouped_packed,
+    qvq_p32_window_wgmma_grouped_reuse2_packed,
     qvq_p32_window_wgmma_m16_tma,
     qvq_p32_window_wgmma_m16_tma_ordered_split,
     qvq_pack_p32_window_hopper_group,
@@ -326,6 +327,7 @@ def test_grouped_hopper_large_m_is_exact_to_m16_tiles_and_graph_safe(
     )
     payload = qvq_pack_p32_window_hopper_group(windows, selectors, plan)
     actual = qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
+    reused = qvq_p32_window_wgmma_grouped_reuse2_packed(input, payload, levels)
     tiled = tuple(
         torch.cat(
             tuple(
@@ -340,7 +342,7 @@ def test_grouped_hopper_large_m_is_exact_to_m16_tiles_and_graph_safe(
     )
 
     for child, expected, window, child_selectors, width, alt_id in zip(
-        actual,
+        reused,
         tiled,
         windows,
         selectors,
@@ -361,12 +363,16 @@ def test_grouped_hopper_large_m_is_exact_to_m16_tiles_and_graph_safe(
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        captured = qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
+        captured = qvq_p32_window_wgmma_grouped_reuse2_packed(input, payload, levels)
     graph.replay()
     torch.cuda.synchronize(device)
     assert all(
         torch.equal(child, expected)
-        for child, expected in zip(captured, actual, strict=True)
+        for child, expected in zip(captured, reused, strict=True)
+    )
+    assert all(
+        torch.equal(child, expected)
+        for child, expected in zip(reused, actual, strict=True)
     )
 
 

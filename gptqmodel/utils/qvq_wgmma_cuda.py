@@ -115,6 +115,8 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m16_tma_grouped",
         "p32_window_m16_tma_grouped_ordered_split",
         "p32_window_m16_tma_grouped_ordered_partials",
+        "p32_window_m32_tma_grouped_reuse2",
+        "p32_window_m32_tma_grouped_ordered_reuse2",
     ),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_WGMMA_BUILD_ROOT",
@@ -688,6 +690,53 @@ def qvq_p32_window_wgmma_grouped_ordered_partials_packed(
     )
 
 
+def qvq_p32_window_wgmma_grouped_reuse2_packed(
+    input: torch.Tensor,
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Decode once for each pair of M16 row tiles in a grouped Hopper grid."""
+
+    plan = payload.plan
+    rows = int(input.shape[0]) if input.ndim == 2 else 0
+    if (
+        input.ndim != 2
+        or input.shape[1] != plan.in_features
+        or rows < 32
+        or rows > 4096
+        or rows % 32
+    ):
+        raise ValueError(
+            "grouped Hopper P32 row-reuse input requires M in [32, 4096] "
+            "and divisible by 32"
+        )
+    widths = [segment.out_features for segment in plan.segments]
+    ordered = any(segment.split_count != 1 for segment in plan.segments)
+    op_name = (
+        "p32_window_m32_tma_grouped_ordered_reuse2"
+        if ordered
+        else "p32_window_m32_tma_grouped_reuse2"
+    )
+    output = _QVQ_WGMMA_EXTENSION.op(op_name)(
+        input,
+        payload.trellis,
+        levels,
+        payload.bank_ids,
+        plan.transition_bits,
+        widths,
+        [segment.bank_alt_id for segment in plan.segments],
+        [segment.split_count for segment in plan.segments],
+    )
+    return tuple(
+        child.reshape(rows, width)
+        for child, width in zip(
+            torch.split(output, [rows * width for width in widths]),
+            widths,
+            strict=True,
+        )
+    )
+
+
 def qvq_p32_window_wgmma_grouped(
     input: torch.Tensor,
     trellises: Sequence[torch.Tensor],
@@ -744,6 +793,7 @@ __all__ = [
     "qvq_p32_window_wgmma_grouped_ordered_packed",
     "qvq_p32_window_wgmma_grouped_ordered_partials_packed",
     "qvq_p32_window_wgmma_grouped_packed",
+    "qvq_p32_window_wgmma_grouped_reuse2_packed",
     "qvq_p32_window_wgmma_m16_tma",
     "qvq_p32_window_wgmma_m16_tma_ordered_split",
     "qvq_p32_window_wgmma_w3_m16",

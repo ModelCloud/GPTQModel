@@ -80,3 +80,21 @@ fragments rather than only increasing the row-grid size.
 All sixteen M128/M256 cells improve over the preceding planar fallback.  The
 largest maximum absolute error is `1.741e-5`; the M128 and M256 CUDA Graph
 tests are bit-exact to the corresponding sequence of M16 row tiles.
+
+## M32/M64 decoded-weight reuse candidate
+
+The reuse-2 CTA loads two M16 activation tiles, decodes each P32 fragment once,
+and issues two independent WGMMA operations before overwriting the fragment.
+The first W3 complete-site acceptance run is:
+
+| Rate | Site | M x K x aggregate N | QVQ us | vs prior row grid | vs Marlin W4 | vs Machete W4 | Better than last |
+| ---: | :--- | ---: | ---: | ---: | ---: | ---: | :---: |
+| W3 | QKV | 32 x 2048 x 3072 | 35.775 | 1.120x | 2.561x | 1.041x | Yes |
+| W3 | QKV | 64 x 2048 x 3072 | 44.474 | 1.117x | 3.129x | 0.856x | Yes |
+| W3 | gate/up | 32 x 2048 x 16384 | 54.819 | 1.162x | 0.472x | 0.573x | Yes |
+| W3 | gate/up | 64 x 2048 x 16384 | 82.642 | 1.163x | 0.466x | 0.426x | Yes |
+
+The candidate is bit-exact to the ordinary row grid and tiled-M16 reference
+for W2, W2.5, W3, and W3.5 at M32, M64, M128, and M256.  CUDA Graph replay is
+also exact.  The first W3 timing promotes reuse-2; the full-rate matrix remains
+the next benchmark gate.
