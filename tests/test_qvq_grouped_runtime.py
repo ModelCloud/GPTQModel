@@ -10,7 +10,7 @@ import pytest
 import torch
 from torch import nn
 
-from gptqmodel.models.base import BaseQModel
+from gptqmodel.models.base import BaseQModel, _qvq_quantization_group_candidates
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.nn_modules.qvq_grouped_runtime import (
     _is_exact_silu_activation,
@@ -117,6 +117,29 @@ def test_exact_silu_activation_recognition_is_narrow():
     assert not _is_exact_silu_activation(nn.SiLU(inplace=True))
     assert not _is_exact_silu_activation(nn.GELU())
     assert not _is_exact_silu_activation(lambda value: torch.nn.functional.silu(value))
+
+
+def test_quantization_uses_the_same_role_groups_as_runtime_fusion():
+    tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1:o"),
+            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+        },
+    ]
+    merged = _qvq_quantization_group_candidates(
+        tree,
+        {"qkv": (("in_proj_qkv", "in_proj_z"),)},
+    )
+    assert merged == {
+        "qkv": (
+            ("in_proj_qkv", "in_proj_z"),
+            ("q_proj", "k_proj", "v_proj"),
+        ),
+        "gate_up": (("gate_proj", "up_proj"),),
+    }
 
 
 @pytest.mark.parametrize(

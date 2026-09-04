@@ -54,6 +54,14 @@ A8 until independently validated. Telemetry adds:
 Gate: on H200, M=1/2/4/8/16 grouped A8 is bit-exact with independent A8 child
 execution and reports exactly one shared FP8 quantization.
 
+The quantization lifecycle now derives ordinary QKV and gate/up topology from
+the same `module_tree` roles used by runtime fusion, then assigns one layer-local
+input sign seed to each sibling group. Previously only architecture-specific
+`qvq_grouped_p32_candidates` received shared SU signs; ordinary Llama P32
+checkpoints therefore could not fuse even though inference discovered their
+roles. Existing checkpoints with different sibling SU tensors remain valid but
+cannot be retrofitted without requantization.
+
 ### Phase 3 — prove the native FP8 WGMMA atom (complete)
 
 The H200 compile-and-run smoke uses the SM90A register/shared
@@ -78,6 +86,30 @@ Calibration gate: add the extra P32-operand quantization error to the calibratio
 objective. The Hessian and quality report must describe the exact scaled E4M3
 operand grid used by the kernel, following the NVFP4 branch's deployed-operand
 principle.
+
+Use a teacher-targeted two-pass solve rather than recursively quantizing P32
+weights:
+
+1. Preserve the original BF16/FP16 teacher weights and capture dense teacher
+   outputs `Y`.
+2. Form the exact deployed activation operand `Z`: shared-input quantization,
+   SU/Hadamard, the final scaled E4M3 operand rounding consumed by WGMMA, and
+   the same logical-M padding policy.
+3. Accumulate both `G = Z Z^T` and `C = Y Z^T`. A `G`-only Hessian optimizes
+   `(W - Wq) Z` but cannot compensate the activation bias between the dense
+   teacher input and `Z`.
+4. Produce the first P32 encoding from the original teacher weights/targets.
+5. Replay the quantized prefix through the real H200 FP8 kernel, recapture the
+   deployed student `Z`, and re-encode once from the original teacher weights
+   against the dense teacher targets. Never use reconstructed P32 weights as
+   the source of a later quantization pass.
+6. With P32 codes frozen, use disjoint held-out block replay to fit only safe
+   recovery variables (SV/bias and activation clipping/scale policy). Bank
+   family reselection is allowed only when held-out teacher loss improves.
+
+The comparison boundary is the real FP32 WGMMA accumulator followed by the
+existing output recovery and BF16 model cast. The accumulator itself is not
+stored as FP8; each following linear quantizes its own actual input operand.
 
 ### Phase 5 — native FP8 KV attention (pending)
 

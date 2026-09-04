@@ -268,6 +268,34 @@ modeling_utils.check_support_param_buffer_assignment = check_support_param_buffe
 
 log = setup_logger()
 
+
+def _qvq_quantization_group_candidates(
+    module_tree: object,
+    declared: object,
+) -> Optional[Dict[str, tuple[tuple[str, ...], ...]]]:
+    """Merge ordinary role groups with architecture-specific P32 groups.
+
+    Quantization must choose shared input signs from the same topology that
+    inference fusion later discovers. Otherwise an apparently compatible
+    checkpoint receives independent SU vectors and can never install its
+    grouped P32 runtime.
+    """
+
+    from ..nn_modules.fused_quant_linear import get_module_tree_fusion_candidates
+
+    qkv, gate_up = get_module_tree_fusion_candidates(module_tree)
+    if declared is not None and not isinstance(declared, dict):
+        raise TypeError("qvq_grouped_p32_candidates must be a dictionary")
+    merged = copy.deepcopy(declared or {})
+    discovered = {"qkv": qkv, "gate_up": gate_up}
+    for category, groups in discovered.items():
+        existing = tuple(tuple(group) for group in merged.get(category, ()))
+        merged[category] = tuple(
+            dict.fromkeys((*existing, *(tuple(group) for group in groups)))
+        )
+    return None if not any(merged.values()) else merged
+
+
 class BaseQModel(nn.Module):
     # name of lm_head
     lm_head: str = "lm_head"
@@ -1808,6 +1836,14 @@ class BaseQModel(nn.Module):
 
             if needs_lora:
                 raise NotImplementedError("QVQ quantization does not support adapter/EoRA generation.")
+            grouped_p32_candidates = getattr(
+                self, "qvq_grouped_p32_candidates", None
+            )
+            if self.quantize_config.format == FORMAT.QVQ_V2B2_P32:
+                grouped_p32_candidates = _qvq_quantization_group_candidates(
+                    getattr(self, "module_tree", None),
+                    grouped_p32_candidates,
+                )
             qvq_args = {
                 "tokenizer": self.tokenizer,
                 "qcfg": self.quantize_config,
@@ -1817,9 +1853,7 @@ class BaseQModel(nn.Module):
                 "calibration_sort": calibration_sort,
                 "calibration_concat_separator": calibration_concat_separator,
                 "batch_size": batch_size,
-                "grouped_p32_candidates": getattr(
-                    self, "qvq_grouped_p32_candidates", None
-                ),
+                "grouped_p32_candidates": grouped_p32_candidates,
                 "transform_axis_overrides": getattr(
                     self, "qvq_transform_axis_overrides", None
                 ),
