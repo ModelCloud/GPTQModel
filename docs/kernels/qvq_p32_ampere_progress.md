@@ -3224,6 +3224,15 @@ was reverted; outputs remained exact.  Diagnostics are
 `artifacts/a100_p32_window/v34_candidate_m4_fullkv_static64_20000.json`, and
 `artifacts/a100_p32_window/v34_candidate_m4_fullkv_static64_repeat20000.json`.
 
+## v35 rejected M16 WMMA static split probe
+
+I screened a compile-time split-count parameter on the M16 WMMA full-KV route
+`(K,N)=(5120,1024)`, which dispatches split 32.  The probe regressed W2/W2.5
+from dynamic `0.092160/0.034816 ms` to `0.111616/0.065536 ms` (W3/W3.5 were
+also not improved), so the WMMA template change and dispatch branch were
+removed.  Outputs stayed exact (`max_abs <= 1.6e-5`).  The failed diagnostic
+is `artifacts/a100_p32_window/v35_candidate_m16_fullkv_static32_8000.json`.
+
 ## Reproduction
 
 ```bash
