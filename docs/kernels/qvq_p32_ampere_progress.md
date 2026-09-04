@@ -3466,6 +3466,19 @@ not routed through the specialization.  Diagnostics are
 and
 `artifacts/a100_p32_window/v26_candidate_m4_attention_static48_repeat20000.json`.
 
+## v58 M8 attention-out static split specialization
+
+The M8 attention-out route `(K,N)=(6144,5120)` uses the measured split-24
+wave for all four P32 rates.  A guarded WMMA `StaticSplitCount=24` launch was
+exact in two matched 20,000-iteration screens.  Fresh-main medians were
+`0.052224/0.052224/0.051200/0.051200 ms`; the static candidate measured
+`0.050176/0.050176/0.051200/0.051200 ms` for W2/W2.5/W3/W3.5 in both runs.
+This is a 2.04-us event-quantized improvement at W2 and W2.5 with no losses
+at the other rates.  Diagnostics are
+`artifacts/a100_p32_window/v26_candidate_m8_attention_static24_20000.json`
+and
+`artifacts/a100_p32_window/v26_candidate_m8_attention_static24_repeat20000.json`.
+
 ## Reproduction
 
 ```bash

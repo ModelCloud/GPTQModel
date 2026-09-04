@@ -383,7 +383,8 @@ template <
     bool UsePowerOfTwoWrap = false,
     bool WideNTiles = false,
     bool UseWideBankIdCopy = false,
-    int StageKTiles = kStageKTiles>
+    int StageKTiles = kStageKTiles,
+    int StaticSplitCount = 0>
 __device__ __forceinline__ void p32_window_ampere_kernel_body(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -427,8 +428,12 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
   const bool active_tile = StaticN > 0 || n_tile_base + warp < n_tiles;
   const int k_tiles = StaticK > 0 ? kStaticKTiles : size_k / kTileRows;
   const int input_stride = StaticK > 0 ? StaticK : size_k;
-  const int k_tile_begin = (k_tiles * split) / split_count;
-  const int k_tile_end = (k_tiles * (split + 1)) / split_count;
+  constexpr int kEffectiveStaticSplitCount =
+      StaticSplitCount > 0 ? StaticSplitCount : 0;
+  const int effective_split_count =
+      kEffectiveStaticSplitCount > 0 ? kEffectiveStaticSplitCount : split_count;
+  const int k_tile_begin = (k_tiles * split) / effective_split_count;
+  const int k_tile_end = (k_tiles * (split + 1)) / effective_split_count;
   const uint32_t alt_mask =
       alternate_bank_mask<TransitionBits, FullRows && WideNTiles>(bank_alt_id);
 
@@ -719,11 +724,11 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
     parity ^= 1;
   }
 
-  float* target = split_count == 1
+  float* target = effective_split_count == 1
       ? output + output_n_offset
       : partial_output + partial_segment_offset +
           static_cast<int64_t>(split) * size_m * size_n;
-  const int target_stride = split_count == 1 ? output_stride : size_n;
+  const int target_stride = effective_split_count == 1 ? output_stride : size_n;
   if (active_tile) {
     const int output_row_0 = lane >> 2;
     const int output_row_1 = output_row_0 + 8;
@@ -811,7 +816,8 @@ template <
     bool UsePowerOfTwoWrap = false,
     bool WideNTiles = false,
     bool UseWideBankIdCopy = false,
-    int StageKTiles = kStageKTiles>
+    int StageKTiles = kStageKTiles,
+    int StaticSplitCount = 0>
 __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -827,7 +833,7 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_kernel(
   p32_window_ampere_kernel_body<
       TransitionBits, FullRows, ActiveRows, StaticN, HoistBankMasks,
       UpperRowsOnly, StaticK, UsePairWrapPredicate, UsePowerOfTwoWrap,
-      WideNTiles, UseWideBankIdCopy, StageKTiles>(
+      WideNTiles, UseWideBankIdCopy, StageKTiles, StaticSplitCount>(
       input,
       trellis,
       levels,
@@ -2166,6 +2172,28 @@ at::Tensor p32_window_ampere_impl(
     p32_window_ampere_kernel<
         TransitionBits, false, 8, 5120, true, true, 0, true, false, true,
         false, 3>
+        <<<wide_grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (size_m == 8 && size_k == 6144 && size_n == 5120 &&
+             split_count == 24) {
+    const dim3 wide_grid(
+        static_cast<unsigned>((n_tiles + 2 * kTilesPerBlock - 1) /
+                              (2 * kTilesPerBlock)),
+        1,
+        static_cast<unsigned>(split_count));
+    p32_window_ampere_kernel<
+        TransitionBits, false, 8, 5120, true, true, 0, true, false, true,
+        false, 3, 24>
         <<<wide_grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
