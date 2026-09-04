@@ -524,7 +524,8 @@ def test_unequal_gate_up_widths_retain_exact_independent_recovery():
     assert telemetry["independent_recovery_children"] == 2
 
 
-def test_warmed_production_group_is_cuda_graph_capturable():
+@pytest.mark.parametrize("logical_m", (1, 32))
+def test_warmed_production_group_is_cuda_graph_capturable(logical_m):
     device = _h100_device()
     if device is None:
         pytest.skip("requires the exclusive H100 validation device")
@@ -541,7 +542,9 @@ def test_warmed_production_group_is_cuda_graph_capturable():
     )
     attention = _Attention(children)
     install_qvq_hopper_groups(attention, gate_up=False)
-    static_input = torch.randn((1, 256), device=device, dtype=torch.float16) * 0.02
+    static_input = (
+        torch.randn((logical_m, 256), device=device, dtype=torch.float16) * 0.02
+    )
 
     with torch.inference_mode():
         # Build the extension, grouped payload, dtype caches, and allocator

@@ -396,8 +396,8 @@ class QVQHopperGroupedRuntime:
         if x.shape[-1] != children[0].in_features or x.numel() == 0:
             return "input shape is unsupported"
         rows = x.numel() // children[0].in_features
-        if not 1 <= rows <= 16:
-            return "grouped Hopper decode requires one through sixteen rows"
+        if not 1 <= rows <= 32:
+            return "grouped Hopper decode currently requires one through thirty-two rows"
         if any(child.trellis.device != x.device for child in children):
             return "activation and grouped payload devices differ"
         properties = torch.cuda.get_device_properties(x.device)
@@ -586,6 +586,7 @@ class QVQHopperGroupedRuntime:
             raise ValueError("ordered partial execution cannot recover child outputs")
         children = self._children()
         rows = x.numel() // children[0].in_features
+        padded_rows = ((rows + 15) // 16) * 16
         x_2d = x.reshape(rows, children[0].in_features).to(torch.float16)
         payload = self._ensure_payload()
         direct_pad = self._h100_direct_padded_input_enabled and rows < 16
@@ -593,6 +594,7 @@ class QVQHopperGroupedRuntime:
             self._h100_fp16_recovery_store_enabled
             and children[0].input_hadamard
             and children[0].in_features == 5120
+            and rows <= 16
             # The single native H40 x H128 launch wins consistently once
             # eight logical rows amortize its wider block-local transform.
             # Decode-sized M1/M2/M4 retains the lower-latency staged path.
@@ -612,7 +614,7 @@ class QVQHopperGroupedRuntime:
                 pre_scale=input_scale,
             )
             self.telemetry.h100_qwen_composite_input_launches += 1
-        elif self._h100_multiblock_input_hadamard_enabled:
+        elif self._h100_multiblock_input_hadamard_enabled and rows <= 16:
             from ..utils.qvq_cuda import (
                 qvq_cuda_hadamard_input_fp16_padded_multiblock,
             )
@@ -633,11 +635,13 @@ class QVQHopperGroupedRuntime:
             if direct_pad:
                 padded = transformed
                 self.telemetry.h100_direct_padded_input_launches += 1
-            elif rows == 16:
+            elif rows % 16 == 0:
                 padded = transformed.contiguous()
             else:
                 padded = torch.zeros(
-                    (16, children[0].in_features), device=x.device, dtype=torch.float16
+                    (padded_rows, children[0].in_features),
+                    device=x.device,
+                    dtype=torch.float16,
                 )
                 padded[:rows].copy_(transformed)
         from ..utils.qvq_cuda import _pgc16_levels
@@ -707,7 +711,9 @@ class QVQHopperGroupedRuntime:
             # products keep the established single-CTA path until separately
             # measured; device identity comes from CUDA properties, never a
             # visible-device index.
-            use_h100_multiblock = self._h100_multiblock_intermediate_enabled
+            use_h100_multiblock = (
+                self._h100_multiblock_intermediate_enabled and rows <= 16
+            )
             recovery = (
                 qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock
                 if use_h100_multiblock
@@ -740,6 +746,7 @@ class QVQHopperGroupedRuntime:
                 and children[0].in_features == 5120
                 and tuple(member.out_features for member in children)
                 == (10240, 6144)
+                and rows <= 16
                 and child.output_hadamard
                 and inner.dtype == torch.float32
             )
@@ -781,6 +788,7 @@ class QVQHopperGroupedRuntime:
                 and inner.dtype == torch.float32
                 and child.out_features <= 16384
                 and child.out_features & (child.out_features - 1) == 0
+                and rows <= 16
             )
             recovered = child._qvq_recover_inference_output(
                 inner[:rows],
@@ -816,6 +824,9 @@ class QVQHopperGroupedRuntime:
         rejection = self._runtime_eligible(x)
         if rejection is not None:
             return rejection
+        rows = x.numel() // self._children()[0].in_features
+        if rows > 16:
+            return "fused MLP large-M execution is not promoted yet"
         down = None if self._mlp_down_ref is None else self._mlp_down_ref()
         if not isinstance(down, QVQLinear):
             return "fused MLP lost its QVQ down projection"
