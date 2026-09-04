@@ -15,6 +15,7 @@ from safetensors import safe_open
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear import qvq as qvq_linear_module
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+from gptqmodel.nn_modules.qvq_fp8_cache import QVQFP8DynamicCache
 from gptqmodel.quantization import FORMAT, QVQConfig
 from gptqmodel.quantization.qvq_activation import fake_quantize_qvq_fp8_activation
 from gptqmodel.utils.qvq_cuda import qvq_cuda_supported
@@ -205,7 +206,15 @@ def test_qvq_p32_a8_quantize_save_reload_and_native_inference(
 
     monkeypatch.setattr(qvq_linear_module, "qvq_cuda_hadamard", record_native_hadamard)
     with torch.inference_mode():
-        native_logits = reloaded.model(**encoded).logits.float()
+        native_output = reloaded.model(**encoded)
+        native_logits = native_output.logits.float()
+    assert isinstance(native_output.past_key_values, QVQFP8DynamicCache)
+    cache_telemetry = native_output.past_key_values.telemetry()
+    assert cache_telemetry["all_payloads_fp8"] is True
+    assert cache_telemetry["no_full_precision_residual"] is True
+    assert cache_telemetry["initialized_layer_count"] == 1
+    assert cache_telemetry["payload_dtypes"] == ["torch.float8_e4m3fn"]
+    assert cache_telemetry["storage_ratio_vs_dense"] == pytest.approx(0.625)
     assert native_fp8_dispatches == [(torch.float8_e4m3fn, torch.float32, 0)] * len(
         qvq_layers
     )
@@ -215,8 +224,15 @@ def test_qvq_p32_a8_quantize_save_reload_and_native_inference(
         min_new_tokens=2,
         max_new_tokens=2,
         do_sample=False,
+        return_dict_in_generate=True,
     )
-    assert generated.shape[-1] == encoded["input_ids"].shape[-1] + 2
+    assert generated.sequences.shape[-1] == encoded["input_ids"].shape[-1] + 2
+    assert isinstance(generated.past_key_values, QVQFP8DynamicCache)
+    generated_cache_telemetry = generated.past_key_values.telemetry()
+    assert generated_cache_telemetry["all_payloads_fp8"] is True
+    assert generated_cache_telemetry["sequence_lengths"] == [
+        generated.sequences.shape[-1] - 1
+    ]
 
     handles = []
     for layer in qvq_layers:

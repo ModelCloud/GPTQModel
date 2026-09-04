@@ -6,12 +6,17 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from transformers import DynamicCache
 
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.qvq_processor import QVQProcessor
 from gptqmodel.models.auto import (
     _activation_quantization_mode,
     _is_supported_quantization_config,
+)
+from gptqmodel.nn_modules.qvq_fp8_cache import (
+    QVQFP8DynamicCache,
+    install_qvq_fp8_kv_cache,
 )
 from gptqmodel.quantization import FORMAT, QVQActivationConfig, QVQConfig
 from gptqmodel.quantization.qvq_activation import (
@@ -76,6 +81,102 @@ def test_qvq_fp8_activation_aliases_and_straight_through_gradient():
     )
     dequantized.sum().backward()
     assert torch.equal(source.grad, torch.ones_like(source))
+
+
+class _TinyCacheConfig:
+    num_hidden_layers = 2
+    is_encoder_decoder = False
+    use_cache = True
+
+    def get_text_config(self, decoder=True):
+        assert decoder is True
+        return self
+
+
+def test_qvq_fp8_dynamic_cache_has_no_full_precision_residual():
+    torch.manual_seed(13)
+    config = _TinyCacheConfig()
+    cache = QVQFP8DynamicCache(config, QVQActivationConfig())
+    key = torch.randn(2, 4, 3, 16, dtype=torch.bfloat16)
+    value = torch.randn(2, 4, 3, 16, dtype=torch.bfloat16)
+
+    returned_key, returned_value = cache.update(key, value, 0)
+    returned_key_2, returned_value_2 = cache.update(
+        key[..., :1, :], value[..., :1, :], 0
+    )
+    layer = cache.layers[0]
+
+    assert returned_key.dtype == torch.bfloat16
+    assert returned_value.dtype == torch.bfloat16
+    assert returned_key_2.shape[-2] == returned_value_2.shape[-2] == 4
+    assert layer.keys.dtype == layer.values.dtype == torch.float8_e4m3fn
+    assert layer.key_scales.dtype == layer.value_scales.dtype == torch.float32
+    assert layer.keys.shape[-2] == layer.key_scales.shape[-2] == 4
+    torch.testing.assert_close(returned_key, key, atol=0.0, rtol=0.065)
+    torch.testing.assert_close(returned_value, value, atol=0.0, rtol=0.065)
+
+    telemetry = cache.telemetry()
+    expected_payload_bytes = layer.keys.numel() + layer.values.numel()
+    expected_scale_bytes = (layer.key_scales.numel() + layer.value_scales.numel()) * 4
+    assert telemetry["all_payloads_fp8"] is True
+    assert telemetry["no_full_precision_residual"] is True
+    assert telemetry["storage_bytes"] == expected_payload_bytes + expected_scale_bytes
+    assert telemetry["storage_ratio_vs_dense"] == pytest.approx(0.625)
+
+
+def test_qvq_a8_runtime_injects_fp8_cache_and_rejects_dense_cache():
+    class TinyCacheModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = _TinyCacheConfig()
+
+        def forward(self, input_ids, past_key_values=None, use_cache=None):
+            if use_cache is False:
+                return SimpleNamespace(past_key_values=None)
+            key = input_ids.to(torch.bfloat16).reshape(1, 1, -1, 1)
+            value = key + 1
+            key, value = past_key_values.update(key, value, 0)
+            return SimpleNamespace(
+                past_key_values=past_key_values, key=key, value=value
+            )
+
+        def _prepare_cache_for_generation(self, *args, **kwargs):
+            raise AssertionError("the dense cache preparer must be replaced")
+
+    model = TinyCacheModel()
+    install_qvq_fp8_kv_cache(model, QVQActivationConfig())
+    output = model(torch.tensor([[1, 2, 3]]), use_cache=True)
+    assert isinstance(output.past_key_values, QVQFP8DynamicCache)
+    assert output.past_key_values.telemetry()["all_payloads_fp8"] is True
+
+    dense_cache = DynamicCache(config=model.config)
+    with pytest.raises(TypeError, match="requires QVQFP8DynamicCache"):
+        model(torch.tensor([[1]]), past_key_values=dense_cache, use_cache=True)
+
+    generation_config = SimpleNamespace(
+        cache_implementation=None,
+        cache_config=None,
+        use_cache=True,
+    )
+    model_kwargs = {}
+    model._prepare_cache_for_generation(
+        generation_config,
+        model_kwargs,
+        generation_mode=None,
+        batch_size=1,
+        max_cache_length=16,
+    )
+    assert isinstance(model_kwargs["past_key_values"], QVQFP8DynamicCache)
+
+    generation_config.cache_implementation = "dynamic"
+    with pytest.raises(ValueError, match="fixes `cache_implementation`"):
+        model._prepare_cache_for_generation(
+            generation_config,
+            {},
+            generation_mode=None,
+            batch_size=1,
+            max_cache_length=16,
+        )
 
 
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))

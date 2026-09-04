@@ -454,6 +454,7 @@ class BaseQModel(nn.Module):
         # Reject activation-quantized checkpoints at load time so the rest of
         # the floatx decoder stack can continue assuming dense activations.
         self._configure_modelopt_runtime()
+        self._configure_qvq_fp8_kv_cache_runtime()
 
         self._turtle_lock = threading.RLock()
 
@@ -1038,6 +1039,7 @@ class BaseQModel(nn.Module):
                 layer_scope=layer_scope,
                 freeze_others=freeze_others,
             )
+            self._configure_qvq_fp8_kv_cache_runtime()
             return result
         finally:
             if layer_scope is not None:
@@ -3102,6 +3104,22 @@ class BaseQModel(nn.Module):
         """Return ``True`` when the checkpoint declares ModelOpt runtime semantics."""
 
         return self._decoder_quant_method_name() == "modelopt"
+
+    def _configure_qvq_fp8_kv_cache_runtime(self) -> None:
+        """Install the fail-closed FP8 KV cache implied by a QVQ A8 config."""
+
+        if not (self.quantized or self.load_quantized_model):
+            return
+        activation_quantization = getattr(
+            getattr(self, "quantize_config", None),
+            "activation_quantization",
+            None,
+        )
+        if activation_quantization is None:
+            return
+        from ..nn_modules.qvq_fp8_cache import install_qvq_fp8_kv_cache
+
+        install_qvq_fp8_kv_cache(self.model, activation_quantization)
 
     def _modelopt_activation_quantization_mode(self) -> Optional[str]:
         """Describe unsupported ModelOpt activation quantization metadata when present."""

@@ -6248,7 +6248,9 @@ class QVQActivationConfig:
     Dynamic per-token scaling is shared by calibration and inference, so the
     Hessian sees the same A8 values consumed by the runtime without retaining
     a calibration-sized activation cache or introducing order-dependent
-    observer state.
+    observer state. Enabling A8 also requires FP8 E4M3 K/V-cache storage for
+    every cache-enabled decoder forward; callers cannot substitute a dense
+    Transformers cache.
     """
 
     bits: int = 8
