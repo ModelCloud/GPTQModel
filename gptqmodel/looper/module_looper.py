@@ -34,7 +34,7 @@ from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
-from ..models.base import CAPTURE_ONLY_FLAG
+from ..models.base import CAPTURE_ONLY_FLAG, BaseQModel
 from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
 from ..quantization.config import METHOD, VramStrategy
 from ..utils.attn_mask import apply_keep_mask_bt
@@ -1652,7 +1652,7 @@ class ModuleLooper():
                 tree_scope_id = None
                 subset_id = None
                 input_spec = None
-                if not is_lm_head_module:
+                if not is_lm_head_module and isinstance(self.gptq_model, BaseQModel):
                     entry = type(self.gptq_model).resolve_module_tree_entry(name)
                     if entry is not None:
                         tree_scope_id = (
