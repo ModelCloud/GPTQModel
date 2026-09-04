@@ -15,6 +15,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <cstring>
 #include <limits>
 #include <torch/library.h>
 #include <torch/types.h>
@@ -68,6 +69,9 @@ constexpr int kHadamardInputMultiblockHalf2Values =
 constexpr int kHadamardInputMultiblockLowThreads =
     kHadamardInputMultiblockTile;
 constexpr int kHadamardInputMultiblockHighThreads = 32;
+constexpr int kQwenCompositeN = 5120;
+constexpr int kQwenCompositeBase = 40;
+constexpr int kQwenCompositeLowN = kQwenCompositeN / kQwenCompositeBase;
 
 __device__ __forceinline__ float round_fp16_unless_overflow(float value) {
   const float narrowed = __half2float(__float2half_rn(value));
@@ -829,6 +833,349 @@ __global__ void __launch_bounds__(kHadamardThreads) qvq_swiglu_precondition_kern
 __device__ __forceinline__ half qvq_silu_fp16(half gate) {
   const float value = __half2float(gate);
   return __float2half_rn(value / (1.0f + expf(-value)));
+}
+
+// Qwen3.8's 17*1024 intermediate axis deliberately folds both surrounding
+// Hadamards.  Consume the two FP32 P32 results without materializing the
+// recovered gate/up, SiLU output, product, or scaled down input.  Explicit
+// round-to-nearest operations preserve the separate PyTorch-kernel contract:
+//
+//   fp32 inner * fp16-rounded SV [+ fp16-rounded bias]
+//     -> fp16 -> fp16 SiLU -> fp16 product -> fp16 down-SU product.
+//
+// The M16-padded output is cleared by the launcher before logical rows are
+// written, so the operation remains directly consumable by Hopper P32.
+template <bool HasGateBias, bool HasUpBias>
+__global__ void qvq_folded_swiglu_precondition_fp32_kernel(
+    const float* __restrict__ gate,
+    const float* __restrict__ up,
+    const float* __restrict__ gate_scale,
+    const float* __restrict__ up_scale,
+    const float* __restrict__ gate_bias,
+    const float* __restrict__ up_bias,
+    const half* __restrict__ down_scale,
+    half* __restrict__ output,
+    int64_t logical_values,
+    int n) {
+  for (int64_t index =
+           static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < logical_values;
+       index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    const int column = static_cast<int>(index % n);
+    float gate_value = __fmul_rn(gate[index], gate_scale[column]);
+    float up_value = __fmul_rn(up[index], up_scale[column]);
+    if constexpr (HasGateBias) {
+      gate_value = __fadd_rn(gate_value, gate_bias[column]);
+    }
+    if constexpr (HasUpBias) {
+      up_value = __fadd_rn(up_value, up_bias[column]);
+    }
+    const half gate_half = __float2half_rn(gate_value);
+    const half up_half = __float2half_rn(up_value);
+    const half activated_gate = qvq_silu_fp16(gate_half);
+    const half product = __float2half_rn(
+        __fmul_rn(__half2float(activated_gate), __half2float(up_half)));
+    output[index] = __float2half_rn(
+        __fmul_rn(__half2float(product), __half2float(down_scale[column])));
+  }
+}
+
+template <int SplitCount, bool HasGateBias, bool HasUpBias>
+__global__ void qvq_folded_swiglu_precondition_ordered_fp32_kernel(
+    const float* __restrict__ partials,
+    const float* __restrict__ gate_scale,
+    const float* __restrict__ up_scale,
+    const float* __restrict__ gate_bias,
+    const float* __restrict__ up_bias,
+    const half* __restrict__ down_scale,
+    half* __restrict__ output,
+    int64_t logical_values,
+    int n) {
+  const int64_t plane_values = static_cast<int64_t>(16) * n;
+  const float* gate_partials = partials;
+  const float* up_partials = partials + SplitCount * plane_values;
+  for (int64_t index =
+           static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+       index < logical_values;
+       index += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    float gate_value = 0.0f;
+    float up_value = 0.0f;
+#pragma unroll
+    for (int split = 0; split < SplitCount; ++split) {
+      gate_value = __fadd_rn(
+          gate_value, gate_partials[static_cast<int64_t>(split) * plane_values + index]);
+      up_value = __fadd_rn(
+          up_value, up_partials[static_cast<int64_t>(split) * plane_values + index]);
+    }
+    const int column = static_cast<int>(index % n);
+    gate_value = __fmul_rn(gate_value, gate_scale[column]);
+    up_value = __fmul_rn(up_value, up_scale[column]);
+    if constexpr (HasGateBias) {
+      gate_value = __fadd_rn(gate_value, gate_bias[column]);
+    }
+    if constexpr (HasUpBias) {
+      up_value = __fadd_rn(up_value, up_bias[column]);
+    }
+    const half activated_gate = qvq_silu_fp16(__float2half_rn(gate_value));
+    const half up_half = __float2half_rn(up_value);
+    const half product = __float2half_rn(
+        __fmul_rn(__half2float(activated_gate), __half2float(up_half)));
+    output[index] = __float2half_rn(
+        __fmul_rn(__half2float(product), __half2float(down_scale[column])));
+  }
+}
+
+// Qwen3.8 uses H_5120 = H_40 tensor H_128.  The generic graph-safe fallback
+// evaluates both its historical FP16 path and its FP32 overflow rescue.  This
+// kernel expresses the same stage-local contract in one launch: every value
+// is rounded to FP16 when finite and retained in FP32 only when narrowing
+// would overflow.  Ordinary finite rows therefore preserve the established
+// FP16 boundaries, while cancellation can still recover an otherwise
+// overflowing intermediate before the final FP16 store.
+template <
+    bool HasBias,
+    int SplitCount = 1,
+    int CompositeN = kQwenCompositeN,
+    int CompositeBase = kQwenCompositeBase>
+__global__ void __launch_bounds__(kHadamardThreads)
+qvq_qwen_composite_recovery_fp32_to_fp16_kernel(
+    const float* __restrict__ input,
+    const half* __restrict__ base,
+    const float* __restrict__ post_scale,
+    const float* __restrict__ bias,
+    half* __restrict__ output) {
+  constexpr int CompositeLowN = CompositeN / CompositeBase;
+  extern __shared__ float shared[];
+  float* low = shared;
+  const int row = static_cast<int>(blockIdx.x);
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(CompositeN))));
+
+  for (int column = static_cast<int>(threadIdx.x); column < CompositeN;
+       column += static_cast<int>(blockDim.x)) {
+    float value = 0.0f;
+    if constexpr (SplitCount == 1) {
+      value = input[static_cast<int64_t>(row) * CompositeN + column];
+    } else {
+#pragma unroll
+      for (int split = 0; split < SplitCount; ++split) {
+        value = __fadd_rn(
+            value,
+            input[
+                static_cast<int64_t>(split) * 16 * CompositeN +
+                static_cast<int64_t>(row) * CompositeN + column]);
+      }
+    }
+    value = round_fp16_unless_overflow(value);
+    low[column] = round_fp16_unless_overflow(value / divisor);
+  }
+  __syncthreads();
+
+  // The ascending butterflies are independent within each contiguous
+  // power-of-two slice (128, 256, or 512 columns for the promoted shapes).
+#pragma unroll
+  for (int bit = 1; bit < CompositeLowN; bit <<= 1) {
+    for (int column = static_cast<int>(threadIdx.x);
+         column < CompositeN;
+         column += static_cast<int>(blockDim.x)) {
+      const int local = column & (CompositeLowN - 1);
+      const int peer = column ^ bit;
+      if (local < (local ^ bit)) {
+        const float a = low[column];
+        const float b = low[peer];
+        low[column] = round_fp16_unless_overflow(__fadd_rn(a, b));
+        low[peer] = round_fp16_unless_overflow(__fsub_rn(a, b));
+      }
+    }
+    __syncthreads();
+  }
+
+  // Finish with the canonical H_40 or H_12 base multiply.  Its entries are exactly
+  // +/-1 in FP16, so the product has no representation error.  Accumulate in
+  // FP32 and reproduce the historical FP16 output boundary afterwards.
+  // Each thread owns the same columns in this loop as in the following
+  // epilogue, so keep the rounded base result in a register.  The old
+  // low/high shared-memory handoff and block barrier did not communicate
+  // between threads and only added traffic and a dependency boundary.
+  for (int column = static_cast<int>(threadIdx.x); column < CompositeN;
+       column += static_cast<int>(blockDim.x)) {
+    const int base_row = column / CompositeLowN;
+    const int local = column & (CompositeLowN - 1);
+    float value = 0.0f;
+#pragma unroll
+    for (int source = 0; source < CompositeBase; ++source) {
+      const float coefficient = __half2float(
+          base[base_row * CompositeBase + source]);
+      value = __fmaf_rn(
+          coefficient,
+          low[source * CompositeLowN + local],
+          value);
+    }
+    value = round_fp16_unless_overflow(value);
+    const float scale = __half2float(__float2half_rn(post_scale[column]));
+    value = round_fp16_unless_overflow(__fmul_rn(value, scale));
+    if constexpr (HasBias) {
+      const float bias_value = __half2float(__float2half_rn(bias[column]));
+      value = round_fp16_unless_overflow(__fadd_rn(value, bias_value));
+    }
+    output[static_cast<int64_t>(row) * CompositeN + column] =
+        __float2half_rn(value);
+  }
+}
+
+// Parallel form of the same composite recovery contract.  Each H_L slice is
+// independent, so expose B low-stage CTAs per row and materialize the exact
+// overflow-preserving FP32 boundary once.  The second grid exposes one CTA
+// per output base row and retains the canonical source-ascending H_B fused
+// multiply-add order.  This changes scheduling only; every R() boundary is
+// identical to qvq_qwen_composite_recovery_fp32_to_fp16_kernel.
+template <int CompositeN, int CompositeBase>
+__global__ void qvq_qwen_composite_recovery_low_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ workspace) {
+  constexpr int CompositeLowN = CompositeN / CompositeBase;
+  __shared__ float values[CompositeLowN];
+  const int base_slice = static_cast<int>(blockIdx.x);
+  const int row = static_cast<int>(blockIdx.y);
+  const int slice_begin = base_slice * CompositeLowN;
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(CompositeN))));
+
+  for (int local = static_cast<int>(threadIdx.x); local < CompositeLowN;
+       local += static_cast<int>(blockDim.x)) {
+    float value = input[
+        static_cast<int64_t>(row) * CompositeN + slice_begin + local];
+    value = round_fp16_unless_overflow(value);
+    values[local] = round_fp16_unless_overflow(value / divisor);
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 1; bit < CompositeLowN; bit <<= 1) {
+    for (int local = static_cast<int>(threadIdx.x); local < CompositeLowN;
+         local += static_cast<int>(blockDim.x)) {
+      const int peer = local ^ bit;
+      if (local < peer) {
+        const float a = values[local];
+        const float b = values[peer];
+        values[local] = round_fp16_unless_overflow(__fadd_rn(a, b));
+        values[peer] = round_fp16_unless_overflow(__fsub_rn(a, b));
+      }
+    }
+    __syncthreads();
+  }
+
+  for (int local = static_cast<int>(threadIdx.x); local < CompositeLowN;
+       local += static_cast<int>(blockDim.x)) {
+    workspace[
+        static_cast<int64_t>(row) * CompositeN + slice_begin + local] =
+        values[local];
+  }
+}
+
+template <bool HasBias, int CompositeN, int CompositeBase>
+__global__ void qvq_qwen_composite_recovery_high_kernel(
+    const float* __restrict__ workspace,
+    const half* __restrict__ base,
+    const float* __restrict__ post_scale,
+    const float* __restrict__ bias,
+    half* __restrict__ output) {
+  constexpr int CompositeLowN = CompositeN / CompositeBase;
+  const int base_row = static_cast<int>(blockIdx.x);
+  const int row = static_cast<int>(blockIdx.y);
+  for (int local = static_cast<int>(threadIdx.x); local < CompositeLowN;
+       local += static_cast<int>(blockDim.x)) {
+    float value = 0.0f;
+#pragma unroll
+    for (int source = 0; source < CompositeBase; ++source) {
+      value = __fmaf_rn(
+          __half2float(base[base_row * CompositeBase + source]),
+          workspace[
+              static_cast<int64_t>(row) * CompositeN +
+              source * CompositeLowN + local],
+          value);
+    }
+    value = round_fp16_unless_overflow(value);
+    const int column = base_row * CompositeLowN + local;
+    const float scale = __half2float(__float2half_rn(post_scale[column]));
+    value = round_fp16_unless_overflow(__fmul_rn(value, scale));
+    if constexpr (HasBias) {
+      const float bias_value = __half2float(__float2half_rn(bias[column]));
+      value = round_fp16_unless_overflow(__fadd_rn(value, bias_value));
+    }
+    output[static_cast<int64_t>(row) * CompositeN + column] =
+        __float2half_rn(value);
+  }
+}
+
+// Exact shared Qwen3.8 input transform.  The historical composite path first
+// rounds x*SU to FP16, divides by FP16(sqrt(5120)) and rounds again, performs
+// H128 with an FP16 boundary after every butterfly, then rounds the H40 base
+// result once.  One kernel preserves that order and writes the WGMMA M16 zero
+// tail without a separate allocation/fill/copy sequence.
+__global__ void __launch_bounds__(kHadamardThreads)
+qvq_qwen_composite_input_fp16_padded_kernel(
+    const half* __restrict__ input,
+    const half* __restrict__ base,
+    const half* __restrict__ pre_scale,
+    half* __restrict__ output,
+    int logical_rows) {
+  const int row = static_cast<int>(blockIdx.x);
+  if (row >= logical_rows) {
+    for (int column = static_cast<int>(threadIdx.x); column < kQwenCompositeN;
+         column += static_cast<int>(blockDim.x)) {
+      output[static_cast<int64_t>(row) * kQwenCompositeN + column] =
+          __float2half_rn(0.0f);
+    }
+    return;
+  }
+
+  extern __shared__ float low[];
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(kQwenCompositeN))));
+  for (int column = static_cast<int>(threadIdx.x); column < kQwenCompositeN;
+       column += static_cast<int>(blockDim.x)) {
+    const int64_t offset =
+        static_cast<int64_t>(row) * kQwenCompositeN + column;
+    const half scaled = __float2half_rn(
+        __fmul_rn(__half2float(input[offset]), __half2float(pre_scale[column])));
+    low[column] = __half2float(
+        __float2half_rn(__half2float(scaled) / divisor));
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 1; bit < kQwenCompositeLowN; bit <<= 1) {
+    for (int column = static_cast<int>(threadIdx.x);
+         column < kQwenCompositeN;
+         column += static_cast<int>(blockDim.x)) {
+      const int local = column & (kQwenCompositeLowN - 1);
+      const int peer = column ^ bit;
+      if (local < (local ^ bit)) {
+        const float a = low[column];
+        const float b = low[peer];
+        low[column] = __half2float(__float2half_rn(__fadd_rn(a, b)));
+        low[peer] = __half2float(__float2half_rn(__fsub_rn(a, b)));
+      }
+    }
+    __syncthreads();
+  }
+
+  for (int column = static_cast<int>(threadIdx.x); column < kQwenCompositeN;
+       column += static_cast<int>(blockDim.x)) {
+    const int base_row = column / kQwenCompositeLowN;
+    const int local = column & (kQwenCompositeLowN - 1);
+    float value = 0.0f;
+#pragma unroll
+    for (int source = 0; source < kQwenCompositeBase; ++source) {
+      value = __fmaf_rn(
+          __half2float(base[base_row * kQwenCompositeBase + source]),
+          low[source * kQwenCompositeLowN + local],
+          value);
+    }
+    output[static_cast<int64_t>(row) * kQwenCompositeN + column] =
+        __float2half_rn(value);
+  }
 }
 
 // Produce one selected output of the 32-point high Hadamard while retaining
@@ -2230,6 +2577,457 @@ at::Tensor qvq_hadamard_pair_swiglu_precondition_multiblock_cuda(
   return output;
 }
 
+at::Tensor qvq_qwen_composite_input_fp16_padded_cuda(
+    const at::Tensor& input,
+    const at::Tensor& base,
+    const at::Tensor& pre_scale) {
+  TORCH_CHECK(input.is_cuda() && base.is_cuda() && pre_scale.is_cuda(),
+              "Qwen composite input tensors must be CUDA tensors");
+  TORCH_CHECK(
+      input.device() == base.device() && input.device() == pre_scale.device(),
+      "Qwen composite input tensors must share a device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kHalf && input.dim() == 2 &&
+          input.size(0) >= 1 && input.size(0) <= 16 &&
+          input.size(1) == kQwenCompositeN && input.is_contiguous(),
+      "Qwen composite input must be contiguous FP16 [1..16, 5120]");
+  TORCH_CHECK(
+      base.scalar_type() == at::kHalf && base.is_contiguous() &&
+          base.numel() == kQwenCompositeBase * kQwenCompositeBase,
+      "Qwen composite input base must be contiguous FP16 [40, 40]");
+  TORCH_CHECK(
+      pre_scale.scalar_type() == at::kHalf && pre_scale.is_contiguous() &&
+          pre_scale.numel() == kQwenCompositeN,
+      "Qwen composite input scale must be contiguous FP16 [5120]");
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
+  TORCH_CHECK(
+      properties.major == 9 && properties.minor == 0 &&
+          std::strcmp(properties.name, "NVIDIA H100") == 0,
+      "Qwen composite input requires the measured physical H100");
+  const size_t smem_bytes = kQwenCompositeN * sizeof(float);
+  auto output = at::empty(
+      {16, kQwenCompositeN}, input.options().dtype(at::kHalf));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  C10_CUDA_CHECK(cudaFuncSetAttribute(
+      qvq_qwen_composite_input_fp16_padded_kernel,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(smem_bytes)));
+  qvq_qwen_composite_input_fp16_padded_kernel<<<
+      16,
+      kHadamardThreads,
+      smem_bytes,
+      stream>>>(
+      reinterpret_cast<const half*>(input.const_data_ptr()),
+      reinterpret_cast<const half*>(base.const_data_ptr()),
+      reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+      reinterpret_cast<half*>(output.mutable_data_ptr()),
+      static_cast<int>(input.size(0)));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+at::Tensor qvq_qwen_composite_recovery_fp32_to_fp16_cuda(
+    const at::Tensor& input,
+    const at::Tensor& base,
+    const at::Tensor& post_scale,
+    const std::optional<at::Tensor>& bias) {
+  TORCH_CHECK(input.is_cuda() && base.is_cuda() && post_scale.is_cuda(),
+              "Qwen composite recovery tensors must be CUDA tensors");
+  TORCH_CHECK(
+      input.device() == base.device() && input.device() == post_scale.device(),
+      "Qwen composite recovery tensors must share a device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kFloat && input.dim() == 2 &&
+          input.size(0) >= 1 && input.size(0) <= 16 &&
+          input.is_contiguous(),
+      "Qwen composite recovery input must be contiguous FP32 [1..16, N]");
+  const int64_t composite_n = input.size(1);
+  const int64_t composite_base =
+      composite_n == 6144 ? 12 : 40;
+  TORCH_CHECK(
+      composite_n == 5120 || composite_n == 6144 || composite_n == 10240,
+      "Qwen composite recovery supports N=5120, 6144, or 10240");
+  TORCH_CHECK(
+      base.scalar_type() == at::kHalf && base.is_contiguous() &&
+          base.numel() == composite_base * composite_base,
+      "Qwen composite recovery base has the wrong square geometry");
+  TORCH_CHECK(
+      post_scale.scalar_type() == at::kFloat && post_scale.is_contiguous() &&
+          post_scale.numel() == composite_n,
+      "Qwen composite recovery scale must be contiguous FP32 [N]");
+  if (bias.has_value()) {
+    TORCH_CHECK(
+            bias->is_cuda() && bias->device() == input.device() &&
+            bias->scalar_type() == at::kFloat && bias->is_contiguous() &&
+            bias->numel() == composite_n,
+        "Qwen composite recovery bias must be contiguous FP32 [N]");
+  }
+
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
+  TORCH_CHECK(
+      properties.major == 9 && properties.minor == 0 &&
+          std::strcmp(properties.name, "NVIDIA H100") == 0,
+      "Qwen composite recovery requires the measured physical H100");
+  const size_t smem_bytes = composite_n * sizeof(float);
+  auto output = at::empty(input.sizes(), input.options().dtype(at::kHalf));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+#define QVQ_LAUNCH_QWEN_COMPOSITE_MULTIBLOCK(HAS_BIAS, N, BASE)               \
+  {                                                                            \
+    auto workspace = at::empty(input.sizes(), input.options().dtype(at::kFloat)); \
+    constexpr int low_n = N / BASE;                                            \
+    constexpr int threads = low_n < 256 ? low_n : 256;                         \
+    const dim3 grid(BASE, static_cast<unsigned>(input.size(0)));                \
+    qvq_qwen_composite_recovery_low_kernel<N, BASE><<<                          \
+        grid, threads, 0, stream>>>(                                            \
+        input.const_data_ptr<float>(),                                         \
+        workspace.mutable_data_ptr<float>());                                  \
+    qvq_qwen_composite_recovery_high_kernel<HAS_BIAS, N, BASE><<<              \
+        grid, threads, 0, stream>>>(                                            \
+        workspace.const_data_ptr<float>(),                                     \
+        reinterpret_cast<const half*>(base.const_data_ptr()),                  \
+        post_scale.const_data_ptr<float>(),                                    \
+        bias.has_value() ? bias->const_data_ptr<float>() : nullptr,            \
+        reinterpret_cast<half*>(output.mutable_data_ptr()));                   \
+  }
+  if (composite_n == 6144 && bias.has_value()) {
+    QVQ_LAUNCH_QWEN_COMPOSITE_MULTIBLOCK(true, 6144, 12)
+  } else if (composite_n == 6144) {
+    QVQ_LAUNCH_QWEN_COMPOSITE_MULTIBLOCK(false, 6144, 12)
+  } else if (composite_n == 10240 && bias.has_value()) {
+    QVQ_LAUNCH_QWEN_COMPOSITE_MULTIBLOCK(true, 10240, 40)
+  } else if (composite_n == 10240) {
+    QVQ_LAUNCH_QWEN_COMPOSITE_MULTIBLOCK(false, 10240, 40)
+  }
+#undef QVQ_LAUNCH_QWEN_COMPOSITE_MULTIBLOCK
+
+  if (composite_n != 5120) {
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+  }
+#define QVQ_LAUNCH_QWEN_COMPOSITE_RECOVERY(HAS_BIAS, N, BASE)                \
+  {                                                                           \
+    auto kernel =                                                             \
+        qvq_qwen_composite_recovery_fp32_to_fp16_kernel<                      \
+            HAS_BIAS, 1, N, BASE>;                                            \
+    C10_CUDA_CHECK(cudaFuncSetAttribute(                                       \
+        kernel,                                                               \
+        cudaFuncAttributeMaxDynamicSharedMemorySize,                          \
+        static_cast<int>(smem_bytes)));                                       \
+    kernel<<<                                                                 \
+        static_cast<unsigned>(input.size(0)),                                 \
+        kHadamardThreads,                                                      \
+        smem_bytes,                                                           \
+        stream>>>(                                                            \
+        input.const_data_ptr<float>(),                                        \
+        reinterpret_cast<const half*>(base.const_data_ptr()),                 \
+        post_scale.const_data_ptr<float>(),                                   \
+        bias.has_value() ? bias->const_data_ptr<float>() : nullptr,           \
+        reinterpret_cast<half*>(output.mutable_data_ptr()));                  \
+  }
+  if (bias.has_value()) {
+    QVQ_LAUNCH_QWEN_COMPOSITE_RECOVERY(true, 5120, 40)
+  } else {
+    QVQ_LAUNCH_QWEN_COMPOSITE_RECOVERY(false, 5120, 40)
+  }
+#undef QVQ_LAUNCH_QWEN_COMPOSITE_RECOVERY
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+at::Tensor qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda(
+    const at::Tensor& partials,
+    const at::Tensor& base,
+    const at::Tensor& post_scale,
+    const std::optional<at::Tensor>& bias,
+    int64_t split_count,
+    int64_t logical_rows) {
+  TORCH_CHECK(partials.is_cuda() && base.is_cuda() && post_scale.is_cuda(),
+              "Qwen ordered composite recovery tensors must be CUDA tensors");
+  TORCH_CHECK(
+      partials.device() == base.device() && partials.device() == post_scale.device(),
+      "Qwen ordered composite recovery tensors must share a device");
+  TORCH_CHECK(
+      partials.scalar_type() == at::kFloat && partials.is_contiguous() &&
+          (split_count == 17 || split_count == 34) &&
+          partials.numel() == split_count * 16 * kQwenCompositeN,
+      "Qwen ordered composite partials must be contiguous FP32 split-major M16x5120");
+  TORCH_CHECK(logical_rows >= 1 && logical_rows <= 16,
+              "Qwen ordered composite recovery requires one through sixteen rows");
+  TORCH_CHECK(
+      base.scalar_type() == at::kHalf && base.is_contiguous() &&
+          base.numel() == kQwenCompositeBase * kQwenCompositeBase,
+      "Qwen ordered composite recovery base must be contiguous FP16 [40, 40]");
+  TORCH_CHECK(
+      post_scale.scalar_type() == at::kFloat && post_scale.is_contiguous() &&
+          post_scale.numel() == kQwenCompositeN,
+      "Qwen ordered composite recovery scale must be contiguous FP32 [5120]");
+  if (bias.has_value()) {
+    TORCH_CHECK(
+        bias->is_cuda() && bias->device() == partials.device() &&
+            bias->scalar_type() == at::kFloat && bias->is_contiguous() &&
+            bias->numel() == kQwenCompositeN,
+        "Qwen ordered composite recovery bias must be contiguous FP32 [5120]");
+  }
+
+  const c10::cuda::CUDAGuard device_guard(partials.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, partials.get_device()));
+  TORCH_CHECK(
+      properties.major == 9 && properties.minor == 0 &&
+          std::strcmp(properties.name, "NVIDIA H100") == 0,
+      "Qwen ordered composite recovery requires the measured physical H100");
+  const size_t smem_bytes = kQwenCompositeN * sizeof(float);
+  auto output = at::empty(
+      {logical_rows, kQwenCompositeN}, partials.options().dtype(at::kHalf));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(partials.get_device());
+#define QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(HAS_BIAS, SPLIT_COUNT)      \
+  {                                                                            \
+    auto kernel = qvq_qwen_composite_recovery_fp32_to_fp16_kernel<             \
+        HAS_BIAS, SPLIT_COUNT>;                                                 \
+    C10_CUDA_CHECK(cudaFuncSetAttribute(                                        \
+        kernel,                                                                \
+        cudaFuncAttributeMaxDynamicSharedMemorySize,                           \
+        static_cast<int>(smem_bytes)));                                        \
+    kernel<<<                                                                  \
+        static_cast<unsigned>(logical_rows),                                   \
+        kHadamardThreads,                                                       \
+        smem_bytes,                                                            \
+        stream>>>(                                                             \
+        partials.const_data_ptr<float>(),                                      \
+        reinterpret_cast<const half*>(base.const_data_ptr()),                  \
+        post_scale.const_data_ptr<float>(),                                    \
+        bias.has_value() ? bias->const_data_ptr<float>() : nullptr,            \
+        reinterpret_cast<half*>(output.mutable_data_ptr()));                   \
+  }
+  if (split_count == 17) {
+    if (bias.has_value()) {
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(true, 17)
+    } else {
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(false, 17)
+    }
+  } else if (bias.has_value()) {
+    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(true, 34)
+  } else {
+    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(false, 34)
+  }
+#undef QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+at::Tensor qvq_folded_swiglu_precondition_fp32_cuda(
+    const at::Tensor& gate,
+    const at::Tensor& up,
+    const at::Tensor& gate_scale,
+    const at::Tensor& up_scale,
+    const std::optional<at::Tensor>& gate_bias,
+    const std::optional<at::Tensor>& up_bias,
+    const at::Tensor& down_scale) {
+  TORCH_CHECK(gate.is_cuda() && up.is_cuda(),
+              "folded SwiGLU inputs must be CUDA tensors");
+  TORCH_CHECK(
+      gate.device() == up.device() && gate.device() == gate_scale.device() &&
+          gate.device() == up_scale.device() && gate.device() == down_scale.device(),
+      "folded SwiGLU tensors must share a device");
+  TORCH_CHECK(gate.scalar_type() == at::kFloat && up.scalar_type() == at::kFloat,
+              "folded SwiGLU inputs must be float32");
+  TORCH_CHECK(gate.dim() == 2 && gate.sizes() == up.sizes() &&
+                  gate.is_contiguous() && up.is_contiguous(),
+              "folded SwiGLU inputs must be equal contiguous 2D tensors");
+  const int64_t rows = gate.size(0);
+  const int64_t n64 = gate.size(1);
+  TORCH_CHECK(rows >= 1 && rows <= 16,
+              "folded SwiGLU requires one through sixteen rows");
+  TORCH_CHECK(n64 > 0 && n64 <= std::numeric_limits<int>::max(),
+              "folded SwiGLU width exceeds int32 range");
+  for (const auto& named : {
+           std::pair<const char*, const at::Tensor&>{"gate_scale", gate_scale},
+           {"up_scale", up_scale}}) {
+    TORCH_CHECK(
+        named.second.scalar_type() == at::kFloat && named.second.is_contiguous() &&
+            named.second.numel() == n64,
+        named.first, " must be contiguous float32 with one value per column");
+  }
+  TORCH_CHECK(
+      down_scale.scalar_type() == at::kHalf && down_scale.is_contiguous() &&
+          down_scale.numel() == n64,
+      "down_scale must be contiguous float16 with one value per column");
+  auto validate_bias = [&](const std::optional<at::Tensor>& bias, const char* name) {
+    if (!bias.has_value()) {
+      return;
+    }
+    TORCH_CHECK(
+        bias->device() == gate.device() && bias->scalar_type() == at::kFloat &&
+            bias->is_contiguous() && bias->numel() == n64,
+        name, " must be contiguous float32 with one value per column");
+  };
+  validate_bias(gate_bias, "gate_bias");
+  validate_bias(up_bias, "up_bias");
+  const c10::cuda::CUDAGuard device_guard(gate.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, gate.get_device()));
+  TORCH_CHECK(properties.major == 9,
+              "folded SwiGLU precondition requires Hopper SM90");
+
+  const int n = static_cast<int>(n64);
+  auto output = at::empty({16, n64}, gate.options().dtype(at::kHalf));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(gate.get_device());
+  if (rows < 16) {
+    C10_CUDA_CHECK(cudaMemsetAsync(
+        output.mutable_data_ptr<at::Half>(),
+        0,
+        static_cast<size_t>(output.numel()) * sizeof(at::Half),
+        stream));
+  }
+  constexpr int kThreads = 256;
+  const int64_t logical_values = rows * n64;
+  const int blocks = static_cast<int>((logical_values + kThreads - 1) / kThreads);
+  const float* gate_bias_ptr = gate_bias.has_value()
+      ? gate_bias->const_data_ptr<float>()
+      : nullptr;
+  const float* up_bias_ptr = up_bias.has_value()
+      ? up_bias->const_data_ptr<float>()
+      : nullptr;
+#define QVQ_LAUNCH_FOLDED_SWIGLU(HAS_GATE_BIAS, HAS_UP_BIAS)                    \
+  qvq_folded_swiglu_precondition_fp32_kernel<HAS_GATE_BIAS, HAS_UP_BIAS>       \
+      <<<blocks, kThreads, 0, stream>>>(                                        \
+          gate.const_data_ptr<float>(),                                         \
+          up.const_data_ptr<float>(),                                           \
+          gate_scale.const_data_ptr<float>(),                                   \
+          up_scale.const_data_ptr<float>(),                                     \
+          gate_bias_ptr,                                                        \
+          up_bias_ptr,                                                          \
+          reinterpret_cast<const half*>(down_scale.const_data_ptr<at::Half>()), \
+          reinterpret_cast<half*>(output.mutable_data_ptr<at::Half>()),         \
+          logical_values,                                                       \
+          n)
+  if (gate_bias.has_value() && up_bias.has_value()) {
+    QVQ_LAUNCH_FOLDED_SWIGLU(true, true);
+  } else if (gate_bias.has_value()) {
+    QVQ_LAUNCH_FOLDED_SWIGLU(true, false);
+  } else if (up_bias.has_value()) {
+    QVQ_LAUNCH_FOLDED_SWIGLU(false, true);
+  } else {
+    QVQ_LAUNCH_FOLDED_SWIGLU(false, false);
+  }
+#undef QVQ_LAUNCH_FOLDED_SWIGLU
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
+    const at::Tensor& partials,
+    const at::Tensor& gate_scale,
+    const at::Tensor& up_scale,
+    const std::optional<at::Tensor>& gate_bias,
+    const std::optional<at::Tensor>& up_bias,
+    const at::Tensor& down_scale,
+    int64_t split_count,
+    int64_t logical_rows) {
+  TORCH_CHECK(partials.is_cuda() && partials.scalar_type() == at::kFloat &&
+                  partials.is_contiguous(),
+              "ordered folded SwiGLU partials must be contiguous CUDA float32");
+  TORCH_CHECK(split_count == 5 || split_count == 10,
+              "ordered folded SwiGLU requires split count five or ten");
+  TORCH_CHECK(logical_rows >= 1 && logical_rows <= 16,
+              "ordered folded SwiGLU requires one through sixteen logical rows");
+  const int64_t n64 = gate_scale.numel();
+  TORCH_CHECK(n64 > 0 && n64 <= std::numeric_limits<int>::max(),
+              "ordered folded SwiGLU width exceeds int32 range");
+  TORCH_CHECK(
+      partials.numel() == 2 * split_count * 16 * n64,
+      "ordered folded SwiGLU partial layout must contain two child-major split planes");
+  for (const auto& named : {
+           std::pair<const char*, const at::Tensor&>{"gate_scale", gate_scale},
+           {"up_scale", up_scale}}) {
+    TORCH_CHECK(
+        named.second.device() == partials.device() &&
+            named.second.scalar_type() == at::kFloat &&
+            named.second.is_contiguous() && named.second.numel() == n64,
+        named.first, " must be contiguous CUDA float32 with one value per column");
+  }
+  TORCH_CHECK(
+      down_scale.device() == partials.device() &&
+          down_scale.scalar_type() == at::kHalf && down_scale.is_contiguous() &&
+          down_scale.numel() == n64,
+      "down_scale must be contiguous CUDA float16 with one value per column");
+  auto validate_bias = [&](const std::optional<at::Tensor>& bias, const char* name) {
+    if (!bias.has_value()) {
+      return;
+    }
+    TORCH_CHECK(
+        bias->device() == partials.device() && bias->scalar_type() == at::kFloat &&
+            bias->is_contiguous() && bias->numel() == n64,
+        name, " must be contiguous CUDA float32 with one value per column");
+  };
+  validate_bias(gate_bias, "gate_bias");
+  validate_bias(up_bias, "up_bias");
+
+  const c10::cuda::CUDAGuard device_guard(partials.device());
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, partials.get_device()));
+  TORCH_CHECK(properties.major == 9,
+              "ordered folded SwiGLU precondition requires Hopper SM90");
+  const int n = static_cast<int>(n64);
+  auto output = at::empty({16, n64}, partials.options().dtype(at::kHalf));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(partials.get_device());
+  if (logical_rows < 16) {
+    C10_CUDA_CHECK(cudaMemsetAsync(
+        output.mutable_data_ptr<at::Half>(),
+        0,
+        static_cast<size_t>(output.numel()) * sizeof(at::Half),
+        stream));
+  }
+  constexpr int kThreads = 256;
+  const int64_t logical_values = logical_rows * n64;
+  const int blocks = static_cast<int>((logical_values + kThreads - 1) / kThreads);
+  const float* gate_bias_ptr = gate_bias.has_value()
+      ? gate_bias->const_data_ptr<float>()
+      : nullptr;
+  const float* up_bias_ptr = up_bias.has_value()
+      ? up_bias->const_data_ptr<float>()
+      : nullptr;
+#define QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(                               \
+    SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS)                                  \
+  qvq_folded_swiglu_precondition_ordered_fp32_kernel<                           \
+      SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS><<<blocks, kThreads, 0, stream>>>(\
+      partials.const_data_ptr<float>(),                                         \
+      gate_scale.const_data_ptr<float>(),                                       \
+      up_scale.const_data_ptr<float>(),                                         \
+      gate_bias_ptr,                                                            \
+      up_bias_ptr,                                                              \
+      reinterpret_cast<const half*>(down_scale.const_data_ptr<at::Half>()),     \
+      reinterpret_cast<half*>(output.mutable_data_ptr<at::Half>()),             \
+      logical_values,                                                           \
+      n)
+#define QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(SPLIT_COUNT)                         \
+  do {                                                                          \
+    if (gate_bias.has_value() && up_bias.has_value()) {                         \
+      QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(SPLIT_COUNT, true, true);          \
+    } else if (gate_bias.has_value()) {                                         \
+      QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(SPLIT_COUNT, true, false);         \
+    } else if (up_bias.has_value()) {                                           \
+      QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(SPLIT_COUNT, false, true);         \
+    } else {                                                                    \
+      QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(SPLIT_COUNT, false, false);        \
+    }                                                                           \
+  } while (false)
+  if (split_count == 5) {
+    QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(5);
+  } else {
+    QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(10);
+  }
+#undef QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU
+#undef QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
 at::Tensor qvq_swiglu_precondition_cuda(
     const at::Tensor& activated_gate,
     const at::Tensor& up,
@@ -2452,6 +3250,11 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("hadamard_ordered_split16_fp32_to_fp16(Tensor partial_input, Tensor post_scale, Tensor? bias, int scale_mode, int logical_rows, bool multiblock=False) -> Tensor");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode, bool warp_low=False) -> (Tensor, Tensor)");
   m.def("hadamard_pair_swiglu_precondition_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, Tensor pre_scale, int scale_mode, bool pad_to_16=False, bool pair_tiles=False, bool bounded_rounding=False, bool packed_gate_up=False) -> Tensor");
+  m.def("folded_swiglu_precondition_fp32(Tensor gate, Tensor up, Tensor gate_scale, Tensor up_scale, Tensor? gate_bias, Tensor? up_bias, Tensor down_scale) -> Tensor");
+  m.def("folded_swiglu_precondition_ordered_fp32(Tensor partials, Tensor gate_scale, Tensor up_scale, Tensor? gate_bias, Tensor? up_bias, Tensor down_scale, int split_count, int logical_rows) -> Tensor");
+  m.def("qwen_composite_recovery_fp32_to_fp16(Tensor input, Tensor base, Tensor post_scale, Tensor? bias) -> Tensor");
+  m.def("qwen_composite_ordered_recovery_fp32_to_fp16(Tensor partials, Tensor base, Tensor post_scale, Tensor? bias, int split_count, int logical_rows) -> Tensor");
+  m.def("qwen_composite_input_fp16_padded(Tensor input, Tensor base, Tensor pre_scale) -> Tensor");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
   m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False, bool half2_low=False, bool pad_to_16=False) -> Tensor");
 }
@@ -2463,6 +3266,11 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("hadamard_ordered_split16_fp32_to_fp16", &qvq_hadamard_ordered_split16_fp32_to_fp16_cuda);
   m.impl("hadamard_pair_fp32_to_fp16_multiblock", &qvq_hadamard_pair_fp32_to_fp16_multiblock_cuda);
   m.impl("hadamard_pair_swiglu_precondition_multiblock", &qvq_hadamard_pair_swiglu_precondition_multiblock_cuda);
+  m.impl("folded_swiglu_precondition_fp32", &qvq_folded_swiglu_precondition_fp32_cuda);
+  m.impl("folded_swiglu_precondition_ordered_fp32", &qvq_folded_swiglu_precondition_ordered_fp32_cuda);
+  m.impl("qwen_composite_recovery_fp32_to_fp16", &qvq_qwen_composite_recovery_fp32_to_fp16_cuda);
+  m.impl("qwen_composite_ordered_recovery_fp32_to_fp16", &qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda);
+  m.impl("qwen_composite_input_fp16_padded", &qvq_qwen_composite_input_fp16_padded_cuda);
   m.impl("swiglu_precondition", &qvq_swiglu_precondition_cuda);
   m.impl("swiglu_precondition_multiblock", &qvq_swiglu_precondition_multiblock_cuda);
 }

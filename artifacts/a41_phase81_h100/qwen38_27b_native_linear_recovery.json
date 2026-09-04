@@ -1,0 +1,60 @@
+{
+  "change": "Use one exact native composite recovery launch for each Qwen3.8-27B linear-input child and remove the redundant composite high-stage shared-memory handoff.",
+  "device": {
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "executable_parent_commit": "181ef9fa3bdabcce6d3e9d3265bc4159942ec893",
+  "hf_model": "Qwen/Qwen3.8-27B",
+  "hf_revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "phase": 81,
+  "timing": {
+    "kind": "warmed CUDA Graph replay timed with H100 CUDA events",
+    "replays_per_sample": 50,
+    "samples": 60,
+    "warmup": 20
+  },
+  "linear_input_geomean_baseline_over_new": 1.3888799958332667,
+  "linear_input_max_abs_error": 1.773657277226448e-05,
+  "linear_input_max_mean_abs_error": 2.4792983595034457e-06,
+  "linear_input_wins": "15/15",
+  "linear_input_rows": [
+    {"bits": 2.0, "m": 1, "median_us": 122.52639770507812, "baseline_over_new": 1.2714, "better_than_baseline": true},
+    {"bits": 2.0, "m": 2, "median_us": 124.14048194885254, "baseline_over_new": 1.3071, "better_than_baseline": true},
+    {"bits": 2.0, "m": 4, "median_us": 124.36351776123047, "baseline_over_new": 1.3537, "better_than_baseline": true},
+    {"bits": 2.0, "m": 8, "median_us": 124.46975708007812, "baseline_over_new": 1.4585, "better_than_baseline": true},
+    {"bits": 2.0, "m": 16, "median_us": 124.45856094360352, "baseline_over_new": 1.5508, "better_than_baseline": true},
+    {"bits": 2.5, "m": 1, "median_us": 122.8380823135376, "baseline_over_new": 1.2690, "better_than_baseline": true},
+    {"bits": 2.5, "m": 2, "median_us": 124.75200176239014, "baseline_over_new": 1.3058, "better_than_baseline": true},
+    {"bits": 2.5, "m": 4, "median_us": 125.06175994873047, "baseline_over_new": 1.3535, "better_than_baseline": true},
+    {"bits": 2.5, "m": 8, "median_us": 124.93695735931396, "baseline_over_new": 1.4584, "better_than_baseline": true},
+    {"bits": 2.5, "m": 16, "median_us": 124.81184005737305, "baseline_over_new": 1.5511, "better_than_baseline": true},
+    {"bits": 3.0, "m": 1, "median_us": 118.2915210723877, "baseline_over_new": 1.2835, "better_than_baseline": true},
+    {"bits": 3.0, "m": 2, "median_us": 120.65248012542725, "baseline_over_new": 1.3209, "better_than_baseline": true},
+    {"bits": 3.0, "m": 4, "median_us": 121.06047630310059, "baseline_over_new": 1.3665, "better_than_baseline": true},
+    {"bits": 3.0, "m": 8, "median_us": 120.88128089904785, "baseline_over_new": 1.4733, "better_than_baseline": true},
+    {"bits": 3.0, "m": 16, "median_us": 120.99103927612305, "baseline_over_new": 1.5665, "better_than_baseline": true}
+  ],
+  "mlp_geomean_baseline_over_new": 1.0102966184065454,
+  "mlp_max_abs_error": 4.837841061089421e-08,
+  "mlp_max_mean_abs_error": 1.544431142974645e-08,
+  "mlp_wins": "15/15",
+  "mlp_rows": [
+    {"bits": 2.0, "m": 1, "median_us": 179.8534393310547, "baseline_over_new": 1.0111, "better_than_baseline": true},
+    {"bits": 2.0, "m": 2, "median_us": 181.31296157836914, "baseline_over_new": 1.0103, "better_than_baseline": true},
+    {"bits": 2.0, "m": 4, "median_us": 181.90943717956543, "baseline_over_new": 1.0101, "better_than_baseline": true},
+    {"bits": 2.0, "m": 8, "median_us": 182.28352546691895, "baseline_over_new": 1.0076, "better_than_baseline": true},
+    {"bits": 2.0, "m": 16, "median_us": 182.16832160949707, "baseline_over_new": 1.0103, "better_than_baseline": true},
+    {"bits": 2.5, "m": 1, "median_us": 180.6649684906006, "baseline_over_new": 1.0130, "better_than_baseline": true},
+    {"bits": 2.5, "m": 2, "median_us": 182.78592109680176, "baseline_over_new": 1.0071, "better_than_baseline": true},
+    {"bits": 2.5, "m": 4, "median_us": 183.02687644958496, "baseline_over_new": 1.0080, "better_than_baseline": true},
+    {"bits": 2.5, "m": 8, "median_us": 182.79648780822754, "baseline_over_new": 1.0111, "better_than_baseline": true},
+    {"bits": 2.5, "m": 16, "median_us": 183.2857608795166, "baseline_over_new": 1.0110, "better_than_baseline": true},
+    {"bits": 3.0, "m": 1, "median_us": 183.71520042419434, "baseline_over_new": 1.0107, "better_than_baseline": true},
+    {"bits": 3.0, "m": 2, "median_us": 185.68896293640137, "baseline_over_new": 1.0109, "better_than_baseline": true},
+    {"bits": 3.0, "m": 4, "median_us": 186.15903854370117, "baseline_over_new": 1.0130, "better_than_baseline": true},
+    {"bits": 3.0, "m": 8, "median_us": 186.44927978515625, "baseline_over_new": 1.0121, "better_than_baseline": true},
+    {"bits": 3.0, "m": 16, "median_us": 187.09919929504395, "baseline_over_new": 1.0081, "better_than_baseline": true}
+  ]
+}
