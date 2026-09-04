@@ -44,15 +44,37 @@ def _bank_mask(transition_bits: int, bank_alt_id: int) -> int:
     return masks[transition_bits][bank_alt_id]
 
 
-def _launch_config(m: int, n: int = 4096) -> tuple[int, int, int]:
+def _launch_config(m: int, n: int = 4096, k: int = 4096) -> tuple[int, int, int]:
     """Choose an MFMA tile without materializing a shape Cartesian product."""
 
     if m <= 16:
         return 16, 64, 8
+    if m == 64 and n >= 10240:
+        return 64, 64, 8
     if m <= 64:
         return 32, 64, 8
-    if m >= 2048 and (n > 1024 or m >= 4096):
-        return 128, 128, 8
+    if m <= 256 and n <= 1024:
+        return 32, 64, 8
+    if m <= 1024 and n <= 1024:
+        return 64, 64, 8
+    if m == 128 and k <= 6144 and n <= 6144:
+        return 64, 64, 8
+    if m == 1024 and 8192 < n <= 12288:
+        return 1024, 64, 8
+    if m == 1024 and n > 1024:
+        return 512, 64, 8
+    if m == 512 and 8192 < n <= 12288:
+        return 512, 64, 8
+    if m == 512 and n > 1024:
+        return 256, 64, 8
+    if m == 256 and n >= 10240:
+        return 256, 64, 8
+    if m == 2048 and n <= 1024:
+        return 128, 64, 8
+    if m >= 4096 and n <= 1024:
+        return 256, 64, 8
+    if m >= 2048:
+        return 512, 64, 8
     return 128, 64, 8
 
 
@@ -85,6 +107,7 @@ def _qvq_p32_gfx950_kernel(  # pragma: no cover - compiled and exercised on the 
     alternate_mask: tl.constexpr,
     block_m: tl.constexpr,
     block_n: tl.constexpr,
+    block_k: tl.constexpr,
     num_pid_n: tl.constexpr,
     xcd_swizzle: tl.constexpr,
 ):
@@ -101,13 +124,16 @@ def _qvq_p32_gfx950_kernel(  # pragma: no cover - compiled and exercised on the 
     accumulator = tl.zeros((block_m, block_n), dtype=tl.float32)
     n_tiles = size_n // 16
 
-    for k_tile in range(size_k // 16):
-        local_k = tl.arange(0, 16)[:, None]
+    for k_block in range(size_k // block_k):
+        local_k = tl.arange(0, block_k)[:, None]
         pair_columns = pid_n * (block_n // 2) + tl.arange(0, block_n // 2)
         pair_column_mask = pair_columns < size_n // 2
         local_pair_n = pair_columns[None, :] & 7
-        pair = local_k * 8 + local_pair_n
-        tile = k_tile * n_tiles + pair_columns[None, :] // 8
+        pair = (local_k & 15) * 8 + local_pair_n
+        tile = (
+            (k_block * (block_k // 16) + (local_k >> 4)) * n_tiles
+            + pair_columns[None, :] // 8
+        )
         bit_position = (127 - pair) * transition_bits
         first_word = bit_position >> 5
         shift = bit_position & 31
@@ -118,23 +144,47 @@ def _qvq_p32_gfx950_kernel(  # pragma: no cover - compiled and exercised on the 
             mask=pair_column_mask[None, :],
             other=0,
         ).to(tl.uint32)
+        high_mask = pair_column_mask[None, :]
+        if transition_bits == 4:
+            high_mask &= shift > 16
         high = tl.load(
             trellis_ptr + word_base + next_word,
-            mask=pair_column_mask[None, :],
+            mask=high_mask,
             other=0,
         ).to(tl.uint32)
-        state = tl.where(shift == 0, low, (low >> shift) | (high << ((32 - shift) & 31))) & 0xFFFF
+        if size_m >= 32 and size_m <= 512:
+            state = tl.inline_asm_elementwise(
+                "v_alignbit_b32 $0, $2, $1, $3",
+                "=v,v,v,v",
+                [low, high, shift],
+                dtype=tl.uint32,
+                is_pure=True,
+                pack=1,
+            ) & 0xFFFF
+        else:
+            state = tl.where(
+                shift == 0,
+                low,
+                (low >> shift) | (high << ((32 - shift) & 31)),
+            ) & 0xFFFF
 
         packed_bank = tl.load(bank_ids_ptr + tile, mask=pair_column_mask[None, :], other=0)
         selected = (packed_bank >> (pair >> 4)) & 1
-        mixed = state ^ (selected * alternate_mask)
-        mixed = mixed ^ (mixed >> 8)
-        mixed = (mixed * 40503 + 17011) & 0xFFFF
+        mixed = state ^ (state >> 8)
+        mixed = mixed ^ (selected * (alternate_mask ^ (alternate_mask >> 8)))
+        mixed = tl.inline_asm_elementwise(
+            "v_mad_u32_u24 $0, $1, $2, $3",
+            "=v,v,s,v",
+            [mixed, 40503, 17011],
+            dtype=tl.uint32,
+            is_pure=True,
+            pack=1,
+        ) & 0xFFFF
         mixed = mixed ^ (mixed >> 7)
         even_weight = tl.load(levels_ptr + (mixed >> 8)).to(tl.float16)
         odd_weight = tl.load(levels_ptr + (mixed & 0xFF)).to(tl.float16)
         weight = tl.interleave(even_weight, odd_weight)
-        input_offsets = rows[:, None] * size_k + k_tile * 16 + tl.arange(0, 16)[None, :]
+        input_offsets = rows[:, None] * size_k + k_block * block_k + tl.arange(0, block_k)[None, :]
         activation = tl.load(input_ptr + input_offsets, mask=row_mask[:, None], other=0.0)
         accumulator = tl.dot(activation, weight, accumulator)
 
@@ -186,17 +236,34 @@ def _qvq_p32_gemv_gfx950_kernel(  # pragma: no cover - compiled and exercised on
             mask=pair_column_mask[None, :],
             other=0,
         ).to(tl.uint32)
+        high_mask = pair_column_mask[None, :]
+        if transition_bits == 4:
+            high_mask &= shift > 16
         high = tl.load(
             trellis_ptr + word_base + next_word,
-            mask=pair_column_mask[None, :],
+            mask=high_mask,
             other=0,
         ).to(tl.uint32)
-        state = tl.where(shift == 0, low, (low >> shift) | (high << ((32 - shift) & 31))) & 0xFFFF
+        state = tl.inline_asm_elementwise(
+            "v_alignbit_b32 $0, $2, $1, $3",
+            "=v,v,v,v",
+            [low, high, shift],
+            dtype=tl.uint32,
+            is_pure=True,
+            pack=1,
+        ) & 0xFFFF
         packed_bank = tl.load(bank_ids_ptr + tile, mask=pair_column_mask[None, :], other=0)
         selected = (packed_bank >> (pair >> 4)) & 1
-        mixed = state ^ (selected * alternate_mask)
-        mixed = mixed ^ (mixed >> 8)
-        mixed = (mixed * 40503 + 17011) & 0xFFFF
+        mixed = state ^ (state >> 8)
+        mixed = mixed ^ (selected * (alternate_mask ^ (alternate_mask >> 8)))
+        mixed = tl.inline_asm_elementwise(
+            "v_mad_u32_u24 $0, $1, $2, $3",
+            "=v,v,s,v",
+            [mixed, 40503, 17011],
+            dtype=tl.uint32,
+            is_pure=True,
+            pack=1,
+        ) & 0xFFFF
         mixed = mixed ^ (mixed >> 7)
         even_weight = tl.load(levels_ptr + (mixed >> 8)).to(tl.float16)
         odd_weight = tl.load(levels_ptr + (mixed & 0xFF)).to(tl.float16)
@@ -258,9 +325,11 @@ def qvq_p32_amd(
     if tuple(bank_ids.shape) != (tile_count,):
         raise ValueError(f"AMD P32 selectors must have shape {(tile_count,)}")
 
-    block_m, block_n, num_warps = _launch_config(m, n)
+    block_m, block_n, num_warps = _launch_config(m, n, k)
+    block_k = 64 if m >= 128 else (32 if m == 64 and n >= 10240 else 16)
     output_dtype = torch.float32 if output_fp32 else x.dtype
     output = torch.empty((m, n), device=x.device, dtype=output_dtype)
+    alternate_mask = _bank_mask(transition_bits, bank_alt_id)
     if _use_gemv(m, n):
         block_n = 64
         num_pid_n = triton.cdiv(n, block_n)
@@ -276,7 +345,7 @@ def qvq_p32_amd(
             size_n=n,
             transition_bits=transition_bits,
             words_per_tile=expected_window[1],
-            alternate_mask=_bank_mask(transition_bits, bank_alt_id),
+            alternate_mask=alternate_mask,
             block_n=block_n,
             num_pid_n=num_pid_n,
             xcd_swizzle=(m * num_pid_n) % 8 == 0,
@@ -301,13 +370,14 @@ def qvq_p32_amd(
         size_n=n,
         transition_bits=transition_bits,
         words_per_tile=expected_window[1],
-        alternate_mask=_bank_mask(transition_bits, bank_alt_id),
+        alternate_mask=alternate_mask,
         block_m=block_m,
         block_n=block_n,
+        block_k=block_k,
         num_pid_n=num_pid_n,
         xcd_swizzle=num_pid % 8 == 0,
         num_warps=num_warps,
-        num_stages=3 if m <= 64 else 2,
+        num_stages=1 if block_m == 1024 else (3 if m <= 64 else 2),
         waves_per_eu=0,
         matrix_instr_nonkdim=16,
         kpack=1,

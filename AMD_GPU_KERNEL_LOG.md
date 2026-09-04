@@ -55,7 +55,15 @@ engineering comparison but is never presented as an official result.
 | PASS (exploratory) | Final K=N=4096 sweep against fixed commit `14928c96` | All 52 cases passed; worst maximum absolute error `1.239777e-5` | Every case improved: 1.022x minimum, 1.519x geometric mean, and 2.070x maximum. M1 geometric mean was 2.039x. |
 | PASS (exploratory) | ROCm Compute Profiler stages `sol` and `cu_ins` plus gfx950 ISA disassembly | Exact HSACO launches completed with the correct dynamic LDS allocation | At W3/M64/K=N=4096, pairwise stage-3 MFMA reduced static VALU 234 to 161 (31.20%), VGPRs 68 to 40 (41.18%), dynamic VALU 14.28M to 6.10M (57.31%), and dynamic VMEM 2.37M to 1.57M (33.52%); profiled median improved from 192.35 us to 85.42 us. The M1 GEMV has 208 static opcodes, 26 VGPRs, and no MFMA; its direct median improved from 189.30 us to 83.14 us (2.277x). The large-M stage-2 kernel reached 95.88% CU utilization. |
 | FAIL (profiler integration), FIXED | Direct `rocprof-compute` injection into the Triton Python process | Benchmark aborted before dispatch | ROCm and Triton's LLVM libraries registered `spirv-expand-step` twice. The corrected path loads the exact cached HSACO in a minimal HIP module launcher and preserves grid, block, LDS, and argument ABI. `rocprof-compute` 3.8.0, `rocprofv3`, and `llvm-objdump` were verified; the profiler analysis dependencies were installed in `/home/ubuntu/.venvs/rocprof-compute`. |
-| PASS | Final correctness and contract suite | 193/193 tests passed | Covers three seeds for every requested M/rate pair, ten repeat calls, adversarial inputs, alternate banks, FP16/FP32 output, public module dispatch, non-default stream behavior, launch/GEMV policy, and invalid contracts. |
+| PASS | Final correctness and contract suite | 202/202 tests passed | Covers three seeds for every requested M/rate pair, ten repeat calls, adversarial inputs, alternate banks, FP16/FP32 output, public module dispatch, non-default stream behavior, every selected Qwen launch regime, GEMV policy, and invalid contracts. |
+| PASS | W2 cross-word load mask | Full Qwen projection sweep passed | The high packed word is skipped for W2 states whose four-bit transition does not cross a 32-bit boundary. Accepted as a strict load reduction. |
+| PASS | Fold bank selection through the xor-shift recurrence | Full Qwen projection sweep passed | Algebraically rewrote `(state ^ selected*mask) ^ ((state ^ selected*mask) >> 8)` as `(state ^ (state >> 8)) ^ selected*(mask ^ (mask >> 8))`, removing a selected-dependent xor from the hot recurrence. |
+| PASS | Exact gfx950 instruction selection | Full Qwen projection sweep passed | Inline `v_mad_u32_u24` replaces multiply-plus-add in the 16-bit hash. `v_alignbit_b32` replaces the variable funnel-shift only for GEMV and M32-M512, where its complete A/B operand dependency reduced latency; it was rejected for larger MFMA tiles. |
+| PASS, REJECTED | Precomputed 65536-entry decode/index LUT | Accuracy passed | The extra global lookup traffic outweighed removed integer algebra across the tested Qwen shapes, so exact on-the-fly recurrence remained selected. |
+| PASS, REJECTED | Extend GEMV to all wide M2/M4 shapes | Accuracy passed | Increased program count and reduction traffic regressed wide QKV/MLP projections. The existing occupancy cap of 256 programs remains selected. |
+| PASS | Wider K blocks and Qwen-specific M/N tiles | Full Qwen projection sweep passed | MFMA uses BK64 from M128, BK32 for M64 with N>=10240, and BK16 otherwise. Selected row tiles range from BM32 for narrow mid-M projections through BM1024 for M1024/N10240-12288; all retain BN64 and eight warps. |
+| PASS (exploratory) | Complete Qwen3.8-27B target sweep versus fixed AMD commit `14928c96` | All 364 cases passed; worst maximum absolute error about `6.2e-5` | All seven projection shapes, four P32 rates, and 13 requested M values improved. Speedup was 1.397x minimum, **2.00045x geometric mean**, and 3.228x maximum. Per-M geometric means ranged from 1.711x at M128 to 2.791x at M4096. This reaches the requested 2x exploratory target, but foreign GPU residency invalidates it as an uncontended certification result. |
+| PASS (exploratory) | Final ROCm Compute Profiler coverage for every selected compiler-stage regime | Exact cached HSACO launches completed for GEMV stage 1 and MFMA stages 1, 2, and 3 | W3 Qwen representatives were M1/K5120/N12288 (GEMV stage 1), M64/K5120/N12288 (MFMA stage 3), M2048/K5120/N12288 (stage 2), and M1024/K5120/N12288 (stage 1). Median dispatches were 103.69, 114.46, 490.14, and 306.84 us. Stage-2 reached 96.81% CU utilization; dynamic MFMA counts were 0, 0.492M, 15.729M, and 7.864M respectively. Static ISA confirms `v_alignbit_b32` only in the selected small/mid regimes and `v_mad_u32_u24` in every representative. |
 
 The initial exploratory sweep is stored in
 `artifacts/mi355x_p32/initial_gfx950.json`. The expanded sweep is stored in
@@ -67,8 +75,10 @@ experiments and the final full sweep are stored alongside it as
 
 The second-pass final square sweep, Qwen3.8-27B candidate and fixed-baseline
 sweeps, pairwise experiment records, comparison summaries, and counter/ISA
-breakdown are stored as `final_gfx950.json`, `qwen38_27b_*_gfx950.json`,
-`experiment_*.json`, and `isa_profile_gfx950.json` in the same directory.
+breakdown are stored as `final_gfx950.json`, `qwen38_27b_2x_gfx950.json`,
+`qwen38_27b_2x_gfx950_shapes/`,
+`qwen38_27b_2x_vs_14928c96_gfx950.json`, `experiment_*.json`, and
+`isa_profile_gfx950.json` in the same directory.
 
 ## Implementation notes
 
@@ -76,8 +86,12 @@ The selected Triton kernels decode the storage-neutral continuous-window P32
 layout in registers, apply packed binary bank selection and the exact PGC16
 mix once per adjacent output pair, and accumulate in FP32. A scalar GEMV path
 handles occupancy-safe tiny-M shapes; the MFMA path uses 16x64 tiles through
-M16, 32x64 through M64, 128x64 through M1024, and shape-aware 128x128 tiles at
-large M, all with eight warps. Dispatch remains limited to ROCm `gfx950`,
+M16 and generally 32x64 through M64. Larger shapes select row tiles from 32 to
+1024 with a 64-column tile, based on the Qwen projection dimensions and M; K
+blocks are 16, 32, or 64. All selected configurations use eight warps. The
+exact bank/hash path folds the bank mask through the xor-shift, uses gfx950
+`v_mad_u32_u24`, and selectively uses `v_alignbit_b32`. Dispatch remains
+limited to ROCm `gfx950`,
 inference mode, FP16 input, V2B2-P32 vector size 2, and transition widths 4
 through 7. Unsupported devices and formats retain the existing reference or
 CUDA paths.
