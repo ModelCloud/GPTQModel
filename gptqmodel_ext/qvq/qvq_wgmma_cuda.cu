@@ -16,6 +16,7 @@
 #include <cutlass/numeric_types.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -23,6 +24,7 @@
 namespace {
 
 using Element = cutlass::half_t;
+using Fp8Element = cutlass::float_e4m3_t;
 using WgmmaTileShape = cute::Shape<cute::_64, cute::_16, cute::_16>;
 using WgmmaTiledMma = decltype(cute::make_tiled_mma(
     cute::GMMA::rs_op_selector<
@@ -41,6 +43,29 @@ using WgmmaSmemLayoutAtomB = decltype(
         false>());
 using WgmmaSmemLayoutB = decltype(cute::tile_to_shape(
     WgmmaSmemLayoutAtomB{}, cute::make_shape(cute::_16{}, cute::_256{})));
+
+// True A8 P32 execution combines two adjacent canonical K16 tiles into the
+// K32 operand required by Hopper's E4M3 x E4M3 RS-WGMMA.  P32 storage remains
+// unchanged: only decoded register values and the transformed activation tile
+// are narrowed to E4M3 for the tensor-core operation.
+using Fp8WgmmaTileShape = cute::Shape<cute::_64, cute::_16, cute::_32>;
+using Fp8WgmmaTiledMma = decltype(cute::make_tiled_mma(
+    cute::GMMA::rs_op_selector<
+        Fp8Element,
+        Fp8Element,
+        float,
+        Fp8WgmmaTileShape,
+        cute::GMMA::Major::K,
+        cute::GMMA::Major::K>()));
+using Fp8WgmmaSmemLayoutAtomB = decltype(
+    cutlass::gemm::collective::detail::rs_smem_selector<
+        cute::GMMA::Major::K,
+        Fp8Element,
+        cute::_32,
+        cute::_32,
+        false>());
+using Fp8WgmmaSmemLayoutB = decltype(cute::tile_to_shape(
+    Fp8WgmmaSmemLayoutAtomB{}, cute::make_shape(cute::_16{}, cute::_32{})));
 
 constexpr int kThreads = 128;
 constexpr int kTmaThreads = 160;
@@ -150,6 +175,7 @@ static_assert(
     "W3.5 lane-interleaved levels must fit the default Hopper shared-memory limit");
 
 static_assert(cute::size(WgmmaTiledMma{}) == kThreads);
+static_assert(cute::size(Fp8WgmmaTiledMma{}) == kThreads);
 
 __device__ __forceinline__ uint32_t qvq_wgmma_pgc16_mix(uint32_t state) {
   uint32_t mixed = state ^ (state >> 8);
@@ -539,6 +565,119 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
         product10,
         product11);
   }
+}
+
+__device__ __forceinline__ int qvq_p32_wgmma_logical_column(int wgmma_column) {
+  const int tile_column = wgmma_column & 15;
+  return (wgmma_column & ~15) + ((tile_column & 7) << 1) + (tile_column >> 3);
+}
+
+template <int TransitionBits>
+__global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
+    const Fp8Element* __restrict__ input,
+    const float* __restrict__ input_scale,
+    const uint32_t* __restrict__ trellis,
+    const uint8_t* __restrict__ bank_ids,
+    const Fp8Element* __restrict__ levels,
+    float level_scale,
+    float* __restrict__ output,
+    int size_k,
+    int size_n,
+    int bank_alt_id) {
+#if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
+  __shared__ __align__(128) Fp8Element shared_input[cute::cosize_v<Fp8WgmmaSmemLayoutB>];
+
+  const int thread = static_cast<int>(threadIdx.x);
+  const int n64_block = static_cast<int>(blockIdx.x);
+  const int n_base = n64_block * kOutputColumns;
+  const int n_tiles = size_n / kP32TileColumns;
+  const uint32_t alternate_bank_mask =
+      qvq_wgmma_v2_alternate_bank_mask<TransitionBits>(bank_alt_id);
+
+  auto sB = cute::make_tensor(cute::make_smem_ptr(shared_input), Fp8WgmmaSmemLayoutB{});
+  Fp8WgmmaTiledMma tiled_mma;
+  auto thread_mma = tiled_mma.get_thread_slice(thread);
+  auto thread_shared_b = thread_mma.partition_B(sB);
+  auto fragment_b = thread_mma.make_fragment_B(thread_shared_b);
+
+  auto coordinate_a = cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_32{}));
+  auto thread_coordinate_a = thread_mma.partition_A(coordinate_a);
+  auto fragment_a = cute::make_tensor<Fp8Element>(thread_coordinate_a.shape());
+  static_assert(cute::size(decltype(thread_coordinate_a){}) == 16);
+
+  auto coordinate_c = cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_16{}));
+  auto thread_coordinate_c = thread_mma.partition_C(coordinate_c);
+  auto accumulator = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto scaled_accumulator = cute::make_tensor<float>(thread_coordinate_c.shape());
+  cute::clear(accumulator);
+  cute::clear(scaled_accumulator);
+  tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
+  constexpr int kAccumulatorValuesPerThread = cute::size(decltype(thread_coordinate_c){});
+
+  for (int k_base = 0; k_base < size_k; k_base += 32) {
+    for (int index = thread; index < kRows * 32; index += kThreads) {
+      const int row = index >> 5;
+      const int column = index & 31;
+      sB(row, column) = input[static_cast<int64_t>(row) * size_k + k_base + column];
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (int index = 0; index < 16; ++index) {
+      const auto coordinate = thread_coordinate_a(index);
+      const int wgmma_column = static_cast<int>(cute::get<0>(coordinate));
+      const int k_column = static_cast<int>(cute::get<1>(coordinate));
+      const int logical_n = n_base + qvq_p32_wgmma_logical_column(wgmma_column);
+      const int logical_k = k_base + k_column;
+      const int n16_tile = logical_n >> 4;
+      const int k16_tile = logical_k >> 4;
+      const int pair = (logical_k & 15) * 8 + ((logical_n & 15) >> 1);
+      constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+      const int64_t tile = static_cast<int64_t>(k16_tile) * n_tiles + n16_tile;
+      const uint32_t* window_words = trellis + tile * kWordsPerP32Tile;
+      const uint32_t state = qvq_p32_window_state<TransitionBits>(window_words, pair);
+      const uint32_t selected_bank =
+          (static_cast<uint32_t>(bank_ids[tile]) >> (pair >> 4)) & 1u;
+      const uint32_t mixed = qvq_wgmma_pgc16_mix(
+          state ^ (selected_bank ? alternate_bank_mask : 0u));
+      const uint32_t level_index =
+          (logical_n & 1) == 0 ? qvq_wgmma_high_byte(mixed) : mixed & 0xffu;
+      fragment_a(index) = levels[level_index];
+    }
+
+    cute::warpgroup_fence_operand(fragment_a);
+    cute::warpgroup_fence_operand(accumulator);
+    cute::warpgroup_arrive();
+    cute::gemm(
+        tiled_mma,
+        fragment_a(cute::_, cute::_, cute::_0{}),
+        fragment_b(cute::_, cute::_, cute::_0{}),
+        accumulator);
+    tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
+    cute::warpgroup_commit_batch();
+    cute::warpgroup_wait<0>();
+    cute::warpgroup_fence_operand(accumulator);
+#pragma unroll
+    for (int index = 0; index < kAccumulatorValuesPerThread; ++index) {
+      const auto coordinate = thread_coordinate_c(index);
+      const int output_row = static_cast<int>(cute::get<1>(coordinate));
+      scaled_accumulator(index) +=
+          accumulator(index) * input_scale[output_row] * level_scale;
+    }
+    cute::clear(accumulator);
+    tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
+    __syncthreads();
+  }
+
+#pragma unroll
+  for (int index = 0; index < kAccumulatorValuesPerThread; ++index) {
+    const auto coordinate = thread_coordinate_c(index);
+    const int wgmma_column = static_cast<int>(cute::get<0>(coordinate));
+    const int output_row = static_cast<int>(cute::get<1>(coordinate));
+    const int logical_n = n_base + qvq_p32_wgmma_logical_column(wgmma_column);
+    output[static_cast<int64_t>(output_row) * size_n + logical_n] = scaled_accumulator(index);
+  }
+#endif
 }
 
 __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
@@ -1974,6 +2113,111 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_ordered_partials(
   }
 }
 
+template <int TransitionBits>
+at::Tensor qvq_p32_window_wgmma_fp8_m16_impl(
+    const at::Tensor& input,
+    const at::Tensor& input_scale,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t out_features,
+    int64_t bank_alt_id,
+    double level_scale) {
+  TORCH_CHECK(input.is_cuda(), "QVQ P32 FP8 WGMMA input must be CUDA");
+  c10::cuda::CUDAGuard device_guard(input.device());
+  TORCH_CHECK(
+      input_scale.device() == input.device() && trellis.device() == input.device() &&
+          levels.device() == input.device() && bank_ids.device() == input.device(),
+      "QVQ P32 FP8 WGMMA tensors must share one CUDA device");
+  TORCH_CHECK(
+      input.scalar_type() == at::kFloat8_e4m3fn && levels.scalar_type() == at::kFloat8_e4m3fn,
+      "QVQ P32 FP8 WGMMA requires float8_e4m3fn input and levels");
+  TORCH_CHECK(input_scale.scalar_type() == at::kFloat,
+              "QVQ P32 FP8 WGMMA input scale must be float32");
+  TORCH_CHECK(trellis.scalar_type() == at::kInt,
+              "QVQ P32 FP8 WGMMA trellis must be int32");
+  TORCH_CHECK(bank_ids.scalar_type() == at::kByte,
+              "QVQ P32 FP8 WGMMA bank ids must be uint8");
+  TORCH_CHECK(
+      input.is_contiguous() && input_scale.is_contiguous() && trellis.is_contiguous() &&
+          levels.is_contiguous() && bank_ids.is_contiguous(),
+      "QVQ P32 FP8 WGMMA tensors must be contiguous");
+  TORCH_CHECK(input.dim() == 2 && input.size(0) == kRows,
+              "QVQ P32 FP8 WGMMA requires M=16");
+  TORCH_CHECK(input_scale.numel() == kRows,
+              "QVQ P32 FP8 WGMMA requires one input scale per row");
+  TORCH_CHECK(out_features > 0 && out_features % kOutputColumns == 0,
+              "QVQ P32 FP8 WGMMA output features must be a positive multiple of 64");
+  TORCH_CHECK(input.size(1) > 0 && input.size(1) % 32 == 0,
+              "QVQ P32 FP8 WGMMA input features must be a positive multiple of 32");
+  TORCH_CHECK(bank_alt_id >= 1 && bank_alt_id <= 3,
+              "QVQ P32 FP8 WGMMA alternate bank id must be in [1, 3]");
+  TORCH_CHECK(std::isfinite(level_scale) && level_scale > 0.0,
+              "QVQ P32 FP8 WGMMA level scale must be finite and positive");
+
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, input.get_device()));
+  TORCH_CHECK(properties.major == 9 && properties.minor == 0,
+              "QVQ P32 FP8 WGMMA requires an SM90 H100/H200 device");
+
+  const int size_k = static_cast<int>(input.size(1));
+  const int size_n = static_cast<int>(out_features);
+  const int64_t expected_tiles =
+      static_cast<int64_t>(size_k / kP32TileRows) * (size_n / kP32TileColumns);
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  TORCH_CHECK(trellis.numel() == expected_tiles * kWordsPerP32Tile,
+              "QVQ P32 FP8 WGMMA trellis size mismatch");
+  TORCH_CHECK(bank_ids.numel() == expected_tiles,
+              "QVQ P32 FP8 WGMMA bank-id size mismatch");
+  TORCH_CHECK(levels.numel() == 256,
+              "QVQ P32 FP8 WGMMA requires 256 quantized PGC16 levels");
+
+  auto output = at::empty({kRows, size_n}, input.options().dtype(at::kFloat));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  const dim3 grid(static_cast<unsigned>(size_n / kOutputColumns));
+  qvq_p32_window_wgmma_fp8_m16_kernel<TransitionBits><<<grid, kThreads, 0, stream>>>(
+      reinterpret_cast<const Fp8Element*>(input.data_ptr()),
+      input_scale.data_ptr<float>(),
+      reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+      bank_ids.data_ptr<uint8_t>(),
+      reinterpret_cast<const Fp8Element*>(levels.data_ptr()),
+      static_cast<float>(level_scale),
+      output.data_ptr<float>(),
+      size_k,
+      size_n,
+      static_cast<int>(bank_alt_id));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+at::Tensor qvq_p32_window_wgmma_fp8_m16(
+    const at::Tensor& input,
+    const at::Tensor& input_scale,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t transition_bits,
+    int64_t out_features,
+    int64_t bank_alt_id,
+    double level_scale) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_wgmma_fp8_m16_impl<4>(
+          input, input_scale, trellis, levels, bank_ids, out_features, bank_alt_id, level_scale);
+    case 5:
+      return qvq_p32_window_wgmma_fp8_m16_impl<5>(
+          input, input_scale, trellis, levels, bank_ids, out_features, bank_alt_id, level_scale);
+    case 6:
+      return qvq_p32_window_wgmma_fp8_m16_impl<6>(
+          input, input_scale, trellis, levels, bank_ids, out_features, bank_alt_id, level_scale);
+    case 7:
+      return qvq_p32_window_wgmma_fp8_m16_impl<7>(
+          input, input_scale, trellis, levels, bank_ids, out_features, bank_alt_id, level_scale);
+    default:
+      TORCH_CHECK(false, "QVQ P32 FP8 WGMMA transition bits must be in [4, 7]");
+  }
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
@@ -1985,6 +2229,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_m16_tma_grouped(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m16_tma_grouped_ordered_split(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m16_tma_grouped_ordered_partials(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
+  m.def("p32_window_fp8_m16(Tensor input, Tensor input_scale, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id, float level_scale) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
@@ -1996,4 +2241,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_m16_tma_grouped", qvq_p32_window_wgmma_m16_tma_grouped);
   m.impl("p32_window_m16_tma_grouped_ordered_split", qvq_p32_window_wgmma_m16_tma_grouped_ordered_split);
   m.impl("p32_window_m16_tma_grouped_ordered_partials", qvq_p32_window_wgmma_m16_tma_grouped_ordered_partials);
+  m.impl("p32_window_fp8_m16", qvq_p32_window_wgmma_fp8_m16);
 }

@@ -119,6 +119,11 @@ def _source_key(children: Sequence[QVQLinear]) -> tuple[Any, ...]:
                         int(child.activation_quantization.bits),
                         child.activation_quantization.format,
                         child.activation_quantization.scale_method,
+                        child.activation_quantization.target,
+                        child.activation_quantization.kernel_mode,
+                        int(child.activation_quantization.replay_passes),
+                        int(child.activation_quantization.replay_max_rows),
+                        float(child.activation_quantization.replay_validation_fraction),
                     )
                 ),
             )
@@ -200,6 +205,7 @@ class QVQGroupedRuntimeTelemetry:
     members: tuple[str, ...]
     grouped_launches: int = 0
     grouped_a8_launches: int = 0
+    fp8_independent_child_launches: int = 0
     shared_fp8_quantizations: int = 0
     sibling_cache_hits: int = 0
     plain_fallbacks: int = 0
@@ -255,6 +261,7 @@ class QVQGroupedRuntimeTelemetry:
             "members": self.members,
             "grouped_launches": self.grouped_launches,
             "grouped_a8_launches": self.grouped_a8_launches,
+            "fp8_independent_child_launches": self.fp8_independent_child_launches,
             "shared_fp8_quantizations": self.shared_fp8_quantizations,
             "sibling_cache_hits": self.sibling_cache_hits,
             "plain_fallbacks": self.plain_fallbacks,
@@ -657,8 +664,27 @@ class QVQHopperGroupedRuntime:
                 torch.float16,
                 pad_to_16=direct_pad,
             )
-            if children[0].activation_quantization is not None:
+            if (
+                children[0].activation_quantization is not None
+                and children[0].activation_quantization.target == "linear_input"
+            ):
                 self.telemetry.shared_fp8_quantizations += 1
+            if (
+                children[0].activation_quantization is not None
+                and children[0].activation_quantization.target == "p32_operand"
+            ):
+                if return_ordered_partials or not recover:
+                    raise _R0Fallback("P32 FP8 grouped split-partial execution is not implemented")
+                # The first correctness phase keeps the proven shared SU/H
+                # transform but lets each child invoke the truthful native
+                # E4M3 P32 dispatch. A future grouped K32 kernel can share the
+                # final operand quantization without changing this contract.
+                outputs = tuple(
+                    child.forward_pretransformed(transformed[:rows], output_dtype=x.dtype)
+                    for child in children
+                )
+                self.telemetry.fp8_independent_child_launches += len(children)
+                return outputs
             if direct_pad:
                 padded = transformed
                 self.telemetry.h100_direct_padded_input_launches += 1

@@ -341,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     if str(repo_root) not in sys.path:
         sys.path.insert(0, str(repo_root))
     from gptqmodel import BACKEND, GPTQModel
+    from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
     from gptqmodel.nn_modules.qvq_fp8_cache import QVQFP8DynamicCache
 
     if not torch.cuda.is_available():
@@ -374,6 +375,23 @@ def main(argv: list[str] | None = None) -> int:
             local_files_only=True,
         )
         model = loaded.model.eval()
+    qvq_named_layers = [
+        (name, module)
+        for name, module in model.named_modules()
+        if isinstance(module, QVQLinear)
+    ]
+    if args.arm == "w35-a8" and (
+        not qvq_named_layers
+        or any(
+            module.activation_quantization is None
+            or module.activation_quantization.target != "p32_operand"
+            or module.activation_quantization.kernel_mode != "require"
+            for _, module in qvq_named_layers
+        )
+    ):
+        raise RuntimeError(
+            "W3.5A8 benchmark requires every QVQ layer to target the P32 operand with kernel_mode=require."
+        )
     fusion_counts = None
     if args.fuse_qvq_groups:
         if args.arm == "dense":
@@ -505,6 +523,24 @@ def main(argv: list[str] | None = None) -> int:
 
         grouped_runtime = qvq_grouped_runtime_telemetry(model)
 
+    p32_fp8_layers = {
+        name: module.qvq_fp8_kernel_telemetry()
+        for name, module in qvq_named_layers
+    }
+    if args.arm == "w35-a8" and any(
+        telemetry["executed"] < 1
+        or telemetry["fallback"] != 0
+        or telemetry["rejected"] != 0
+        for telemetry in p32_fp8_layers.values()
+    ):
+        raise RuntimeError(
+            "W3.5A8 benchmark did not prove native FP8 execution for every QVQ layer."
+        )
+    p32_fp8_totals = {
+        counter: sum(int(telemetry[counter]) for telemetry in p32_fp8_layers.values())
+        for counter in ("requested", "eligible", "executed", "fallback", "rejected")
+    }
+
     driver = subprocess.check_output(
         ["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"], text=True
     ).splitlines()[int(_physical_gpu(args.expected_gpu_uuid)["physical_index"])]
@@ -563,6 +599,12 @@ def main(argv: list[str] | None = None) -> int:
             "requested": args.fuse_qvq_groups,
             "installed": fusion_counts,
             "groups": grouped_runtime,
+        },
+        "p32_fp8_kernel": {
+            "required": args.arm == "w35-a8",
+            "all_layers_executed": bool(args.arm == "w35-a8"),
+            "totals": p32_fp8_totals,
+            "layers": p32_fp8_layers,
         },
         "runtime": {
             "command": [sys.executable, *sys.argv],

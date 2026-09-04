@@ -7,9 +7,9 @@ Perplexity is teacher-forced next-token perplexity. KLD is
 ``KL(dense || candidate)`` in nats. Top-1 is exact dense/candidate argmax
 agreement; Top-5 and Top-10 are mean set overlap fractions. All metrics use
 the same shifted, non-padding next-token positions. Model compute defaults to
-BF16; W3.5A8 quantizes each targeted linear input to FP8 E4M3 and dequantizes
-back to that compute dtype at the kernel boundary. Every arm enables its runtime
-KV cache, so W3.5A8 metrics also include its mandatory FP8 E4M3 K/V error.
+BF16; W3.5A8 quantizes each post-SU/Hadamard P32 operand to E4M3 and requires
+the native E4M3 x E4M3 Hopper WGMMA path. Every arm enables its runtime KV
+cache, so W3.5A8 metrics also include its mandatory FP8 E4M3 K/V error.
 """
 
 from __future__ import annotations
@@ -46,7 +46,12 @@ from scripts.qvq_quantize import DatasetSlice, load_dataset_slice
 _A8_CONTRACT = {
     "bits": 8,
     "format": "float8_e4m3fn",
+    "kernel_mode": "require",
+    "replay_max_rows": 2048,
+    "replay_passes": 1,
+    "replay_validation_fraction": 0.125,
     "scale_method": "dynamic_per_token",
+    "target": "p32_operand",
 }
 
 
@@ -305,9 +310,12 @@ def main(argv: list[str] | None = None) -> int:
     a16_layers = [
         module for module in a16.model.modules() if isinstance(module, QVQLinear)
     ]
-    a8_layers = [
-        module for module in a8.model.modules() if isinstance(module, QVQLinear)
+    a8_named_layers = [
+        (name, module)
+        for name, module in a8.model.named_modules()
+        if isinstance(module, QVQLinear)
     ]
+    a8_layers = [module for _, module in a8_named_layers]
     if not a16_layers or len(a16_layers) != len(a8_layers):
         raise RuntimeError("W3.5 checkpoints have inconsistent QVQ layer counts")
     if any(
@@ -434,6 +442,24 @@ def main(argv: list[str] | None = None) -> int:
         result["perplexity_delta_vs_dense"] = result["perplexity"] - dense_ppl
         result["perplexity_ratio_vs_dense"] = result["perplexity"] / dense_ppl
 
+    a8_kernel_layers = {
+        name: module.qvq_fp8_kernel_telemetry()
+        for name, module in a8_named_layers
+    }
+    if any(
+        telemetry["executed"] < 1
+        or telemetry["fallback"] != 0
+        or telemetry["rejected"] != 0
+        for telemetry in a8_kernel_layers.values()
+    ):
+        raise RuntimeError(
+            "W3.5A8 quality evaluation did not execute every QVQ layer through the required native FP8 kernel"
+        )
+    a8_kernel_totals = {
+        counter: sum(int(telemetry[counter]) for telemetry in a8_kernel_layers.values())
+        for counter in ("requested", "eligible", "executed", "fallback", "rejected")
+    }
+
     device_index = torch.cuda.current_device()
     props = torch.cuda.get_device_properties(device_index)
     report = {
@@ -462,6 +488,11 @@ def main(argv: list[str] | None = None) -> int:
             **a8_cache_validation,
             "payload_dtypes": sorted(a8_cache_validation["payload_dtypes"]),
             "scale_dtypes": sorted(a8_cache_validation["scale_dtypes"]),
+        },
+        "a8_p32_kernel_validation": {
+            "all_layers_executed": True,
+            "totals": a8_kernel_totals,
+            "layers": a8_kernel_layers,
         },
         "runtime": {
             "commit": subprocess.check_output(

@@ -6256,12 +6256,46 @@ class QVQActivationConfig:
     bits: int = 8
     format: str = QVQ_FP8_ACTIVATION_FORMAT
     scale_method: str = QVQ_FP8_ACTIVATION_SCALE_METHOD
+    target: str = "p32_operand"
+    kernel_mode: str = "auto"
+    replay_passes: int = 1
+    replay_max_rows: int = 2048
+    replay_validation_fraction: float = 0.125
 
     def __post_init__(self) -> None:
         if isinstance(self.bits, bool) or not isinstance(self.bits, int) or self.bits != 8:
             raise ValueError("QVQActivationConfig: `bits` must be 8.")
         self.format = normalize_qvq_fp8_activation_format(self.format)
         self.scale_method = normalize_qvq_fp8_activation_scale_method(self.scale_method)
+        if not isinstance(self.target, str):
+            raise TypeError("QVQActivationConfig: `target` must be a string.")
+        self.target = self.target.strip().lower().replace("-", "_")
+        if self.target not in {"p32_operand", "linear_input"}:
+            raise ValueError("QVQActivationConfig: `target` must be `p32_operand` or `linear_input`.")
+        if not isinstance(self.kernel_mode, str):
+            raise TypeError("QVQActivationConfig: `kernel_mode` must be a string.")
+        self.kernel_mode = self.kernel_mode.strip().lower().replace("-", "_")
+        if self.kernel_mode not in {"auto", "require", "disable"}:
+            raise ValueError("QVQActivationConfig: `kernel_mode` must be `auto`, `require`, or `disable`.")
+        if isinstance(self.replay_passes, bool) or not isinstance(self.replay_passes, int):
+            raise TypeError("QVQActivationConfig: `replay_passes` must be an integer.")
+        if self.replay_passes not in {0, 1}:
+            raise ValueError("QVQActivationConfig: `replay_passes` must be 0 or 1.")
+        if (
+            isinstance(self.replay_max_rows, bool)
+            or not isinstance(self.replay_max_rows, int)
+            or self.replay_max_rows < 16
+        ):
+            raise ValueError("QVQActivationConfig: `replay_max_rows` must be an integer >= 16.")
+        if isinstance(self.replay_validation_fraction, bool) or not isinstance(
+            self.replay_validation_fraction, (int, float)
+        ):
+            raise TypeError("QVQActivationConfig: `replay_validation_fraction` must be a real scalar.")
+        self.replay_validation_fraction = float(self.replay_validation_fraction)
+        if not 0.0 < self.replay_validation_fraction < 0.5:
+            raise ValueError(
+                "QVQActivationConfig: `replay_validation_fraction` must be in (0, 0.5)."
+            )
 
 
 def _normalize_qvq_activation_config(

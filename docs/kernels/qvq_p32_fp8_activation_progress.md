@@ -23,14 +23,55 @@ share scales at shared input sites, and fail loudly when serving metadata cannot
 reproduce calibration. P32 does not copy NVFP4's weight format or two-level
 weight scales.
 
+## Comparison quantization configurations
+
+Dense BF16 is the unmodified source checkpoint and has no quantization config.
+The two P32 arms share the same weight artifact contract:
+
+```json
+{
+  "method": "qvq",
+  "bits": 3.5,
+  "format": "qvq_v2b2_p32",
+  "vector_size": 2,
+  "trellis_window": 16,
+  "bank_count": 2,
+  "rounding": "block_ldlq"
+}
+```
+
+W3.5A16 sets `activation_quantization` to `null`. W3.5A8 adds:
+
+```json
+{
+  "activation_quantization": {
+    "bits": 8,
+    "format": "float8_e4m3fn",
+    "scale_method": "dynamic_per_token",
+    "target": "p32_operand",
+    "kernel_mode": "require",
+    "replay_passes": 1,
+    "replay_max_rows": 2048,
+    "replay_validation_fraction": 0.125
+  }
+}
+```
+
+`kernel_mode=require` is deliberate for acceptance checkpoints: a run cannot be
+labeled W3.5A8 if native FP8 P32 execution is unavailable. Developers may use
+`auto` for an observable fallback or `disable` for the exact FP8-emulation
+control. `replay_passes=0` disables the FP8-targeted second encode.
+
 ## Phases and gates
 
 ### Phase 0 — freeze modes and observability (complete)
 
-The comparison modes remain dense BF16, W3.5A16, and W3.5A8. Existing A8
-calibration applies dynamic per-token E4M3 fake quantization before Hessian and
-YAQA statistics. FP8 KV telemetry proves payload dtype, scale dtype, byte count,
-sequence length, and absence of a full-precision residual.
+The comparison modes remain dense BF16, W3.5A16, and W3.5A8. The recommended
+A8 target is now `p32_operand`: model-visible BF16/FP16 input remains native,
+and dynamic per-token E4M3 quantization occurs only after SU/Hadamard at the
+actual WGMMA operand boundary. `target=linear_input` retains the old pre-linear
+fake-quantization experiment. FP8 KV telemetry proves payload dtype, scale
+dtype, byte count, sequence length, and absence of a full-precision residual.
 
 ### Phase 1 — remove avoidable A8 work (complete)
 
@@ -44,15 +85,19 @@ numerically identical to the previous A8 contract.
 ### Phase 2 — share activation preparation across P32 siblings (complete)
 
 Grouped QKV and gate/up launches accept A8 only when every sibling has identical
-activation-quantization state. One shared input is quantized once and reused by
-the segmented P32 launch. H100-only specialized input paths are not selected for
-A8 until independently validated. Telemetry adds:
+activation-quantization state. `target=linear_input` retains one shared input
+quantization. For `target=p32_operand`, the current correctness implementation
+shares SU/Hadamard preparation and invokes each child's proven native FP8 P32
+kernel; a future grouped K32 kernel will share the final E4M3 conversion.
+Telemetry adds:
 
 - `grouped_a8_launches`
+- `fp8_independent_child_launches`
 - `shared_fp8_quantizations`
 
-Gate: on H200, M=1/2/4/8/16 grouped A8 is bit-exact with independent A8 child
-execution and reports exactly one shared FP8 quantization.
+Gate: on H200, FP16 and BF16 M=1/2/4/8/16 grouped A8 is bit-exact with
+independent A8 child execution and reports three native child launches with no
+fallback.
 
 The quantization lifecycle now derives ordinary QKV and gate/up topology from
 the same `module_tree` roles used by runtime fusion, then assigns one layer-local
@@ -69,7 +114,7 @@ The H200 compile-and-run smoke uses the SM90A register/shared
 register-A values per lane. This is the shape required to combine two adjacent
 P32 K16 decoded tiles without changing the P32 stream.
 
-### Phase 4 — integrate optional FP8 P32 operands (next)
+### Phase 4 — integrate optional FP8 P32 operands (correctness complete)
 
 1. Decode two adjacent P32 K16 tiles into one K32 E4M3 register-A fragment.
 2. Write the transformed activation operand to the WGMMA shared-memory layout
@@ -77,14 +122,30 @@ P32 K16 decoded tiles without changing the P32 stream.
 3. Quantize the 256-entry PGC16 level table to E4M3 with an explicit transient
    kernel scale. Apply activation and level scales to the FP32 accumulator before
    the existing output recovery.
-4. Add an opt-in dispatch policy. The default remains the current FP16 WGMMA
-   until quality and speed gates pass; unsupported cases fall back to FP16.
+4. Add `kernel_mode=auto|require|disable`. `require` rejects any ineligible or
+   failed launch, `auto` records and falls back, and `disable` is the explicit
+   emulation control.
 5. Add counters for requested/eligible/executed FP8 WGMMA and every fallback
    reason. "A8" alone is not evidence that FP8 WGMMA executed.
 
-Calibration gate: add the extra P32-operand quantization error to the calibration
-objective. The Hessian and quality report must describe the exact scaled E4M3
-operand grid used by the kernel, following the NVFP4 branch's deployed-operand
+The P32 checkpoint format is unchanged. The new operator decodes the standard
+continuous P32 window directly into an E4M3 register-A fragment and uses the
+SM90 `m64n16k32` E4M3 x E4M3 WGMMA with FP32 accumulation. It adds four device
+specializations (transition widths 4/5/6/7) behind one host launch site. Each
+K32 partial is scaled in FP32 before summation to prevent raw FP8 accumulator
+growth from weakening the strict 2e-3 exact-deployed-operand gate.
+
+The native operator remains M16. The wrapper automatically tiles and tail-pads
+every positive logical M. H200 coverage passed W2/W2.5/W3/W3.5 at M=1/16/17,
+and W3.5 at M=1/2/4/8/16/17/32/64/128/256/512/1024/2048/4096 across three
+seeds. A dedicated native M=17..4096 kernel remains a performance TODO.
+
+### Phase 4.5 — recommended FP8-targeted quantization replay
+
+Implementation complete; full-checkpoint gate pending.
+
+The calibration objective now describes the exact scaled E4M3 operand grid
+used by the deployed kernel, following the NVFP4 branch's deployed-operand
 principle.
 
 Use a teacher-targeted two-pass solve rather than recursively quantizing P32
@@ -92,20 +153,29 @@ weights:
 
 1. Preserve the original BF16/FP16 teacher weights and capture dense teacher
    outputs `Y`.
-2. Form the exact deployed activation operand `Z`: shared-input quantization,
-   SU/Hadamard, the final scaled E4M3 operand rounding consumed by WGMMA, and
-   the same logical-M padding policy.
-3. Accumulate both `G = Z Z^T` and `C = Y Z^T`. A `G`-only Hessian optimizes
-   `(W - Wq) Z` but cannot compensate the activation bias between the dense
-   teacher input and `Z`.
-4. Produce the first P32 encoding from the original teacher weights/targets.
-5. Replay the quantized prefix through the real H200 FP8 kernel, recapture the
-   deployed student `Z`, and re-encode once from the original teacher weights
-   against the dense teacher targets. Never use reconstructed P32 weights as
-   the source of a later quantization pass.
-6. With P32 codes frozen, use disjoint held-out block replay to fit only safe
-   recovery variables (SV/bias and activation clipping/scale policy). Bank
-   family reselection is allowed only when held-out teacher loss improves.
+2. Produce the first P32 encoding from that immutable original dense weight
+   using the pristine native-input Hessian.
+3. Instantiate the exact first-pass artifact, require the real H200 FP8 kernel,
+   and form the deployed post-SU/Hadamard operand `Z` using the same row scales
+   and E4M3 rounding as inference.
+4. Invert bias/SV/output-Hadamard on the native teacher output to obtain the
+   matching inner target `T`, then accumulate normalized `G = Z^T Z` and
+   `C = Z^T T` in FP32. A `G`-only objective cannot compensate the activation
+   error between the native teacher input and deployed `Z`.
+5. Solve `(G + lambda I) W* = C`, freeze the first pass's SU/SV coordinate
+   system, and perform exactly one new P32 encode of `W*`. The encoder still
+   receives the immutable original dense weight for reconstruction/proxy
+   authority; reconstructed P32 weights are never recursively quantized.
+6. Run both serialized candidates through `kernel_mode=require` on disjoint
+   held-out native teacher rows. Select the re-encode only when its full module
+   output MSE is no worse. Persist row counts, G/C shapes, damping, both losses,
+   selection, source provenance, and native-kernel execution counters.
+
+The flow is optional: `replay_passes=0` disables it, while
+`target=linear_input` preserves the legacy calibration contract. A focused H200
+test passes the entire native-teacher/first-encode/FP8-replay/re-encode/held-out
+sequence and proves both candidates execute the native kernel. The remaining
+gate is a fresh full-model W3.5A8 quantization and save/reload run.
 
 The comparison boundary is the real FP32 WGMMA accumulator followed by the
 existing output recovery and BF16 model cast. The accumulator itself is not

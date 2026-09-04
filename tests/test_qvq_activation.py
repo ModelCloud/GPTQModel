@@ -19,6 +19,7 @@ from gptqmodel.nn_modules.qvq_fp8_cache import (
     install_qvq_fp8_kv_cache,
 )
 from gptqmodel.quantization import FORMAT, QVQActivationConfig, QVQConfig
+from gptqmodel.quantization.qvq import quantize_qvq_linear
 from gptqmodel.quantization.qvq_activation import (
     dequantize_qvq_fp8_activation,
     fake_quantize_qvq_fp8_activation,
@@ -197,8 +198,99 @@ def test_qvq_v2b2_g32_a8_config_round_trip(bits):
     assert reloaded.quant_linear_init_kwargs()["activation_quantization"] == {
         "bits": 8,
         "format": "float8_e4m3fn",
+        "kernel_mode": "auto",
+        "replay_max_rows": 2048,
+        "replay_passes": 1,
+        "replay_validation_fraction": 0.125,
         "scale_method": "dynamic_per_token",
+        "target": "p32_operand",
     }
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_h200_fp8_replay_reencodes_from_immutable_dense_teacher_and_executes_native_kernel():
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
+        pytest.skip("true QVQ P32 FP8 replay validation requires the assigned H200")
+
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(20260952)
+    linear = torch.nn.Linear(32, 64, bias=True, device=device, dtype=torch.float16).eval()
+    with torch.no_grad():
+        linear.weight.copy_(
+            torch.randn(linear.weight.shape, generator=generator, device=device, dtype=torch.float16) * 0.02
+        )
+        linear.bias.copy_(
+            torch.randn(linear.bias.shape, generator=generator, device=device, dtype=torch.float16) * 0.01
+        )
+    calibration_input = torch.randn(
+        (64, 32),
+        generator=generator,
+        device=device,
+        dtype=torch.float16,
+    )
+    with torch.inference_mode():
+        native_teacher = linear(calibration_input)
+    canonical_weight = linear.weight.detach().clone()
+    immutable_weight = canonical_weight.clone()
+    source_hessian = calibration_input.float().t() @ calibration_input.float()
+    quantization_kwargs = {
+        "bias": linear.bias.detach(),
+        "vector_size": 2,
+        "trellis_window": 16,
+        "bank_count": 2,
+        "v2b2_p32": True,
+        "rounding": "block_ldlq",
+        "trellis_batch_size": 1,
+        "input_hadamard": True,
+        "output_hadamard": True,
+    }
+    first_result = quantize_qvq_linear(
+        canonical_weight,
+        source_hessian,
+        bits=3.5,
+        **quantization_kwargs,
+    )
+    qcfg = QVQConfig(
+        bits=3.5,
+        format="v2b2-g32",
+        rounding="block_ldlq",
+        activation_quantization={
+            "kernel_mode": "require",
+            "replay_max_rows": 64,
+            "replay_validation_fraction": 0.125,
+        },
+        offload_to_disk=False,
+    )
+    named = NamedModule(linear, name="proj", full_name="proj", layer_index=0)
+    task_entry = {
+        "fp8_replay_rows": [(calibration_input, native_teacher)],
+        "fp8_replay_stats": None,
+    }
+    processor = object.__new__(QVQProcessor)
+
+    selected = processor._fp8_replay_reencode(
+        named,
+        qcfg,
+        canonical_weight,
+        source_hessian,
+        quantization_kwargs,
+        first_result,
+        task_entry,
+    )
+
+    assert torch.equal(canonical_weight, immutable_weight)
+    assert torch.equal(selected.SU, first_result.SU)
+    assert torch.equal(selected.SV, first_result.SV)
+    stats = task_entry["fp8_replay_stats"]
+    assert stats["schema"] == "qvq.fp8-target-replay.v1"
+    assert stats["source"] == "immutable_original_dense_weight"
+    assert stats["rows"] == 64
+    assert stats["train_rows"] == 56
+    assert stats["validation_rows"] == 8
+    assert stats["native_first_executed"] == 1
+    assert stats["native_second_executed"] == 1
+    assert selected.telemetry["fp8_target_replay"] == stats
 
 
 def test_qvq_a8_rejects_incompatible_weight_formats_and_rates():
@@ -233,7 +325,7 @@ def test_qvq_v2b2_g32_alias_normalizes_in_dynamic_overrides():
     assert config.dynamic["model.layers.0.*"]["format"] == FORMAT.QVQ_V2B2_P32.value
 
 
-def test_qvq_processor_accumulates_hessian_on_dequantized_a8_values():
+def test_qvq_processor_accumulates_hessian_on_dequantized_linear_input_a8_values():
     torch.manual_seed(7)
     root = torch.nn.Module()
     root.proj = torch.nn.Linear(16, 16, bias=False)
@@ -242,7 +334,7 @@ def test_qvq_processor_accumulates_hessian_on_dequantized_a8_values():
         bits=2,
         format="qvq_v2b2_p32",
         rounding="block_ldlq",
-        activation_quantization=True,
+        activation_quantization={"target": "linear_input"},
         device="cpu",
         offload_to_disk=False,
     )
@@ -264,6 +356,35 @@ def test_qvq_processor_accumulates_hessian_on_dequantized_a8_values():
     assert stats["format"] == "float8_e4m3fn"
     assert stats["elements"] == 48
     assert stats["relative_rmse"] > 0.0
+
+
+def test_qvq_fp8_replay_teacher_capture_survives_completed_pristine_hessian():
+    root = torch.nn.Module()
+    root.proj = torch.nn.Linear(16, 16, bias=False)
+    named = NamedModule(root.proj, name="proj", full_name="proj", layer_index=0)
+    config = QVQConfig(
+        bits=2,
+        format="qvq_v2b2_p32",
+        rounding="block_ldlq",
+        activation_quantization={"replay_max_rows": 16},
+        device="cpu",
+        offload_to_disk=False,
+    )
+    processor = _processor(config)
+    processor.preprocess(named)
+    task_entry = processor.tasks["proj"]
+    task_entry["pristine_hessian_complete"] = True
+    source = torch.randn((1, 4, 16))
+    native_output = root.proj(source)
+
+    processor.pre_process_fwd_hook("proj")(root.proj, (source,), native_output)
+
+    assert task_entry["fp8_replay_row_count"] == 4
+    assert len(task_entry["fp8_replay_rows"]) == 1
+    captured_source, captured_output = task_entry["fp8_replay_rows"][0]
+    assert torch.equal(captured_source, source.reshape(-1, 16))
+    assert torch.equal(captured_output, native_output.reshape(-1, 16))
+    assert not task_entry["capture"]._device_hessian_partials
 
 
 def test_qvq_processor_merges_device_local_activation_error_statistics():
@@ -290,7 +411,9 @@ def test_qvq_processor_merges_device_local_activation_error_statistics():
                     "maximum_scale": torch.tensor(2.0),
                 },
             },
-            "qcfg": SimpleNamespace(activation_quantization=QVQActivationConfig()),
+            "qcfg": SimpleNamespace(
+                activation_quantization=QVQActivationConfig(target="linear_input")
+            ),
         }
     )
 
@@ -365,7 +488,7 @@ def test_yaqa_collects_fisher_factors_under_the_a8_forward_contract():
         {"proj": module},
         device=torch.device("cpu"),
         seed=23,
-        activation_quantization=QVQActivationConfig(),
+        activation_quantization=QVQActivationConfig(target="linear_input"),
         activation_modules={"proj": module},
     )
 

@@ -14,6 +14,7 @@ import threading
 import time
 import zlib
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
@@ -54,7 +55,11 @@ from ..nn_modules.qlinear.qvq import QVQLinear
 from ..quantization.config import FORMAT, METHOD, GPTQConfig, HessianConfig, QVQConfig
 from ..quantization.gptq import GPTQ
 from ..quantization.qvq import QVQQuantizationTelemetry, quantize_qvq_linear
-from ..quantization.qvq_activation import fake_quantize_qvq_fp8_activation
+from ..quantization.qvq_activation import (
+    dequantize_qvq_fp8_activation,
+    fake_quantize_qvq_fp8_activation,
+    quantize_qvq_fp8_activation,
+)
 from ..quantization.qvq_axis_policy import (
     qvq_shared_input_seed,
     resolve_qvq_transform_axes,
@@ -62,6 +67,7 @@ from ..quantization.qvq_axis_policy import (
     validate_qvq_transform_axis_overrides,
 )
 from ..quantization.qvq_yaqa import capture_yaqa_sketch_b
+from ..quantization.rotation.hadamard_utils import matmul_hadU
 from ..quantization.swiglu import (
     apply_swiglu_reparameterization,
     choose_swiglu_scales,
@@ -1659,6 +1665,10 @@ class QVQProcessor(LoopProcessor):
             # introducing cross-device adds or a synchronization in the hook.
             "activation_quantization_error": {},
             "activation_quantization_error_lock": threading.Lock(),
+            "fp8_replay_rows": [],
+            "fp8_replay_row_count": 0,
+            "fp8_replay_lock": threading.Lock(),
+            "fp8_replay_stats": None,
         }
         if self._output_alignment is not None:
             self._output_alignment.register_module(module)
@@ -1879,8 +1889,7 @@ class QVQProcessor(LoopProcessor):
             task_entry = self.tasks[name]
             with self._pristine_hessian_lock:
                 task = self._active_pristine_hessian_captures.get(name)
-                if task is None and task_entry.get("pristine_hessian_complete", False):
-                    return
+                skip_hessian_capture = task is None and task_entry.get("pristine_hessian_complete", False)
             if task is None:
                 task = task_entry["capture"]
             source = inp[0]
@@ -1900,7 +1909,36 @@ class QVQProcessor(LoopProcessor):
             capture_source = prepared_source.data
             capture_output = None if prepared_output is None else prepared_output.data
             qcfg = task_entry["qcfg"]
-            if qcfg.activation_quantization is not None and capture_source.numel() > 0:
+            if (
+                qcfg.activation_quantization is not None
+                and qcfg.activation_quantization.target == "p32_operand"
+                and qcfg.activation_quantization.replay_passes == 1
+                and capture_output is not None
+                and capture_source.numel() > 0
+            ):
+                source_rows = capture_source.reshape(-1, capture_source.shape[-1])
+                output_rows = capture_output.reshape(-1, capture_output.shape[-1])
+                if source_rows.shape[0] != output_rows.shape[0]:
+                    raise RuntimeError("QVQ FP8 replay source/output row counts differ.")
+                with task_entry["fp8_replay_lock"]:
+                    remaining = (
+                        qcfg.activation_quantization.replay_max_rows
+                        - task_entry["fp8_replay_row_count"]
+                    )
+                    take = min(max(0, remaining), int(source_rows.shape[0]))
+                    if take:
+                        task_entry["fp8_replay_rows"].append(
+                            (
+                                source_rows[:take].detach().clone(),
+                                output_rows[:take].detach().clone(),
+                            )
+                        )
+                        task_entry["fp8_replay_row_count"] += take
+            if (
+                qcfg.activation_quantization is not None
+                and qcfg.activation_quantization.target == "linear_input"
+                and capture_source.numel() > 0
+            ):
                 _, activation_scale, dequantized_source = fake_quantize_qvq_fp8_activation(
                     capture_source,
                     format=qcfg.activation_quantization.format,
@@ -1938,6 +1976,11 @@ class QVQProcessor(LoopProcessor):
                         )
                         accumulated["finite"].logical_and_(update["finite"])
                 capture_source = dequantized_source
+            if skip_hessian_capture:
+                # Pristine Hessian collection may already be complete, but
+                # native teacher rows are a separate FP8 replay artifact and
+                # must still be captured from the live dense forward above.
+                return
             if (
                 qcfg.propagated_bank_selection
                 and qcfg.format != FORMAT.QVQ_V2B2_P32
@@ -1991,6 +2034,181 @@ class QVQProcessor(LoopProcessor):
             "minimum_scale": min(float(accumulated["minimum_scale"].item()) for accumulated in accumulated_values),
             "maximum_scale": max(float(accumulated["maximum_scale"].item()) for accumulated in accumulated_values),
         }
+
+    def _fp8_replay_reencode(
+        self,
+        module: NamedModule,
+        module_qcfg: QVQConfig,
+        canonical_weight: torch.Tensor,
+        quantization_hessian: torch.Tensor,
+        quantization_kwargs: Dict[str, Any],
+        first_result,
+        task_entry: Dict[str, Any],
+    ):
+        """Re-encode once against exact deployed FP8 operands and native teacher targets."""
+
+        config = module_qcfg.activation_quantization
+        if (
+            config is None
+            or config.target != "p32_operand"
+            or config.replay_passes != 1
+        ):
+            return first_result
+        if module_qcfg.rounding != "block_ldlq":
+            task_entry["fp8_replay_stats"] = {"selected": False, "reason": "rounding_not_block_ldlq"}
+            return first_result
+        if not isinstance(module.module, torch.nn.Linear):
+            task_entry["fp8_replay_stats"] = {"selected": False, "reason": "non_linear_module"}
+            return first_result
+        if canonical_weight.device.type != "cuda":
+            raise RuntimeError("QVQ FP8 replay re-encode requires CUDA quantization on a native FP8 device.")
+        properties = torch.cuda.get_device_properties(canonical_weight.device)
+        if (properties.major, properties.minor) != (9, 0):
+            raise RuntimeError(
+                "QVQ FP8 replay re-encode requires an SM90 native FP8 device; "
+                f"found {properties.name} with compute capability {properties.major}.{properties.minor}."
+            )
+
+        replay_rows = task_entry.get("fp8_replay_rows", ())
+        if not replay_rows:
+            raise RuntimeError(f"QVQ FP8 replay captured no native teacher rows for `{module.full_name}`.")
+        inputs = torch.cat(
+            [rows[0].to(device=canonical_weight.device) for rows in replay_rows],
+            dim=0,
+        )
+        teacher_output = torch.cat(
+            [rows[1].to(device=canonical_weight.device) for rows in replay_rows],
+            dim=0,
+        )
+        validation_rows = max(
+            1,
+            int(inputs.shape[0] * config.replay_validation_fraction),
+        )
+        if inputs.shape[0] - validation_rows < 1:
+            raise RuntimeError("QVQ FP8 replay needs at least one train and one held-out row.")
+        train_inputs = inputs[:-validation_rows]
+        train_teacher = teacher_output[:-validation_rows]
+        validation_inputs = inputs[-validation_rows:]
+        validation_teacher = teacher_output[-validation_rows:]
+
+        replay_qcfg = copy.deepcopy(module_qcfg)
+        replay_qcfg.activation_quantization.kernel_mode = "require"
+        first_candidate = self._module_replay_qlinear(
+            module.module,
+            module.full_name,
+            replay_qcfg,
+            first_result,
+        )
+        compute_dtype = torch.float16
+        with torch.inference_mode():
+            transformed = first_candidate._qvq_prepare_inference_input(
+                train_inputs,
+                compute_dtype,
+            )
+            quantized, row_scale = quantize_qvq_fp8_activation(
+                transformed,
+                format=config.format,
+                scale_method=config.scale_method,
+                validate=False,
+            )
+            deployed_input = dequantize_qvq_fp8_activation(
+                quantized,
+                row_scale,
+                dtype=torch.float32,
+            )
+            # Execute the exact kernel whose operand geometry defines G/C.
+            native_inner = first_candidate._inner_forward_fp8(quantized, row_scale)
+            if not bool(torch.isfinite(native_inner).all()):
+                raise RuntimeError("QVQ FP8 replay native student produced non-finite inner outputs.")
+
+            teacher_inner = train_teacher.to(torch.float32)
+            if first_result.bias is not None:
+                teacher_inner = teacher_inner - first_result.bias.to(torch.float32)
+            teacher_inner = teacher_inner / first_result.SV.to(torch.float32)
+            if first_result.output_hadamard:
+                teacher_inner = matmul_hadU(teacher_inner, transpose=True)
+
+            normalization = float(max(1, deployed_input.shape[0]))
+            deployed_hessian = deployed_input.transpose(0, 1) @ deployed_input
+            deployed_cross = deployed_input.transpose(0, 1) @ teacher_inner
+            deployed_hessian.div_(normalization)
+            deployed_cross.div_(normalization)
+            damping = torch.maximum(
+                deployed_hessian.diagonal().abs().mean() * 0.01,
+                torch.tensor(torch.finfo(torch.float32).eps, device=deployed_hessian.device),
+            )
+            solve_hessian = deployed_hessian.clone()
+            solve_hessian.diagonal().add_(damping)
+            cholesky, info = torch.linalg.cholesky_ex(solve_hessian)
+            if int(info.max().item()) != 0:
+                raise RuntimeError("QVQ FP8 replay G matrix is not positive definite after damping.")
+            deployed_target = torch.cholesky_solve(deployed_cross, cholesky)
+            if not bool(torch.isfinite(deployed_target).all()):
+                raise RuntimeError("QVQ FP8 replay G/C solve produced non-finite weights.")
+
+        replay_kwargs = dict(quantization_kwargs)
+        replay_kwargs["telemetry"] = None
+        replay_kwargs["module_scale_search"] = False
+        replay_kwargs["output_channel_scale_optimization"] = False
+        replay_kwargs["input_hessian_preparation"] = None
+        for key in (
+            "propagated_inputs",
+            "propagated_target_output",
+            "propagated_acceptance",
+            "propagated_candidate_score",
+            "propagated_candidate_gradient",
+        ):
+            replay_kwargs[key] = None
+        second_result = quantize_qvq_linear(
+            canonical_weight,
+            quantization_hessian,
+            bits=module_qcfg.bits,
+            deployed_inner_target=deployed_target,
+            deployed_input_hessian=deployed_hessian,
+            fixed_SU=first_result.SU,
+            fixed_SV=first_result.SV,
+            **replay_kwargs,
+        )
+        second_candidate = self._module_replay_qlinear(
+            module.module,
+            module.full_name,
+            replay_qcfg,
+            second_result,
+        )
+        with torch.inference_mode():
+            first_validation = first_candidate(validation_inputs).to(torch.float32)
+            second_validation = second_candidate(validation_inputs).to(torch.float32)
+            validation_target = validation_teacher.to(torch.float32)
+            first_mse = float((first_validation - validation_target).square().mean().item())
+            second_mse = float((second_validation - validation_target).square().mean().item())
+        first_telemetry = first_candidate.qvq_fp8_kernel_telemetry()
+        second_telemetry = second_candidate.qvq_fp8_kernel_telemetry()
+        if first_telemetry["executed"] < 1 or second_telemetry["executed"] < 1:
+            raise RuntimeError("QVQ FP8 replay did not execute the required native FP8 P32 kernel.")
+        reencode_selected = second_mse <= first_mse
+        selected = second_result if reencode_selected else first_result
+        stats = {
+            "schema": "qvq.fp8-target-replay.v1",
+            "teacher_dtype": str(train_teacher.dtype).removeprefix("torch."),
+            "operand_dtype": "float8_e4m3fn",
+            "accumulator_dtype": "float32",
+            "rows": int(inputs.shape[0]),
+            "train_rows": int(train_inputs.shape[0]),
+            "validation_rows": int(validation_inputs.shape[0]),
+            "g_shape": list(deployed_hessian.shape),
+            "c_shape": list(deployed_cross.shape),
+            "damping": float(damping.item()),
+            "first_validation_mse": first_mse,
+            "second_validation_mse": second_mse,
+            "selected": reencode_selected,
+            "source": "immutable_original_dense_weight",
+            "native_first_executed": int(first_telemetry["executed"]),
+            "native_second_executed": int(second_telemetry["executed"]),
+        }
+        task_entry["fp8_replay_stats"] = stats
+        selected_telemetry = dict(first_result.telemetry or {})
+        selected_telemetry["fp8_target_replay"] = stats
+        return replace(selected, telemetry=selected_telemetry)
 
     @staticmethod
     def _restore_module_weight(module: NamedModule, quantized_weight: torch.Tensor) -> torch.Tensor:
@@ -2139,6 +2357,15 @@ class QVQProcessor(LoopProcessor):
                     quantization_hessian,
                     quantization_kwargs,
                 )
+                result = self._fp8_replay_reencode(
+                    module,
+                    module_qcfg,
+                    canonical_weight,
+                    quantization_hessian,
+                    quantization_kwargs,
+                    result,
+                    task_entry,
+                )
             duration = time.perf_counter() - started
 
             # Quantized replay temporarily overwrites the dense module. The
@@ -2253,6 +2480,7 @@ class QVQProcessor(LoopProcessor):
                 ),
                 "module_granular_replay": self._module_replay_stats.get(module.full_name),
                 "activation_quantization_error": activation_quantization_error,
+                "fp8_target_replay": task_entry.get("fp8_replay_stats"),
             }
             if result.telemetry is not None:
                 stat["qvq_telemetry"] = result.telemetry
@@ -2305,6 +2533,8 @@ class QVQProcessor(LoopProcessor):
             if propagation_gate is not None:
                 self._pop_propagation_gate(module.full_name, propagation_gate[4])
             capture.free()
+            task_entry["fp8_replay_rows"].clear()
+            task_entry["fp8_replay_row_count"] = 0
             if module_qcfg.rounding == "yaqa":
                 task_entry.pop("yaqa_input_hessian", None)
                 task_entry.pop("yaqa_output_hessian", None)

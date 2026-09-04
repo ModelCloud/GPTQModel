@@ -116,6 +116,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m16_tma_grouped",
         "p32_window_m16_tma_grouped_ordered_split",
         "p32_window_m16_tma_grouped_ordered_partials",
+        "p32_window_fp8_m16",
     ),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_WGMMA_BUILD_ROOT",
@@ -471,6 +472,79 @@ def qvq_p32_window_wgmma_m16_tma_ordered_partials(
     )
 
 
+def qvq_p32_window_wgmma_fp8_m16(
+    input: torch.Tensor,
+    input_scale: torch.Tensor,
+    trellis: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    bits: float,
+    *,
+    out_features: int,
+    bank_alt_id: int,
+    level_scale: float,
+) -> torch.Tensor:
+    """Run true E4M3 x E4M3 P32 WGMMA, tiling logical M over native M16.
+
+    ``input`` is the final transformed WGMMA operand, not the model-visible
+    pre-transform activation. ``input_scale`` maps each E4M3 row back to that
+    transformed domain; ``level_scale`` maps the E4M3 PGC table back to the
+    canonical decoded-weight domain. Accumulation and returned output are FP32.
+    """
+
+    transition_bits = _resolve_transition_bits(bits)
+    fp8_dtype = getattr(torch, "float8_e4m3fn", None)
+    if fp8_dtype is None or input.dtype != fp8_dtype or levels.dtype != fp8_dtype:
+        raise TypeError("QVQ P32 FP8 WGMMA requires float8_e4m3fn input and levels")
+    if input.dim() != 2 or input.shape[0] <= 0:
+        raise ValueError("QVQ P32 FP8 WGMMA input must be a nonempty matrix")
+    if (
+        input_scale.dtype != torch.float32
+        or input_scale.device != input.device
+        or tuple(input_scale.shape) != (int(input.shape[0]), 1)
+        or not input_scale.is_contiguous()
+    ):
+        raise ValueError(
+            "QVQ P32 FP8 WGMMA requires contiguous FP32 [M, 1] input scales"
+        )
+    native_op = _QVQ_WGMMA_EXTENSION.op("p32_window_fp8_m16")
+    outputs = []
+    logical_rows = int(input.shape[0])
+    for start in range(0, logical_rows, _P32_WGMMA_NATIVE_ROWS):
+        rows = min(_P32_WGMMA_NATIVE_ROWS, logical_rows - start)
+        tile = input[start : start + rows]
+        tile_scale = input_scale[start : start + rows]
+        if rows != _P32_WGMMA_NATIVE_ROWS:
+            padded = torch.zeros(
+                (_P32_WGMMA_NATIVE_ROWS, input.shape[1]),
+                dtype=input.dtype,
+                device=input.device,
+            )
+            padded_scale = torch.ones(
+                (_P32_WGMMA_NATIVE_ROWS, 1),
+                dtype=torch.float32,
+                device=input.device,
+            )
+            padded[:rows].copy_(tile)
+            padded_scale[:rows].copy_(tile_scale)
+            tile = padded
+            tile_scale = padded_scale
+        outputs.append(
+            native_op(
+                tile.contiguous(),
+                tile_scale.contiguous(),
+                trellis,
+                levels,
+                bank_ids,
+                transition_bits,
+                int(out_features),
+                int(bank_alt_id),
+                float(level_scale),
+            )[:rows]
+        )
+    return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
+
+
 def qvq_p32_window_wgmma_group_plan(
     input: torch.Tensor,
     trellises: Sequence[torch.Tensor],
@@ -750,6 +824,7 @@ __all__ = [
     "QVQHopperP32SegmentPlan",
     "qvq_h100_grouped_ordered_split_counts",
     "qvq_h100_ordered_split_count",
+    "qvq_p32_window_wgmma_fp8_m16",
     "qvq_p32_window_wgmma_group_plan",
     "qvq_p32_window_wgmma_grouped",
     "qvq_p32_window_wgmma_grouped_ordered_packed",

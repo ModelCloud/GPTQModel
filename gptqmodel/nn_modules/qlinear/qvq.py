@@ -408,6 +408,17 @@ class QVQLinear(BaseQuantLinear):
         ) = None
         self._qvq_cuda_bank_cache_lock = threading.Lock()
         self._qvq_cuda_window_cache: tuple[torch.Tensor, int, torch.device, torch.Tensor] | None = None
+        self._qvq_fp8_levels_cache: tuple[torch.device, torch.Tensor, float] | None = None
+        self._qvq_fp8_telemetry_lock = threading.Lock()
+        self._qvq_fp8_telemetry = {
+            "requested": 0,
+            "eligible": 0,
+            "executed": 0,
+            "fallback": 0,
+            "rejected": 0,
+            "fallback_reasons": {},
+            "rejection_reasons": {},
+        }
         pgc16_levels_for_version(self.codebook_version)
 
         missing = {"trellis", "SU", "SV"} - set(tensors) if tensors else set()
@@ -465,16 +476,34 @@ class QVQLinear(BaseQuantLinear):
         """Exclude transient selector state from deepcopy/pickle."""
         state = super().__getstate__()
         state.pop("_qvq_cuda_bank_cache_lock", None)
+        state.pop("_qvq_fp8_telemetry_lock", None)
         state.pop("_qvq_grouped_p32_delegate", None)
         state["_qvq_cuda_bank_cache"] = None
         state["_qvq_cuda_window_cache"] = None
+        state["_qvq_fp8_levels_cache"] = None
         return state
 
     def __setstate__(self, state):
         super().__setstate__(state)
         self._qvq_cuda_bank_cache_lock = threading.Lock()
+        self._qvq_fp8_telemetry_lock = threading.Lock()
         self._qvq_cuda_bank_cache = None
         self._qvq_cuda_window_cache = None
+        self._qvq_fp8_levels_cache = None
+        if "_qvq_fp8_telemetry" not in self.__dict__:
+            self._qvq_fp8_telemetry = {
+                "requested": 0,
+                "eligible": 0,
+                "executed": 0,
+                "fallback": 0,
+                "rejected": 0,
+                "fallback_reasons": {},
+                "rejection_reasons": {},
+            }
+        else:
+            self._qvq_fp8_telemetry.setdefault("rejected", 0)
+            self._qvq_fp8_telemetry.setdefault("fallback_reasons", {})
+            self._qvq_fp8_telemetry.setdefault("rejection_reasons", {})
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         super()._save_to_state_dict(destination, prefix, keep_vars)
@@ -527,6 +556,54 @@ class QVQLinear(BaseQuantLinear):
             raise RuntimeError("QVQ P32 trellis changed while preparing the Hopper window payload")
         self._qvq_cuda_window_cache = (source, source_version, device, window)
         return window
+
+    def _prepare_hopper_fp8_levels(self, device: torch.device) -> tuple[torch.Tensor, float]:
+        """Return the cached E4M3 PGC table and its explicit dequantization scale."""
+
+        cached = self._qvq_fp8_levels_cache
+        if cached is not None and cached[0] == device:
+            return cached[1], cached[2]
+        fp8_dtype = torch.float8_e4m3fn
+        fp8_max = float(torch.finfo(fp8_dtype).max)
+        canonical = pgc16_levels_for_version(self.codebook_version).to(torch.float32)
+        level_scale = float(canonical.abs().amax().item() / fp8_max)
+        levels = torch.clamp(canonical / level_scale, min=-fp8_max, max=fp8_max).to(
+            device=device,
+            dtype=fp8_dtype,
+        ).contiguous()
+        self._qvq_fp8_levels_cache = (device, levels, level_scale)
+        return levels, level_scale
+
+    def _record_fp8_kernel(self, event: str, reason: str | None = None) -> None:
+        with self._qvq_fp8_telemetry_lock:
+            self._qvq_fp8_telemetry[event] += 1
+            if reason is not None:
+                reason_key = "rejection_reasons" if event == "rejected" else "fallback_reasons"
+                reasons = self._qvq_fp8_telemetry[reason_key]
+                reasons[reason] = reasons.get(reason, 0) + 1
+
+    def qvq_fp8_kernel_telemetry(self, *, reset: bool = False) -> dict:
+        """Return truthful requested/eligible/executed/fallback counters."""
+
+        with self._qvq_fp8_telemetry_lock:
+            result = {
+                **self._qvq_fp8_telemetry,
+                "fallback_reasons": dict(self._qvq_fp8_telemetry["fallback_reasons"]),
+                "rejection_reasons": dict(self._qvq_fp8_telemetry["rejection_reasons"]),
+                "operand_dtype": "float8_e4m3fn",
+                "accumulator_dtype": "float32",
+            }
+            if reset:
+                self._qvq_fp8_telemetry = {
+                    "requested": 0,
+                    "eligible": 0,
+                    "executed": 0,
+                    "fallback": 0,
+                    "rejected": 0,
+                    "fallback_reasons": {},
+                    "rejection_reasons": {},
+                }
+        return result
 
     def _cached_cast(self, name: str, *dtypes: torch.dtype) -> torch.Tensor | None:
         """Convert a constant auxiliary tensor (SU/SV/bias) to the requested
@@ -1160,6 +1237,90 @@ class QVQLinear(BaseQuantLinear):
             )
         return self._reference_inner_forward(x)
 
+    def _inner_forward_fp8(
+        self,
+        input: torch.Tensor,
+        input_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        """Consume the exact transformed E4M3 operand through Hopper WGMMA."""
+
+        if self.bank_ids is None or self.bank_alt_id is None:
+            raise RuntimeError("QVQ P32 FP8 WGMMA requires loaded bank metadata")
+        tile_count = (self.in_features // 16) * (self.out_features // 16)
+        selector_count = tile_count * 8
+        with self._qvq_cuda_bank_cache_lock:
+            source = self.bank_ids
+            source_version = source._version
+            alt_source = self.bank_alt_id
+            alt_version = alt_source._version
+            cached = self._qvq_cuda_bank_cache
+            if (
+                cached is not None
+                and cached[0] is source
+                and cached[1] == source_version
+                and cached[2] == input.device
+                and cached[3] is alt_source
+                and cached[4] == alt_version
+            ):
+                cuda_bank_ids = cached[5]
+                bank_alt_id = cached[6]
+            else:
+                cuda_bank_ids = pack_qvq_binary_bank_ids(
+                    unpack_qvq_binary_bank_ids(source.detach().clone(), selector_count)
+                ).to(device=input.device)
+                bank_alt_id = int(alt_source.detach().item())
+                if (
+                    self.bank_ids is not source
+                    or source._version != source_version
+                    or self.bank_alt_id is not alt_source
+                    or alt_source._version != alt_version
+                    or not 1 <= bank_alt_id <= 3
+                ):
+                    raise RuntimeError("QVQ P32 FP8 bank metadata changed during snapshot")
+                self._qvq_cuda_bank_cache = (
+                    source,
+                    source_version,
+                    input.device,
+                    alt_source,
+                    alt_version,
+                    cuda_bank_ids,
+                    bank_alt_id,
+                )
+
+        from ...utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_fp8_m16
+
+        window = self._prepare_hopper_p32_window(input.device)
+        fp8_levels, level_scale = self._prepare_hopper_fp8_levels(input.device)
+        return qvq_p32_window_wgmma_fp8_m16(
+            input,
+            input_scale,
+            window,
+            fp8_levels,
+            cuda_bank_ids,
+            self.bits,
+            out_features=self.out_features,
+            bank_alt_id=bank_alt_id,
+            level_scale=level_scale,
+        )
+
+    def _fp8_kernel_ineligible_reason(self, transformed: torch.Tensor) -> str | None:
+        if transformed.device.type != "cuda":
+            return "non_cuda"
+        if not self.v2b2_p32 or self.vector_size != 2 or self.trellis_window != 16:
+            return "non_p32"
+        if self.bits not in (2, 2.5, 3, 3.5):
+            return "unsupported_rate"
+        if transformed.ndim != 2 or transformed.shape[0] <= 0:
+            return "unsupported_rank_or_rows"
+        if self.in_features % 32 or self.out_features % 64:
+            return "unsupported_shape"
+        properties = torch.cuda.get_device_properties(transformed.device)
+        if (properties.major, properties.minor) != (9, 0):
+            return "non_sm90"
+        if not device_supports_native_fp8(transformed.device):
+            return "native_fp8_unavailable"
+        return None
+
     def _prepare_activation_input(
         self,
         x_2d: torch.Tensor,
@@ -1171,6 +1332,11 @@ class QVQLinear(BaseQuantLinear):
 
         config = self.activation_quantization
         if config is None:
+            return x_2d.to(compute_dtype), None, 0
+        if config.target == "p32_operand":
+            # The model-visible activation remains in its native BF16/FP16
+            # dtype. Quantization happens after SU/Hadamard, at the exact
+            # operand boundary consumed by Hopper WGMMA.
             return x_2d.to(compute_dtype), None, 0
         validate = straight_through or x_2d.device.type == "cpu"
         if straight_through:
@@ -1400,6 +1566,17 @@ class QVQLinear(BaseQuantLinear):
                 transformed = input_transform(transformed_input)
             else:
                 transformed = transformed_input
+            if (
+                self.activation_quantization is not None
+                and self.activation_quantization.target == "p32_operand"
+            ):
+                _, _, transformed = fake_quantize_qvq_fp8_activation(
+                    transformed,
+                    format=self.activation_quantization.format,
+                    scale_method=self.activation_quantization.scale_method,
+                    straight_through=True,
+                    validate=True,
+                )
             output = self._inner_forward(transformed)
             if self.output_hadamard:
                 output_transform = (
@@ -1438,6 +1615,40 @@ class QVQLinear(BaseQuantLinear):
         transformed: torch.Tensor,
         compute_dtype: torch.dtype,
     ) -> torch.Tensor:
+        config = self.activation_quantization
+        if config is not None and config.target == "p32_operand":
+            quantized, scale = quantize_qvq_fp8_activation(
+                transformed,
+                format=config.format,
+                scale_method=config.scale_method,
+                validate=False,
+            )
+            reason = "kernel_disabled" if config.kernel_mode == "disable" else self._fp8_kernel_ineligible_reason(
+                transformed
+            )
+            if config.kernel_mode != "disable":
+                self._record_fp8_kernel("requested")
+            if reason is None:
+                self._record_fp8_kernel("eligible")
+                try:
+                    output = self._inner_forward_fp8(quantized, scale)
+                except RuntimeError:
+                    if config.kernel_mode == "require":
+                        self._record_fp8_kernel("rejected", "launch_error")
+                        raise
+                    reason = "launch_error"
+                else:
+                    self._record_fp8_kernel("executed")
+                    return self._recover_output_compute_dtype(output, compute_dtype)
+            elif config.kernel_mode == "require":
+                self._record_fp8_kernel("rejected", reason)
+                raise RuntimeError(f"required QVQ P32 FP8 WGMMA path is ineligible: {reason}")
+            self._record_fp8_kernel("fallback", reason)
+            transformed = dequantize_qvq_fp8_activation(
+                quantized,
+                scale,
+                dtype=transformed.dtype,
+            )
         output = self._inner_forward(transformed)
         return self._recover_output_compute_dtype(output, compute_dtype)
 

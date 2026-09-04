@@ -263,7 +263,7 @@ def test_r0_accepts_shared_a8_contract_and_rejects_mixed_activation_state():
 
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
 @pytest.mark.parametrize("logical_m", (1, 2, 4, 8, 16))
-def test_h200_grouped_a8_quantizes_shared_input_once_and_matches_children(
+def test_h200_grouped_a8_executes_true_fp8_children_and_matches_independent_outputs(
     logical_m, dtype
 ):
     device = _h200_device()
@@ -299,8 +299,13 @@ def test_h200_grouped_a8_quantizes_shared_input_once_and_matches_children(
     )
     telemetry = qvq_grouped_runtime_telemetry(attention)[0]
     assert telemetry["grouped_launches"] == 1
-    assert telemetry["grouped_a8_launches"] == 1
-    assert telemetry["shared_fp8_quantizations"] == 1
+    assert telemetry["grouped_a8_launches"] == 0
+    assert telemetry["shared_fp8_quantizations"] == 0
+    assert telemetry["fp8_independent_child_launches"] == 3
+    for child in children:
+        fp8_telemetry = child.qvq_fp8_kernel_telemetry()
+        assert fp8_telemetry["executed"] == 2
+        assert fp8_telemetry["fallback"] == 0
 
 
 def test_sibling_lifecycle_fires_once_and_never_returns_stale_output(monkeypatch):
