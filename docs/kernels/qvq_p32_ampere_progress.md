@@ -3370,6 +3370,23 @@ than the normal ~35x.  The compile-time-K addition was therefore reverted;
 the stable split-only v47 path remains.  Diagnostic:
 `artifacts/a100_p32_window/v48_candidate_m2_fullq_static_splitk_repeat8000.json`.
 
+## v50 M2 linear-QKV static split specialization
+
+The M2 linear-QKV route `(K,N)=(5120,10240)` consistently autotunes to split
+40.  A guarded static-split-40 scalar launch was exact across the formal
+matrix suite.  The dynamic 500-iteration sweep measured medians
+`0.057344/0.062464/0.062464/0.063488 ms`; two 8,000-iteration probes and a
+20,000-iteration confirmation of the static path measured
+`0.056320/0.061440/0.062464/0.062464 ms` (the first short probe was noisier at
+W2).  The long confirmation reduces the four-rate geometric mean from
+`0.0613917` to `0.0606168 ms` (1.28% shape-local).  Exactness remained within
+`max_abs <= 1.2e-5`, and the formal Ampere suite is 56/56.  Diagnostics are
+`artifacts/a100_p32_window/v50_candidate_m2_linearqkv_static40_8000.json`,
+`artifacts/a100_p32_window/v50_candidate_m2_linearqkv_static40_repeat8000.json`,
+and `artifacts/a100_p32_window/v50_candidate_m2_linearqkv_static40_20000.json`;
+the v43 full sweep provides the dynamic control.  The full-matrix 10% target
+remains open.
+
 ## Reproduction
 
 ```bash
