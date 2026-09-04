@@ -1,0 +1,36 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "abi",
+    hdrs = ["qvq_p32_abi.h"],
+    includes = ["."],
+)
+
+# QvQ owns the framework-neutral P32 runtime. Framework repositories consume
+# this target and provide only their graph/compiler adapters.
+genrule(
+    name = "libqvq_p32",
+    srcs = [
+        "qvq_p32_abi.h",
+        "qvq_p32_cuda.cu",
+    ],
+    outs = ["libqvq_p32.so"],
+    cmd = """
+set -eu
+cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then cuda_home=/usr/local/cuda-13.3; fi
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
+  echo "nvcc not found; set CUDA_HOME to a CUDA toolkit containing nvcc" >&2
+  exit 1
+fi
+"$${cuda_home}/bin/nvcc" \
+  -std=c++17 -O3 -lineinfo -cudart=shared -Xcompiler=-fPIC \
+  --split-compile=64 \
+  -gencode arch=compute_80,code=sm_80 \
+  -I$$(dirname $(location qvq_p32_abi.h)) \
+  -shared -o "$@" $(location qvq_p32_cuda.cu)
+""",
+    tags = ["manual"],
+)
