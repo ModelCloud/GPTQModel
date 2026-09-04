@@ -345,6 +345,12 @@ def main(argv: list[str] | None = None) -> int:
         "maximum_sequence_length": 0,
         "all_payloads_fp8": True,
         "no_full_precision_residual": True,
+        "native_fp8_attention": True,
+        "native_attention_calls": 0,
+        "native_qk_fp8_mm_calls": 0,
+        "native_pv_fp8_mm_calls": 0,
+        "dequantized_elements": 0,
+        "dense_kv_prefix_materializations": 0,
     }
     started_all = time.perf_counter()
     for row_index, row in enumerate(dataset):
@@ -383,9 +389,12 @@ def main(argv: list[str] | None = None) -> int:
                 if (
                     not telemetry["all_payloads_fp8"]
                     or not telemetry["no_full_precision_residual"]
+                    or not telemetry["native_fp8_attention"]
+                    or telemetry["dequantized_elements"] != 0
+                    or telemetry["dense_kv_prefix_materializations"] != 0
                 ):
                     raise RuntimeError(
-                        "W3.5A8 quality evaluation retained non-FP8 K/V payloads"
+                        "W3.5A8 quality evaluation did not consume K/V natively as FP8"
                     )
                 ratios = telemetry["storage_ratio_vs_dense"]
                 a8_cache_validation["rows_validated"] += 1
@@ -403,6 +412,15 @@ def main(argv: list[str] | None = None) -> int:
                     a8_cache_validation["maximum_sequence_length"],
                     *telemetry["sequence_lengths"],
                 )
+                a8_cache_validation["native_attention_calls"] += telemetry[
+                    "native_attention_calls"
+                ]
+                a8_cache_validation["native_qk_fp8_mm_calls"] += telemetry[
+                    "native_qk_fp8_mm_calls"
+                ]
+                a8_cache_validation["native_pv_fp8_mm_calls"] += telemetry[
+                    "native_pv_fp8_mm_calls"
+                ]
             elif isinstance(cache, QVQFP8DynamicCache):
                 raise RuntimeError(f"{name} unexpectedly used the QVQ FP8 cache")
             rows[name], arm_labels = _prediction_rows(

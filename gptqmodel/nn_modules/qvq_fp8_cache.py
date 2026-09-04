@@ -7,10 +7,13 @@ from __future__ import annotations
 
 import inspect
 import types
+from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from transformers.cache_utils import Cache, DynamicLayer
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from ..quantization.config import QVQActivationConfig
 from ..quantization.qvq_activation import (
@@ -35,6 +38,183 @@ def _tensor_bytes(tensor: torch.Tensor | None) -> int:
     return 0 if tensor is None else tensor.numel() * tensor.element_size()
 
 
+@dataclass(frozen=True)
+class QVQFP8KVView:
+    """Opaque FP8 cache view consumed only by the QVQ attention interface."""
+
+    payload: torch.Tensor
+    scales: torch.Tensor
+    source_dtype: torch.dtype
+    layer: "QVQFP8CacheLayer"
+    kind: str
+
+
+def _pad_fp8_rows(tensor: torch.Tensor, rows: int) -> torch.Tensor:
+    if tensor.shape[0] == rows:
+        return tensor
+    return F.pad(tensor, (0, 0, 0, rows - tensor.shape[0]))
+
+
+def _attention_mask_slice(
+    attention_mask: torch.Tensor | None,
+    *,
+    batch: int,
+    head: int,
+    query_tokens: int,
+    key_tokens: int,
+) -> torch.Tensor | None:
+    if attention_mask is None:
+        return None
+    if attention_mask.ndim == 4:
+        mask_head = 0 if attention_mask.shape[1] == 1 else head
+        return attention_mask[batch, mask_head, :query_tokens, :key_tokens]
+    if attention_mask.ndim == 3:
+        return attention_mask[batch, :query_tokens, :key_tokens]
+    if attention_mask.ndim == 2:
+        return attention_mask[batch, :key_tokens].unsqueeze(0)
+    raise ValueError(
+        f"QVQ FP8 attention requires a 2D--4D attention mask, got {attention_mask.ndim}D."
+    )
+
+
+def qvq_fp8_attention_forward(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: QVQFP8KVView,
+    value: QVQFP8KVView,
+    attention_mask: torch.Tensor | None,
+    scaling: float,
+    dropout: float = 0.0,
+    **kwargs,
+):
+    """Consume per-token-scaled E4M3 K/V without a dense prefix materialization."""
+
+    del kwargs
+    if isinstance(key, torch.Tensor) and isinstance(value, torch.Tensor):
+        # `use_cache=False` has no retained prefix to consume. Keep that valid
+        # without weakening the cache-enabled A8 contract below.
+        groups = module.num_key_value_groups
+        dense_key = key.repeat_interleave(groups, dim=1)
+        dense_value = value.repeat_interleave(groups, dim=1)
+        dense_weights = torch.matmul(query, dense_key.transpose(2, 3)) * scaling
+        if attention_mask is not None:
+            dense_weights = dense_weights + attention_mask
+        dense_weights = torch.softmax(dense_weights, dim=-1, dtype=torch.float32).to(
+            query.dtype
+        )
+        dense_weights = F.dropout(
+            dense_weights, p=dropout, training=module.training
+        )
+        dense_output = torch.matmul(dense_weights, dense_value)
+        return dense_output.transpose(1, 2).contiguous(), dense_weights
+    if not isinstance(key, QVQFP8KVView) or not isinstance(value, QVQFP8KVView):
+        raise TypeError("QVQ FP8 attention requires opaque FP8 K/V cache views.")
+    if key.layer is not value.layer or key.kind != "key" or value.kind != "value":
+        raise ValueError("QVQ FP8 attention received mismatched K/V cache views.")
+    if query.device.type != "cuda" or torch.cuda.get_device_capability(query.device)[0] < 9:
+        raise RuntimeError("QVQ native FP8 attention requires an NVIDIA SM90+ GPU.")
+    fp8_dtype = getattr(torch, QVQ_FP8_ACTIVATION_FORMAT)
+    if key.payload.dtype != fp8_dtype or value.payload.dtype != fp8_dtype:
+        raise TypeError("QVQ native FP8 attention requires E4M3 K/V payloads.")
+    if query.ndim != 4 or key.payload.ndim != 4 or value.payload.ndim != 4:
+        raise ValueError("QVQ FP8 attention requires [batch, heads, tokens, width] tensors.")
+    if key.payload.shape != value.payload.shape:
+        raise ValueError("QVQ FP8 attention requires matching K/V payload geometry.")
+    if query.shape[0] != key.payload.shape[0] or query.shape[-1] != key.payload.shape[-1]:
+        raise ValueError("QVQ FP8 attention query and cache geometry differ.")
+
+    batch_size, query_heads, query_tokens, _ = query.shape
+    _, kv_heads, key_tokens, _ = key.payload.shape
+    if query_heads % kv_heads:
+        raise ValueError("QVQ FP8 attention requires query heads divisible by KV heads.")
+    groups = query_heads // kv_heads
+    padded_keys = ((key_tokens + 15) // 16) * 16
+    one = torch.ones((), dtype=torch.float32, device=query.device)
+    outputs: list[torch.Tensor] = []
+    weights: list[torch.Tensor] = []
+
+    for batch in range(batch_size):
+        batch_outputs: list[torch.Tensor] = []
+        batch_weights: list[torch.Tensor] = []
+        for head in range(query_heads):
+            kv_head = head // groups
+            query_head = query[batch, head]
+            query_fp8, query_scale = quantize_qvq_fp8_activation(
+                query_head,
+                format=QVQ_FP8_ACTIVATION_FORMAT,
+                scale_method="dynamic_per_token",
+                validate=False,
+            )
+            key_fp8 = key.payload[batch, kv_head]
+            key_scale = key.scales[batch, kv_head]
+            if padded_keys != key_tokens:
+                key_fp8 = _pad_fp8_rows(key_fp8, padded_keys)
+            raw_logits = torch._scaled_mm(
+                query_fp8,
+                key_fp8.T,
+                one,
+                one,
+                out_dtype=torch.float32,
+                use_fast_accum=False,
+            )[:, :key_tokens]
+            logits = raw_logits * query_scale.float() * key_scale.T.float()
+            logits.mul_(scaling)
+            mask = _attention_mask_slice(
+                attention_mask,
+                batch=batch,
+                head=head,
+                query_tokens=query_tokens,
+                key_tokens=key_tokens,
+            )
+            if mask is not None:
+                logits.add_(mask.float())
+            probabilities = torch.softmax(logits, dim=-1, dtype=torch.float32)
+            probabilities = F.dropout(
+                probabilities, p=dropout, training=module.training
+            )
+            batch_weights.append(probabilities.to(query.dtype))
+
+            # Absorb each V row's dynamic scale into the probability column.
+            # The second native E4M3 GEMM can then consume the cached V payload
+            # directly without ever constructing a BF16/FP16 V prefix.
+            scaled_probabilities = probabilities * value.scales[
+                batch, kv_head, :, 0
+            ].float().unsqueeze(0)
+            probability_fp8, probability_scale = quantize_qvq_fp8_activation(
+                scaled_probabilities,
+                format=QVQ_FP8_ACTIVATION_FORMAT,
+                scale_method="dynamic_per_token",
+                validate=False,
+            )
+            value_fp8 = value.payload[batch, kv_head]
+            if padded_keys != key_tokens:
+                probability_fp8 = F.pad(
+                    probability_fp8, (0, padded_keys - key_tokens)
+                )
+                value_fp8 = _pad_fp8_rows(value_fp8, padded_keys)
+            # cuBLASLt FP8 accepts row-major A and column-major B. This
+            # transpose-copy-transpose remains FP8 and is not a dense K/V copy.
+            value_column_major = value_fp8.T.contiguous().T
+            raw_output = torch._scaled_mm(
+                probability_fp8,
+                value_column_major,
+                one,
+                one,
+                out_dtype=torch.float32,
+                use_fast_accum=False,
+            )
+            batch_outputs.append((raw_output * probability_scale.float()).to(query.dtype))
+        outputs.append(torch.stack(batch_outputs, dim=0))
+        weights.append(torch.stack(batch_weights, dim=0))
+
+    key.layer.native_attention_calls += 1
+    key.layer.native_qk_fp8_mm_calls += batch_size * query_heads
+    key.layer.native_pv_fp8_mm_calls += batch_size * query_heads
+    key.layer.native_attention_query_tokens += batch_size * query_heads * query_tokens
+    output = torch.stack(outputs, dim=0).transpose(1, 2).contiguous()
+    return output, torch.stack(weights, dim=0)
+
+
 class QVQFP8CacheLayer(DynamicLayer):
     """Dynamic cache layer with no full-precision persistent K/V residual."""
 
@@ -47,6 +227,10 @@ class QVQFP8CacheLayer(DynamicLayer):
         self.update_calls = 0
         self.quantized_elements = 0
         self.dequantized_elements = 0
+        self.native_attention_calls = 0
+        self.native_qk_fp8_mm_calls = 0
+        self.native_pv_fp8_mm_calls = 0
+        self.native_attention_query_tokens = 0
 
     def lazy_initialization(
         self, key_states: torch.Tensor, value_states: torch.Tensor
@@ -136,6 +320,16 @@ class QVQFP8CacheLayer(DynamicLayer):
         self.quantized_elements += key_states.numel() + value_states.numel()
         self.assert_fp8_storage()
 
+        if key_states.device.type == "cuda":
+            return (
+                QVQFP8KVView(self.keys, self.key_scales, self.source_dtype, self, "key"),
+                QVQFP8KVView(
+                    self.values, self.value_scales, self.source_dtype, self, "value"
+                ),
+            )
+
+        # CPU remains a portable reference path for cache unit tests. CUDA A8
+        # is fail-closed on the registered native FP8 attention consumer.
         keys = dequantize_qvq_fp8_activation(
             self.keys, self.key_scales, dtype=self.source_dtype
         )
@@ -254,6 +448,14 @@ class QVQFP8CacheLayer(DynamicLayer):
             "update_calls": self.update_calls,
             "quantized_elements": self.quantized_elements,
             "dequantized_elements": self.dequantized_elements,
+            "native_attention_calls": self.native_attention_calls,
+            "native_qk_fp8_mm_calls": self.native_qk_fp8_mm_calls,
+            "native_pv_fp8_mm_calls": self.native_pv_fp8_mm_calls,
+            "native_attention_query_tokens": self.native_attention_query_tokens,
+            "native_attention_backend": "torch._scaled_mm_cublaslt_fp8",
+            "dense_kv_prefix_materializations": 0
+            if self.keys.device.type == "cuda"
+            else self.update_calls,
         }
 
 
@@ -288,6 +490,21 @@ class QVQFP8DynamicCache(Cache):
         payload_dtypes = sorted({layer["payload_dtype"] for layer in initialized})
         scale_dtypes = sorted({layer["scale_dtype"] for layer in initialized})
         sequence_lengths = sorted({layer["sequence_length"] for layer in initialized})
+        native_attention_calls = sum(
+            layer["native_attention_calls"] for layer in initialized
+        )
+        native_qk_fp8_mm_calls = sum(
+            layer["native_qk_fp8_mm_calls"] for layer in initialized
+        )
+        native_pv_fp8_mm_calls = sum(
+            layer["native_pv_fp8_mm_calls"] for layer in initialized
+        )
+        dequantized_elements = sum(
+            layer["dequantized_elements"] for layer in initialized
+        )
+        dense_kv_prefix_materializations = sum(
+            layer["dense_kv_prefix_materializations"] for layer in initialized
+        )
         return {
             "schema": "qvq.fp8-kv-cache.v1",
             "format": self.activation_quantization.format,
@@ -306,6 +523,18 @@ class QVQFP8DynamicCache(Cache):
             "all_payloads_fp8": payload_dtypes
             in ([], [f"torch.{QVQ_FP8_ACTIVATION_FORMAT}"]),
             "no_full_precision_residual": True,
+            "native_attention_backend": "torch._scaled_mm_cublaslt_fp8",
+            "native_attention_calls": native_attention_calls,
+            "native_qk_fp8_mm_calls": native_qk_fp8_mm_calls,
+            "native_pv_fp8_mm_calls": native_pv_fp8_mm_calls,
+            "dequantized_elements": dequantized_elements,
+            "dense_kv_prefix_materializations": dense_kv_prefix_materializations,
+            "native_fp8_attention": bool(initialized)
+            and native_attention_calls >= len(initialized)
+            and native_qk_fp8_mm_calls > 0
+            and native_pv_fp8_mm_calls > 0
+            and dequantized_elements == 0
+            and dense_kv_prefix_materializations == 0,
         }
 
 
@@ -356,6 +585,10 @@ def install_qvq_fp8_kv_cache(model: torch.nn.Module, activation_quantization) ->
         raise ValueError(
             "QVQ A8 requires a model forward with `past_key_values` support."
         )
+
+    ALL_ATTENTION_FUNCTIONS.register("qvq_fp8", qvq_fp8_attention_forward)
+    text_config = model.config.get_text_config(decoder=True)
+    text_config._attn_implementation = "qvq_fp8"
 
     def forward_pre_hook(module, args, kwargs):
         use_cache = _argument_value(
@@ -432,5 +665,7 @@ def install_qvq_fp8_kv_cache(model: torch.nn.Module, activation_quantization) ->
 __all__ = [
     "QVQFP8CacheLayer",
     "QVQFP8DynamicCache",
+    "QVQFP8KVView",
     "install_qvq_fp8_kv_cache",
+    "qvq_fp8_attention_forward",
 ]

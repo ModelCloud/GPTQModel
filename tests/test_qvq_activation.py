@@ -17,6 +17,7 @@ from gptqmodel.models.auto import (
 from gptqmodel.nn_modules.qvq_fp8_cache import (
     QVQFP8DynamicCache,
     install_qvq_fp8_kv_cache,
+    qvq_fp8_attention_forward,
 )
 from gptqmodel.quantization import FORMAT, QVQActivationConfig, QVQConfig
 from gptqmodel.quantization.qvq import quantize_qvq_linear
@@ -178,6 +179,55 @@ def test_qvq_a8_runtime_injects_fp8_cache_and_rejects_dense_cache():
             batch_size=1,
             max_cache_length=16,
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("seed", (17, 29, 41))
+def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(seed):
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
+        pytest.skip("native QVQ FP8 attention validation requires the assigned H200")
+
+    torch.manual_seed(seed)
+    cache = QVQFP8DynamicCache(_TinyCacheConfig(), QVQActivationConfig())
+    query = torch.randn(1, 4, 3, 64, device="cuda", dtype=torch.bfloat16)
+    key = torch.randn(1, 1, 3, 64, device="cuda", dtype=torch.bfloat16)
+    value = torch.randn(1, 1, 3, 64, device="cuda", dtype=torch.bfloat16)
+    key_view, value_view = cache.update(key, value, 0)
+    mask = torch.full((1, 1, 3, 3), float("-inf"), device="cuda")
+    mask = torch.triu(mask, diagonal=1)
+
+    output, weights = qvq_fp8_attention_forward(
+        SimpleNamespace(num_key_value_groups=4, training=False),
+        query,
+        key_view,
+        value_view,
+        mask,
+        scaling=0.125,
+    )
+    layer = cache.layers[0]
+    dense_key = (layer.keys.float() * layer.key_scales).repeat_interleave(4, dim=1)
+    dense_value = (layer.values.float() * layer.value_scales).repeat_interleave(
+        4, dim=1
+    )
+    reference_weights = torch.softmax(
+        query.float() @ dense_key.transpose(2, 3) * 0.125 + mask,
+        dim=-1,
+    )
+    reference = (reference_weights @ dense_value).transpose(1, 2)
+
+    assert output.shape == (1, 3, 4, 64)
+    assert weights.shape == (1, 4, 3, 3)
+    error = output.float() - reference
+    assert error.square().mean().item() < 3e-4
+    assert error.abs().max().item() < 0.1
+    telemetry = cache.telemetry()
+    assert telemetry["native_fp8_attention"] is True
+    assert telemetry["native_attention_calls"] == 1
+    assert telemetry["native_qk_fp8_mm_calls"] == 4
+    assert telemetry["native_pv_fp8_mm_calls"] == 4
+    assert telemetry["dequantized_elements"] == 0
+    assert telemetry["dense_kv_prefix_materializations"] == 0
 
 
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))

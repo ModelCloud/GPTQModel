@@ -469,9 +469,12 @@ def main(argv: list[str] | None = None) -> int:
             if (
                 not cache_after_prefill["all_payloads_fp8"]
                 or not cache_after_prefill["no_full_precision_residual"]
+                or not cache_after_prefill["native_fp8_attention"]
+                or cache_after_prefill["dequantized_elements"] != 0
+                or cache_after_prefill["dense_kv_prefix_materializations"] != 0
             ):
                 raise RuntimeError(
-                    "A8 KV-cache telemetry did not prove exclusive FP8 payload storage."
+                    "A8 KV-cache telemetry did not prove native FP8 attention consumption."
                 )
         elif isinstance(cache, QVQFP8DynamicCache):
             raise RuntimeError(f"{args.arm} unexpectedly enabled the QVQ FP8 cache.")
@@ -506,6 +509,14 @@ def main(argv: list[str] | None = None) -> int:
         cache_after_decode = _cache_telemetry(cache)
         if args.arm == "w35-a8":
             cache.assert_fp8_storage()
+            if (
+                not cache_after_decode["native_fp8_attention"]
+                or cache_after_decode["dequantized_elements"] != 0
+                or cache_after_decode["dense_kv_prefix_materializations"] != 0
+            ):
+                raise RuntimeError(
+                    "A8 decode did not preserve native FP8 K/V consumption."
+                )
             if cache_after_decode["sequence_lengths"] != [
                 args.prompt_length + args.decode_warmup + args.decode_steps
             ]:

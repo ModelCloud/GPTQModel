@@ -140,9 +140,7 @@ every positive logical M. H200 coverage passed W2/W2.5/W3/W3.5 at M=1/16/17,
 and W3.5 at M=1/2/4/8/16/17/32/64/128/256/512/1024/2048/4096 across three
 seeds. A dedicated native M=17..4096 kernel remains a performance TODO.
 
-### Phase 4.5 — recommended FP8-targeted quantization replay
-
-Implementation complete; full-checkpoint gate pending.
+### Phase 4.5 — recommended FP8-targeted quantization replay (complete)
 
 The calibration objective now describes the exact scaled E4M3 operand grid
 used by the deployed kernel, following the NVFP4 branch's deployed-operand
@@ -175,19 +173,32 @@ weights:
 The flow is optional: `replay_passes=0` disables it, while
 `target=linear_input` preserves the legacy calibration contract. A focused H200
 test passes the entire native-teacher/first-encode/FP8-replay/re-encode/held-out
-sequence and proves both candidates execute the native kernel. The remaining
-gate is a fresh full-model W3.5A8 quantization and save/reload run.
+sequence and proves both candidates execute the native kernel.
+
+The fresh Llama-3.2-1B W3.5A8 checkpoint recorded 112/112 first-candidate and
+112/112 second-candidate native H200 executions. The held-out safety gate kept
+the first encoding for all 112 modules: mean validation MSE was 0.000700 for
+the initial encode and 0.001931 for the correction. This is the intended safe
+outcome when replay cannot improve the serialized P32 candidate.
 
 The comparison boundary is the real FP32 WGMMA accumulator followed by the
 existing output recovery and BF16 model cast. The accumulator itself is not
 stored as FP8; each following linear quantizes its own actual input operand.
 
-### Phase 5 — native FP8 KV attention (pending)
+### Phase 5 — native FP8 KV attention (correctness complete)
 
-The current cache is true FP8 storage but SDPA dequantizes the retained prefix to
-BF16 for attention. Replace that with an H200 FP8-cache-aware attention consumer
-and a static/paged allocation strategy so decode no longer requantizes and
-dequantizes the full growing prefix.
+The H200 attention interface now receives opaque E4M3 cache views. It
+row-quantizes Q and runs native E4M3 QK-transpose through cuBLASLt with FP32
+accumulation. After softmax, it folds each per-token V scale into the
+probability column, row-quantizes that operand to E4M3, and runs the second
+native E4M3-by-E4M3 GEMM directly against the cached V payload. No BF16/FP16 K
+or V prefix is constructed. Telemetry counts both FP8 GEMM sites,
+dequantized elements, and dense-prefix materializations; acceptance requires
+the latter two to remain zero.
+
+The current correctness path performs one cuBLASLt launch per query head and
+uses a dynamic concatenating cache. Grouped-head launches and a static/paged
+FP8 allocation remain performance TODOs.
 
 Gate: cache payload stays E4M3 end to end, no BF16 residual cache exists, and
 Nsight/kernel telemetry proves the attention consumer reads FP8 payloads.
