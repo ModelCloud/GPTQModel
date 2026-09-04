@@ -2499,15 +2499,15 @@ int launch_p32_large_m(
 }  // namespace
 
 extern "C" int qvq_p32_abi_version(void) {
-  return 1;
+  return QVQ_P32_ABI_VERSION;
 }
 
 extern "C" int qvq_p32_kernel_version(void) {
-  return 8;
+  return QVQ_P32_KERNEL_VERSION;
 }
 
 extern "C" int qvq_compiled_sm(void) {
-  return 80;
+  return QVQ_P32_COMPILED_SM;
 }
 
 extern "C" int qvq_device_sm(int device) {
@@ -2568,12 +2568,13 @@ extern "C" int qvq_p32_window(
     set_last_error("QVQ P32 received a null device pointer");
     return -1;
   }
-  if (size_m < 1 || size_k <= 0 || size_k % 16 != 0 ||
-      size_n <= 0 || size_n % 16 != 0) {
+  if (size_m < 1 || size_k <= 0 || size_k % QVQ_P32_TILE_SIZE != 0 ||
+      size_n <= 0 || size_n % QVQ_P32_TILE_SIZE != 0) {
     set_last_error("QVQ P32 requires M >= 1 and K/N divisible by 16");
     return -1;
   }
-  if (split_count < 1 || split_count > 128 || split_count > size_k / kTileRows) {
+  if (split_count < 1 || split_count > QVQ_P32_SPLIT_COUNT_MAX ||
+      split_count > size_k / kTileRows) {
     set_last_error("QVQ P32 split_count exceeds the K-tile count or 128");
     return -1;
   }
@@ -2582,7 +2583,8 @@ extern "C" int qvq_p32_window(
     set_last_error("QVQ P32 kernel_variant must be scalar (1) or block (2)");
     return -1;
   }
-  if (kernel_variant == QVQ_P32_VARIANT_SCALAR && size_m > 4) {
+  if (kernel_variant == QVQ_P32_VARIANT_SCALAR &&
+      size_m > QVQ_P32_SCALAR_M_MAX) {
     set_last_error("QVQ P32 scalar variant supports M in [1,4]");
     return -1;
   }
@@ -2590,7 +2592,8 @@ extern "C" int qvq_p32_window(
     set_last_error("QVQ P32 threads must be one of 64, 128, or 256");
     return -1;
   }
-  if (stage_k_tiles < 1 || stage_k_tiles > 4) {
+  if (stage_k_tiles < QVQ_P32_STAGE_K_TILES_MIN ||
+      stage_k_tiles > QVQ_P32_STAGE_K_TILES_MAX) {
     set_last_error("QVQ P32 stage_k_tiles must be in [1, 4]");
     return -1;
   }
@@ -2603,7 +2606,8 @@ extern "C" int qvq_p32_window(
     set_last_error("QVQ P32 reduction mode must be native (1) or graph-visible (2)");
     return -1;
   }
-  if (size_m > 16 && reduction_mode != QVQ_P32_REDUCTION_NATIVE) {
+  if (size_m > QVQ_P32_GROUPED_M_MAX &&
+      reduction_mode != QVQ_P32_REDUCTION_NATIVE) {
     set_last_error("QVQ P32 large-M batching requires native reduction");
     return -1;
   }
@@ -2635,7 +2639,7 @@ extern "C" int qvq_p32_window(
       reduction_mode};
   int status = 0;
   switch (transition_bits) {
-    case 4:
+    case QVQ_P32_TRANSITION_BITS_MIN:
       status = size_m <= 16
           ? launch_p32_config<4>(input, trellis, levels, bank_ids, bank_alt_id,
                                  output, partial_output, size_m, size_k, size_n,
@@ -2662,7 +2666,7 @@ extern "C" int qvq_p32_window(
                                   output, partial_output, size_m, size_k, size_n,
                                   config, stream);
       break;
-    case 7:
+    case QVQ_P32_TRANSITION_BITS_MAX:
       status = size_m <= 16
           ? launch_p32_config<7>(input, trellis, levels, bank_ids, bank_alt_id,
                                  output, partial_output, size_m, size_k, size_n,
@@ -2710,16 +2714,19 @@ extern "C" int qvq_p32_grouped_window(
     set_last_error("QVQ P32 grouped received a null device pointer");
     return -1;
   }
-  if (size_m < 1 || size_m > 16 || size_k <= 0 || size_k % 16 != 0 ||
-      size_n <= 0 || size_n % 16 != 0) {
+  if (size_m < 1 || size_m > QVQ_P32_GROUPED_M_MAX || size_k <= 0 ||
+      size_k % QVQ_P32_TILE_SIZE != 0 || size_n <= 0 ||
+      size_n % QVQ_P32_TILE_SIZE != 0) {
     set_last_error("QVQ P32 grouped requires M in [1,16] and K/N divisible by 16");
     return -1;
   }
-  if (group_count < 2 || group_count > kMaxGroupedP32Segments) {
+  if (group_count < QVQ_P32_GROUP_COUNT_MIN ||
+      group_count > QVQ_P32_GROUP_COUNT_MAX) {
     set_last_error("QVQ P32 grouped requires two or three groups");
     return -1;
   }
-  if (split_count < 1 || split_count > 128 || split_count > size_k / kTileRows ||
+  if (split_count < 1 || split_count > QVQ_P32_SPLIT_COUNT_MAX ||
+      split_count > size_k / kTileRows ||
       split_count_0 < 1 || split_count_1 < 1 || split_count_2 < 1) {
     set_last_error("QVQ P32 grouped split_count exceeds the K-tile count or 128");
     return -1;
@@ -2729,8 +2736,10 @@ extern "C" int qvq_p32_grouped_window(
     set_last_error("QVQ P32 grouped kernel variant must be scalar or block");
     return -1;
   }
-  if ((kernel_variant == QVQ_P32_VARIANT_SCALAR && size_m > 4) ||
-      (kernel_variant == QVQ_P32_VARIANT_BLOCK && size_m <= 4) ||
+  if ((kernel_variant == QVQ_P32_VARIANT_SCALAR &&
+       size_m > QVQ_P32_SCALAR_M_MAX) ||
+      (kernel_variant == QVQ_P32_VARIANT_BLOCK &&
+       size_m <= QVQ_P32_SCALAR_M_MAX) ||
       static_n != 0 || reduction_mode != QVQ_P32_REDUCTION_NATIVE) {
     set_last_error("QVQ P32 grouped variant does not match M or reduction configuration");
     return -1;
@@ -2739,11 +2748,13 @@ extern "C" int qvq_p32_grouped_window(
     set_last_error("QVQ P32 grouped threads must be one of 64, 128, or 256");
     return -1;
   }
-  if (stage_k_tiles < 1 || stage_k_tiles > 4) {
+  if (stage_k_tiles < QVQ_P32_STAGE_K_TILES_MIN ||
+      stage_k_tiles > QVQ_P32_STAGE_K_TILES_MAX) {
     set_last_error("QVQ P32 grouped stage_k_tiles must be in [1, 4]");
     return -1;
   }
-  if (transition_bits < 4 || transition_bits > 7) {
+  if (transition_bits < QVQ_P32_TRANSITION_BITS_MIN ||
+      transition_bits > QVQ_P32_TRANSITION_BITS_MAX) {
     set_last_error("QVQ P32 grouped transition_bits must be in [4, 7]");
     return -1;
   }
@@ -2752,7 +2763,7 @@ extern "C" int qvq_p32_grouped_window(
       reduction_mode};
   int status = 0;
   switch (transition_bits) {
-    case 4:
+    case QVQ_P32_TRANSITION_BITS_MIN:
       status = kernel_variant == QVQ_P32_VARIANT_SCALAR
           ? launch_p32_grouped_scalar<4>(
           input, trellis, levels, bank_ids, bank_alt_ids, output, partial_output,
@@ -2791,7 +2802,7 @@ extern "C" int qvq_p32_grouped_window(
           split_count_2, n_tile_end_0, n_tile_end_1,
           config, stream);
       break;
-    case 7:
+    case QVQ_P32_TRANSITION_BITS_MAX:
       status = kernel_variant == QVQ_P32_VARIANT_SCALAR
           ? launch_p32_grouped_scalar<7>(
           input, trellis, levels, bank_ids, bank_alt_ids, output, partial_output,

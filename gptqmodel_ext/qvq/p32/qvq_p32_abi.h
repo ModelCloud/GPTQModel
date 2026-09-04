@@ -6,6 +6,27 @@
 extern "C" {
 #endif
 
+// Stable constants shared by runtime implementations and framework/compiler
+// adapters. The operation version describes the mathematical P32 contract;
+// the ABI version describes this C surface; the kernel version invalidates
+// launch-autotune entries when implementation details change.
+#define QVQ_P32_OPERATION_VERSION 1
+#define QVQ_P32_ABI_VERSION 1
+#define QVQ_P32_KERNEL_VERSION 8
+#define QVQ_P32_COMPILED_SM 80
+
+#define QVQ_P32_TILE_SIZE 16
+#define QVQ_P32_LEVEL_COUNT 256
+#define QVQ_P32_TRANSITION_BITS_MIN 4
+#define QVQ_P32_TRANSITION_BITS_MAX 7
+#define QVQ_P32_SPLIT_COUNT_MAX 128
+#define QVQ_P32_STAGE_K_TILES_MIN 1
+#define QVQ_P32_STAGE_K_TILES_MAX 4
+#define QVQ_P32_SCALAR_M_MAX 4
+#define QVQ_P32_GROUPED_M_MAX 16
+#define QVQ_P32_GROUP_COUNT_MIN 2
+#define QVQ_P32_GROUP_COUNT_MAX 3
+
 // Kernel variants are compile-time specializations selected by the host
 // tuner. The scalar variant is intended for small M; the block variant
 // uses one output tile per warp. `threads` must be a multiple of 32 and
