@@ -3431,6 +3431,17 @@ dynamic `0.086016/0.089088/0.086016/0.087040 ms` to
 source change was reverted.  Diagnostic:
 `artifacts/a100_p32_window/v54_candidate_m8_fullq_statick_8000.json`.
 
+## v55 rejected M16 long-K compile-time-split probe
+
+The M16 long-K MLP-down route `(K,N)=(17408,5120)` retains the measured
+split-24 plan.  A WMMA main-kernel specialization with `StaticSplitCount=24`
+was exact, but the matched 20,000-iteration medians moved from the retained
+`0.124928/0.124928/0.125952/0.129024 ms` control to
+`0.123904/0.125952/0.128000/0.130048 ms` for W2/W2.5/W3/W3.5.  The single
+W2 tick was outweighed by regressions at the other rates, so the template
+extension and dispatch were reverted.  Diagnostic:
+`artifacts/a100_p32_window/v25_candidate_m16_mlpdown_static24_20000.json`.
+
 ## Reproduction
 
 ```bash
