@@ -3898,6 +3898,40 @@ instructions; HMMA.16816, LDSM, STG, LEA, and shuffle counts are unchanged.
 No new conversion, permutation, redundant address expression, or spill was
 found in the SSA/data-movement review.
 
+## v83 selective stage-4 eight-row reuse
+
+After v82 merged in PR #117, the branch was refreshed to `origin/main` at
+`0c6b8a38`.  The next screen tested the remaining large-M stage-4 gap.  An
+unconditional eight-row policy regressed W2 (transition bits 4) by 2--3% on
+wide N, so that probe was rejected.  The retained dispatch instead selects
+eight-row reuse only when `TransitionBits>=5`, `N!=1024`, `M=4096`, and
+`stage_k_tiles=4`; W2 and all other shapes remain on the merged four-row
+route.
+
+On the A100 with `K=5120`, 10 warmups, and 50 timed iterations, the targeted
+`M=4096` stage-4 screen is exact under split-8 comparisons for every wide-N
+shape and bits 5--7.  Geometric-mean speedups versus the merged v82 main are
+1.0468x (W2.5), 1.0467x (W3), and 1.0588x (W3.5), including the neutral
+N=1024 control in each rate.  The five wide-N cases alone improve by about
+5.4%, 5.4%, and 7.1% respectively.  The 65-case Ampere test suite and the
+P32 contract smoke test pass.
+
+The matched NCU captures are `/tmp/v33_ncu_candidate_20260905.csv` and
+`/tmp/v33_ncu_baseline_20260905.csv` for `N=5120,M=4096,stage=4,bits=5`.
+The eight-row launch halves the grid from 5,120 to 2,560 CTAs and lowers
+executed instructions from 1,363,184,640 to 780,815,360.  Profiled duration
+falls from 7,216,288 ns to 6,808,288 ns; both variants report zero local or
+shared spill requests.  The candidate resource entry is 126 registers and
+35,360 B static shared memory, versus 64 registers and 18,976 B for the
+four-row control.
+
+The source-correlated SASS extracts are `/tmp/v33_base_stage4_sass.txt` and
+`/tmp/v33_cand_stage4_sass.txt`.  Per-CTA static instructions rise from 1,640
+to 1,704 while HMMA/LDSM/STG scale 2x with the doubled row work.  Decode and
+address families stay nearly flat (IMAD 155->158, SHF 158->161,
+LOP3 164->171, LEA 55->58); no new conversion, permutation, redundant
+address expression, or spill was found in the SSA/data-movement pass.
+
 ## Reproduction
 
 ```bash
