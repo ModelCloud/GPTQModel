@@ -5,6 +5,7 @@
 
 """Looper-side Hessian dedup for explicit `:in=<tag>` shared-input groups (CPU only)."""
 
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Dict, List, Optional
 
@@ -12,6 +13,7 @@ import pytest
 import torch
 from torch import nn
 
+from gptqmodel.looper import stage_subset
 from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.loop_processor import LoopProcessor
 from gptqmodel.looper.named_module import NamedModule
@@ -215,6 +217,19 @@ class TestProcessorLeaderElection:
         assert len(model._calls) == 1
         assert model._calls[0] == (model.model.config, proc.qcfg)
 
+    def test_plan_derivation_is_thread_safe(self):
+        proc = _processor()
+        plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)
+        model = _fake_model(plan, proc.qcfg)
+        names = ["self_attn.q", "self_attn.k", "self_attn.v"]
+        _setup(proc, names)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(lambda _: proc.begin_shared_input_capture(model, names), range(8)))
+
+        assert results == [results[0]] * len(results)
+        assert len(model._calls) == 1
+
     def test_subset_order_decides_leader(self):
         proc = _processor()
         plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)
@@ -397,6 +412,23 @@ class TestProcessorLeaderElection:
 
 
 class TestProcessorCaptureAndAdopt:
+    def test_concurrent_followers_adopt_independent_copies(self):
+        qcfg = QuantizeConfig(method=METHOD.GPTQ)
+        leader = GPTQ(module=_named_linear("self_attn.q"), qcfg=qcfg)
+        followers = [
+            GPTQ(module=_named_linear("self_attn.k", seed=1), qcfg=qcfg),
+            GPTQ(module=_named_linear("self_attn.v", seed=2), qcfg=qcfg),
+        ]
+        batches = _batches()
+        for index, batch in enumerate(batches):
+            leader.add_batch(batch, None, batch_index=index)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(lambda follower: follower.adopt_hessian_from(leader), followers))
+
+        assert all(torch.equal(follower.H, leader.H) for follower in followers)
+        assert followers[0].H.data_ptr() != followers[1].H.data_ptr()
+
     def test_followers_skip_capture_then_adopt_leader_hessian(self):
         proc = _processor()
         plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)
@@ -414,7 +446,7 @@ class TestProcessorCaptureAndAdopt:
         assert not k._device_hessian_partials and not v._device_hessian_partials
         assert not proc.has_captured_input_ids("self_attn.k")
 
-        proc.end_shared_input_capture(names)
+        telemetry = proc.end_shared_input_capture(names)
 
         expected = _expected_H(batches)
         for task in (leader, k, v):
@@ -424,6 +456,20 @@ class TestProcessorCaptureAndAdopt:
         assert k.H.data_ptr() != leader.H.data_ptr() != v.H.data_ptr()
         assert proc.has_captured_input_ids("self_attn.k") and proc.has_captured_input_ids("self_attn.v")
         assert proc.shared_input_dedup_count == 2
+        assert telemetry == {
+            "enabled": True,
+            "expected_followers": 2,
+            "adopted_followers": 2,
+            "cumulative_adopted_followers": 2,
+            "leader_count": 1,
+            "follower_to_leader": {
+                "self_attn.k": "self_attn.q",
+                "self_attn.v": "self_attn.q",
+            },
+            "subset_module_count": 3,
+            "status": "verified",
+        }
+        assert proc.shared_input_dedup_telemetry == telemetry
         assert proc.shared_input_leader("self_attn.k") is None
 
     def test_hooks_after_end_capture_normally_again(self):
@@ -537,6 +583,53 @@ class TestProcessorCaptureAndAdopt:
         _setup(proc, names)
         proc.begin_shared_input_capture(model, names)
         proc.tasks.pop("self_attn.q")
-        proc.end_shared_input_capture(names)
+        telemetry = proc.end_shared_input_capture(names)
         assert proc.shared_input_dedup_count == 0
         assert proc.tasks["self_attn.k"].H is None
+        assert telemetry["expected_followers"] == 1
+        assert telemetry["adopted_followers"] == 0
+        assert telemetry["status"] == "mismatch"
+
+
+def test_subset_lifecycle_emits_structured_hessian_dedup_telemetry(monkeypatch):
+    records = []
+    info_logs = []
+    warning_logs = []
+    logger = SimpleNamespace(
+        info=lambda *args: info_logs.append(args),
+        warning=lambda *args: warning_logs.append(args),
+    )
+    telemetry = {
+        "enabled": True,
+        "expected_followers": 2,
+        "adopted_followers": 2,
+        "cumulative_adopted_followers": 5,
+        "leader_count": 1,
+        "follower_to_leader": {"k": "q", "v": "q"},
+        "subset_module_count": 3,
+        "status": "verified",
+    }
+
+    monkeypatch.setattr(
+        stage_subset,
+        "emit_device_telemetry",
+        lambda event, **fields: records.append({"event": event, **fields}),
+    )
+    stage_subset._emit_shared_input_hessian_dedup_telemetry(
+        telemetry=telemetry,
+        layer_index=3,
+        subset_index=1,
+        subset_total=4,
+        logger=logger,
+    )
+
+    assert records == [{
+        "event": "hessian_input_collection_dedup",
+        "lifecycle_stage": "forward_capture_complete",
+        "layer_index": 3,
+        "subset_index": 2,
+        "subset_total": 4,
+        **telemetry,
+    }]
+    assert len(info_logs) == 1
+    assert warning_logs == []

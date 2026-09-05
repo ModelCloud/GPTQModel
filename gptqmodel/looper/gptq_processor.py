@@ -6,26 +6,36 @@
 import copy
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
 from ..models.shared_input import SharedInputPlan
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
-from ..quantization import GPTAQ, GPTQ, FOEM
-from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
-from ..utils.fallback import normalize_fallback
-from ..utils.logger import setup_logger, log_time_block
+from ..models.writer import (
+    PROCESS_LOG_FWD_TIME,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_TIME,
+    PROCESS_USED_MEMORY,
+    QUANT_LOG_DAMP,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_NSAMPLES,
+)
+from ..quantization import FOEM, GPTAQ, GPTQ
+from ..quantization.config import METHOD, FOEMConfig, GPTAQConfig, HessianConfig, QuantizeConfig, resolve_quant_format
 from ..utils.device import get_device
+from ..utils.fallback import normalize_fallback
+from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, find_modules, pack_module
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import HAS_NPU
+
 
 log = setup_logger()
 lock = threading.Lock()
@@ -152,8 +162,10 @@ class GPTQProcessor(LoopProcessor):
         # pass currently being captured and is cleared once followers adopt.
         self._shared_input_plan: Optional[SharedInputPlan] = None
         self._shared_input_plan_owner: Optional[type] = None
+        self._shared_input_plan_lock = threading.Lock()
         self._shared_input_leaders: Dict[str, str] = {}
         self.shared_input_dedup_count = 0
+        self.shared_input_dedup_telemetry: Dict[str, Any] = {}
 
     def set_calibration_dataset(self, calibration_dataset):
         """Rejects dataset replacement because GPTQ capture is fixed at construction."""
@@ -204,21 +216,22 @@ class GPTQProcessor(LoopProcessor):
         """Derives (once per model class) the explicit `:in=<tag>` plan for one decoder layer."""
 
         owner = type(model)
-        if self._shared_input_plan_owner is owner:
-            return self._shared_input_plan
+        with self._shared_input_plan_lock:
+            if self._shared_input_plan_owner is owner:
+                return self._shared_input_plan
 
-        plan: Optional[SharedInputPlan] = None
-        shared_input_plan = getattr(model, "shared_input_plan", None)
-        if callable(shared_input_plan):
-            inner = getattr(model, "model", None)
-            plan = shared_input_plan(
-                model_config=getattr(inner, "config", None),
-                quantize_config=getattr(model, "quantize_config", None),
-            )
+            plan: Optional[SharedInputPlan] = None
+            shared_input_plan = getattr(model, "shared_input_plan", None)
+            if callable(shared_input_plan):
+                inner = getattr(model, "model", None)
+                plan = shared_input_plan(
+                    model_config=getattr(inner, "config", None),
+                    quantize_config=getattr(model, "quantize_config", None),
+                )
 
-        self._shared_input_plan = plan
-        self._shared_input_plan_owner = owner
-        return plan
+            self._shared_input_plan = plan
+            self._shared_input_plan_owner = owner
+            return plan
 
     @staticmethod
     def _hessian_accumulation_settings(task: GPTQ) -> Tuple[str, Optional[int], Optional[int]]:
@@ -285,8 +298,8 @@ class GPTQProcessor(LoopProcessor):
             self._shared_input_leaders = leaders
         return dict(leaders)
 
-    def end_shared_input_capture(self, subset_names: List[str]) -> None:
-        """Copies each leader's finalized Hessian into its followers, then clears the election."""
+    def end_shared_input_capture(self, subset_names: List[str]) -> Dict[str, Any]:
+        """Copies finalized Hessians and returns lifecycle telemetry for this capture pass."""
 
         with self.lock:
             leaders = self._shared_input_leaders
@@ -302,9 +315,20 @@ class GPTQProcessor(LoopProcessor):
             follower_task.adopt_hessian_from(leader_task)
             adopted += 1
 
-        if adopted:
-            with self.lock:
-                self.shared_input_dedup_count += adopted
+        with self.lock:
+            self.shared_input_dedup_count += adopted
+            telemetry = {
+                "enabled": bool(self.qcfg.hessian.dedup_shared_inputs),
+                "expected_followers": len(leaders),
+                "adopted_followers": adopted,
+                "cumulative_adopted_followers": self.shared_input_dedup_count,
+                "leader_count": len(set(leaders.values())),
+                "follower_to_leader": dict(leaders),
+                "subset_module_count": len(subset_names),
+                "status": "verified" if adopted == len(leaders) else "mismatch",
+            }
+            self.shared_input_dedup_telemetry = telemetry
+        return dict(telemetry)
 
     def shared_input_leader(self, name: str) -> Optional[str]:
         """Returns the module whose Hessian `name` will adopt in the current pass, if any."""

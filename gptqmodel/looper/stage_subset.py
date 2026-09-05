@@ -24,21 +24,22 @@ from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional, Tuple
 import pcre
 import torch
 
-from .awq_processor import AWQProcessor
-from .paroquant_processor import ParoQuantProcessor
-from .qqq_processor import QQQProcessor
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models._const import META
-from ..quantization.config import GcMode, ExpertsRoutingBypass, VramStrategy
-from ..utils.device_telemetry import emit_device_telemetry
+from ..quantization.config import ExpertsRoutingBypass, GcMode, VramStrategy
 from ..utils.device import get_device
+from ..utils.device_telemetry import emit_device_telemetry
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import normalize_device_like, select_forward_devices
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import torch_empty_cache, torch_sync
+from .awq_processor import AWQProcessor
+from .paroquant_processor import ParoQuantProcessor
+from .qqq_processor import QQQProcessor
+
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .module_looper import ModuleLooper
@@ -702,6 +703,44 @@ def _emit_moe_parallel_quant_subset_telemetry(
     )
 
 
+def _emit_shared_input_hessian_dedup_telemetry(
+    *,
+    telemetry: Optional[Dict[str, object]],
+    layer_index: int,
+    subset_index: int,
+    subset_total: int,
+    logger,
+) -> None:
+    """Report whether one subset's planned Hessian input dedup was fully realized."""
+
+    if not telemetry or telemetry.get("expected_followers", 0) <= 0:
+        return
+
+    fields = {
+        "lifecycle_stage": "forward_capture_complete",
+        "layer_index": layer_index,
+        "subset_index": subset_index + 1,
+        "subset_total": subset_total,
+        **telemetry,
+    }
+    emit_device_telemetry("hessian_input_collection_dedup", **fields)
+
+    log_method = logger.info if telemetry["status"] == "verified" else logger.warning
+    log_method(
+        "HessianInputDedup: lifecycle=%s layer=%s subset=%s/%s expected=%s adopted=%s "
+        "leaders=%s cumulative=%s status=%s",
+        fields["lifecycle_stage"],
+        layer_index,
+        subset_index + 1,
+        subset_total,
+        telemetry["expected_followers"],
+        telemetry["adopted_followers"],
+        telemetry["leader_count"],
+        telemetry["cumulative_adopted_followers"],
+        telemetry["status"],
+    )
+
+
 def _run_single_subset_pass(
     looper: 'ModuleLooper',
     processor: LoopProcessor,
@@ -983,7 +1022,14 @@ def _run_single_subset_pass(
 
         # Followers adopt the leader's finalized Hessian before coverage checks and
         # before any worker may quantize (and mutate/free) the leader's copy.
-        processor.end_shared_input_capture(subset_names)
+        dedup_telemetry = processor.end_shared_input_capture(subset_names)
+        _emit_shared_input_hessian_dedup_telemetry(
+            telemetry=dedup_telemetry,
+            layer_index=layer_index,
+            subset_index=subset_index,
+            subset_total=subset_total,
+            logger=logger,
+        )
 
     forward_flush_device = _resolve_forward_flush_device(plan, cur_layer_device)
     if looper.gptq_model.quantize_config.gc_mode == GcMode.ON_STAGE_END:
