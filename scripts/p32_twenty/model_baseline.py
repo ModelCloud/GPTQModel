@@ -25,6 +25,9 @@ def main():
     )
     parser.add_argument("--ampere-min-rows", type=int, default=1)
     parser.add_argument("--capture-only", action="store_true")
+    parser.add_argument("--capture-sequences", type=int, default=1)
+    parser.add_argument("--capture-tokens", type=int, default=2048)
+    parser.add_argument("--recovered-export", type=Path, action="append", default=[])
     parser.add_argument("--task", choices=("arc_challenge", "gsm8k_cot"))
     parser.add_argument("--task-max-rows", type=int, default=128)
     parser.add_argument("--uuid", required=True)
@@ -246,6 +249,50 @@ def main():
                 )
                 print("RECONSTRUCTED", prefix, flush=True)
             del trellis, su, sv, bank, alt, inner
+    if args.recovered_export:
+        import hashlib
+
+        from scripts.p32_twenty.recovered_linear import RecoveredLinear
+
+        if args.mode not in ("production", "ampere"):
+            raise ValueError(
+                "Recovered exports require an experimental production/ampere arm"
+            )
+        replacements = []
+        for path in args.recovered_export:
+            candidate = RecoveredLinear(path)
+            name = candidate.source_module
+            original = model.get_submodule(name)
+            if (original.in_features, original.out_features) != (
+                candidate.in_features,
+                candidate.out_features,
+            ):
+                raise ValueError("Recovered export geometry mismatch")
+            parent, leaf = name.rsplit(".", 1)
+            setattr(model.get_submodule(parent), leaf, candidate)
+            replacements.append(
+                {
+                    "module": name,
+                    "path": str(path),
+                    "bytes": path.stat().st_size,
+                    "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+            )
+        report["recovered_exports"] = replacements
+        if "runtime_repack_caches" in report:
+            replaced = {r["module"] for r in replacements}
+            report["runtime_repack_caches"] = [
+                c
+                for c in report["runtime_repack_caches"]
+                if c["module"] not in replaced
+            ]
+            report["runtime_extra_bytes"] = sum(
+                c["window_bytes"] + c["levels_bytes"]
+                for c in report["runtime_repack_caches"]
+            )
+        report["recovery_contract"] = (
+            "Full operator replacement: W4A16 + FP32 correction, output cast to input dtype; teacher files read only"
+        )
     if args.task:
         from transformers import AutoTokenizer
 
@@ -274,21 +321,16 @@ def main():
     if args.capture_only:
         if args.mode != "canonical":
             raise ValueError("Capture requires canonical teacher")
+        if args.capture_sequences < 1 or args.capture_tokens < 1:
+            raise ValueError("Capture sequences/tokens must be positive")
         captured = []
+        chunks = {}
         hooks = []
 
         def hook(name):
             def save(module, values, output):
-                path = args.output / (name + ".pt")
-                torch.save(
-                    {
-                        "input": values[0].detach().cpu(),
-                        "teacher_output": output.detach().cpu(),
-                    },
-                    path,
-                )
-                captured.append(
-                    {"module": name, "path": str(path), "shape": list(values[0].shape)}
+                chunks.setdefault(name, []).append(
+                    (values[0].detach().cpu(), output.detach().cpu())
                 )
 
             return save
@@ -296,16 +338,40 @@ def main():
         for name, module in model.named_modules():
             if isinstance(module, CanonicalLinear) and name.split(".")[2] in ("0", "1"):
                 hooks.append(module.register_forward_hook(hook(name)))
-        ids = [token for row in inputs["rows"] for token in row["input_ids"]][:2048]
+        if args.capture_sequences == 1:
+            sequences = [
+                [token for row in inputs["rows"] for token in row["input_ids"]][
+                    : args.capture_tokens
+                ]
+            ]
+        else:
+            if len(inputs["rows"]) < args.capture_sequences:
+                raise ValueError("Not enough prepared calibration sequences")
+            sequences = [
+                row["input_ids"][: args.capture_tokens]
+                for row in inputs["rows"][: args.capture_sequences]
+            ]
         with torch.inference_mode():
-            model(torch.tensor([ids], device="cuda"), use_cache=False)
+            for i, ids in enumerate(sequences):
+                model(torch.tensor([ids], device="cuda"), use_cache=False)
+                print("CAPTURE_SEQUENCE", i + 1, len(sequences), len(ids), flush=True)
         for handle in hooks:
             handle.remove()
+        for name, parts in chunks.items():
+            x = torch.cat([part[0] for part in parts], dim=1)
+            y = torch.cat([part[1] for part in parts], dim=1)
+            path = args.output / (name + ".pt")
+            torch.save({"input": x, "teacher_output": y}, path)
+            captured.append({"module": name, "path": str(path), "shape": list(x.shape)})
         (args.output / "capture.json").write_text(
             json.dumps(
                 {
-                    "scope": inputs.get("capture_scope", "timing/kernel correctness only; not calibration for fitting"),
+                    "scope": inputs.get(
+                        "capture_scope",
+                        "timing/kernel correctness only; not calibration for fitting",
+                    ),
                     "input_manifest": str(args.inputs),
+                    "sequence_token_counts": [len(ids) for ids in sequences],
                     "modules": captured,
                 },
                 indent=2,

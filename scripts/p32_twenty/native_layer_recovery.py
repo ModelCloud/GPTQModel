@@ -23,7 +23,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--uuid", required=True)
     parser.add_argument("--module", required=True)
+    parser.add_argument("--fp16-boundary", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--calibration-root",
+        type=Path,
+        default=Path("/root/p32-recovery-calibration/activations"),
+    )
     args = parser.parse_args()
     if args.output.resolve().is_relative_to(SNAPSHOT.resolve()):
         parser.error("Output must be outside teacher snapshot")
@@ -141,18 +147,29 @@ def main():
             "teacher_output"
         ].reshape(-1, n).cuda().float()
 
-    xc, yc = capture("/root/p32-recovery-calibration/activations")
+    xc, yc = capture(args.calibration_root)
     xe, ye = capture("/root/p32-timing-activations")
+    if args.fp16_boundary:
+        xc, xe = xc.half().float(), xe.half().float()
+        # Recompute the canonical reference on IDENTICAL rounded input values.
+        yc = matmul_hadU(matmul_hadU(xc * su.float()) @ inner) * sv.float()
+        ye = matmul_hadU(matmul_hadU(xe * su.float()) @ inner) * sv.float()
+
+    def output_cast(y):
+        return y.half().float() if args.fp16_boundary else y
+
     args.output.mkdir(parents=True, exist_ok=True)
     report = {
         "experiment": 19,
+        "fp16_boundary": args.fp16_boundary,
         "module": args.module,
         "uuid": args.uuid,
         "scope": "one real projection; actual TorchAO INT4-storage BF16-activation tinygemm plus FP32 low-rank GEMMs; not INT4 activation IMMA or full-model evaluation",
         "source_revision": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip(),
-        "calibration": "verified historical Fisher source; first 2048 prepared tokens",
+        "calibration": str(args.calibration_root),
+        "calibration_rows": xc.shape[0],
         "evaluation": "separate C4 teacher activation capture; never used in fitting",
         "activation_rcond": 1e-5,
         "rows": [],
@@ -254,7 +271,7 @@ def main():
                 a, b = aa[:, :rr].contiguous(), bb[:rr].contiguous()
 
                 def corrected(x=x, a=a, b=b):
-                    return native(x) + (x @ a) @ b
+                    return output_cast(native(x) + (x @ a) @ b)
 
                 row["ranks"].append(
                     {
@@ -262,7 +279,7 @@ def main():
                         "actual_rank": rr,
                         "metrics": layer_metrics(corrected(), y),
                         "calibration_metrics": layer_metrics(
-                            native(xc) + (xc @ a) @ b, yc
+                            output_cast(native(xc) + (xc @ a) @ b), yc
                         ),
                         "samples_ms": timing(corrected),
                         "factor_bytes": (a.numel() + b.numel()) * 4,

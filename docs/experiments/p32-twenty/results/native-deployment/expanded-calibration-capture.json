@@ -1,0 +1,150 @@
+{
+  "scope": "calibration-only activations for residual fitting; disjoint evaluation remains required",
+  "input_manifest": "/root/p32-recovery-calibration/inputs.json",
+  "sequence_token_counts": [
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512
+  ],
+  "modules": [
+    {
+      "module": "model.layers.0.self_attn.q_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.0.self_attn.q_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.0.self_attn.k_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.0.self_attn.k_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.0.self_attn.v_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.0.self_attn.o_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.0.self_attn.o_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.0.mlp.gate_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.0.mlp.gate_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.0.mlp.up_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.0.mlp.up_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.0.mlp.down_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.0.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.1.self_attn.q_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.1.self_attn.k_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.1.self_attn.k_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.1.self_attn.v_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.1.self_attn.v_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.1.self_attn.o_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.1.self_attn.o_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.1.mlp.gate_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.1.mlp.gate_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.1.mlp.up_proj.pt",
+      "shape": [
+        1,
+        8192,
+        2048
+      ]
+    },
+    {
+      "module": "model.layers.1.mlp.down_proj",
+      "path": "/root/p32-recovery-calibration/activations16x512/model.layers.1.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    }
+  ]
+}
