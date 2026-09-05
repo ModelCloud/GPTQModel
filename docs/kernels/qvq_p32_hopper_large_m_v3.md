@@ -375,3 +375,62 @@ multiply-adds. The original kernel instead executes 1.82M branches, 1.18M
 predicate comparisons, 0.79M barrier-sync operations, and 0.67M scalar
 half-unpack adds. Reports remain at
 `/tmp/qvq_v3_phase5_input_{oneblock,multiblock_low,multiblock_high}_m512.ncu-rep`.
+
+## Phase 6: multiblock large-M down output recovery
+
+The final Llama down output has N=2048 and remained a scalar one-block-per-row
+FP32-to-FP16 Hadamard recovery. Phase 6 adds a dedicated exact two-stage
+operator. Its low kernel keeps bits 1 through 16 in warp shuffles and uses
+shared memory only for bits 32, 64, and 128. Its high kernel keeps the eight
+tile values for one column in registers for bits 256, 512, and 1024, then
+applies output scale, optional bias, and the final FP16 store in the original
+order.
+
+The intermediate workspace is FP32, so the stage boundary introduces no
+rounding. Every historical finite FP16-emulation boundary remains, including
+the overflow-preserving fallback behavior. The operator allocates only normal
+per-call temporaries, is CUDA Graph safe, and adds no persistent model VRAM.
+
+Focused M32/M512 tests with and without bias require exact FP16 bits against
+the original recovery and exact graph replay. Full-MLP graph validation also
+remains within the dense P32 oracle bound after merging current `origin/main`.
+
+| Weight | MLP MKN (gate/up; down) | Phase 5 | Phase 6 | Speedup | vs merged main | vs Marlin W4 | vs Machete W4 | Better than last |
+|---|---|---:|---:|---:|---:|---:|---:|:---:|
+| W2 | 128x2048x8192; 128x8192x2048 | 103.923 us | 102.474 us | 1.014x | 1.194x | 0.776x | 0.714x | Yes |
+| W2 | 512x2048x8192; 512x8192x2048 | 353.501 us | 345.872 us | 1.022x | 1.188x | 0.480x | 0.338x | Yes |
+| W2 | 4096x2048x8192; 4096x8192x2048 | 2653.184 us | 2589.795 us | 1.024x | 1.219x | 0.524x | 0.331x | Yes |
+| W2.5 | 128x2048x8192; 128x8192x2048 | 106.458 us | 105.302 us | 1.011x | 1.176x | 0.755x | 0.694x | Yes |
+| W2.5 | 512x2048x8192; 512x8192x2048 | 360.288 us | 352.838 us | 1.021x | 1.198x | 0.470x | 0.331x | Yes |
+| W2.5 | 4096x2048x8192; 4096x8192x2048 | 2684.922 us | 2620.768 us | 1.024x | 1.223x | 0.518x | 0.327x | Yes |
+| W3 | 128x2048x8192; 128x8192x2048 | 106.397 us | 104.608 us | 1.017x | 1.171x | 0.760x | 0.699x | Yes |
+| W3 | 512x2048x8192; 512x8192x2048 | 361.469 us | 350.333 us | 1.032x | 1.200x | 0.474x | 0.334x | Yes |
+| W3 | 4096x2048x8192; 4096x8192x2048 | 2697.293 us | 2630.230 us | 1.025x | 1.210x | 0.516x | 0.326x | Yes |
+| W3.5 | 128x2048x8192; 128x8192x2048 | 105.088 us | 103.296 us | 1.017x | 1.195x | 0.770x | 0.708x | Yes |
+| W3.5 | 512x2048x8192; 512x8192x2048 | 354.000 us | 348.598 us | 1.015x | 1.244x | 0.476x | 0.335x | Yes |
+| W3.5 | 4096x2048x8192; 4096x8192x2048 | 2662.349 us | 2595.162 us | 1.026x | 1.265x | 0.523x | 0.330x | Yes |
+
+All twelve cells improve. Phase 6 is `1.0208x` over Phase 5 and `1.2067x`
+cumulatively over the merged PR-112 baseline. Marlin and Machete W4 geometric
+ratios are `0.5739x` and `0.4261x`. Maximum dense-oracle absolute error remains
+`1.073e-6`.
+
+### Post-merge Nsight Compute and SASS audit
+
+The output-recovery implementation at merged executable commit `d25b3b69`
+was compared with the original kernel from the same binary at M512.
+
+| Metric | One-block scalar | Multiblock low | Multiblock high | Combined change |
+|---|---:|---:|---:|---:|
+| NCU duration | 20.61 us | 8.86 us | 6.21 us | 1.368x |
+| Executed instructions | 14.75 M | 4.65 M | 1.10 M | -61.00% |
+| Registers/thread | 27 | 16 | 31 | bounded |
+| Achieved occupancy | 88.06% | 82.69% | 45.13% | staged grids |
+| Eligible warps/scheduler | 4.15 | 2.85 | 0.76 | staged grids |
+| DRAM throughput | 8.39% | 19.50% | 27.88% | higher useful rate |
+
+Source-correlated SASS shows the scalar path dominated by 1.64M branches,
+1.18M predicate comparisons, 0.77M barrier syncs, and 0.67M scalar half
+unpacks. The low stage exposes warp butterflies and trims those totals; the
+high stage executes only 1.10M instructions including scale/bias/store. The
+reports are `/tmp/qvq_v3_phase6_output_{oneblock,multiblock_low,multiblock_high}_m512.ncu-rep`.
