@@ -25,6 +25,7 @@ except ImportError:  # pragma: no cover - non-POSIX hosts fall back to process-l
     fcntl = None
 
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -473,6 +474,64 @@ def _fingerprint_path_key(path: Path) -> str:
     except ValueError:
         return str(normalized)
     return relative.as_posix()
+
+
+@lru_cache(maxsize=None)
+def _system_include_roots() -> tuple[Path, ...]:
+    """Return system/dependency include directories used by the toolchain.
+
+    These roots identify headers (e.g. ``torch/``, ``ATen/``, ``c10/``,
+    ``Python.h``, ``cuda*.h``) whose contents are captured by the ABI/toolchain
+    portion of the cache key rather than by hashing the header files directly.
+    """
+
+    roots: list[Path] = []
+    try:
+        from torch.utils.cpp_extension import include_paths as _torch_include_paths
+
+        roots.extend(Path(p).expanduser().resolve(strict=False) for p in _torch_include_paths())
+    except Exception:
+        pass
+    try:
+        import sysconfig
+
+        roots.append(Path(sysconfig.get_paths()["include"]).expanduser().resolve(strict=False))
+    except Exception:
+        pass
+    try:
+        roots.extend(Path(p).expanduser().resolve(strict=False) for p in detected_local_cuda_include_paths())
+    except Exception:
+        pass
+    try:
+        roots.extend(Path(p).expanduser().resolve(strict=False) for p in detected_cuda_wheel_include_paths())
+    except Exception:
+        pass
+
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        deduped.append(root)
+    return tuple(deduped)
+
+
+def _is_system_or_dependency_header(include_name: str) -> bool:
+    """Return True if *include_name* names a system/dependency header.
+
+    The check is conservative: only headers that actually exist under a known
+    system include directory (torch, Python, CUDA, etc.) are skipped. This lets
+    legitimate local angle-bracket headers (e.g. ``<wrapper.h>`` under an
+    extension-specific include root) still be hashed while preventing files
+    dropped by unrelated kernels (e.g. ``gptqmodel_ext/torch/all.h``) from
+    leaking into an extension's cache key.
+    """
+
+    for root in _system_include_roots():
+        if (root / include_name).is_file():
+            return True
+    return False
 
 
 def detected_cuda_wheel_include_paths() -> list[str]:
@@ -947,23 +1006,31 @@ class TorchOpsJitExtension:
 
             source_text = source_bytes.decode("utf-8", errors="ignore")
             for delimiter, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
-                # Only quoted includes are part of the extension's source graph.
-                # Angle-bracket includes name system/dependency headers whose
-                # precise content is captured by the ABI/toolchain flags in the
-                # cache key; resolving them against local search roots would let
-                # unrelated sibling files (e.g. a new kernel dropping a ``torch/``
-                # header) leak into this extension's fingerprint.
-                if delimiter != '"':
-                    continue
-                included_path = _resolve_local_include_path(
-                    include_name,
-                    including_path=normalized,
-                    include_search_roots=include_search_roots,
-                )
-                if included_path is None:
-                    payload.append(f"missing_include={_fingerprint_path_key(normalized)}:{include_name}")
-                    continue
-                visit(included_path)
+                if delimiter == '"':
+                    included_path = _resolve_local_include_path(
+                        include_name,
+                        including_path=normalized,
+                        include_search_roots=include_search_roots,
+                    )
+                    if included_path is None:
+                        payload.append(f"missing_include={_fingerprint_path_key(normalized)}:{include_name}")
+                        continue
+                    visit(included_path)
+                else:
+                    # Angle-bracket headers name system/dependency headers whose
+                    # contents are captured by ABI/toolchain flags. Do not hash
+                    # them when they are part of the installed toolchain; only
+                    # follow local angle-bracket headers that are not shadowing
+                    # a system header (e.g. the synthetic ``<wrapper.h>`` in tests).
+                    if _is_system_or_dependency_header(include_name):
+                        continue
+                    included_path = _resolve_local_include_path(
+                        include_name,
+                        including_path=normalized,
+                        include_search_roots=include_search_roots,
+                    )
+                    if included_path is not None:
+                        visit(included_path)
 
         visit(Path(source))
         return payload
@@ -987,8 +1054,9 @@ class TorchOpsJitExtension:
             texts.append((normalized, source_text))
             for delimiter, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
                 # ABI detection only needs the extension's own source graph.
-                # System headers use angle brackets and are covered by ABI/toolchain flags.
-                if delimiter != '"':
+                # Installed system/dependency headers are captured by the
+                # ABI/toolchain flags rather than by reading their contents.
+                if delimiter != '"' and _is_system_or_dependency_header(include_name):
                     continue
                 included_path = _resolve_local_include_path(
                     include_name,
