@@ -478,19 +478,30 @@ def _qvq_p32_composite_base_gfx950_kernel(  # pragma: no cover - compiled and ex
     row = tl.program_id(0)
     position = tl.program_id(1) * block_p + tl.arange(0, block_p)
     output_base = tl.arange(0, base_pad)
-    reduce_base = tl.arange(0, base_pad)
-    base = tl.load(
-        base_ptr + output_base[:, None] * base_pad + reduce_base[None, :]
+    reduce_low = tl.arange(0, 32)
+    base_low = tl.load(
+        base_ptr + output_base[:, None] * base_pad + reduce_low[None, :]
     )
-    staged = tl.load(
+    staged_low = tl.load(
         staged_ptr
         + row * size_n
-        + reduce_base[:, None] * power_width
+        + reduce_low[:, None] * power_width
+        + position[None, :]
+    )
+    transformed = tl.dot(base_low, staged_low, input_precision="ieee")
+    reduce_high = 32 + tl.arange(0, 16)
+    base_high = tl.load(
+        base_ptr + output_base[:, None] * base_pad + reduce_high[None, :]
+    )
+    staged_high = tl.load(
+        staged_ptr
+        + row * size_n
+        + reduce_high[:, None] * power_width
         + position[None, :],
-        mask=reduce_base[:, None] < base_size,
+        mask=reduce_high[:, None] < base_size,
         other=0.0,
     )
-    transformed = tl.dot(base, staged, input_precision="ieee")
+    transformed += tl.dot(base_high, staged_high, input_precision="ieee")
     columns = output_base[:, None] * power_width + position[None, :]
     scale = tl.load(sv_ptr + columns, mask=output_base[:, None] < base_size, other=0.0)
     tl.store(
