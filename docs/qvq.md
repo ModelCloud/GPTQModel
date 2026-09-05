@@ -416,6 +416,15 @@ projection distribution/rank, exact-diagonal status, logical dense bytes, retain
 off-diagonal projected estimator is unbiased over its seeded projection but a single realization is approximate, so
 production rank changes still require post-quantization KL, Top-N, perplexity, and task-quality gates.
 
+Compact-factor finalization caches each projected source diagonal on the accumulator device and reuses it during
+materialization. The same reduction previously ran once on pageable CPU memory during validation and again on the
+quantization device for every factor; caching removes both redundant passes while preserving the FP32 source, exact
+Fisher diagonal, congruence scaling, and materialized Gram. On CUDA devices with at least 128 GiB, the default
+`batch_size="auto"` / `activation_checkpointing="auto"` policy uses batch 16 and retains forward activations for the
+streaming collector, splitting prepared batches as needed to stay within the measured 1,024-token activation envelope.
+Exact collection and smaller devices keep batch 8 with checkpointing. Explicit integer/boolean settings override the
+automatic policy.
+
 `scripts/benchmark_qvq_yaqa_qwen38.py` is the strict H200 comparison harness and
 `scripts/profile_qvq_yaqa_streaming.py` isolates the generated collection kernels for NCU/SASS inspection. The
 Qwen3.8-27B architecture revision has 400 target linears and the same relevant 64-layer/5120-hidden/17408-MLP

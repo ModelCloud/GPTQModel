@@ -1105,7 +1105,7 @@ def test_yaqa_streaming_projected_factor_is_compact_deterministic_and_materializ
     assert first_input["proj"].source.shape == (2, 4096)
     assert first_output["proj"].source.shape == (2, 4096)
     assert stats["gram_strategy"] == "streaming_projected"
-    assert stats["factor_storage_bytes"] == 2 * 2 * (4096 + 1) * 4
+    assert stats["factor_storage_bytes"] == 2 * 2 * (4096 + 2) * 4
     assert stats["dense_factor_storage_bytes"] == 2 * 2 * 2 * 4
     torch.testing.assert_close(first_input["proj"].source, captures[1][0]["proj"].source)
     torch.testing.assert_close(first_output["proj"].source, captures[1][1]["proj"].source)

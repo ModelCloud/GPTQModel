@@ -1910,27 +1910,6 @@ class BaseQModel(nn.Module):
                     self, "qvq_transform_axis_overrides", None
                 ),
             }
-            if yaqa_calibration is not None:
-                qvq_args["yaqa_calibration"] = self.prepare_dataset(
-                    calibration_dataset=yaqa_calibration,
-                    calibration_dataset_concat_size=calibration_concat_size,
-                    # YAQA batching is independent of ordinary calibration.
-                    # Length bucketing removes padded model/Gram work without
-                    # changing which independent Fisher rows are consumed.
-                    calibration_dataset_sort=(
-                        None
-                        if self.quantize_config.yaqa.sequence_sort == "none"
-                        else self.quantize_config.yaqa.sequence_sort
-                    ),
-                    # Sketch-B remains per-sequence: collating independent rows
-                    # only amortizes model launches, Gram transfers, and MPS
-                    # synchronization. Ordinary calibration keeps its own batch.
-                    batch_size=self.quantize_config.yaqa.batch_size,
-                    calibration_data_min_length=10,
-                    calibration_concat_separator=calibration_concat_separator,
-                    calibration_source_weight_column=self.quantize_config.yaqa.source_weight_column,
-                    calibration_source_weights=self.quantize_config.yaqa.source_weights,
-                )
             if propagated_replay_enabled:
                 qvq_args["module_replay_search_calibration"] = self.prepare_dataset(
                     calibration_dataset=module_replay_search_calibration,
@@ -1949,6 +1928,36 @@ class BaseQModel(nn.Module):
                     calibration_concat_separator=None,
                 )
             qvq_processor = QVQProcessor(**qvq_args)
+            if yaqa_calibration is not None:
+                yaqa_execution_plan = qvq_processor.yaqa_execution_plan(self)
+                prepared_yaqa_calibration = self.prepare_dataset(
+                    calibration_dataset=yaqa_calibration,
+                    calibration_dataset_concat_size=calibration_concat_size,
+                    # YAQA batching is independent of ordinary calibration.
+                    # Length bucketing removes padded model/Gram work without
+                    # changing which independent Fisher rows are consumed.
+                    calibration_dataset_sort=(
+                        None
+                        if self.quantize_config.yaqa.sequence_sort == "none"
+                        else self.quantize_config.yaqa.sequence_sort
+                    ),
+                    # The compact streaming collector can amortize one full
+                    # model pass across 16 rows on >=128-GiB CUDA devices.
+                    # Exact and smaller-device paths retain batch 8.
+                    batch_size=yaqa_execution_plan["batch_size"],
+                    calibration_data_min_length=10,
+                    calibration_concat_separator=calibration_concat_separator,
+                    calibration_source_weight_column=self.quantize_config.yaqa.source_weight_column,
+                    calibration_source_weights=self.quantize_config.yaqa.source_weights,
+                )
+                if (
+                    yaqa_execution_plan["high_memory_streaming"]
+                    and self.quantize_config.yaqa.batch_size == "auto"
+                ):
+                    prepared_yaqa_calibration = qvq_processor.bound_yaqa_batch_tokens(
+                        prepared_yaqa_calibration
+                    )
+                qvq_processor.yaqa_calibration = prepared_yaqa_calibration
             # Smooth-SwiGLU must precede every Hessian/YAQA capture.  It is an
             # exact dense reparameterization, but it intentionally changes the
             # activation geometry seen by the down projection.

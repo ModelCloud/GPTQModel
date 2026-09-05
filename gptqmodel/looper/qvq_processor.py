@@ -15,7 +15,7 @@ import time
 import zlib
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -137,6 +137,9 @@ class QVQProcessor(LoopProcessor):
     # QVQ uses the input Hessian only; routing bypass may capture expert inputs
     # directly without executing an otherwise-discarded dense projection.
     moe_input_capture_without_forward = True
+    _YAQA_HIGH_MEMORY_CUDA_BYTES = 128 * 1024**3
+    _YAQA_HIGH_MEMORY_BATCH_TOKENS = 1024
+
     def __init__(
         self,
         tokenizer,
@@ -1428,6 +1431,100 @@ class QVQProcessor(LoopProcessor):
         # default; users can still override this explicitly in YaqaConfig.
         return 4 * 1024**3
 
+    def yaqa_execution_plan(
+        self,
+        gptq_model: BaseQModel,
+        *,
+        prepared_batches: Sequence[dict[str, torch.Tensor]] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve factor strategy, batching, and recomputation for the current device."""
+
+        named_tensors = tuple(gptq_model.model.named_parameters()) + tuple(gptq_model.model.named_buffers())
+        source_devices = {tensor.device for _, tensor in named_tensors}
+        if len(source_devices) != 1:
+            raise RuntimeError(
+                "QVQ YAQA currently requires the dense source model on one device before its full-model backward; "
+                f"found devices {sorted(map(str, source_devices))}."
+            )
+        source_device = next(iter(source_devices))
+        target_device = normalize_device_like(self.qcfg.device) or source_device
+        targets, decoder_layers = self._yaqa_target_modules(gptq_model)
+        total_factor_bytes = sum(self._yaqa_factor_bytes(module) for module in targets.values())
+        max_factor_bytes = self.qcfg.yaqa.max_factor_bytes_per_pass
+        if max_factor_bytes is None:
+            max_factor_bytes = self._yaqa_default_max_factor_bytes(target_device, total_factor_bytes)
+
+        gram_strategy = self.qcfg.yaqa.gram_strategy
+        free_bytes = total_bytes = 0
+        if target_device.type == "cuda":
+            free_bytes, total_bytes = torch.cuda.mem_get_info(target_device)
+        if gram_strategy == "auto":
+            gram_strategy = "exact"
+            if target_device.type == "cuda":
+                reserve_bytes = max(16 * 1024**3, total_bytes // 4)
+                exact_budget = min(max_factor_bytes, max(0, free_bytes - reserve_bytes))
+                if total_factor_bytes > exact_budget:
+                    gram_strategy = "streaming_projected"
+
+        high_memory_streaming = (
+            gram_strategy == "streaming_projected"
+            and target_device.type == "cuda"
+            and total_bytes >= self._YAQA_HIGH_MEMORY_CUDA_BYTES
+        )
+        configured_batch_size = self.qcfg.yaqa.batch_size
+        batch_size = (
+            16 if configured_batch_size == "auto" and high_memory_streaming
+            else 8 if configured_batch_size == "auto"
+            else configured_batch_size
+        )
+        configured_checkpointing = self.qcfg.yaqa.activation_checkpointing
+        within_activation_budget = bool(prepared_batches) and max(
+            batch["attention_mask"].numel() for batch in prepared_batches
+        ) <= self._YAQA_HIGH_MEMORY_BATCH_TOKENS
+        activation_checkpointing = (
+            not (high_memory_streaming and within_activation_budget)
+            if configured_checkpointing == "auto"
+            else configured_checkpointing
+        )
+        return {
+            "source_device": source_device,
+            "target_device": target_device,
+            "targets": targets,
+            "decoder_layers": decoder_layers,
+            "total_factor_bytes": total_factor_bytes,
+            "max_factor_bytes": max_factor_bytes,
+            "gram_strategy": gram_strategy,
+            "batch_size": batch_size,
+            "activation_checkpointing": activation_checkpointing,
+            "high_memory_streaming": high_memory_streaming,
+            "free_bytes": free_bytes,
+            "total_bytes": total_bytes,
+        }
+
+    @classmethod
+    def bound_yaqa_batch_tokens(
+        cls,
+        batches: Sequence[dict[str, torch.Tensor]],
+    ) -> list[dict[str, torch.Tensor]]:
+        """Split prepared batches so high-memory no-recompute capture stays within its measured token envelope."""
+
+        bounded = []
+        for batch in batches:
+            attention_mask = batch["attention_mask"]
+            batch_rows, sequence_length = attention_mask.shape
+            rows_per_batch = max(1, cls._YAQA_HIGH_MEMORY_BATCH_TOKENS // sequence_length)
+            for start in range(0, batch_rows, rows_per_batch):
+                stop = min(batch_rows, start + rows_per_batch)
+                bounded.append(
+                    {
+                        name: value[start:stop]
+                        if isinstance(value, torch.Tensor) and value.ndim > 0 and value.shape[0] == batch_rows
+                        else value
+                        for name, value in batch.items()
+                    }
+                )
+        return bounded
+
     @classmethod
     def _yaqa_target_chunks(
         cls,
@@ -1506,31 +1603,15 @@ class QVQProcessor(LoopProcessor):
                 "QVQ YAQA requires every source tensor to be materialized; found meta tensors including "
                 f"{meta_names[:3]}. Reload with `offload_to_disk=False`."
             )
-        source_devices = {tensor.device for _, tensor in named_tensors}
-        if len(source_devices) != 1:
-            raise RuntimeError(
-                "QVQ YAQA currently requires the dense source model on one device before its full-model backward; "
-                f"found devices {sorted(map(str, source_devices))}."
-            )
-        source_device = next(iter(source_devices))
-        target_device = normalize_device_like(self.qcfg.device) or source_device
-        targets, decoder_layers = self._yaqa_target_modules(gptq_model)
-        total_factor_bytes = sum(self._yaqa_factor_bytes(module) for module in targets.values())
-        max_factor_bytes = self.qcfg.yaqa.max_factor_bytes_per_pass
-        if max_factor_bytes is None:
-            max_factor_bytes = self._yaqa_default_max_factor_bytes(
-                target_device,
-                total_factor_bytes,
-            )
-        gram_strategy = self.qcfg.yaqa.gram_strategy
-        if gram_strategy == "auto":
-            gram_strategy = "exact"
-            if target_device.type == "cuda":
-                free_bytes, total_bytes = torch.cuda.mem_get_info(target_device)
-                reserve_bytes = max(16 * 1024**3, total_bytes // 4)
-                exact_budget = min(max_factor_bytes, max(0, free_bytes - reserve_bytes))
-                if total_factor_bytes > exact_budget:
-                    gram_strategy = "streaming_projected"
+        execution_plan = self.yaqa_execution_plan(gptq_model, prepared_batches=self.yaqa_calibration)
+        source_device = execution_plan["source_device"]
+        target_device = execution_plan["target_device"]
+        targets = execution_plan["targets"]
+        decoder_layers = execution_plan["decoder_layers"]
+        total_factor_bytes = execution_plan["total_factor_bytes"]
+        max_factor_bytes = execution_plan["max_factor_bytes"]
+        gram_strategy = execution_plan["gram_strategy"]
+        activation_checkpointing = execution_plan["activation_checkpointing"]
         packed_symmetric_accumulators = target_device.type == "mps" and gram_strategy == "exact"
         target_chunks = (
             [targets]
@@ -1553,9 +1634,9 @@ class QVQProcessor(LoopProcessor):
             self.qcfg.yaqa.seed,
             self.qcfg.yaqa.minimum_sequences,
             self.qcfg.yaqa.regularization,
-            self.qcfg.yaqa.batch_size,
-            self.qcfg.yaqa.activation_checkpointing,
-            len(decoder_layers) if self.qcfg.yaqa.activation_checkpointing else 0,
+            execution_plan["batch_size"],
+            activation_checkpointing,
+            len(decoder_layers) if activation_checkpointing else 0,
             len(target_chunks),
             max_factor_bytes,
             packed_symmetric_accumulators,
@@ -1598,7 +1679,7 @@ class QVQProcessor(LoopProcessor):
                         seed=self.qcfg.yaqa.seed,
                         minimum_sequences=self.qcfg.yaqa.minimum_sequences,
                         first_decoder_layer=decoder_layers[0],
-                        checkpoint_modules=decoder_layers if self.qcfg.yaqa.activation_checkpointing else (),
+                        checkpoint_modules=decoder_layers if activation_checkpointing else (),
                         progress_callback=log_progress,
                         mps_cleanup_interval=self.qcfg.yaqa.mps_cleanup_interval,
                         chat_template_config=self.qcfg.yaqa.chat_template,
@@ -1649,6 +1730,10 @@ class QVQProcessor(LoopProcessor):
         stats["factor_passes"] = len(pass_stats)
         stats["configured_gram_strategy"] = self.qcfg.yaqa.gram_strategy
         stats["selected_gram_strategy"] = gram_strategy
+        stats["configured_batch_size"] = self.qcfg.yaqa.batch_size
+        stats["effective_batch_size"] = max(batch["attention_mask"].shape[0] for batch in self.yaqa_calibration)
+        stats["configured_activation_checkpointing"] = self.qcfg.yaqa.activation_checkpointing
+        stats["high_memory_streaming"] = execution_plan["high_memory_streaming"]
         stats["max_factor_bytes_per_pass"] = max_factor_bytes
         stats["pass_target_counts"] = [len(chunk) for chunk in target_chunks]
         stats["pass_factor_bytes"] = [item["factor_storage_bytes"] for item in pass_stats]
