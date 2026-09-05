@@ -20,6 +20,7 @@ SNAPSHOT = Path(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--profile-fused", action="store_true")
     parser.add_argument("--fused-block-m", type=int, choices=(16,32,64))
     parser.add_argument("--fused-block-n", type=int, choices=(32,64), default=32)
     parser.add_argument("--fused-split", type=int, default=1)
@@ -35,6 +36,8 @@ def main():
     parser.add_argument("--uuid", required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.profile_fused and not args.fused_block_m:
+        parser.error("--profile-fused requires --fused-block-m")
     if args.output.resolve().is_relative_to(SNAPSHOT):
         parser.error("Output must be outside the snapshot")
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -217,6 +220,47 @@ def main():
             )
             base = full(planar)
             candidate = full(ampere)
+            fused = None
+            if args.fused_block_m:
+                from scripts.p32_twenty.fused_window_gemm import fused_window_mm
+
+                def fused(z):
+                    return fused_window_mm(
+                        z, window, levels, bank, bits, out_features=N,
+                        bank_alt_id=aid, block_m=args.fused_block_m,
+                        block_n=args.fused_block_n, split=args.fused_split,
+                        promotion_k=args.fused_promotion_k,
+                    )
+
+            if args.profile_fused:
+                fused_output = full(fused)
+                for _ in range(10):
+                    fused(transformed)
+                torch.cuda.synchronize()
+                exclusive()
+                torch.cuda.cudart().cudaProfilerStart()
+                fused(transformed)
+                torch.cuda.synchronize()
+                torch.cuda.cudart().cudaProfilerStop()
+                report["rows"].append(
+                    {
+                        "module": prefix,
+                        "M": m,
+                        "K": K,
+                        "N": N,
+                        "bits": bits,
+                        "fused_metrics": layer_metrics(fused_output, teacher),
+                        "fused_vs_window": layer_metrics(fused_output, candidate),
+                        "profile_scope": "one fused decode/MMA inner call after warmup",
+                        "fused": {
+                            "block_m": args.fused_block_m,
+                            "block_n": args.fused_block_n,
+                            "split": args.fused_split,
+                            "promotion_k": args.fused_promotion_k,
+                        },
+                    }
+                )
+                continue
             if args.profile:
                 for _ in range(10):
                     planar(transformed)
@@ -266,17 +310,7 @@ def main():
                 "payload_bytes": t.numel() * t.element_size(),
                 "resident_reference_bytes": inner.numel() * inner.element_size(),
             }
-            if args.fused_block_m:
-                from scripts.p32_twenty.fused_window_gemm import fused_window_mm
-
-                def fused(z):
-                    return fused_window_mm(
-                        z, window, levels, bank, bits, out_features=N,
-                        bank_alt_id=aid, block_m=args.fused_block_m,
-                        block_n=args.fused_block_n, split=args.fused_split,
-                        promotion_k=args.fused_promotion_k,
-                    )
-
+            if fused is not None:
                 fused_output = full(fused)
                 row["fused"] = {
                     "block_m": args.fused_block_m,
