@@ -51,3 +51,22 @@ The harness now supports live-model Evalution ARC-Challenge or GSM8K evaluation,
 with explicit bounded row counts. Results go only to the external output directory,
 avoiding the general evaluation CLI's checkpoint publication path. Four matched
 128-row ARC-Challenge runs (BF16, FP32 teacher, planar, window) are in progress.
+
+## Bounded ARC-Challenge result
+
+All four arms completed the same 128 examples, verified by prompt hashes. This
+is the repository Evalution loglikelihood suite, batch 1, eager attention, seed 7,
+with no chat template. Evaluation data was not used for calibration or fitting.
+
+| Arm | Accuracy | Length-normalized accuracy |
+|---|---:|---:|
+| Original BF16 | 37.5000% | 40.6250% |
+| FP32 P32 teacher | 36.71875% | 38.28125% |
+| Planar | 36.71875% | 37.5000% |
+| Window | 36.71875% | 37.5000% |
+
+Window and planar have identical aggregate scores. Both have one fewer normalized
+correct answer than the FP32 teacher. The bounded task does not demonstrate a P32
+advantage over BF16; broader held-out evaluation remains necessary. Results with
+prompt hashes and paired predictions are in results/arc-challenge-128; benchmark
+prompt text stays outside Git in /root/p32-downstream.
