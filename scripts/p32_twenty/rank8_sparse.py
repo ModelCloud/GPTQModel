@@ -136,7 +136,10 @@ def main():
         return matmul_hadU(matmul_hadU(x.float() * su.float()) @ inner) * sv.float()
 
     def raw(x):
-        return op.base(x.bfloat16()).float() + ((x @ op.a) @ op.b).float()
+        base = op.base(x.bfloat16()).float()
+        if op.a.shape[1] == 0:
+            return base
+        return base + ((x @ op.a) @ op.b).float()
 
     report = {
         "scope": __doc__,
