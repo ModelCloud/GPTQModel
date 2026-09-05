@@ -135,3 +135,16 @@ At 8,192 tokens, rank6 tail passes all three subsets; rank8 does not pass seed71
 At 16,384 and 32,768 tokens, rank6 L2 and tail pass all three subsets. This is
 local evidence, not completion of the full calibration-stability scorecard:
 broader document pass distributions, model checks and sensitivity analysis remain.
+
+## Broader replay interim: 14/15 completed
+
+Each completed replay evaluated 24 exports on 16 document cases plus nine
+prefix row counts. Seed72/8192 stopped at the idle-GPU preflight before evaluation;
+an explicit separate-output retry is queued. The failure remains in queue history.
+[Interim candidate-level pass counts and failures](results/low-rank/stability-broader-interim.json)
+include source paths/hashes; missing replay is not counted as passing.
+
+Rank6 tail at seed72/4096 passes the original nine cases but only 23/25 replay
+cases. In contrast, rank6 L2 and tail at 16K/32K pass both original and replay
+cases across all three subsets. These are still development activation tests,
+not untouched full-model confirmation or proof of P32's advantage over BF16.
