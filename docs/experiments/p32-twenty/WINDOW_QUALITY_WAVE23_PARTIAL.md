@@ -9,8 +9,16 @@ same 1,172-example test split.
 | production window | 0 | 0.3327645 (390/1172) | 0.3651877 (428/1172) |
 | production window | 1 | 0.3327645 (390/1172) | 0.3651877 (428/1172) |
 
-The two repeats are identical. The two policy ARC repeats and four GSM8K
-repeats are still running and will be added after their reports complete.
+The first two production-window GSM8K repeats also agree:
+
+| Arm | Host GPU | GSM8K |
+|---|---:|---:|
+| production window | 4 | 0.4609375 (59/128) |
+| production window | 5 | 0.4609375 (59/128) |
+
+The completed repeats are identical within each task. The two policy ARC
+repeats and two policy GSM8K repeats are still running and will be added after
+their reports complete.
 
 Raw reports:
 
@@ -18,3 +26,7 @@ Raw reports:
 - [window ARC GPU 0 task results](results/window-quality-wave23/window-arc-gpu0-task-results.json)
 - [window ARC GPU 1 report](results/window-quality-wave23/window-arc-gpu1.json)
 - [window ARC GPU 1 task results](results/window-quality-wave23/window-arc-gpu1-task-results.json)
+- [window GSM8K GPU 4 report](results/window-quality-wave23/window-gsm-gpu4.json)
+- [window GSM8K GPU 4 task results](results/window-quality-wave23/window-gsm-gpu4-task-results.json)
+- [window GSM8K GPU 5 report](results/window-quality-wave23/window-gsm-gpu5.json)
+- [window GSM8K GPU 5 task results](results/window-quality-wave23/window-gsm-gpu5-task-results.json)
