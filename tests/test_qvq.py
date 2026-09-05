@@ -903,13 +903,15 @@ def test_yaqa_config_defaults_to_validated_rate_damping_and_sample_floor():
 
     assert config.yaqa.regularization == pytest.approx(0.05)
     assert config.yaqa.minimum_sequences == YAQA_PAPER_MINIMUM_SEQUENCES == 2_000
-    assert config.yaqa.batch_size == 8
-    assert config.yaqa.activation_checkpointing is True
+    assert config.yaqa.batch_size == "auto"
+    assert config.yaqa.activation_checkpointing == "auto"
     assert config.yaqa.mps_cleanup_interval == 8
     assert config.yaqa.sequence_sort == "desc"
     assert config.yaqa.source_weight_column is None
     assert config.yaqa.source_weights == ()
     assert config.yaqa.max_factor_bytes_per_pass is None
+    assert config.yaqa.gram_strategy == "auto"
+    assert config.yaqa.gram_projection_rank == 256
     for rate in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0):
         assert config.yaqa.regularization_for_rate(rate) == pytest.approx(0.1)
     for rate in (4.5, 5.0, 6.0, 7.0, 8.0):
@@ -921,13 +923,19 @@ def test_yaqa_config_defaults_to_validated_rate_damping_and_sample_floor():
     (
         ({"batch_size": 0}, ValueError, "batch_size"),
         ({"batch_size": True}, ValueError, "batch_size"),
+        ({"batch_size": "fast"}, ValueError, "batch_size"),
         ({"activation_checkpointing": 1}, TypeError, "activation_checkpointing"),
+        ({"activation_checkpointing": "sometimes"}, ValueError, "activation_checkpointing"),
         ({"mps_cleanup_interval": 0}, ValueError, "mps_cleanup_interval"),
         ({"mps_cleanup_interval": True}, ValueError, "mps_cleanup_interval"),
         ({"sequence_sort": 1}, TypeError, "sequence_sort"),
         ({"sequence_sort": "shuffle"}, ValueError, "sequence_sort"),
         ({"max_factor_bytes_per_pass": 0}, ValueError, "max_factor_bytes_per_pass"),
         ({"max_factor_bytes_per_pass": True}, ValueError, "max_factor_bytes_per_pass"),
+        ({"gram_strategy": 1}, TypeError, "gram_strategy"),
+        ({"gram_strategy": "dense"}, ValueError, "gram_strategy"),
+        ({"gram_projection_rank": 0}, ValueError, "gram_projection_rank"),
+        ({"gram_projection_rank": True}, ValueError, "gram_projection_rank"),
     ),
 )
 def test_yaqa_config_rejects_invalid_collection_controls(kwargs, exception, message):
@@ -6351,3 +6359,85 @@ def test_qvq_hyb_mlx_reference_remains_a_correct_nonloadable_oracle(bits):
     )
 
     np.testing.assert_allclose(np.asarray(result), reference.numpy(), rtol=1e-3, atol=1e-3)
+
+
+def test_qvq_p32_deployed_operand_reencode_freezes_coordinates_and_original_weight():
+    torch.manual_seed(20260904)
+    weight = torch.randn(16, 16, dtype=torch.float32) * 0.02
+    immutable_weight = weight.clone()
+    source_hessian = torch.eye(16, dtype=torch.float32)
+    deployed_input = torch.randn(32, 16, dtype=torch.float32)
+    deployed_teacher = torch.randn(32, 16, dtype=torch.float32) * 0.05
+    deployed_hessian = deployed_input.t() @ deployed_input / deployed_input.shape[0]
+    deployed_cross = deployed_input.t() @ deployed_teacher / deployed_input.shape[0]
+    deployed_target = torch.linalg.solve(
+        deployed_hessian + torch.eye(16) * 0.01,
+        deployed_cross,
+    )
+    fixed_su = torch.where(torch.arange(16) % 2 == 0, 1.0, -1.0)
+    fixed_sv = torch.where(torch.arange(16) % 2 == 0, 2.0, -2.0)
+
+    result = quantize_qvq_linear(
+        weight,
+        source_hessian,
+        bits=3.5,
+        vector_size=2,
+        trellis_window=16,
+        bank_count=2,
+        v2b2_p32=True,
+        rounding="block_ldlq",
+        trellis_batch_size=1,
+        deployed_inner_target=deployed_target,
+        deployed_input_hessian=deployed_hessian,
+        fixed_SU=fixed_su,
+        fixed_SV=fixed_sv,
+    )
+
+    assert torch.equal(weight, immutable_weight)
+    assert torch.equal(result.SU, fixed_su)
+    assert torch.equal(result.SV, fixed_sv)
+    assert result.bank_ids is not None
+    assert result.bank_alt_id is not None
+    roundtrip = reconstruct_qvq_inner_weight(
+        result.trellis,
+        bits=3.5,
+        vector_size=2,
+        trellis_window=16,
+        in_features=16,
+        out_features=16,
+        bank_ids=result.bank_ids,
+        v2b2_p32=True,
+        bank_alt_id=result.bank_alt_id,
+    )
+    assert torch.equal(roundtrip.to(result.inner_weight.dtype), result.inner_weight)
+
+
+def test_qvq_p32_deployed_operand_reencode_rejects_partial_or_moving_coordinates():
+    weight = torch.eye(16)
+    hessian = torch.eye(16)
+    common = {
+        "bits": 3.5,
+        "vector_size": 2,
+        "trellis_window": 16,
+        "bank_count": 2,
+        "v2b2_p32": True,
+        "rounding": "block_ldlq",
+    }
+    with pytest.raises(ValueError, match="requires target, Hessian, fixed SU, and fixed SV together"):
+        quantize_qvq_linear(
+            weight,
+            hessian,
+            deployed_inner_target=torch.eye(16),
+            **common,
+        )
+    with pytest.raises(ValueError, match="requires frozen module and output scales"):
+        quantize_qvq_linear(
+            weight,
+            hessian,
+            deployed_inner_target=torch.eye(16),
+            deployed_input_hessian=hessian,
+            fixed_SU=torch.ones(16),
+            fixed_SV=torch.ones(16),
+            module_scale_search=True,
+            **common,
+        )

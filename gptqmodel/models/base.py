@@ -105,6 +105,7 @@ from ._const import (
     META,
 )
 from .loader import ModelLoader, _setup_rotation_online_had
+from .shared_input import SharedInputPlan, build_shared_input_plan
 from .writer import ModelWriter
 
 
@@ -268,6 +269,34 @@ modeling_utils.check_support_param_buffer_assignment = check_support_param_buffe
 
 log = setup_logger()
 
+
+def _qvq_quantization_group_candidates(
+    module_tree: object,
+    declared: object,
+) -> Optional[Dict[str, tuple[tuple[str, ...], ...]]]:
+    """Merge ordinary role groups with architecture-specific P32 groups.
+
+    Quantization must choose shared input signs from the same topology that
+    inference fusion later discovers. Otherwise an apparently compatible
+    checkpoint receives independent SU vectors and can never install its
+    grouped P32 runtime.
+    """
+
+    from ..nn_modules.fused_quant_linear import get_module_tree_fusion_candidates
+
+    qkv, gate_up = get_module_tree_fusion_candidates(module_tree)
+    if declared is not None and not isinstance(declared, dict):
+        raise TypeError("qvq_grouped_p32_candidates must be a dictionary")
+    merged = copy.deepcopy(declared or {})
+    discovered = {"qkv": qkv, "gate_up": gate_up}
+    for category, groups in discovered.items():
+        existing = tuple(tuple(group) for group in merged.get(category, ()))
+        merged[category] = tuple(
+            dict.fromkeys((*existing, *(tuple(group) for group in groups)))
+        )
+    return None if not any(merged.values()) else merged
+
+
 class BaseQModel(nn.Module):
     # name of lm_head
     lm_head: str = "lm_head"
@@ -279,6 +308,11 @@ class BaseQModel(nn.Module):
     module_tree: List[str] = None
     # Override module_tree according to different QUANT_METHOD
     module_tree_overrides: dict[METHOD, List[str]] = None
+
+    # Model types whose explicit ``:in=<tag>`` metadata was verified against a
+    # real forward. This set is intentionally not inherited: subclasses must
+    # opt in independently so unverified aliases stay singleton-only.
+    shared_input_verified_model_types: frozenset[str] = frozenset()
 
     # Cache of role/semantic module-tree flags keyed by the path within a layer.
     # Populated by ``_build_layer_modules_for_tree`` and consulted by the looper
@@ -382,6 +416,9 @@ class BaseQModel(nn.Module):
     # so `defuser_module_paths` is used to explicitly locate and defuse them.
     defuser_module_paths = None
 
+    # Multimodal wrappers can reuse the checkpoint rules of their text model.
+    hf_conversion_model_type_alias: Optional[str] = None
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -454,6 +491,7 @@ class BaseQModel(nn.Module):
         # Reject activation-quantized checkpoints at load time so the rest of
         # the floatx decoder stack can continue assuming dense activations.
         self._configure_modelopt_runtime()
+        self._configure_qvq_fp8_kv_cache_runtime()
 
         self._turtle_lock = threading.RLock()
 
@@ -618,6 +656,15 @@ class BaseQModel(nn.Module):
         configured_map = getattr(cls, "HF_CONVERSION_MAP_REVERSED", None)
         if configured_map is not None:
             return copy.deepcopy(configured_map)
+
+        model_type_alias = getattr(cls, "hf_conversion_model_type_alias", None)
+        if model_type_alias:
+            inferred_map = LazyTurtle.infer_hf_conversion_map_reversed(
+                target_model=target_model,
+                model_type=model_type_alias,
+            )
+            if inferred_map is not None:
+                return copy.deepcopy(inferred_map)
 
         inferred_map = LazyTurtle.infer_hf_conversion_map_reversed(target_model=target_model)
         return copy.deepcopy(inferred_map) if inferred_map is not None else None
@@ -896,6 +943,33 @@ class BaseQModel(nn.Module):
         return layer_modules
 
     @classmethod
+    def shared_input_verified(cls, model_config=None) -> bool:
+        model_type = getattr(model_config, "model_type", None)
+        if not isinstance(model_type, str):
+            return False
+        verified = cls.__dict__.get("shared_input_verified_model_types", ())
+        return model_type in verified
+
+    @classmethod
+    def shared_input_plan(
+        cls,
+        model_config=None,
+        quantize_config=None,
+        is_awq_quantize: bool = False,
+    ) -> SharedInputPlan:
+        """Build the conservative explicit shared-input plan for one layer."""
+        layer_modules = cls.simple_layer_modules(
+            model_config,
+            quantize_config,
+            is_awq_quantize=is_awq_quantize,
+        )
+        return build_shared_input_plan(
+            cls.module_tree,
+            layer_modules,
+            explicit_tags=cls.shared_input_verified(model_config),
+        )
+
+    @classmethod
     def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False, include_capture_only: bool = False):
         full = cls.build_layer_modules(cls.module_tree, include_capture_only=include_capture_only)
         full = cls.build_moe_modules_if_need(model_config, full, is_awq_quantize)
@@ -1038,6 +1112,7 @@ class BaseQModel(nn.Module):
                 layer_scope=layer_scope,
                 freeze_others=freeze_others,
             )
+            self._configure_qvq_fp8_kv_cache_runtime()
             return result
         finally:
             if layer_scope is not None:
@@ -1781,14 +1856,21 @@ class BaseQModel(nn.Module):
                 raise ValueError("`yaqa_calibration` requires QVQ `rounding='yaqa'`.")
 
         replay_config = getattr(self.quantize_config, "module_granular_replay", None)
+        activation_config = getattr(self.quantize_config, "activation", None)
+        fp8_replay_enabled = bool(
+            activation_config is not None
+            and activation_config.target == "p32_operand"
+            and activation_config.replay_passes == 1
+        )
+        propagated_replay_enabled = replay_config is not None or fp8_replay_enabled
         replay_streams = (module_replay_search_calibration, module_replay_confirmation_calibration)
-        if replay_config is None and any(stream is not None for stream in replay_streams):
+        if not propagated_replay_enabled and any(stream is not None for stream in replay_streams):
             raise ValueError(
-                "Module replay calibration streams require QVQ `module_granular_replay` to be enabled."
+                "Propagated replay calibration streams require QVQ module-granular replay or FP8 replay."
             )
-        if replay_config is not None and any(stream is None for stream in replay_streams):
+        if propagated_replay_enabled and any(stream is None for stream in replay_streams):
             raise ValueError(
-                "QVQ module-granular replay requires explicit search and confirmation calibration streams."
+                "QVQ propagated replay requires explicit search and confirmation calibration streams."
             )
 
         configured_preprocessors = getattr(self.quantize_config, "preprocessors", None) or []
@@ -1806,6 +1888,14 @@ class BaseQModel(nn.Module):
 
             if needs_lora:
                 raise NotImplementedError("QVQ quantization does not support adapter/EoRA generation.")
+            grouped_p32_candidates = getattr(
+                self, "qvq_grouped_p32_candidates", None
+            )
+            if self.quantize_config.format == FORMAT.QVQ_V2B2_P32:
+                grouped_p32_candidates = _qvq_quantization_group_candidates(
+                    getattr(self, "module_tree", None),
+                    grouped_p32_candidates,
+                )
             qvq_args = {
                 "tokenizer": self.tokenizer,
                 "qcfg": self.quantize_config,
@@ -1815,35 +1905,12 @@ class BaseQModel(nn.Module):
                 "calibration_sort": calibration_sort,
                 "calibration_concat_separator": calibration_concat_separator,
                 "batch_size": batch_size,
-                "grouped_p32_candidates": getattr(
-                    self, "qvq_grouped_p32_candidates", None
-                ),
+                "grouped_p32_candidates": grouped_p32_candidates,
                 "transform_axis_overrides": getattr(
                     self, "qvq_transform_axis_overrides", None
                 ),
             }
-            if yaqa_calibration is not None:
-                qvq_args["yaqa_calibration"] = self.prepare_dataset(
-                    calibration_dataset=yaqa_calibration,
-                    calibration_dataset_concat_size=calibration_concat_size,
-                    # YAQA batching is independent of ordinary calibration.
-                    # Length bucketing removes padded model/Gram work without
-                    # changing which independent Fisher rows are consumed.
-                    calibration_dataset_sort=(
-                        None
-                        if self.quantize_config.yaqa.sequence_sort == "none"
-                        else self.quantize_config.yaqa.sequence_sort
-                    ),
-                    # Sketch-B remains per-sequence: collating independent rows
-                    # only amortizes model launches, Gram transfers, and MPS
-                    # synchronization. Ordinary calibration keeps its own batch.
-                    batch_size=self.quantize_config.yaqa.batch_size,
-                    calibration_data_min_length=10,
-                    calibration_concat_separator=calibration_concat_separator,
-                    calibration_source_weight_column=self.quantize_config.yaqa.source_weight_column,
-                    calibration_source_weights=self.quantize_config.yaqa.source_weights,
-                )
-            if replay_config is not None:
+            if propagated_replay_enabled:
                 qvq_args["module_replay_search_calibration"] = self.prepare_dataset(
                     calibration_dataset=module_replay_search_calibration,
                     calibration_dataset_concat_size=None,
@@ -1861,6 +1928,36 @@ class BaseQModel(nn.Module):
                     calibration_concat_separator=None,
                 )
             qvq_processor = QVQProcessor(**qvq_args)
+            if yaqa_calibration is not None:
+                yaqa_execution_plan = qvq_processor.yaqa_execution_plan(self)
+                prepared_yaqa_calibration = self.prepare_dataset(
+                    calibration_dataset=yaqa_calibration,
+                    calibration_dataset_concat_size=calibration_concat_size,
+                    # YAQA batching is independent of ordinary calibration.
+                    # Length bucketing removes padded model/Gram work without
+                    # changing which independent Fisher rows are consumed.
+                    calibration_dataset_sort=(
+                        None
+                        if self.quantize_config.yaqa.sequence_sort == "none"
+                        else self.quantize_config.yaqa.sequence_sort
+                    ),
+                    # The compact streaming collector can amortize one full
+                    # model pass across 16 rows on >=128-GiB CUDA devices.
+                    # Exact and smaller-device paths retain batch 8.
+                    batch_size=yaqa_execution_plan["batch_size"],
+                    calibration_data_min_length=10,
+                    calibration_concat_separator=calibration_concat_separator,
+                    calibration_source_weight_column=self.quantize_config.yaqa.source_weight_column,
+                    calibration_source_weights=self.quantize_config.yaqa.source_weights,
+                )
+                if (
+                    yaqa_execution_plan["high_memory_streaming"]
+                    and self.quantize_config.yaqa.batch_size == "auto"
+                ):
+                    prepared_yaqa_calibration = qvq_processor.bound_yaqa_batch_tokens(
+                        prepared_yaqa_calibration
+                    )
+                qvq_processor.yaqa_calibration = prepared_yaqa_calibration
             # Smooth-SwiGLU must precede every Hessian/YAQA capture.  It is an
             # exact dense reparameterization, but it intentionally changes the
             # activation geometry seen by the down projection.
@@ -2973,6 +3070,34 @@ class BaseQModel(nn.Module):
         # Tie weights once for the whole layer rather than once per materialized submodule.
         if hasattr(self.model, "tie_weights"):
             self.model.tie_weights()
+    def forward_device_for_module(self, module: nn.Module, planned_device: torch.device) -> torch.device:
+        """Apply model-declared placement exclusions to subset replay planning."""
+
+        turtle_model = self.turtle_model
+        if not isinstance(turtle_model, LazyTurtle):
+            return planned_device
+
+        # LazyTurtle matches exclusions by dotted parameter path, not module type.
+        module_paths = getattr(self, "_forward_module_paths_by_id", None)
+        if module_paths is None or id(module) not in module_paths:
+            module_paths = {id(candidate): name for name, candidate in self.model.named_modules() if name}
+            self._forward_module_paths_by_id = module_paths
+        module_path = module_paths.get(id(module))
+        if module_path is None:
+            return planned_device
+        # Check only tensors owned by this leaf; descendants receive their own plan entry.
+        for rel_name, _ in module.named_parameters(recurse=False):
+            if turtle_model.is_no_placement_tensor(module_path, rel_name):
+                return torch.device(CPU)
+        return planned_device
+
+    def has_forward_device_overrides(self) -> bool:
+        """Return whether replay must preserve model-declared tensor placement."""
+
+        turtle_model = self.turtle_model
+        return isinstance(turtle_model, LazyTurtle) and bool(
+            getattr(turtle_model, "_no_placement_params", ())
+        )
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         #return self.offload_to_disk(module=module)
@@ -3102,6 +3227,22 @@ class BaseQModel(nn.Module):
         """Return ``True`` when the checkpoint declares ModelOpt runtime semantics."""
 
         return self._decoder_quant_method_name() == "modelopt"
+
+    def _configure_qvq_fp8_kv_cache_runtime(self) -> None:
+        """Install the fail-closed FP8 KV cache implied by a QVQ A8 config."""
+
+        if not (self.quantized or self.load_quantized_model):
+            return
+        activation = getattr(
+            getattr(self, "quantize_config", None),
+            "activation",
+            None,
+        )
+        if activation is None:
+            return
+        from ..nn_modules.qvq_fp8_cache import install_qvq_fp8_kv_cache
+
+        install_qvq_fp8_kv_cache(self.model, activation)
 
     def _modelopt_activation_quantization_mode(self) -> Optional[str]:
         """Describe unsupported ModelOpt activation quantization metadata when present."""
@@ -3516,6 +3657,32 @@ class BaseQModel(nn.Module):
     def awq_skip_modules_for_scaling(self) -> bool:
         pass
 
+    @classmethod
+    def awq_input_feature_aggregation(cls, module_name: str) -> Optional[Dict[str, Any]]:
+        """Declare bounded token-row aggregation for pointwise MoE modules."""
+
+        if not isinstance(module_name, str):
+            return None
+        for moe_root in cls.get_moe_module_name() or []:
+            root_match = (
+                module_name == moe_root
+                or module_name.endswith(f".{moe_root}")
+                or f".{moe_root}." in f".{module_name}."
+            )
+            if not root_match:
+                continue
+            if module_name == moe_root or module_name.endswith(f".{moe_root}"):
+                suffix = ""
+            elif module_name.startswith(f"{moe_root}."):
+                suffix = module_name[len(moe_root):]
+            else:
+                suffix = module_name.split(f".{moe_root}", 1)[1]
+            if suffix in ("", "."):
+                return {"mode": "token_rows", "capture_root": True}
+            if suffix.startswith("."):
+                return {"mode": "token_rows"}
+        return None
+
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
         nodes = []
         last_module = None  # most recent norm obj (from a '!...' block)
@@ -3634,6 +3801,7 @@ class BaseQModel(nn.Module):
                     n, root = generate_node_for_awq_scaling(inp=input_feat[name], prev_op=prev_op,
                                                             module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                             subset=subset, module2inspect=None)
+                    n["_input_feature_name"] = feature_name
                     if root is not None and last_module_root != root:
                         last_module_root = root
 
@@ -3699,6 +3867,7 @@ class BaseQModel(nn.Module):
                 n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
                                                         module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                         subset=subset, module2inspect=module2inspect)
+                n["_input_feature_name"] = feature_name
 
                 nodes.append(n)
 

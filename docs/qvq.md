@@ -1,6 +1,6 @@
 # QVQ (QTIP-derived) integration design
 
-Status as of 2026-08-12: **QVQ** names this repository's QTIP-derived quantizer plus the planar PGC16 codec, half-step
+Status as of 2026-09-04: **QVQ** names this repository's QTIP-derived quantizer plus the planar PGC16 codec, half-step
 W1, W1.5, ..., W8 coverage, and optimized inference backends. Production quantization, configuration, checkpoint
 loading, and Torch/MPS/MLX/CUDA inference accept only `pgc16-v1` with fixed Gaussian levels. Learned `pgc16-v2` is
 retired because repeated held-out tests showed that its lower local reconstruction proxy did not reliably improve
@@ -403,6 +403,34 @@ the YAQA factors fixed is not an increase in YAQA Hessian evidence. `YaqaConfig.
 fail-closed lower-bound check; the actual treatment is the population supplied through `yaqa_calibration`. Report the
 observed `independent_sequences` and valid-output-token count, not only the configured minimum.
 
+Large dense models can make the two FP32 Sketch-B factors impractical to retain. For example, the 400 quantized
+linears in Qwen3.8-27B require about 299 GiB of dense factors. `YaqaConfig.gram_strategy="auto"` retains exact
+collection when the factors fit the safe accelerator working set and otherwise selects
+`"streaming_projected"`. The streaming collector applies seeded Gaussian projections to the concatenated
+per-sequence score matrices and retains `[features, rank]` sources plus the exact FP32 Fisher diagonal. It uses a
+diagonal congruence transform when materializing one dense PSD Gram, making every channel curvature exact while only
+the cross-channel correlations remain sketched. The default rank is 256 and can be changed with
+`gram_projection_rank`; use
+`gram_strategy="exact"` for an explicit dense control. Telemetry reports the configured and selected strategy,
+projection distribution/rank, exact-diagonal status, logical dense bytes, retained bytes, and compression ratio. The
+off-diagonal projected estimator is unbiased over its seeded projection but a single realization is approximate, so
+production rank changes still require post-quantization KL, Top-N, perplexity, and task-quality gates.
+
+Compact-factor finalization caches each projected source diagonal on the accumulator device and reuses it during
+materialization. The same reduction previously ran once on pageable CPU memory during validation and again on the
+quantization device for every factor; caching removes both redundant passes while preserving the FP32 source, exact
+Fisher diagonal, congruence scaling, and materialized Gram. On CUDA devices with at least 128 GiB, the default
+`batch_size="auto"` / `activation_checkpointing="auto"` policy uses batch 16 and retains forward activations for the
+streaming collector, splitting prepared batches as needed to stay within the measured 1,024-token activation envelope.
+Exact collection and smaller devices keep batch 8 with checkpointing. Explicit integer/boolean settings override the
+automatic policy.
+
+`scripts/benchmark_qvq_yaqa_qwen38.py` is the strict H200 comparison harness and
+`scripts/profile_qvq_yaqa_streaming.py` isolates the generated collection kernels for NCU/SASS inspection. The
+Qwen3.8-27B architecture revision has 400 target linears and the same relevant 64-layer/5120-hidden/17408-MLP
+geometry as the locally available Qwen3.5-27B checkpoint used when exact Qwen3.8 weights are unavailable; benchmark
+payloads label that substitution explicitly rather than presenting it as a weight-identical run.
+
 The completed Llama-3.2-1B overlap controls held ordinary calibration at `[0,512)` and expanded only the nested YAQA
 population from `[0,512)` to `[0,1024)`. Their changes are mixed:
 
@@ -767,6 +795,72 @@ The initial reference implementation deliberately separates codec validation fro
 3. Score the complete serialized reconstruction with `tr(E H_x E^T)`.
 4. Accept only a finite strict improvement; otherwise emit the independent V2 path, all-zero selectors, and a
    deterministic alternative-family ID.
+
+##### Optional W2--W3.5/A8 target
+
+V2B2-P32 can opt into NVIDIA-oriented FP8 E4M3 input activations at W2, W2.5, W3, or W3.5. The input spelling
+`v2b2-g32` is accepted as an alias; checkpoints always serialize the canonical `qvq_v2b2_p32` format name.
+
+```python
+from gptqmodel.quantization import QVQConfig
+
+qcfg = QVQConfig(
+    bits=2,
+    format="v2b2-g32",
+    activation={
+        "bits": 8,
+        "format": "float8_e4m3fn",
+        "scale_method": "dynamic_per_token",
+        "replay_passes": 0,
+    },
+)
+```
+
+The production quantization harness exposes the same opt-in contract directly:
+
+```bash
+python scripts/qvq_quantize.py \
+  --model MODEL --output OUTPUT --calibration-dataset DATASET \
+  --format v2b2-g32 --bits 3 --activation
+```
+
+One FP32 scale is derived from each logical activation row and shared across its hidden dimension. This dynamic
+contract has no calibration-order-dependent observer and adds no persistent per-module tensor. A zero row uses scale
+one. The recommended `target="p32_operand"` flow keeps the first Block-LDLQ encoding on the native-input Hessian,
+then applies A8 only at the post-SU/Hadamard operand boundary used by inference. Per-module logs report A8 RMSE,
+relative RMSE, maximum absolute error, and observed scale range separately from the weight-codec loss.
+
+`replay_passes=1` explicitly opts into an experimental second encode fitted to the deployed E4M3 operand. Candidate
+promotion requires explicit `module_replay_search_calibration` and `module_replay_confirmation_calibration` streams,
+both disjoint from ordinary calibration and from each other. Two search folds must each improve final-logit KL by at
+least 10% without increasing teacher-forced next-token NLL; a separate confirmation split must repeat both conditions
+without reducing Top-1/5/10 agreement by more than 0.25 percentage points. Module-local held-out MSE remains
+diagnostic and cannot promote a candidate.
+
+Ready-to-run configs are `scripts/configs/llama32_1b_v2b2_p32_w35a16.json`,
+`scripts/configs/llama32_1b_v2b2_p32_w35a8_fp8.json`, and the experimental
+`scripts/configs/llama32_1b_v2b2_p32_w35a8_fp8_replay.json`. With the replay config and
+`scripts/qvq_quantize.py`, also supply explicit `--replay-search-*` and `--replay-confirmation-*` dataset slices.
+Replay remains default-disabled. The legacy
+`target="linear_input"` experiment still accumulates the GPTQ-style input Hessian from dequantized `Q_A8(X)`. YAQA
+supports that linear-input boundary; it rejects `p32_operand` until its Sketch-B collector can observe the
+post-SU/Hadamard boundary directly.
+
+This follows the calibration boundary demonstrated by Together's
+[NVFP4 Hessian change](https://github.com/togethercomputer/GPTQModel/commit/96cc70621b86477ba01c10d678944f9796507f6c): curvature must be built from the activation values the deployed kernel
+actually consumes. QVQ deliberately does not copy NVFP4's static global-scale sidecar because dynamic per-token E4M3
+has no dataset-global scale to freeze.
+
+At inference, Ada (SM89) and Hopper (SM90+) keep the transient E4M3 payload through QVQ's fused `SU -> Hadamard`
+input transform. The CUDA kernel reads FP8 plus the row scale directly and writes the established FP16 transformed
+activation expected by the P32 decoder. CPU, older CUDA devices, FP32 CUDA calls, and unsupported
+fusion shapes use the exact explicit-dequantization fallback. The grouped Hopper coordinator currently delegates A8
+children to this child-local path. `output_alignment` is rejected with A8 until its dense replay explicitly models the
+same activation boundary.
+
+A8 installs QVQ's fail-closed E4M3 dynamic KV cache whenever caching is enabled. Callers cannot substitute a dense
+Transformers cache or configure a separate `kv_cache_scheme`; both native QK and PV attention consume the stored FP8
+payload plus its dynamic row scale directly. Disabling caching remains valid and allocates no KV cache.
 
 YAQA level 1 now feeds each two-sided corrected tile through the same exact segmented recurrence. It evaluates all
 three complementary families as complete YAQA artifacts, selects one family per module under the complete Kronecker

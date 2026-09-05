@@ -1,0 +1,1140 @@
+{
+  "revision": "7115503153c3ac2d3c64ba92b42d3891ba0ab7a8",
+  "comparison_revision": "cc4ba71e",
+  "scope": "M1 full_kv, attn_out, mlp_gate_up; rates 2/2.5/3/3.5; FP16; BN4 BK512 for candidate",
+  "unmeasured": [
+    "occupancy",
+    "bank conflicts",
+    "scheduler eligibility",
+    "stall reasons",
+    "achieved bandwidth"
+  ],
+  "profiles": {
+    "gluon": {
+      "raw_csv": "/tmp/qvq-gluon-71155031-profile/raw/ubuntu2404-mi350x/790067_counter_collection.csv",
+      "sha256": "485bd15b3d5ca8503c83e5b8d5bd5b3d07ae09e9ea73bd3f563529af4f3e79f1",
+      "kernels": [
+        {
+          "kernel": "_qvq_p32_folded_gemv_gfx950_kernel.kd",
+          "grid_threads": 16384,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 26368.0,
+              "max": 26368.0,
+              "mean": 26368.0,
+              "records": 16
+            },
+            "SQ_INSTS_SALU": {
+              "min": 18944.0,
+              "max": 18944.0,
+              "mean": 18944.0,
+              "records": 16
+            },
+            "SQ_INSTS_VALU": {
+              "min": 353280.0,
+              "max": 353280.0,
+              "mean": 353280.0,
+              "records": 16
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              52
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        },
+        {
+          "kernel": "folded_gemv_dot2_gluon_kernel.kd",
+          "grid_threads": 65536,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "records": 24
+            },
+            "SQ_INSTS_SALU": {
+              "min": 15360.0,
+              "max": 15360.0,
+              "mean": 15360.0,
+              "records": 24
+            },
+            "SQ_INSTS_VALU": {
+              "min": 72704.0,
+              "max": 72704.0,
+              "mean": 72704.0,
+              "records": 24
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              64
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        },
+        {
+          "kernel": "_qvq_p32_folded_gemv_gfx950_kernel.kd",
+          "grid_threads": 327680,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 317440.0,
+              "max": 317440.0,
+              "mean": 317440.0,
+              "records": 16
+            },
+            "SQ_INSTS_SALU": {
+              "min": 189440.0,
+              "max": 189440.0,
+              "mean": 189440.0,
+              "records": 16
+            },
+            "SQ_INSTS_VALU": {
+              "min": 1873920.0,
+              "max": 1873920.0,
+              "mean": 1873920.0,
+              "records": 16
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              40
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        },
+        {
+          "kernel": "folded_gemv_dot2_gluon_kernel.kd",
+          "grid_threads": 327680,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "records": 24
+            },
+            "SQ_INSTS_SALU": {
+              "min": 76800.0,
+              "max": 76800.0,
+              "mean": 76800.0,
+              "records": 24
+            },
+            "SQ_INSTS_VALU": {
+              "min": 404480.0,
+              "max": 404480.0,
+              "mean": 404480.0,
+              "records": 24
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              64
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        },
+        {
+          "kernel": "_qvq_p32_folded_gemv_gfx950_kernel.kd",
+          "grid_threads": 1114112,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 905216.0,
+              "max": 905216.0,
+              "mean": 905216.0,
+              "records": 16
+            },
+            "SQ_INSTS_SALU": {
+              "min": 487424.0,
+              "max": 487424.0,
+              "mean": 487424.0,
+              "records": 16
+            },
+            "SQ_INSTS_VALU": {
+              "min": 5344256.0,
+              "max": 5344256.0,
+              "mean": 5344256.0,
+              "records": 16
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              32
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        },
+        {
+          "kernel": "folded_gemv_dot2_gluon_kernel.kd",
+          "grid_threads": 1114112,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0,
+              "records": 24
+            },
+            "SQ_INSTS_SALU": {
+              "min": 261120.0,
+              "max": 261120.0,
+              "mean": 261120.0,
+              "records": 24
+            },
+            "SQ_INSTS_VALU": {
+              "min": 1235968.0,
+              "max": 1235968.0,
+              "mean": 1235968.0,
+              "records": 24
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              64
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        }
+      ]
+    },
+    "loop": {
+      "raw_csv": "/tmp/qvq-loop-71155031-profile/raw/ubuntu2404-mi350x/791239_counter_collection.csv",
+      "sha256": "778308e1fe1b0435d8a5a16936c8a59ad2c5bd00e83140696b9a701e0056eedc",
+      "kernels": [
+        {
+          "kernel": "_qvq_p32_folded_gemv_gfx950_kernel.kd",
+          "grid_threads": 16384,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 26368.0,
+              "max": 26368.0,
+              "mean": 26368.0,
+              "records": 16
+            },
+            "SQ_INSTS_SALU": {
+              "min": 18944.0,
+              "max": 18944.0,
+              "mean": 18944.0,
+              "records": 16
+            },
+            "SQ_INSTS_VALU": {
+              "min": 353280.0,
+              "max": 353280.0,
+              "mean": 353280.0,
+              "records": 16
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              52
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        },
+        {
+          "kernel": "folded_gemv_dot2_loop_kernel.kd",
+          "grid_threads": 65536,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 53248.0,
+              "max": 53248.0,
+              "mean": 53248.0,
+              "records": 24
+            },
+            "SQ_INSTS_SALU": {
+              "min": 30720.0,
+              "max": 30720.0,
+              "mean": 30720.0,
+              "records": 24
+            },
+            "SQ_INSTS_VALU": {
+              "min": 96256.0,
+              "max": 96256.0,
+              "mean": 96256.0,
+              "records": 24
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              28
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        },
+        {
+          "kernel": "_qvq_p32_folded_gemv_gfx950_kernel.kd",
+          "grid_threads": 327680,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 317440.0,
+              "max": 317440.0,
+              "mean": 317440.0,
+              "records": 16
+            },
+            "SQ_INSTS_SALU": {
+              "min": 189440.0,
+              "max": 189440.0,
+              "mean": 189440.0,
+              "records": 16
+            },
+            "SQ_INSTS_VALU": {
+              "min": 1873920.0,
+              "max": 1873920.0,
+              "mean": 1873920.0,
+              "records": 16
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              40
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        },
+        {
+          "kernel": "folded_gemv_dot2_loop_kernel.kd",
+          "grid_threads": 327680,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 317440.0,
+              "max": 317440.0,
+              "mean": 317440.0,
+              "records": 24
+            },
+            "SQ_INSTS_SALU": {
+              "min": 143360.0,
+              "max": 143360.0,
+              "mean": 143360.0,
+              "records": 24
+            },
+            "SQ_INSTS_VALU": {
+              "min": 501760.0,
+              "max": 501760.0,
+              "mean": 501760.0,
+              "records": 24
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              44
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        },
+        {
+          "kernel": "_qvq_p32_folded_gemv_gfx950_kernel.kd",
+          "grid_threads": 1114112,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 905216.0,
+              "max": 905216.0,
+              "mean": 905216.0,
+              "records": 16
+            },
+            "SQ_INSTS_SALU": {
+              "min": 487424.0,
+              "max": 487424.0,
+              "mean": 487424.0,
+              "records": 16
+            },
+            "SQ_INSTS_VALU": {
+              "min": 5344256.0,
+              "max": 5344256.0,
+              "mean": 5344256.0,
+              "records": 16
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              32
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        },
+        {
+          "kernel": "folded_gemv_dot2_loop_kernel.kd",
+          "grid_threads": 1114112,
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "min": 905216.0,
+              "max": 905216.0,
+              "mean": 905216.0,
+              "records": 24
+            },
+            "SQ_INSTS_SALU": {
+              "min": 522240.0,
+              "max": 522240.0,
+              "mean": 522240.0,
+              "records": 24
+            },
+            "SQ_INSTS_VALU": {
+              "min": 1636352.0,
+              "max": 1636352.0,
+              "mean": 1636352.0,
+              "records": 24
+            }
+          },
+          "resources": {
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              28
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "code_objects": [
+    {
+      "profile": "gluon",
+      "asm": "/tmp/qvq-gluon-safe-profile-cache/HFCOZFKCAXCVHBNKXZIQ2WJW4XLSHQATL6Y25BF66W3QTDBFCPVQ/_qvq_p32_folded_gemv_gfx950_kernel.amdgcn",
+      "jit_key": "HFCOZFKCAXCVHBNKXZIQ2WJW4XLSHQATL6Y25BF66W3QTDBFCPVQ",
+      "hsaco_sha256": "616296a4cfa2f1920390ce1550207f5e47f5f29d4a35acf65baa4a89f96add1f",
+      "static_total": 163,
+      "static_opcodes": {
+        "buffer_load_dword": 2,
+        "buffer_load_dwordx4": 2,
+        "buffer_store_short": 1,
+        "ds_read_b64": 8,
+        "ds_read_u16": 1,
+        "ds_write_b16": 1,
+        "ds_write_b64": 2,
+        "s_add_i32": 2,
+        "s_and_b32": 4,
+        "s_barrier": 6,
+        "s_branch": 1,
+        "s_cbranch_scc1": 1,
+        "s_cmp_lg_u32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl1_add_u32": 1,
+        "s_lshr_b32": 1,
+        "s_mov_b32": 7,
+        "s_mov_b64": 1,
+        "s_movk_i32": 1,
+        "s_mul_i32": 2,
+        "s_nop": 14,
+        "s_waitcnt": 13,
+        "v_add_f32_dpp": 10,
+        "v_add_f32_e32": 6,
+        "v_add_u32_e32": 9,
+        "v_and_b32_e32": 2,
+        "v_and_or_b32": 1,
+        "v_bfrev_b32_e32": 1,
+        "v_bitop3_b32": 1,
+        "v_cmp_eq_u32_e32": 1,
+        "v_cndmask_b32_e32": 1,
+        "v_cvt_f16_f32_e32": 1,
+        "v_cvt_f32_f16_e32": 10,
+        "v_cvt_f32_f16_sdwa": 10,
+        "v_lshl_add_u32": 1,
+        "v_lshl_or_b32": 3,
+        "v_lshlrev_b32_e32": 5,
+        "v_mov_b32_dpp": 2,
+        "v_mov_b32_e32": 5,
+        "v_or_b32_e32": 2,
+        "v_pk_add_f32": 2,
+        "v_pk_fma_f32": 4,
+        "v_pk_mul_f32": 4,
+        "v_readfirstlane_b32": 1,
+        "v_readlane_b32": 2,
+        "v_xor_b32_e32": 3
+      },
+      "shared_bytes": 2048,
+      "resource_metadata": [
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     21",
+        ".vgpr_count:     31"
+      ]
+    },
+    {
+      "profile": "gluon",
+      "asm": "/tmp/qvq-gluon-safe-profile-cache/BHVE6K264OHMMZ2UR7WQXK6YSZMUUB5XCVWIWKP6AHX4YB7LTULA/folded_gemv_dot2_gluon_kernel.amdgcn",
+      "jit_key": "BHVE6K264OHMMZ2UR7WQXK6YSZMUUB5XCVWIWKP6AHX4YB7LTULA",
+      "hsaco_sha256": "87f485457841c26222383b452550791e3b2aa6979d18d91b0c45b6d819009dac",
+      "static_total": 176,
+      "static_opcodes": {
+        "global_load_dwordx4": 20,
+        "global_store_short": 1,
+        "s_add_u32": 2,
+        "s_addc_u32": 2,
+        "s_and_saveexec_b64": 1,
+        "s_ashr_i32": 2,
+        "s_branch": 1,
+        "s_cbranch_execz": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl_b32": 1,
+        "s_lshl_b64": 2,
+        "s_lshr_b32": 1,
+        "s_movk_i32": 2,
+        "s_mul_i32": 1,
+        "s_nop": 52,
+        "s_or_b32": 1,
+        "s_waitcnt": 11,
+        "v_add_co_u32_e32": 4,
+        "v_add_f32_dpp": 5,
+        "v_add_f32_e32": 2,
+        "v_addc_co_u32_e32": 4,
+        "v_and_b32_e32": 1,
+        "v_cmp_eq_u32_e32": 1,
+        "v_cvt_f16_f32_e32": 1,
+        "v_dot2c_f32_f16": 40,
+        "v_lshl_add_u64": 2,
+        "v_lshlrev_b32_e32": 1,
+        "v_mov_b32_dpp": 1,
+        "v_mov_b32_e32": 6,
+        "v_pk_add_f32": 1,
+        "v_readfirstlane_b32": 1,
+        "v_readlane_b32": 1
+      },
+      "shared_bytes": 0,
+      "resource_metadata": [
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     21",
+        ".vgpr_count:     63"
+      ]
+    },
+    {
+      "profile": "gluon",
+      "asm": "/tmp/qvq-gluon-safe-profile-cache/PSEX2FHDFRVLKDJIJ2QZWSMYO7B63DJPYIKRJCMHK22ML2SDCHGA/folded_gemv_dot2_gluon_kernel.amdgcn",
+      "jit_key": "PSEX2FHDFRVLKDJIJ2QZWSMYO7B63DJPYIKRJCMHK22ML2SDCHGA",
+      "hsaco_sha256": "962666eba34e9d5bf83872a48f3b086000ad7dc8324bf8917e83cdde8e065333",
+      "static_total": 197,
+      "static_opcodes": {
+        "global_load_dwordx4": 24,
+        "global_store_short": 1,
+        "s_add_u32": 2,
+        "s_addc_u32": 2,
+        "s_and_saveexec_b64": 1,
+        "s_ashr_i32": 2,
+        "s_branch": 1,
+        "s_cbranch_execz": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl_b32": 1,
+        "s_lshl_b64": 2,
+        "s_lshr_b32": 1,
+        "s_movk_i32": 2,
+        "s_mul_i32": 1,
+        "s_nop": 59,
+        "s_or_b32": 1,
+        "s_waitcnt": 13,
+        "v_add_co_u32_e32": 4,
+        "v_add_f32_dpp": 5,
+        "v_add_f32_e32": 2,
+        "v_addc_co_u32_e32": 4,
+        "v_and_b32_e32": 1,
+        "v_cmp_eq_u32_e32": 1,
+        "v_cvt_f16_f32_e32": 1,
+        "v_dot2c_f32_f16": 48,
+        "v_lshl_add_u64": 2,
+        "v_lshlrev_b32_e32": 1,
+        "v_mov_b32_dpp": 1,
+        "v_mov_b32_e32": 6,
+        "v_pk_add_f32": 1,
+        "v_readfirstlane_b32": 1,
+        "v_readlane_b32": 1
+      },
+      "shared_bytes": 0,
+      "resource_metadata": [
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     21",
+        ".vgpr_count:     61"
+      ]
+    },
+    {
+      "profile": "gluon",
+      "asm": "/tmp/qvq-gluon-safe-profile-cache/NZIOTXG44NZPRDIVOYNIT7XHITK6P2CIUAVO6OPEWAODTLVEF2RA/_qvq_p32_folded_gemv_gfx950_kernel.amdgcn",
+      "jit_key": "NZIOTXG44NZPRDIVOYNIT7XHITK6P2CIUAVO6OPEWAODTLVEF2RA",
+      "hsaco_sha256": "7b531920f20dd231323353524a1c421515ad1d875a216a22022015615e080c83",
+      "static_total": 259,
+      "static_opcodes": {
+        "buffer_load_dwordx4": 4,
+        "buffer_load_ushort": 2,
+        "buffer_store_short": 1,
+        "ds_read_b64": 8,
+        "ds_read_u16": 1,
+        "ds_write_b16": 1,
+        "ds_write_b16_d16_hi": 1,
+        "ds_write_b32": 2,
+        "s_add_i32": 2,
+        "s_addk_i32": 1,
+        "s_and_b32": 6,
+        "s_barrier": 6,
+        "s_branch": 1,
+        "s_cbranch_scc1": 1,
+        "s_cmp_lg_u32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl_b32": 4,
+        "s_lshr_b32": 1,
+        "s_mov_b32": 7,
+        "s_mov_b64": 1,
+        "s_movk_i32": 4,
+        "s_mul_i32": 1,
+        "s_nop": 11,
+        "s_or_b32": 1,
+        "s_waitcnt": 13,
+        "v_add3_u32": 1,
+        "v_add_lshl_u32": 4,
+        "v_add_u32_e32": 8,
+        "v_and_b32_e32": 6,
+        "v_and_or_b32": 3,
+        "v_bfrev_b32_e32": 1,
+        "v_bitop3_b32": 4,
+        "v_cmp_eq_u32_e32": 5,
+        "v_cndmask_b32_e32": 5,
+        "v_cvt_f32_f16_e32": 18,
+        "v_cvt_f32_f16_sdwa": 16,
+        "v_cvt_pk_f16_f32": 1,
+        "v_lshl_add_u32": 1,
+        "v_lshlrev_b32_e32": 6,
+        "v_lshrrev_b32_e32": 2,
+        "v_mov_b32_dpp": 20,
+        "v_mov_b32_e32": 29,
+        "v_mul_u32_u24_e32": 1,
+        "v_or_b32_e32": 4,
+        "v_permlane16_swap_b32_e32": 4,
+        "v_pk_add_f32": 18,
+        "v_pk_fma_f32": 8,
+        "v_pk_mul_f32": 8,
+        "v_readfirstlane_b32": 1
+      },
+      "shared_bytes": 1024,
+      "resource_metadata": [
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     22",
+        ".vgpr_count:     50"
+      ]
+    },
+    {
+      "profile": "gluon",
+      "asm": "/tmp/qvq-gluon-safe-profile-cache/QBNDQFZ7REZVUWAF7OZCL3I7OTQHK6XDTJWZP7NEV4P2VKQS5ZXA/_qvq_p32_folded_gemv_gfx950_kernel.amdgcn",
+      "jit_key": "QBNDQFZ7REZVUWAF7OZCL3I7OTQHK6XDTJWZP7NEV4P2VKQS5ZXA",
+      "hsaco_sha256": "c94db82bf68f66c4ba6cf6562f9562925f960fab949b7fe7c487efcb5bf37de5",
+      "static_total": 211,
+      "static_opcodes": {
+        "buffer_load_dword": 3,
+        "buffer_load_dwordx4": 3,
+        "buffer_store_short": 1,
+        "ds_read_b64": 12,
+        "ds_read_u16": 1,
+        "ds_write_b16": 1,
+        "ds_write_b64": 3,
+        "s_add_i32": 2,
+        "s_addk_i32": 1,
+        "s_and_b32": 4,
+        "s_barrier": 8,
+        "s_branch": 1,
+        "s_cbranch_scc1": 1,
+        "s_cmp_lg_u32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl1_add_u32": 1,
+        "s_lshl_b32": 1,
+        "s_lshr_b32": 1,
+        "s_mov_b32": 7,
+        "s_mov_b64": 1,
+        "s_movk_i32": 1,
+        "s_mul_i32": 2,
+        "s_nop": 21,
+        "s_waitcnt": 16,
+        "v_add_f32_dpp": 15,
+        "v_add_f32_e32": 9,
+        "v_add_lshl_u32": 1,
+        "v_add_u32_e32": 9,
+        "v_and_b32_e32": 2,
+        "v_and_or_b32": 1,
+        "v_bfrev_b32_e32": 1,
+        "v_bitop3_b32": 1,
+        "v_cmp_eq_u32_e32": 1,
+        "v_cndmask_b32_e32": 1,
+        "v_cvt_f16_f32_e32": 1,
+        "v_cvt_f32_f16_e32": 15,
+        "v_cvt_f32_f16_sdwa": 15,
+        "v_lshl_add_u32": 1,
+        "v_lshl_or_b32": 1,
+        "v_lshlrev_b32_e32": 5,
+        "v_mov_b32_dpp": 3,
+        "v_mov_b32_e32": 5,
+        "v_or_b32_e32": 5,
+        "v_pk_add_f32": 3,
+        "v_pk_fma_f32": 6,
+        "v_pk_mul_f32": 6,
+        "v_readfirstlane_b32": 1,
+        "v_readlane_b32": 3,
+        "v_xor_b32_e32": 3
+      },
+      "shared_bytes": 2048,
+      "resource_metadata": [
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     21",
+        ".vgpr_count:     37"
+      ]
+    },
+    {
+      "profile": "loop",
+      "asm": "/tmp/qvq-loop-71155031-profile-cache/HFCOZFKCAXCVHBNKXZIQ2WJW4XLSHQATL6Y25BF66W3QTDBFCPVQ/_qvq_p32_folded_gemv_gfx950_kernel.amdgcn",
+      "jit_key": "HFCOZFKCAXCVHBNKXZIQ2WJW4XLSHQATL6Y25BF66W3QTDBFCPVQ",
+      "hsaco_sha256": "ceddaa4e3bd9437ad8e2a856585c117017ed17df905829af9ece0bd5b2eeae21",
+      "static_total": 163,
+      "static_opcodes": {
+        "buffer_load_dword": 2,
+        "buffer_load_dwordx4": 2,
+        "buffer_store_short": 1,
+        "ds_read_b64": 8,
+        "ds_read_u16": 1,
+        "ds_write_b16": 1,
+        "ds_write_b64": 2,
+        "s_add_i32": 2,
+        "s_and_b32": 4,
+        "s_barrier": 6,
+        "s_branch": 1,
+        "s_cbranch_scc1": 1,
+        "s_cmp_lg_u32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl1_add_u32": 1,
+        "s_lshr_b32": 1,
+        "s_mov_b32": 7,
+        "s_mov_b64": 1,
+        "s_movk_i32": 1,
+        "s_mul_i32": 2,
+        "s_nop": 14,
+        "s_waitcnt": 13,
+        "v_add_f32_dpp": 10,
+        "v_add_f32_e32": 6,
+        "v_add_u32_e32": 9,
+        "v_and_b32_e32": 2,
+        "v_and_or_b32": 1,
+        "v_bfrev_b32_e32": 1,
+        "v_bitop3_b32": 1,
+        "v_cmp_eq_u32_e32": 1,
+        "v_cndmask_b32_e32": 1,
+        "v_cvt_f16_f32_e32": 1,
+        "v_cvt_f32_f16_e32": 10,
+        "v_cvt_f32_f16_sdwa": 10,
+        "v_lshl_add_u32": 1,
+        "v_lshl_or_b32": 3,
+        "v_lshlrev_b32_e32": 5,
+        "v_mov_b32_dpp": 2,
+        "v_mov_b32_e32": 5,
+        "v_or_b32_e32": 2,
+        "v_pk_add_f32": 2,
+        "v_pk_fma_f32": 4,
+        "v_pk_mul_f32": 4,
+        "v_readfirstlane_b32": 1,
+        "v_readlane_b32": 2,
+        "v_xor_b32_e32": 3
+      },
+      "shared_bytes": 2048,
+      "resource_metadata": [
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     21",
+        ".vgpr_count:     31"
+      ]
+    },
+    {
+      "profile": "loop",
+      "asm": "/tmp/qvq-loop-71155031-profile-cache/NZIOTXG44NZPRDIVOYNIT7XHITK6P2CIUAVO6OPEWAODTLVEF2RA/_qvq_p32_folded_gemv_gfx950_kernel.amdgcn",
+      "jit_key": "NZIOTXG44NZPRDIVOYNIT7XHITK6P2CIUAVO6OPEWAODTLVEF2RA",
+      "hsaco_sha256": "5a5e286f578b5fb3f6997f1b58f8459e6dd73593ac7daa00873699f026f96ac2",
+      "static_total": 259,
+      "static_opcodes": {
+        "buffer_load_dwordx4": 4,
+        "buffer_load_ushort": 2,
+        "buffer_store_short": 1,
+        "ds_read_b64": 8,
+        "ds_read_u16": 1,
+        "ds_write_b16": 1,
+        "ds_write_b16_d16_hi": 1,
+        "ds_write_b32": 2,
+        "s_add_i32": 2,
+        "s_addk_i32": 1,
+        "s_and_b32": 6,
+        "s_barrier": 6,
+        "s_branch": 1,
+        "s_cbranch_scc1": 1,
+        "s_cmp_lg_u32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl_b32": 4,
+        "s_lshr_b32": 1,
+        "s_mov_b32": 7,
+        "s_mov_b64": 1,
+        "s_movk_i32": 4,
+        "s_mul_i32": 1,
+        "s_nop": 11,
+        "s_or_b32": 1,
+        "s_waitcnt": 13,
+        "v_add3_u32": 1,
+        "v_add_lshl_u32": 4,
+        "v_add_u32_e32": 8,
+        "v_and_b32_e32": 6,
+        "v_and_or_b32": 3,
+        "v_bfrev_b32_e32": 1,
+        "v_bitop3_b32": 4,
+        "v_cmp_eq_u32_e32": 5,
+        "v_cndmask_b32_e32": 5,
+        "v_cvt_f32_f16_e32": 18,
+        "v_cvt_f32_f16_sdwa": 16,
+        "v_cvt_pk_f16_f32": 1,
+        "v_lshl_add_u32": 1,
+        "v_lshlrev_b32_e32": 6,
+        "v_lshrrev_b32_e32": 2,
+        "v_mov_b32_dpp": 20,
+        "v_mov_b32_e32": 29,
+        "v_mul_u32_u24_e32": 1,
+        "v_or_b32_e32": 4,
+        "v_permlane16_swap_b32_e32": 4,
+        "v_pk_add_f32": 18,
+        "v_pk_fma_f32": 8,
+        "v_pk_mul_f32": 8,
+        "v_readfirstlane_b32": 1
+      },
+      "shared_bytes": 1024,
+      "resource_metadata": [
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     22",
+        ".vgpr_count:     50"
+      ]
+    },
+    {
+      "profile": "loop",
+      "asm": "/tmp/qvq-loop-71155031-profile-cache/WPYW35LZNGTKEKGYFVRJCXXJP2ZTP3HAOKHMLJYF7B2DWP5KUHEQ/folded_gemv_dot2_loop_kernel.amdgcn",
+      "jit_key": "WPYW35LZNGTKEKGYFVRJCXXJP2ZTP3HAOKHMLJYF7B2DWP5KUHEQ",
+      "hsaco_sha256": "a5b44393845a4f75aa5ea370c00671e76010d72bd2b5e168ad1718c450ebde5c",
+      "static_total": 174,
+      "static_opcodes": {
+        "buffer_load_dword": 4,
+        "buffer_store_short": 1,
+        "ds_read_b32": 16,
+        "ds_read_u16": 1,
+        "ds_write_b16": 1,
+        "ds_write_b32": 4,
+        "global_load_dwordx4": 4,
+        "s_add_i32": 1,
+        "s_add_u32": 2,
+        "s_addc_u32": 2,
+        "s_and_b32": 3,
+        "s_ashr_i32": 1,
+        "s_barrier": 10,
+        "s_branch": 1,
+        "s_cbranch_scc1": 1,
+        "s_cmpk_lg_i32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl1_add_u32": 1,
+        "s_lshl_b64": 1,
+        "s_lshr_b32": 1,
+        "s_mov_b32": 4,
+        "s_mov_b64": 2,
+        "s_movk_i32": 1,
+        "s_mul_i32": 2,
+        "s_nop": 22,
+        "s_waitcnt": 21,
+        "v_add_f32_dpp": 5,
+        "v_add_f32_e32": 2,
+        "v_add_u32_e32": 7,
+        "v_and_b32_e32": 2,
+        "v_and_or_b32": 1,
+        "v_bfrev_b32_e32": 1,
+        "v_bitop3_b32": 1,
+        "v_cmp_eq_u32_e32": 1,
+        "v_cndmask_b32_e32": 1,
+        "v_cvt_f16_f32_e32": 1,
+        "v_dot2c_f32_f16": 16,
+        "v_lshl_add_u32": 1,
+        "v_lshl_add_u64": 2,
+        "v_lshl_or_b32": 2,
+        "v_lshlrev_b32_e32": 4,
+        "v_mov_b32_dpp": 1,
+        "v_mov_b32_e32": 7,
+        "v_or_b32_e32": 1,
+        "v_pk_add_f32": 1,
+        "v_readfirstlane_b32": 1,
+        "v_readlane_b32": 1,
+        "v_xor_b32_e32": 3
+      },
+      "shared_bytes": 1024,
+      "resource_metadata": [
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     21",
+        ".vgpr_count:     42"
+      ]
+    },
+    {
+      "profile": "loop",
+      "asm": "/tmp/qvq-loop-71155031-profile-cache/3E7W7ANHKQ6WNLMYNWVXQTGTZLZLG7S4BS7ZS66OQPQPQUMX533Q/folded_gemv_dot2_loop_kernel.amdgcn",
+      "jit_key": "3E7W7ANHKQ6WNLMYNWVXQTGTZLZLG7S4BS7ZS66OQPQPQUMX533Q",
+      "hsaco_sha256": "a256f7b332491a08ba263bb3c62ad53df4c7f49a3b822ff3ede12c3b22e9837f",
+      "static_total": 132,
+      "static_opcodes": {
+        "buffer_load_dword": 2,
+        "buffer_store_short": 1,
+        "ds_read_b32": 8,
+        "ds_read_u16": 1,
+        "ds_write_b16": 1,
+        "ds_write_b32": 2,
+        "global_load_dwordx4": 2,
+        "s_add_i32": 1,
+        "s_add_u32": 1,
+        "s_addc_u32": 1,
+        "s_and_b32": 3,
+        "s_ashr_i32": 1,
+        "s_barrier": 6,
+        "s_branch": 1,
+        "s_cbranch_scc1": 1,
+        "s_cmp_lg_u32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl1_add_u32": 1,
+        "s_lshl_b32": 1,
+        "s_lshl_b64": 1,
+        "s_lshr_b32": 1,
+        "s_mov_b32": 5,
+        "s_mov_b64": 2,
+        "s_movk_i32": 1,
+        "s_mul_i32": 1,
+        "s_nop": 14,
+        "s_or_b32": 1,
+        "s_waitcnt": 13,
+        "v_add_f32_dpp": 5,
+        "v_add_f32_e32": 2,
+        "v_add_u32_e32": 6,
+        "v_and_b32_e32": 2,
+        "v_and_or_b32": 1,
+        "v_bfrev_b32_e32": 1,
+        "v_bitop3_b32": 1,
+        "v_cmp_eq_u32_e32": 1,
+        "v_cndmask_b32_e32": 1,
+        "v_cvt_f16_f32_e32": 1,
+        "v_dot2c_f32_f16": 8,
+        "v_lshl_add_u32": 2,
+        "v_lshl_add_u64": 2,
+        "v_lshl_or_b32": 1,
+        "v_lshlrev_b32_e32": 4,
+        "v_mov_b32_dpp": 1,
+        "v_mov_b32_e32": 7,
+        "v_or_b32_e32": 2,
+        "v_pk_add_f32": 1,
+        "v_readfirstlane_b32": 1,
+        "v_readlane_b32": 1,
+        "v_xor_b32_e32": 3
+      },
+      "shared_bytes": 1024,
+      "resource_metadata": [
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     21",
+        ".vgpr_count:     27"
+      ]
+    },
+    {
+      "profile": "loop",
+      "asm": "/tmp/qvq-loop-71155031-profile-cache/QBNDQFZ7REZVUWAF7OZCL3I7OTQHK6XDTJWZP7NEV4P2VKQS5ZXA/_qvq_p32_folded_gemv_gfx950_kernel.amdgcn",
+      "jit_key": "QBNDQFZ7REZVUWAF7OZCL3I7OTQHK6XDTJWZP7NEV4P2VKQS5ZXA",
+      "hsaco_sha256": "df915a028938d0d3a46b289b69fbc5b63d031f3796577845dcbfd17698f80aa2",
+      "static_total": 211,
+      "static_opcodes": {
+        "buffer_load_dword": 3,
+        "buffer_load_dwordx4": 3,
+        "buffer_store_short": 1,
+        "ds_read_b64": 12,
+        "ds_read_u16": 1,
+        "ds_write_b16": 1,
+        "ds_write_b64": 3,
+        "s_add_i32": 2,
+        "s_addk_i32": 1,
+        "s_and_b32": 4,
+        "s_barrier": 8,
+        "s_branch": 1,
+        "s_cbranch_scc1": 1,
+        "s_cmp_lg_u32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl1_add_u32": 1,
+        "s_lshl_b32": 1,
+        "s_lshr_b32": 1,
+        "s_mov_b32": 7,
+        "s_mov_b64": 1,
+        "s_movk_i32": 1,
+        "s_mul_i32": 2,
+        "s_nop": 21,
+        "s_waitcnt": 16,
+        "v_add_f32_dpp": 15,
+        "v_add_f32_e32": 9,
+        "v_add_lshl_u32": 1,
+        "v_add_u32_e32": 9,
+        "v_and_b32_e32": 2,
+        "v_and_or_b32": 1,
+        "v_bfrev_b32_e32": 1,
+        "v_bitop3_b32": 1,
+        "v_cmp_eq_u32_e32": 1,
+        "v_cndmask_b32_e32": 1,
+        "v_cvt_f16_f32_e32": 1,
+        "v_cvt_f32_f16_e32": 15,
+        "v_cvt_f32_f16_sdwa": 15,
+        "v_lshl_add_u32": 1,
+        "v_lshl_or_b32": 1,
+        "v_lshlrev_b32_e32": 5,
+        "v_mov_b32_dpp": 3,
+        "v_mov_b32_e32": 5,
+        "v_or_b32_e32": 5,
+        "v_pk_add_f32": 3,
+        "v_pk_fma_f32": 6,
+        "v_pk_mul_f32": 6,
+        "v_readfirstlane_b32": 1,
+        "v_readlane_b32": 3,
+        "v_xor_b32_e32": 3
+      },
+      "shared_bytes": 2048,
+      "resource_metadata": [
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     21",
+        ".vgpr_count:     37"
+      ]
+    }
+  ]
+}

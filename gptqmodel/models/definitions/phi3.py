@@ -6,6 +6,7 @@ from ..base import BaseQModel
 
 
 class Phi3QModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"phi3"})
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [
@@ -14,7 +15,7 @@ class Phi3QModel(BaseQModel):
         "#",
         {
             "self_attn": ("qkv_proj:0:k:q:v", "o_proj:1"),
-            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+            "mlp": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
         }
     ]
 

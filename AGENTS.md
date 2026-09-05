@@ -2,6 +2,18 @@
 
 This file governs the whole repository. Keep changes narrowly scoped, preserve CPU and non-target GPU fallbacks, and never infer hardware capabilities from a fixed CUDA index.
 
+## Accuracy before kernel speed
+
+For QVQ kernel optimization, use [$qvq-kernel-accuracy](.agents/skills/qvq-kernel-accuracy/SKILL.md) before choosing
+math transformations, precision changes, or MKNE autotune winners. First pursue accuracy-preserving algebra,
+redundant-work elimination, and data reuse. Preserve the existing exact quantization contract and the inference
+**mean absolute drift <= 2e-3 AND maximum absolute drift <= 0.046875 per case** contract. Both limits are
+inclusive and must pass independently; relative L2 or averaging across cases cannot replace either gate.
+These gates apply only to localized kernel outputs against the reference on identical inputs, weights, and state.
+Propagated final-logit differences are diagnostics, not kernel acceptance gates; do not apply these limits to them.
+Real-arithmetic equivalence and FP32 output alone do not prove numerical equivalence.
+The skill distinguishes kernel correctness, measured model propagation, and separately scoped precision experiments.
+
 ## Repository map
 
 - `gptqmodel/`: Python package, model adapters, quantization lifecycle, backend selection, and JIT wrappers.
@@ -60,6 +72,8 @@ This file governs the whole repository. Keep changes narrowly scoped, preserve C
 - Upstream sync, ports, public release notes, or disclosure-boundary review: use `$gptqmodel-upstream`.
 - Ampere or A100 tuning: also use `$gptqmodel-ampere-kernels`.
 - Hopper or H100 tuning: also use `$gptqmodel-hopper-kernels`.
+- AMD ROCm kernel work, including MI350/MI355, gfx950, FlyDSL, Gluon, AITER, Primus-Turbo, hipBLASLt/rocBLAS,
+  rocprof, or AMD ISA analysis: also use `$gptqmodel-amd-kernels`.
 
 Read every selected `SKILL.md` completely before editing. Follow its linked references only when relevant to the task.
 
@@ -112,6 +126,22 @@ Compare exact rendered prompts and input IDs as well as aggregate scores.
     propagated final-logit KL and Top-K agreement improve materially, remain finite, and pass the predeclared
     uncertainty/guardrail policy. Do not trade demonstrated final-model recovery for a lower local error solely to
     make the proxy look better.
+11. Treat generated GPU code as a per-commit deliverable. After every commit or
+    experimental phase that can change GPU instructions (CUDA/C++, Triton,
+    CUTLASS, templates, launch geometry, compiler flags, or relevant constants),
+    capture the affected kernel with Nsight Compute or an equivalent executed
+    instruction profiler and inspect source-correlated SASS. Compare against the
+    preceding committed kernel at the same shape/configuration, then perform an
+    explicit math/algebra and data-movement pass for folding, common-subexpression
+    elimination, deduplication, address reuse, and removal of redundant
+    masks/shifts/conversions/permutations. Compiler output may reintroduce work
+    removed in an earlier phase, so do not assume a source-level simplification
+    survived compilation. Record total/opcode deltas, registers, spills, shared
+    conflicts, occupancy, scheduler/stall changes, profiler artifact paths, and
+    the exact source revisions. Re-run correctness and warmed CUDA-event timing
+    after the profile. If target-hardware profiling is unavailable, label the
+    result compilation-only and do not call the phase complete or promote it as a
+    kernel performance win.
 
 ## Typical checks
 

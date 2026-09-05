@@ -3566,6 +3566,572 @@ and `artifacts/a100_p32_window/v28_candidate_large_m_all_shapes_staticnk_50.json
 As in v63, `origin/main` rejects M>16, so these large-M comparisons are
 capability/planar-oracle measurements rather than direct main-branch deltas.
 
+## v66 inconclusive M16 full-KV explicit-stage probe
+
+The fixed M16 full-KV route `(K,N)=(5120,1024)` was screened with an explicit
+`StageKTiles=2` template argument.  This is the existing default
+(`kStageKTiles=2`), so it changes no generated schedule.  The 2,000-iteration
+run remained exact (`max_abs <= 1.6e-5`) and measured
+`0.035840/0.034816/0.034816/0.033792 ms`; the small W2 difference versus
+earlier runs is timing noise, not a retained optimization.
+Diagnostic: `artifacts/a100_p32_window/v30_candidate_m16_fullkv_stage2_2000.json`.
+
+## v67 rejected M1 full-KV pair-decode probe
+
+The M1 full-KV scalar route already uses a fixed `StaticN=1024` launch, but
+falls back to the conservative per-pair decode because its bank-ID layout is
+special.  Reusing the batched pair-decode path from wider N shapes remained
+exact (`max_abs <= 1.1e-5`) but regressed the 2,000-iteration medians at W2.5,
+W3, and W3.5 to `0.032768/0.033792/0.033792 ms` (W2 was `0.031744 ms`).
+The source change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v31_candidate_m1_fullkv_pairdecode_2000.json`.
+
+## v68 rejected small-N vectorized output stores
+
+The scalar M2/M4 full-KV paths were screened with `float2` stores for their
+fixed N=1024 output pairs (the existing fast store is intentionally limited
+to M1).  Outputs remained exact (`max_abs <= 9.6e-6`), but the 2,000-iteration
+Ampere medians regressed to about `0.033792 ms` for M2 and
+`0.032768--0.033792 ms` for M4 versus the retained dynamic stores.  The source
+change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v32_candidate_m24_fullkv_vector_store_2000.json`.
+
+## v69 neutral M16 full-KV bank-mask hoist
+
+The M16 full-KV WMMA route `(K,N)=(5120,1024)` was screened with
+`HoistBankMasks=true`, extending the optimization used by the M8 route.  The
+2,000-iteration run remained exact and measured
+`0.033792/0.032768/0.033792/0.033792 ms`, matching the retained schedule
+within event resolution.  The source probe was reverted as neutral.
+Diagnostic: `artifacts/a100_p32_window/v33_candidate_m16_fullkv_hoistmask_2000.json`.
+
+## v70 rejected M8 full-KV wide-N reuse
+
+The M8 full-KV `(K,N)=(5120,1024)` WMMA route was screened with the
+Marlin-style `WideNTiles=true` reuse path and a two-N-tile grid.  It remained
+exact (`max_abs <= 1.2e-5`), but the 2,000-iteration medians regressed at W2.5
+and W3 to `0.033792 ms` (W2/W3.5 were `0.032768/0.031744 ms`).  The source
+change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v34_candidate_m8_fullkv_widentiles_2000.json`.
+
+## v71 rejected M1 full-KV single-stage pipeline
+
+The M1 full-KV `(K,N)=(5120,1024)` scalar route was screened with one K tile
+per cp.async stage (the retained route uses two).  It remained exact
+(`max_abs <= 1.1e-5`) but increased the 2,000-iteration medians to
+`0.035840/0.036864/0.036864/0.035840 ms`; the two-stage route is faster at
+all four rates.  The source change was reverted.  Diagnostic:
+`artifacts/a100_p32_window/v35_candidate_m1_fullkv_stage1_2000.json`.
+
+## v72 large-M shared-ABI row grid with automatic fixed-N dispatch
+
+The framework-neutral `gptqmodel_ext/qvq/p32` ABI now launches all `M/16` row
+tiles in one two-dimensional grid and performs one global split reduction.
+The previous `origin/main` implementation launched and reduced each 16-row
+chunk independently.  For the six supported model widths, the large-M path
+automatically uses the existing compile-time fixed-N kernels; nonstandard
+widths retain the generic path.  The ABI still requires native reduction for
+`M>16`, and the canonical `[split,M,N]` partial layout is preserved.
+
+The implementation was checked against latest `origin/main` commit
+`4ef2089f` on A100 (SM80), with `K=5120`, transition bits 4, split 1, block
+variant, 128 threads, and one K tile per stage.  Ten warmups and 50 timed
+iterations covered every `M` in `512/1024/2048/4096` and every `N` in
+`1024/5120/6144/10240/12288/17408`.  Candidate output matched main bit-for-bit on
+a randomized `M=32,N=6144,split=8` comparison.  Candidate/main geometric
+mean speedups by N were 1.091x, 1.146x, 1.164x, 1.165x, 1.165x, and
+1.179x respectively (1.151x over all 24 cases).  Per-M geometric means were
+1.161x, 1.154x, 1.146x, and 1.144x for `M=512/1024/2048/4096`.
+
+This is a direct main-relative improvement for the expanded-M target; the
+smaller 1.090x full-KV result is retained without claiming a uniform 10%
+gain for every individual shape.  The matching diagnostics used
+`/tmp/bench_p32` against `/tmp/libqvq_p32_main.so` and the candidate shared
+library built from this source.
+
+## v73 all-rate validation for the expanded-M target
+
+The same 24-case sweep was repeated for transition bits 5, 6, and 7 (the
+W2.5/W3/W3.5 paths), in addition to the bits-4 results above.  Geometric-mean
+candidate/main speedups were 1.140x, 1.145x, and 1.134x respectively.  A
+randomized `M=32,N=6144,split=8` comparison remained bit-for-bit identical for
+all four transition-bit values, covering the global partial-layout and single
+reduction changes across every supported rate.
+
+## v74 large-M two-row CTA reuse (WIP)
+
+The next probe reuses each packed trellis/bank-ID tile across two adjacent
+16-row groups in a 128-thread CTA.  The input staging tile and accumulator
+fragments are doubled, while the four-warp N layout and one native reduction
+are unchanged.  This removes the repeated trellis decode and global tile loads
+that dominate large M.  Fixed `K=5120` and fixed model N dispatches are used;
+the existing one-row path remains available for other thread counts and
+non-specialized shapes.
+
+The corrected probe matched the merged `origin/main` output bit-for-bit for
+transition bits 4, 5, 6, and 7 on randomized `M=32,N=6144,split=8` data.  On
+the A100, `K=5120`, block variant, native reduction, `threads=128`,
+`StageKTiles=1`, and ten warmups/50 timed iterations, the 24-case
+`M=512/1024/2048/4096` by `N=1024/5120/6144/10240/12288/17408` sweep gave a
+1.782x geometric-mean speedup versus the fetched `origin/main` shared-ABI
+baseline (minimum 1.373x, maximum 1.858x).  Per-N means were
+1.635x/1.785x/1.797x/1.824x/1.835x/1.835x; per-M means were
+1.697x/1.799x/1.804x/1.841x.  This exceeds the current 20% target on every
+reported aggregate, but still needs the post-commit NCU/SASS pass below.
+
+An initial build returned `-1` because the new stage-dispatch macro was defined
+but not invoked; that control-flow bug was fixed before collecting these
+numbers.  The first vector-store predicate was also narrowed to static-N
+launches so generic/non-specialized N remains boundary-safe.
+
+## v75 rejected Static-N/Static-K stride folding
+
+The post-commit SASS pass attempted to replace the m2 kernel's runtime
+`size_n/size_k` stride arguments with compile-time `StaticN/StaticK` values.
+The generated specialization remained exact for all four transition widths,
+but regressed the `N=1024,M=512` timing from about `0.265 ms` to `0.289 ms`
+and similarly slowed the first wide-N cases.  The change was reverted; the
+committed row-reuse path retains the compiler's existing SSA treatment of these
+values.  NCU for the retained commit reported no local/shared spills, so no
+register-pressure workaround was needed.
+
+## v76 large-M four-row CTA reuse
+
+The reuse kernel is now parameterized for four adjacent 16-row groups (64
+rows per CTA) when `threads=128` and `M` is divisible by 64.  This keeps one
+packed trellis tile live across four output groups.  The probe remained exact
+for transition bits 4--7 on the randomized split-8 comparison.  A100 resource
+usage for the fixed `N=1024,K=5120,StageKTiles=1` specialization is 96
+registers/thread, 4,616 B static shared memory, and no local-memory spill.
+
+The 24-case `M=512/1024/2048/4096` by six-N sweep measured 2.565x geometric
+mean versus fetched `origin/main` (minimum 1.458x, maximum 2.826x), and
+1.440x versus the preceding two-row reuse commit.  Per-N means were
+2.140x/2.528x/2.635x/2.702x/2.758x/2.773x.  This is the first probe to clear
+2.5x main-relative throughput; the additional grouping pass is still being
+screened for the requested 50% step over the prior commit.
+
+## v77 shape-aware eight-row reuse
+
+For fixed widths other than `N=1024`, stages 1--3 now reuse one packed tile
+across eight adjacent 16-row groups (128 rows per 128-thread CTA).  `N=1024`
+continues to use the four-row kernel because its smaller workload makes the
+larger accumulator footprint slower; stage 4 also remains on four-row reuse
+to stay below Ampere's static shared-memory limit.  The eight-row probe is
+exact for transition bits 4--7.  The fixed `N=5120,K=5120,StageKTiles=1`
+resource entry is 127 registers/thread, 8,712 B shared memory, and no local
+memory spill (the `N=1024` fallback uses the four-row entry at 96 registers
+and 4,616 B shared memory).
+
+The full 24-case stage-1 sweep measured 3.106x geometric mean versus fetched
+`origin/main` (minimum 1.458x, maximum 3.663x), or 1.211x over the preceding
+four-row commit.  The extra 50% step is therefore not uniform per commit, but
+the cumulative result is now over 3x main-relative throughput on this A100
+matrix.
+
+The post-commit NCU profile of the wide eight-row specialization measured
+59.12% memory throughput and 33.71% compute throughput, with 95.79M executed
+instructions and zero local/shared spill requests.  The accompanying SASS
+scan found the expected unrolled MMA/row-group body; remaining integer
+instructions are tile-address and circular-state indexing, so no additional
+algebraic reduction was retained after this commit.
+
+## v78 rejected sixteen-row-group reuse
+
+A stage-3-only attempt to reuse one packed tile across 16 adjacent row groups
+was rejected by `ptxas` before execution.  The doubled input staging tile
+requires `0xc618`--`0x10820` bytes of static shared memory across the generated
+rate/N variants, exceeding Ampere's `0xc000` per-block limit.  The probe
+produced no binary and made no source change to the retained dispatch.
+
+## v79 compiler-owned large-M row-group tuning
+
+The framework-neutral runtime now exposes an additive
+`qvq_p32_window_with_row_groups` entry point for compiler integrations that
+own autotuning.  It accepts an explicit 1/2/4/8 multiplier describing how many
+adjacent M16 tiles reuse one packed weight decode.  The established
+`qvq_p32_window` ABI remains source- and behavior-compatible and continues to
+apply QvQ's automatic large-M row-group and fixed-N policy for PyTorch and
+other callers.
+
+Explicit calls also honor `static_n` literally instead of silently enabling a
+known-N specialization.  This lets a compiler represent row grouping, stage
+depth, thread count, split count, and fixed-N selection as visible graph
+attributes and benchmark the exact schedule it will emit.  The contract and
+runtime smoke tests pass against kernel contract version 10; end-to-end ZML
+autotune and model timing are tracked in the consuming integration.
+
+## v80 stage-3 N=1024 eight-row reuse
+
+This WIP branch starts from freshly fetched `origin/main` at `8c131ac5` and
+keeps the merged eight-row schedule for wide projections unchanged.  The
+remaining fixed-N gap was the small `N=1024` projection: for `M=512/1024/2048/4096`
+and `stage_k_tiles=3`, the four-row CTA was substantially slower than the
+eight-row CTA even though the latter was previously excluded for this width.
+The dispatch now selects `RowGroups=8` only for that exact stage, while
+stages 1, 2, and 4 retain the prior four-row schedule.  This avoids the
+stage-1/2 regression seen in the broad guard probe.
+
+On the A100 SM80 target (`K=5120`, block variant, 128 threads, split 1), the
+four-rate `N=1024` stage-3 screen is exact for all M values and improves the
+candidate/control geometric mean by 1.153x (bits 4), 1.210x (bits 5),
+1.147x (bits 6), and 1.097x (bits 7).  At bits 4 the per-M speedups are
+1.064x/1.054x/1.154x/1.366x for `M=512/1024/2048/4096`.  The all-N stage-3
+matrix improves 1.024x because this specialization affects one of six N
+shapes; the targeted N=1024 result clears the requested 10% step.
+
+The random split-1 and split-8 comparisons match bit-for-bit for transition
+bits 4--7 (`M=512,N=1024`).  Resource usage for the new fixed-N, stage-3,
+eight-row entry is 96 registers/thread and 27,288 B static shared memory,
+with no local-memory spill; the retained four-row entry is 72 registers and
+15,000 B.  The broad stage-1/2 guard was rejected because it slowed the
+small-N screen and is recorded as a failed probe rather than enabled.
+
+The candidate library used for this screen was built directly from
+`gptqmodel_ext/qvq/p32/qvq_p32_cuda.cu` with CUDA 13.3, `-O3`,
+`--split-compile=64`, and `-gencode arch=compute_80,code=sm_80`.
+
+The post-commit Nsight Compute capture is `/tmp/v30_ncu_candidate.csv`, with
+the matched control in `/tmp/v30_ncu_baseline.csv`.  For `M=512,N=1024`, the
+eight-row launch halves the grid from 128 to 64 CTAs and lowers executed
+instructions from 32,834,944 to 19,729,856 (-39.9%).  NCU reports zero local
+or shared-memory spill requests in both kernels.  The candidate uses 96
+registers/thread and 26,136 B static shared memory in the launch report
+(the resource dump rounds this to 27,288 B); the four-row control uses 64
+registers and 13,848 B in NCU (15,000 B in the resource dump).  The profiled
+candidate duration is 293,152 ns versus 310,880 ns for the control; this
+profiled timing is directional because Nsight instrumentation dominates this
+small grid.
+
+The source-correlated SASS extracts are `/tmp/v30_candidate_m8_sass.txt` and
+`/tmp/v30_base_m4_sass.txt`.  Static instruction count rises from 1,426 to
+1,522 per CTA, but after normalizing for four versus eight live row groups,
+the body is about 47% smaller per output row.  HMMA/LDSM/STG scale exactly
+with the doubled row work (24/12/16 to 48/24/32), while shared decode/address
+families do not: IMAD 275 to 278, SHF 126 to 129, LOP3 127 to 132, and LEA
+78 to 79.  The algebraic/data-movement pass found no new mask, shift,
+conversion, permutation, or address expression to fold; the surviving
+integer instructions are shared trellis-address and circular-state indexing.
+
+## v81 N=1024 large-M stage-1/2 reuse
+
+This phase starts from the merged `origin/main` tip `f74ec0cc`, which includes
+the v80 implementation and the explicit row-group ABI from PR #112.  The
+automatic policy now retains eight-row reuse for `N=1024, stage_k_tiles=3` at
+all aligned large-M sizes and additionally selects it for stages 1 and 2 only
+when `M>=2048`.  The four-row route remains in place for `M=512/1024` and for
+stage 4, where the larger accumulator footprint is not beneficial.
+
+Against an exact SM80 build of `origin/main`, `K=5120`, block variant,
+128 threads, split 1, the `N=1024` stage-1 large-M geometric-mean speedups
+(`M=2048/4096`) are 1.070x/1.031x (bits 4--7 averaged), and stage 2 reaches
+1.024x/1.175x.  Per-rate stage-2 large-M means are 1.092x, 1.089x, 1.090x,
+and 1.115x for bits 4, 5, 6, and 7.  The M=512/1024 controls stay within
+timer noise, and stage 3/4 dispatch remains unchanged.  The strongest case,
+`N=1024,M=4096,stage=2`, clears the requested 10% step across every rate.
+
+Random split-8 comparisons for `M=2048` and `M=4096`, stages 1 and 2, and
+transition bits 4--7 remain bit-for-bit identical to the fetched baseline.
+The broad stage-1/2 guard from the earlier probe is not used: it regressed
+small M, so the retained condition is explicitly limited to `M>=2048`.
+
+The post-commit Nsight Compute captures are `/tmp/v31_ncu_candidate_m4096.csv`
+and `/tmp/v31_ncu_baseline_m4096.csv`.  At the strongest case (`M=4096`,
+`stage=2`), the eight-row launch halves the grid from 1024 to 512 CTAs and
+lowers executed instructions from 280,303,616 to 160,534,528 (-42.7%).
+Profiled duration falls from 1,069,632 ns to 925,280 ns (13.5%); this timing
+is directional because the small kernel is profiler-instrumented.  Memory
+throughput is 77.17% versus 78.08%, L1/TEX is 93.77% versus 86.80%, and both
+variants have zero local/shared-memory spill requests.  The retained four-row
+entry uses 64 registers and 9,232 B shared memory; the new eight-row entry uses
+96 registers and 17,424 B.
+
+The source-correlated SASS extracts are `/tmp/v31_candidate_m8_stage2_sass.txt`
+and `/tmp/v31_base_m4_stage2_sass.txt`.  Static instructions rise from 1,269
+to 1,350 per CTA, but normalize to roughly 47% fewer instructions per output
+row after accounting for four versus eight live row groups.  HMMA/STG scale
+with doubled row work (16/16 to 32/32); decode/address work remains flat or
+falls (IMAD 225 to 230, SHF 126 to 121, LOP3 100 to 99, LEA 75 to 76).
+The SSA/algebraic pass found no redundant mask, shift, conversion, permutation,
+or address expression introduced by the new dispatch.
+
+## v82 large-M paired-decode selector-mask hoist
+
+The next phase starts from fetched `origin/main` at `277e088f`; the separate
+N=1024 stage-1/2 row-group WIP remains isolated in PR #115.  The large-M
+128-thread row-reuse kernel now instantiates `HoistBankMasks=true`.  This
+computes the two selector masks once for each paired state decode and feeds
+the shared decode helper, instead of recomputing the selected mask through
+each of the four scalar pair decoders.  The ABI, row-group policy, and
+small-M routes are unchanged.
+
+The candidate stayed exact on randomized split-8 comparisons for
+`N=6144`, stages 1--4, and transition bits 4--7, and for the merged
+`N=1024` stage-3 eight-row route at all four rates.  The contract smoke test
+and the 65-case `tests/test_qvq_p32_ampere.py` suite both pass.
+
+With `K=5120`, `M=512/1024/2048/4096`, six supported N values, four stages,
+and four transition widths (384 timed cases, 10 warmups/50 iterations), the
+candidate/main geometric mean is `1.0194x`.  Stage means are 1.0454x,
+1.0077x, 1.0198x, and 1.0052x for stages 1--4; per-rate means across all
+stages are 1.0224x, 1.0220x, 1.0172x, and 1.0159x.  The per-M means are
+1.0209x/1.0188x/1.0193x/1.0184x.  Stage-4 is intentionally retained even
+though its aggregate is near neutral because it has no broad regression and
+keeps the dispatch policy uniform; the strongest gain is in the
+decode-bound stage-1 path.
+
+The matched Nsight Compute capture is `/tmp/v32_ncu_candidate_20260905.csv`,
+with control `/tmp/v32_ncu_baseline_20260905.csv`, for
+`N=5120,M=4096,stage=2,bits=4`.  Both launches use 128 threads and a
+2560-CTA grid, 96 registers/thread, 17,424 B static shared memory, and zero
+local/shared spill requests.  Profiled duration moves from 3,876,384 ns to
+3,856,032 ns while memory throughput changes 92.13% to 92.69% and compute
+throughput 34.36% to 34.71%.  Executed instructions are effectively flat
+(802,672,640 to 805,949,440, +0.4%), so the gain is a scheduling/cache
+effect rather than an instruction-count reduction.
+
+The source-correlated SASS extracts are `/tmp/v32_base_m4_stage2_sass2.txt`
+and `/tmp/v32_cand_m4_stage2_sass2.txt`.  Static instruction count is 1,256
+per CTA in both builds.  The hoisted form removes six `LOP3.LUT` and four
+right-shift instructions, at the cost of four additional `IMAD`-family
+instructions; HMMA.16816, LDSM, STG, LEA, and shuffle counts are unchanged.
+No new conversion, permutation, redundant address expression, or spill was
+found in the SSA/data-movement review.
+
+## v83 selective stage-4 eight-row reuse
+
+After v82 merged in PR #117, the branch was refreshed to `origin/main` at
+`9dcaf07e` (the benchmark control was built before the unrelated Hopper merge,
+which does not touch this Ampere source).  The next screen tested the remaining large-M stage-4 gap.  An
+unconditional eight-row policy regressed W2 (transition bits 4) by 2--3% on
+wide N, so that probe was rejected.  The retained dispatch instead selects
+eight-row reuse only when `TransitionBits>=5`, `N!=1024`, `M=4096`, and
+`stage_k_tiles=4`; W2 and all other shapes remain on the merged four-row
+route.
+
+On the A100 with `K=5120`, 10 warmups, and 50 timed iterations, the targeted
+`M=4096` stage-4 screen is exact under split-8 comparisons for every wide-N
+shape and bits 5--7.  Geometric-mean speedups versus the merged v82 main are
+1.0468x (W2.5), 1.0467x (W3), and 1.0588x (W3.5), including the neutral
+N=1024 control in each rate.  The five wide-N cases alone improve by about
+5.4%, 5.4%, and 7.1% respectively.  The 65-case Ampere test suite and the
+P32 contract smoke test pass.
+
+The matched NCU captures are `/tmp/v33_ncu_candidate_20260905.csv` and
+`/tmp/v33_ncu_baseline_20260905.csv` for `N=5120,M=4096,stage=4,bits=5`.
+The eight-row launch halves the grid from 5,120 to 2,560 CTAs and lowers
+executed instructions from 1,363,184,640 to 780,815,360.  Profiled duration
+falls from 7,216,288 ns to 6,808,288 ns; both variants report zero local or
+shared spill requests.  The candidate resource entry is 126 registers and
+35,360 B static shared memory, versus 64 registers and 18,976 B for the
+four-row control.
+
+The source-correlated SASS extracts are `/tmp/v33_base_stage4_sass.txt` and
+`/tmp/v33_cand_stage4_sass.txt`.  Per-CTA static instructions rise from 1,640
+to 1,704 while HMMA/LDSM/STG scale 2x with the doubled row work.  Decode and
+address families stay nearly flat (IMAD 155->158, SHF 158->161,
+LOP3 164->171, LEA 55->58); no new conversion, permutation, redundant
+address expression, or spill was found in the SSA/data-movement pass.
+
+## v84 selective stage-4 reuse at M=2048
+
+With the branch merged to the fetched `origin/main` tip `9dcaf07e`, the next
+screen extended the v83 high-rate stage-4 policy from `M=4096` to `M>=2048`.
+The broad probe stayed exact, but its `W3.5, N=6144, M=2048` case was 8--9%
+slower because the eight-row specialization uses 124 registers/thread.  The
+automatic policy therefore keeps that one shape on the four-row control:
+`TransitionBits==7 && M==2048 && N==6144` is explicitly excluded.  W2 remains
+on the four-row path for all wide N.
+
+Matched A100 medians (three runs, 10 warmups/50 iterations) for the affected
+`M=2048` wide-N matrix show 14 positive cases and one neutral control after
+that guard.  The geometric mean is 1.072x versus the retained v83 schedule
+(about 7.2% faster); per-rate means are 1.078x, 1.072x, and 1.079x for
+W2.5/W3/W3.5.  The strongest stable gains are 9--11% at `N=10240` and
+`N=12288`.  The untouched `M=512/1024` routes remain on their prior plans.
+
+The split-8 randomized comparison is bit-for-bit exact for every affected
+wide-N shape and transition width.  The contract smoke test and all 65
+Ampere tests pass.
+
+The matched NCU captures are `/tmp/v84_ncu_candidate_m2048.csv` and
+`/tmp/v84_ncu_baseline_m2048.csv` for `N=5120,M=2048,stage=4,bits=5`.
+Eight-row reuse halves the grid from 2,560 to 1,280 CTAs and lowers executed
+instructions from 681,592,320 to 390,407,680.  Profiled duration falls from
+3,626,560 ns to 3,587,360 ns; memory throughput is 88.43% versus 95.52%,
+and compute throughput is 18.06% versus 31.20%.  Both variants report zero
+local/shared spill requests.  The candidate uses 126 registers and 35,360 B
+static shared memory; the four-row control uses 64 registers and 18,976 B.
+
+The source-correlated SASS extracts are `/tmp/v84_candidate_stage4_exact.txt`
+and `/tmp/v84_baseline_stage4_exact.txt`.  Static instructions rise from
+1,640 to 1,704 per CTA while HMMA/LDSM/STG scale with the doubled row work;
+IMAD 155->158, SHF 158->161, LOP3 164->171, and LEA 55->58.  The
+SSA/algebraic/data-movement pass found no redundant mask, shift, conversion,
+permutation, or address expression, and no spill was introduced.
+
+## v85 rejected M=1024 stage-4 eight-row reuse
+
+An explicit-row-group build temporarily allowed the stage-4 eight-row kernel at
+`M=1024` so the last unoptimized large-M tier could be screened without
+changing the automatic policy.  Five matched A100 repeats across wide N and
+W2.5--W3.5 were mixed: for example, `N=5120` W2.5 was 0.94x and `N=6144`
+W2.5 was 0.86x, while selected `N=10240` cases improved.  The 124-register
+specialization is therefore not a uniform win at this smaller M, so the ABI
+validation and automatic dispatch remain unchanged and no source change is
+retained from this probe.
+
+## v86 rejected split-1 constant-fold wrapper
+
+A dedicated large-M kernel wrapper passed literal `split_count=1` and `split=0`
+to the inlined body, matching the automatic native single-wave policy.  It
+was exact for the affected `M=2048` matrix, but three-repeat medians changed
+by only 0.1--0.3% (with one noisy `W3.5,N=6144` regression).  The extra
+template family materially increases the SM80 binary without a repeatable
+throughput gain, so the wrapper was reverted and split-K dispatch remains
+unchanged.
+
+## v87 rejected stage-tile unroll reduction
+
+The stage-4 row-group-8 specialization is register-heavy, so a temporary
+`#pragma unroll 1` probe reduced its resource entry from 126 to 122
+registers/thread.  It did not produce a repeatable latency improvement versus
+the retained v84 binary (the matched W2.5 `N=5120,M=2048` medians differed by
+about 0.3%), while stage-1/2/3 variants gained registers and slowed in the
+same build.  The pragma was reverted; the staged loop and generated schedule
+remain unchanged.
+
+## v88 selective stage-2 sixteen-group reuse
+
+The 50% campaign starts from fetched `origin/main` at `bdcf7f73`, which
+contains the merged PR #120 code.  The large-M stage-2 kernel now has a
+sixteen-row-group specialization which reuses each staged compressed-weight
+tile and decode across 256 input rows.  Automatic dispatch selects it only
+for the measured winning regions: `M=1024` at N=5120/10240/17408,
+`M=2048,N=5120` for transition widths 5--7, and `M>=4096,N!=1024`.
+All other shapes retain the merged eight-row-group policy.
+
+On the A100 with `K=5120`, 10 warmups, and 50 timed iterations, all 35
+selected M/N/rate cases improved versus the freshly merged main binary.  The
+geometric-mean speedup is `1.0565x`.  `M=1024,N=5120` improves by
+1.167--1.195x across transition widths 4--7; `M=4096,N=10240/12288` improves
+by about 1.057--1.062x.  The guarded split-1 and split-8 comparisons are
+bit-for-bit exact, as are representative excluded controls at M=512,
+N=1024, N=6144, and N=12288.
+
+The stage-2 sixteen-group resource entry uses 168 registers/thread and
+34,576 B static shared memory, with no local stack or spills.  This permits
+one 128-thread CTA per A100 SM and halves the grid relative to eight-group
+reuse.  The high register footprint explains why the specialization is
+profitable only once the grid has enough work to amortize decode and staged
+weight traffic.
+
+The matched Nsight Compute captures are `/tmp/v88_ncu_candidate_m1024.csv`
+and `/tmp/v88_ncu_base_m1024.csv` for
+`N=5120,M=1024,stage=2,bits=5`.  Sixteen-group reuse halves the grid from
+640 to 320 CTAs and lowers executed instructions from 208,359,040 to
+130,910,400.  Profiled duration falls from 1,252,320 ns to 1,046,272 ns;
+memory throughput rises from 71.56% to 78.22% while compute throughput moves
+from 27.63% to 20.73%.  For this rate, the candidate uses 168 registers and
+34,064 B static shared memory versus 96 registers and 17,680 B for the
+eight-group control.
+
+The source-correlated SASS extracts are `/tmp/v88_candidate_stage2_rg16.sass`
+and `/tmp/v88_base_stage2_rg8.sass`.  Static instructions rise from 1,384 to
+1,528 per CTA while the doubled row work scales HMMA/LDSM/STG exactly 2x
+(32/16/32 to 64/32/64).  Decode and address families remain nearly flat:
+IMAD 389->398, IADD3 105->96, LEA 92->91, SHF 126->126, LOP3 89->94, and
+PRMT 12->12.  The SSA/algebraic pass found no duplicated decode, redundant
+mask or shift, unnecessary conversion/permutation, address-expression
+regression, or spill introduced by the larger row group.
+
+The companion stage-1 sixteen-group probe was rejected.  Although it also
+halves the decode grid, matched N=5120 timings regressed by roughly 21--27%
+at M=512/2048/4096.  Stage 1 needs the extra occupancy supplied by the
+eight-group kernel, so no stage-1 dispatch or instantiation is retained.
+
+## v89 Qwen3.8-27B stage-3 sixteen-group reuse
+
+After PR #126 merged, this phase was refreshed to `origin/main` at
+`83c8fc33` and narrowed to the actual Qwen3.8-27B projection set:
+`5120x{1024,6144,10240,12288,17408}`, `6144x5120`, and `17408x5120`.
+The stage-3 kernel now reuses each compressed-weight tile and decode across
+256 input rows.  Its double-buffered 49,152 B input tile uses opt-in dynamic
+shared memory; the packed words and bank IDs remain static.  Dispatch is
+restricted to those seven K/N pairs and the measured winning M/rate regions.
+
+The Qwen-only A100 matrix used `M=1024/2048/4096`, transition widths 4--7,
+10 warmups, and 50 timed iterations.  Projection weights match the model
+stack: full-Q 1, full-KV 2, attention-out 2, linear-QKV 1, linear-Z 1,
+MLP gate/up 2, and MLP-down 1.  All 71 affected cases improved versus the
+newly merged main, for a projection-weighted geometric mean of `1.1629x`.
+At M=1024, attention-out improves by 1.383--1.401x and MLP-down by
+1.391--1.410x.  At M=4096, every affected projection/rate improves by
+1.086--1.169x.  Randomized split-1 and split-8 comparisons are bit-for-bit
+exact for K=5120, 6144, and 17408.
+
+The bits-5 static-K resource entry uses 168 registers/thread, 1,952 B static
+shared memory, and 49,152 B dynamic shared memory, with zero stack/local
+storage.  A temporary flattened representation of the original static input
+tile shifted excluded-route timing by 0.3--1%; it was rejected.  Restoring
+the original two-dimensional static layout makes excluded M=512,
+M=1024/N=6144, and M=2048/N=1024 controls neutral to measurement resolution.
+Stage-3 sixteen-group reuse at M=512 was also rejected because N=5120
+regressed by roughly 5--9%; that tier remains on eight groups.
+
+The matched Qwen attention-out NCU captures are
+`/tmp/v89_ncu_qwen_attn_candidate.csv` and
+`/tmp/v89_ncu_qwen_attn_base.csv` for
+`M=1024,K=6144,N=5120,stage=3,bits=5`.  The grid falls from 640 to 320 CTAs,
+executed instructions from 239,629,440 to 148,370,240, and profiled duration
+from 1,049,120 ns to 748,704 ns (`1.401x`).  Memory throughput rises from
+62.06% to 75.06%; compute throughput moves from 37.92% to 32.85%.  The
+control uses 96 registers and 26,520 B static shared memory; the candidate
+uses 168 registers, 1,952 B static shared, and 49,152 B dynamic shared.
+
+The matched SASS extracts are `/tmp/v89_qwen_attn_candidate_rg16.sass` and
+`/tmp/v89_qwen_attn_base_rg8.sass`.  Static instructions rise from 1,584 to
+1,736 per CTA while doubled row work scales HMMA/LDSM/STG exactly 2x
+(48/24/32 to 96/48/64).  Decode work stays flat (LOP3 121, SHF 139, PRMT 18,
+and LDG 25 in both); address families change only slightly (IMAD 453->466,
+IADD3 120->111, LEA 90->89).  The post-commit SSA/algebraic pass found no
+duplicated decode, redundant mask/shift, unnecessary conversion/permutation,
+address-expression regression, or spill.
+
+## v90 Qwen W2 M=4096 stage-4 sixteen-group reuse
+
+The stage-4 dynamic-shared probe was mixed when applied broadly: M=512
+regressed by 14--17%, M=2048 regressed by up to about 2%, and W2.5--W3.5 at
+M=4096 were neutral to slightly slower.  Those routes remain unchanged.
+The retained policy is restricted to Qwen3.8-27B, `M=4096`, W2
+(`TransitionBits=4`), and `N!=1024`.
+
+Three matched A100 repeats show every retained Qwen projection improving:
+full-Q 1.091x, attention-out 1.065x, linear-QKV 1.072x, linear-Z 1.077x,
+MLP gate/up 1.110x, and MLP-down 1.047x.  With the model projection
+multiplicities, the geometric mean is `1.0795x` versus v89.  Full-KV
+`N=1024` regressed by about 21% in the exploratory build and is explicitly
+excluded.  A randomized K=6144 attention-out comparison is bit-for-bit exact
+at split 8.
+
+The matched NCU captures are `/tmp/v90_ncu_qwen_fullq_candidate.csv` and
+`/tmp/v90_ncu_qwen_fullq_base.csv` for
+`M=4096,K=5120,N=12288,stage=4,bits=4`.  The candidate replaces the
+four-group control, reducing the grid from 12,288 to 3,072 CTAs and executed
+instructions from 3,180,982,272 to 1,204,902,912.  Profiled duration falls
+from 17,137,184 ns to 15,696,448 ns.  The control uses 64 registers and
+18,464 B static shared memory; the candidate uses 168 registers, 2,080 B
+static shared, and 65,536 B dynamic shared.
+
+The matched SASS extracts are `/tmp/v90_qwen_fullq_candidate_rg16.sass` and
+`/tmp/v90_qwen_fullq_base_rg4.sass`.  Per-CTA static instructions rise from
+1,592 to 1,912 while the 4x row work scales HMMA/LDSM/STG exactly 4x
+(32/16/16 to 128/64/64).  Decode work stays flat (SHF 186, PRMT 24, LDG 33)
+or nearly flat (LOP3 173->177); address families change from IMAD 371 to
+411, IADD3 116 to 110, and LEA 133 to 128.  The post-commit SSA/algebraic
+pass found no duplicated decode, redundant mask/shift, unnecessary
+conversion/permutation, address-expression regression, or spill.
+
 ## Reproduction
 
 ```bash

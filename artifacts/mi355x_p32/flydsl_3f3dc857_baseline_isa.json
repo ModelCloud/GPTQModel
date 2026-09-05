@@ -1,0 +1,441 @@
+{
+  "hsaco": "/tmp/qvq-isa-hhs-alik-bljk/gfx950.hsaco",
+  "hsaco_sha256": "04b15e474ada427872ec96867888a4828cad9135f6fa0c2bb813381f592824fd",
+  "counter_csv": "/tmp/qvq-flydsl-profile/raw/ubuntu2404-mi350x/896635_counter_collection.csv",
+  "symbols": [
+    {
+      "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB2_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB2_LPMXSA0_LPMXSB0_LPM0_LRVW2_LWPMn1_MIAV0_MIWT4_2_MXLIBL_MXSFNS_MO40_MGRIPM2_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+      "error": "symbol not in supplied code object"
+    },
+    {
+      "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT96x64x64_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA1536_LBSPPB512_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW4_LWPMn1_MIAV0_MIWT3_2_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA3_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+      "error": "symbol not in supplied code object"
+    },
+    {
+      "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT256x16x16_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB1_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB2_LPMXSA0_LPMXSB0_LPM0_LRVW2_LWPMn1_MIAV0_MIWT4_1_MXLIBL_MXSFNS_MO40_MGRIPM3_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB1_WSGRA0_WSGRB0_WS64_WG64_4_1_WGMXCCn1.kd",
+      "error": "symbol not in supplied code object"
+    },
+    {
+      "kernel": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB0_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB0_LPMXSA0_LPMXSB0_LPM0_LRVW1_LWPMn1_MIAV0_MIWT4_2_MXLIBL_MXSFNS_MO40_MGRIPM2_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS0_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+      "error": "symbol not in supplied code object"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_HHS_BH_Bias_HA_S_SAV_UserArgs_MT64x128x128_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR0_CLS0_CADS0_DTLA1_DTLB1_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT4_2_MXLIBL_MXSFNS_MO40_MGRIPM2_NTn1_NTA4_NTB0_NTC5_NTD4_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO1_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO1_USI0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG16_16_1_WGMXCCn1.kd",
+      "function_symbol": "Cijk_Alik_Bljk_HHS_BH_Bias_HA_S_SAV_UserArgs_MT64x128x128_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR0_CLS0_CADS0_DTLA1_DTLB1_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT4_2_MXLIBL_MXSFNS_MO40_MGRIPM2_NTn1_NTA4_NTB0_NTC5_NTD4_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO1_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO1_USI0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG16_16_1_WGMXCCn1",
+      "start": "0x690b200",
+      "stop": "0x6929e00",
+      "asm": "/tmp/qvq-flydsl-baseline-isa/690b200.amdgcn",
+      "static_total": 20260,
+      "static_opcodes": {
+        "buffer_load_dword": 3,
+        "buffer_load_dwordx2": 96,
+        "buffer_load_dwordx4": 52,
+        "buffer_load_short_d16": 145,
+        "buffer_load_short_d16_hi": 144,
+        "buffer_store_dword": 32,
+        "buffer_store_dwordx2": 192,
+        "buffer_store_dwordx4": 24,
+        "buffer_store_short": 384,
+        "ds_read_b128": 144,
+        "ds_read_b32": 97,
+        "ds_write_b128": 12,
+        "ds_write_b32": 5,
+        "s_abs_i32": 5,
+        "s_add_i32": 13,
+        "s_add_u32": 309,
+        "s_addc_u32": 197,
+        "s_and_b32": 36,
+        "s_and_b64": 520,
+        "s_atomic_inc": 1,
+        "s_barrier": 113,
+        "s_branch": 78,
+        "s_cbranch_scc0": 44,
+        "s_cbranch_scc1": 94,
+        "s_cbranch_vccz": 4,
+        "s_cmov_b32": 5,
+        "s_cmp_eq_i32": 1,
+        "s_cmp_eq_u32": 77,
+        "s_cmp_eq_u64": 11,
+        "s_cmp_ge_i32": 3,
+        "s_cmp_ge_u32": 11,
+        "s_cmp_gt_i32": 1,
+        "s_cmp_gt_u32": 4,
+        "s_cmp_le_i32": 4,
+        "s_cmp_le_u32": 2,
+        "s_cmp_lt_u32": 19,
+        "s_cmpk_eq_u32": 38,
+        "s_cmpk_gt_u32": 6,
+        "s_cmpk_lg_u32": 2,
+        "s_cselect_b32": 45,
+        "s_endpgm": 2,
+        "s_getpc_b64": 13,
+        "s_load_dword": 11,
+        "s_load_dwordx16": 5,
+        "s_load_dwordx2": 8,
+        "s_load_dwordx4": 4,
+        "s_load_dwordx8": 4,
+        "s_lshl2_add_u32": 1,
+        "s_lshl_b32": 158,
+        "s_lshl_b64": 11,
+        "s_lshr_b32": 19,
+        "s_max_i32": 1,
+        "s_min_u32": 4,
+        "s_mov_b32": 81,
+        "s_mov_b64": 40,
+        "s_mul_hi_i32": 4,
+        "s_mul_hi_u32": 25,
+        "s_mul_i32": 623,
+        "s_nop": 1247,
+        "s_setpc_b64": 13,
+        "s_sext_i32_i16": 1,
+        "s_sleep": 60,
+        "s_store_dword": 3,
+        "s_sub_i32": 6,
+        "s_sub_u32": 65,
+        "s_subb_u32": 22,
+        "s_waitcnt": 184,
+        "s_xor_b32": 10,
+        "v_accvgpr_read_b32": 1344,
+        "v_accvgpr_write_b32": 96,
+        "v_add_co_u32_e32": 12,
+        "v_add_co_u32_e64": 494,
+        "v_add_f32_e32": 1024,
+        "v_add_lshl_u32": 781,
+        "v_add_u32_e32": 22,
+        "v_add_u32_e64": 438,
+        "v_addc_co_u32_e64": 4,
+        "v_and_b32_e32": 24,
+        "v_cmp_eq_f32_e64": 4,
+        "v_cmp_ge_i32_e64": 112,
+        "v_cmp_gt_u32_e64": 2,
+        "v_cmp_lt_u32_e64": 1040,
+        "v_cmp_ne_u32_e64": 4,
+        "v_cmpx_eq_u32_e64": 6,
+        "v_cmpx_ge_u32_e64": 10,
+        "v_cmpx_gt_u32_e64": 6,
+        "v_cndmask_b32_e64": 954,
+        "v_cvt_f16_f32_e32": 384,
+        "v_cvt_f32_f16_sdwa": 1,
+        "v_cvt_f32_u32_e32": 20,
+        "v_cvt_f64_u32_e32": 20,
+        "v_cvt_pk_f16_f32": 384,
+        "v_cvt_u32_f32_e32": 10,
+        "v_cvt_u32_f64_e32": 10,
+        "v_exp_f32_e32": 576,
+        "v_fma_f32": 384,
+        "v_fma_mix_f32": 576,
+        "v_lshl_add_u32": 7,
+        "v_lshlrev_b32_e32": 525,
+        "v_lshlrev_b64": 48,
+        "v_lshrrev_b32_e32": 24,
+        "v_max_f32_e32": 192,
+        "v_max_f32_e64": 192,
+        "v_mfma_f32_16x16x32_f16": 128,
+        "v_min_f32_e32": 192,
+        "v_mov_b32_e32": 49,
+        "v_mul_f32_e32": 1954,
+        "v_mul_f64": 10,
+        "v_mul_lo_u32": 24,
+        "v_mul_u32_u24_e32": 6,
+        "v_mul_u32_u24_e64": 12,
+        "v_or_b32_e32": 48,
+        "v_pk_add_f32": 384,
+        "v_pk_mul_f32": 948,
+        "v_rcp_f32_e32": 576,
+        "v_rcp_f64_e32": 10,
+        "v_rcp_iflag_f32_e32": 10,
+        "v_readfirstlane_b32": 38,
+        "v_readlane_b32": 4,
+        "v_sub_u32_e32": 32,
+        "v_sub_u32_e64": 501,
+        "v_writelane_b32": 2,
+        "v_xor_b32_e32": 4
+      },
+      "issued_counters": {
+        "LDSBankConflict": {
+          "records": 16,
+          "min": 2.63624,
+          "max": 3.513363,
+          "mean": 3.207624125
+        },
+        "MeanOccupancyPerCU": {
+          "records": 16,
+          "min": 1.940671,
+          "max": 2.417474,
+          "mean": 2.2307769375
+        },
+        "SQ_INSTS_LDS": {
+          "records": 16,
+          "min": 740352.0,
+          "max": 740352.0,
+          "mean": 740352.0
+        },
+        "SQ_INSTS_MFMA": {
+          "records": 16,
+          "min": 983040.0,
+          "max": 983040.0,
+          "mean": 983040.0
+        },
+        "SQ_INSTS_SALU": {
+          "records": 16,
+          "min": 1310976.0,
+          "max": 1310976.0,
+          "mean": 1310976.0
+        },
+        "SQ_INSTS_VALU": {
+          "records": 16,
+          "min": 1254144.0,
+          "max": 1254144.0,
+          "mean": 1254144.0
+        },
+        "SQ_WAIT_INST_LDS": {
+          "records": 16,
+          "min": 828792.0,
+          "max": 830955.0,
+          "mean": 830247.0625
+        }
+      },
+      "resources": {
+        "Grid_Size": [
+          49152
+        ],
+        "Workgroup_Size": [
+          256
+        ],
+        "LDS_Block_Size": [
+          116224
+        ],
+        "Scratch_Size": [
+          0
+        ],
+        "VGPR_Count": [
+          32
+        ],
+        "Accum_VGPR_Count": [
+          160
+        ],
+        "SGPR_Count": [
+          112
+        ]
+      }
+    },
+    {
+      "kernel": "hgemm_f16_128x128x64x2_SPK1_W2x2x1_BLDS1_TN_AS1_0.kd",
+      "error": "symbol not in supplied code object"
+    },
+    {
+      "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT256x256x32_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB512_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW4_LWPMn1_MIAV0_MIWT8_8_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB4_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+      "error": "symbol not in supplied code object"
+    },
+    {
+      "kernel": "Cijk_Alik_Bljk_HHS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC0_AG1_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR0_CLS0_CADS0_DTLA1_DTLB1_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_8_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC4_NTD4_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO4_SVW8_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA8_VWB8_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+      "function_symbol": "Cijk_Alik_Bljk_HHS_BH_Bias_HA_S_SAV_UserArgs_MT256x256x64_MI16x16x1_CMS_SN_LDSB0_AFC0_AG1_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR0_CLS0_CADS0_DTLA1_DTLB1_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_8_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC4_NTD4_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO4_SVW8_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA8_VWB8_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1",
+      "start": "0xaffbe00",
+      "stop": "0xb156100",
+      "asm": "/tmp/qvq-flydsl-baseline-isa/affbe00.amdgcn",
+      "static_total": 218107,
+      "static_opcodes": {
+        "buffer_load_dword": 771,
+        "buffer_load_dwordx2": 384,
+        "buffer_load_dwordx4": 576,
+        "buffer_load_short_d16": 833,
+        "buffer_load_short_d16_hi": 832,
+        "buffer_store_dword": 1792,
+        "buffer_store_dwordx2": 896,
+        "buffer_store_dwordx4": 1024,
+        "buffer_store_short": 3072,
+        "ds_read_b128": 976,
+        "ds_read_b32": 1393,
+        "ds_read_b64": 576,
+        "ds_write_b128": 16,
+        "ds_write_b32": 5,
+        "s_abs_i32": 16,
+        "s_add_i32": 57,
+        "s_add_u32": 919,
+        "s_addc_u32": 699,
+        "s_and_b32": 39,
+        "s_and_b64": 6240,
+        "s_atomic_inc": 1,
+        "s_barrier": 667,
+        "s_branch": 81,
+        "s_cbranch_scc0": 62,
+        "s_cbranch_scc1": 119,
+        "s_cbranch_vccz": 4,
+        "s_cmov_b32": 5,
+        "s_cmp_eq_i32": 2,
+        "s_cmp_eq_u32": 81,
+        "s_cmp_eq_u64": 11,
+        "s_cmp_ge_i32": 14,
+        "s_cmp_ge_u32": 20,
+        "s_cmp_gt_i32": 1,
+        "s_cmp_gt_u32": 4,
+        "s_cmp_le_i32": 2,
+        "s_cmp_le_u32": 2,
+        "s_cmp_lt_u32": 19,
+        "s_cmpk_eq_u32": 62,
+        "s_cmpk_gt_u32": 15,
+        "s_cmpk_lg_u32": 2,
+        "s_cselect_b32": 60,
+        "s_endpgm": 2,
+        "s_getpc_b64": 57,
+        "s_getreg_b32": 1,
+        "s_load_dword": 11,
+        "s_load_dwordx16": 5,
+        "s_load_dwordx2": 8,
+        "s_load_dwordx4": 4,
+        "s_load_dwordx8": 4,
+        "s_lshl2_add_u32": 1,
+        "s_lshl_b32": 602,
+        "s_lshl_b64": 11,
+        "s_lshr_b32": 19,
+        "s_max_i32": 1,
+        "s_min_u32": 6,
+        "s_mov_b32": 81,
+        "s_mov_b64": 40,
+        "s_mul_hi_i32": 4,
+        "s_mul_hi_u32": 25,
+        "s_mul_i32": 5895,
+        "s_nop": 15811,
+        "s_setpc_b64": 68,
+        "s_sext_i32_i16": 1,
+        "s_sleep": 577,
+        "s_store_dword": 3,
+        "s_sub_i32": 4,
+        "s_sub_u32": 77,
+        "s_subb_u32": 35,
+        "s_waitcnt": 700,
+        "s_xor_b32": 16,
+        "v_accvgpr_read_b32": 17408,
+        "v_accvgpr_write_b32": 528,
+        "v_add_co_u32_e32": 20,
+        "v_add_co_u32_e64": 6188,
+        "v_add_f32_e32": 11264,
+        "v_add_lshl_u32": 9141,
+        "v_add_u32_e32": 68,
+        "v_add_u32_e64": 3306,
+        "v_addc_co_u32_e64": 4,
+        "v_and_b32_e32": 33,
+        "v_cmp_eq_f32_e64": 4,
+        "v_cmp_ge_i32_e64": 136,
+        "v_cmp_gt_u32_e64": 2,
+        "v_cmp_lt_u32_e64": 12480,
+        "v_cmp_ne_u32_e64": 4,
+        "v_cmpx_eq_u32_e64": 6,
+        "v_cmpx_ge_u32_e64": 10,
+        "v_cmpx_gt_u32_e64": 6,
+        "v_cndmask_b32_e64": 9378,
+        "v_cvt_f16_f32_e32": 3072,
+        "v_cvt_f32_f16_sdwa": 1,
+        "v_cvt_f32_u32_e32": 20,
+        "v_cvt_f64_u32_e32": 20,
+        "v_cvt_pk_f16_f32": 6144,
+        "v_cvt_u32_f32_e32": 10,
+        "v_cvt_u32_f64_e32": 10,
+        "v_exp_f32_e32": 7680,
+        "v_fma_f32": 5120,
+        "v_fma_mix_f32": 7680,
+        "v_lshl_add_u32": 8,
+        "v_lshlrev_b32_e32": 5831,
+        "v_lshlrev_b64": 64,
+        "v_lshrrev_b32_e32": 39,
+        "v_max_f32_e32": 2560,
+        "v_max_f32_e64": 2560,
+        "v_mfma_f32_16x16x32_f16": 640,
+        "v_mfma_i32_32x32x16_i8": 15,
+        "v_min_f32_e32": 2560,
+        "v_min_i32_e32": 4,
+        "v_mov_b32_e32": 344,
+        "v_mov_b64_e32": 1,
+        "v_mul_f32_e32": 23742,
+        "v_mul_f64": 10,
+        "v_mul_lo_u32": 38,
+        "v_mul_u32_u24_e32": 6,
+        "v_mul_u32_u24_e64": 12,
+        "v_or_b32_e32": 64,
+        "v_pk_add_f32": 6144,
+        "v_pk_mul_f32": 13734,
+        "v_rcp_f32_e32": 7680,
+        "v_rcp_f64_e32": 10,
+        "v_rcp_iflag_f32_e32": 10,
+        "v_readfirstlane_b32": 38,
+        "v_readlane_b32": 4,
+        "v_sub_u32_e32": 32,
+        "v_sub_u32_e64": 5781,
+        "v_writelane_b32": 2,
+        "v_xor_b32_e32": 12
+      },
+      "issued_counters": {
+        "LDSBankConflict": {
+          "records": 16,
+          "min": 0.112383227,
+          "max": 0.123678468,
+          "mean": 0.1180266413125
+        },
+        "MeanOccupancyPerCU": {
+          "records": 16,
+          "min": 3.416699,
+          "max": 3.633059,
+          "mean": 3.5190734999999997
+        },
+        "SQ_INSTS_LDS": {
+          "records": 16,
+          "min": 7919616.0,
+          "max": 7919616.0,
+          "mean": 7919616.0
+        },
+        "SQ_INSTS_MFMA": {
+          "records": 16,
+          "min": 31503360.0,
+          "max": 31503360.0,
+          "mean": 31503360.0
+        },
+        "SQ_INSTS_SALU": {
+          "records": 16,
+          "min": 10607104.0,
+          "max": 10607104.0,
+          "mean": 10607104.0
+        },
+        "SQ_INSTS_VALU": {
+          "records": 16,
+          "min": 35384320.0,
+          "max": 35384320.0,
+          "mean": 35384320.0
+        },
+        "SQ_WAIT_INST_LDS": {
+          "records": 16,
+          "min": 6040818.0,
+          "max": 6044235.0,
+          "mean": 6041852.0
+        }
+      },
+      "resources": {
+        "Grid_Size": [
+          65536
+        ],
+        "Workgroup_Size": [
+          256
+        ],
+        "LDS_Block_Size": [
+          135168
+        ],
+        "Scratch_Size": [
+          0
+        ],
+        "VGPR_Count": [
+          120
+        ],
+        "Accum_VGPR_Count": [
+          384
+        ],
+        "SGPR_Count": [
+          96
+        ]
+      }
+    },
+    {
+      "kernel": "hgemm_f16_256x256x64x2_SPK1_W2x4x1_BLDS1_TN_AS1_0.kd",
+      "error": "symbol not in supplied code object"
+    }
+  ],
+  "warning": "Whole-symbol static counts include untaken branches. Issued counters include all profiled launches."
+}

@@ -1,0 +1,51 @@
+{
+  "schema": "qvq_p32_gfx950_cache_profile_v1",
+  "date_utc": "2026-09-04",
+  "hardware": {
+    "name": "AMD Instinct MI355X VF",
+    "arch": "gfx950:sramecc+:xnack-",
+    "compute_units": 256
+  },
+  "software": {
+    "torch": "2.13.0+rocm10.0.0",
+    "hip": "7.15.26333",
+    "triton": "3.8.0",
+    "rocprof_compute": "3.8.0"
+  },
+  "case": {
+    "bits": 3.0,
+    "m": 64,
+    "k": 5120,
+    "n": 12288,
+    "repetitions": 20
+  },
+  "passes": {
+    "predecode_plus_first_gemm_ms": 0.537645,
+    "steady_fp32_output_gemm_ms": 0.036456,
+    "estimated_predecode_ms": 0.501189,
+    "fixed_fused_baseline_ms": 0.142761,
+    "estimated_cache_break_even_calls": 4.7146
+  },
+  "runtime_storage": {
+    "p32_bytes": 23838720,
+    "predecoded_fp16_bytes": 125829120,
+    "cache_to_p32_ratio": 5.278350515463917
+  },
+  "predecode_static_isa": {
+    "compiler_stages": 1,
+    "static_opcodes": 156,
+    "valu": 87,
+    "salu": 52,
+    "vmem": 11,
+    "lds": 6,
+    "mfma": 0,
+    "alignbit_b32": 2,
+    "mad_u32_u24": 2,
+    "vgpr": 16,
+    "sgpr": 25,
+    "dynamic_lds_bytes": 2048,
+    "scratch_bytes": 0,
+    "code_bytes": 1220
+  },
+  "profiler_note": "Direct rocprofv3 injection into Python/Triton aborts because LLVM option spirv-expand-step is registered twice. Timings use synchronized ROCm events; ISA is direct llvm-objdump disassembly of the exact gfx950 HSACO. The already documented minimal-HSACO rocprof-compute workaround remains available for counter collection."
+}

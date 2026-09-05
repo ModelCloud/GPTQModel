@@ -14,7 +14,8 @@ import threading
 import time
 import zlib
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Optional, Tuple
+from dataclasses import replace
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -53,19 +54,29 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qvq import QVQLinear
 from ..quantization.config import FORMAT, METHOD, GPTQConfig, HessianConfig, QVQConfig
 from ..quantization.gptq import GPTQ
-from ..quantization.qvq import QVQQuantizationTelemetry, quantize_qvq_linear
+from ..quantization.qvq import (
+    QVQQuantizationTelemetry,
+    quantize_qvq_linear,
+    rht_preprocess_weight,
+)
+from ..quantization.qvq_activation import (
+    dequantize_qvq_fp8_activation,
+    fake_quantize_qvq_fp8_activation,
+    quantize_qvq_fp8_activation,
+)
 from ..quantization.qvq_axis_policy import (
     qvq_shared_input_seed,
     resolve_qvq_transform_axes,
     set_qvq_transform_axis_metadata,
     validate_qvq_transform_axis_overrides,
 )
+from ..quantization.qvq_yaqa import YaqaGramSketch, capture_yaqa_sketch_b
+from ..quantization.rotation.hadamard_utils import matmul_hadU
 from ..quantization.swiglu import (
     apply_swiglu_reparameterization,
     choose_swiglu_scales,
     select_swiglu_candidate_triplet,
 )
-from ..quantization.qvq_yaqa import capture_yaqa_sketch_b
 from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.backend import BACKEND
 from ..utils.device import get_device
@@ -75,8 +86,14 @@ from ..utils.model import find_modules, get_layers_with_prefixes, recurse_setatt
 from ..utils.module_locks import parent_module_lock
 from .qvq_output_alignment import QVQOutputAlignmentAttachment
 
-
 log = setup_logger()
+
+_FP8_REPLAY_SEARCH_FOLDS = 2
+# Real-model H200 trials at 0.1% and 2% admitted candidates that improved
+# teacher-forced PPL/Top-1 but regressed held-out KL. Keep replay fail-closed
+# above the strongest observed candidate until broader evidence justifies it.
+_FP8_REPLAY_MINIMUM_RELATIVE_KL_IMPROVEMENT = 0.10
+_FP8_REPLAY_TOPN_REGRESSION_LIMIT = 0.0025
 
 
 def clone_qvq_config_for_module(qcfg: QVQConfig, module_full_name: str) -> Optional[QVQConfig]:
@@ -120,6 +137,9 @@ class QVQProcessor(LoopProcessor):
     # QVQ uses the input Hessian only; routing bypass may capture expert inputs
     # directly without executing an otherwise-discarded dense projection.
     moe_input_capture_without_forward = True
+    _YAQA_HIGH_MEMORY_CUDA_BYTES = 128 * 1024**3
+    _YAQA_HIGH_MEMORY_BATCH_TOKENS = 1024
+
     def __init__(
         self,
         tokenizer,
@@ -173,8 +193,8 @@ class QVQProcessor(LoopProcessor):
         self.preserve_batch_keep_mask = True
         self.avg_losses = []
         self._stats_lock = threading.Lock()
-        self._yaqa_input_hessians: Dict[str, torch.Tensor] = {}
-        self._yaqa_output_hessians: Dict[str, torch.Tensor] = {}
+        self._yaqa_input_hessians: Dict[str, torch.Tensor | YaqaGramSketch] = {}
+        self._yaqa_output_hessians: Dict[str, torch.Tensor | YaqaGramSketch] = {}
         self._yaqa_stats: Dict[str, Any] = {}
         self._yaqa_factor_lock = threading.Lock()
         self._yaqa_prepared = qcfg.rounding != "yaqa"
@@ -439,18 +459,24 @@ class QVQProcessor(LoopProcessor):
         return target_device
 
     def prepare_module_granular_replay(self, gptq_model: BaseQModel) -> None:
-        """Cache exact dense FP32 logits for later propagated replay."""
+        """Cache exact dense FP32 logits for later propagated candidate replay."""
 
         replay_config = self.qcfg.module_granular_replay
-        if replay_config is None:
+        activation_config = self.qcfg.activation
+        fp8_replay_enabled = bool(
+            activation_config is not None
+            and activation_config.target == "p32_operand"
+            and activation_config.replay_passes == 1
+        )
+        if replay_config is None and not fp8_replay_enabled:
             return
         if self._module_replay_search_calibration is None or self._module_replay_confirmation_calibration is None:
-            raise ValueError("QVQ module-granular replay requires explicit search and confirmation streams.")
+            raise ValueError("QVQ propagated replay requires explicit search and confirmation streams.")
         if self._module_replay_model is not None:
-            raise RuntimeError("QVQ module-granular replay teacher targets were already prepared.")
+            raise RuntimeError("QVQ propagated replay teacher targets were already prepared.")
         model = gptq_model.model
         if any(isinstance(module, BaseQuantLinear) for module in model.modules()):
-            raise RuntimeError("QVQ module-granular replay teacher capture requires an entirely dense source model.")
+            raise RuntimeError("QVQ propagated replay teacher capture requires an entirely dense source model.")
         self._ensure_module_replay_residency(model)
         input_embeddings = model.get_input_embeddings()
         if input_embeddings is None:
@@ -460,7 +486,12 @@ class QVQProcessor(LoopProcessor):
             "search": list(self._module_replay_search_calibration),
             "confirmation": list(self._module_replay_confirmation_calibration),
         }
-        if len(streams["search"]) < replay_config.search_folds:
+        search_folds = (
+            replay_config.search_folds
+            if replay_config is not None
+            else _FP8_REPLAY_SEARCH_FOLDS
+        )
+        if len(streams["search"]) < search_folds:
             raise ValueError("QVQ module replay search rows must cover every configured search fold.")
         fingerprints = {
             name: {self._module_replay_row_fingerprint(row) for row in rows}
@@ -610,7 +641,7 @@ class QVQProcessor(LoopProcessor):
                 self._propagation_gates.pop(module_full_name, None)
 
     def _module_replay_metrics(self, split_name: str, *, fold_index: int = 0, folds: int = 1) -> Dict[str, float]:
-        """Replay one split and compare exact final logits against cached dense hidden states."""
+        """Replay one split and compare exact final logits against cached dense logits."""
 
         if self._module_replay_model is None:
             raise RuntimeError("QVQ module replay model is unavailable.")
@@ -623,7 +654,7 @@ class QVQProcessor(LoopProcessor):
         teacher_logits_rows = self._module_replay_teacher_logits[split_name][fold_index::folds]
         if not rows:
             raise ValueError("QVQ module replay produced an empty search fold.")
-        totals = {"kl": 0.0, "top1": 0.0, "top5": 0.0, "top10": 0.0, "tokens": 0}
+        totals = {"kl": 0.0, "nll": 0.0, "top1": 0.0, "top5": 0.0, "top10": 0.0, "tokens": 0}
         with torch.no_grad():
             for row, teacher_logits_cpu in zip(rows, teacher_logits_rows, strict=True):
                 student_logits = model(**self._module_replay_model_inputs(row, input_device), use_cache=False).logits[
@@ -643,12 +674,22 @@ class QVQProcessor(LoopProcessor):
                 student_logits = student_logits[valid]
                 if teacher_logits.numel() == 0:
                     continue
+                labels = row["input_ids"][:, 1:].to(device=student_logits.device)[valid]
                 teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
                 student_log_probs = F.log_softmax(student_logits, dim=-1)
                 token_count = int(teacher_logits.shape[0])
-                totals["kl"] += float(
-                    F.kl_div(student_log_probs, teacher_log_probs, reduction="sum", log_target=True).item()
+                totals["kl"] += max(
+                    0.0,
+                    float(
+                        F.kl_div(
+                            student_log_probs,
+                            teacher_log_probs,
+                            reduction="sum",
+                            log_target=True,
+                        ).item()
+                    ),
                 )
+                totals["nll"] += float(F.cross_entropy(student_logits, labels, reduction="sum").item())
                 teacher_top10 = teacher_logits.topk(10, dim=-1).indices
                 student_top10 = student_logits.topk(10, dim=-1).indices
                 totals["top1"] += float((teacher_top10[..., 0] == student_top10[..., 0]).sum().item())
@@ -664,6 +705,7 @@ class QVQProcessor(LoopProcessor):
             raise ValueError("QVQ module replay split contains no valid next-token positions.")
         return {
             "kl_forward": totals["kl"] / tokens,
+            "mean_nll": totals["nll"] / tokens,
             "top1_agreement": totals["top1"] / tokens,
             "top5_overlap": totals["top5"] / tokens,
             "top10_overlap": totals["top10"] / tokens,
@@ -723,6 +765,7 @@ class QVQProcessor(LoopProcessor):
             dual_v2=module_qcfg.format == FORMAT.QVQ_DUAL_V2,
             v2b4_p64=module_qcfg.format == FORMAT.QVQ_V2B4_P64,
             v2b2_p32=module_qcfg.format == FORMAT.QVQ_V2B2_P32,
+            activation=module_qcfg.activation,
             input_hadamard=input_hadamard,
             output_hadamard=output_hadamard,
         ).eval()
@@ -1388,6 +1431,100 @@ class QVQProcessor(LoopProcessor):
         # default; users can still override this explicitly in YaqaConfig.
         return 4 * 1024**3
 
+    def yaqa_execution_plan(
+        self,
+        gptq_model: BaseQModel,
+        *,
+        prepared_batches: Sequence[dict[str, torch.Tensor]] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve factor strategy, batching, and recomputation for the current device."""
+
+        named_tensors = tuple(gptq_model.model.named_parameters()) + tuple(gptq_model.model.named_buffers())
+        source_devices = {tensor.device for _, tensor in named_tensors}
+        if len(source_devices) != 1:
+            raise RuntimeError(
+                "QVQ YAQA currently requires the dense source model on one device before its full-model backward; "
+                f"found devices {sorted(map(str, source_devices))}."
+            )
+        source_device = next(iter(source_devices))
+        target_device = normalize_device_like(self.qcfg.device) or source_device
+        targets, decoder_layers = self._yaqa_target_modules(gptq_model)
+        total_factor_bytes = sum(self._yaqa_factor_bytes(module) for module in targets.values())
+        max_factor_bytes = self.qcfg.yaqa.max_factor_bytes_per_pass
+        if max_factor_bytes is None:
+            max_factor_bytes = self._yaqa_default_max_factor_bytes(target_device, total_factor_bytes)
+
+        gram_strategy = self.qcfg.yaqa.gram_strategy
+        free_bytes = total_bytes = 0
+        if target_device.type == "cuda":
+            free_bytes, total_bytes = torch.cuda.mem_get_info(target_device)
+        if gram_strategy == "auto":
+            gram_strategy = "exact"
+            if target_device.type == "cuda":
+                reserve_bytes = max(16 * 1024**3, total_bytes // 4)
+                exact_budget = min(max_factor_bytes, max(0, free_bytes - reserve_bytes))
+                if total_factor_bytes > exact_budget:
+                    gram_strategy = "streaming_projected"
+
+        high_memory_streaming = (
+            gram_strategy == "streaming_projected"
+            and target_device.type == "cuda"
+            and total_bytes >= self._YAQA_HIGH_MEMORY_CUDA_BYTES
+        )
+        configured_batch_size = self.qcfg.yaqa.batch_size
+        batch_size = (
+            16 if configured_batch_size == "auto" and high_memory_streaming
+            else 8 if configured_batch_size == "auto"
+            else configured_batch_size
+        )
+        configured_checkpointing = self.qcfg.yaqa.activation_checkpointing
+        within_activation_budget = bool(prepared_batches) and max(
+            batch["attention_mask"].numel() for batch in prepared_batches
+        ) <= self._YAQA_HIGH_MEMORY_BATCH_TOKENS
+        activation_checkpointing = (
+            not (high_memory_streaming and within_activation_budget)
+            if configured_checkpointing == "auto"
+            else configured_checkpointing
+        )
+        return {
+            "source_device": source_device,
+            "target_device": target_device,
+            "targets": targets,
+            "decoder_layers": decoder_layers,
+            "total_factor_bytes": total_factor_bytes,
+            "max_factor_bytes": max_factor_bytes,
+            "gram_strategy": gram_strategy,
+            "batch_size": batch_size,
+            "activation_checkpointing": activation_checkpointing,
+            "high_memory_streaming": high_memory_streaming,
+            "free_bytes": free_bytes,
+            "total_bytes": total_bytes,
+        }
+
+    @classmethod
+    def bound_yaqa_batch_tokens(
+        cls,
+        batches: Sequence[dict[str, torch.Tensor]],
+    ) -> list[dict[str, torch.Tensor]]:
+        """Split prepared batches so high-memory no-recompute capture stays within its measured token envelope."""
+
+        bounded = []
+        for batch in batches:
+            attention_mask = batch["attention_mask"]
+            batch_rows, sequence_length = attention_mask.shape
+            rows_per_batch = max(1, cls._YAQA_HIGH_MEMORY_BATCH_TOKENS // sequence_length)
+            for start in range(0, batch_rows, rows_per_batch):
+                stop = min(batch_rows, start + rows_per_batch)
+                bounded.append(
+                    {
+                        name: value[start:stop]
+                        if isinstance(value, torch.Tensor) and value.ndim > 0 and value.shape[0] == batch_rows
+                        else value
+                        for name, value in batch.items()
+                    }
+                )
+        return bounded
+
     @classmethod
     def _yaqa_target_chunks(
         cls,
@@ -1466,45 +1603,46 @@ class QVQProcessor(LoopProcessor):
                 "QVQ YAQA requires every source tensor to be materialized; found meta tensors including "
                 f"{meta_names[:3]}. Reload with `offload_to_disk=False`."
             )
-        source_devices = {tensor.device for _, tensor in named_tensors}
-        if len(source_devices) != 1:
-            raise RuntimeError(
-                "QVQ YAQA currently requires the dense source model on one device before its full-model backward; "
-                f"found devices {sorted(map(str, source_devices))}."
+        execution_plan = self.yaqa_execution_plan(gptq_model, prepared_batches=self.yaqa_calibration)
+        source_device = execution_plan["source_device"]
+        target_device = execution_plan["target_device"]
+        targets = execution_plan["targets"]
+        decoder_layers = execution_plan["decoder_layers"]
+        total_factor_bytes = execution_plan["total_factor_bytes"]
+        max_factor_bytes = execution_plan["max_factor_bytes"]
+        gram_strategy = execution_plan["gram_strategy"]
+        activation_checkpointing = execution_plan["activation_checkpointing"]
+        packed_symmetric_accumulators = target_device.type == "mps" and gram_strategy == "exact"
+        target_chunks = (
+            [targets]
+            if gram_strategy == "streaming_projected"
+            else self._yaqa_target_chunks(
+                targets,
+                decoder_layers,
+                max_factor_bytes,
+                packed_symmetric=packed_symmetric_accumulators,
             )
-        source_device = next(iter(source_devices))
-        target_device = normalize_device_like(self.qcfg.device) or source_device
-        targets, decoder_layers = self._yaqa_target_modules(gptq_model)
-        max_factor_bytes = self.qcfg.yaqa.max_factor_bytes_per_pass
-        if max_factor_bytes is None:
-            total_factor_bytes = sum(self._yaqa_factor_bytes(module) for module in targets.values())
-            max_factor_bytes = self._yaqa_default_max_factor_bytes(
-                target_device,
-                total_factor_bytes,
-            )
-        packed_symmetric_accumulators = target_device.type == "mps"
-        target_chunks = self._yaqa_target_chunks(
-            targets,
-            decoder_layers,
-            max_factor_bytes,
-            packed_symmetric=packed_symmetric_accumulators,
         )
         log.info(
             "QVQ YAQA: collecting full-model Sketch-B factors targets=%d batches=%d device=%s seed=%d "
             "minimum_sequences=%d regularization=%.6g batch_size=%d activation_checkpointing=%s "
-            "checkpointed_modules=%d factor_passes=%d max_factor_bytes_per_pass=%d packed_symmetric=%s",
+            "checkpointed_modules=%d factor_passes=%d max_factor_bytes_per_pass=%d packed_symmetric=%s "
+            "gram_strategy=%s gram_projection_rank=%s dense_factor_bytes=%d",
             len(targets),
             len(self.yaqa_calibration),
             target_device,
             self.qcfg.yaqa.seed,
             self.qcfg.yaqa.minimum_sequences,
             self.qcfg.yaqa.regularization,
-            self.qcfg.yaqa.batch_size,
-            self.qcfg.yaqa.activation_checkpointing,
-            len(decoder_layers) if self.qcfg.yaqa.activation_checkpointing else 0,
+            execution_plan["batch_size"],
+            activation_checkpointing,
+            len(decoder_layers) if activation_checkpointing else 0,
             len(target_chunks),
             max_factor_bytes,
             packed_symmetric_accumulators,
+            gram_strategy,
+            self.qcfg.yaqa.gram_projection_rank if gram_strategy == "streaming_projected" else None,
+            total_factor_bytes,
         )
         progress_stride = max(1, len(self.yaqa_calibration) // 16)
         moved = source_device != target_device
@@ -1541,10 +1679,20 @@ class QVQProcessor(LoopProcessor):
                         seed=self.qcfg.yaqa.seed,
                         minimum_sequences=self.qcfg.yaqa.minimum_sequences,
                         first_decoder_layer=decoder_layers[0],
-                        checkpoint_modules=decoder_layers if self.qcfg.yaqa.activation_checkpointing else (),
+                        checkpoint_modules=decoder_layers if activation_checkpointing else (),
                         progress_callback=log_progress,
                         mps_cleanup_interval=self.qcfg.yaqa.mps_cleanup_interval,
                         chat_template_config=self.qcfg.yaqa.chat_template,
+                        activation=self.qcfg.activation,
+                        activation_modules=(
+                            targets if self.qcfg.activation is not None else None
+                        ),
+                        gram_strategy="streaming_projected" if gram_strategy == "streaming_projected" else "batched",
+                        gram_projection_rank=(
+                            self.qcfg.yaqa.gram_projection_rank
+                            if gram_strategy == "streaming_projected"
+                            else None
+                        ),
                     )
                     input_hessians.update(pass_inputs)
                     output_hessians.update(pass_outputs)
@@ -1567,15 +1715,25 @@ class QVQProcessor(LoopProcessor):
             "input_factor_elements",
             "output_factor_elements",
             "factor_storage_bytes",
+            "dense_factor_storage_bytes",
             "mps_cleanup_count",
         )
         for field in sum_fields:
             stats[field] = sum(item[field] for item in pass_stats)
+        stats["factor_compression_ratio"] = stats["dense_factor_storage_bytes"] / max(
+            1, stats["factor_storage_bytes"]
+        )
         stats["phase_wall_seconds"] = {
             phase: sum(item["phase_wall_seconds"][phase] for item in pass_stats)
             for phase in pass_stats[0]["phase_wall_seconds"]
         }
         stats["factor_passes"] = len(pass_stats)
+        stats["configured_gram_strategy"] = self.qcfg.yaqa.gram_strategy
+        stats["selected_gram_strategy"] = gram_strategy
+        stats["configured_batch_size"] = self.qcfg.yaqa.batch_size
+        stats["effective_batch_size"] = max(batch["attention_mask"].shape[0] for batch in self.yaqa_calibration)
+        stats["configured_activation_checkpointing"] = self.qcfg.yaqa.activation_checkpointing
+        stats["high_memory_streaming"] = execution_plan["high_memory_streaming"]
         stats["max_factor_bytes_per_pass"] = max_factor_bytes
         stats["pass_target_counts"] = [len(chunk) for chunk in target_chunks]
         stats["pass_factor_bytes"] = [item["factor_storage_bytes"] for item in pass_stats]
@@ -1651,6 +1809,15 @@ class QVQProcessor(LoopProcessor):
             "qcfg": module_qcfg,
             "yaqa_input_hessian": yaqa_input_hessian,
             "yaqa_output_hessian": yaqa_output_hessian,
+            # Calibration forwards may run replicas on multiple devices. Keep
+            # accelerator scalars device-local until finalization instead of
+            # introducing cross-device adds or a synchronization in the hook.
+            "activation_quantization_error": {},
+            "activation_quantization_error_lock": threading.Lock(),
+            "fp8_replay_rows": [],
+            "fp8_replay_row_count": 0,
+            "fp8_replay_lock": threading.Lock(),
+            "fp8_replay_stats": None,
         }
         if self._output_alignment is not None:
             self._output_alignment.register_module(module)
@@ -1871,8 +2038,7 @@ class QVQProcessor(LoopProcessor):
             task_entry = self.tasks[name]
             with self._pristine_hessian_lock:
                 task = self._active_pristine_hessian_captures.get(name)
-                if task is None and task_entry.get("pristine_hessian_complete", False):
-                    return
+                skip_hessian_capture = task is None and task_entry.get("pristine_hessian_complete", False)
             if task is None:
                 task = task_entry["capture"]
             source = inp[0]
@@ -1892,6 +2058,78 @@ class QVQProcessor(LoopProcessor):
             capture_source = prepared_source.data
             capture_output = None if prepared_output is None else prepared_output.data
             qcfg = task_entry["qcfg"]
+            if (
+                qcfg.activation is not None
+                and qcfg.activation.target == "p32_operand"
+                and qcfg.activation.replay_passes == 1
+                and capture_output is not None
+                and capture_source.numel() > 0
+            ):
+                source_rows = capture_source.reshape(-1, capture_source.shape[-1])
+                output_rows = capture_output.reshape(-1, capture_output.shape[-1])
+                if source_rows.shape[0] != output_rows.shape[0]:
+                    raise RuntimeError("QVQ FP8 replay source/output row counts differ.")
+                with task_entry["fp8_replay_lock"]:
+                    remaining = (
+                        qcfg.activation.replay_max_rows
+                        - task_entry["fp8_replay_row_count"]
+                    )
+                    take = min(max(0, remaining), int(source_rows.shape[0]))
+                    if take:
+                        task_entry["fp8_replay_rows"].append(
+                            (
+                                source_rows[:take].detach().clone(),
+                                output_rows[:take].detach().clone(),
+                            )
+                        )
+                        task_entry["fp8_replay_row_count"] += take
+            if (
+                qcfg.activation is not None
+                and qcfg.activation.target == "linear_input"
+                and capture_source.numel() > 0
+            ):
+                _, activation_scale, dequantized_source = fake_quantize_qvq_fp8_activation(
+                    capture_source,
+                    format=qcfg.activation.format,
+                    scale_method=qcfg.activation.scale_method,
+                    validate=False,
+                )
+                source_fp32 = capture_source.detach().to(torch.float32)
+                error = dequantized_source.detach().to(torch.float32) - source_fp32
+                update = {
+                    "elements": capture_source.numel(),
+                    "source_square_sum": source_fp32.square().sum(),
+                    "error_square_sum": error.square().sum(),
+                    "maximum_absolute_error": error.abs().amax(),
+                    "minimum_scale": activation_scale.amin(),
+                    "maximum_scale": activation_scale.amax(),
+                    "finite": torch.isfinite(source_fp32).all() & torch.isfinite(dequantized_source).all(),
+                }
+                with task_entry["activation_quantization_error_lock"]:
+                    accumulated_by_device = task_entry["activation_quantization_error"]
+                    accumulated = accumulated_by_device.get(capture_source.device)
+                    if accumulated is None:
+                        accumulated_by_device[capture_source.device] = update
+                    else:
+                        accumulated["elements"] += update["elements"]
+                        accumulated["source_square_sum"].add_(update["source_square_sum"])
+                        accumulated["error_square_sum"].add_(update["error_square_sum"])
+                        accumulated["maximum_absolute_error"] = torch.maximum(
+                            accumulated["maximum_absolute_error"], update["maximum_absolute_error"]
+                        )
+                        accumulated["minimum_scale"] = torch.minimum(
+                            accumulated["minimum_scale"], update["minimum_scale"]
+                        )
+                        accumulated["maximum_scale"] = torch.maximum(
+                            accumulated["maximum_scale"], update["maximum_scale"]
+                        )
+                        accumulated["finite"].logical_and_(update["finite"])
+                capture_source = dequantized_source
+            if skip_hessian_capture:
+                # Pristine Hessian collection may already be complete, but
+                # native teacher rows are a separate FP8 replay artifact and
+                # must still be captured from the live dense forward above.
+                return
             if (
                 qcfg.propagated_bank_selection
                 and qcfg.format != FORMAT.QVQ_V2B2_P32
@@ -1918,6 +2156,318 @@ class QVQProcessor(LoopProcessor):
             task.add_batch(capture_source, capture_output, batch_index=self.current_batch_index())
 
         return capture_input
+
+    @staticmethod
+    def _activation_quantization_error_summary(task_entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        accumulated_by_device = task_entry.get("activation_quantization_error")
+        if not accumulated_by_device:
+            return None
+        accumulated_values = tuple(accumulated_by_device.values())
+        if not all(bool(accumulated["finite"].item()) for accumulated in accumulated_values):
+            raise ValueError("QVQ A8 calibration observed non-finite source or dequantized activations.")
+        elements = sum(int(accumulated["elements"]) for accumulated in accumulated_values)
+        source_square_sum = sum(float(accumulated["source_square_sum"].item()) for accumulated in accumulated_values)
+        error_square_sum = sum(float(accumulated["error_square_sum"].item()) for accumulated in accumulated_values)
+        epsilon = torch.finfo(torch.float32).tiny
+        config = task_entry["qcfg"].activation
+        return {
+            "bits": config.bits,
+            "format": config.format,
+            "scale_method": config.scale_method,
+            "elements": elements,
+            "rmse": math.sqrt(error_square_sum / max(1, elements)),
+            "relative_rmse": math.sqrt(error_square_sum / max(source_square_sum, epsilon)),
+            "maximum_absolute_error": max(
+                float(accumulated["maximum_absolute_error"].item()) for accumulated in accumulated_values
+            ),
+            "minimum_scale": min(float(accumulated["minimum_scale"].item()) for accumulated in accumulated_values),
+            "maximum_scale": max(float(accumulated["maximum_scale"].item()) for accumulated in accumulated_values),
+        }
+
+    def _fp8_replay_reencode(
+        self,
+        module: NamedModule,
+        module_qcfg: QVQConfig,
+        canonical_weight: torch.Tensor,
+        quantization_hessian: torch.Tensor,
+        quantization_kwargs: Dict[str, Any],
+        first_result,
+        task_entry: Dict[str, Any],
+    ):
+        """Re-encode once, then promote only through disjoint final-logit replay."""
+
+        config = module_qcfg.activation
+        if (
+            config is None
+            or config.target != "p32_operand"
+            or config.replay_passes != 1
+        ):
+            return first_result
+        if module_qcfg.rounding != "block_ldlq":
+            task_entry["fp8_replay_stats"] = {"selected": False, "reason": "rounding_not_block_ldlq"}
+            return first_result
+        if not isinstance(module.module, torch.nn.Linear):
+            task_entry["fp8_replay_stats"] = {"selected": False, "reason": "non_linear_module"}
+            return first_result
+        if canonical_weight.device.type != "cuda":
+            raise RuntimeError("QVQ FP8 replay re-encode requires CUDA quantization on a native FP8 device.")
+        properties = torch.cuda.get_device_properties(canonical_weight.device)
+        if (properties.major, properties.minor) != (9, 0):
+            raise RuntimeError(
+                "QVQ FP8 replay re-encode requires an SM90 native FP8 device; "
+                f"found {properties.name} with compute capability {properties.major}.{properties.minor}."
+            )
+
+        replay_rows = task_entry.get("fp8_replay_rows", ())
+        if not replay_rows:
+            raise RuntimeError(f"QVQ FP8 replay captured no native teacher rows for `{module.full_name}`.")
+        inputs = torch.cat(
+            [rows[0].to(device=canonical_weight.device) for rows in replay_rows],
+            dim=0,
+        )
+        teacher_output = torch.cat(
+            [rows[1].to(device=canonical_weight.device) for rows in replay_rows],
+            dim=0,
+        )
+        validation_rows = max(
+            1,
+            int(inputs.shape[0] * config.replay_validation_fraction),
+        )
+        if inputs.shape[0] - validation_rows < 1:
+            raise RuntimeError("QVQ FP8 replay needs at least one train and one held-out row.")
+        train_inputs = inputs[:-validation_rows]
+        train_teacher = teacher_output[:-validation_rows]
+        validation_inputs = inputs[-validation_rows:]
+        validation_teacher = teacher_output[-validation_rows:]
+
+        replay_qcfg = copy.deepcopy(module_qcfg)
+        replay_qcfg.activation.kernel_mode = "require"
+        first_candidate = self._module_replay_qlinear(
+            module.module,
+            module.full_name,
+            replay_qcfg,
+            first_result,
+        )
+        compute_dtype = torch.float16
+        with torch.inference_mode():
+            transformed = first_candidate._qvq_prepare_inference_input(
+                train_inputs,
+                compute_dtype,
+            )
+            quantized, row_scale = quantize_qvq_fp8_activation(
+                transformed,
+                format=config.format,
+                scale_method=config.scale_method,
+                validate=False,
+            )
+            deployed_input = dequantize_qvq_fp8_activation(
+                quantized,
+                row_scale,
+                dtype=torch.float32,
+            )
+            # Execute the exact kernel whose operand geometry defines G/C.
+            native_inner = first_candidate._inner_forward_fp8(quantized, row_scale)
+            if not bool(torch.isfinite(native_inner).all()):
+                raise RuntimeError("QVQ FP8 replay native student produced non-finite inner outputs.")
+
+            teacher_inner = train_teacher.to(torch.float32)
+            if first_result.bias is not None:
+                teacher_inner = teacher_inner - first_result.bias.to(torch.float32)
+            teacher_inner = teacher_inner / first_result.SV.to(torch.float32)
+            if first_result.output_hadamard:
+                teacher_inner = matmul_hadU(teacher_inner, transpose=True)
+
+            normalization = float(max(1, deployed_input.shape[0]))
+            deployed_hessian = deployed_input.transpose(0, 1) @ deployed_input
+            deployed_cross = deployed_input.transpose(0, 1) @ teacher_inner
+            deployed_hessian.div_(normalization)
+            deployed_cross.div_(normalization)
+            damping = torch.maximum(
+                deployed_hessian.diagonal().abs().mean() * 0.01,
+                torch.tensor(torch.finfo(torch.float32).eps, device=deployed_hessian.device),
+            )
+            solve_hessian = deployed_hessian.clone()
+            solve_hessian.diagonal().add_(damping)
+            cholesky, info = torch.linalg.cholesky_ex(solve_hessian)
+            if int(info.max().item()) != 0:
+                raise RuntimeError("QVQ FP8 replay G matrix is not positive definite after damping.")
+            fixed_scale = first_result.SV.to(torch.float32).abs().mean()
+            fixed_sv_sign = first_result.SV.to(torch.float32) / fixed_scale
+            native_inner_prior = rht_preprocess_weight(
+                canonical_weight,
+                first_result.SU,
+                fixed_sv_sign,
+                input_hadamard=first_result.input_hadamard,
+                output_hadamard=first_result.output_hadamard,
+            ) / fixed_scale
+            # Calibration rows can be fewer than K. Centering ridge on the
+            # immutable dense target preserves unconstrained/null-space
+            # directions instead of shrinking them toward zero.
+            deployed_target = torch.cholesky_solve(
+                deployed_cross + damping * native_inner_prior,
+                cholesky,
+            )
+            if not bool(torch.isfinite(deployed_target).all()):
+                raise RuntimeError("QVQ FP8 replay G/C solve produced non-finite weights.")
+
+        replay_kwargs = dict(quantization_kwargs)
+        replay_kwargs["telemetry"] = None
+        replay_kwargs["module_scale_search"] = False
+        replay_kwargs["output_channel_scale_optimization"] = False
+        replay_kwargs["input_hessian_preparation"] = None
+        for key in (
+            "propagated_inputs",
+            "propagated_target_output",
+            "propagated_acceptance",
+            "propagated_candidate_score",
+            "propagated_candidate_gradient",
+        ):
+            replay_kwargs[key] = None
+        second_result = quantize_qvq_linear(
+            canonical_weight,
+            quantization_hessian,
+            bits=module_qcfg.bits,
+            deployed_inner_target=deployed_target,
+            deployed_input_hessian=deployed_hessian,
+            fixed_SU=first_result.SU,
+            fixed_SV=first_result.SV,
+            **replay_kwargs,
+        )
+        second_candidate = self._module_replay_qlinear(
+            module.module,
+            module.full_name,
+            replay_qcfg,
+            second_result,
+        )
+        with torch.inference_mode():
+            first_validation = first_candidate(validation_inputs).to(torch.float32)
+            second_validation = second_candidate(validation_inputs).to(torch.float32)
+            validation_target = validation_teacher.to(torch.float32)
+            first_mse = float((first_validation - validation_target).square().mean().item())
+            second_mse = float((second_validation - validation_target).square().mean().item())
+
+        if self._module_replay_model is None:
+            raise RuntimeError(
+                "QVQ FP8 replay requires prepared disjoint search and confirmation logits."
+            )
+        model = self._module_replay_model.model
+        self._ensure_module_replay_residency(model)
+        original = model.get_submodule(module.full_name)
+        if original is not module.module or not isinstance(original, torch.nn.Linear):
+            raise RuntimeError(
+                f"QVQ FP8 replay target `{module.full_name}` is not the authoritative live dense linear."
+            )
+        parent_name, _, child_name = module.full_name.rpartition(".")
+        parent = model.get_submodule(parent_name) if parent_name else model
+        baseline_folds = []
+        candidate_folds = []
+        baseline_confirmation = None
+        candidate_confirmation = None
+        with self._module_replay_lock:
+            try:
+                setattr(parent, child_name, first_candidate)
+                baseline_folds = [
+                    self._module_replay_metrics(
+                        "search",
+                        fold_index=fold_index,
+                        folds=_FP8_REPLAY_SEARCH_FOLDS,
+                    )
+                    for fold_index in range(_FP8_REPLAY_SEARCH_FOLDS)
+                ]
+                setattr(parent, child_name, second_candidate)
+                candidate_folds = [
+                    self._module_replay_metrics(
+                        "search",
+                        fold_index=fold_index,
+                        folds=_FP8_REPLAY_SEARCH_FOLDS,
+                    )
+                    for fold_index in range(_FP8_REPLAY_SEARCH_FOLDS)
+                ]
+                search_score = self._module_replay_score(candidate_folds, baseline_folds)
+                search_nll_passed = all(
+                    math.isfinite(candidate_fold["mean_nll"])
+                    and candidate_fold["mean_nll"] <= baseline_fold["mean_nll"]
+                    for candidate_fold, baseline_fold in zip(candidate_folds, baseline_folds, strict=True)
+                )
+                search_passed = bool(
+                    search_score
+                    <= 1.0 - _FP8_REPLAY_MINIMUM_RELATIVE_KL_IMPROVEMENT
+                    and search_nll_passed
+                )
+                confirmation_passed = False
+                if search_passed:
+                    setattr(parent, child_name, first_candidate)
+                    baseline_confirmation = self._module_replay_metrics("confirmation")
+                    setattr(parent, child_name, second_candidate)
+                    candidate_confirmation = self._module_replay_metrics("confirmation")
+                    required = (
+                        baseline_confirmation["kl_forward"]
+                        * _FP8_REPLAY_MINIMUM_RELATIVE_KL_IMPROVEMENT
+                    )
+                    confirmation_passed = bool(
+                        math.isfinite(candidate_confirmation["kl_forward"])
+                        and math.isfinite(candidate_confirmation["mean_nll"])
+                        and baseline_confirmation["kl_forward"]
+                        - candidate_confirmation["kl_forward"]
+                        >= required
+                        and candidate_confirmation["mean_nll"]
+                        <= baseline_confirmation["mean_nll"]
+                        and all(
+                            candidate_confirmation[metric]
+                            >= baseline_confirmation[metric]
+                            - _FP8_REPLAY_TOPN_REGRESSION_LIMIT
+                            for metric in (
+                                "top1_agreement",
+                                "top5_overlap",
+                                "top10_overlap",
+                            )
+                        )
+                    )
+            finally:
+                setattr(parent, child_name, original)
+
+        first_telemetry = first_candidate.qvq_fp8_kernel_telemetry()
+        second_telemetry = second_candidate.qvq_fp8_kernel_telemetry()
+        if first_telemetry["executed"] < 1 or second_telemetry["executed"] < 1:
+            raise RuntimeError("QVQ FP8 replay did not execute the required native FP8 P32 kernel.")
+        reencode_selected = search_passed and confirmation_passed
+        selected = second_result if reencode_selected else first_result
+        stats = {
+            "schema": "qvq.fp8-target-replay.v2",
+            "teacher_dtype": str(train_teacher.dtype).removeprefix("torch."),
+            "operand_dtype": "float8_e4m3fn",
+            "accumulator_dtype": "float32",
+            "rows": int(inputs.shape[0]),
+            "train_rows": int(train_inputs.shape[0]),
+            "validation_rows": int(validation_inputs.shape[0]),
+            "g_shape": list(deployed_hessian.shape),
+            "c_shape": list(deployed_cross.shape),
+            "damping": float(damping.item()),
+            "ridge_prior": "immutable_original_dense_inner_target",
+            "first_validation_mse": first_mse,
+            "second_validation_mse": second_mse,
+            "local_mse_prefers_second": second_mse <= first_mse,
+            "selection_horizon": "final_logits",
+            "search_folds": _FP8_REPLAY_SEARCH_FOLDS,
+            "minimum_relative_kl_improvement": _FP8_REPLAY_MINIMUM_RELATIVE_KL_IMPROVEMENT,
+            "topn_regression_limit": _FP8_REPLAY_TOPN_REGRESSION_LIMIT,
+            "search_baseline": baseline_folds,
+            "search_candidate": candidate_folds,
+            "search_worst_kl_ratio": search_score if math.isfinite(search_score) else None,
+            "search_nll_passed": search_nll_passed,
+            "search_passed": search_passed,
+            "confirmation_baseline": baseline_confirmation,
+            "confirmation_candidate": candidate_confirmation,
+            "confirmation_passed": confirmation_passed,
+            "selected": reencode_selected,
+            "source": "immutable_original_dense_weight",
+            "native_first_executed": int(first_telemetry["executed"]),
+            "native_second_executed": int(second_telemetry["executed"]),
+        }
+        task_entry["fp8_replay_stats"] = stats
+        selected_telemetry = dict(first_result.telemetry or {})
+        selected_telemetry["fp8_target_replay"] = stats
+        return replace(selected, telemetry=selected_telemetry)
 
     @staticmethod
     def _restore_module_weight(module: NamedModule, quantized_weight: torch.Tensor) -> torch.Tensor:
@@ -1958,6 +2508,10 @@ class QVQProcessor(LoopProcessor):
                 output_hessian = task_entry["yaqa_output_hessian"]
                 if quantization_hessian is None or output_hessian is None:
                     raise RuntimeError(f"QVQ YAQA factors disappeared for module `{module.full_name}`.")
+                if isinstance(quantization_hessian, YaqaGramSketch):
+                    quantization_hessian = quantization_hessian.materialize(device=target_device)
+                if isinstance(output_hessian, YaqaGramSketch):
+                    output_hessian = output_hessian.materialize(device=target_device)
             else:
                 capture.finalize_hessian(target_device=target_device)
                 if capture.H is None:
@@ -1966,6 +2520,7 @@ class QVQProcessor(LoopProcessor):
             if capture.nsamples <= 0:
                 raise RuntimeError(f"QVQ captured no calibration activations for module `{module.full_name}`.")
             self._assert_calibration_sample_count(module.name, capture.nsamples)
+            activation_quantization_error = self._activation_quantization_error_summary(task_entry)
 
             canonical_weight = capture.clone_module(copy=True, device=target_device)
             seed = zlib.crc32(module.full_name.encode("utf-8")) & 0x7FFFFFFF
@@ -2065,6 +2620,15 @@ class QVQProcessor(LoopProcessor):
                     quantization_hessian,
                     quantization_kwargs,
                 )
+                result = self._fp8_replay_reencode(
+                    module,
+                    module_qcfg,
+                    canonical_weight,
+                    quantization_hessian,
+                    quantization_kwargs,
+                    result,
+                    task_entry,
+                )
             duration = time.perf_counter() - started
 
             # Quantized replay temporarily overwrites the dense module. The
@@ -2098,6 +2662,7 @@ class QVQProcessor(LoopProcessor):
                     module_qcfg.format == FORMAT.QVQ_V2B2_P32,
                     result.input_hadamard,
                     result.output_hadamard,
+                    copy.deepcopy(module_qcfg.activation),
                 )
             restored_weight = self._restore_module_weight(module, result.weight)
             module.weight.data = restored_weight.to(dtype=module.weight.dtype)
@@ -2177,6 +2742,8 @@ class QVQProcessor(LoopProcessor):
                     None if result.kronecker_proxy_loss is None else float(result.kronecker_proxy_loss.item())
                 ),
                 "module_granular_replay": self._module_replay_stats.get(module.full_name),
+                "activation_quantization_error": activation_quantization_error,
+                "fp8_target_replay": task_entry.get("fp8_replay_stats"),
             }
             if result.telemetry is not None:
                 stat["qvq_telemetry"] = result.telemetry
@@ -2229,6 +2796,8 @@ class QVQProcessor(LoopProcessor):
             if propagation_gate is not None:
                 self._pop_propagation_gate(module.full_name, propagation_gate[4])
             capture.free()
+            task_entry["fp8_replay_rows"].clear()
+            task_entry["fp8_replay_row_count"] = 0
             if module_qcfg.rounding == "yaqa":
                 task_entry.pop("yaqa_input_hessian", None)
                 task_entry.pop("yaqa_output_hessian", None)
@@ -2260,6 +2829,7 @@ class QVQProcessor(LoopProcessor):
                 v2b2_p32 = runtime_config[7] if len(runtime_config) > 7 else False
                 input_hadamard = runtime_config[8] if len(runtime_config) > 8 else True
                 output_hadamard = runtime_config[9] if len(runtime_config) > 9 else True
+                activation = runtime_config[10] if len(runtime_config) > 10 else None
                 for tensor_name in ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"):
                     tensor = module.state.get(tensor_name)
                     if tensor is not None:
@@ -2288,6 +2858,7 @@ class QVQProcessor(LoopProcessor):
                 dual_v2=dual_v2,
                 v2b4_p64=v2b4_p64,
                 v2b2_p32=v2b2_p32,
+                activation=activation,
                 input_hadamard=input_hadamard,
                 output_hadamard=output_hadamard,
             )

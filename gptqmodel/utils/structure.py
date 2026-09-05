@@ -980,6 +980,11 @@ class LazyTurtle:
         alias_items = self._normalize_runtime_to_checkpoint_renamings(conversion_aliases)
         self._runtime_to_checkpoint_renamings = tuple(alias_items)
         self._runtime_to_checkpoint_converters = self._normalize_runtime_to_checkpoint_converters(conversion_aliases)
+        # Keep the same placement exclusions declared by the Transformers model.
+        no_placement_params = getattr(target_model, "_no_placement_params", ())
+        self._no_placement_params = tuple(
+            pattern for pattern in (no_placement_params or ()) if isinstance(pattern, str) and pattern
+        )
         self._lock = threading.RLock()
         # Reuse safetensors file handles across per-module materialization calls
         # inside a layer to avoid re-parsing the JSON header for every tensor.
@@ -1428,9 +1433,10 @@ class LazyTurtle:
                         fallback_needed = True
                         break
 
+                    tensor_device = self._materialization_device_for_tensor(module_path, rel_name, device)
                     is_meta = getattr(target_param, "is_meta", False) or target_param.device.type == "meta"
                     already_loaded = id(target_param) in self._loaded_tensor_ids
-                    if not is_meta and target_param.device == device and already_loaded:
+                    if not is_meta and target_param.device == tensor_device and already_loaded:
                         continue
                     source_tensor = None
                     if not is_meta and already_loaded:
@@ -1438,7 +1444,7 @@ class LazyTurtle:
 
                     phase_started_at = time.perf_counter()
                     new_param = torch.nn.Parameter(
-                        torch.empty_like(target_param, device=device),
+                        torch.empty_like(target_param, device=tensor_device),
                         requires_grad=False,
                     )
                     t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
@@ -2065,11 +2071,14 @@ class LazyTurtle:
         return reversed_map or None
 
     @classmethod
-    def infer_hf_conversion_map_reversed(cls, *, target_model: Optional[nn.Module] = None) -> Optional[Any]:
-        if target_model is None:
-            return None
-
-        model_type = getattr(getattr(target_model, "config", None), "model_type", None)
+    def infer_hf_conversion_map_reversed(
+        cls,
+        *,
+        target_model: Optional[nn.Module] = None,
+        model_type: Optional[str] = None,
+    ) -> Optional[Any]:
+        if model_type is None:
+            model_type = getattr(getattr(target_model, "config", None), "model_type", None)
         deepseek_v4_fallbacks = (
             [
                 _LazyWeightRenaming(r"compressor\.kv_proj", r"compressor\.wkv"),
@@ -2104,6 +2113,8 @@ class LazyTurtle:
                     if reversed_map is not None:
                         return [*reversed_map, *deepseek_v4_fallbacks]
 
+        if target_model is None:
+            return None
         reversed_map = cls.reverse_hf_conversion_map(getattr(target_model, "_checkpoint_conversion_mapping", None))
         if reversed_map is not None:
             return [*reversed_map, *deepseek_v4_fallbacks]
@@ -2784,15 +2795,39 @@ class LazyTurtle:
         for converter in self._runtime_to_checkpoint_converters:
             if "Concatenate" not in converter.operation_names:
                 continue
-            if len(converter.source_patterns) != 1 or len(converter.target_patterns) < 2:
+            if len(converter.source_patterns) != 1:
                 continue
 
             runtime_pattern = converter.source_patterns[0]
             if _LazyWeightRenaming(runtime_pattern, runtime_pattern).rename_source_key(combined_name)[1] is None:
                 continue
 
+            concat_operation = next(
+                operation
+                for operation in converter.operations
+                if type(operation).__name__ == "Concatenate"
+            )
+            checkpoint_patterns = list(converter.target_patterns)
+            num_shards_attribute = getattr(concat_operation, "num_shards_attribute", None)
+            if len(checkpoint_patterns) == 1 and "*" in checkpoint_patterns[0] and num_shards_attribute:
+                text_config = self.config
+                get_text_config = getattr(text_config, "get_text_config", None)
+                if callable(get_text_config):
+                    text_config = get_text_config()
+                else:
+                    text_config = getattr(text_config, "text_config", text_config)
+                num_shards = getattr(text_config, num_shards_attribute, None)
+                if not isinstance(num_shards, int) or num_shards <= 0:
+                    continue
+                checkpoint_patterns = [
+                    checkpoint_patterns[0].replace("*", str(index))
+                    for index in range(num_shards)
+                ]
+            elif len(checkpoint_patterns) < 2:
+                continue
+
             checkpoint_names = []
-            for checkpoint_pattern in converter.target_patterns:
+            for checkpoint_pattern in checkpoint_patterns:
                 renamed, matched_pattern = _LazyWeightRenaming(
                     runtime_pattern,
                     checkpoint_pattern,
@@ -2811,17 +2846,34 @@ class LazyTurtle:
                     break
                 checkpoint_names.append(resolved_name)
 
-            if len(checkpoint_names) != len(converter.target_patterns):
+            if len(checkpoint_names) != len(checkpoint_patterns):
                 continue
 
-            concat_dim = 0
-            for operation in converter.operations:
-                if type(operation).__name__ == "Concatenate":
-                    concat_dim = getattr(operation, "dim", 0)
-                    break
+            concat_dim = getattr(concat_operation, "dim", 0)
             return checkpoint_names, concat_dim
 
         return None
+
+    def _materialization_device_for_tensor(
+        self,
+        module_path: str,
+        rel_name: str,
+        default_device: torch.device,
+    ) -> torch.device:
+        """Prevent layer materialization from moving an excluded tensor off CPU."""
+
+        if self.is_no_placement_tensor(module_path, rel_name):
+            return torch.device("cpu")
+        return torch.device(default_device)
+
+    def is_no_placement_tensor(self, module_path: str, rel_name: str) -> bool:
+        """Check Transformers' accelerator placement exclusions."""
+
+        full_name = self._join_tensor_name(module_path, rel_name)
+        for pattern in self._no_placement_params:
+            if full_name == pattern or full_name.endswith(f".{pattern}"):
+                return True
+        return False
 
     def _resolve_direct_checkpoint_tensor_source(
         self,
@@ -3553,7 +3605,8 @@ class LazyTurtle:
                                     source_shape=tuple(tensor.shape),
                                 )
                             )
-                        target_param_new = _ensure_target_storage_on_device_(target_param, device)
+                        tensor_device = self._materialization_device_for_tensor(module_path, rel_name, device)
+                        target_param_new = _ensure_target_storage_on_device_(target_param, tensor_device)
                         if target_param_new is not target_param:
                             t_parent, leaf = _get_parent_and_leaf_by_path(target_submodule, rel_name)
                             setattr(t_parent, leaf, target_param_new)

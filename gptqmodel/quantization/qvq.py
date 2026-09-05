@@ -6943,6 +6943,10 @@ def quantize_qvq_linear(
     propagated_candidate_score: Callable[[torch.Tensor], float] | None = None,
     propagated_candidate_gradient: Callable[[torch.Tensor], torch.Tensor] | None = None,
     input_hessian_preparation: QVQInputHessianPreparation | None = None,
+    deployed_inner_target: torch.Tensor | None = None,
+    deployed_input_hessian: torch.Tensor | None = None,
+    fixed_SU: torch.Tensor | None = None,
+    fixed_SV: torch.Tensor | None = None,
     # Exact Viterbi survivor-pruning policy (`QVQConfig.viterbi_pruning`).
     # `None` resolves to `auto`, which reproduces today's automatic behavior.
     viterbi_pruning: object | None = None,
@@ -7037,6 +7041,46 @@ def quantize_qvq_linear(
         raise TypeError("QVQ shared input-Hessian preparation has an invalid type.")
     if input_hessian_preparation is not None and not input_hadamard:
         raise ValueError("QVQ folded input basis cannot reuse a two-sided RHT Hessian preparation.")
+    deployed_reencode = any(
+        value is not None
+        for value in (deployed_inner_target, deployed_input_hessian, fixed_SU, fixed_SV)
+    )
+    if deployed_reencode and any(
+        value is None
+        for value in (deployed_inner_target, deployed_input_hessian, fixed_SU, fixed_SV)
+    ):
+        raise ValueError(
+            "QVQ deployed-operand re-encode requires target, Hessian, fixed SU, and fixed SV together."
+        )
+    if deployed_reencode and (not v2b2_p32 or rounding != "block_ldlq"):
+        raise ValueError("QVQ deployed-operand re-encode requires V2B2-P32 BlockLDLQ.")
+    if deployed_reencode and input_hessian_preparation is not None:
+        raise ValueError("QVQ deployed-operand re-encode cannot reuse a source-coordinate Hessian preparation.")
+    if deployed_reencode and (module_scale_search or output_channel_scale_optimization):
+        raise ValueError("QVQ deployed-operand re-encode requires frozen module and output scales.")
+    if deployed_reencode:
+        assert deployed_inner_target is not None
+        assert deployed_input_hessian is not None
+        assert fixed_SU is not None
+        assert fixed_SV is not None
+        if tuple(deployed_inner_target.shape) != (in_features, out_features):
+            raise ValueError("QVQ deployed inner target has incompatible dimensions.")
+        if tuple(deployed_input_hessian.shape) != (in_features, in_features):
+            raise ValueError("QVQ deployed input Hessian has incompatible dimensions.")
+        if tuple(fixed_SU.shape) != (in_features,) or tuple(fixed_SV.shape) != (out_features,):
+            raise ValueError("QVQ deployed fixed scales have incompatible dimensions.")
+        if any(
+            value.device != weight.device
+            for value in (deployed_inner_target, deployed_input_hessian, fixed_SU, fixed_SV)
+        ):
+            raise ValueError("QVQ deployed re-encode tensors must share the weight device.")
+        if not all(
+            value.is_floating_point() and bool(torch.isfinite(value).all())
+            for value in (deployed_inner_target, deployed_input_hessian, fixed_SU, fixed_SV)
+        ):
+            raise ValueError("QVQ deployed re-encode tensors must be finite floating-point values.")
+        if bool((fixed_SV == 0).any()):
+            raise ValueError("QVQ deployed fixed SV must be nonzero.")
     rounding = rounding.strip().lower()
     if rounding not in {"block_ldlq", "yaqa"}:
         raise ValueError("QVQ rounding must be `block_ldlq` or `yaqa`.")
@@ -7272,18 +7316,49 @@ def quantize_qvq_linear(
         effective_input_sign_seed = input_sign_seed
     SU = SU.to(device=device, dtype=torch.float32)
     SV_sign = SV_sign.to(device=device, dtype=torch.float32)
+    fixed_encoding_scale = None
+    if deployed_reencode:
+        assert fixed_SU is not None and fixed_SV is not None
+        SU = fixed_SU.to(device=device, dtype=torch.float32).contiguous()
+        fixed_SV_fp32 = fixed_SV.to(device=device, dtype=torch.float32)
+        fixed_encoding_scale = fixed_SV_fp32.abs().mean()
+        if not torch.allclose(
+            fixed_SV_fp32.abs(),
+            fixed_encoding_scale.expand_as(fixed_SV_fp32),
+            atol=0.0,
+            rtol=1e-6,
+        ):
+            raise ValueError("QVQ deployed re-encode requires one shared P32 output scale.")
+        SV_sign = (fixed_SV_fp32 / fixed_encoding_scale).contiguous()
 
     with _qvq_phase(telemetry, "rht_weight", device):
-        transformed_weight = rht_preprocess_weight(
-            weight,
-            SU,
-            SV_sign,
-            input_hadamard=input_hadamard,
-            output_hadamard=output_hadamard,
-        )
+        if deployed_reencode:
+            assert deployed_inner_target is not None and fixed_encoding_scale is not None
+            transformed_weight = (
+                deployed_inner_target.to(device=device, dtype=torch.float32)
+                * fixed_encoding_scale
+            ).contiguous()
+        else:
+            transformed_weight = rht_preprocess_weight(
+                weight,
+                SU,
+                SV_sign,
+                input_hadamard=input_hadamard,
+                output_hadamard=output_hadamard,
+            )
     with _qvq_phase(telemetry, "rht_hessian", device):
         block_ldlq_control_H = None
-        if input_hessian_preparation is not None:
+        if deployed_reencode:
+            assert deployed_input_hessian is not None
+            transformed_H = deployed_input_hessian.to(device=device, dtype=torch.float32).clone()
+            transformed_H = (transformed_H + transformed_H.transpose(0, 1)) * 0.5
+            mean_diagonal = transformed_H.diagonal().abs().mean()
+            damping = torch.maximum(
+                mean_diagonal * damp_percent,
+                torch.tensor(torch.finfo(torch.float32).eps, device=device),
+            )
+            transformed_H.diagonal().add_(damping)
+        elif input_hessian_preparation is not None:
             preparation = input_hessian_preparation
             if (
                 preparation.source_hessian is not H
@@ -7481,7 +7556,13 @@ def quantize_qvq_linear(
                 dtype=codebook.dtype,
             )
     source_rms = transformed_weight.square().mean().sqrt()
-    scale = (source_rms / PGC16_NORMALIZATION_RMS * pgc16_scale_factor(bits)).clamp_min(torch.finfo(torch.float32).eps)
+    scale = (
+        fixed_encoding_scale
+        if fixed_encoding_scale is not None
+        else (
+            source_rms / PGC16_NORMALIZATION_RMS * pgc16_scale_factor(bits)
+        ).clamp_min(torch.finfo(torch.float32).eps)
+    )
     prepared_block_factors = None
     if rounding == "block_ldlq":
         with _qvq_phase(telemetry, "block_ldl_factor", device):

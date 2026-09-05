@@ -1,0 +1,4 @@
+interface:
+  display_name: "QVQ Kernel Accuracy"
+  short_description: "Preserve QVQ accuracy before optimizing kernels"
+  default_prompt: "Use $qvq-kernel-accuracy to optimize this QVQ kernel while preserving its mathematics and numerical contract."

@@ -6,7 +6,7 @@
 import copy
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Tuple, Type
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -17,6 +17,7 @@ from ..looper.named_module import NamedModule
 from ..looper.ordered_hessian_replay import GPTQOrderedHessianReplayAttachment
 from ..models import BaseQModel
 from ..models._const import CPU, DEVICE
+from ..models.shared_input import SharedInputPlan
 from ..models.writer import (
     PROCESS_LOG_FWD_TIME,
     PROCESS_LOG_LAYER,
@@ -331,6 +332,128 @@ class GPTQProcessor(LoopProcessor):
             "inverse_hits": 0,
             "inverse_misses": 0,
         }
+
+        # Explicit module-tree ``:in=<tag>`` Hessian deduplication. This path
+        # intentionally remains separate from QVQ's tensor-identity cache above:
+        # it is conservative, model-verified, and copies finalized Hessians only
+        # when matching accumulation settings are proven.
+        self._shared_input_plan: Optional[SharedInputPlan] = None
+        self._shared_input_plan_owner: Optional[type] = None
+        self._shared_input_plan_lock = threading.Lock()
+        self._shared_input_leaders: Dict[str, str] = {}
+        self.shared_input_dedup_count = 0
+        self.shared_input_dedup_telemetry: Dict[str, Any] = {}
+
+    def _resolve_shared_input_plan(self, model) -> Optional[SharedInputPlan]:
+        """Derive the verified shared-input plan once per model class."""
+
+        owner = type(model)
+        with self._shared_input_plan_lock:
+            if self._shared_input_plan_owner is owner:
+                return self._shared_input_plan
+            plan = None
+            shared_input_plan = getattr(model, "shared_input_plan", None)
+            if callable(shared_input_plan):
+                inner = getattr(model, "model", None)
+                plan = shared_input_plan(
+                    model_config=getattr(inner, "config", None),
+                    quantize_config=getattr(model, "quantize_config", None),
+                )
+            self._shared_input_plan = plan
+            self._shared_input_plan_owner = owner
+            return plan
+
+    @staticmethod
+    def _hessian_accumulation_settings(task: GPTQ) -> Tuple[str, Optional[int], Optional[int]]:
+        hessian = task.qcfg.hessian
+        return (str(hessian.staging_dtype), hessian.chunk_size, hessian.chunk_bytes)
+
+    def begin_shared_input_capture(
+        self,
+        model,
+        subset_names: List[str],
+        is_lm_head_module: bool = False,
+    ) -> Dict[str, str]:
+        """Elect one capture leader per explicit verified group in this subset."""
+
+        with self.lock:
+            self._shared_input_leaders = {}
+        if is_lm_head_module or not getattr(self.qcfg.hessian, "dedup_shared_inputs", True):
+            return {}
+
+        plan = self._resolve_shared_input_plan(model)
+        if plan is None or not plan.shared_groups:
+            return {}
+
+        with self.lock:
+            tasks = dict(self.tasks)
+        leaders: Dict[str, str] = {}
+        for group in plan.shared_groups:
+            if not group.explicit:
+                continue
+            members = [
+                name for name in subset_names
+                if name in group.modules
+                and type(tasks.get(name)) is GPTQ
+                and getattr(tasks[name].qcfg.hessian, "dedup_shared_inputs", True)
+            ]
+            if len(members) < 2:
+                continue
+            leader = members[0]
+            columns = tasks[leader].columns
+            settings = self._hessian_accumulation_settings(tasks[leader])
+            for follower in members[1:]:
+                if tasks[follower].columns != columns:
+                    log.warn(
+                        "Quantization: shared-input group `%s` mixes input widths (%s=%s, %s=%s); not sharing Hessian.",
+                        group.key, leader, columns, follower, tasks[follower].columns,
+                    )
+                    continue
+                if self._hessian_accumulation_settings(tasks[follower]) != settings:
+                    log.warn(
+                        "Quantization: shared-input group `%s` mixes Hessian accumulation settings; not sharing Hessian.",
+                        group.key,
+                    )
+                    continue
+                leaders[follower] = leader
+
+        with self.lock:
+            self._shared_input_leaders = leaders
+        return dict(leaders)
+
+    def end_shared_input_capture(self, subset_names: List[str]) -> Dict[str, Any]:
+        """Adopt finalized leader Hessians and publish lifecycle telemetry."""
+
+        with self.lock:
+            leaders = dict(self._shared_input_leaders)
+            self._shared_input_leaders = {}
+            tasks = dict(self.tasks)
+        adopted = 0
+        for follower, leader in leaders.items():
+            follower_task = tasks.get(follower)
+            leader_task = tasks.get(leader)
+            if follower_task is None or leader_task is None:
+                continue
+            follower_task.adopt_hessian_from(leader_task)
+            adopted += 1
+        with self.lock:
+            self.shared_input_dedup_count += adopted
+            telemetry = {
+                "enabled": bool(getattr(self.qcfg.hessian, "dedup_shared_inputs", True)),
+                "expected_followers": len(leaders),
+                "adopted_followers": adopted,
+                "cumulative_adopted_followers": self.shared_input_dedup_count,
+                "leader_count": len(set(leaders.values())),
+                "follower_to_leader": dict(leaders),
+                "subset_module_count": len(subset_names),
+                "status": "verified" if adopted == len(leaders) else "mismatch",
+            }
+            self.shared_input_dedup_telemetry = telemetry
+        return dict(telemetry)
+
+    def shared_input_leader(self, name: str) -> Optional[str]:
+        with self.lock:
+            return self._shared_input_leaders.get(name)
 
     def set_calibration_dataset(self, calibration_dataset):
         """Rejects dataset replacement because GPTQ capture is fixed at construction."""
@@ -1038,6 +1161,11 @@ class GPTQProcessor(LoopProcessor):
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the GPTQ task."""
+
+        if self.shared_input_leader(name) is not None:
+            def skip(module, inp, out):
+                del module, inp, out
+            return skip
 
         def tmp(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
             """Records one activation batch for GPTQ Hessian/statistics accumulation."""

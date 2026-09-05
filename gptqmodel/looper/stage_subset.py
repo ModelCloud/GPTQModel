@@ -593,24 +593,41 @@ def build_subset_plan(
                         for module_name in moe_groups[group_key]:
                             forward_device_map[module_name] = target_device
 
-        if forward_device_map:
-            # Once either dense or expert placement is explicit, anchor every
-            # untouched module back to its baseline placement so stale quant
-            # devices never leak into a later subset forward.
-            baseline_devices = _resolve_forward_baseline_devices(
-                subset=subset,
-                full=full,
-            )
-            for module_name, baseline_device in baseline_devices.items():
-                forward_device_map.setdefault(module_name, baseline_device)
+    # A model may keep selected leaf modules on CPU even while replaying their layer on GPU.
+    placement_override = getattr(looper.gptq_model, "forward_device_for_module", None)
+    placement_override_active = getattr(looper.gptq_model, "has_forward_device_overrides", None)
+    placement_override_active = (
+        callable(placement_override)
+        and callable(placement_override_active)
+        and placement_override_active()
+    )
 
-            for module_name, named_module in subset.items():
-                preferred_device = forward_device_map.get(module_name)
-                if preferred_device is not None:
-                    named_module.state["preferred_quant_device"] = preferred_device
+    if forward_device_map or placement_override_active:
+        # Start from each leaf's current device so an excluded tensor is never
+        # moved implicitly with its parent layer.
+        baseline_devices = _resolve_forward_baseline_devices(
+            subset=subset,
+            full=full,
+        )
+        for module_name, baseline_device in baseline_devices.items():
+            forward_device_map.setdefault(module_name, baseline_device)
 
-            restore_forward_device_overrides = False
-            subset_forward_serial = True
+        if placement_override_active:
+            for module_name, planned_device in list(forward_device_map.items()):
+                module_ref = subset.get(module_name)
+                if module_ref is None and full is not None:
+                    module_ref = full.get(module_name)
+                actual_module = module_ref.module if isinstance(module_ref, NamedModule) else module_ref
+                if actual_module is not None:
+                    forward_device_map[module_name] = placement_override(actual_module, planned_device)
+
+        for module_name, named_module in subset.items():
+            preferred_device = forward_device_map.get(module_name)
+            if preferred_device is not None:
+                named_module.state["preferred_quant_device"] = preferred_device
+
+        restore_forward_device_overrides = False
+        subset_forward_serial = True
 
     auto_forward_data_parallel = getattr(
         looper.gptq_model.quantize_config,
@@ -789,6 +806,35 @@ def _emit_moe_parallel_quant_subset_telemetry(
     )
 
 
+def _emit_shared_input_hessian_dedup_telemetry(
+    *,
+    telemetry: Optional[Dict[str, object]],
+    layer_index: int,
+    subset_index: int,
+    subset_total: int,
+    logger,
+) -> None:
+    """Emit one structured lifecycle record for shared-input Hessian adoption."""
+    if not telemetry or telemetry.get("expected_followers", 0) <= 0:
+        return
+    fields = {
+        "lifecycle_stage": "forward_capture_complete",
+        "layer_index": layer_index,
+        "subset_index": subset_index + 1,
+        "subset_total": subset_total,
+        **telemetry,
+    }
+    emit_device_telemetry("hessian_input_collection_dedup", **fields)
+    log_method = logger.info if telemetry["status"] == "verified" else logger.warning
+    log_method(
+        "HessianInputDedup: lifecycle=%s layer=%s subset=%s/%s expected=%s adopted=%s "
+        "leaders=%s cumulative=%s status=%s",
+        fields["lifecycle_stage"], layer_index, subset_index + 1, subset_total,
+        telemetry["expected_followers"], telemetry["adopted_followers"],
+        telemetry["leader_count"], telemetry["cumulative_adopted_followers"], telemetry["status"],
+    )
+
+
 def _pop_task(name: str, processor: LoopProcessor, subset: Dict[str, NamedModule]) -> Optional[NamedModule]:
     skipped_module = subset.pop(name, None)
     task_map = getattr(processor, "tasks", None)
@@ -876,6 +922,24 @@ def _run_single_subset_pass(
     handle = []
     subset_size = len(subset_names)
 
+    # Capture a model-declared pointwise MoE root even when routing override
+    # executes every expert through the ordinary model forward (the lifecycle
+    # bypass hook is not active in that mode).
+    moe_block_name = None
+    moe_block = None
+    if looper.gptq_model and hasattr(looper.gptq_model, "moe_lifecycle_hooks"):
+        hooks = looper.gptq_model.moe_lifecycle_hooks
+        if hooks is not None:
+            moe_block = hooks.get_moe_block(module, looper.gptq_model.__class__)
+            if moe_block is not None:
+                for mod_name, mod in module.named_modules():
+                    if mod is moe_block:
+                        moe_block_name = mod_name
+                        break
+
+    if execute_forward and moe_block is not None and moe_block_name is not None:
+        processor.register_moe_root_capture_hook(moe_block, moe_block_name, handle)
+
     def clear_forward_hooks() -> None:
         for hook_handle in handle:
             hook_handle.remove()
@@ -892,6 +956,18 @@ def _run_single_subset_pass(
         and getattr(processor, "moe_input_capture_without_forward", False)
         and looper.gptq_model.quantize_config.moe_routing_bypass()
     )
+    shared_input_leaders: Dict[str, str] = {}
+    if execute_forward:
+        shared_input_leaders = processor.begin_shared_input_capture(
+            looper.gptq_model,
+            subset_names,
+            is_lm_head_module=is_lm_head_module,
+        )
+        if shared_input_leaders and DEBUG_ON and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "StageSubset: layer=%s subset=%s/%s sharing Hessian capture for %s",
+                layer_index, subset_index + 1, subset_total, shared_input_leaders,
+            )
     if execute_forward:
         for name, named_module in subset.items():
             if not isinstance(named_module, NamedModule):
@@ -1089,6 +1165,16 @@ def _run_single_subset_pass(
                 clear_forward_hooks()
                 if execute_forward and not forward_completed:
                     looper._current_subset = None
+
+    if execute_forward:
+        dedup_telemetry = processor.end_shared_input_capture(subset_names)
+        _emit_shared_input_hessian_dedup_telemetry(
+            telemetry=dedup_telemetry,
+            layer_index=layer_index,
+            subset_index=subset_index,
+            subset_total=subset_total,
+            logger=logger,
+        )
 
     returned_outputs = None
     if execute_forward and capture_layer_forward_context:

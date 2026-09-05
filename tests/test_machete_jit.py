@@ -128,7 +128,7 @@ def test_machete_static_runtime_error_requires_hopper_sm90(monkeypatch):
 
     error = machete_utils._machete_static_runtime_error()
 
-    assert "Hopper-class SM90 GPUs only" in error
+    assert "Machete kernel is Hopper-only (SM90)" in error
     assert "12.0" in error
 
 

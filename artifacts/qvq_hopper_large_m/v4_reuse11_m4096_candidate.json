@@ -1,0 +1,273 @@
+{
+  "comparison": "native grouped large-M QVQ versus ordinary QVQ and W4 baselines",
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_commit": "05560475ca7244ecfd6b8a26d3bfacd6c9faf5f3",
+  "previous_artifacts": [
+    "artifacts/qvq_hopper_large_m/v4_merged_pr114_baseline.json"
+  ],
+  "rows": [
+    {
+      "better_than_last_benchmark": true,
+      "better_than_plain_qvq": true,
+      "bits": 2.0,
+      "dense_oracle_error": {
+        "max_abs": 1.0728836059570312e-06,
+        "mean_abs": 1.577136288233305e-07,
+        "relative_l2": 0.6752431952618864,
+        "rmse": 1.9918472754507196e-07
+      },
+      "down_mkn": [
+        4096,
+        8192,
+        2048
+      ],
+      "effective_tflops": 175.8894107945611,
+      "m": 4096,
+      "machete_w4": {
+        "max_us": 1012.8255844116211,
+        "mean_us": 912.8943939208984,
+        "median_us": 913.8591766357422,
+        "min_us": 852.7759552001953,
+        "p95_us": 938.2431983947754
+      },
+      "marlin_w4": {
+        "max_us": 1572.488021850586,
+        "mean_us": 1409.5191688537598,
+        "median_us": 1388.532018661499,
+        "min_us": 1357.5056076049805,
+        "p95_us": 1512.116813659668
+      },
+      "mkn": [
+        4096,
+        2048,
+        8192
+      ],
+      "plain_qvq": {
+        "max_us": 4243.291091918945,
+        "mean_us": 4071.151542663574,
+        "median_us": 4059.623146057129,
+        "min_us": 4057.2513580322266,
+        "p95_us": 4132.56950378418
+      },
+      "previous_qvq": {
+        "max_us": 2661.686325073242,
+        "mean_us": 2469.3011512756348,
+        "median_us": 2447.2975730895996,
+        "min_us": 2425.4560470581055,
+        "p95_us": 2562.1856689453125
+      },
+      "qvq": {
+        "max_us": 2410.1823806762695,
+        "mean_us": 2347.1248359680176,
+        "median_us": 2344.1823959350586,
+        "min_us": 2303.144073486328,
+        "p95_us": 2403.8143157958984
+      },
+      "selected_chunk_rows": null,
+      "speedup_vs_machete_w4": 0.38984132728768217,
+      "speedup_vs_marlin_w4": 0.5923310494393653,
+      "speedup_vs_plain_qvq": 1.7317863802307956
+    },
+    {
+      "better_than_last_benchmark": true,
+      "better_than_plain_qvq": true,
+      "bits": 2.5,
+      "dense_oracle_error": {
+        "max_abs": 1.0728836059570312e-06,
+        "mean_abs": 1.577691364218481e-07,
+        "relative_l2": 0.6746706431584267,
+        "rmse": 1.992619209673169e-07
+      },
+      "down_mkn": [
+        4096,
+        8192,
+        2048
+      ],
+      "effective_tflops": 172.4703481306183,
+      "m": 4096,
+      "machete_w4": {
+        "max_us": 1012.8255844116211,
+        "mean_us": 912.8943939208984,
+        "median_us": 913.8591766357422,
+        "min_us": 852.7759552001953,
+        "p95_us": 938.2431983947754
+      },
+      "marlin_w4": {
+        "max_us": 1572.488021850586,
+        "mean_us": 1409.5191688537598,
+        "median_us": 1388.532018661499,
+        "min_us": 1357.5056076049805,
+        "p95_us": 1512.116813659668
+      },
+      "mkn": [
+        4096,
+        2048,
+        8192
+      ],
+      "plain_qvq": {
+        "max_us": 4321.984100341797,
+        "mean_us": 4168.0139083862305,
+        "median_us": 4161.569595336914,
+        "min_us": 4160.670471191406,
+        "p95_us": 4200.384140014648
+      },
+      "previous_qvq": {
+        "max_us": 2672.444725036621,
+        "mean_us": 2504.034622192383,
+        "median_us": 2484.994316101074,
+        "min_us": 2460.1280212402344,
+        "p95_us": 2612.4624252319336
+      },
+      "qvq": {
+        "max_us": 2416.702461242676,
+        "mean_us": 2391.2391395568848,
+        "median_us": 2390.653610229492,
+        "min_us": 2358.241653442383,
+        "p95_us": 2416.0240173339844
+      },
+      "selected_chunk_rows": null,
+      "speedup_vs_machete_w4": 0.3822633160761486,
+      "speedup_vs_marlin_w4": 0.5808168999139135,
+      "speedup_vs_plain_qvq": 1.7407664487777557
+    },
+    {
+      "better_than_last_benchmark": true,
+      "better_than_plain_qvq": true,
+      "bits": 3.0,
+      "dense_oracle_error": {
+        "max_abs": 1.0132789611816406e-06,
+        "mean_abs": 1.576982811002381e-07,
+        "relative_l2": 0.6752645490613731,
+        "rmse": 1.9913213419323624e-07
+      },
+      "down_mkn": [
+        4096,
+        8192,
+        2048
+      ],
+      "effective_tflops": 171.12565589872156,
+      "m": 4096,
+      "machete_w4": {
+        "max_us": 1012.8255844116211,
+        "mean_us": 912.8943939208984,
+        "median_us": 913.8591766357422,
+        "min_us": 852.7759552001953,
+        "p95_us": 938.2431983947754
+      },
+      "marlin_w4": {
+        "max_us": 1572.488021850586,
+        "mean_us": 1409.5191688537598,
+        "median_us": 1388.532018661499,
+        "min_us": 1357.5056076049805,
+        "p95_us": 1512.116813659668
+      },
+      "mkn": [
+        4096,
+        2048,
+        8192
+      ],
+      "plain_qvq": {
+        "max_us": 4320.568084716797,
+        "mean_us": 4169.06339263916,
+        "median_us": 4164.2608642578125,
+        "min_us": 4137.974548339844,
+        "p95_us": 4204.081726074219
+      },
+      "previous_qvq": {
+        "max_us": 2648.161506652832,
+        "mean_us": 2509.705883026123,
+        "median_us": 2503.2687187194824,
+        "min_us": 2468.662452697754,
+        "p95_us": 2594.647979736328
+      },
+      "qvq": {
+        "max_us": 2438.667106628418,
+        "mean_us": 2406.936325073242,
+        "median_us": 2409.439182281494,
+        "min_us": 2350.222396850586,
+        "p95_us": 2438.483238220215
+      },
+      "selected_chunk_rows": null,
+      "speedup_vs_machete_w4": 0.3792829399289549,
+      "speedup_vs_marlin_w4": 0.5762884694797319,
+      "speedup_vs_plain_qvq": 1.7283112580225746
+    },
+    {
+      "better_than_last_benchmark": true,
+      "better_than_plain_qvq": true,
+      "bits": 3.5,
+      "dense_oracle_error": {
+        "max_abs": 1.0728836059570312e-06,
+        "mean_abs": 1.5771774997119792e-07,
+        "relative_l2": 0.6750274378211583,
+        "rmse": 1.991924159157216e-07
+      },
+      "down_mkn": [
+        4096,
+        8192,
+        2048
+      ],
+      "effective_tflops": 171.94358022363576,
+      "m": 4096,
+      "machete_w4": {
+        "max_us": 1012.8255844116211,
+        "mean_us": 912.8943939208984,
+        "median_us": 913.8591766357422,
+        "min_us": 852.7759552001953,
+        "p95_us": 938.2431983947754
+      },
+      "marlin_w4": {
+        "max_us": 1572.488021850586,
+        "mean_us": 1409.5191688537598,
+        "median_us": 1388.532018661499,
+        "min_us": 1357.5056076049805,
+        "p95_us": 1512.116813659668
+      },
+      "mkn": [
+        4096,
+        2048,
+        8192
+      ],
+      "plain_qvq": {
+        "max_us": 4443.755340576172,
+        "mean_us": 4286.205062866211,
+        "median_us": 4280.025672912598,
+        "min_us": 4271.895980834961,
+        "p95_us": 4320.016098022461
+      },
+      "previous_qvq": {
+        "max_us": 2692.9712295532227,
+        "mean_us": 2491.339672088623,
+        "median_us": 2468.719959259033,
+        "min_us": 2437.7567291259766,
+        "p95_us": 2645.128059387207
+      },
+      "qvq": {
+        "max_us": 2516.748809814453,
+        "mean_us": 2405.7759552001953,
+        "median_us": 2397.977638244629,
+        "min_us": 2370.128059387207,
+        "p95_us": 2450.9408950805664
+      },
+      "selected_chunk_rows": null,
+      "speedup_vs_machete_w4": 0.3810957875756951,
+      "speedup_vs_marlin_w4": 0.5790429387314613,
+      "speedup_vs_plain_qvq": 1.7848480338814454
+    }
+  ],
+  "source_fingerprint": "aab814e60055930af43e4ffbb98b0121d774ce6560bbeef75879048ccda76b04",
+  "timing": {
+    "cpu_time_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 20,
+    "samples": 50,
+    "warmup": 20
+  },
+  "workload": "complete Llama 3.2 1B gate/up/SiLU/product/down MLP"
+}

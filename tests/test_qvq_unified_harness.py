@@ -20,8 +20,8 @@ from scripts.qvq_evaluate import (
     _mmlu_question_row_progress,
     _model_logits,
     _publish_snapshot_evaluation,
-    _row_text,
     _resolve_cuda_graph_request,
+    _row_text,
     _wilson_interval,
     validate_evaluation_is_held_out,
 )
@@ -82,6 +82,59 @@ def test_qvq_quantize_parser_can_disable_nested_telemetry():
     assert args.qvq_telemetry is False
 
 
+def test_qvq_quantize_parser_builds_v2b2_g32_a8_configuration():
+    args = build_quantize_parser().parse_args(
+        [
+            "--model",
+            "dense-model",
+            "--output",
+            "quantized-model",
+            "--calibration-dataset",
+            "dataset",
+            "--format",
+            "v2b2-g32",
+            "--bits",
+            "3",
+            "--activation",
+        ]
+    )
+
+    config = build_quantize_config(args)
+
+    assert config.format == FORMAT.QVQ_V2B2_P32
+    assert config.bits == 3
+    assert config.bank_count == 2
+    assert config.rounding == "block_ldlq"
+    assert config.offload_to_disk is True
+    assert config.activation.bits == 8
+    assert config.activation.format == "float8_e4m3fn"
+    assert config.activation.scale_method == "dynamic_per_token"
+    assert config.activation.replay_passes == 0
+
+
+def test_qvq_quantize_parser_rejects_explicit_yaqa_p32_operand_activation():
+    args = build_quantize_parser().parse_args(
+        [
+            "--model",
+            "dense-model",
+            "--output",
+            "quantized-model",
+            "--calibration-dataset",
+            "dataset",
+            "--format",
+            "v2b2-g32",
+            "--bits",
+            "3",
+            "--activation",
+            "--rounding",
+            "yaqa",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="YAQA activation-aware calibration"):
+        build_quantize_config(args)
+
+
 def test_qvq_quantize_parser_exposes_fail_closed_disjointness_gate():
     args = build_quantize_parser().parse_args(
         [
@@ -116,6 +169,38 @@ def test_qvq_quantize_json_requires_explicit_rounding(tmp_path):
 
     with pytest.raises(ValueError, match="explicit.*rounding"):
         build_quantize_config(args)
+
+
+def test_qvq_quantize_json_maps_legacy_activation_field(tmp_path, capsys):
+    config_path = tmp_path / "legacy-a8.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "bits": 3.5,
+                "format": "qvq_v2b2_p32",
+                "rounding": "block_ldlq",
+                "activation_quantization": {"kernel_mode": "require"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = build_quantize_parser().parse_args(
+        [
+            "--model",
+            "dense-model",
+            "--output",
+            "quantized-model",
+            "--calibration-dataset",
+            "dataset",
+            "--quant-config",
+            str(config_path),
+        ]
+    )
+
+    config = build_quantize_config(args)
+
+    assert config.activation.kernel_mode == "require"
+    assert "deprecated" in capsys.readouterr().out
 
 
 def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():
@@ -185,6 +270,7 @@ def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():
     [
         (FORMAT.QVQ.value, 1),
         (FORMAT.QVQ_V2B2_P32.value, 2),
+        ("v2b2-g32", 2),
         (FORMAT.QVQ_V2B4_P64.value, 4),
         (FORMAT.QVQ_V4.value, 4),
     ],

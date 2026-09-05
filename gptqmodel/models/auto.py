@@ -65,7 +65,7 @@ from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from .base import BaseQModel  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
-from .definitions.apertus import ApertusQModel  # noqa: E402
+from .definitions.apertus import Apertus1p5QModel, Apertus1p5TextQModel, ApertusQModel  # noqa: E402
 from .definitions.axk2 import AXK2QModel  # noqa: E402
 from .definitions.baichuan import BaiChuanQModel  # noqa: E402
 from .definitions.bailing_moe import BailingMoeQModel  # noqa: E402
@@ -104,6 +104,7 @@ from .definitions.glm4_moe_lite import Glm4MoeLiteQModel  # noqa: E402
 from .definitions.glm4v import Glm4vGPTQ  # noqa: E402
 from .definitions.glm4v_moe import Glm4vMoeQModel, Glm4vMoeTextQModel  # noqa: E402
 from .definitions.glm_moe_dsa import GlmMoeDsaQModel  # noqa: E402
+from .definitions.glm5_next import Glm5NextQModel  # noqa: E402
 from .definitions.glm_ocr import GlmOCRGPTQ  # noqa: E402
 from .definitions.glmasr import GlmASRGPTQ  # noqa: E402
 from .definitions.gpt2 import GPT2QModel  # noqa: E402
@@ -117,6 +118,7 @@ from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hrm_text import HrmTextQModel  # noqa: E402
 from .definitions.hunyuan_v1_dense import HunYuanDenseV1QModel  # noqa: E402
 from .definitions.hunyuan_v1_moe import HunYuanMoEV1QModel  # noqa: E402
+from .definitions.hunyuan_vl import HunYuanVLQModel  # noqa: E402
 from .definitions.hy_v3 import HYV3QModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
@@ -137,6 +139,7 @@ from .definitions.llama import LlamaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel, Llama4TextQModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashQModel  # noqa: E402
+from .definitions.locateanything import LocateAnythingQModel  # noqa: E402
 from .definitions.mage_vl import MageVLQModel  # noqa: E402
 from .definitions.mimo import MimoQModel  # noqa: E402
 from .definitions.mimo_v2 import MimoV2QModel  # noqa: E402
@@ -183,6 +186,7 @@ from .definitions.qwen3_moe import Qwen3MoeQModel  # noqa: E402
 from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .definitions.qwen3_vl import Qwen3_VLQModel
+from .definitions.qwen4_exp import Qwen4ExpQModel  # noqa: E402
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
@@ -207,6 +211,8 @@ else:
 
 MODEL_MAP = {
     "apertus": ApertusQModel,
+    "apertus1p5": Apertus1p5QModel,
+    "apertus1p5_text": Apertus1p5TextQModel,
     "axk2": AXK2QModel,
     "dream": DreamQModel,
     "bloom": BloomQModel,
@@ -237,6 +243,7 @@ MODEL_MAP = {
     "glm4_moe": GLM4MoEGPTQ,
     "glm4_moe_lite": Glm4MoeLiteQModel,
     "glm_moe_dsa": GlmMoeDsaQModel,
+    "glm5_next": Glm5NextQModel,
     "gpt_bigcode": GptBigCodeQModel,
     "codegen": CodeGenQModel,
     "cohere": LlamaQModel, # 100% llama clone
@@ -256,6 +263,7 @@ MODEL_MAP = {
     "hrm_text": HrmTextQModel,
     "hunyuan_v1_dense": HunYuanDenseV1QModel,
     "hunyuan_v1_moe": HunYuanMoEV1QModel,
+    "hunyuan_vl": HunYuanVLQModel,
     "hy_v3": HYV3QModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone
@@ -306,6 +314,7 @@ MODEL_MAP = {
     "qwen2_5_omni": Qwen2_5_OmniGPTQ,
     "qwen3_omni_moe": Qwen3OmniMoeGPTQ,
     "qwen3_vl": Qwen3_VLQModel,
+    "qwen4_exp": Qwen4ExpQModel,
     "dbrx": DbrxQModel,
     "dbrx_converted": DbrxConvertedQModel,
     "deepseek_v2": DeepSeekV2QModel,
@@ -349,6 +358,7 @@ MODEL_MAP = {
     "seed_oss": LlamaQModel, # 100% llama clone
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
+    "locateanything": LocateAnythingQModel,
     "llava_qwen2": LlavaQwen2QModel,
     "nemotron_h": NemotronHQModel,
     "nemotron_h_puzzle": NemotronHPuzzleQModel,
@@ -376,13 +386,41 @@ if Qwen3_5_MoeQModel is not None:
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
 
 
+def _is_qvq_fp8_activation_metadata(quantization_config: dict) -> bool:
+    """Recognize the activation contract implemented by QVQ V2B2-P32."""
+
+    method = quantization_config.get("method", quantization_config.get("quant_method"))
+    quant_format = quantization_config.get("format", quantization_config.get("quant_format"))
+    activation = quantization_config.get("activation")
+    if activation is None:
+        activation = quantization_config.get("activation_quantization")
+    if not isinstance(method, str) or method.lower() != METHOD.QVQ:
+        return False
+    if not isinstance(quant_format, str) or quant_format.strip().lower() not in {
+        "qvq_v2b2_p32",
+        "qvq_v2b2_g32",
+        "v2b2_g32",
+        "v2b2-g32",
+    }:
+        return False
+    if not isinstance(activation, dict):
+        return False
+    bits = activation.get("bits", 8)
+    activation_format = str(activation.get("format", "float8_e4m3fn")).strip().lower()
+    scale_method = str(activation.get("scale_method", "dynamic_per_token")).strip().lower()
+    return (
+        bits == 8
+        and activation_format in {"e4m3", "e4m3fn", "float8_e4m3fn"}
+        and scale_method in {"dynamic_per_token", "per_token", "token"}
+    )
+
+
 def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
     """Return the first activation-quantization field that makes this config unsupported.
 
-    GPT-QModel can load weight-only quantized checkpoints through the Transformers
-    surface, but it does not currently implement activation-quantized runtime
-    semantics. This helper keeps the rejection logic in one place for both
-    ModelOpt-style grouped configs and flatter HF quantization payloads.
+    The exact QVQ V2B2-P32/A8 contract is implemented below. Other activation-
+    quantized checkpoints remain unsupported; this helper keeps their rejection
+    logic in one place for ModelOpt-style groups and flatter HF payloads.
     """
 
     config_groups = quantization_config.get("config_groups")
@@ -398,9 +436,13 @@ def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
     if isinstance(kv_cache_scheme, dict) and kv_cache_scheme:
         return "kv_cache_scheme"
 
-    for key in ("input_activations", "activation_quantization", "activations"):
+    for key in ("input_activations", "activation", "activation_quantization", "activations"):
         value = quantization_config.get(key)
         if isinstance(value, dict) and value:
+            if key in {"activation", "activation_quantization"} and _is_qvq_fp8_activation_metadata(
+                quantization_config
+            ):
+                continue
             return key
     return None
 
@@ -430,6 +472,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.PARO,
         METHOD.QQQ,
         METHOD.EXL3,
+        METHOD.QVQ,
     ):
         return True
 
@@ -438,6 +481,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.GPTQ,
         METHOD.GGUF,
         METHOD.FP8,
+        METHOD.QVQ,
         METHOD.BITSANDBYTES,
         METHOD.AWQ,
         METHOD.PARO,

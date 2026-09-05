@@ -1,0 +1,701 @@
+{
+  "schema": "qvq.amd.large_down_extension.v1",
+  "commit": "92acde48",
+  "baseline": "c89459e3",
+  "change": "Raise down-projection folded M limit from1024 to4096. Existing M>=2048 recovery uses the already-retained fused FP32 Hadamard specialization.",
+  "validation": {
+    "cases": 364,
+    "passes": 364,
+    "canonical_cases": 352,
+    "unchanged_fallback_cases": 12,
+    "canonical_max_abs": 0.001961231231689453,
+    "tests": 270,
+    "warnings": 14,
+    "stream_graph": true
+  },
+  "performance": {
+    "all_geomean": 1.2230438672770367,
+    "cases_at_least1p5": 36,
+    "remaining_below1p5": 328,
+    "new_down_cases": [
+      {
+        "bits": 2,
+        "m": 2048,
+        "baseline_ms": 0.8434689939022064,
+        "candidate_ms": 0.46538500487804413,
+        "speedup": 1.8124111973122998
+      },
+      {
+        "bits": 2,
+        "m": 4096,
+        "baseline_ms": 1.373235046863556,
+        "candidate_ms": 0.8752094805240631,
+        "speedup": 1.5690358450428143
+      },
+      {
+        "bits": 2.5,
+        "m": 2048,
+        "baseline_ms": 0.8473289906978607,
+        "candidate_ms": 0.46836499869823456,
+        "speedup": 1.8091210766238126
+      },
+      {
+        "bits": 2.5,
+        "m": 4096,
+        "baseline_ms": 1.3924344778060913,
+        "candidate_ms": 0.8717490136623383,
+        "speedup": 1.5972882744728112
+      },
+      {
+        "bits": 3,
+        "m": 2048,
+        "baseline_ms": 0.8403084874153137,
+        "candidate_ms": 0.4631645083427429,
+        "speedup": 1.814276509273209
+      },
+      {
+        "bits": 3,
+        "m": 4096,
+        "baseline_ms": 1.3851940035820007,
+        "candidate_ms": 0.8788489997386932,
+        "speedup": 1.5761456222785237
+      },
+      {
+        "bits": 3.5,
+        "m": 2048,
+        "baseline_ms": 0.8354685008525848,
+        "candidate_ms": 0.46374499797821045,
+        "speedup": 1.801568759760165
+      },
+      {
+        "bits": 3.5,
+        "m": 4096,
+        "baseline_ms": 1.3784945011138916,
+        "candidate_ms": 0.8698095083236694,
+        "speedup": 1.584823444584527
+      }
+    ]
+  },
+  "precision": "FP16 input/output, FP32 main GEMM and composite recovery; canonical packed-weight fixture unchanged; no added persistent cache memory.",
+  "counter_environment": "LD_LIBRARY_PATH=/opt/rocm/core-10.0/lib:/opt/rocm/core-10.0/lib/rocprofiler-sdk",
+  "counters": [
+    {
+      "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT160x256x64_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT5_8_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB8_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1",
+      "grid": 65536,
+      "resources": {
+        "Workgroup_Size": 256,
+        "LDS_Block_Size": 124928,
+        "Scratch_Size": 0,
+        "VGPR_Count": 128,
+        "Accum_VGPR_Count": 288,
+        "SGPR_Count": 96
+      },
+      "counters": {
+        "SQ_INSTS_LDS": {
+          "records": 32,
+          "min": 10885120,
+          "max": 21770240,
+          "mean": 16327680
+        },
+        "SQ_INSTS_MFMA": {
+          "records": 32,
+          "min": 22282240,
+          "max": 44564480,
+          "mean": 33423360
+        },
+        "SQ_INSTS_SALU": {
+          "records": 32,
+          "min": 6021120,
+          "max": 11978752,
+          "mean": 8999936
+        },
+        "SQ_INSTS_VALU": {
+          "records": 32,
+          "min": 24404992,
+          "max": 48756736,
+          "mean": 36580864
+        }
+      }
+    },
+    {
+      "kernel": "Cijk_Ailk_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT256x176x64_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT4_11_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB1_WSGRA0_WSGRB0_WS64_WG64_4_1_WGMXCCn1",
+      "grid": 61440,
+      "resources": {
+        "Workgroup_Size": 256,
+        "LDS_Block_Size": 126464,
+        "Scratch_Size": 0,
+        "VGPR_Count": 128,
+        "Accum_VGPR_Count": 304,
+        "SGPR_Count": 96
+      },
+      "counters": {
+        "SQ_INSTS_LDS": {
+          "records": 24,
+          "min": 14891520,
+          "max": 14891520,
+          "mean": 14891520
+        },
+        "SQ_INSTS_MFMA": {
+          "records": 24,
+          "min": 22978560,
+          "max": 22978560,
+          "mean": 22978560
+        },
+        "SQ_INSTS_SALU": {
+          "records": 24,
+          "min": 5681840,
+          "max": 5681840,
+          "mean": 5681840
+        },
+        "SQ_INSTS_VALU": {
+          "records": 24,
+          "min": 33310800,
+          "max": 33310800,
+          "mean": 33310800
+        }
+      }
+    },
+    {
+      "kernel": "_qvq_p32_composite_recovery_gfx950_kernel",
+      "grid": 2097152,
+      "resources": {
+        "Workgroup_Size": 512,
+        "LDS_Block_Size": 0,
+        "Scratch_Size": 0,
+        "VGPR_Count": 116,
+        "Accum_VGPR_Count": 4,
+        "SGPR_Count": 32
+      },
+      "counters": {
+        "SQ_INSTS_LDS": {
+          "records": 24,
+          "min": 3178496,
+          "max": 3178496,
+          "mean": 3178496
+        },
+        "SQ_INSTS_MFMA": {
+          "records": 24,
+          "min": 3145728,
+          "max": 3145728,
+          "mean": 3145728
+        },
+        "SQ_INSTS_SALU": {
+          "records": 24,
+          "min": 1245184,
+          "max": 1245184,
+          "mean": 1245184
+        },
+        "SQ_INSTS_VALU": {
+          "records": 24,
+          "min": 7176192,
+          "max": 7176192,
+          "mean": 7176192
+        }
+      }
+    },
+    {
+      "kernel": "Cijk_Ailk_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT256x176x64_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT4_11_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB1_WSGRA0_WSGRB0_WS64_WG64_4_1_WGMXCCn1",
+      "grid": 122880,
+      "resources": {
+        "Workgroup_Size": 256,
+        "LDS_Block_Size": 126464,
+        "Scratch_Size": 0,
+        "VGPR_Count": 128,
+        "Accum_VGPR_Count": 304,
+        "SGPR_Count": 96
+      },
+      "counters": {
+        "SQ_INSTS_LDS": {
+          "records": 24,
+          "min": 29783040,
+          "max": 29783040,
+          "mean": 29783040
+        },
+        "SQ_INSTS_MFMA": {
+          "records": 24,
+          "min": 45957120,
+          "max": 45957120,
+          "mean": 45957120
+        },
+        "SQ_INSTS_SALU": {
+          "records": 24,
+          "min": 11365040,
+          "max": 11365040,
+          "mean": 11365040
+        },
+        "SQ_INSTS_VALU": {
+          "records": 24,
+          "min": 66590160,
+          "max": 66590160,
+          "mean": 66590160
+        }
+      }
+    },
+    {
+      "kernel": "_qvq_p32_composite_recovery_gfx950_kernel",
+      "grid": 4194304,
+      "resources": {
+        "Workgroup_Size": 512,
+        "LDS_Block_Size": 0,
+        "Scratch_Size": 0,
+        "VGPR_Count": 116,
+        "Accum_VGPR_Count": 4,
+        "SGPR_Count": 32
+      },
+      "counters": {
+        "SQ_INSTS_LDS": {
+          "records": 24,
+          "min": 6356992,
+          "max": 6356992,
+          "mean": 6356992
+        },
+        "SQ_INSTS_MFMA": {
+          "records": 24,
+          "min": 6291456,
+          "max": 6291456,
+          "mean": 6291456
+        },
+        "SQ_INSTS_SALU": {
+          "records": 24,
+          "min": 2490368,
+          "max": 2490368,
+          "mean": 2490368
+        },
+        "SQ_INSTS_VALU": {
+          "records": 24,
+          "min": 14352384,
+          "max": 14352384,
+          "mean": 14352384
+        }
+      }
+    }
+  ],
+  "recovery_isa": {
+    "source_unchanged": true,
+    "static_instructions": 414,
+    "static_mfma": 96,
+    "static_barriers": 9,
+    "static_waitcnt": 28,
+    "vgpr": 116,
+    "sgpr_descriptor": 30,
+    "spills": 0,
+    "dynamic_lds_bytes": 32768,
+    "jit_hash": "70065b317c7f2ef0f05f2ad5bd70bcaad88ce84e64949c79d15005c889d23605",
+    "asm_sha256": "a263899c385dd8097b726416498e28b3a0f03af10f95a0d4a3663925a109b5b0",
+    "preexisting_dump": "/tmp/qvq-triton-butterfly-experiment/OADFWML4P4XPB4C7FLK324F4VLMIZ2COMSKJY6ORKAC4RCOSGYCQ/_qvq_p32_composite_recovery_gfx950_kernel.amdgcn",
+    "preexisting_dump_mtime": "2026-09-05T03:46:25Z",
+    "post_dump": "/tmp/qvq-down-extended-profile-cache/OADFWML4P4XPB4C7FLK324F4VLMIZ2COMSKJY6ORKAC4RCOSGYCQ/_qvq_p32_composite_recovery_gfx950_kernel.amdgcn",
+    "comparison": "Both complete AMDGCN dumps have identical SHA256. Counter LDS_Block_Size reports static0; JIT metadata reports32KiB dynamic LDS. Do not report zero LDS usage."
+  },
+  "library_isa": [
+    {
+      "hsaco": "/tmp/qvq-down-a-gfx950.hsaco",
+      "hsaco_sha256": "4ad269bf89e2162099c89bc036122e1dd71aaa520e0f9aaadda8696c82083989",
+      "counter_csv": "/tmp/qvq-down-extended-counters/raw/ubuntu2404-mi350x/735924_counter_collection.csv",
+      "symbols": [
+        {
+          "kernel": "Cijk_Ailk_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT256x176x64_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT4_11_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB1_WSGRA0_WSGRB0_WS64_WG64_4_1_WGMXCCn1",
+          "start": "0x4679d00",
+          "stop": "0x4715300",
+          "asm": "/tmp/qvq-down-extended-isa/a/4679d00.amdgcn",
+          "static_total": 98821,
+          "static_opcodes": {
+            "buffer_load_dword": 1058,
+            "buffer_load_dwordx2": 44,
+            "buffer_load_dwordx4": 648,
+            "buffer_load_short_d16": 22,
+            "buffer_store_dword": 2288,
+            "buffer_store_dwordx4": 1188,
+            "ds_bpermute_b32": 704,
+            "ds_read_b128": 245,
+            "ds_read_b32": 433,
+            "ds_read_b64": 56,
+            "ds_write_b128": 32,
+            "ds_write_b32": 3,
+            "ds_write_b64": 44,
+            "s_abs_i32": 10,
+            "s_add_i32": 29,
+            "s_add_u32": 1090,
+            "s_addc_u32": 901,
+            "s_and_b32": 29,
+            "s_and_b64": 2860,
+            "s_atomic_inc": 1,
+            "s_barrier": 49,
+            "s_branch": 107,
+            "s_cbranch_scc0": 91,
+            "s_cbranch_scc1": 123,
+            "s_cbranch_vccnz": 21,
+            "s_cbranch_vccz": 4,
+            "s_cmov_b32": 6,
+            "s_cmp_eq_i32": 1,
+            "s_cmp_eq_u32": 108,
+            "s_cmp_eq_u64": 11,
+            "s_cmp_ge_i32": 8,
+            "s_cmp_ge_u32": 55,
+            "s_cmp_gt_i32": 1,
+            "s_cmp_gt_u32": 5,
+            "s_cmp_le_i32": 1,
+            "s_cmp_le_u32": 2,
+            "s_cmp_lg_u32": 3,
+            "s_cmp_lt_i32": 1,
+            "s_cmp_lt_u32": 19,
+            "s_cmpk_eq_u32": 38,
+            "s_cmpk_gt_u32": 6,
+            "s_cselect_b32": 46,
+            "s_endpgm": 2,
+            "s_getpc_b64": 27,
+            "s_load_dword": 11,
+            "s_load_dwordx16": 5,
+            "s_load_dwordx2": 8,
+            "s_load_dwordx4": 4,
+            "s_load_dwordx8": 4,
+            "s_lshl2_add_u32": 1,
+            "s_lshl_b32": 639,
+            "s_lshl_b64": 17,
+            "s_lshr_b32": 19,
+            "s_lshr_b64": 6,
+            "s_max_i32": 1,
+            "s_min_u32": 4,
+            "s_mov_b32": 91,
+            "s_mov_b64": 47,
+            "s_mul_hi_i32": 4,
+            "s_mul_hi_u32": 25,
+            "s_mul_i32": 3502,
+            "s_nop": 6850,
+            "s_or_saveexec_b64": 7,
+            "s_setpc_b64": 32,
+            "s_sext_i32_i16": 1,
+            "s_store_dword": 3,
+            "s_sub_i32": 4,
+            "s_sub_u32": 75,
+            "s_subb_u32": 27,
+            "s_waitcnt": 908,
+            "s_xor_b32": 4,
+            "v_accvgpr_read_b32": 8360,
+            "v_accvgpr_write_b32": 1496,
+            "v_add_co_u32_e32": 42,
+            "v_add_co_u32_e64": 2834,
+            "v_add_f32_e32": 5632,
+            "v_add_i32": 520,
+            "v_add_lshl_u32": 4201,
+            "v_add_u32_e32": 34,
+            "v_add_u32_e64": 1761,
+            "v_addc_co_u32_e64": 4,
+            "v_and_b32_e32": 30,
+            "v_cmp_eq_f32_e64": 4,
+            "v_cmp_eq_u32_e64": 22,
+            "v_cmp_ge_i32_e64": 65,
+            "v_cmp_gt_u32_e64": 1,
+            "v_cmp_lt_i32_e64": 1,
+            "v_cmp_lt_u32_e64": 5721,
+            "v_cmp_ne_u32_e64": 4,
+            "v_cmpx_eq_u32_e64": 13,
+            "v_cmpx_ge_u32_e64": 10,
+            "v_cmpx_gt_u32_e64": 6,
+            "v_cndmask_b32_e64": 4303,
+            "v_cvt_f32_u32_e32": 20,
+            "v_cvt_f64_u32_e32": 20,
+            "v_cvt_u32_f32_e32": 10,
+            "v_cvt_u32_f64_e32": 10,
+            "v_exp_f32_e32": 3168,
+            "v_fma_f32": 2112,
+            "v_fmac_f32_e64": 3168,
+            "v_lshl_add_u32": 5,
+            "v_lshlrev_b32_e32": 2699,
+            "v_lshlrev_b64": 30,
+            "v_lshrrev_b32_e32": 23,
+            "v_max_f32_e32": 1056,
+            "v_max_f32_e64": 1056,
+            "v_mfma_f32_16x16x32_f16": 308,
+            "v_min_f32_e32": 1056,
+            "v_min_i32_e32": 1,
+            "v_mov_b32_e32": 140,
+            "v_mul_f32_e32": 10678,
+            "v_mul_f64": 10,
+            "v_mul_i32_i24_e32": 1,
+            "v_mul_lo_u32": 41,
+            "v_mul_u32_u24_e32": 6,
+            "v_mul_u32_u24_e64": 12,
+            "v_or_b32_e32": 22,
+            "v_perm_b32": 112,
+            "v_pk_add_f32": 2112,
+            "v_pk_mul_f32": 5226,
+            "v_rcp_f32_e32": 3168,
+            "v_rcp_f64_e32": 10,
+            "v_rcp_iflag_f32_e32": 10,
+            "v_readfirstlane_b32": 36,
+            "v_readlane_b32": 4,
+            "v_sub_u32_e32": 34,
+            "v_sub_u32_e64": 2662,
+            "v_writelane_b32": 2,
+            "v_xor_b32_e32": 10
+          },
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "records": 48,
+              "min": 14891520,
+              "max": 29783040,
+              "mean": 22337280
+            },
+            "SQ_INSTS_MFMA": {
+              "records": 48,
+              "min": 22978560,
+              "max": 45957120,
+              "mean": 34467840
+            },
+            "SQ_INSTS_SALU": {
+              "records": 48,
+              "min": 5681840,
+              "max": 11365040,
+              "mean": 8523440
+            },
+            "SQ_INSTS_VALU": {
+              "records": 48,
+              "min": 33310800,
+              "max": 66590160,
+              "mean": 49950480
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              61440,
+              122880
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              126464
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              128
+            ],
+            "Accum_VGPR_Count": [
+              304
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        }
+      ],
+      "warning": "Whole-symbol static counts include untaken branches. Issued counters include all profiled launches."
+    },
+    {
+      "hsaco": "/tmp/qvq-residual-attn-gfx950.hsaco",
+      "hsaco_sha256": "424e296a25535a3257f966cd4892015140a101691ae3b74117b15a4573d6e973",
+      "counter_csv": "/tmp/qvq-down-extended-counters/raw/ubuntu2404-mi350x/735924_counter_collection.csv",
+      "symbols": [
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT160x256x64_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT5_8_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB8_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1",
+          "start": "0x9586f00",
+          "stop": "0x95f3700",
+          "asm": "/tmp/qvq-down-extended-isa/b/9586f00.amdgcn",
+          "static_total": 70972,
+          "static_opcodes": {
+            "buffer_load_dword": 2242,
+            "buffer_load_dwordx4": 52,
+            "buffer_load_short_d16": 52,
+            "buffer_store_dword": 4320,
+            "ds_read_b128": 91,
+            "ds_read_b32": 781,
+            "ds_write_b128": 52,
+            "ds_write_b32": 3,
+            "s_abs_i32": 8,
+            "s_add_i32": 27,
+            "s_add_u32": 1208,
+            "s_addc_u32": 669,
+            "s_and_b32": 36,
+            "s_and_b64": 2080,
+            "s_atomic_inc": 1,
+            "s_barrier": 37,
+            "s_branch": 94,
+            "s_cbranch_scc0": 150,
+            "s_cbranch_scc1": 118,
+            "s_cbranch_vccz": 4,
+            "s_cmov_b32": 10,
+            "s_cmp_eq_i32": 1,
+            "s_cmp_eq_u32": 116,
+            "s_cmp_eq_u64": 11,
+            "s_cmp_ge_i32": 6,
+            "s_cmp_ge_u32": 115,
+            "s_cmp_gt_i32": 1,
+            "s_cmp_gt_u32": 6,
+            "s_cmp_le_i32": 1,
+            "s_cmp_le_u32": 2,
+            "s_cmp_lg_u32": 4,
+            "s_cmp_lt_i32": 2,
+            "s_cmp_lt_u32": 19,
+            "s_cmpk_eq_u32": 26,
+            "s_cmpk_gt_u32": 6,
+            "s_cselect_b32": 48,
+            "s_endpgm": 2,
+            "s_getpc_b64": 23,
+            "s_load_dword": 11,
+            "s_load_dwordx16": 5,
+            "s_load_dwordx2": 8,
+            "s_load_dwordx4": 4,
+            "s_load_dwordx8": 4,
+            "s_lshl2_add_u32": 1,
+            "s_lshl_b32": 601,
+            "s_lshl_b64": 17,
+            "s_lshr_b32": 22,
+            "s_lshr_b64": 6,
+            "s_max_i32": 1,
+            "s_min_u32": 4,
+            "s_mov_b32": 915,
+            "s_mov_b64": 40,
+            "s_mul_hi_i32": 4,
+            "s_mul_hi_u32": 27,
+            "s_mul_i32": 2075,
+            "s_nop": 3979,
+            "s_setpc_b64": 26,
+            "s_sext_i32_i16": 1,
+            "s_store_dword": 3,
+            "s_sub_i32": 5,
+            "s_sub_u32": 73,
+            "s_subb_u32": 25,
+            "s_waitcnt": 1528,
+            "s_xor_b32": 4,
+            "v_accvgpr_read_b32": 4640,
+            "v_accvgpr_write_b32": 480,
+            "v_add_co_u32_e32": 28,
+            "v_add_co_u32_e64": 2067,
+            "v_add_f32_e32": 6080,
+            "v_add_lshl_u32": 3061,
+            "v_add_u32_e32": 28,
+            "v_add_u32_e64": 848,
+            "v_addc_co_u32_e64": 4,
+            "v_and_b32_e32": 19,
+            "v_cmp_eq_f32_e64": 4,
+            "v_cmp_ge_i32_e64": 58,
+            "v_cmp_gt_u32_e64": 1,
+            "v_cmp_lt_i32_e64": 2,
+            "v_cmp_lt_u32_e64": 4160,
+            "v_cmp_ne_u32_e64": 4,
+            "v_cmpx_eq_u32_e64": 6,
+            "v_cmpx_ge_u32_e64": 10,
+            "v_cmpx_gt_u32_e64": 6,
+            "v_cndmask_b32_e32": 1,
+            "v_cndmask_b32_e64": 3145,
+            "v_cvt_f32_u32_e32": 20,
+            "v_cvt_f64_u32_e32": 20,
+            "v_cvt_u32_f32_e32": 10,
+            "v_cvt_u32_f64_e32": 10,
+            "v_exp_f32_e32": 1920,
+            "v_fma_f32": 1280,
+            "v_fmac_f32_e64": 1920,
+            "v_lshl_add_u32": 8,
+            "v_lshlrev_b32_e32": 1964,
+            "v_lshlrev_b64": 26,
+            "v_lshrrev_b32_e32": 19,
+            "v_max_f32_e32": 640,
+            "v_max_f32_e64": 640,
+            "v_mfma_f32_16x16x32_f16": 280,
+            "v_min_f32_e32": 640,
+            "v_mov_b32_e32": 90,
+            "v_mul_f32_e32": 9066,
+            "v_mul_f64": 10,
+            "v_mul_lo_u32": 35,
+            "v_mul_u32_u24_e32": 6,
+            "v_mul_u32_u24_e64": 12,
+            "v_or_b32_e32": 52,
+            "v_pk_mul_f32": 1872,
+            "v_rcp_f32_e32": 1920,
+            "v_rcp_f64_e32": 10,
+            "v_rcp_iflag_f32_e32": 10,
+            "v_readfirstlane_b32": 36,
+            "v_readlane_b32": 4,
+            "v_sub_u32_e32": 32,
+            "v_sub_u32_e64": 1943,
+            "v_writelane_b32": 2,
+            "v_xor_b32_e32": 10
+          },
+          "issued_counters": {
+            "SQ_INSTS_LDS": {
+              "records": 32,
+              "min": 10885120,
+              "max": 21770240,
+              "mean": 16327680
+            },
+            "SQ_INSTS_MFMA": {
+              "records": 32,
+              "min": 22282240,
+              "max": 44564480,
+              "mean": 33423360
+            },
+            "SQ_INSTS_SALU": {
+              "records": 32,
+              "min": 6021120,
+              "max": 11978752,
+              "mean": 8999936
+            },
+            "SQ_INSTS_VALU": {
+              "records": 32,
+              "min": 24404992,
+              "max": 48756736,
+              "mean": 36580864
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              65536
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              124928
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              128
+            ],
+            "Accum_VGPR_Count": [
+              288
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        }
+      ],
+      "warning": "Whole-symbol static counts include untaken branches. Issued counters include all profiled launches."
+    }
+  ],
+  "code_object_provenance": {
+    "database": "/tmp/qvq-down-codeobjects/raw/ubuntu2404-mi350x/737153_results.db",
+    "candidate": {
+      "unbundled_size": 168281944,
+      "descriptor_offset": "0x41bd40",
+      "runtime_kernel_object": "0x7753a661bd40",
+      "runtime_load_delta": "0x7753a6200000"
+    },
+    "baseline": {
+      "unbundled_size": 178680992,
+      "descriptor_offset": "0x486d80",
+      "runtime_kernel_object": "0x7753f7c86d80",
+      "runtime_load_delta": "0x7753f7800000"
+    },
+    "verification": "Runtime object-minus-load_delta equals the exact matching global .kd symbol offset; memory-object byte sizes match unbundled code objects."
+  },
+  "algebra_review": [
+    "Recovery reuses exactly the earlier96-MFMA binary with a larger grid. Issued MFMA is3145728 at M2048 and6291456 at M4096, matching96 instructions *8 waves *2 CTAs per input row.",
+    "Dense128-point power recovery and padded64-wide base reduction retain redundant work. Next test low32/high16 staging, or butterfly power recovery, one rewrite at a time; no reduction claim yet.",
+    "The candidate GEMM uses256x176 tiles with padded N=5280 for N5120. Issued MFMA is3.125% above the ideal M*N*K work, motivating a tile-divisibility tuning experiment.",
+    "The preceding baseline uses a persistent160x256 library kernel; it issues the ideal22282240/44564480 MFMA counts at M2048/4096. Candidate wins despite more GEMM work because the costly fallback transform/synchronization sequence disappears.",
+    "All three changed-route symbols were audited: two library GEMMs (baseline/candidate) and the reused Triton recovery. No scratch spills were observed. Occupancy, bank-conflict and scheduler-stall counters were not collected."
+  ],
+  "artifact_paths": {
+    "trace": "/tmp/qvq-down-extended-profile/raw/ubuntu2404-mi350x/735080_kernel_trace.csv",
+    "counter_csv": "/tmp/qvq-down-extended-counters/raw/ubuntu2404-mi350x/735924_counter_collection.csv",
+    "trace_log": "/tmp/qvq-down-extended-profile.log",
+    "counter_log": "/tmp/qvq-down-extended-counters.log"
+  },
+  "next_scope": "Keep all364 cases in scope. Remaining12 unfurled fallback cases are gate/up at M>=1024; investigate cheaper residual correction. Also tune launch-sensitive decode and large GEMMs. Goal remains active."
+}

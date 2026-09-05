@@ -5,6 +5,9 @@ description: Build, port, optimize, review, benchmark, or debug GPT-QModel CUDA,
 
 # GPT-QModel CUDA kernels
 
+For QVQ optimization, first read [qvq-kernel-accuracy](../qvq-kernel-accuracy/SKILL.md) for accuracy-preserving math
+and the locked numerical contract; apply it before selecting lower precision or ranking performance candidates.
+
 Start from a numerical reference and select the smallest kernel path that can express the operation. Keep correctness tests separate from performance benchmarks.
 
 Read [references/kernel-workflow.md](references/kernel-workflow.md). For crashes or silent corruption, also read [references/cuda-debugging.md](references/cuda-debugging.md).
@@ -99,10 +102,18 @@ Treat QVQ quantization and QVQ inference as separate numerical contracts:
   error tolerance to waive a quantization mismatch.
 - **Inference kernels:** compare the CUDA output with the dequantized/reference
   inference output for the identical packed tensors, inputs, dtype, shape, and
-  stream. The maximum absolute output drift must be `<= 2e-3` for every tested
-  case. Report max-absolute, mean-absolute, relative-L2, and the tested dtype,
-  shape, batch/token regime, and GPU. A case over `2e-3` fails even if aggregate
-  metrics or generated text appear acceptable.
+  stream. Require both mean absolute output drift `<= 2e-3` and maximum absolute
+  output drift `<= 0.046875` for every tested case, with finite outputs. Compute
+  both metrics over all valid output elements of that case in sufficient precision;
+  neither signed mean nor pooling cases is allowed. Report max-absolute,
+  mean-absolute, relative-L2, and the tested dtype, shape, batch/token regime,
+  and GPU. Exceeding either inclusive limit fails even if aggregate metrics or
+  generated text appear acceptable.
+  These are localized kernel-output gates on identical inputs, weights, and
+  initial state, including the full reference composition for a fused operator.
+  Propagated final-logit differences are diagnostics, not acceptance gates;
+  do not apply these thresholds to final logits or use that drift alone to
+  reject a locally passing kernel.
 - Test both contracts on deterministic seeds, adversarial signs/magnitudes,
   long reductions, smallest legal dimensions, non-divisible M/N/K tails, every
   supported bit/layout branch, repeated calls, and each target architecture.
@@ -123,6 +134,39 @@ A compilation-only result must be labeled compilation-only. A passing kernel uni
 ## Benchmark after correctness
 
 Put reproducible benchmarks in `scripts/`. Warm up compilation and steady-state launches, synchronize correctly or use CUDA events, report distribution statistics rather than one timing, and compare against both the reference and the nearest production kernel. Include shapes, tokens/batch regime, dtype, quantization config, GPU properties, software stack, latency, throughput, and memory. Present the complete result table in ASCII.
+
+## Audit generated instructions after every kernel commit
+
+Every commit or named phase that can change generated GPU instructions requires
+a matched generated-code audit on the target GPU. This includes source changes,
+template/specialization changes, launch geometry, compiler flags, and constants
+that affect unrolling or control flow.
+
+1. Profile the affected steady-state kernel with Nsight Compute or an equivalent
+   profiler that reports executed instructions. Bind the report to the exact
+   committed revision, binary/JIT fingerprint, shape, dtype, rate, and launch.
+2. Export and inspect source-correlated SASS. Compare with the preceding committed
+   implementation at an identical workload; source-level operation counts are
+   not evidence of generated instruction reduction.
+3. Perform an explicit math/algebra and movement review against the new hot SASS:
+   fold equivalent expressions, eliminate common subexpressions, deduplicate
+   decode/address work, reuse values across consumers, and remove redundant
+   masks, shifts, conversions, permutations, and store/load round trips.
+4. Check for compiler regressions even when the source looks simpler. A new
+   compilation can reintroduce opcode families removed by an earlier phase or
+   exchange fewer instructions for more registers, spills, bank conflicts,
+   barriers, dependency latency, or scheduler stalls.
+5. Record before/after executed instructions and dominant opcode families,
+   registers, spills/local memory, shared-memory conflicts, occupancy, scheduler
+   eligibility, dominant stalls, achieved memory/compute throughput, exact
+   commands, and report paths.
+6. Re-run numerical correctness and warmed CUDA-event end-to-end timing after the
+   profiler capture. Promote only when those gates pass; an instruction-count win
+   alone is not a latency win.
+
+If the target GPU or instruction profiler is unavailable, mark the result
+compilation-only. Do not describe the commit/phase as complete or as a kernel
+performance win until this audit can run.
 
 ## Reference: modern CUDA SIMT and warp specialization
 
