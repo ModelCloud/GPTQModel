@@ -245,6 +245,31 @@ def _save_embedding_replacement_safetensors(
     if not prefixes:
         raise ValueError("Embedding replacement save requires at least one embedding prefix.")
 
+    config = getattr(model, "config", None)
+    tie_word_embeddings = bool(getattr(config, "tie_word_embeddings", False))
+    if not tie_word_embeddings:
+        source_config_path = os.path.join(turtle_model.model_local_path, "config.json")
+        if os.path.exists(source_config_path):
+            try:
+                with open(source_config_path, "r", encoding="utf-8") as handle:
+                    tie_word_embeddings = bool(json.load(handle).get("tie_word_embeddings", False))
+            except (OSError, TypeError, ValueError):
+                pass
+    input_prefix = _module_name(model, model.get_input_embeddings()) if hasattr(model, "get_input_embeddings") else None
+    output_prefix = _module_name(model, model.get_output_embeddings()) if hasattr(model, "get_output_embeddings") else None
+
+    # Untying happens before endpoint quantization. If only the input endpoint
+    # was requested, the cloned output head must still be serialized because
+    # the saved config is no longer tied.
+    if (
+        tie_word_embeddings
+        and input_prefix
+        and output_prefix
+        and input_prefix in prefixes
+        and output_prefix not in prefixes
+    ):
+        prefixes = sorted({*prefixes, output_prefix})
+
     index_path = os.path.join(save_dir, "model.safetensors.index.json")
     existing_weight_map = {}
     if os.path.exists(index_path):
@@ -276,30 +301,17 @@ def _save_embedding_replacement_safetensors(
                     matched_shards.append(runtime_shard)
         matched_shards_by_prefix[prefix] = matched_shards
 
-    config = getattr(model, "config", None)
-    tie_word_embeddings = bool(getattr(config, "tie_word_embeddings", False))
-    if not tie_word_embeddings:
-        source_config_path = os.path.join(turtle_model.model_local_path, "config.json")
-        if os.path.exists(source_config_path):
-            try:
-                with open(source_config_path, "r", encoding="utf-8") as handle:
-                    tie_word_embeddings = bool(json.load(handle).get("tie_word_embeddings", False))
-            except (OSError, TypeError, ValueError):
-                pass
-    input_prefix = _module_name(model, model.get_input_embeddings()) if hasattr(model, "get_input_embeddings") else None
-    output_prefix = _module_name(model, model.get_output_embeddings()) if hasattr(model, "get_output_embeddings") else None
-    tied_output_fallback = (
-        input_prefix
-        if tie_word_embeddings
-        and input_prefix in matched_shards_by_prefix
-        and output_prefix in matched_shards_by_prefix
-        else None
-    )
+    tied_input_shards = list(matched_shards_by_prefix.get(input_prefix, [])) if input_prefix else []
+    if tie_word_embeddings and input_prefix and not tied_input_shards:
+        input_checkpoint_prefixes = _checkpoint_prefixes_for_replacement(input_prefix, turtle_model)
+        for tensor_name, shard_name in turtle_model._weight_map.items():
+            if _tensor_matches_prefixes(tensor_name, input_checkpoint_prefixes) and shard_name not in tied_input_shards:
+                tied_input_shards.append(shard_name)
 
     for prefix in prefixes:
         matched_shards = matched_shards_by_prefix[prefix]
-        if not matched_shards and tied_output_fallback and prefix == output_prefix:
-            matched_shards = matched_shards_by_prefix[tied_output_fallback]
+        if not matched_shards and tie_word_embeddings and prefix == output_prefix:
+            matched_shards = tied_input_shards
         if not matched_shards:
             raise ValueError(f"Could not find checkpoint tensor for embedding module `{prefix}`.")
         try:
@@ -307,6 +319,7 @@ def _save_embedding_replacement_safetensors(
         except AttributeError as exc:
             raise ValueError(f"Embedding replacement module `{prefix}` is not present in the model tree.") from exc
         replacements = replacements_by_shard.setdefault(matched_shards[0], {})
+        drop_by_shard.setdefault(matched_shards[0], set())
         for relative_name, tensor in module.state_dict().items():
             replacements[f"{prefix}.{relative_name}" if relative_name else prefix] = tensor.detach().cpu()
 

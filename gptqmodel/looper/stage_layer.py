@@ -21,11 +21,8 @@ import time
 from concurrent.futures import as_completed
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from defuser.modeling.replace_modules import materialize_model
-from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
-from ..nn_modules.converter import MODULE_CONVERTER_MAP
-from ..quantization.config import GcMode, QuantizeEmbed
 import torch
+from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.awq_processor import AWQProcessor
@@ -33,13 +30,17 @@ from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
 from ..looper.paroquant_processor import ParoQuantProcessor
 from ..looper.qqq_processor import QQQProcessor
+from ..nn_modules.converter import MODULE_CONVERTER_MAP
+from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
+from ..quantization.config import GcMode, QuantizeEmbed
 from ..utils.device import get_device, get_device_new
-from ..utils.looper_helpers import find_last_quantized_layer_index, normalize_device_like
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
+from ..utils.looper_helpers import find_last_quantized_layer_index, normalize_device_like
 from ..utils.model import find_modules, get_layer_name, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
+
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from .module_looper import ModuleLooper
@@ -362,6 +363,7 @@ def run_layer_stage(
     region_timer,
     finalize_progress_cls,
     embed_quant_mode: Optional[QuantizeEmbed] = None,
+    embed_only: Optional[bool] = None,
     logger=None,
 ) -> None:
     """Execute the main per-layer quantization loop."""
@@ -380,11 +382,13 @@ def run_layer_stage(
     hook_skip_modules = _collect_hook_skip_modules(planning_layer_modules)
     quant_input_embeddings = embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
     quant_output_embeddings = embed_quant_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH)
+    input_embeddings_name = getattr(looper, "input_embeddings_name", None)
+    output_embeddings_name = getattr(looper, "output_embeddings_name", None)
     requant_endpoint_names = {
         name
         for enabled, name in (
-            (quant_input_embeddings, looper.input_embeddings_name),
-            (quant_output_embeddings, looper.output_embeddings_name),
+            (quant_input_embeddings, input_embeddings_name),
+            (quant_output_embeddings, output_embeddings_name),
         )
         if enabled and name
     }
@@ -542,8 +546,8 @@ def run_layer_stage(
             # starts running this layer. The rest of the layer stage can then
             # iterate plans instead of repeatedly re-deriving replay, batching,
             # and device-routing state inside the execution loop.
-            if embed_quant_mode is not None and not is_embeddings_module:
-                # Loaded decoder blocks are already quantized. Replay them only
+            if embed_quant_mode is not None and embed_only is not False and not is_embeddings_module:
+                # Embedding-only operations replay loaded decoder blocks only
                 # to propagate calibration activations to the output endpoint.
                 subset_plans = []
             else:

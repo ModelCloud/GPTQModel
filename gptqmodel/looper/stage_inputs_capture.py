@@ -18,10 +18,11 @@ from ..nn_modules.hooked_linear import STOP_FORWARD_EXCEPTION, StopForward
 from ..quantization.config import QuantizeEmbed
 from ..utils.ctx import ctx
 from ..utils.device import get_device
-from ..utils.looper_helpers import device_ctx, select_forward_devices
 from ..utils.logger import setup_logger
+from ..utils.looper_helpers import device_ctx, select_forward_devices
 from ..utils.model import get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.torch import CPU, META
+
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from .module_looper import ModuleLooper
@@ -231,8 +232,10 @@ class StageInputsCapture:
                     return name
             return None
 
-        input_embeddings = self.gptq_model.get_input_embeddings()
-        input_embeddings_name = self.gptq_model.get_input_embeddings_name()
+        get_input_embeddings = getattr(self.gptq_model, "get_input_embeddings", None)
+        input_embeddings = get_input_embeddings() if callable(get_input_embeddings) else None
+        get_input_embeddings_name = getattr(self.gptq_model, "get_input_embeddings_name", None)
+        input_embeddings_name = get_input_embeddings_name() if callable(get_input_embeddings_name) else None
         ori_outside_layer_module_devices: Dict[str, torch.device] = {}
         for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])

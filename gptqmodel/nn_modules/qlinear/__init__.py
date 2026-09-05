@@ -999,6 +999,11 @@ class PackableQuantLinear(GPTQQuantLinear):
         return self._dequantize_from_codes(weight, zeros, num_itr=num_itr)
 
     def _dequantize_from_codes(self, weight: t.Tensor, zeros: t.Tensor, num_itr: int = 1):
+        # Packed words may contain zero-filled tail codes when an embedding
+        # vocabulary is not divisible by the packing width. The runtime
+        # embedding contract remains the original vocabulary size.
+        if weight.shape[0] > self.in_features:
+            weight = weight[:self.in_features]
         if num_itr == 1:
             weights = self.scales[self.g_idx.long()] * (weight - zeros[self.g_idx.long()])
         else:
@@ -1544,6 +1549,14 @@ class PackableQuantLinear(GPTQQuantLinear):
             qweight = np.zeros((math.ceil(int_weight.shape[0] * self.bits / self.pack_dtype_bits), int_weight.shape[1]),
                                dtype=self.pack_np_math_dtype)
             if self.bits in [2, 4, 8]:
+                if is_embedding:
+                    packed_rows = qweight.shape[0] * self.pack_factor
+                    if int_weight.shape[0] < packed_rows:
+                        int_weight = np.pad(
+                            int_weight,
+                            ((0, packed_rows - int_weight.shape[0]), (0, 0)),
+                            mode="constant",
+                        )
                 for row in range(qweight.shape[0]):
                     for j in range(self.pack_factor):
                         qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)

@@ -15,17 +15,15 @@ thread pool.
 
 from __future__ import annotations
 
-import math
+import os
 import threading
 import time
-import logging
-import os
-from concurrent.futures import as_completed
-from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
 
 import torch
 import torch.nn as nn
 
+from .. import DEVICE_THREAD_POOL
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
@@ -35,17 +33,15 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
-from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
+from ..nn_modules.hooked_linear import HookedLinear
 from ..quantization.config import METHOD, QuantizeEmbed, QuantizeEmbedConfig, VramStrategy
 from ..utils.attn_mask import apply_keep_mask_bt
-from ..utils.ctx import ctx
+from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
-from ..utils.device import get_device, get_device_new
 from ..utils.disk import estimate_disk_io_speed
-from ..utils.logger import setup_logger, log_time_block
+from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
-    device_ctx,
     forward_batch_worker,
     normalize_device_like,
     rehome_module_to_device,
@@ -55,20 +51,21 @@ from ..utils.model import (
     MoETopKState,
     get_layers_with_prefixes,
     get_module,
+    get_module_by_name_prefix,
     move_to,
     restore_moe_topk,
-    set_moe_topk, get_module_by_name_prefix, untie_word_embeddings,
+    set_moe_topk,
+    untie_word_embeddings,
 )
 from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
-from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
-from .. import DEVICE_THREAD_POOL
+from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
-from .qqq_processor import QQQProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
+
 
 log = setup_logger()
 
@@ -180,6 +177,7 @@ class ModuleLooper():
         self.processors = processors
         self.gptq_model = model
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
+        self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
 
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
@@ -1630,6 +1628,7 @@ class ModuleLooper():
             region_timer=region_timer,
             finalize_progress_cls=FinalizeProgressInfo,
             embed_quant_mode=self.embed_quant_mode,
+            embed_only=self.embed_only,
             logger=log,
         )
 
