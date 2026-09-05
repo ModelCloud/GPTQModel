@@ -1,0 +1,268 @@
+{
+  "revision": "2c8388ee",
+  "previous_prefetch_revision": "6df7146e",
+  "profiles": {
+    "profile": {
+      "csv": "/tmp/qvq-regpair-profile/raw/ubuntu2404-mi350x/862175_counter_collection.csv",
+      "csv_sha256": "ac237487281de2ece304ce7f737d6e1a62a9b4bc423df926804aaf95fe11222b",
+      "config": {
+        "physical_gpu": 0,
+        "idle_samples": 3,
+        "idle_interval": 1.0,
+        "idle_memory_tolerance_mib": 1024,
+        "allow_busy": false,
+        "full_sweep": true,
+        "trim_composite": false,
+        "recovery_warps": 8,
+        "gemv_full_k": false,
+        "gemv_dot2": false,
+        "gemv_dot2_loop": false,
+        "gemv_gluon": false,
+        "inplace_correction": false,
+        "fused_correction": true,
+        "fused_interleave": true,
+        "fused_keep_masks": false,
+        "fused_prefetch": true,
+        "fused_register_prefetch": true,
+        "fused_block_m": 128,
+        "fused_block_n": 64,
+        "fused_block_k": 64,
+        "torch_profile_dir": null,
+        "gemv_loop_k": 512,
+        "gemv_split_k": false,
+        "graph_execute": false,
+        "aiter_skinny": "none",
+        "aiter_direct": false,
+        "gemv_block_n": 2,
+        "shapes": [
+          "mlp_gate_up"
+        ],
+        "m_values": [
+          1024
+        ],
+        "folded_residual_ceiling": true,
+        "folded_direct_ceiling": false,
+        "baseline_forward_commit": null,
+        "baseline_amd_commit": "a857aa26",
+        "iterations": 2,
+        "warmup": 1,
+        "butterfly": "none",
+        "block_rows": 4,
+        "hipblaslt_solution": -1,
+        "output": "/tmp/qvq-regpair-profile/report.json"
+      },
+      "source_sha256": "cc8f75112d4ce397502ecc4f168327ef37b71da6922f5e95094dd0d6344f2d21",
+      "kernels": [
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT144x256x64_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB512_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT9_4_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB4_WSGRA0_WSGRB0_WS64_WG16_16_1_WGMXCCn1.kd",
+          "counters": {
+            "LDSBankConflict": {
+              "samples": 16,
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0
+            },
+            "MeanOccupancyPerCU": {
+              "samples": 16,
+              "min": 3.001892,
+              "max": 3.255841,
+              "mean": 3.1867247499999998
+            },
+            "SQ_INSTS_LDS": {
+              "samples": 16,
+              "min": 6733696.0,
+              "max": 6733696.0,
+              "mean": 6733696.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 16,
+              "min": 11151360.0,
+              "max": 11151360.0,
+              "mean": 11151360.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 16,
+              "min": 3861488.0,
+              "max": 3861488.0,
+              "mean": 3861488.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 16,
+              "min": 13588000.0,
+              "max": 13588000.0,
+              "mean": 13588000.0
+            },
+            "SQ_WAIT_INST_LDS": {
+              "samples": 16,
+              "min": 5769785.0,
+              "max": 5885492.0,
+              "mean": 5796509.9375
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              123904
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              123392
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              128
+            ],
+            "Accum_VGPR_Count": [
+              272
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "folded_residual_prefetch_kernel.kd",
+          "counters": {
+            "LDSBankConflict": {
+              "samples": 28,
+              "min": 9.391505,
+              "max": 9.870226,
+              "mean": 9.639980142857143
+            },
+            "MeanOccupancyPerCU": {
+              "samples": 28,
+              "min": 6.465982,
+              "max": 6.741543,
+              "mean": 6.622418714285715
+            },
+            "SQ_INSTS_LDS": {
+              "samples": 28,
+              "min": 11141120.0,
+              "max": 11141120.0,
+              "mean": 11141120.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 28,
+              "min": 22282240.0,
+              "max": 22282240.0,
+              "mean": 22282240.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 28,
+              "min": 13821952.0,
+              "max": 13821952.0,
+              "mean": 13821952.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 28,
+              "min": 23178752.0,
+              "max": 23178752.0,
+              "mean": 23178752.0
+            },
+            "SQ_WAIT_INST_LDS": {
+              "samples": 28,
+              "min": 29590642.0,
+              "max": 29907088.0,
+              "mean": 29789331.285714287
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              557056
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              44
+            ],
+            "Accum_VGPR_Count": [
+              132
+            ],
+            "SGPR_Count": [
+              48
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "code_objects": [
+    {
+      "asm": "/tmp/qvq-regpair-profile-cache/2UHH5PN7NSTF3LFD7UHJGKC3AMZQUGUSPM5QHATY4GVIV4CBQLDQ/folded_residual_prefetch_kernel.amdgcn",
+      "jit_key": "2UHH5PN7NSTF3LFD7UHJGKC3AMZQUGUSPM5QHATY4GVIV4CBQLDQ",
+      "hsaco_sha256": "3822ecc84c9b9636e01aec2d87c6405c9e7f9b2c3539c998259573e0f7662047",
+      "static_total": 478,
+      "static_opcodes": {
+        "buffer_load_dwordx4": 32,
+        "ds_read_b128": 64,
+        "global_store_dwordx2": 8,
+        "s_add_i32": 16,
+        "s_add_u32": 12,
+        "s_addc_u32": 12,
+        "s_and_b32": 13,
+        "s_barrier": 8,
+        "s_bfe_u32": 1,
+        "s_branch": 1,
+        "s_cbranch_scc1": 1,
+        "s_cmpk_lt_u32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx8": 1,
+        "s_lshl_b32": 5,
+        "s_lshr_b32": 1,
+        "s_mov_b32": 41,
+        "s_movk_i32": 3,
+        "s_mulk_i32": 1,
+        "s_nop": 8,
+        "s_waitcnt": 17,
+        "v_add3_u32": 1,
+        "v_add_u32_e32": 9,
+        "v_and_b32_e32": 6,
+        "v_and_or_b32": 3,
+        "v_ashrrev_i32_e32": 5,
+        "v_bitop3_b32": 1,
+        "v_cvt_pk_f16_f32": 16,
+        "v_lshl_add_u64": 8,
+        "v_lshl_or_b32": 2,
+        "v_lshlrev_b32_e32": 5,
+        "v_lshlrev_b64": 1,
+        "v_lshrrev_b32_e32": 1,
+        "v_mad_u32_u24": 1,
+        "v_mfma_f32_16x16x32_f16": 128,
+        "v_mov_b32_e32": 33,
+        "v_mul_lo_u32": 3,
+        "v_or_b32_e32": 7,
+        "v_readfirstlane_b32": 1
+      },
+      "vmcnt_waits": [
+        "s_waitcnt vmcnt(8)",
+        "s_waitcnt vmcnt(8)",
+        "s_waitcnt vmcnt(8)",
+        "s_waitcnt vmcnt(0)"
+      ],
+      "shared_bytes": 67488,
+      "resources": [
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     40",
+        ".sgpr_spill_count: 0",
+        ".vgpr_count:     170",
+        ".vgpr_spill_count: 0"
+      ]
+    }
+  ],
+  "unmeasured": [
+    "scheduler eligibility",
+    "achieved bandwidth",
+    "actual overlap percentage",
+    "general stall breakdown"
+  ]
+}

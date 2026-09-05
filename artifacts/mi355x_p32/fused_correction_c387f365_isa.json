@@ -1,0 +1,1259 @@
+{
+  "revision": "c387f365",
+  "baseline": "62db1106",
+  "production_changed": false,
+  "profiles": {
+    "single": {
+      "csv": "/tmp/qvq-fused-single-profile/raw/ubuntu2404-mi350x/808060_counter_collection.csv",
+      "csv_sha256": "61b43fa691f7f1128b6c0ab271f478d24f109579c95299f4e122fd7ecc9148be",
+      "config": {
+        "physical_gpu": 0,
+        "idle_samples": 3,
+        "idle_interval": 1.0,
+        "idle_memory_tolerance_mib": 1024,
+        "allow_busy": false,
+        "full_sweep": true,
+        "trim_composite": false,
+        "recovery_warps": 8,
+        "gemv_full_k": false,
+        "gemv_dot2": false,
+        "gemv_dot2_loop": false,
+        "gemv_gluon": false,
+        "inplace_correction": false,
+        "fused_correction": true,
+        "fused_interleave": true,
+        "fused_block_m": 64,
+        "fused_block_n": 128,
+        "fused_block_k": 64,
+        "torch_profile_dir": null,
+        "gemv_loop_k": 512,
+        "gemv_split_k": false,
+        "graph_execute": false,
+        "aiter_skinny": "none",
+        "aiter_direct": false,
+        "gemv_block_n": 2,
+        "shapes": [
+          "mlp_gate_up"
+        ],
+        "m_values": [
+          1024
+        ],
+        "folded_residual_ceiling": true,
+        "folded_direct_ceiling": false,
+        "baseline_forward_commit": null,
+        "baseline_amd_commit": "62db1106",
+        "iterations": 2,
+        "warmup": 1,
+        "butterfly": "none",
+        "block_rows": 4,
+        "hipblaslt_solution": -1,
+        "output": "/tmp/qvq-fused-single-profile/report.json"
+      },
+      "kernel_sha256": "07edf540c17cebeae65aee7f8800ca4efccc89c7635f6872f2f4b1040616f09e",
+      "rows_pass": 4,
+      "kernels": [
+        {
+          "kernel": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB0_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB0_LPMXSA0_LPMXSB0_LPM0_LRVW1_LWPMn1_MIAV0_MIWT4_2_MXLIBL_MXSFNS_MO40_MGRIPM2_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS0_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 4,
+              "min": 2576384.0,
+              "max": 2576384.0,
+              "mean": 2576384.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 4,
+              "min": 5570560.0,
+              "max": 5570560.0,
+              "mean": 5570560.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 4,
+              "min": 28131328.0,
+              "max": 28131328.0,
+              "mean": 28131328.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 4,
+              "min": 35094528.0,
+              "max": 35094528.0,
+              "mean": 35094528.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              4456448
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              28672
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              64
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB2_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB2_LPMXSA0_LPMXSB0_LPM0_LRVW2_LWPMn1_MIAV0_MIWT4_2_MXLIBL_MXSFNS_MO40_MGRIPM2_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 4,
+              "min": 172032.0,
+              "max": 172032.0,
+              "mean": 172032.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 4,
+              "min": 327680.0,
+              "max": 327680.0,
+              "mean": 327680.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 4,
+              "min": 1658880.0,
+              "max": 1658880.0,
+              "mean": 1658880.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 4,
+              "min": 2101248.0,
+              "max": 2101248.0,
+              "mean": 2101248.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              262144
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              29184
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              64
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT224x64x64_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA3584_LBSPPB512_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW4_LWPMn1_MIAV0_MIWT7_2_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA7_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 4,
+              "min": 55192448.0,
+              "max": 55192448.0,
+              "mean": 55192448.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 4,
+              "min": 89456640.0,
+              "max": 89456640.0,
+              "mean": 89456640.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 4,
+              "min": 9846656.0,
+              "max": 9846656.0,
+              "mean": 9846656.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 4,
+              "min": 92362944.0,
+              "max": 92362944.0,
+              "mean": 92362944.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              319488
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              75776
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              112
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Ailk_Bljk_HHS_BH_Bias_HA_S_SAV_UserArgs_MT128x64x32_MI16x16x1_SN_LDSB0_AFC0_AG1_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR0_CLS0_CADS0_DTLA1_DTLB1_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB1_EPS0_ELFLR0_EMLL0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI1_LBSPPA1024_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS16_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR4_PLR1_PKA1_SGROB0_SIA3_SS0_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN1_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSMn1_ULSGRO1_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS64_WG16_16_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 16,
+              "min": 212992.0,
+              "max": 212992.0,
+              "mean": 212992.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 16,
+              "min": 65536.0,
+              "max": 65536.0,
+              "mean": 65536.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 16,
+              "min": 1359872.0,
+              "max": 1359872.0,
+              "mean": 1359872.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 16,
+              "min": 1982464.0,
+              "max": 1982464.0,
+              "mean": 1982464.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              131072
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              63488
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              32
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT144x256x64_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB512_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT9_4_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB4_WSGRA0_WSGRB0_WS64_WG16_16_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 16,
+              "min": 6733696.0,
+              "max": 6733696.0,
+              "mean": 6733696.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 16,
+              "min": 11151360.0,
+              "max": 11151360.0,
+              "mean": 11151360.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 16,
+              "min": 3861488.0,
+              "max": 3861488.0,
+              "mean": 3861488.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 16,
+              "min": 13588000.0,
+              "max": 13588000.0,
+              "mean": 13588000.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              123904
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              123392
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              128
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "folded_residual_gemm_gluon_kernel.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 28,
+              "min": 21028864.0,
+              "max": 21028864.0,
+              "mean": 21028864.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 28,
+              "min": 22282240.0,
+              "max": 22282240.0,
+              "mean": 22282240.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 28,
+              "min": 29558784.0,
+              "max": 29558784.0,
+              "mean": 29558784.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 28,
+              "min": 106362880.0,
+              "max": 106362880.0,
+              "mean": 106362880.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              557056
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              36
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        }
+      ]
+    },
+    "dual": {
+      "csv": "/tmp/qvq-fused-dual-profile/raw/ubuntu2404-mi350x/808984_counter_collection.csv",
+      "csv_sha256": "ec0f49a19ecf87a70204213a3f889b3e2099bcac546ecc5f1dde1a885016038d",
+      "config": {
+        "physical_gpu": 0,
+        "idle_samples": 3,
+        "idle_interval": 1.0,
+        "idle_memory_tolerance_mib": 1024,
+        "allow_busy": false,
+        "full_sweep": true,
+        "trim_composite": false,
+        "recovery_warps": 8,
+        "gemv_full_k": false,
+        "gemv_dot2": false,
+        "gemv_dot2_loop": false,
+        "gemv_gluon": false,
+        "inplace_correction": false,
+        "fused_correction": true,
+        "fused_interleave": false,
+        "fused_block_m": 128,
+        "fused_block_n": 128,
+        "fused_block_k": 128,
+        "torch_profile_dir": null,
+        "gemv_loop_k": 512,
+        "gemv_split_k": false,
+        "graph_execute": false,
+        "aiter_skinny": "none",
+        "aiter_direct": false,
+        "gemv_block_n": 2,
+        "shapes": [
+          "mlp_gate_up"
+        ],
+        "m_values": [
+          1024
+        ],
+        "folded_residual_ceiling": true,
+        "folded_direct_ceiling": false,
+        "baseline_forward_commit": null,
+        "baseline_amd_commit": "62db1106",
+        "iterations": 2,
+        "warmup": 1,
+        "butterfly": "none",
+        "block_rows": 4,
+        "hipblaslt_solution": -1,
+        "output": "/tmp/qvq-fused-dual-profile/report.json"
+      },
+      "kernel_sha256": "07edf540c17cebeae65aee7f8800ca4efccc89c7635f6872f2f4b1040616f09e",
+      "rows_pass": 4,
+      "kernels": [
+        {
+          "kernel": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB0_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB0_LPMXSA0_LPMXSB0_LPM0_LRVW1_LWPMn1_MIAV0_MIWT4_2_MXLIBL_MXSFNS_MO40_MGRIPM2_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS0_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 4,
+              "min": 2576384.0,
+              "max": 2576384.0,
+              "mean": 2576384.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 4,
+              "min": 5570560.0,
+              "max": 5570560.0,
+              "mean": 5570560.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 4,
+              "min": 28131328.0,
+              "max": 28131328.0,
+              "mean": 28131328.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 4,
+              "min": 35094528.0,
+              "max": 35094528.0,
+              "mean": 35094528.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              4456448
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              28672
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              64
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB2_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB2_LPMXSA0_LPMXSB0_LPM0_LRVW2_LWPMn1_MIAV0_MIWT4_2_MXLIBL_MXSFNS_MO40_MGRIPM2_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 4,
+              "min": 172032.0,
+              "max": 172032.0,
+              "mean": 172032.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 4,
+              "min": 327680.0,
+              "max": 327680.0,
+              "mean": 327680.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 4,
+              "min": 1658880.0,
+              "max": 1658880.0,
+              "mean": 1658880.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 4,
+              "min": 2101248.0,
+              "max": 2101248.0,
+              "mean": 2101248.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              262144
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              29184
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              64
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT224x64x64_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA3584_LBSPPB512_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW4_LWPMn1_MIAV0_MIWT7_2_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA7_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 4,
+              "min": 55192448.0,
+              "max": 55192448.0,
+              "mean": 55192448.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 4,
+              "min": 89456640.0,
+              "max": 89456640.0,
+              "mean": 89456640.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 4,
+              "min": 9846656.0,
+              "max": 9846656.0,
+              "mean": 9846656.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 4,
+              "min": 92362944.0,
+              "max": 92362944.0,
+              "mean": 92362944.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              319488
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              75776
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              112
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Ailk_Bljk_HHS_BH_Bias_HA_S_SAV_UserArgs_MT128x64x32_MI16x16x1_SN_LDSB0_AFC0_AG1_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR0_CLS0_CADS0_DTLA1_DTLB1_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB1_EPS0_ELFLR0_EMLL0_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI1_LBSPPA1024_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT8_1_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS16_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR4_PLR1_PKA1_SGROB0_SIA3_SS0_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN1_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSMn1_ULSGRO1_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB1_WSGRA0_WSGRB0_WS64_WG16_16_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 16,
+              "min": 212992.0,
+              "max": 212992.0,
+              "mean": 212992.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 16,
+              "min": 65536.0,
+              "max": 65536.0,
+              "mean": 65536.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 16,
+              "min": 1359872.0,
+              "max": 1359872.0,
+              "mean": 1359872.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 16,
+              "min": 1982464.0,
+              "max": 1982464.0,
+              "mean": 1982464.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              131072
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              63488
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              32
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT144x256x64_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB512_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT9_4_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB4_WSGRA0_WSGRB0_WS64_WG16_16_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 16,
+              "min": 6733696.0,
+              "max": 6733696.0,
+              "mean": 6733696.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 16,
+              "min": 11151360.0,
+              "max": 11151360.0,
+              "mean": 11151360.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 16,
+              "min": 3861488.0,
+              "max": 3861488.0,
+              "mean": 3861488.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 16,
+              "min": 13588000.0,
+              "max": 13588000.0,
+              "mean": 13588000.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              123904
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              123392
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              128
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "folded_residual_gemm_gluon_kernel.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 28,
+              "min": 12673024.0,
+              "max": 12673024.0,
+              "mean": 12673024.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 28,
+              "min": 22282240.0,
+              "max": 22282240.0,
+              "mean": 22282240.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 28,
+              "min": 17229568.0,
+              "max": 17229568.0,
+              "mean": 17229568.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 28,
+              "min": 70467584.0,
+              "max": 70467584.0,
+              "mean": 70467584.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              278528
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              128
+            ],
+            "SGPR_Count": [
+              48
+            ]
+          }
+        }
+      ]
+    },
+    "small": {
+      "csv": "/tmp/qvq-fused-small-profile/raw/ubuntu2404-mi350x/809863_counter_collection.csv",
+      "csv_sha256": "7c657955697850d5d59386854240baa493526a1d1dea8ffcf049a879543ff7de",
+      "config": {
+        "physical_gpu": 0,
+        "idle_samples": 3,
+        "idle_interval": 1.0,
+        "idle_memory_tolerance_mib": 1024,
+        "allow_busy": false,
+        "full_sweep": true,
+        "trim_composite": false,
+        "recovery_warps": 8,
+        "gemv_full_k": false,
+        "gemv_dot2": false,
+        "gemv_dot2_loop": false,
+        "gemv_gluon": false,
+        "inplace_correction": false,
+        "fused_correction": true,
+        "fused_interleave": false,
+        "fused_block_m": 64,
+        "fused_block_n": 64,
+        "fused_block_k": 64,
+        "torch_profile_dir": null,
+        "gemv_loop_k": 512,
+        "gemv_split_k": false,
+        "graph_execute": false,
+        "aiter_skinny": "none",
+        "aiter_direct": false,
+        "gemv_block_n": 2,
+        "shapes": [
+          "attn_out"
+        ],
+        "m_values": [
+          1024
+        ],
+        "folded_residual_ceiling": false,
+        "folded_direct_ceiling": false,
+        "baseline_forward_commit": null,
+        "baseline_amd_commit": "62db1106",
+        "iterations": 2,
+        "warmup": 1,
+        "butterfly": "none",
+        "block_rows": 4,
+        "hipblaslt_solution": -1,
+        "output": "/tmp/qvq-fused-small-profile/report.json"
+      },
+      "kernel_sha256": "07edf540c17cebeae65aee7f8800ca4efccc89c7635f6872f2f4b1040616f09e",
+      "rows_pass": 4,
+      "kernels": [
+        {
+          "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT256x16x16_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB1_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB2_LPMXSA0_LPMXSB0_LPM0_LRVW2_LWPMn1_MIAV0_MIWT4_1_MXLIBL_MXSFNS_MO40_MGRIPM3_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB1_WSGRA0_WSGRB0_WS64_WG64_4_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 4,
+              "min": 139264.0,
+              "max": 139264.0,
+              "mean": 139264.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 4,
+              "min": 98304.0,
+              "max": 98304.0,
+              "mean": 98304.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 4,
+              "min": 3055616.0,
+              "max": 3055616.0,
+              "mean": 3055616.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 4,
+              "min": 3096576.0,
+              "max": 3096576.0,
+              "mean": 3096576.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              524288
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              17920
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              48
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT160x128x64_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA2560_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW4_LWPMn1_MIAV0_MIWT5_4_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA5_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB4_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 4,
+              "min": 11218944.0,
+              "max": 11218944.0,
+              "mean": 11218944.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 4,
+              "min": 31457280.0,
+              "max": 31457280.0,
+              "mean": 31457280.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 4,
+              "min": 2370560.0,
+              "max": 2370560.0,
+              "mean": 2370560.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 4,
+              "min": 32158720.0,
+              "max": 32158720.0,
+              "mean": 32158720.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              65536
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              75776
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              112
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB2_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB2_LPMXSA0_LPMXSB0_LPM0_LRVW2_LWPMn1_MIAV0_MIWT4_2_MXLIBL_MXSFNS_MO40_MGRIPM2_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 12,
+              "min": 172032.0,
+              "max": 1032192.0,
+              "mean": 745472.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 12,
+              "min": 327680.0,
+              "max": 1966080.0,
+              "mean": 1419946.6666666667
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 12,
+              "min": 1658880.0,
+              "max": 9953280.0,
+              "mean": 7188480.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 12,
+              "min": 2101248.0,
+              "max": 12607488.0,
+              "mean": 9105408.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              262144,
+              1572864
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              29184
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              64
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Ailk_Bjlk_S_B_Bias_HA_S_SAV_UserArgs_MT256x16x16_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB1_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB0_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB0_LPMXSA0_LPMXSB0_LPM0_LRVW1_LWPMn1_MIAV0_MIWT4_1_MXLIBL_MXSFNS_MO40_MGRIPM3_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS0_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB1_WSGRA0_WSGRB0_WS64_WG64_4_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 8,
+              "min": 696320.0,
+              "max": 696320.0,
+              "mean": 696320.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 8,
+              "min": 491520.0,
+              "max": 491520.0,
+              "mean": 491520.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 8,
+              "min": 12910592.0,
+              "max": 12910592.0,
+              "mean": 12910592.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 8,
+              "min": 12247040.0,
+              "max": 12247040.0,
+              "mean": 12247040.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              524288
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              17408
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              48
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT160x128x128_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA256_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT5_4_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB4_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 32,
+              "min": 2666496.0,
+              "max": 2676736.0,
+              "mean": 2671616.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 32,
+              "min": 3932160.0,
+              "max": 3932160.0,
+              "mean": 3932160.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 32,
+              "min": 1385472.0,
+              "max": 1425408.0,
+              "mean": 1405440.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 32,
+              "min": 4595712.0,
+              "max": 4678656.0,
+              "mean": 4637184.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              65536
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              79872
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              112
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "folded_residual_gemm_gluon_kernel.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 28,
+              "min": 8888320.0,
+              "max": 8888320.0,
+              "mean": 8888320.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 28,
+              "min": 7864320.0,
+              "max": 7864320.0,
+              "mean": 7864320.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 28,
+              "min": 12953600.0,
+              "max": 12953600.0,
+              "mean": 12953600.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 28,
+              "min": 43335680.0,
+              "max": 43335680.0,
+              "mean": 43335680.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              327680
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              128
+            ],
+            "SGPR_Count": [
+              48
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "code_objects": [
+    {
+      "asm": "/tmp/qvq-fused-profile-cache/TRLQ45MIUC4C6JU7U44477P4QWYO2HDM4BH2XEMN4NYNAFGEQ2LA/folded_residual_gemm_gluon_kernel.amdgcn",
+      "jit_key": "TRLQ45MIUC4C6JU7U44477P4QWYO2HDM4BH2XEMN4NYNAFGEQ2LA",
+      "hsaco_sha256": "99da5925db5eeeae20497cd3aea65c7436c0fecf968511175fcea682b51523ac",
+      "static_instructions": 583,
+      "opcodes": {
+        "ds_read_b128": 28,
+        "ds_write_b128": 18,
+        "global_load_dwordx2": 20,
+        "global_store_dwordx2": 8,
+        "s_add_i32": 1,
+        "s_and_b32": 5,
+        "s_and_b64": 1,
+        "s_and_saveexec_b64": 21,
+        "s_barrier": 12,
+        "s_bfe_i32": 1,
+        "s_branch": 3,
+        "s_cbranch_execz": 21,
+        "s_cbranch_scc0": 1,
+        "s_cmpk_lg_i32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl_b32": 4,
+        "s_mov_b32": 4,
+        "s_movk_i32": 20,
+        "s_or_b64": 20,
+        "s_waitcnt": 20,
+        "v_add_co_u32_e32": 1,
+        "v_add_u32_e32": 29,
+        "v_addc_co_u32_e32": 1,
+        "v_and_b32_e32": 15,
+        "v_and_or_b32": 2,
+        "v_ashrrev_i32_e32": 16,
+        "v_bfe_i32": 5,
+        "v_bitop3_b32": 16,
+        "v_cmp_eq_u32_e64": 2,
+        "v_cmp_gt_i32_e32": 1,
+        "v_cmp_gt_i32_e64": 2,
+        "v_cndmask_b32_e64": 2,
+        "v_cvt_pk_f16_f32": 16,
+        "v_lshl_add_u64": 31,
+        "v_lshl_or_b32": 3,
+        "v_lshlrev_b32_e32": 13,
+        "v_lshlrev_b64": 1,
+        "v_lshrrev_b32_e32": 1,
+        "v_mad_u32_u24": 1,
+        "v_mfma_f32_16x16x32_f16": 32,
+        "v_mov_b32_e32": 143,
+        "v_mul_lo_u32": 11,
+        "v_or3_b32": 5,
+        "v_or_b32_e32": 17,
+        "v_readfirstlane_b32": 1,
+        "v_xad_u32": 1,
+        "v_xor_b32_e32": 2
+      },
+      "shared_bytes": 32768,
+      "resources": [
+        ".agpr_count:     0",
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     32",
+        ".sgpr_spill_count: 0",
+        ".vgpr_count:     164",
+        ".vgpr_spill_count: 0"
+      ]
+    },
+    {
+      "asm": "/tmp/qvq-fused-profile-cache/OZVVNQJ3V62ZI7TP4PXIWVERM55VC7WIZ5WETKEMUZF7LMALD7HQ/folded_residual_gemm_gluon_kernel.amdgcn",
+      "jit_key": "OZVVNQJ3V62ZI7TP4PXIWVERM55VC7WIZ5WETKEMUZF7LMALD7HQ",
+      "hsaco_sha256": "1c991fd0cbd7518741a032d3db6fed03b3a9abd721566ccdbfe31501ee579237",
+      "static_instructions": 441,
+      "opcodes": {
+        "ds_read2st64_b64": 4,
+        "ds_read_b128": 12,
+        "ds_write2_b64": 4,
+        "ds_write_b128": 6,
+        "global_load_dwordx2": 12,
+        "global_store_dwordx2": 4,
+        "s_add_i32": 1,
+        "s_and_b32": 5,
+        "s_and_b64": 1,
+        "s_and_saveexec_b64": 13,
+        "s_barrier": 8,
+        "s_bfe_i32": 1,
+        "s_branch": 3,
+        "s_cbranch_execz": 13,
+        "s_cbranch_scc0": 1,
+        "s_cmpk_lg_i32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl_b32": 5,
+        "s_lshr_b32": 1,
+        "s_mov_b32": 2,
+        "s_movk_i32": 18,
+        "s_nop": 3,
+        "s_or_b64": 12,
+        "s_waitcnt": 13,
+        "v_add_co_u32_e32": 3,
+        "v_add_u32_e32": 21,
+        "v_addc_co_u32_e32": 3,
+        "v_and_b32_e32": 16,
+        "v_and_or_b32": 1,
+        "v_ashrrev_i32_e32": 10,
+        "v_bfe_i32": 5,
+        "v_bitop3_b32": 17,
+        "v_cmp_eq_u32_e32": 1,
+        "v_cmp_eq_u32_e64": 2,
+        "v_cmp_gt_i32_e64": 3,
+        "v_cndmask_b32_e64": 3,
+        "v_cvt_pk_f16_f32": 8,
+        "v_lshl_add_u64": 18,
+        "v_lshl_or_b32": 3,
+        "v_lshlrev_b32_e32": 11,
+        "v_lshrrev_b32_e32": 1,
+        "v_mad_u32_u24": 1,
+        "v_mfma_f32_16x16x32_f16": 16,
+        "v_mov_b32_e32": 108,
+        "v_mul_lo_u32": 9,
+        "v_or3_b32": 5,
+        "v_or_b32_e32": 17,
+        "v_pk_add_f32": 8,
+        "v_readfirstlane_b32": 1,
+        "v_xad_u32": 1,
+        "v_xor_b32_e32": 2
+      },
+      "shared_bytes": 16384,
+      "resources": [
+        ".agpr_count:     0",
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     34",
+        ".sgpr_spill_count: 0",
+        ".vgpr_count:     126",
+        ".vgpr_spill_count: 0"
+      ]
+    },
+    {
+      "asm": "/tmp/qvq-fused-profile-cache/SULXDYETLAH7GYHVMEMEJ5K66ES2PEEAAODZ54IWD4EK2FGFDGMQ/folded_residual_gemm_gluon_kernel.amdgcn",
+      "jit_key": "SULXDYETLAH7GYHVMEMEJ5K66ES2PEEAAODZ54IWD4EK2FGFDGMQ",
+      "hsaco_sha256": "2c61121614fd4b0fe92a027254ea9c5e8ef6e79957af7e0e2804b140a7f7d8de",
+      "static_instructions": 1292,
+      "opcodes": {
+        "ds_read_b128": 64,
+        "ds_write_b128": 40,
+        "global_load_dwordx2": 48,
+        "global_store_dwordx2": 16,
+        "s_addk_i32": 1,
+        "s_and_b32": 5,
+        "s_and_b64": 1,
+        "s_and_saveexec_b64": 49,
+        "s_ashr_i32": 1,
+        "s_barrier": 28,
+        "s_bfe_i32": 1,
+        "s_branch": 3,
+        "s_cbranch_execz": 49,
+        "s_cbranch_scc0": 1,
+        "s_cmpk_lg_i32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx2": 2,
+        "s_load_dwordx8": 1,
+        "s_lshl_b32": 4,
+        "s_mov_b32": 3,
+        "s_mov_b64": 1,
+        "s_movk_i32": 20,
+        "s_mul_i32": 2,
+        "s_or_b64": 48,
+        "s_waitcnt": 37,
+        "v_accvgpr_mov_b32": 56,
+        "v_accvgpr_read_b32": 4,
+        "v_accvgpr_write_b32": 72,
+        "v_add_u32_e32": 41,
+        "v_and_b32_e32": 15,
+        "v_and_or_b32": 2,
+        "v_ashrrev_i32_e32": 32,
+        "v_bfe_i32": 5,
+        "v_bitop3_b32": 17,
+        "v_cmp_eq_u32_e64": 2,
+        "v_cmp_gt_i32_e32": 1,
+        "v_cmp_gt_i32_e64": 2,
+        "v_cndmask_b32_e64": 2,
+        "v_cvt_pk_f16_f32": 32,
+        "v_lshl_add_u64": 67,
+        "v_lshl_or_b32": 2,
+        "v_lshlrev_b32_e32": 13,
+        "v_lshlrev_b64": 10,
+        "v_lshrrev_b32_e32": 1,
+        "v_mad_u32_u24": 1,
+        "v_mfma_f32_16x16x32_f16": 128,
+        "v_mov_b32_e32": 287,
+        "v_mul_lo_u32": 8,
+        "v_mul_u32_u24_e32": 1,
+        "v_or3_b32": 6,
+        "v_or_b32_e32": 23,
+        "v_pk_add_f32": 32,
+        "v_readfirstlane_b32": 1,
+        "v_xor_b32_e32": 2
+      },
+      "shared_bytes": 32768,
+      "resources": [
+        ".agpr_count:     122",
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     33",
+        ".sgpr_spill_count: 0",
+        ".vgpr_count:     378",
+        ".vgpr_spill_count: 0"
+      ]
+    }
+  ],
+  "unmeasured": [
+    "achieved occupancy",
+    "bank conflicts",
+    "scheduler eligibility",
+    "stall reasons",
+    "achieved bandwidth"
+  ]
+}

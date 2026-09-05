@@ -36,6 +36,42 @@ P32_RATES = (2.0, 2.5, 3.0, 3.5)
 REQUESTED_M = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
 
 
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available() or not torch.version.hip, reason="requires AMD GPU")
+@pytest.mark.parametrize("output_fp32", (False, True))
+@pytest.mark.parametrize("grad_input", (None, 0, 1, 2))
+def test_folded_correction_private_output_and_autograd_fallback(output_fp32, grad_input):
+    from gptqmodel.utils.qvq_amd import _qvq_p32_folded_execute
+
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("requires gfx950")
+    generator = torch.Generator(device="cuda").manual_seed(9506144)
+    x = torch.randn((64, 256), generator=generator, device="cuda", dtype=torch.float16) * 0.01
+    w = torch.randn((256, 256), generator=generator, device="cuda", dtype=torch.float16)
+    low = torch.randn((256, 256), generator=generator, device="cuda", dtype=torch.float16) * 0.001
+    tensors = (x, w, low)
+    saved = tuple(t.clone() for t in tensors)
+    reference = torch.addmm(torch.mm(x, w, out_dtype=torch.float32), x, low, out_dtype=torch.float32)
+    if grad_input is not None:
+        tensors[grad_input].requires_grad_(True)
+    with patch("torch.addmm", wraps=torch.addmm) as addmm:
+        actual = _qvq_p32_folded_execute(x, w, low, out_features=256, output_fp32=output_fp32)
+        arguments = addmm.call_args
+    assert ("out" in arguments.kwargs) == (grad_input is None)
+    if grad_input is None:
+        assert arguments.kwargs["out"] is arguments.args[0]
+    expected = reference if output_fp32 else reference.to(torch.float16)
+    assert torch.equal(actual, expected)
+    for tensor, prior in zip(tensors, saved):
+        assert torch.equal(tensor, prior)
+    previous = actual.clone()
+    changed = _qvq_p32_folded_execute(-x, w, low, out_features=256, output_fp32=output_fp32)
+    # Compare identical inputs/evaluation, not an assumed floating-point odd symmetry.
+    negative = torch.addmm(torch.mm(-x, w, out_dtype=torch.float32), -x, low, out_dtype=torch.float32)
+    assert torch.equal(changed, negative if output_fp32 else negative.to(torch.float16))
+    assert torch.equal(actual, previous)
+
+
 def test_qvq_p32_amd_benchmark_filters_rocm_processes_to_target_gpu():
     system = {
         "Driver version": "7.1.3",
@@ -119,11 +155,16 @@ def test_qvq_p32_amd_folded_shape_gate_is_fail_closed():
 def test_qvq_p32_amd_folded_case_gate_enforces_accuracy_boundaries():
     assert qvq_p32_amd_folded_case_supported(4096, 5120, 12288)
     assert qvq_p32_amd_folded_case_supported(32, 6144, 5120)
-    assert not qvq_p32_amd_folded_case_supported(64, 6144, 5120)
+    assert qvq_p32_amd_folded_case_supported(64, 6144, 5120)
+    assert qvq_p32_amd_folded_case_supported(4096, 6144, 5120)
+    assert not qvq_p32_amd_folded_case_supported(4097, 6144, 5120)
     assert qvq_p32_amd_folded_case_supported(512, 5120, 17408)
     assert not qvq_p32_amd_folded_case_supported(1024, 5120, 17408)
     assert qvq_p32_amd_folded_case_supported(512, 17408, 5120)
-    assert not qvq_p32_amd_folded_case_supported(1024, 17408, 5120)
+    assert qvq_p32_amd_folded_case_supported(1024, 17408, 5120)
+    assert qvq_p32_amd_folded_case_supported(2048, 17408, 5120)
+    assert qvq_p32_amd_folded_case_supported(4096, 17408, 5120)
+    assert not qvq_p32_amd_folded_case_supported(4097, 17408, 5120)
 
 
 def test_qvq_p32_amd_folded_output_dtype_gate_covers_measured_regressions():
@@ -628,7 +669,9 @@ def test_qvq_p32_amd_folded_residual_cache_reuses_and_matches_fp32_oracle(m):
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not _gfx950_available(), reason="requires a ROCm gfx950 GPU")
-def test_qvq_linear_amd_folded_cache_reuses_and_invalidates_auxiliary_mutation():
+@pytest.mark.parametrize("buffer_name", ["trellis", "bank_ids", "bank_alt_id", "SU", "SV", "bias"])
+@pytest.mark.parametrize("replacement", [False, True])
+def test_qvq_linear_amd_folded_cache_reuses_and_invalidates_auxiliary_mutation(buffer_name, replacement):
     bits = 3.0
     k, n = 5120, 1024
     x, planar, _, _, bank_ids, bank_alt_id = _case(bits, 7, k=k, n=n, seed=9950)
@@ -656,17 +699,112 @@ def test_qvq_linear_amd_folded_cache_reuses_and_invalidates_auxiliary_mutation()
     first_folded = window._qvq_p32_amd_folded_cache[1]
     first_hot = layer._qvq_amd_folded_hot_cache
     assert first_hot is not None
-    repeated = layer(x)
+    with patch(
+        "gptqmodel.nn_modules.qlinear.qvq.qvq_transition_bits",
+        side_effect=AssertionError("hot hit should not normalize an unchanged rate"),
+    ):
+        repeated = layer(x)
     assert window._qvq_p32_amd_folded_cache[1] is first_folded
     assert layer._qvq_amd_folded_hot_cache is first_hot
     assert torch.equal(first, repeated)
 
-    layer.SU.mul_(0.875)
+    source = getattr(layer, buffer_name)
+    if replacement:
+        replacement_tensor = source.clone()
+        if buffer_name == "SU":
+            # Parameter replacement must still use normal module resolution.
+            replacement_tensor = torch.nn.Parameter(replacement_tensor, requires_grad=False)
+        setattr(layer, buffer_name, replacement_tensor)
+    elif buffer_name == "bank_alt_id":
+        source.fill_(1)
+    elif buffer_name in ("trellis", "bank_ids"):
+        source.bitwise_xor_(1)
+    elif buffer_name == "bias":
+        source.add_(0.001)
+    else:
+        source.mul_(0.875)
     changed = layer(x)
+    window = layer._qvq_cuda_window_cache[3]
     second_folded = window._qvq_p32_amd_folded_cache[1]
-    assert second_folded is not first_folded
+    if buffer_name != "bias":
+        assert second_folded is not first_folded
     assert layer._qvq_amd_folded_hot_cache is not first_hot
     inner = layer.get_inner_weight_tensor()
     reference = matmul_hadU(x.float() * layer.SU) @ inner
     reference = matmul_hadU(reference) * layer.SV + layer.bias.float()
     torch.testing.assert_close(changed.float(), reference, rtol=0.0, atol=2e-3)
+    layer.bits = 2.5
+    with patch(
+        "gptqmodel.nn_modules.qlinear.qvq.qvq_transition_bits",
+        side_effect=RuntimeError("changed rate must be validated"),
+    ), pytest.raises(RuntimeError, match="changed rate must be validated"):
+        layer._qvq_amd_folded_forward(x, torch.float16)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not _gfx950_available(), reason="requires a ROCm gfx950 GPU")
+@pytest.mark.parametrize("bits", P32_RATES)
+@pytest.mark.parametrize("has_bias", [False, True])
+def test_attention_residual_cache_preserves_decode_prefill_transitions(bits, has_bias):
+    from gptqmodel.utils.qvq_amd import _qvq_p32_folded_execute
+
+    k, n = 6144, 5120
+    _, planar, _, _, bank_ids, bank_alt_id = _case(bits, 1, k=k, n=n, seed=9964)
+    layer = QVQLinear(
+        bits=bits, in_features=k, out_features=n, bank_count=2, v2b2_p32=True,
+        input_hadamard=True, output_hadamard=True,
+        tensors={"trellis": planar, "bank_ids": bank_ids, "bank_alt_id": bank_alt_id,
+                 "SU": torch.full((k,), .875, device="cuda"),
+                 "SV": torch.full((n,), .75, device="cuda"),
+                 "bias": torch.full((n,), .001, device="cuda", dtype=torch.float16) if has_bias else None},
+    ).eval()
+    inner = layer.get_inner_weight_tensor()
+    generator = torch.Generator(device="cuda").manual_seed(9965)
+    cache = None
+    for m in (1, 64, 1, 4096, 32, 128):
+        x = torch.randn((m, k), device="cuda", dtype=torch.float16, generator=generator) * .01
+        actual = layer(x)
+        hot = layer._qvq_amd_folded_hot_cache
+        assert hot[25] is not None
+        assert hot[25].numel() * hot[25].element_size() == 2 * k * n
+        if cache is not None:
+            assert hot is cache
+        cache = hot
+        reference = matmul_hadU(matmul_hadU(x.float() * layer.SU) @ inner) * layer.SV
+        if has_bias:
+            reference = reference + layer.bias.float()
+        torch.testing.assert_close(actual.float(), reference, atol=2e-3, rtol=0)
+        if m <= 32:
+            expected = _qvq_p32_folded_execute(
+                x, hot[24], None, None, out_features=n, output_fp32=has_bias,
+            )
+            if has_bias:
+                expected = expected + hot[23]
+            assert torch.equal(actual, expected.to(torch.float16))
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not _gfx950_available(), reason="requires a ROCm gfx950 GPU")
+@pytest.mark.parametrize("bits", P32_RATES)
+def test_down_composite_cache_large_m_transitions(bits):
+    k, n = 17408, 5120
+    _, planar, _, _, bank_ids, bank_alt_id = _case(bits, 1, k=k, n=n, seed=9970)
+    layer = QVQLinear(
+        bits=bits, in_features=k, out_features=n, bank_count=2, v2b2_p32=True,
+        input_hadamard=False, output_hadamard=True,
+        tensors={"trellis": planar, "bank_ids": bank_ids, "bank_alt_id": bank_alt_id,
+                 "SU": torch.ones(k, device="cuda"), "SV": torch.full((n,), .75, device="cuda")},
+    ).eval()
+    inner = layer.get_inner_weight_tensor()
+    generator = torch.Generator(device="cuda").manual_seed(9971)
+    cache = None
+    for m in (32, 2048, 4096, 32):
+        x = torch.randn((m, k), device="cuda", dtype=torch.float16, generator=generator) * .01
+        actual = layer(x)
+        hot = layer._qvq_amd_folded_hot_cache
+        assert hot[26] is not None
+        if cache is not None:
+            assert hot is cache
+        cache = hot
+        reference = matmul_hadU(x.float() @ inner) * layer.SV
+        torch.testing.assert_close(actual.float(), reference, atol=2e-3, rtol=0)

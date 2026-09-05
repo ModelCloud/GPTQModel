@@ -1,0 +1,127 @@
+{
+  "baseline": "c89459e3",
+  "hardware": {
+    "physical_gpu": 0,
+    "pci_bus_id": "0000:83:00.0",
+    "unique_id": "0x333ef6e01ec019b3",
+    "driver": "7.1.3.31500000",
+    "utilization_percent": 0,
+    "vram_total_bytes": 308902100992,
+    "vram_used_bytes": 299532288,
+    "process_ids": []
+  },
+  "valid": true,
+  "rows": [
+    {
+      "bits": 2,
+      "baseline": {
+        "median_ms": 0.23382600396871567,
+        "mean_ms": 0.2417245998978615,
+        "p95_ms": 0.2776870131492615,
+        "min_ms": 0.22688500583171844,
+        "max_ms": 0.4568510055541992,
+        "max_abs": 0.001956462860107422
+      },
+      "candidate": {
+        "median_ms": 0.21662549674510956,
+        "mean_ms": 0.22279735922813415,
+        "p95_ms": 0.2604460120201111,
+        "min_ms": 0.2100449949502945,
+        "max_ms": 0.2757669985294342,
+        "max_abs": 0.001956462860107422
+      },
+      "speedup": 1.079402043997826,
+      "stream_equal": true,
+      "graph_equal": true
+    },
+    {
+      "bits": 2.5,
+      "baseline": {
+        "median_ms": 0.23436550050973892,
+        "mean_ms": 0.240922699123621,
+        "p95_ms": 0.27640700340270996,
+        "min_ms": 0.22812600433826447,
+        "max_ms": 0.31360700726509094,
+        "max_abs": 0.0019583702087402344
+      },
+      "candidate": {
+        "median_ms": 0.21860500425100327,
+        "mean_ms": 0.22432702973484994,
+        "p95_ms": 0.25600600242614746,
+        "min_ms": 0.21140499413013458,
+        "max_ms": 0.27384600043296814,
+        "max_abs": 0.0019583702087402344
+      },
+      "speedup": 1.0720957706926022,
+      "stream_equal": true,
+      "graph_equal": true
+    },
+    {
+      "bits": 3,
+      "baseline": {
+        "median_ms": 0.23662599921226501,
+        "mean_ms": 0.24377991899847984,
+        "p95_ms": 0.2866869866847992,
+        "min_ms": 0.23132599890232086,
+        "max_ms": 0.3108479976654053,
+        "max_abs": 0.001956462860107422
+      },
+      "candidate": {
+        "median_ms": 0.22268500179052353,
+        "mean_ms": 0.22901516959071158,
+        "p95_ms": 0.2619659900665283,
+        "min_ms": 0.21620500087738037,
+        "max_ms": 0.281046986579895,
+        "max_abs": 0.001956462860107422
+      },
+      "speedup": 1.0626041148242915,
+      "stream_equal": true,
+      "graph_equal": true
+    },
+    {
+      "bits": 3.5,
+      "baseline": {
+        "median_ms": 0.2347860038280487,
+        "mean_ms": 0.24115630969405175,
+        "p95_ms": 0.2818869948387146,
+        "min_ms": 0.22692599892616272,
+        "max_ms": 0.3187279999256134,
+        "max_abs": 0.001957416534423828
+      },
+      "candidate": {
+        "median_ms": 0.21902550011873245,
+        "mean_ms": 0.22505185917019843,
+        "p95_ms": 0.2578060030937195,
+        "min_ms": 0.21200500428676605,
+        "max_ms": 0.2790069878101349,
+        "max_abs": 0.0019588470458984375
+      },
+      "speedup": 1.0719573917227563,
+      "stream_equal": true,
+      "graph_equal": true
+    }
+  ],
+  "status": "exploratory; unit-scale synthetic packed fixtures; not model-quality or promotion evidence",
+  "command": "QVQ_PROBE_FHT=1 python /tmp/qvq_paired_aiter.py",
+  "scope": {
+    "M": 1024,
+    "K": 17408,
+    "N": 5120,
+    "rates": [
+      2,
+      2.5,
+      3,
+      3.5
+    ],
+    "warmup": 20,
+    "iterations": 100,
+    "order": "alternating AB/BA",
+    "dtype": "float16",
+    "output_dtype": "float16"
+  },
+  "aiter": {
+    "revision": "456b92780c8b650c1e3e4b0fa1ca21f0d1fb363d",
+    "fp32_solution": 65827,
+    "portable": false
+  }
+}

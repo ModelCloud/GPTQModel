@@ -1,0 +1,232 @@
+"""Algebra/tail checks for experimental kernels, not model-quality tests."""
+
+import pytest
+import torch
+
+triton = pytest.importorskip("triton")
+
+
+@pytest.mark.parametrize("size_k", [256, 5120, 6144])
+@pytest.mark.parametrize("tile", [64, 128])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("interleave", [False, True])
+@pytest.mark.parametrize("m,n", [(128, 128), (65, 67), (65, 128), (128, 67)])
+@pytest.mark.parametrize("prefetch", [False, True, "register", "bk32", "bk32register", "single", "bk32single"])
+def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, interleave, m, n, prefetch):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("requires AMD GPU")
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("requires gfx950")
+    from scripts.qvq_p32_amd_butterfly_experiment import (
+        folded_residual_gemm_gluon_kernel,
+    )
+    from scripts.qvq_p32_amd_prefetch_experiment import (
+        folded_residual_prefetch_kernel,
+    )
+
+    kernel = folded_residual_prefetch_kernel if prefetch else folded_residual_gemm_gluon_kernel
+    block_k = 64 if prefetch else tile
+    if prefetch in ("bk32", "bk32register", "bk32single"):
+        block_k = 32
+    prefetch_options = ({"register_prefetch": prefetch in ("register", "bk32register", "single", "bk32single"),
+                         "single_buffer": prefetch in ("single", "bk32single")} if prefetch else {})
+
+    generator = torch.Generator(device="cuda").manual_seed(950 + size_k)
+    x = torch.randn((m, size_k), generator=generator, device="cuda", dtype=torch.float16) * 0.01
+    high = torch.randn((n, size_k), generator=generator, device="cuda", dtype=torch.float16)
+    low = torch.randn(high.shape, generator=generator, device="cuda", dtype=torch.float16) * 0.001
+    reference = x.float() @ (high.float() + low.float()).T
+    output = torch.full((m * n + 128,), 999.0, device="cuda", dtype=dtype)
+    kernel[(triton.cdiv(m, tile), triton.cdiv(n, tile))](
+        x, high, low, output, m, n, size_k, tile, tile, block_k, interleave,
+        num_warps=4, num_stages=2, **prefetch_options,
+    )
+    torch.testing.assert_close(output[:m*n].view(m, n).float(), reference, atol=2e-3, rtol=0)
+    assert (output[m*n:] == 999.0).all()
+    control = torch.empty_like(output)
+    kernel[(triton.cdiv(m, tile), triton.cdiv(n, tile))](
+        x, high, low, control, m, n, size_k, tile, tile, block_k, interleave, False,
+        num_warps=4, num_stages=2, **prefetch_options,
+    )
+    assert torch.equal(output[:m*n], control[:m*n])
+    if prefetch:
+        folded_residual_gemm_gluon_kernel[(triton.cdiv(m, tile), triton.cdiv(n, tile))](
+            x, high, low, control, m, n, size_k, tile, tile, block_k, interleave,
+            num_warps=4, num_stages=2,
+        )
+        assert torch.equal(output[:m*n], control[:m*n])
+
+
+@pytest.mark.parametrize("tile_count", [1, 2, 3, 5])
+@pytest.mark.parametrize("block_k", [32, 64])
+@pytest.mark.parametrize("interleave", [False, True])
+@pytest.mark.parametrize("register_prefetch", [False, True, "single"])
+def test_prefetch_ring_single_and_odd_tile_counts(tile_count, block_k, interleave, register_prefetch):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("requires AMD GPU")
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("requires gfx950")
+    from scripts.qvq_p32_amd_prefetch_experiment import (
+        folded_residual_prefetch_kernel,
+    )
+
+    size_k = tile_count * block_k
+    x = torch.ones((65, size_k), device="cuda", dtype=torch.float16)
+    high = torch.ones((67, size_k), device="cuda", dtype=torch.float16)
+    low = torch.full_like(high, 0.5)
+    output = torch.full((65 * 67 + 16,), 999.0, device="cuda", dtype=torch.float32)
+    for _ in range(10):
+        folded_residual_prefetch_kernel[(2, 1)](
+            x, high, low, output, 65, 67, size_k, 64, 128, block_k, interleave,
+            num_warps=4, num_stages=2, register_prefetch=bool(register_prefetch),
+            single_buffer=register_prefetch == "single",
+        )
+        assert (output[:65*67] == size_k * 1.5).all()
+        assert (output[65*67:] == 999.0).all()
+
+
+@pytest.mark.parametrize("interleave", [False, True])
+@pytest.mark.parametrize("block_k", [32, 64])
+def test_prefetch_paired_odd_random(interleave, block_k):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("requires AMD GPU")
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("requires gfx950")
+    from scripts.qvq_p32_amd_prefetch_experiment import folded_residual_prefetch_kernel
+
+    # Five K tiles exercise a paired main loop plus one unpaired iteration.
+    size_k = 5 * block_k
+    generator = torch.Generator(device="cuda").manual_seed(320950)
+    x = torch.randn((65, size_k), generator=generator, device="cuda", dtype=torch.float16) * 0.01
+    high = torch.randn((67, size_k), generator=generator, device="cuda", dtype=torch.float16)
+    low = torch.randn(high.shape, generator=generator, device="cuda", dtype=torch.float16) * 0.001
+    reference = x.float() @ (high.float() + low.float()).T
+    outputs = [torch.full((65 * 67 + 16,), 999.0, device="cuda", dtype=torch.float32) for _ in range(3)]
+    for enabled, output in zip((False, True, "single"), outputs):
+        folded_residual_prefetch_kernel[(2, 1)](
+            x, high, low, output, 65, 67, size_k, 64, 128, block_k, interleave,
+            register_prefetch=bool(enabled), single_buffer=enabled == "single", num_warps=4, num_stages=2,
+        )
+        torch.testing.assert_close(output[:65*67].view(65, 67), reference, atol=2e-3, rtol=0)
+        assert (output[65*67:] == 999.0).all()
+    assert torch.equal(outputs[0], outputs[1])
+    assert torch.equal(outputs[0], outputs[2])
+
+
+@pytest.mark.parametrize("size_k", [5120, 6144])
+@pytest.mark.parametrize("block_n", [2, 4, 8])
+@pytest.mark.parametrize("residual", [False, True])
+@pytest.mark.parametrize("variant", ["full", "split", "dot2", "dot2_loop", "gluon"])
+def test_full_k_gemv_reduction_and_padding(size_k, block_n, residual, variant):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("requires AMD GPU")
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("experiment targets gfx950")
+    from scripts.qvq_p32_amd_butterfly_experiment import (
+        folded_gemv_dot2_gluon_kernel,
+        folded_gemv_dot2_kernel,
+        folded_gemv_dot2_loop_kernel,
+        folded_gemv_full_k_kernel,
+        folded_gemv_split_k_kernel,
+    )
+
+    g = torch.Generator(device="cuda").manual_seed(20260905 + size_k)
+    x = torch.randn(size_k, generator=g, device="cuda", dtype=torch.float16) * 0.01
+    w = torch.randn((32, size_k), generator=g, device="cuda", dtype=torch.float16)
+    low = torch.randn(w.shape, generator=g, device="cuda", dtype=torch.float16) * 0.001
+    effective = w.float() + low.float() if residual else w.float()
+    reference = effective @ x.float()
+    output = torch.full((36,), 999.0, device="cuda", dtype=torch.float16)
+    kernel = (folded_gemv_dot2_gluon_kernel if variant == "gluon" else
+              folded_gemv_dot2_loop_kernel if variant == "dot2_loop" else
+              folded_gemv_dot2_kernel if variant == "dot2" else
+              folded_gemv_split_k_kernel if variant == "split" else folded_gemv_full_k_kernel)
+    block_k = 512 if variant in ("dot2_loop", "gluon") else triton.next_power_of_2(size_k)
+    kernel[(32 // block_n,)](
+        x, w, low, output, size_k, block_n, block_k, residual,
+        num_warps=4, num_stages=1, waves_per_eu=0,
+    )
+    torch.testing.assert_close(output[:32].float(), reference, atol=2e-3, rtol=0)
+    assert (output[32:] == 999.0).all()
+
+
+@pytest.mark.parametrize("size_k", [5120, 6144])
+@pytest.mark.parametrize("variant", ["dot2_loop", "gluon"])
+@pytest.mark.parametrize("value", [1.0, 2.0**-20])
+def test_looped_dot2_dependency_and_subnormal_inputs(size_k, variant, value):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("requires AMD GPU")
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("experiment targets gfx950")
+    from scripts.qvq_p32_amd_butterfly_experiment import (
+        folded_gemv_dot2_gluon_kernel,
+        folded_gemv_dot2_loop_kernel,
+    )
+
+    kernel = folded_gemv_dot2_gluon_kernel if variant == "gluon" else folded_gemv_dot2_loop_kernel
+    x = torch.full((size_k,), value, device="cuda", dtype=torch.float16)
+    w = torch.ones((4, size_k), device="cuda", dtype=torch.float16)
+    output = torch.empty(4, device="cuda", dtype=torch.float32)
+    expected = torch.full_like(output, size_k * value)
+    # Missing a dependency delay previously dropped exactly 128 ones in some rows.
+    for _ in range(10):
+        kernel[(1,)](x, w, w, output, size_k, 4, 512, False,
+                     num_warps=4, num_stages=1, waves_per_eu=0)
+        assert torch.equal(output, expected)
+
+
+@pytest.mark.parametrize("warps", [4, 8])
+@pytest.mark.parametrize("block_p", [32, 64])
+def test_composite_trim_algebra_and_canary(warps, block_p):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("requires AMD GPU")
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("experiment targets gfx950")
+    from gptqmodel.utils.qvq_amd import _qvq_p32_composite_hadamard_constants
+    from scripts.qvq_p32_amd_butterfly_experiment import composite_trim_kernel
+
+    base, power, base_size, width = _qvq_p32_composite_hadamard_constants(torch.device("cuda", 0))
+    generator = torch.Generator(device="cuda").manual_seed(20260905)
+    x = torch.randn((3, 40, 128), generator=generator, device="cuda") * 0.01
+    sv = torch.randn(5120, generator=generator, device="cuda", dtype=torch.float16)
+    reference = ((base[:40, :40] @ (x @ power)).reshape(3, 5120) / 5120**0.5) * sv
+    output = torch.full((4, 5120), 999.0, device="cuda", dtype=torch.float16)
+    composite_trim_kernel[(3, width // block_p)](
+        x, power, base, sv, output, 5120, base_size, 64, width, block_p, 5120**-0.5,
+        num_warps=warps, num_stages=1, waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
+    )
+    assert torch.isfinite(output).all()
+    torch.testing.assert_close(output[:3].float(), reference, atol=2e-3, rtol=0)
+    assert (output[3] == 999.0).all()
+
+
+@pytest.mark.parametrize("variant", ["gather", "split"])
+@pytest.mark.parametrize("rows", [1, 3, 128, 513])
+def test_butterfly128_algebra_and_tail(variant, rows):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("requires AMD GPU")
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("experiment targets gfx950")
+    from scripts.qvq_p32_amd_butterfly_experiment import (
+        fht128_kernel,
+        fht128_split_kernel,
+    )
+
+    kernel = fht128_kernel if variant == "gather" else fht128_split_kernel
+    generator = torch.Generator(device="cuda").manual_seed(20260905 + rows)
+    x = torch.randn((rows, 128), device="cuda", generator=generator)
+    # The identity case verifies every sign/permutation exactly.
+    if rows == 128:
+        x = torch.eye(128, device="cuda")
+    h = torch.tensor(
+        [[1.0 if (i & j).bit_count() % 2 == 0 else -1.0 for j in range(128)] for i in range(128)],
+        device="cuda",
+    )
+    reference = x @ h
+    # Canary rows detect writes past the tail.
+    output = torch.full((rows + 4, 128), 999.0, device="cuda")
+    kernel[(triton.cdiv(rows, 4),)](x, output, rows, 4, num_warps=4)
+    torch.testing.assert_close(output[:rows], reference, atol=1e-4, rtol=0)
+    assert (output[rows:] == 999.0).all()
+    if rows == 128:
+        assert torch.equal(output[:rows], h)

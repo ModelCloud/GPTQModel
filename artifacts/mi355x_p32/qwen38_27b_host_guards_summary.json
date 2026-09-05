@@ -1,0 +1,66 @@
+{
+  "schema": "qvq.amd.host_guard_sweep.v1",
+  "baseline": "c89459e3",
+  "gpu_instruction_changes": false,
+  "validation": {
+    "tests_passed": 258,
+    "warnings": 14,
+    "full_cases": 364,
+    "full_failures": 0,
+    "valid_idle_gate": true,
+    "canonical_cases": 316
+  },
+  "all_geomean": 1.0560094465081782,
+  "cases_meeting_1p5": 0,
+  "shape_groups": [
+    {
+      "shape": "full_q_gate",
+      "cases": 52,
+      "geomean": 1.0239928973968229
+    },
+    {
+      "shape": "full_kv",
+      "cases": 52,
+      "geomean": 1.129535185964741
+    },
+    {
+      "shape": "attn_out",
+      "cases": 52,
+      "geomean": 1.0687149400383336
+    },
+    {
+      "shape": "linear_qkv",
+      "cases": 52,
+      "geomean": 1.045805119176992
+    },
+    {
+      "shape": "linear_z",
+      "cases": 52,
+      "geomean": 1.0852671546825805
+    },
+    {
+      "shape": "mlp_gate_up",
+      "cases": 52,
+      "geomean": 1.001934261622181
+    },
+    {
+      "shape": "mlp_down",
+      "cases": 52,
+      "geomean": 1.041812065358734
+    }
+  ],
+  "limitations": [
+    "CUDA event public-forward timing includes host submission gaps, not just device kernel duration.",
+    "No device code, launch geometry, dtype, precision, packed layout, or kernel-selection changes. Therefore no GPU-instruction-changing commit or new ISA claim.",
+    "Host-only cleanup cannot improve compute/memory-bound cases sufficiently; target remains active.",
+    "A prior direct-buffer attempt was invalidated by a transient new GPU PID. The retained full retry passed strict idle/pre-timing checks."
+  ],
+  "next_work": [
+    "All seven shape groups and all thirteen M values remain in scope; require >=1.5 for every case, not only a geometric mean.",
+    "For launch-sensitive cases, further reduce dispatch overhead while preserving tensor mutation and stream semantics.",
+    "For memory-bound decode, investigate weight access layout/vectorization against the measured physical GPU.",
+    "For high-M fallback regions (attn_out>=64, gate_up>=1024, down>=2048), isolate transform/precision costs before selecting a replacement.",
+    "For large GEMMs, pursue backend tile/layout changes with canonical checks and post-device-code profiling."
+  ],
+  "command": "python scripts/benchmark_qvq_p32_amd_butterfly.py --full-sweep --butterfly none --baseline-forward-commit c89459e3 --warmup 10 --iterations 30 --output /tmp/qvq-hostcache-direct-retry/report.json"
+}
