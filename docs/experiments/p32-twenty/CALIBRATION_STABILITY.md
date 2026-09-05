@@ -122,3 +122,16 @@ rank varies with sample composition; the seed-71 rank-6 result is not a stable
 cross-subset acceptance claim. Broader replay and the remaining sizes are still
 required. The progress summary records every observed attempt and uses the
 newest retry directory without erasing original partial reports.
+
+## Local calibration grid completed
+
+All 15 fits completed, including the separately recorded seed-71 large-capture
+retries: 360 exports and 3,240 local export-reload cases. Every completed fit
+verified its source export and read teacher-shard hashes unchanged. The full
+reports for every seed/size are archived beside the progress summary.
+
+No FP16 rank/fit passes all 15 subsets/sizes: seed72/2048 has no passing choice.
+At 8,192 tokens, rank6 tail passes all three subsets; rank8 does not pass seed71.
+At 16,384 and 32,768 tokens, rank6 L2 and tail pass all three subsets. This is
+local evidence, not completion of the full calibration-stability scorecard:
+broader document pass distributions, model checks and sensitivity analysis remain.

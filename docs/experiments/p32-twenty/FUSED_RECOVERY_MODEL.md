@@ -34,3 +34,9 @@ eager outputs. The full harness completed 81 cases across its nine variants.
 This validates the bounded real-activation layer path; it does not yet validate
 full-model quality, all fallback transitions, or speed under model execution.
 Fresh Nsight captures now include the integrated route at M=1/16/2048.
+
+The first fused model C4 slice completed: PPL 26.97508702, versus separate alpha1
+26.97691913 and window 26.99152524. These small differences do not establish a
+quality improvement. The report records FP16 factors, rank8, no sparse values,
+and fused eligibility; full ARC and propagated-logit comparisons remain pending.
+[Raw report](results/rank8-targeted/fused-model-c4.json).
