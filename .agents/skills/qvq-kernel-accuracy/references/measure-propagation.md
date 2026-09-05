@@ -1,8 +1,11 @@
 # Measuring propagation when arithmetic changes
 
 Use this protocol for a numerical-strategy experiment or to localize a kernel regression. It supplements the
-max-absolute inference gate; it cannot override it. Do not require a whole-model sensitivity survey for a small,
-already-validated exact decode/address-reuse change.
+localized mean-absolute/max-absolute inference gates; it cannot override them. Propagated final-logit differences,
+KL, and top-token agreement are diagnostics, not kernel acceptance gates. Do not apply the local thresholds to
+final logits or reject a locally passing kernel solely for propagated final-logit drift. Separately requested
+model-quality evaluations retain their explicitly agreed criteria. Do not require a whole-model sensitivity survey
+for a small, already-validated exact decode/address-reuse change.
 
 ## Define the measured system
 
@@ -31,7 +34,9 @@ g_i       = E_i / epsilon_i
 z_0 and z_i are raw final logits on identical evaluation positions. For block sensitivity, replace logits with the
 chosen block boundary and name that boundary. Define token/mask aggregation explicitly. When denominators vanish or
 the perturbation is below measurement resolution, report undefined/below-resolution; a silent denominator clamp can
-produce a misleading g. The repository's max-absolute 2e-3 gate is NOT epsilon_i in these formulas.
+produce a misleading g. The repository's mean-absolute `<= 2e-3` and max-absolute `<= 0.046875` gates are NOT
+epsilon_i in these formulas. They apply only to localized kernel outputs on identical inputs, weights, and initial
+state. Propagated final logits are a distinct diagnostic boundary to which these acceptance thresholds do not apply.
 
 Prefer the candidate's actual error direction. Injecting Y_i + s * (Yhat_i - Y_i) can probe nearby amplitudes; remeasure
 epsilon_i after casting. Synthetic noise on real activations is diagnostic only and does not certify the actual kernel
