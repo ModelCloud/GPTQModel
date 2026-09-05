@@ -719,6 +719,142 @@ __global__ void qvq_hadamard_pair_fp32_to_fp16_multiblock_warp_low_kernel(
       buf[p(local)];
 }
 
+// Large-M paired form of recovery-low. Gate and up execute the same first
+// eight butterfly stages over independent values. Owning both projections in
+// one CTA shares row/column address arithmetic and every CTA barrier. A
+// conservative L1 bound selects native half2 butterflies with gate/up in the
+// two lanes when no intermediate can overflow FP16. Unsafe tiles retain the
+// scalar FP32 add/sub and overflow-aware FP16 rounding order exactly.
+__global__ void qvq_hadamard_pair_fp32_to_fp16_multiblock_warp_low_paired_kernel(
+    const float* __restrict__ input0,
+    const float* __restrict__ input1,
+    float* __restrict__ workspace,
+    int rows,
+    int scale_mode) {
+  __shared__ float buf[2][
+      kHadamardPairMultiblockTile + kHadamardPairMultiblockTile / 32];
+  __shared__ float warp_abs[2][kHadamardPairMultiblockTile / 32];
+  __shared__ int packed_safe;
+  const int row = static_cast<int>(blockIdx.y);
+  const int tile = static_cast<int>(blockIdx.x);
+  const int local = static_cast<int>(threadIdx.x);
+  const int column = tile * kHadamardPairMultiblockTile + local;
+  const int64_t input_offset =
+      static_cast<int64_t>(row) * kHadamardPairMultiblockN + column;
+  auto p = [](int i) { return i + (i >> 5); };
+
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(kHadamardPairMultiblockN))));
+  float gate = round_fp16_unless_overflow(input0[input_offset]);
+  float up = round_fp16_unless_overflow(input1[input_offset]);
+  if (scale_mode == 3) {
+    gate = round_fp16_unless_overflow(gate / divisor);
+    up = round_fp16_unless_overflow(up / divisor);
+  }
+
+  float gate_abs = fabsf(gate);
+  float up_abs = fabsf(up);
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    gate_abs += __shfl_down_sync(0xffffffffu, gate_abs, offset);
+    up_abs += __shfl_down_sync(0xffffffffu, up_abs, offset);
+  }
+  if ((local & 31) == 0) {
+    warp_abs[0][local >> 5] = gate_abs;
+    warp_abs[1][local >> 5] = up_abs;
+  }
+  __syncthreads();
+  if (local == 0) {
+    float gate_tile_abs = 0.0f;
+    float up_tile_abs = 0.0f;
+#pragma unroll
+    for (int warp = 0; warp < kHadamardPairMultiblockTile / 32; ++warp) {
+      gate_tile_abs += warp_abs[0][warp];
+      up_tile_abs += warp_abs[1][warp];
+    }
+    // The margin below FP16 max absorbs conservative floating reduction error.
+    packed_safe = gate_tile_abs <= 64000.0f && up_tile_abs <= 64000.0f;
+  }
+  __syncthreads();
+
+  if (packed_safe) {
+    half2 packed = __floats2half2_rn(gate, up);
+#pragma unroll
+    for (int bit = 1; bit < 32; bit <<= 1) {
+      union Half2Bits {
+        half2 value;
+        unsigned int bits;
+      } self, peer;
+      self.value = packed;
+      peer.bits = __shfl_xor_sync(0xffffffffu, self.bits, bit);
+      packed = (local & bit) == 0
+          ? __hadd2(packed, peer.value)
+          : __hsub2(peer.value, packed);
+    }
+    reinterpret_cast<half2*>(buf)[p(local)] = packed;
+    __syncthreads();
+
+#pragma unroll
+    for (int bit = 32; bit < kHadamardPairMultiblockTile; bit <<= 1) {
+      const int peer = local ^ bit;
+      if (local < peer) {
+        half2* packed_buf = reinterpret_cast<half2*>(buf);
+        const half2 a = packed_buf[p(local)];
+        const half2 b = packed_buf[p(peer)];
+        packed_buf[p(local)] = __hadd2(a, b);
+        packed_buf[p(peer)] = __hsub2(a, b);
+      }
+      __syncthreads();
+    }
+
+    const half2 result = reinterpret_cast<half2*>(buf)[p(local)];
+    workspace[static_cast<int64_t>(row) * kHadamardPairMultiblockN + column] =
+        __low2float(result);
+    workspace[
+        static_cast<int64_t>(rows + row) * kHadamardPairMultiblockN + column] =
+        __high2float(result);
+    return;
+  }
+
+#pragma unroll
+  for (int bit = 1; bit < 32; bit <<= 1) {
+    const float gate_peer = __shfl_xor_sync(0xffffffffu, gate, bit);
+    const float up_peer = __shfl_xor_sync(0xffffffffu, up, bit);
+    if ((local & bit) == 0) {
+      gate = round_fp16_unless_overflow(gate + gate_peer);
+      up = round_fp16_unless_overflow(up + up_peer);
+    } else {
+      gate = round_fp16_unless_overflow(gate_peer - gate);
+      up = round_fp16_unless_overflow(up_peer - up);
+    }
+  }
+  buf[0][p(local)] = gate;
+  buf[1][p(local)] = up;
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 32; bit < kHadamardPairMultiblockTile; bit <<= 1) {
+    const int peer = local ^ bit;
+    if (local < peer) {
+      const float gate_a = buf[0][p(local)];
+      const float gate_b = buf[0][p(peer)];
+      const float up_a = buf[1][p(local)];
+      const float up_b = buf[1][p(peer)];
+      buf[0][p(local)] = round_fp16_unless_overflow(gate_a + gate_b);
+      buf[0][p(peer)] = round_fp16_unless_overflow(gate_a - gate_b);
+      buf[1][p(local)] = round_fp16_unless_overflow(up_a + up_b);
+      buf[1][p(peer)] = round_fp16_unless_overflow(up_a - up_b);
+    }
+    __syncthreads();
+  }
+
+  workspace[static_cast<int64_t>(row) * kHadamardPairMultiblockN + column] =
+      buf[0][p(local)];
+  workspace[
+      static_cast<int64_t>(rows + row) * kHadamardPairMultiblockN + column] =
+      buf[1][p(local)];
+}
+
 __global__ void qvq_hadamard_pair_fp32_to_fp16_multiblock_high_kernel(
     const float* __restrict__ workspace,
     half* __restrict__ output0,
@@ -2455,8 +2591,8 @@ at::Tensor qvq_hadamard_pair_swiglu_precondition_multiblock_cuda(
       : at::empty({rows, kHadamardPairMultiblockN}, half_options);
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input0.get_device());
 
-  qvq_hadamard_pair_fp32_to_fp16_multiblock_warp_low_kernel<<<
-      dim3(kHadamardPairMultiblockTiles, rows * 2),
+  qvq_hadamard_pair_fp32_to_fp16_multiblock_warp_low_paired_kernel<<<
+      dim3(kHadamardPairMultiblockTiles, rows),
       kHadamardPairMultiblockTile,
       0,
       stream>>>(
