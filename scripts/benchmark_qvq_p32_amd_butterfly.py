@@ -7,13 +7,16 @@ solution indices are build-specific research knobs, not portable defaults.
 
 import argparse
 import ast
+import copy
 import hashlib
+import importlib.util
 import itertools
 import json
 import os
 import statistics
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from benchmark_qvq_p32_amd import _idle_preflight, _rocm_snapshot, _timing_recheck
@@ -34,6 +37,7 @@ def main():
     parser.add_argument("--folded-residual-ceiling", action="store_true",
                         help="Benchmark a raw cached high+residual operator, not production dispatch")
     parser.add_argument("--baseline-forward-commit", help="Compare the folded-forward method from this git revision")
+    parser.add_argument("--baseline-amd-commit", help="Use isolated kernel module and layer caches from this git revision")
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument(
@@ -57,11 +61,31 @@ def main():
     from qvq_p32_amd_butterfly_experiment import fht128_kernel, fht128_split_kernel
 
     import gptqmodel.nn_modules.qlinear.qvq as qvq_module
+    import gptqmodel.utils.qvq_amd as candidate_amd
     from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
     from gptqmodel.quantization.qvq import pack_qvq_binary_bank_ids
     from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
     from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
     from gptqmodel.utils.qvq_amd import qvq_p32_amd_folded_case_supported
+
+    baseline_amd = candidate_amd
+    baseline_source_dir = None
+    if args.baseline_amd_commit:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "--verify", args.baseline_amd_commit + "^{commit}"], cwd=root, text=True,
+        ).strip()
+        source = subprocess.check_output(
+            ["git", "show", revision + ":gptqmodel/utils/qvq_amd.py"], cwd=root, text=True,
+        )
+        # A real generated snapshot is required for Triton's inspect/JIT source
+        # lookup. This is trusted local git code, with independent module globals.
+        baseline_source_dir = tempfile.TemporaryDirectory(prefix="qvq-amd-baseline-")
+        snapshot = Path(baseline_source_dir.name) / "qvq_amd.py"
+        snapshot.write_text(source)
+        spec = importlib.util.spec_from_file_location("gptqmodel.utils._qvq_amd_benchmark_baseline", snapshot)
+        baseline_amd = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = baseline_amd
+        spec.loader.exec_module(baseline_amd)
 
     props = torch.cuda.get_device_properties(0)
     if not torch.version.hip or props.gcnArchName.split(":")[0] != "gfx950":
@@ -130,6 +154,7 @@ def main():
         return original_mm(x, w, *mm_args, **kwargs)
 
     def select(name):
+        sys.modules["gptqmodel.utils.qvq_amd"] = baseline_amd if name == "baseline" else candidate_amd
         QVQLinear._qvq_amd_folded_forward = baseline_forward if name == "baseline" else candidate_forward
         torch.mm = (candidate_mm if name == "candidate"
                     and (args.butterfly != "none" or hipb_mm is not None) else original_mm)
@@ -211,6 +236,7 @@ def main():
                     "bank_alt_id": torch.tensor([3], device="cuda", dtype=torch.uint8),
                 },
             ).eval()
+            baseline_layer = copy.deepcopy(layer) if args.baseline_amd_commit else layer
             inner = layer.get_inner_weight_tensor()
             high = low = None
             if args.folded_residual_ceiling:
@@ -232,11 +258,11 @@ def main():
                 ref = ref @ inner
                 if oh:
                     ref = matmul_hadU(ref)
-                def run(name, input_tensor=x, high=high, low=low, layer=layer):
+                def run(name, input_tensor=x, high=high, low=low, layer=layer, baseline_layer=baseline_layer):
                     if name == "candidate" and args.folded_residual_ceiling:
                         primary = original_mm(input_tensor, high.T, out_dtype=torch.float32)
                         return torch.addmm(primary, input_tensor, low.T, out_dtype=torch.float32).to(torch.float16)
-                    return layer(input_tensor)
+                    return (baseline_layer if name == "baseline" else layer)(input_tensor)
                 outputs = {}
                 for name, fn in [
                     ("baseline", original_mm),
@@ -311,7 +337,7 @@ def main():
                     if row["accuracy_basis"] == "canonical_fp32"
                     else torch.equal(outputs["candidate"], outputs["baseline"])
                 )
-                if (m, k, n) == (1024, 17408, 5120):
+                if (m, k, n) == (1024, 17408, 5120) or ((k, n) == (6144, 5120) and m >= 64):
                     select("candidate")
                     stream = torch.cuda.Stream()
                     stream.wait_stream(torch.cuda.current_stream())
@@ -337,7 +363,7 @@ def main():
                     flush=True,
                 )
                 del x, ref, outputs, run
-            del layer, packed, banks, inner, high, low
+            del layer, baseline_layer, packed, banks, inner, high, low
             torch.cuda.empty_cache()
         report["completed"] = True
         args.output.write_text(json.dumps(report, indent=2))
@@ -350,6 +376,9 @@ def main():
     finally:
         torch.mm = original_mm
         QVQLinear._qvq_amd_folded_forward = candidate_forward
+        sys.modules["gptqmodel.utils.qvq_amd"] = candidate_amd
+        if baseline_source_dir is not None:
+            baseline_source_dir.cleanup()
 
 
 if __name__ == "__main__":

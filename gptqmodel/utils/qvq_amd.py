@@ -33,11 +33,11 @@ _QWEN38_27B_FOLDED_SHAPES = frozenset(
     }
 )
 _QWEN38_27B_FOLDED_M_LIMITS = {
-    (6144, 5120): 32,
+    (6144, 5120): 4096,
     (5120, 17408): 512,
     (17408, 5120): 1024,
 }
-_QWEN38_27B_RESIDUAL_FOLDED_SHAPES = frozenset({(17408, 5120)})
+_QWEN38_27B_RESIDUAL_FOLDED_SHAPES = frozenset({(17408, 5120), (6144, 5120)})
 _QWEN38_27B_COMPOSITE_RECOVERY_SHAPE = (17408, 5120)
 _COMPOSITE_HADAMARD_CACHE: dict[
     torch.device, tuple[torch.Tensor, torch.Tensor, int, int]
@@ -363,8 +363,9 @@ def _qvq_p32_folded_weight(
         # This shape narrowly misses the end-to-end 2e-3 error budget when the
         # FP32 folded matrix is rounded once.  A second FP16 expansion term
         # preserves that accuracy while remaining much cheaper than decoding
-        # P32 weights on every token.  Limit it to the measured down projection
-        # because it doubles that layer's persistent folded-cache footprint.
+        # P32 weights on every token. Attention output needs the second term at
+        # M>=64; keep it cached across mixed decode/prefill calls. This doubles
+        # these layers' persistent folded-cache footprint.
         residual = (folded_fp32 - folded.to(torch.float32)).to(torch.float16).contiguous()
         residual_operand = residual.T
     # The predecoded matrix is only a construction intermediate here. Keeping
@@ -601,6 +602,10 @@ def _qvq_p32_folded_execute(
             kpack=1,
         )
         return output
+    if (k, n) == (6144, 5120) and m <= 32:
+        # Preserve the retained small-M arithmetic and single-weight read even
+        # when the same module previously populated its large-M residual cache.
+        residual_operand = None
     if m == 1 and not output_fp32 and qvq_p32_amd_folded_shape_supported(k, n):
         output = torch.empty((1, n), device=x.device, dtype=x.dtype)
         if n == 1024:
