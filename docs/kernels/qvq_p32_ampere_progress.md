@@ -4079,6 +4079,25 @@ M=1024/N=6144, and M=2048/N=1024 controls neutral to measurement resolution.
 Stage-3 sixteen-group reuse at M=512 was also rejected because N=5120
 regressed by roughly 5--9%; that tier remains on eight groups.
 
+The matched Qwen attention-out NCU captures are
+`/tmp/v89_ncu_qwen_attn_candidate.csv` and
+`/tmp/v89_ncu_qwen_attn_base.csv` for
+`M=1024,K=6144,N=5120,stage=3,bits=5`.  The grid falls from 640 to 320 CTAs,
+executed instructions from 239,629,440 to 148,370,240, and profiled duration
+from 1,049,120 ns to 748,704 ns (`1.401x`).  Memory throughput rises from
+62.06% to 75.06%; compute throughput moves from 37.92% to 32.85%.  The
+control uses 96 registers and 26,520 B static shared memory; the candidate
+uses 168 registers, 1,952 B static shared, and 49,152 B dynamic shared.
+
+The matched SASS extracts are `/tmp/v89_qwen_attn_candidate_rg16.sass` and
+`/tmp/v89_qwen_attn_base_rg8.sass`.  Static instructions rise from 1,584 to
+1,736 per CTA while doubled row work scales HMMA/LDSM/STG exactly 2x
+(48/24/32 to 96/48/64).  Decode work stays flat (LOP3 121, SHF 139, PRMT 18,
+and LDG 25 in both); address families change only slightly (IMAD 453->466,
+IADD3 120->111, LEA 90->89).  The post-commit SSA/algebraic pass found no
+duplicated decode, redundant mask/shift, unnecessary conversion/permutation,
+address-expression regression, or spill.
+
 ## Reproduction
 
 ```bash
