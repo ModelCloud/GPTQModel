@@ -3813,6 +3813,49 @@ families do not: IMAD 275 to 278, SHF 126 to 129, LOP3 127 to 132, and LEA
 conversion, permutation, or address expression to fold; the surviving
 integer instructions are shared trellis-address and circular-state indexing.
 
+## v82 large-M paired-decode selector-mask hoist
+
+The next phase starts from fetched `origin/main` at `277e088f`; the separate
+N=1024 stage-1/2 row-group WIP remains isolated in PR #115.  The large-M
+128-thread row-reuse kernel now instantiates `HoistBankMasks=true`.  This
+computes the two selector masks once for each paired state decode and feeds
+the shared decode helper, instead of recomputing the selected mask through
+each of the four scalar pair decoders.  The ABI, row-group policy, and
+small-M routes are unchanged.
+
+The candidate stayed exact on randomized split-8 comparisons for
+`N=6144`, stages 1--4, and transition bits 4--7, and for the merged
+`N=1024` stage-3 eight-row route at all four rates.  The contract smoke test
+and the 65-case `tests/test_qvq_p32_ampere.py` suite both pass.
+
+With `K=5120`, `M=512/1024/2048/4096`, six supported N values, four stages,
+and four transition widths (384 timed cases, 10 warmups/50 iterations), the
+candidate/main geometric mean is `1.0194x`.  Stage means are 1.0454x,
+1.0077x, 1.0198x, and 1.0052x for stages 1--4; per-rate means across all
+stages are 1.0224x, 1.0220x, 1.0172x, and 1.0159x.  The per-M means are
+1.0209x/1.0188x/1.0193x/1.0184x.  Stage-4 is intentionally retained even
+though its aggregate is near neutral because it has no broad regression and
+keeps the dispatch policy uniform; the strongest gain is in the
+decode-bound stage-1 path.
+
+The matched Nsight Compute capture is `/tmp/v32_ncu_candidate_20260905.csv`,
+with control `/tmp/v32_ncu_baseline_20260905.csv`, for
+`N=5120,M=4096,stage=2,bits=4`.  Both launches use 128 threads and a
+2560-CTA grid, 96 registers/thread, 17,424 B static shared memory, and zero
+local/shared spill requests.  Profiled duration moves from 3,876,384 ns to
+3,856,032 ns while memory throughput changes 92.13% to 92.69% and compute
+throughput 34.36% to 34.71%.  Executed instructions are effectively flat
+(802,672,640 to 805,949,440, +0.4%), so the gain is a scheduling/cache
+effect rather than an instruction-count reduction.
+
+The source-correlated SASS extracts are `/tmp/v32_base_m4_stage2_sass2.txt`
+and `/tmp/v32_cand_m4_stage2_sass2.txt`.  Static instruction count is 1,256
+per CTA in both builds.  The hoisted form removes six `LOP3.LUT` and four
+right-shift instructions, at the cost of four additional `IMAD`-family
+instructions; HMMA.16816, LDSM, STG, LEA, and shuffle counts are unchanged.
+No new conversion, permutation, redundant address expression, or spill was
+found in the SSA/data-movement review.
+
 ## Reproduction
 
 ```bash

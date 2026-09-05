@@ -1263,7 +1263,7 @@ __global__ __launch_bounds__(128) void p32_window_ampere_large_m2_kernel(
   const int split = static_cast<int>(blockIdx.z);
   p32_window_ampere_kernel_body<
       TransitionBits, true, 0, StaticN, 128, 4, StageKTiles,
-      false, false, StaticK, RowGroups>(
+      true, false, StaticK, RowGroups>(
       input + static_cast<int64_t>(row_offset) * size_k,
       trellis, levels, bank_ids, partial_output,
       output + static_cast<int64_t>(row_offset) * size_n, local_m, size_k,
