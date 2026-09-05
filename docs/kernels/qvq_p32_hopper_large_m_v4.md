@@ -142,3 +142,26 @@ weight cache is introduced.
 
 Artifact:
 `artifacts/qvq_hopper_large_m/v4_reuse11_m4096_candidate.json`.
+
+The exact `83f29ef9` NCU capture verifies that this is an instruction-reuse
+win rather than timing noise:
+
+| Metric | Reuse-8 | Reuse-11 | Change |
+| --- | ---: | ---: | ---: |
+| Gate/up kernel duration | 1092.640 µs | 960.704 µs | -12.1% |
+| Executed warp instructions | 509,056,242 | 437,936,958 | -14.0% |
+| CTAs | 4096 | 3072 | -25.0% |
+| Registers/thread | 139 | 168 | +20.9% |
+| Dynamic shared memory/CTA | 172.800 KiB | 221.952 KiB | +28.4% |
+| Eligible warps/scheduler/cycle | 0.700 | 0.753 | +7.4% |
+| DRAM throughput | 11.21% | 13.15% | +1.94 points |
+| Local/shared spills | 0 / 0 | 0 / 0 | unchanged |
+
+Source-correlated SASS agrees with the row-wave algebra: `PRMT` and
+`WARPGROUP` fall exactly 25%; `LDS` falls 24.8%; `SHF` and `LOP3` fall
+23.2–23.4%; and `IMAD` falls 15.8%. The zero-row padding raises `HGMMA` by
+exactly 3.125%. The kernel remains instruction/scheduler limited, with only
+13.15% DRAM activity.
+
+NCU report:
+`artifacts/qvq_hopper_large_m/profiles/v4_reuse11_w3_m4096_83f29ef9_ncu.ncu-rep`.
