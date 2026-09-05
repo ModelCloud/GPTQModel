@@ -13,8 +13,8 @@ worst absolute drift was `0.0045776367`.
 
 ## Full-layer speed ratios
 
-Ratios are `fused full-layer latency / production window full-layer latency`;
-values below 1.0 are faster. Each median is across the 12 projections.
+Values are full-layer speedups, `production-window latency / fused latency`;
+values above 1.0 are faster. Each median is across the 12 projections.
 
 | M | BM16/BN64/split1 | BM16/BN64/split2 |
 |---:|---:|---:|

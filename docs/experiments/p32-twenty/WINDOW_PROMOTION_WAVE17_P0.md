@@ -9,7 +9,10 @@ All 144 cases passed both local gates. The maximum teacher mean error was
 drift from production window `0.0001104819`, and maximum window drift
 `0.0045776367`.
 
-| M | Exact-control fused/window median |
+Values are full-layer speedups, `production-window latency / fused latency`;
+values above 1.0 are faster.
+
+| M | Exact-control speedup median |
 |---:|---:|
 | 1 | 0.951x |
 | 2 | 0.972x |

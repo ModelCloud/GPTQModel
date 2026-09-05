@@ -14,9 +14,10 @@ failures are layer-1 `mlp.down_proj` at M=1 and M=2.
 | K32 | 143/144 | 0.00589171 | 0.0272694 | 0.00514145 | 0.0240825 |
 | K64 | 142/144 | 0.00739415 | 0.0339589 | 0.00680621 | 0.0321151 |
 
-The median fused/window ratios are:
+The median full-layer speedups are `production-window latency / fused latency`;
+values above 1.0 are faster:
 
-| M | K32 | K64 |
+| M | K32 speedup | K64 speedup |
 |---:|---:|---:|
 | 1 | 0.957x | 0.953x |
 | 2 | 0.972x | 0.956x |

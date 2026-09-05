@@ -15,7 +15,10 @@ projection at every M. The intervals are therefore unsuitable as global
 policies and the maximum-error gate is decisive even where average error is
 small.
 
-| M | K128 fused/window median | K256 fused/window median |
+Values are full-layer speedups, `production-window latency / fused latency`;
+values above 1.0 are faster.
+
+| M | K128 speedup median | K256 speedup median |
 |---:|---:|---:|
 | 1 | 0.973x | 0.960x |
 | 2 | 0.953x | 0.946x |

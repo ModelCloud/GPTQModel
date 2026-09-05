@@ -11,9 +11,10 @@ There were 143/144 local passes. The single failure is:
 | `model.layers.1.mlp.down_proj` | 1 | 0.00479307 | 0.0204201 | 0.00401083 | 0.0159455 |
 
 This is a real integrated-kernel failure against both gates, so K16 is not a
-global promotion policy. Its median fused/window ratios were:
+global promotion policy. The values below are full-layer speedups,
+`production-window latency / fused latency`; values above 1.0 are faster:
 
-| M | K16 fused/window median |
+| M | K16 speedup median |
 |---:|---:|
 | 1 | 0.965x |
 | 2 | 0.940x |

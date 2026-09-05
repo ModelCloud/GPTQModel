@@ -14,8 +14,8 @@ the production window reference was mean `2.5793297e-05` and maximum
 
 ## Full-layer speed ratios
 
-Ratios are `fused full-layer latency / production window full-layer latency`;
-values below 1.0 are faster. Each median is across the 12 projections.
+Values are full-layer speedups, `production-window latency / fused latency`;
+values above 1.0 are faster. Each median is across the 12 projections.
 
 | M | BM64/BN64/split4 | BM32/BN32/split4 |
 |---:|---:|---:|
@@ -33,9 +33,9 @@ values below 1.0 are faster. Each median is across the 12 projections.
 | 2048 | 1.225x | 1.013x |
 
 Split-K=4 does not improve the best split-1 configuration consistently. The
-BM64/BN64 path becomes slower than window at large M, while BM32/BN32 is near
-parity at M=512–2048 and remains below the requested 2x target. The extra
-split-K reduction therefore does not advance the window kernel.
+BM64/BN64 path reaches 1.225x at M=2048, while BM32/BN32 is near parity at
+M=512–2048; both remain below the requested 2x target. The extra split-K
+reduction therefore does not advance the window kernel.
 
 The result is a useful negative control: direct decode/MMA fusion preserves
 the reconstructed outputs under split-K=4, but the reduction and scheduling
