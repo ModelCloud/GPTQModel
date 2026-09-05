@@ -20,3 +20,11 @@ Limitations: calibration uses a diagonal energy approximation; no window output
 comparison, original-BF16 comparison, full-model run, or packed runtime profiling
 has yet been performed. This result rules out only the tested greedy representation,
 not signed-basis quantization generally. The 3e-3/0.046875 gates remain unchanged.
+
+## Uniform-weight control
+
+Uniform-weight controls completed for tiles 16/32/64/128 and ranks 1/2/4/8/12/16.
+Every candidate failed all nine local cases; the tile16 rank16 maximum error was
+approximately 2.4783, with about 48 BPW. Changing diagonal activation weighting
+to uniform weighting therefore does not rescue this greedy representation. These
+are screening results only; no packed GPU kernel or model claim follows.

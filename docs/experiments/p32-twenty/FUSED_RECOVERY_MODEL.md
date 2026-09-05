@@ -81,3 +81,11 @@ top1/5/10 agreement 0.9777832031 / 0.9744140625 / 0.9754638672.
 [Full comparison](results/rank8-targeted/fused-logits-vs-window.json).
 This measures the combined native conversion/recovery and fusion difference;
 the separate-reference comparison isolates the smaller fusion contribution.
+
+## GSM8K-128 follow-up
+
+The opt-in fused alpha1 rank8 arm scored 63/128 and fused joint-rank8 scored
+60/128. The 32K-calibrated rank6 tail arms scored 61/128 (seed71) and 63/128
+(seed72). These are exploratory task results; no paired significance or P32
+post-quant advantage is claimed. Complete reports are archived under
+`results/quality/`.
