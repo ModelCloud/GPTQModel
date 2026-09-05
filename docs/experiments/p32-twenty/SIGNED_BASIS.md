@@ -28,3 +28,20 @@ Every candidate failed all nine local cases; the tile16 rank16 maximum error was
 approximately 2.4783, with about 48 BPW. Changing diagonal activation weighting
 to uniform weighting therefore does not rescue this greedy representation. These
 are screening results only; no packed GPU kernel or model claim follows.
+
+## Sparse Walsh screen (experiment 30)
+
+The four tile sizes 16/32/64/128 completed with largest-magnitude coefficient
+retention at keep values up to the full tile. Every reduced keep value failed
+all nine local max-error cases. Full keep reconstructs the folded weights to the
+FP32 control (nine of nine cases), but costs about 40 BPW because this screen
+stores FP32 values and byte indices; it is therefore not a useful compressed
+representation. At tile128/keep64, for example, retained spectral energy is
+0.92642 but maximum error is about 7.60531. This rejects the tested sparse
+Walsh export as a practical approximation. No packed GPU execution or model
+quality claim follows.
+
+[Raw tile reports](results/structured/sparse-walsh-tile16.json),
+[tile32](results/structured/sparse-walsh-tile32.json),
+[tile64](results/structured/sparse-walsh-tile64.json), and
+[tile128](results/structured/sparse-walsh-tile128.json).

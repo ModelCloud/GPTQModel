@@ -1,0 +1,670 @@
+{
+  "scope": "Real folded-weight representation screening; dense reconstruction, not packed inference",
+  "representation": "walsh",
+  "module": "model.layers.0.mlp.down_proj",
+  "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+  "tile": 16,
+  "calibration": "/root/p32-recovery-calibration/activations16x512/model.layers.0.mlp.down_proj.pt",
+  "calibration_sha256": "c1e952cd89219ff6f614d09034ccf58c71ec27b4f9e9a79ff001e8a3e98bb8b7",
+  "evaluation": "/root/p32-timing-activations/model.layers.0.mlp.down_proj.pt",
+  "evaluation_sha256": "95907071a3990f379ae0f2ee767f90e4d8441d38c3258d88beb327ac762f7d91",
+  "objective": "post-hoc largest Walsh coefficients; no activation fitting",
+  "weighting": "none",
+  "candidates": [
+    {
+      "keep": 1,
+      "export": "/root/p32-signed-basis/walsh-tile16/keep1.pt",
+      "sha256": "a79929499ff1557edf4ae70fa251abd24f0943066f7099d57d50e1dadeaf25d2",
+      "serialized_bytes": 5244757,
+      "bpw": 2.5008950233459473,
+      "reload_equal": true,
+      "retained_spectral_energy": 0.28264909982681274,
+      "cases": [
+        {
+          "M": 1,
+          "teacher_metrics": {
+            "elements": 2048,
+            "mean_abs": 0.32667474007836317,
+            "max_abs": 18.983517169952393,
+            "relative_l2": 0.9799607718565105,
+            "cosine": 0.2413330774085373,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 2,
+          "teacher_metrics": {
+            "elements": 4096,
+            "mean_abs": 0.17439444217537237,
+            "max_abs": 18.98351740837097,
+            "relative_l2": 0.9796768291818357,
+            "cosine": 0.2421488206216717,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 4,
+          "teacher_metrics": {
+            "elements": 8192,
+            "mean_abs": 0.09552591365212237,
+            "max_abs": 18.98351740837097,
+            "relative_l2": 0.9793644532743332,
+            "cosine": 0.2430636029185745,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 8,
+          "teacher_metrics": {
+            "elements": 16384,
+            "mean_abs": 0.05782144684855939,
+            "max_abs": 18.98351740837097,
+            "relative_l2": 0.9784260567682702,
+            "cosine": 0.24572918529367,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 16,
+          "teacher_metrics": {
+            "elements": 32768,
+            "mean_abs": 0.036974862608325734,
+            "max_abs": 18.98351740837097,
+            "relative_l2": 0.9772236632327377,
+            "cosine": 0.249156160903356,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 32,
+          "teacher_metrics": {
+            "elements": 65536,
+            "mean_abs": 0.02680885630506512,
+            "max_abs": 18.98351740837097,
+            "relative_l2": 0.9747059394269973,
+            "cosine": 0.25636645850207573,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 128,
+          "teacher_metrics": {
+            "elements": 262144,
+            "mean_abs": 0.019776384921571452,
+            "max_abs": 18.98351752758026,
+            "relative_l2": 0.9599278435707882,
+            "cosine": 0.2964215298150104,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 512,
+          "teacher_metrics": {
+            "elements": 1048576,
+            "mean_abs": 0.017960702631073577,
+            "max_abs": 18.98351812362671,
+            "relative_l2": 0.9251012867407796,
+            "cosine": 0.38039740302924313,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 2048,
+          "teacher_metrics": {
+            "elements": 4194304,
+            "mean_abs": 0.017699668301591802,
+            "max_abs": 18.98351812362671,
+            "relative_l2": 0.8962093932029203,
+            "cosine": 0.44576218530851563,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        }
+      ]
+    },
+    {
+      "keep": 2,
+      "export": "/root/p32-signed-basis/walsh-tile16/keep2.pt",
+      "sha256": "89ea75f550baa7440a7913064d99a98e90c19727031517265b90de808e36f92d",
+      "serialized_bytes": 10487637,
+      "bpw": 5.000895023345947,
+      "reload_equal": true,
+      "retained_spectral_energy": 0.46164214611053467,
+      "cases": [
+        {
+          "M": 1,
+          "teacher_metrics": {
+            "elements": 2048,
+            "mean_abs": 0.25704736537572925,
+            "max_abs": 17.44437837600708,
+            "relative_l2": 0.9050885756073113,
+            "cosine": 0.42543027817882817,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 2,
+          "teacher_metrics": {
+            "elements": 4096,
+            "mean_abs": 0.13815056075970766,
+            "max_abs": 17.444379568099976,
+            "relative_l2": 0.904743632682093,
+            "cosine": 0.4261712637121069,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 4,
+          "teacher_metrics": {
+            "elements": 8192,
+            "mean_abs": 0.07624000511250106,
+            "max_abs": 17.444379568099976,
+            "relative_l2": 0.9043609222851255,
+            "cosine": 0.4269889770350075,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 8,
+          "teacher_metrics": {
+            "elements": 16384,
+            "mean_abs": 0.04676949492700033,
+            "max_abs": 17.444379568099976,
+            "relative_l2": 0.9031634635428804,
+            "cosine": 0.4295495034499859,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 16,
+          "teacher_metrics": {
+            "elements": 32768,
+            "mean_abs": 0.03028714747716818,
+            "max_abs": 17.444379568099976,
+            "relative_l2": 0.9016245170330859,
+            "cosine": 0.43280842414379306,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 32,
+          "teacher_metrics": {
+            "elements": 65536,
+            "mean_abs": 0.022286117719590732,
+            "max_abs": 17.444379568099976,
+            "relative_l2": 0.8984645764974394,
+            "cosine": 0.439398891742073,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 128,
+          "teacher_metrics": {
+            "elements": 262144,
+            "mean_abs": 0.016744210149216173,
+            "max_abs": 17.444379568099976,
+            "relative_l2": 0.8795706148784832,
+            "cosine": 0.47671026615050643,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 512,
+          "teacher_metrics": {
+            "elements": 1048576,
+            "mean_abs": 0.015336016857477965,
+            "max_abs": 17.444376230239868,
+            "relative_l2": 0.8350992880941079,
+            "cosine": 0.5546596960861447,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 2048,
+          "teacher_metrics": {
+            "elements": 4194304,
+            "mean_abs": 0.015163868208122728,
+            "max_abs": 17.444376230239868,
+            "relative_l2": 0.7981745580910508,
+            "cosine": 0.6124844251390278,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        }
+      ]
+    },
+    {
+      "keep": 4,
+      "export": "/root/p32-signed-basis/walsh-tile16/keep4.pt",
+      "sha256": "db95c8a32f5d77db190d66c6425de26b8fa82b19146b00d00650ce42c841ff47",
+      "serialized_bytes": 20973397,
+      "bpw": 10.000895023345947,
+      "reload_equal": true,
+      "retained_spectral_energy": 0.690670371055603,
+      "cases": [
+        {
+          "M": 1,
+          "teacher_metrics": {
+            "elements": 2048,
+            "mean_abs": 0.2361089723827834,
+            "max_abs": 14.66508960723877,
+            "relative_l2": 0.7550010146516383,
+            "cosine": 0.6916456382441488,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 2,
+          "teacher_metrics": {
+            "elements": 4096,
+            "mean_abs": 0.12510509935969594,
+            "max_abs": 14.665087699890137,
+            "relative_l2": 0.7546122193503175,
+            "cosine": 0.6918876131796344,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 4,
+          "teacher_metrics": {
+            "elements": 8192,
+            "mean_abs": 0.06792714465107685,
+            "max_abs": 14.665087699890137,
+            "relative_l2": 0.7541971907261718,
+            "cosine": 0.6921034082057679,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 8,
+          "teacher_metrics": {
+            "elements": 16384,
+            "mean_abs": 0.04039567071112404,
+            "max_abs": 14.665087699890137,
+            "relative_l2": 0.7528641054484597,
+            "cosine": 0.6930401381134658,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 16,
+          "teacher_metrics": {
+            "elements": 32768,
+            "mean_abs": 0.025302840627555515,
+            "max_abs": 14.665087699890137,
+            "relative_l2": 0.751141527210764,
+            "cosine": 0.6941747148029451,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 32,
+          "teacher_metrics": {
+            "elements": 65536,
+            "mean_abs": 0.017994299621147982,
+            "max_abs": 14.665087699890137,
+            "relative_l2": 0.7476414416837699,
+            "cosine": 0.6963496430345962,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 128,
+          "teacher_metrics": {
+            "elements": 262144,
+            "mean_abs": 0.012771637790806195,
+            "max_abs": 14.665090560913086,
+            "relative_l2": 0.7263602254665797,
+            "cosine": 0.7119604624346233,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 512,
+          "teacher_metrics": {
+            "elements": 1048576,
+            "mean_abs": 0.011479867897014096,
+            "max_abs": 14.665079116821289,
+            "relative_l2": 0.6759197136505697,
+            "cosine": 0.7551439771689951,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 2048,
+          "teacher_metrics": {
+            "elements": 4194304,
+            "mean_abs": 0.011317503537353505,
+            "max_abs": 14.665079116821289,
+            "relative_l2": 0.6332609846561884,
+            "cosine": 0.7907306320599273,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        }
+      ]
+    },
+    {
+      "keep": 8,
+      "export": "/root/p32-signed-basis/walsh-tile16/keep8.pt",
+      "sha256": "b7c9a895816abde38507ac3f502f1d4fcb4da90b26264feb1476b277d090114b",
+      "serialized_bytes": 41944917,
+      "bpw": 20.000895023345947,
+      "reload_equal": true,
+      "retained_spectral_energy": 0.9114487171173096,
+      "cases": [
+        {
+          "M": 1,
+          "teacher_metrics": {
+            "elements": 2048,
+            "mean_abs": 0.14176913740294284,
+            "max_abs": 9.42190170288086,
+            "relative_l2": 0.46229383044841316,
+            "cosine": 0.942539954151138,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 2,
+          "teacher_metrics": {
+            "elements": 4096,
+            "mean_abs": 0.0745229863827025,
+            "max_abs": 9.421911239624023,
+            "relative_l2": 0.4619922937677761,
+            "cosine": 0.9423637154158317,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 4,
+          "teacher_metrics": {
+            "elements": 8192,
+            "mean_abs": 0.040109449569777134,
+            "max_abs": 9.421911239624023,
+            "relative_l2": 0.4616723290009608,
+            "cosine": 0.9421618525016752,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 8,
+          "teacher_metrics": {
+            "elements": 16384,
+            "mean_abs": 0.023350314036118036,
+            "max_abs": 9.421911239624023,
+            "relative_l2": 0.46064337639893715,
+            "cosine": 0.9416875635755083,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 16,
+          "teacher_metrics": {
+            "elements": 32768,
+            "mean_abs": 0.014351566243358996,
+            "max_abs": 9.421911239624023,
+            "relative_l2": 0.45934060640065566,
+            "cosine": 0.9410214720481866,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 32,
+          "teacher_metrics": {
+            "elements": 65536,
+            "mean_abs": 0.009973521079488356,
+            "max_abs": 9.421911239624023,
+            "relative_l2": 0.45665731175068885,
+            "cosine": 0.939674771421002,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 128,
+          "teacher_metrics": {
+            "elements": 262144,
+            "mean_abs": 0.006789229660120195,
+            "max_abs": 9.42190933227539,
+            "relative_l2": 0.4402921404841004,
+            "cosine": 0.9347132967768224,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 512,
+          "teacher_metrics": {
+            "elements": 1048576,
+            "mean_abs": 0.006006165062819613,
+            "max_abs": 9.42190170288086,
+            "relative_l2": 0.4003962459859997,
+            "cosine": 0.936559201390587,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        },
+        {
+          "M": 2048,
+          "teacher_metrics": {
+            "elements": 4194304,
+            "mean_abs": 0.005898885136196078,
+            "max_abs": 9.42190170288086,
+            "relative_l2": 0.3654589460529045,
+            "cosine": 0.9438584450505888,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          }
+        }
+      ]
+    },
+    {
+      "keep": 16,
+      "export": "/root/p32-signed-basis/walsh-tile16/keep16.pt",
+      "sha256": "3d9e45757b5ceb02c83df69ffb0378b3b636943c37afe1c70263a86c2a974424",
+      "serialized_bytes": 83887965,
+      "bpw": 40.00089883804321,
+      "reload_equal": true,
+      "retained_spectral_energy": 1.0,
+      "cases": [
+        {
+          "M": 1,
+          "teacher_metrics": {
+            "elements": 2048,
+            "mean_abs": 4.090554557301118e-07,
+            "max_abs": 5.7220458984375e-06,
+            "relative_l2": 6.660992980891835e-07,
+            "cosine": 0.9999999999997816,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": true
+          }
+        },
+        {
+          "M": 2,
+          "teacher_metrics": {
+            "elements": 4096,
+            "mean_abs": 2.1309582398654214e-07,
+            "max_abs": 3.814697265625e-06,
+            "relative_l2": 6.434507232148019e-07,
+            "cosine": 0.9999999999997928,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": true
+          }
+        },
+        {
+          "M": 4,
+          "teacher_metrics": {
+            "elements": 8192,
+            "mean_abs": 1.1492906482057919e-07,
+            "max_abs": 3.814697265625e-06,
+            "relative_l2": 6.438329397587969e-07,
+            "cosine": 0.9999999999997928,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": true
+          }
+        },
+        {
+          "M": 8,
+          "teacher_metrics": {
+            "elements": 16384,
+            "mean_abs": 6.730948198807596e-08,
+            "max_abs": 3.814697265625e-06,
+            "relative_l2": 6.446909757022782e-07,
+            "cosine": 0.9999999999997922,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": true
+          }
+        },
+        {
+          "M": 16,
+          "teacher_metrics": {
+            "elements": 32768,
+            "mean_abs": 4.1641589842988935e-08,
+            "max_abs": 3.814697265625e-06,
+            "relative_l2": 6.459235908222817e-07,
+            "cosine": 0.9999999999997915,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": true
+          }
+        },
+        {
+          "M": 32,
+          "teacher_metrics": {
+            "elements": 65536,
+            "mean_abs": 2.9187012385960276e-08,
+            "max_abs": 3.814697265625e-06,
+            "relative_l2": 6.489327550400626e-07,
+            "cosine": 0.9999999999997894,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": true
+          }
+        },
+        {
+          "M": 128,
+          "teacher_metrics": {
+            "elements": 262144,
+            "mean_abs": 2.0074900935812198e-08,
+            "max_abs": 5.7220458984375e-06,
+            "relative_l2": 6.692187331003711e-07,
+            "cosine": 0.9999999999997773,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": true
+          }
+        },
+        {
+          "M": 512,
+          "teacher_metrics": {
+            "elements": 1048576,
+            "mean_abs": 2.254321216075864e-08,
+            "max_abs": 1.52587890625e-05,
+            "relative_l2": 9.198233399159493e-07,
+            "cosine": 0.9999999999995852,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": true
+          }
+        },
+        {
+          "M": 2048,
+          "teacher_metrics": {
+            "elements": 4194304,
+            "mean_abs": 2.2214506202463717e-08,
+            "max_abs": 1.71661376953125e-05,
+            "relative_l2": 9.146237669014779e-07,
+            "cosine": 0.9999999999995822,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": true
+          }
+        }
+      ]
+    }
+  ],
+  "folding_metrics": {
+    "elements": 4194304,
+    "mean_abs": 2.216555930613653e-08,
+    "max_abs": 1.9073486328125e-05,
+    "relative_l2": 9.230449428567029e-07,
+    "cosine": 0.9999999999995745,
+    "reference_zero_norm": false,
+    "equal_values": false,
+    "local_tolerance_pass": true
+  },
+  "teacher_shards_unchanged": true,
+  "teacher_shard_sha256": {
+    "/root/qvq-results/calibration-fisher-frontier-wave14-v1/llama32-1b-f6_yaqa125x_seed7/model-00001-of-00017.safetensors": "d711d6cdd6eeb90bc4d2afdc90ef0a2a31c914216491681115ae77a3c1faf108"
+  },
+  "complete": true
+}
