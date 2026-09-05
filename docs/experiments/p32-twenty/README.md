@@ -1,0 +1,92 @@
+# Twenty P32 experiments
+
+Status: preparation only; **0/20 experiments completed**. No candidate is promoted.
+
+Baseline: origin/main `a75e6f732d49041535ff0b0890d4002b3fc0d7ae`.
+All experiment commits and results belong to the single branch `experiments/p32-twenty` and its PR.
+Commit and push after each completed experiment, including rejected results and profiler evidence.
+
+## Inputs still to lock
+
+The user must identify the accepted P32 teacher by checkpoint path/model revision.
+The best checkpoint documented in `docs/qvq_vaqa_best_log.md` is absent at its recorded
+`/root/qvq-results/calibration-fisher-scaling-v2/llama32-1b-f6_yaqa182_nm10000-anchor-up4-l6-l8` path.
+Other local QVQ checkpoints cannot establish retention of that checkpoint's advantage.
+Record hashes of all teacher tensors, metadata, tokenizer and original BF16 checkpoint before running.
+The original `/monster/data/model/Llama-3.2-1B-Instruct` directory is available.
+
+Calibration must use ordinary C4 or FineWeb text, with pinned dataset revision and document IDs.
+Keep calibration, tuning, held-out perplexity and downstream evaluation disjoint. Record sample counts,
+sequence lengths, seeds, prompt/template configuration and evaluation versions before candidate selection.
+Never calibrate on evaluation benchmarks. Synthetic tests establish kernel correctness only.
+
+## Common scorecard
+
+For every candidate, preserve raw per-case results and record:
+
+- Canonical FP32 P32 reconstruction and forward teacher; original BF16 secondary reference.
+  Disable TF32/reduced precision modes for the canonical FP32 reference. Record all dtype boundaries.
+- Layer mean/max absolute error, relative L2 and cosine on identical inputs; propagated logits KL
+  (teacher to candidate), top-1/5/10 agreement, perplexity, and downstream task scores.
+  Declare top-k agreement semantics and aggregation before running. Keep kernel and model metrics separate.
+- M = 1, 2, 4, 8, 16, 32, 128, 512, 2048, with actual N/K and projection roles;
+  actual Llama prefill and decode, including the full transforms, decoder, correction and epilogue.
+- Warmed latency distributions and baseline/candidate speedups. Target >=2x end-to-end linear latency
+  improvement, stretch >=4x. Model inference and held-out quality must support advancement.
+- Tensor Core utilization, executed integer/FP32 instructions, registers, spills, occupancy, shared memory,
+  L2 traffic and decoder/GEMM overlap. Bind source-correlated SASS and profiler reports to revisions/builds.
+- Effective BPW = 8 * total representation bytes / represented logical weights. Include packed data,
+  checkpoints, padding, LUTs, banks, scales, exception indices/values and correction factors. Report resident
+  decoded caches separately and count shared tables once with an explicit amortization denominator.
+- Numerical failures, unsupported cases and unavailable metrics explicitly; never substitute zero.
+
+Localized inference gates: finite values, mean absolute drift <=0.002 AND maximum absolute drift <=0.046875
+per case against the same-input canonical operator. Exactness claims additionally require exact reconstructed
+values and preserved checkpoint bits where applicable. Passing these tolerances does not prove bitwise math.
+Model-quality gates and uncertainty policy must be locked with the teacher before selection.
+
+## Ordered ledger
+
+All entries are pending teacher identification and execution.
+
+| Wave | ID | Experiment | Required sweep |
+|---|---:|---|---|
+| 1 | 1 | Decoder cost decomposition | traversal, bank, lookup, SU/SV, Hadamards, accumulation; isolated/fused |
+| 1 | 2 | Decode once across rows | reuse 2/4/8/16 |
+| 1 | 5 | Transition LUT | state, bank XOR, PGC and code indices; LUT sizes |
+| 1 | 7 | Short low-precision partials | FP16/BF16; promotion K=16/32/64/128/256 |
+| 1 | 10 | Lossless repack | warp order, boundaries, padding; inverse round trip |
+| 2 | 3 | Persistent decoded tiles | tile shape, reuse, registers/shared storage |
+| 2 | 4 | Warp-specialized pipeline | producer/consumer warps, double buffers |
+| 2 | 6 | Vector codebook outputs | half2/BF16 pairs/fragment layout |
+| 2 | 8 | Blockwise promotion | local/periodic/final FP32 reductions; deterministic orders |
+| 2 | 9 | Output supertiles | neighboring channels, QKV, gate/up |
+| 3 | 11 | Independent trellis tiles | 64/128/256 weights |
+| 3 | 12 | Checkpointed states | every 8/16/32 transitions |
+| 3 | 13 | Multi-symbol tables | 2/4/8 steps |
+| 3 | 14 | GPU-aligned banks | permutations, signs, additive bases |
+| 3 | 15 | Additive codebooks | two-codebook sizes and residual |
+| 3 | 16 | Signed basis | basis dimension and residual |
+| 4 | 17 | INT4 plus exceptions | exception density and full BPW |
+| 4 | 18 | Hybrid native/trellis | calibration-weighted tile sensitivity and allocation |
+| 4 | 19 | Native plus output-fitted recovery | rank 16/32/64/128 |
+| 4 | 20 | Joint native/recovery optimization | iterations and per-layer rank allocation |
+
+Experiments 7 and 8 preserve checkpoint bits but can change arithmetic. Experiments 11 and 14–18 may change
+reconstructed weights; classify those as approximation unless exact value equivalence is demonstrated.
+A representation change alone does not guarantee exact reconstruction.
+
+For 19, fit rank-constrained D to Z = Y_P32(X) - Y_native(X; Q, scales, activation quantization), minimizing
+||Z-XD||_F^2. Obtain Z from the actual deployed native function; a weight-only residual is insufficient.
+For 20, alternate native quantization of W_T-AB and fitting real output residuals; account for all rank storage.
+
+## Host preflight (2026-09-05)
+
+- Physical GPU 0, PCI 00000000:25:00.0, UUID GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2.
+- NVIDIA PG506-230, compute capability 8.0, 124 SMs, Torch reports 97457 MiB memory.
+- Driver 610.43.02; `/root/work/venv/bin/python`: Torch 2.13.0+cu130, CUDA 13.0.
+- Nsight Compute executable exists at `/usr/local/bin/ncu`; counter permission not yet tested.
+- Initial inventory showed no running GPU processes. Formal three-sample and pre-timing idle gates pending.
+- This host supports Ampere experiments. H100/H200 FP8 and Blackwell NVFP4 performance require those devices.
+
+Validation so far: repository checkout and runtime property query only; no kernel benchmarks or model evaluation.
