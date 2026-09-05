@@ -1,6 +1,6 @@
 # Twenty P32 experiments
 
-Status: F6 seed-7 C4 teacher quantization running; **0/20 experiments completed**. No candidate is promoted.
+Status: C4 run cancelled; locating verified historical F6 seed-7 artifacts; **0/20 experiments completed**. No candidate is promoted.
 
 Baseline: origin/main `a75e6f732d49041535ff0b0890d4002b3fc0d7ae`.
 All experiment commits and results belong to the single branch `experiments/p32-twenty` and its PR.
@@ -124,29 +124,37 @@ Existing integration points inspected:
 Experiment completion remains 0/20. No kernel source or production dispatch has changed.
 
 
-### Authorized teacher: F6 seed 7
+### Required teacher: exact historical F6, seed 7
 
-The user selected F6 seed 7 on 2026-09-05 and authorized fresh Llama 3.2 1B quantization.
-This resolves checkpoint identity: use the resulting immutable checkpoint for all twenty experiments.
-`scripts/p32_twenty/f6_seed7.json` copies the documented F6 config, changing only YAQA seed 0 to 7.
-The study retains latest-main quantizer code, rather than reproducing the historical quantizer revision.
+The user's clarified instruction is authoritative: first reuse an existing verified F6 seed-7 checkpoint;
+otherwise quantize with the exact historical F6 recipe and already-verified datasets, changing only YAQA seed to 7.
+The C4 substitution was incorrect. Its process 369335 was terminated and confirmed absent on 2026-09-05.
+No C4 checkpoint or result is eligible as the teacher. The C4 preparation scripts have been removed from this branch.
 
-To retain the original ordinary-text calibration requirement, `prepare_c4.py` uses the local C4 training shard,
-with URL and normalized whole-document deduplication across all streams and up to 512 tokens per document.
-This is an F6-settings C4 variant, not a historical F6 quality reproduction. No historical score is inherited.
-The checkpoint must establish its own BF16 comparison before any post-quant advantage is claimed.
+A search of mounted artifact paths inspected 61 QVQ configs and found no seed-7 checkpoint.
+Historical quantizer `3ebcf9a307231187178e29ae7ad91e156a84d6ef` is checked out at
+`/root/work/qvq-f6-historical`. `verify_historical_inputs.py` checks this revision, seed-only config parity,
+and recorded artifact hashes before the launcher can quantize. The launcher uses `run_in_worktree.py`
+to avoid importing the latest editable checkout accidentally, and requires the historical disjointness manifest.
 
-Prepared streams: lifecycle 128 documents, teacher calibration 10178, candidate calibration 512,
-tuning 128, heldout 256. Corpus bindings and ordered document hashes are stored in
-`/root/work/p32-twenty-data/manifest.json`. No benchmark is used for calibration.
-Exact duplicate/URL separation is not a claim of semantic near-duplicate decontamination.
+Verified against historical SHA-256 bindings:
 
-Run `bash scripts/p32_twenty/quantize_teacher.sh` after `prepare_c4.py`.
-Output: `/root/work/p32-twenty-data/f6-seed7-c4-checkpoint`.
-The launcher pins the physical UUID, passes a strict idle gate and caps build/CPU parallelism.
-Environment: `/root/venv-py3.14t`, Python 3.14, Torch 2.15.0.dev20260817+cu130, Transformers 5.15.0.
-The earlier Python 3.13 probe environment lacks model dependencies and is not used for quantization.
+- Original Llama 3.2 1B Instruct model.safetensors.
+- NM `llm.parquet`, lifecycle rows [0,128).
+- Historical disjointness manifest.
 
+Missing locally:
+
+- `/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm10000.parquet`,
+  SHA-256 `5a2429da9754040e16baf47c569c14267b92126f37caafd4fafc8d5bfb5c3f39`.
+- `/root/QvQ/dataset/calibration_mix_500k_llama3.2_1b/calibration.parquet`,
+  SHA-256 `2140541facb66112428212b3a36d51a7735393b28c79db59c2429f6e51ed57ef`.
+
+Historical Fisher selection is all 10178 sequences and 3961260 valid token samples, with no new truncation,
+resampling or corpus substitution. The seed-7 config preserves the historical F6 allocation and all other settings.
+No replacement quantization is running. `quantize_teacher.sh` is prepared but must not launch until verified
+inputs are available. The selected local Torch 2.13 environment also needs its runtime provenance checked before
+reproduction; merely matching dataset hashes does not establish runtime equivalence.
 
 ### Shared scorecard validation
 
@@ -160,8 +168,4 @@ Validation: Ruff passed; `pytest -q tests/test_p32_twenty_scorecard.py` passed (
 covering constant-logit shifts, opposite rankings, outlier local-gate failure, non-finite rejection,
 zero-norm handling and metadata-inclusive BPW. No GPU implementation or model quality is validated by this test.
 
-Teacher job launched from quantizer revision `f75b2ff8`, process 369335, with log
-`/root/work/p32-twenty-data/quantize.log`. Runtime inspection confirmed active Fisher capture over
-112 targets and 10178 sequences. The log reports every 636 batches; timestamps/process/GPU activity
-must be checked rather than treating a quiet log as job completion or failure. Checkpoint save and
-reload/evaluation remain pending.
+The cancelled C4 job log remains at `/root/work/p32-twenty-data/quantize.log` for audit only.
