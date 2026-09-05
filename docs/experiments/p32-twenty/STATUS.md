@@ -8,7 +8,7 @@ AGENTS.md. All changes and evidence share PR #137.
 
 | # | Experiment | Current evidence / outstanding implementation |
 |---:|---|---|
-|1|Decoder decomposition|Real-layer transform/decoder timing and four scoped Nsight captures; instruction-class breakdown and overlap remain.|
+|1|Decoder decomposition|Real-layer timing now covers 12 projections and all nine row counts in decomposition wave 2; instruction-class breakdown, profiler counters, and decoder/GEMM overlap remain.|
 |2|Decode reuse across rows|Fused BM16/32/64 split16 q sweep and layer1-down BM32 pass 36/36; modest/no gains against existing window. More configurations/model/profile remain.|
 |3|Persistent decoded tiles|New persistent scheduling/register-pressure sweep remains.|
 |4|Warp-specialized pipeline|Producer/consumer decode-MMA implementation and overlap measurement remain.|
