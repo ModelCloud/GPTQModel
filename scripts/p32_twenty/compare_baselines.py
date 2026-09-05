@@ -1,37 +1,68 @@
+"""Compare saved logits without running or modifying the checkpoint."""
+
+import argparse
 import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, "/root/f6-snapshot-pr")
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 import torch
 
 from scripts.p32_twenty.scorecard import logits_metrics
 
-root = Path("/root/p32-model-baseline")
-report = {
-    "scope": "16 C4 documents; per-token KL and top-k overlap, not downstream tasks",
-    "rows": [],
-}
-for i in range(16):
-    teacher = torch.load(
-        root / "canonical" / f"logits-{i:03d}.pt", weights_only=True
-    ).squeeze(0)
-    window = torch.load(
-        root / "window" / f"logits-{i:03d}.pt", weights_only=True
-    ).squeeze(0)
-    row = {"row": i, "canonical_window_logits_equal": torch.equal(teacher, window)}
-    del window
-    bf16 = torch.load(root / "bf16" / f"logits-{i:03d}.pt", weights_only=True).squeeze(
-        0
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=Path("/root/p32-model-baseline"))
+    parser.add_argument("--candidate", default="production")
+    parser.add_argument("--teacher", default="canonical")
+    args = parser.parse_args()
+    teacher_root = args.root / args.teacher
+    candidate_root = args.root / args.candidate
+    files = sorted(teacher_root.glob("logits-*.pt"))
+    if not files:
+        raise ValueError("No teacher logits")
+    for root in (teacher_root, candidate_root):
+        if not json.loads((root / "report.json").read_text()).get("complete"):
+            raise ValueError("Baseline run is not complete: " + str(root))
+    report = {
+        "scope": "bounded C4 per-token logits; no downstream-task claim",
+        "candidate": args.candidate,
+        "teacher": args.teacher,
+        "rows": [],
+    }
+    for path in files:
+        teacher = torch.load(path, weights_only=True).squeeze(0)
+        candidate = torch.load(candidate_root / path.name, weights_only=True).squeeze(0)
+        metrics = logits_metrics(candidate, teacher)
+        report["rows"].append(
+            {
+                "file": path.name,
+                "equal_logits": torch.equal(candidate, teacher),
+                "metrics": metrics,
+            }
+        )
+        print(path.name, metrics["kl_teacher_candidate"], flush=True)
+        (args.root / (args.candidate + "-comparison.json")).write_text(
+            json.dumps(report, indent=2) + "\n"
+        )
+    report["complete"] = True
+    count = sum(r["metrics"]["tokens"] for r in report["rows"])
+    report["aggregate"] = {
+        key: sum(r["metrics"][key] * r["metrics"]["tokens"] for r in report["rows"])
+        / count
+        for key in (
+            "kl_teacher_candidate",
+            "top1_agreement",
+            "top5_agreement",
+            "top10_agreement",
+        )
+    }
+    (args.root / (args.candidate + "-comparison.json")).write_text(
+        json.dumps(report, indent=2) + "\n"
     )
-    row["bf16_vs_p32_teacher"] = logits_metrics(bf16, teacher)
-    report["rows"].append(row)
-    print(
-        i,
-        row["canonical_window_logits_equal"],
-        row["bf16_vs_p32_teacher"]["kl_teacher_candidate"],
-        flush=True,
-    )
-    (root / "comparison.json").write_text(json.dumps(report, indent=2) + "\n")
-report["complete"] = True
-(root / "comparison.json").write_text(json.dumps(report, indent=2) + "\n")
+
+
+if __name__ == "__main__":
+    main()

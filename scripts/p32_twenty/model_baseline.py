@@ -21,6 +21,7 @@ def main():
     parser.add_argument(
         "--mode", choices=("bf16", "canonical", "window", "production"), required=True
     )
+    parser.add_argument("--capture-only", action="store_true")
     parser.add_argument("--uuid", required=True)
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -176,6 +177,48 @@ def main():
                 )
                 print("RECONSTRUCTED", prefix, flush=True)
             del trellis, su, sv, bank, alt, inner
+    if args.capture_only:
+        if args.mode != "canonical":
+            raise ValueError("Capture requires canonical teacher")
+        captured = []
+        hooks = []
+
+        def hook(name):
+            def save(module, values, output):
+                path = args.output / (name + ".pt")
+                torch.save(
+                    {
+                        "input": values[0].detach().cpu(),
+                        "teacher_output": output.detach().cpu(),
+                    },
+                    path,
+                )
+                captured.append(
+                    {"module": name, "path": str(path), "shape": list(values[0].shape)}
+                )
+
+            return save
+
+        for name, module in model.named_modules():
+            if isinstance(module, CanonicalLinear) and name.split(".")[2] in ("0", "1"):
+                hooks.append(module.register_forward_hook(hook(name)))
+        ids = [token for row in inputs["rows"] for token in row["input_ids"]][:2048]
+        with torch.inference_mode():
+            model(torch.tensor([ids], device="cuda"), use_cache=False)
+        for handle in hooks:
+            handle.remove()
+        (args.output / "capture.json").write_text(
+            json.dumps(
+                {
+                    "scope": "timing/kernel correctness only; not calibration for fitting",
+                    "modules": captured,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        print("CAPTURED", len(captured), flush=True)
+        return
     with torch.inference_mode():
         total_nll = 0.0
         total_tokens = 0

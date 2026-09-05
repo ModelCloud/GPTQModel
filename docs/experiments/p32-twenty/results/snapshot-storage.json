@@ -1,0 +1,1923 @@
+{
+  "snapshot": "/root/qvq-results/calibration-fisher-frontier-wave14-v1/llama32-1b-f6_yaqa125x_seed7",
+  "modules": [
+    {
+      "module": "model.layers.0.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.0.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.0.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.0.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.0.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.0.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.1.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.1.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.1.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.1.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.1.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.10.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.10.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.10.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.10.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.10.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.10.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.10.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.11.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.11.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.11.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.11.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.11.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.11.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.11.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.12.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.12.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.12.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.12.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.12.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.12.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.12.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.13.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.13.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.13.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.13.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.13.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.13.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.13.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.14.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.14.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.14.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.14.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.14.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.14.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.14.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.15.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.15.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.15.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.15.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.15.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.15.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.15.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.2.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.2.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.2.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.2.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.2.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.2.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.2.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.3.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.3.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.3.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.3.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.3.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.3.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.3.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.4.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.4.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.4.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.4.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.4.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.4.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.4.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.5.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.5.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.5.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.5.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.5.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.5.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.5.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.6.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.6.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.6.mlp.up_proj",
+      "format": "QVQ",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "trellis": 8388608
+      },
+      "total_bytes": 8429568,
+      "effective_bpw": 4.01953125
+    },
+    {
+      "module": "model.layers.6.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.6.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.6.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.6.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.7.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.7.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.7.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.7.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.7.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.7.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.7.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.8.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.8.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.8.mlp.up_proj",
+      "format": "QVQ",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "trellis": 8388608
+      },
+      "total_bytes": 8429568,
+      "effective_bpw": 4.01953125
+    },
+    {
+      "module": "model.layers.8.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.8.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.8.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.8.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    },
+    {
+      "module": "model.layers.9.mlp.down_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 32768,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.9.mlp.gate_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 6291456
+      },
+      "total_bytes": 6397953,
+      "effective_bpw": 3.050781726837158
+    },
+    {
+      "module": "model.layers.9.mlp.up_proj",
+      "format": "P32",
+      "logical_weights": 16777216,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 32768,
+        "bank_alt_id": 1,
+        "bank_ids": 65536,
+        "trellis": 7340032
+      },
+      "total_bytes": 7446529,
+      "effective_bpw": 3.550781726837158
+    },
+    {
+      "module": "model.layers.9.self_attn.k_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 327680
+      },
+      "total_bytes": 342017,
+      "effective_bpw": 2.6093826293945312
+    },
+    {
+      "module": "model.layers.9.self_attn.o_proj",
+      "format": "QVQ",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "trellis": 2097152
+      },
+      "total_bytes": 2113536,
+      "effective_bpw": 4.03125
+    },
+    {
+      "module": "model.layers.9.self_attn.q_proj",
+      "format": "P32",
+      "logical_weights": 4194304,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 8192,
+        "bank_alt_id": 1,
+        "bank_ids": 16384,
+        "trellis": 1048576
+      },
+      "total_bytes": 1081345,
+      "effective_bpw": 2.062501907348633
+    },
+    {
+      "module": "model.layers.9.self_attn.v_proj",
+      "format": "P32",
+      "logical_weights": 1048576,
+      "components_bytes": {
+        "SU": 8192,
+        "SV": 2048,
+        "bank_alt_id": 1,
+        "bank_ids": 4096,
+        "trellis": 458752
+      },
+      "total_bytes": 473089,
+      "effective_bpw": 3.6093826293945312
+    }
+  ],
+  "dense_tensors": {
+    "model.layers.0.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.0.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.1.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.1.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.2.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.2.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.3.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.3.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.4.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.4.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.5.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.5.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.6.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.6.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.7.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.7.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.8.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.8.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.9.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.9.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.10.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.10.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.11.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.11.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.12.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.12.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.13.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.13.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.14.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.14.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.15.input_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.layers.15.post_attention_layernorm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    },
+    "model.embed_tokens.weight": {
+      "dtype": "F16",
+      "shape": [
+        128256,
+        2048
+      ],
+      "bytes": 525336576
+    },
+    "model.norm.weight": {
+      "dtype": "F16",
+      "shape": [
+        2048
+      ],
+      "bytes": 4096
+    }
+  },
+  "shards": [
+    {
+      "file": "model-00001-of-00017.safetensors",
+      "file_bytes": 24264302,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3688
+    },
+    {
+      "file": "model-00002-of-00017.safetensors",
+      "file_bytes": 24264302,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3688
+    },
+    {
+      "file": "model-00003-of-00017.safetensors",
+      "file_bytes": 24264302,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3688
+    },
+    {
+      "file": "model-00004-of-00017.safetensors",
+      "file_bytes": 24264302,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3688
+    },
+    {
+      "file": "model-00005-of-00017.safetensors",
+      "file_bytes": 24264302,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3688
+    },
+    {
+      "file": "model-00006-of-00017.safetensors",
+      "file_bytes": 24264302,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3688
+    },
+    {
+      "file": "model-00007-of-00017.safetensors",
+      "file_bytes": 25247133,
+      "tensor_bytes": 25243653,
+      "overhead_bytes": 3480
+    },
+    {
+      "file": "model-00008-of-00017.safetensors",
+      "file_bytes": 24264302,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3688
+    },
+    {
+      "file": "model-00009-of-00017.safetensors",
+      "file_bytes": 25247133,
+      "tensor_bytes": 25243653,
+      "overhead_bytes": 3480
+    },
+    {
+      "file": "model-00010-of-00017.safetensors",
+      "file_bytes": 24264302,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3688
+    },
+    {
+      "file": "model-00011-of-00017.safetensors",
+      "file_bytes": 24264334,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3720
+    },
+    {
+      "file": "model-00012-of-00017.safetensors",
+      "file_bytes": 24264334,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3720
+    },
+    {
+      "file": "model-00013-of-00017.safetensors",
+      "file_bytes": 24264334,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3720
+    },
+    {
+      "file": "model-00014-of-00017.safetensors",
+      "file_bytes": 24264334,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3720
+    },
+    {
+      "file": "model-00015-of-00017.safetensors",
+      "file_bytes": 24264334,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3720
+    },
+    {
+      "file": "model-00016-of-00017.safetensors",
+      "file_bytes": 24264334,
+      "tensor_bytes": 24260614,
+      "overhead_bytes": 3720
+    },
+    {
+      "file": "model-00017-of-00017.safetensors",
+      "file_bytes": 525340896,
+      "tensor_bytes": 525340672,
+      "overhead_bytes": 224
+    }
+  ],
+  "metadata_files": [
+    {
+      "file": "config.json",
+      "bytes": 5093,
+      "sha256": "479cbae6f86d46d8422e61e86ecb5724264bfd14dade57f357db95de47da2e3c"
+    },
+    {
+      "file": "generation_config.json",
+      "bytes": 184,
+      "sha256": "72bb6b42fe376e280f60fbcfa7859f78d28f6d9a3945d0853cb6400793fd4f36"
+    },
+    {
+      "file": "model.safetensors.index.json",
+      "bytes": 45132,
+      "sha256": "6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697"
+    },
+    {
+      "file": "quantize_config.json",
+      "bytes": 3826,
+      "sha256": "e4f6db43d71c91d91570a5e8e19e5d97bd67e4142cf116f1e77549aa2debefce"
+    },
+    {
+      "file": "tokenizer.json",
+      "bytes": 17209920,
+      "sha256": "6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b"
+    },
+    {
+      "file": "tokenizer_config.json",
+      "bytes": 426,
+      "sha256": "9bf3439e95c394672875c156fbb182c514ddb9645188feb318b49270af29cdcd"
+    }
+  ],
+  "quantized_logical_weights": 973078528,
+  "quantized_tensor_bytes": 390004830,
+  "quantized_projection_bpw": 3.2063585314257392,
+  "dense_stored_elements": 262735872,
+  "dense_tensor_bytes": 525471744,
+  "whole_model_logical_elements": 1235814400,
+  "serialized_inference_files_bytes": 932800163,
+  "whole_model_serialized_bpw": 6.038448252423665,
+  "conventions": "Shared stored dense tensors counted once (tied weights not duplicated). Whole-model denominator includes saved dense scalar/vector parameters. Metadata includes tokenizer/config/index, excludes evaluation/audit reports. Quantized BPW excludes shard header and model-global files, itemized separately. Runtime LUTs, workspaces and decoded caches are not serialized checkpoint storage; candidates must add their own inventories."
+}
