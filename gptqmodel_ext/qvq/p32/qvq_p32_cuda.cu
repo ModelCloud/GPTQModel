@@ -28,6 +28,7 @@ constexpr int kStageKTiles = 2;
 constexpr int kScalarTripleStageKTiles = 3;
 constexpr int kScalarLongStageKTiles = 4;
 constexpr int kPairsPerTile = 128;
+constexpr int kReductionThreads = 256;
 constexpr uint32_t kPgc16Multiplier = 40503u;
 constexpr uint32_t kPgc16Increment = 17011u;
 
@@ -1298,6 +1299,90 @@ struct GroupedP32LaunchParams {
   int64_t partial_offset[kMaxGroupedP32Segments];
 };
 
+void set_last_error(const char* message);
+
+bool build_grouped_params(
+    int size_m,
+    int size_n,
+    int group_count,
+    int split_count_0,
+    int split_count_1,
+    int split_count_2,
+    int n_tile_end_0,
+    int n_tile_end_1,
+    GroupedP32LaunchParams* params) {
+  const int total_n_tiles = size_n / kTileColumns;
+  const int ends[kMaxGroupedP32Segments] = {
+      n_tile_end_0,
+      n_tile_end_1,
+      total_n_tiles,
+  };
+  *params = {};
+  params->segment_count = group_count;
+  params->split_count[0] = split_count_0;
+  params->split_count[1] = split_count_1;
+  params->split_count[2] = split_count_2;
+  int tile_start = 0;
+  int64_t output_offset = 0;
+  int64_t partial_offset = 0;
+  for (int segment = 0; segment < group_count; ++segment) {
+    const int tile_end = ends[segment];
+    if (tile_end <= tile_start || tile_end > total_n_tiles) {
+      set_last_error("QVQ P32 grouped N-tile boundaries are invalid");
+      return false;
+    }
+    params->n_tile_start[segment] = tile_start;
+    params->n_tiles[segment] = tile_end - tile_start;
+    params->output_offset[segment] = output_offset;
+    params->partial_offset[segment] = partial_offset;
+    output_offset += static_cast<int64_t>(size_m) *
+        params->n_tiles[segment] * kTileColumns;
+    if (params->split_count[segment] > 1) {
+      partial_offset += static_cast<int64_t>(params->split_count[segment]) *
+          size_m * params->n_tiles[segment] * kTileColumns;
+    }
+    tile_start = tile_end;
+  }
+  if (tile_start != total_n_tiles) {
+    set_last_error("QVQ P32 grouped boundaries must cover all output tiles");
+    return false;
+  }
+  return true;
+}
+
+bool grouped_work_count(
+    const GroupedP32LaunchParams& params,
+    int tiles_per_block,
+    int64_t* grouped_work) {
+  *grouped_work = 0;
+  for (int segment = 0; segment < params.segment_count; ++segment) {
+    const int segment_blocks =
+        (params.n_tiles[segment] + tiles_per_block - 1) / tiles_per_block;
+    *grouped_work += static_cast<int64_t>(segment_blocks) *
+        params.split_count[segment];
+  }
+  if (*grouped_work <= 0 ||
+      *grouped_work > std::numeric_limits<unsigned>::max()) {
+    set_last_error("QVQ P32 grouped work exceeds the CUDA grid limit");
+    return false;
+  }
+  return true;
+}
+
+bool validate_grouped_splits(
+    const GroupedP32LaunchParams& params, int size_k) {
+  for (int segment = 0; segment < params.segment_count; ++segment) {
+    if (params.split_count[segment] < 1 ||
+        params.split_count[segment] > QVQ_P32_SPLIT_COUNT_MAX ||
+        params.split_count[segment] > size_k / kTileRows) {
+      set_last_error(
+          "QVQ P32 grouped split count exceeds the K-tile count or 128");
+      return false;
+    }
+  }
+  return true;
+}
+
 template <int TransitionBits, int Rows, int Threads, int StageKTiles>
 __global__ __launch_bounds__(Threads) void p32_window_ampere_grouped_scalar_kernel(
     const half* __restrict__ input,
@@ -1685,7 +1770,6 @@ void launch_split_reduction_grouped(
     int group_n_offset,
     int split_count,
     cudaStream_t stream) {
-  constexpr int kReductionThreads = 256;
   const int group_values = size_m * group_n;
   const int blocks = (group_values + kReductionThreads - 1) / kReductionThreads;
   reduce_split_grouped_kernel<<<blocks, kReductionThreads, 0, stream>>>(
@@ -1805,15 +1889,7 @@ int launch_p32_grouped_scalar_stage(
     cudaStream_t stream) {
   constexpr int kTilesPerBlock = 4 * (Threads / 32);
   int64_t grouped_work = 0;
-  for (int segment = 0; segment < params.segment_count; ++segment) {
-    const int segment_blocks =
-        (params.n_tiles[segment] + kTilesPerBlock - 1) / kTilesPerBlock;
-    grouped_work += static_cast<int64_t>(segment_blocks) * params.split_count[segment];
-  }
-  if (grouped_work <= 0 || grouped_work > std::numeric_limits<unsigned>::max()) {
-    set_last_error("QVQ P32 grouped work exceeds the CUDA grid limit");
-    return -1;
-  }
+  if (!grouped_work_count(params, kTilesPerBlock, &grouped_work)) return -1;
   const dim3 grid(static_cast<unsigned>(grouped_work));
   p32_window_ampere_grouped_scalar_kernel<TransitionBits, Rows, Threads, StageKTiles>
       <<<grid, Threads, 0, stream>>>(
@@ -1927,16 +2003,7 @@ int launch_p32_grouped_block_stage(
     cudaStream_t stream) {
   constexpr int kTilesPerBlock = Threads / 32;
   int64_t grouped_work = 0;
-  for (int segment = 0; segment < params.segment_count; ++segment) {
-    const int segment_blocks =
-        (params.n_tiles[segment] + kTilesPerBlock - 1) / kTilesPerBlock;
-    grouped_work += static_cast<int64_t>(segment_blocks) *
-        params.split_count[segment];
-  }
-  if (grouped_work <= 0 || grouped_work > std::numeric_limits<unsigned>::max()) {
-    set_last_error("QVQ P32 grouped work exceeds the CUDA grid limit");
-    return -1;
-  }
+  if (!grouped_work_count(params, kTilesPerBlock, &grouped_work)) return -1;
 #define QVQ_GROUPED_BLOCK_LAUNCH(FULL_ROWS, ACTIVE_ROWS)                    \
   p32_window_ampere_grouped_block_kernel<                                       \
       TransitionBits, Threads, StageKTiles, FULL_ROWS, ACTIVE_ROWS>             \
@@ -2036,47 +2103,13 @@ int launch_p32_grouped_block(
     return -1;
   }
   const int total_n_tiles = size_n / kTileColumns;
-  const int ends[kMaxGroupedP32Segments] = {
-      n_tile_end_0,
-      n_tile_end_1,
-      total_n_tiles,
-  };
   GroupedP32LaunchParams params{};
-  params.segment_count = group_count;
-  params.split_count[0] = split_count_0;
-  params.split_count[1] = split_count_1;
-  params.split_count[2] = split_count_2;
-  int tile_start = 0;
-  int64_t output_offset = 0;
-  int64_t partial_offset = 0;
-  for (int segment = 0; segment < group_count; ++segment) {
-    const int tile_end = ends[segment];
-    if (tile_end <= tile_start || tile_end > total_n_tiles) {
-      set_last_error("QVQ P32 grouped N-tile boundaries are invalid");
-      return -1;
-    }
-    params.n_tile_start[segment] = tile_start;
-    params.n_tiles[segment] = tile_end - tile_start;
-    params.output_offset[segment] = output_offset;
-    params.partial_offset[segment] = partial_offset;
-    output_offset += static_cast<int64_t>(size_m) * params.n_tiles[segment] * kTileColumns;
-    if (params.split_count[segment] > 1) {
-      partial_offset += static_cast<int64_t>(params.split_count[segment]) * size_m *
-          params.n_tiles[segment] * kTileColumns;
-    }
-    tile_start = tile_end;
-  }
-  if (tile_start != total_n_tiles) {
-    set_last_error("QVQ P32 grouped boundaries must cover all output tiles");
+  if (!build_grouped_params(
+          size_m, size_n, group_count, split_count_0, split_count_1,
+          split_count_2, n_tile_end_0, n_tile_end_1, &params)) {
     return -1;
   }
-  for (int segment = 0; segment < group_count; ++segment) {
-    if (params.split_count[segment] < 1 || params.split_count[segment] > 128 ||
-        params.split_count[segment] > size_k / kTileRows) {
-      set_last_error("QVQ P32 grouped split count exceeds the K-tile count or 128");
-      return -1;
-    }
-  }
+  if (!validate_grouped_splits(params, size_k)) return -1;
 
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
   const auto* input_half = reinterpret_cast<const half*>(input);
@@ -2152,47 +2185,13 @@ int launch_p32_grouped_scalar(
     return -1;
   }
   const int total_n_tiles = size_n / kTileColumns;
-  const int ends[kMaxGroupedP32Segments] = {
-      n_tile_end_0,
-      n_tile_end_1,
-      total_n_tiles,
-  };
   GroupedP32LaunchParams params{};
-  params.segment_count = group_count;
-  params.split_count[0] = split_count_0;
-  params.split_count[1] = split_count_1;
-  params.split_count[2] = split_count_2;
-  int tile_start = 0;
-  int64_t output_offset = 0;
-  int64_t partial_offset = 0;
-  for (int segment = 0; segment < group_count; ++segment) {
-    const int tile_end = ends[segment];
-    if (tile_end <= tile_start || tile_end > total_n_tiles) {
-      set_last_error("QVQ P32 grouped N-tile boundaries are invalid");
-      return -1;
-    }
-    params.n_tile_start[segment] = tile_start;
-    params.n_tiles[segment] = tile_end - tile_start;
-    params.output_offset[segment] = output_offset;
-    params.partial_offset[segment] = partial_offset;
-    output_offset += static_cast<int64_t>(size_m) * params.n_tiles[segment] * kTileColumns;
-    if (params.split_count[segment] > 1) {
-      partial_offset += static_cast<int64_t>(params.split_count[segment]) * size_m *
-          params.n_tiles[segment] * kTileColumns;
-    }
-    tile_start = tile_end;
-  }
-  if (tile_start != total_n_tiles) {
-    set_last_error("QVQ P32 grouped boundaries must cover all output tiles");
+  if (!build_grouped_params(
+          size_m, size_n, group_count, split_count_0, split_count_1,
+          split_count_2, n_tile_end_0, n_tile_end_1, &params)) {
     return -1;
   }
-  for (int segment = 0; segment < group_count; ++segment) {
-    if (params.split_count[segment] < 1 || params.split_count[segment] > 128 ||
-        params.split_count[segment] > size_k / kTileRows) {
-      set_last_error("QVQ P32 grouped split count exceeds the K-tile count or 128");
-      return -1;
-    }
-  }
+  if (!validate_grouped_splits(params, size_k)) return -1;
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
   const auto* input_half = reinterpret_cast<const half*>(input);
   const auto* trellis_words = reinterpret_cast<const uint32_t*>(trellis);
@@ -2384,55 +2383,6 @@ void set_host_arg(
       static_cast<long long>(sizeof(T)),
       QVQ_P32_LAUNCH_ARG_HOST_VALUE,
   };
-}
-
-bool build_grouped_params(
-    int size_m,
-    int size_n,
-    int group_count,
-    int split_count_0,
-    int split_count_1,
-    int split_count_2,
-    int n_tile_end_0,
-    int n_tile_end_1,
-    GroupedP32LaunchParams* params) {
-  const int total_n_tiles = size_n / kTileColumns;
-  const int ends[kMaxGroupedP32Segments] = {
-      n_tile_end_0,
-      n_tile_end_1,
-      total_n_tiles,
-  };
-  *params = {};
-  params->segment_count = group_count;
-  params->split_count[0] = split_count_0;
-  params->split_count[1] = split_count_1;
-  params->split_count[2] = split_count_2;
-  int tile_start = 0;
-  int64_t output_offset = 0;
-  int64_t partial_offset = 0;
-  for (int segment = 0; segment < group_count; ++segment) {
-    const int tile_end = ends[segment];
-    if (tile_end <= tile_start || tile_end > total_n_tiles) {
-      set_last_error("QVQ P32 grouped N-tile boundaries are invalid");
-      return false;
-    }
-    params->n_tile_start[segment] = tile_start;
-    params->n_tiles[segment] = tile_end - tile_start;
-    params->output_offset[segment] = output_offset;
-    params->partial_offset[segment] = partial_offset;
-    output_offset += static_cast<int64_t>(size_m) *
-        params->n_tiles[segment] * kTileColumns;
-    if (params->split_count[segment] > 1) {
-      partial_offset += static_cast<int64_t>(params->split_count[segment]) *
-          size_m * params->n_tiles[segment] * kTileColumns;
-    }
-    tile_start = tile_end;
-  }
-  if (tile_start != total_n_tiles) {
-    set_last_error("QVQ P32 grouped boundaries must cover all output tiles");
-    return false;
-  }
-  return true;
 }
 
 template <int TransitionBits>
@@ -3847,29 +3797,14 @@ extern "C" int qvq_p32_grouped_launch_plan(
           split_count_2, n_tile_end_0, n_tile_end_1, &storage->params)) {
     return -1;
   }
-  for (int segment = 0; segment < group_count; ++segment) {
-    if (storage->params.split_count[segment] > QVQ_P32_SPLIT_COUNT_MAX ||
-        storage->params.split_count[segment] > size_k / kTileRows) {
-      set_last_error("QVQ P32 grouped launch plan split count exceeds the K-tile count or 128");
-      return -1;
-    }
-  }
+  if (!validate_grouped_splits(storage->params, size_k)) return -1;
 
   const int total_n_tiles = size_n / kTileColumns;
   const int tiles_per_block = kernel_variant == QVQ_P32_VARIANT_SCALAR
       ? 4 * (threads / 32)
       : threads / 32;
   int64_t grouped_work = 0;
-  for (int segment = 0; segment < group_count; ++segment) {
-    const int segment_blocks =
-        (storage->params.n_tiles[segment] + tiles_per_block - 1) /
-        tiles_per_block;
-    grouped_work += static_cast<int64_t>(segment_blocks) *
-        storage->params.split_count[segment];
-  }
-  if (grouped_work <= 0 ||
-      grouped_work > std::numeric_limits<unsigned>::max()) {
-    set_last_error("QVQ P32 grouped launch-plan work exceeds the CUDA grid limit");
+  if (!grouped_work_count(storage->params, tiles_per_block, &grouped_work)) {
     return -1;
   }
 
@@ -3928,10 +3863,10 @@ extern "C" int qvq_p32_grouped_launch_plan(
         reduce_split_grouped_kernel<>);
     reduction->kernel_name = "qvq_p32_grouped_reduce";
     reduction->grid_x = static_cast<unsigned>(
-        (output_values + 255) / 256);
+        (output_values + kReductionThreads - 1) / kReductionThreads);
     reduction->grid_y = 1;
     reduction->grid_z = 1;
-    reduction->block_x = 256;
+    reduction->block_x = kReductionThreads;
     reduction->block_y = 1;
     reduction->block_z = 1;
     int reduction_arg = 0;

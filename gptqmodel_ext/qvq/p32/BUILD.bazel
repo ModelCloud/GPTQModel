@@ -69,7 +69,7 @@ if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
   exit 1
 fi
 "$${cuda_home}/bin/nvcc" \
-  -std=c++17 -O2 \
+  -std=c++17 -O2 -cudart=shared \
   -gencode arch=compute_80,code=sm_80 \
   -I$$(dirname $(location qvq_p32_abi.h)) \
   -L$$(dirname $(location :libqvq_p32)) -lqvq_p32 \

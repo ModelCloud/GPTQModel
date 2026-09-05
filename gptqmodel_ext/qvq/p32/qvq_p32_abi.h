@@ -66,6 +66,8 @@ struct qvq_p32_config {
 // storage and are copied by the consuming compiler runtime. Dependencies are
 // launch indexes in this plan. The descriptor exposes launch structure without
 // introducing an XLA/PJRT dependency into QvQ.
+// Host-value addresses refer into this exact plan instance: do not copy or move
+// a populated plan. Consume its arguments before destroying or rebuilding it.
 enum qvq_p32_launch_arg_type {
   QVQ_P32_LAUNCH_ARG_DEVICE_POINTER = 1,
   QVQ_P32_LAUNCH_ARG_HOST_VALUE = 2,
