@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +34,7 @@ _TORCH_NVCC_UNDEFINES = (
 )
 _P32_TRANSITION_BITS = {2: 4, 2.5: 5, 3: 6, 3.5: 7}
 _MAX_GROUPED_P32_SEGMENTS = 3
+_P32_WGMMA_NATIVE_ROWS = 16
 
 
 @dataclass(frozen=True)
@@ -116,10 +117,12 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m16_tma_grouped",
         "p32_window_m16_tma_grouped_ordered_split",
         "p32_window_m16_tma_grouped_ordered_partials",
+        "p32_window_fp8_m16",
         "p32_window_m32_tma_grouped_reuse2",
         "p32_window_m32_tma_grouped_ordered_reuse2",
         "p32_window_m64_tma_grouped_reuse4",
         "p32_window_m64_tma_grouped_ordered_reuse4",
+        "p32_window_m128_tma_grouped_reuse8",
         "p32_window_decode_grouped_fp16",
         "p32_window_prepare_grouped_fp8",
         "p32_window_prepare_grouped_fp8_half_fold",
@@ -208,6 +211,36 @@ def _resolve_hopper_split_count(
             (17408, 5120): 34,
         },
     }[transition_bits].get(shape, 1)
+
+
+def _run_p32_wgmma_m16_tiles(
+    input: torch.Tensor,
+    launch: Callable[[torch.Tensor], torch.Tensor],
+) -> torch.Tensor:
+    """Apply the native M16 operator to an arbitrary positive logical M."""
+
+    if input.dim() != 2 or input.shape[0] <= 0:
+        # Preserve the native operator's validation and error messages for
+        # malformed inputs instead of partially duplicating its contract here.
+        return launch(input)
+    logical_rows = int(input.shape[0])
+    if logical_rows == _P32_WGMMA_NATIVE_ROWS:
+        return launch(input)
+
+    # TODO(qvq-p32): replace this compatibility tiling with one bank-aware
+    # native Hopper P32 kernel for logical M=17..4096. The future kernel should
+    # grid-stride over M tiles so decoded weights are reused across rows and
+    # the Python dispatcher emits one launch instead of ceil(M / 16) launches.
+    outputs = []
+    for start in range(0, logical_rows, _P32_WGMMA_NATIVE_ROWS):
+        rows = min(_P32_WGMMA_NATIVE_ROWS, logical_rows - start)
+        tile = input[start : start + rows]
+        if rows != _P32_WGMMA_NATIVE_ROWS:
+            padded = input.new_zeros((_P32_WGMMA_NATIVE_ROWS, input.shape[1]))
+            padded[:rows].copy_(tile)
+            tile = padded
+        outputs.append(launch(tile)[:rows])
+    return outputs[0] if len(outputs) == 1 else torch.cat(outputs, dim=0)
 
 
 def qvq_h100_ordered_split_count(
@@ -390,7 +423,7 @@ def qvq_p32_window_wgmma_m16_tma(
     bank_alt_id: int = 3,
     split_count: int = 0,
 ) -> torch.Tensor:
-    """Run the two-stage TMA direct-window P32 RS-WGMMA kernel at W2-W3.5."""
+    """Run P32 RS-WGMMA at W2-W3.5, automatically tiling logical M over M16."""
 
     transition_bits = _resolve_transition_bits(bits)
     split_count = _resolve_hopper_split_count(
@@ -399,15 +432,19 @@ def qvq_p32_window_wgmma_m16_tma(
         out_features=int(out_features),
         split_count=int(split_count),
     )
-    return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma")(
+    native_op = _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma")
+    return _run_p32_wgmma_m16_tiles(
         input,
-        trellis,
-        levels,
-        bank_ids,
-        transition_bits,
-        out_features,
-        bank_alt_id,
-        split_count,
+        lambda tile: native_op(
+            tile,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            split_count,
+        ),
     )
 
 
@@ -431,15 +468,19 @@ def qvq_p32_window_wgmma_m16_tma_ordered_split(
         out_features=int(out_features),
         split_count=int(split_count),
     )
-    return _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma_ordered_split")(
+    native_op = _QVQ_WGMMA_EXTENSION.op("p32_window_m16_tma_ordered_split")
+    return _run_p32_wgmma_m16_tiles(
         input,
-        trellis,
-        levels,
-        bank_ids,
-        transition_bits,
-        out_features,
-        bank_alt_id,
-        split_count,
+        lambda tile: native_op(
+            tile,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            split_count,
+        ),
     )
 
 
@@ -475,6 +516,72 @@ def qvq_p32_window_wgmma_m16_tma_ordered_partials(
         bank_alt_id,
         split_count,
     )
+
+
+def qvq_p32_window_wgmma_fp8_m16(
+    input: torch.Tensor,
+    input_scale: torch.Tensor,
+    trellis: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    bits: float,
+    *,
+    out_features: int,
+    bank_alt_id: int,
+    level_scale: float,
+) -> torch.Tensor:
+    """Run true E4M3 x E4M3 P32 WGMMA on an M16-tiled 2D CUDA grid.
+
+    ``input`` is the final transformed WGMMA operand, not the model-visible
+    pre-transform activation. ``input_scale`` maps each E4M3 row back to that
+    transformed domain; ``level_scale`` maps the E4M3 PGC table back to the
+    canonical decoded-weight domain. Accumulation and returned output are FP32.
+    """
+
+    transition_bits = _resolve_transition_bits(bits)
+    fp8_dtype = getattr(torch, "float8_e4m3fn", None)
+    if fp8_dtype is None or input.dtype != fp8_dtype or levels.dtype != fp8_dtype:
+        raise TypeError("QVQ P32 FP8 WGMMA requires float8_e4m3fn input and levels")
+    if input.dim() != 2 or input.shape[0] <= 0:
+        raise ValueError("QVQ P32 FP8 WGMMA input must be a nonempty matrix")
+    if (
+        input_scale.dtype != torch.float32
+        or input_scale.device != input.device
+        or tuple(input_scale.shape) != (int(input.shape[0]), 1)
+        or not input_scale.is_contiguous()
+    ):
+        raise ValueError(
+            "QVQ P32 FP8 WGMMA requires contiguous FP32 [M, 1] input scales"
+        )
+    logical_rows = int(input.shape[0])
+    padded_rows = (
+        (logical_rows + _P32_WGMMA_NATIVE_ROWS - 1)
+        // _P32_WGMMA_NATIVE_ROWS
+        * _P32_WGMMA_NATIVE_ROWS
+    )
+    if padded_rows != logical_rows:
+        padded = torch.zeros(
+            (padded_rows, input.shape[1]), dtype=input.dtype, device=input.device
+        )
+        padded_scale = torch.ones(
+            (padded_rows, 1), dtype=torch.float32, device=input.device
+        )
+        padded[:logical_rows].copy_(input)
+        padded_scale[:logical_rows].copy_(input_scale)
+        input = padded
+        input_scale = padded_scale
+    native_op = _QVQ_WGMMA_EXTENSION.op("p32_window_fp8_m16")
+    return native_op(
+        input.contiguous(),
+        input_scale.contiguous(),
+        trellis,
+        levels,
+        bank_ids,
+        transition_bits,
+        int(out_features),
+        int(bank_alt_id),
+        float(level_scale),
+    )[:logical_rows]
 
 
 def qvq_p32_window_wgmma_group_plan(
@@ -825,6 +932,49 @@ def qvq_p32_window_wgmma_grouped_reuse4_packed(
     )
 
 
+def qvq_p32_window_wgmma_grouped_reuse8_packed(
+    input: torch.Tensor,
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Decode once for each group of eight M16 row tiles on Hopper."""
+
+    plan = payload.plan
+    rows = int(input.shape[0]) if input.ndim == 2 else 0
+    if (
+        input.ndim != 2
+        or input.shape[1] != plan.in_features
+        or rows < 128
+        or rows > 4096
+        or rows % 128
+    ):
+        raise ValueError(
+            "grouped Hopper P32 reuse-8 input requires M in [128, 4096] "
+            "and divisible by 128"
+        )
+    if any(segment.split_count != 1 for segment in plan.segments):
+        raise ValueError("grouped Hopper P32 reuse-8 requires unsplit children")
+    widths = [segment.out_features for segment in plan.segments]
+    output = _QVQ_WGMMA_EXTENSION.op("p32_window_m128_tma_grouped_reuse8")(
+        input,
+        payload.trellis,
+        levels,
+        payload.bank_ids,
+        plan.transition_bits,
+        widths,
+        [segment.bank_alt_id for segment in plan.segments],
+        [segment.split_count for segment in plan.segments],
+    )
+    return tuple(
+        child.reshape(rows, width)
+        for child, width in zip(
+            torch.split(output, [rows * width for width in widths]),
+            widths,
+            strict=True,
+        )
+    )
+
+
 def qvq_p32_window_decode_grouped_fp16_packed(
     payload: QVQHopperGroupedP32Payload,
     levels: torch.Tensor,
@@ -1021,7 +1171,9 @@ def qvq_p32_window_wgmma_single_large_m_packed(
         plan=plan,
     )
     rows = int(input.shape[0])
-    if rows >= 64 and rows % 64 == 0:
+    if split_count == 1 and rows >= 512 and rows % 128 == 0:
+        output = qvq_p32_window_wgmma_grouped_reuse8_packed(input, payload, levels)
+    elif rows >= 64 and rows % 64 == 0:
         output = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
     elif rows >= 32 and rows % 32 == 0:
         output = qvq_p32_window_wgmma_grouped_reuse2_packed(input, payload, levels)
@@ -1087,6 +1239,7 @@ __all__ = [
     "qvq_h100_grouped_ordered_split_counts",
     "qvq_h100_large_m_ordered_split_count",
     "qvq_h100_ordered_split_count",
+    "qvq_p32_window_wgmma_fp8_m16",
     "qvq_p32_window_decode_grouped_fp16_packed",
     "qvq_p32_window_grouped_prefill_fp16_packed",
     "qvq_p32_window_prepare_grouped_fp8_packed",
@@ -1098,6 +1251,7 @@ __all__ = [
     "qvq_p32_window_wgmma_grouped_packed",
     "qvq_p32_window_wgmma_grouped_reuse2_packed",
     "qvq_p32_window_wgmma_grouped_reuse4_packed",
+    "qvq_p32_window_wgmma_grouped_reuse8_packed",
     "qvq_p32_window_wgmma_m16_tma",
     "qvq_p32_window_wgmma_m16_tma_ordered_split",
     "qvq_p32_window_wgmma_single_large_m_packed",

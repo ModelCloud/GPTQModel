@@ -5,6 +5,9 @@ description: Build, port, optimize, review, benchmark, or debug GPT-QModel CUDA,
 
 # GPT-QModel CUDA kernels
 
+For QVQ optimization, first read [qvq-kernel-accuracy](../qvq-kernel-accuracy/SKILL.md) for accuracy-preserving math
+and the locked numerical contract; apply it before selecting lower precision or ranking performance candidates.
+
 Start from a numerical reference and select the smallest kernel path that can express the operation. Keep correctness tests separate from performance benchmarks.
 
 Read [references/kernel-workflow.md](references/kernel-workflow.md). For crashes or silent corruption, also read [references/cuda-debugging.md](references/cuda-debugging.md).

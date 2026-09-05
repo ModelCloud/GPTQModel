@@ -13,6 +13,8 @@ import torch
 from ...adapter.adapter import Adapter
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
+from ...quantization.config import QVQActivationConfig, _normalize_qvq_activation_config
+from ...quantization.dtype import device_supports_native_fp8
 from ...quantization.qvq import (
     QVQ_BITS,
     pack_qvq_bank_ids,
@@ -21,6 +23,11 @@ from ...quantization.qvq import (
     repack_p32_planar_to_window,
     unpack_qvq_bank_ids,
     unpack_qvq_binary_bank_ids,
+)
+from ...quantization.qvq_activation import (
+    dequantize_qvq_fp8_activation,
+    fake_quantize_qvq_fp8_activation,
+    quantize_qvq_fp8_activation,
 )
 from ...quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
 from ...quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
@@ -77,12 +84,15 @@ def _qvq_fp16_emulated_hadamard_fallback(
 def _qvq_hadamard_fused(
     x: torch.Tensor,
     *,
+    input_scale: torch.Tensor | None = None,
+    input_rounding_mode: int = 0,
     pre_scale: torch.Tensor | None = None,
     post_scale: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
     scale_mode: int = 0,
     pad_to_16: bool = False,
     output_fp16: bool = False,
+    output_bf16: bool = False,
 ) -> torch.Tensor:
     """One fused Hadamard launch (CUDA or CPU AVX-512); Python butterfly fallback otherwise.
 
@@ -93,6 +103,21 @@ def _qvq_hadamard_fused(
     """
 
     n = x.shape[-1]
+    if input_scale is not None:
+        fp8_dtype = getattr(torch, "float8_e4m3fn", None)
+        if fp8_dtype is None or x.dtype != fp8_dtype:
+            raise TypeError("scaled QVQ A8 Hadamard input must use torch.float8_e4m3fn")
+        if (
+            input_scale.dtype != torch.float32
+            or input_scale.device != x.device
+            or input_scale.shape != (*x.shape[:-1], 1)
+            or not input_scale.is_contiguous()
+        ):
+            raise ValueError("QVQ A8 Hadamard scale must be contiguous FP32 with one value per input row")
+        if input_rounding_mode not in (0, 1):
+            raise ValueError("QVQ A8 Hadamard input rounding mode must be 0 (FP16) or 1 (BF16)")
+    elif input_rounding_mode != 0:
+        raise ValueError("QVQ A8 Hadamard input rounding mode requires input_scale")
     if x.device.type == "mps" and pre_scale is not None:
         # Keep x*SU in FP32 until normalization; Metal GEMV narrows only the
         # already range-reduced transform result to FP16.
@@ -122,7 +147,10 @@ def _qvq_hadamard_fused(
             )
     if (
         x.device.type == "cuda"
-        and x.dtype in (torch.float16, torch.float32)
+        and (
+            x.dtype in (torch.float16, torch.float32)
+            or input_scale is not None
+        )
         and x.is_contiguous()
         and n >= 2
         and n & (n - 1) == 0
@@ -137,14 +165,22 @@ def _qvq_hadamard_fused(
         )
         return qvq_cuda_hadamard(
             x,
+            input_scale=input_scale,
+            input_rounding_mode=input_rounding_mode,
             pre_scale=pre_scale,
             post_scale=post_scale,
             bias=bias,
             scale_mode=mode,
             pad_to_16=pad_to_16,
             output_fp16=output_fp16,
+            output_bf16=output_bf16,
         )
-    if pad_to_16 or output_fp16:
+    if input_scale is not None:
+        source_dtype = torch.bfloat16 if input_rounding_mode == 1 else torch.float16
+        x = dequantize_qvq_fp8_activation(x, input_scale, dtype=source_dtype)
+        if pre_scale is not None:
+            x = x.to(pre_scale.dtype)
+    if pad_to_16 or output_fp16 or output_bf16:
         raise RuntimeError(
             "requested QVQ Hadamard output specialization requires the native CUDA path"
         )
@@ -274,6 +310,7 @@ class QVQLinear(BaseQuantLinear):
         dual_v2: bool = False,
         v2b4_p64: bool = False,
         v2b2_p32: bool = False,
+        activation: QVQActivationConfig | dict | bool | None = None,
         input_hadamard: bool = True,
         output_hadamard: bool = True,
         **kwargs,
@@ -370,6 +407,11 @@ class QVQLinear(BaseQuantLinear):
                 "QVQ V2B2-P32 requires vector_size=2, trellis_window=16, bank_count=2, and W1-W3.5"
             )
         self.v2b2_p32 = v2b2_p32
+        self.activation = _normalize_qvq_activation_config(activation)
+        if self.activation is not None and (
+            not self.v2b2_p32 or self.bits not in (2, 2.5, 3, 3.5)
+        ):
+            raise ValueError("QVQ A8 requires V2B2-P32 weights at rates W2 through W3.5")
         if not isinstance(input_hadamard, bool) or not isinstance(
             output_hadamard, bool
         ):
@@ -439,6 +481,17 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_cuda_window_cache: (
             tuple[torch.Tensor, int, torch.device, torch.Tensor] | None
         ) = None
+        self._qvq_fp8_levels_cache: tuple[torch.device, torch.Tensor, float] | None = None
+        self._qvq_fp8_telemetry_lock = threading.Lock()
+        self._qvq_fp8_telemetry = {
+            "requested": 0,
+            "eligible": 0,
+            "executed": 0,
+            "fallback": 0,
+            "rejected": 0,
+            "fallback_reasons": {},
+            "rejection_reasons": {},
+        }
         self._qvq_amd_folded_hot_cache: tuple | None = None
         pgc16_levels_for_version(self.codebook_version)
 
@@ -504,17 +557,35 @@ class QVQLinear(BaseQuantLinear):
         """Exclude transient selector state from deepcopy/pickle."""
         state = super().__getstate__()
         state.pop("_qvq_cuda_bank_cache_lock", None)
+        state.pop("_qvq_fp8_telemetry_lock", None)
         state.pop("_qvq_grouped_p32_delegate", None)
         state["_qvq_cuda_bank_cache"] = None
         state["_qvq_cuda_window_cache"] = None
+        state["_qvq_fp8_levels_cache"] = None
         state["_qvq_amd_folded_hot_cache"] = None
         return state
 
     def __setstate__(self, state):
         super().__setstate__(state)
         self._qvq_cuda_bank_cache_lock = threading.Lock()
+        self._qvq_fp8_telemetry_lock = threading.Lock()
         self._qvq_cuda_bank_cache = None
         self._qvq_cuda_window_cache = None
+        self._qvq_fp8_levels_cache = None
+        if "_qvq_fp8_telemetry" not in self.__dict__:
+            self._qvq_fp8_telemetry = {
+                "requested": 0,
+                "eligible": 0,
+                "executed": 0,
+                "fallback": 0,
+                "rejected": 0,
+                "fallback_reasons": {},
+                "rejection_reasons": {},
+            }
+        else:
+            self._qvq_fp8_telemetry.setdefault("rejected", 0)
+            self._qvq_fp8_telemetry.setdefault("fallback_reasons", {})
+            self._qvq_fp8_telemetry.setdefault("rejection_reasons", {})
         self._qvq_amd_folded_hot_cache = None
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
@@ -585,6 +656,54 @@ class QVQLinear(BaseQuantLinear):
             )
         self._qvq_cuda_window_cache = (source, source_version, device, window)
         return window
+
+    def _prepare_hopper_fp8_levels(self, device: torch.device) -> tuple[torch.Tensor, float]:
+        """Return the cached E4M3 PGC table and its explicit dequantization scale."""
+
+        cached = self._qvq_fp8_levels_cache
+        if cached is not None and cached[0] == device:
+            return cached[1], cached[2]
+        fp8_dtype = torch.float8_e4m3fn
+        fp8_max = float(torch.finfo(fp8_dtype).max)
+        canonical = pgc16_levels_for_version(self.codebook_version).to(torch.float32)
+        level_scale = float(canonical.abs().amax().item() / fp8_max)
+        levels = torch.clamp(canonical / level_scale, min=-fp8_max, max=fp8_max).to(
+            device=device,
+            dtype=fp8_dtype,
+        ).contiguous()
+        self._qvq_fp8_levels_cache = (device, levels, level_scale)
+        return levels, level_scale
+
+    def _record_fp8_kernel(self, event: str, reason: str | None = None) -> None:
+        with self._qvq_fp8_telemetry_lock:
+            self._qvq_fp8_telemetry[event] += 1
+            if reason is not None:
+                reason_key = "rejection_reasons" if event == "rejected" else "fallback_reasons"
+                reasons = self._qvq_fp8_telemetry[reason_key]
+                reasons[reason] = reasons.get(reason, 0) + 1
+
+    def qvq_fp8_kernel_telemetry(self, *, reset: bool = False) -> dict:
+        """Return truthful requested/eligible/executed/fallback counters."""
+
+        with self._qvq_fp8_telemetry_lock:
+            result = {
+                **self._qvq_fp8_telemetry,
+                "fallback_reasons": dict(self._qvq_fp8_telemetry["fallback_reasons"]),
+                "rejection_reasons": dict(self._qvq_fp8_telemetry["rejection_reasons"]),
+                "operand_dtype": "float8_e4m3fn",
+                "accumulator_dtype": "float32",
+            }
+            if reset:
+                self._qvq_fp8_telemetry = {
+                    "requested": 0,
+                    "eligible": 0,
+                    "executed": 0,
+                    "fallback": 0,
+                    "rejected": 0,
+                    "fallback_reasons": {},
+                    "rejection_reasons": {},
+                }
+        return result
 
     def _prepare_amd_p32_metadata(
         self,
@@ -872,6 +991,7 @@ class QVQLinear(BaseQuantLinear):
         dual_v2: bool = False,
         v2b4_p64: bool = False,
         v2b2_p32: bool = False,
+        activation: QVQActivationConfig | dict | bool | None = None,
         input_hadamard: bool = True,
         output_hadamard: bool = True,
     ) -> QVQLinear:
@@ -888,6 +1008,7 @@ class QVQLinear(BaseQuantLinear):
             dual_v2=dual_v2,
             v2b4_p64=v2b4_p64,
             v2b2_p32=v2b2_p32,
+            activation=activation,
             input_hadamard=input_hadamard,
             output_hadamard=output_hadamard,
         )
@@ -1143,6 +1264,19 @@ class QVQLinear(BaseQuantLinear):
         inner = self.get_inner_weight_tensor(dtype=x.dtype)
         return x @ inner
 
+    def _reference_fp8_inner_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Emulate the exact E4M3-rounded level table deployed by Hopper."""
+
+        fp8_levels, level_scale = self._prepare_hopper_fp8_levels(x.device)
+        deployed_levels = fp8_levels.to(torch.float32).mul(level_scale)
+        canonical_levels = pgc16_levels_for_version(self.codebook_version).to(
+            device=x.device, dtype=torch.float32
+        )
+        inner = self.get_inner_weight_tensor(dtype=torch.float32)
+        level_indices = torch.searchsorted(canonical_levels, inner)
+        inner = deployed_levels[level_indices]
+        return x.to(torch.float32) @ inner
+
     def _inner_forward(
         self,
         x: torch.Tensor,
@@ -1387,7 +1521,8 @@ class QVQLinear(BaseQuantLinear):
             # lazily repack once per module. H100 additionally uses the native
             # row-tiled grid through M4096; M32/M64 buckets decode each P32
             # fragment once for two/four independent M16 tensor-core tiles.
-            # Padded rows are zero, so every logical row remains exact.
+            # H200 retains automatic exact M16 tiling until the large-M grid
+            # is independently accepted there. Padded rows are always zero.
             if (
                 self.v2b2_p32
                 and self.vector_size == 2
@@ -1417,22 +1552,7 @@ class QVQLinear(BaseQuantLinear):
                         window = self._prepare_hopper_p32_window(x.device)
                     wgmma_input = x.contiguous()
                     logical_rows = int(wgmma_input.shape[0])
-                    large_m_h100 = (
-                        logical_rows > 16 and properties.name == "NVIDIA H100"
-                    )
-                    if logical_rows > 16 and not large_m_h100:
-                        return qvq_cuda_gemv(
-                            x.contiguous(),
-                            self.trellis.contiguous(),
-                            self.bits,
-                            out_features=self.out_features,
-                            codebook_version=self.codebook_version,
-                            output_fp32=True,
-                            vector_size=self.vector_size,
-                            bank_ids=cuda_bank_ids,
-                            v2b2_p32=True,
-                            bank_alt_id=cuda_bank_alt_id,
-                        )
+                    large_m_hopper = logical_rows > 16
                     padded_rows = (
                         16
                         if logical_rows <= 16
@@ -1448,7 +1568,7 @@ class QVQLinear(BaseQuantLinear):
                         )
                         padded[: wgmma_input.shape[0]].copy_(wgmma_input)
                         wgmma_input = padded
-                    if large_m_h100:
+                    if large_m_hopper:
                         large_m_split = qvq_h100_large_m_ordered_split_count(
                             device_name=properties.name,
                             compute_capability=(properties.major, properties.minor),
@@ -1476,7 +1596,7 @@ class QVQLinear(BaseQuantLinear):
                     ordered_split = qvq_h100_ordered_split_count(
                         device_name=properties.name,
                         compute_capability=(properties.major, properties.minor),
-                        logical_rows=int(x.shape[0]),
+                        logical_rows=min(int(x.shape[0]), 16),
                         in_features=self.in_features,
                         out_features=self.out_features,
                         transition_bits=transition_bits,
@@ -1552,6 +1672,147 @@ class QVQLinear(BaseQuantLinear):
             )
         return self._reference_inner_forward(x)
 
+    def _inner_forward_fp8(
+        self,
+        input: torch.Tensor,
+        input_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        """Consume the exact transformed E4M3 operand through Hopper WGMMA."""
+
+        if self.bank_ids is None or self.bank_alt_id is None:
+            raise RuntimeError("QVQ P32 FP8 WGMMA requires loaded bank metadata")
+        tile_count = (self.in_features // 16) * (self.out_features // 16)
+        selector_count = tile_count * 8
+        with self._qvq_cuda_bank_cache_lock:
+            source = self.bank_ids
+            source_version = source._version
+            alt_source = self.bank_alt_id
+            alt_version = alt_source._version
+            cached = self._qvq_cuda_bank_cache
+            if (
+                cached is not None
+                and cached[0] is source
+                and cached[1] == source_version
+                and cached[2] == input.device
+                and cached[3] is alt_source
+                and cached[4] == alt_version
+            ):
+                cuda_bank_ids = cached[5]
+                bank_alt_id = cached[6]
+            else:
+                cuda_bank_ids = pack_qvq_binary_bank_ids(
+                    unpack_qvq_binary_bank_ids(source.detach().clone(), selector_count)
+                ).to(device=input.device)
+                bank_alt_id = int(alt_source.detach().item())
+                if (
+                    self.bank_ids is not source
+                    or source._version != source_version
+                    or self.bank_alt_id is not alt_source
+                    or alt_source._version != alt_version
+                    or not 1 <= bank_alt_id <= 3
+                ):
+                    raise RuntimeError("QVQ P32 FP8 bank metadata changed during snapshot")
+                self._qvq_cuda_bank_cache = (
+                    source,
+                    source_version,
+                    input.device,
+                    alt_source,
+                    alt_version,
+                    cuda_bank_ids,
+                    bank_alt_id,
+                )
+
+        from ...utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_fp8_m16
+
+        window = self._prepare_hopper_p32_window(input.device)
+        fp8_levels, level_scale = self._prepare_hopper_fp8_levels(input.device)
+        return qvq_p32_window_wgmma_fp8_m16(
+            input,
+            input_scale,
+            window,
+            fp8_levels,
+            cuda_bank_ids,
+            self.bits,
+            out_features=self.out_features,
+            bank_alt_id=bank_alt_id,
+            level_scale=level_scale,
+        )
+
+    def _fp8_kernel_ineligible_reason(self, transformed: torch.Tensor) -> str | None:
+        if transformed.device.type != "cuda":
+            return "non_cuda"
+        if not self.v2b2_p32 or self.vector_size != 2 or self.trellis_window != 16:
+            return "non_p32"
+        if self.bits not in (2, 2.5, 3, 3.5):
+            return "unsupported_rate"
+        if transformed.ndim != 2 or transformed.shape[0] <= 0:
+            return "unsupported_rank_or_rows"
+        if self.in_features % 32 or self.out_features % 64:
+            return "unsupported_shape"
+        properties = torch.cuda.get_device_properties(transformed.device)
+        if (properties.major, properties.minor) != (9, 0):
+            return "non_sm90"
+        if not device_supports_native_fp8(transformed.device):
+            return "native_fp8_unavailable"
+        return None
+
+    def _prepare_activation_input(
+        self,
+        x_2d: torch.Tensor,
+        compute_dtype: torch.dtype,
+        *,
+        straight_through: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, int]:
+        """Apply the checkpoint's A8 contract and retain FP8 for the fused CUDA transform."""
+
+        config = self.activation
+        if config is None:
+            return x_2d.to(compute_dtype), None, 0
+        if config.target == "p32_operand":
+            # The model-visible activation remains in its native BF16/FP16
+            # dtype. Quantization happens after SU/Hadamard, at the exact
+            # operand boundary consumed by Hopper WGMMA.
+            return x_2d.to(compute_dtype), None, 0
+        validate = straight_through or x_2d.device.type == "cpu"
+        if straight_through:
+            quantized, scale, dequantized = fake_quantize_qvq_fp8_activation(
+                x_2d,
+                format=config.format,
+                scale_method=config.scale_method,
+                straight_through=True,
+                validate=validate,
+            )
+        else:
+            # The native fused Hadamard consumes FP8 + row scale directly.
+            # Do not eagerly allocate and populate a dequantized tensor that
+            # this path immediately discards.
+            quantized, scale = quantize_qvq_fp8_activation(
+                x_2d,
+                format=config.format,
+                scale_method=config.scale_method,
+                # Avoid a device-to-host synchronization in the inference hot
+                # path. Runtime non-finites retain ordinary propagation.
+                validate=validate,
+            )
+            dequantized = None
+        native_fp8_transform = (
+            not straight_through
+            and self.input_hadamard
+            and x_2d.device.type == "cuda"
+            and compute_dtype == torch.float16
+            and device_supports_native_fp8(x_2d.device)
+        )
+        if native_fp8_transform:
+            input_rounding_mode = 1 if x_2d.dtype == torch.bfloat16 else 0
+            return quantized, scale, input_rounding_mode
+        if dequantized is None:
+            dequantized = dequantize_qvq_fp8_activation(
+                quantized,
+                scale,
+                dtype=x_2d.dtype,
+            )
+        return dequantized.to(compute_dtype), None, 0
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.shape[-1] != self.in_features:
             raise ValueError(
@@ -1565,7 +1826,7 @@ class QVQLinear(BaseQuantLinear):
             return state.consume(consumer_index, module_name, self, x)
         input_dtype = x.dtype
         compute_dtype = _qvq_compute_dtype(input_dtype, x.device.type)
-        x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
+        x_2d = x.reshape(-1, self.in_features)
 
         # The folded gfx950 path has no low-precision butterfly intermediate,
         # so it cannot trigger the transform-overflow rescue below. Return at
@@ -1580,8 +1841,13 @@ class QVQLinear(BaseQuantLinear):
         # completed linear result to the model dtype. This removes the
         # factorization-only FP16 overflow without host synchronization or a
         # duplicate BF16 path during CUDA-graph capture.
-        output = self._forward_compute_dtype(x_2d, compute_dtype)
-        if input_dtype == torch.bfloat16 and x.device.type == "cuda":
+        output = self._forward_compute_dtype(
+            x_2d, compute_dtype, output_dtype=input_dtype
+        )
+        if (
+            input_dtype == torch.bfloat16
+            and x.device.type == "cuda"
+        ):
             if torch.cuda.is_current_stream_capturing():
                 rescued = self._forward_compute_dtype(
                     x.reshape(-1, self.in_features).to(torch.bfloat16),
@@ -1642,10 +1908,13 @@ class QVQLinear(BaseQuantLinear):
         if x.numel() == 0:
             return x
         compute_dtype = _qvq_compute_dtype(x.dtype, x.device.type)
-        x_2d = x.reshape(-1, self.in_features).to(compute_dtype)
+        x_2d = x.reshape(-1, self.in_features)
+        x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(x_2d, compute_dtype)
         if self.input_hadamard:
             transformed = _qvq_hadamard_fused(
                 x_2d,
+                input_scale=input_scale,
+                input_rounding_mode=input_rounding_mode,
                 pre_scale=self._cached_cast("SU", compute_dtype),
                 scale_mode=(
                     2
@@ -1697,6 +1966,81 @@ class QVQLinear(BaseQuantLinear):
             target_dtype
         )
 
+    def forward_prequantized_fp8(
+        self,
+        quantized: torch.Tensor,
+        scale: torch.Tensor,
+        *,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Consume one shared, already-quantized P32 activation operand.
+
+        Grouped QKV and gate/up projections have a proven-identical SU/Hadamard
+        transform.  Their dynamic per-row E4M3 conversion is therefore also
+        identical and may be performed once without changing checkpoint or
+        arithmetic semantics.
+        """
+
+        config = self.activation
+        if config is None or config.target != "p32_operand":
+            raise RuntimeError(
+                "prequantized QVQ input requires target=p32_operand"
+            )
+        if self.training:
+            raise RuntimeError("prequantized QVQ inference is unavailable in training mode")
+        if quantized.shape[-1] != self.in_features:
+            raise ValueError(
+                f"QVQ expected prequantized input width {self.in_features}, "
+                f"got {quantized.shape[-1]}"
+            )
+        compute_dtype = _qvq_compute_dtype(output_dtype, quantized.device.type)
+        if output_dtype == torch.bfloat16 and quantized.device.type == "cuda":
+            compute_dtype = torch.float32
+        quantized_2d = quantized.reshape(-1, self.in_features)
+        scale_2d = scale.reshape(-1, 1)
+        reason = (
+            "kernel_disabled"
+            if config.kernel_mode == "disable"
+            else self._fp8_kernel_ineligible_reason(quantized_2d)
+        )
+        if config.kernel_mode != "disable":
+            self._record_fp8_kernel("requested")
+        if reason is None:
+            self._record_fp8_kernel("eligible")
+            try:
+                output = self._inner_forward_fp8(quantized_2d, scale_2d)
+            except RuntimeError:
+                if config.kernel_mode == "require":
+                    self._record_fp8_kernel("rejected", "launch_error")
+                    raise
+                reason = "launch_error"
+            else:
+                self._record_fp8_kernel("executed")
+                recovered = self._recover_output_compute_dtype(
+                    output, compute_dtype, target_dtype=output_dtype
+                )
+                return recovered.reshape(
+                    *quantized.shape[:-1], self.out_features
+                ).to(output_dtype)
+        elif config.kernel_mode == "require":
+            self._record_fp8_kernel("rejected", reason)
+            raise RuntimeError(
+                f"required QVQ P32 FP8 WGMMA path is ineligible: {reason}"
+            )
+        self._record_fp8_kernel("fallback", reason)
+        transformed = dequantize_qvq_fp8_activation(
+            quantized_2d,
+            scale_2d,
+            dtype=torch.float32,
+        )
+        output = self._reference_fp8_inner_forward(transformed)
+        recovered = self._recover_output_compute_dtype(
+            output, torch.float32, target_dtype=output_dtype
+        )
+        return recovered.reshape(*quantized.shape[:-1], self.out_features).to(
+            output_dtype
+        )
+
     def recover_output(
         self,
         inner_output: torch.Tensor,
@@ -1731,9 +2075,19 @@ class QVQLinear(BaseQuantLinear):
         )
 
     def _forward_compute_dtype(
-        self, x_2d: torch.Tensor, compute_dtype: torch.dtype
+        self,
+        x_2d: torch.Tensor,
+        compute_dtype: torch.dtype,
+        *,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         if self.training:
+            compute_dtype = self._qvq_operand_compute_dtype(x_2d, compute_dtype)
+            x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(
+                x_2d,
+                compute_dtype,
+                straight_through=True,
+            )
             # Keep the differentiable Python butterfly path for the reference
             # forward used in training.
             transformed_input = x_2d * self.SU.to(compute_dtype)
@@ -1751,6 +2105,17 @@ class QVQLinear(BaseQuantLinear):
                 transformed = input_transform(transformed_input)
             else:
                 transformed = transformed_input
+            if (
+                self.activation is not None
+                and self.activation.target == "p32_operand"
+            ):
+                _, _, transformed = fake_quantize_qvq_fp8_activation(
+                    transformed,
+                    format=self.activation.format,
+                    scale_method=self.activation.scale_method,
+                    straight_through=True,
+                    validate=True,
+                )
             output = self._inner_forward(transformed)
             if self.output_hadamard:
                 output_transform = (
@@ -1767,21 +2132,10 @@ class QVQLinear(BaseQuantLinear):
             if self.bias is not None:
                 output = output + self.bias.to(compute_dtype)
         else:
-            if self.input_hadamard:
-                transformed = _qvq_hadamard_fused(
-                    x_2d,
-                    pre_scale=self._cached_cast("SU", compute_dtype),
-                    scale_mode=(
-                        2
-                        if compute_dtype == torch.float16
-                        and self.in_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
-                        else 1
-                    ),
-                )
-            else:
-                transformed = x_2d * self._cached_cast("SU", compute_dtype)
+            compute_dtype = self._qvq_operand_compute_dtype(x_2d, compute_dtype)
+            transformed = self._qvq_prepare_inference_input(x_2d, compute_dtype)
             return self._forward_pretransformed_compute_dtype(
-                transformed, compute_dtype
+                transformed, compute_dtype, output_dtype=output_dtype
             )
         return output
 
@@ -1789,7 +2143,49 @@ class QVQLinear(BaseQuantLinear):
         self,
         transformed: torch.Tensor,
         compute_dtype: torch.dtype,
+        *,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
+        config = self.activation
+        if config is not None and config.target == "p32_operand":
+            quantized, scale = quantize_qvq_fp8_activation(
+                transformed,
+                format=config.format,
+                scale_method=config.scale_method,
+                validate=False,
+            )
+            reason = "kernel_disabled" if config.kernel_mode == "disable" else self._fp8_kernel_ineligible_reason(
+                transformed
+            )
+            if config.kernel_mode != "disable":
+                self._record_fp8_kernel("requested")
+            if reason is None:
+                self._record_fp8_kernel("eligible")
+                try:
+                    output = self._inner_forward_fp8(quantized, scale)
+                except RuntimeError:
+                    if config.kernel_mode == "require":
+                        self._record_fp8_kernel("rejected", "launch_error")
+                        raise
+                    reason = "launch_error"
+                else:
+                    self._record_fp8_kernel("executed")
+                    return self._recover_output_compute_dtype(
+                        output, compute_dtype, target_dtype=output_dtype
+                    )
+            elif config.kernel_mode == "require":
+                self._record_fp8_kernel("rejected", reason)
+                raise RuntimeError(f"required QVQ P32 FP8 WGMMA path is ineligible: {reason}")
+            self._record_fp8_kernel("fallback", reason)
+            transformed = dequantize_qvq_fp8_activation(
+                quantized,
+                scale,
+                dtype=torch.float32,
+            )
+            output = self._reference_fp8_inner_forward(transformed)
+            return self._recover_output_compute_dtype(
+                output, torch.float32, target_dtype=output_dtype
+            )
         output = self._inner_forward(transformed)
         return self._recover_output_compute_dtype(output, compute_dtype)
 
@@ -1797,10 +2193,26 @@ class QVQLinear(BaseQuantLinear):
         self,
         output: torch.Tensor,
         compute_dtype: torch.dtype,
+        *,
+        target_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         output_dtype = output.dtype
         if self.output_hadamard:
-            return _qvq_hadamard_fused(
+            target_bf16 = (
+                target_dtype == torch.bfloat16
+                and output_dtype == torch.float32
+            )
+            native_bf16_store = (
+                target_bf16
+                and output.device.type == "cuda"
+                and output.is_contiguous()
+                and self.out_features >= 2
+                and self.out_features & (self.out_features - 1) == 0
+                and self.out_features <= _QVQ_HADAMARD_MAX_WIDTH
+                and qvq_cuda_device_supported(output.device)
+                and qvq_cuda_available()
+            )
+            recovered = _qvq_hadamard_fused(
                 output,
                 post_scale=self._cached_cast("SV", compute_dtype, output_dtype),
                 bias=self._cached_cast("bias", compute_dtype, output_dtype),
@@ -1812,10 +2224,32 @@ class QVQLinear(BaseQuantLinear):
                     if output_dtype == torch.float32
                     else 0
                 ),
+                output_bf16=native_bf16_store,
             )
+            return recovered.to(torch.bfloat16) if target_bf16 else recovered
         output = output * self._cached_cast("SV", compute_dtype, output_dtype)
         cached_bias = self._cached_cast("bias", compute_dtype, output_dtype)
         return output if cached_bias is None else output + cached_bias
+
+    def _qvq_operand_compute_dtype(
+        self,
+        x_2d: torch.Tensor,
+        compute_dtype: torch.dtype,
+    ) -> torch.dtype:
+        """Select the shared runtime/replay dtype at the deployed operand boundary."""
+
+        if (
+            x_2d.device.type == "cuda"
+            and x_2d.dtype == torch.bfloat16
+            and self.activation is not None
+            and self.activation.target == "p32_operand"
+        ):
+            # BF16 values can exceed FP16 before SU/Hadamard has reduced their
+            # range. Preserve them through that transform; the resulting row
+            # is bounded when it is converted to E4M3 below. Replay calls the
+            # same helper, so its fitted operand cannot silently narrow first.
+            return torch.float32
+        return compute_dtype
 
     def _qvq_prepare_inference_input(
         self,
@@ -1832,12 +2266,19 @@ class QVQLinear(BaseQuantLinear):
         or subtly reordering QVQLinear's numerical contract.
         """
 
+        compute_dtype = self._qvq_operand_compute_dtype(x_2d, compute_dtype)
+        x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(
+            x_2d, compute_dtype
+        )
+
         if not self.input_hadamard:
             if pad_to_16:
                 raise RuntimeError("direct padded input requires an input Hadamard")
             return x_2d * self._cached_cast("SU", compute_dtype)
         return _qvq_hadamard_fused(
             x_2d,
+            input_scale=input_scale,
+            input_rounding_mode=input_rounding_mode,
             pre_scale=self._cached_cast("SU", compute_dtype),
             scale_mode=(
                 2
@@ -1932,12 +2373,42 @@ def qvq_dense_oracle_forward(
                     else layer.bank_alt_id.to(device=compute_device)
                 ),
             ).to(dtype=torch.float32)
-            x_2d = x.to(device=compute_device, dtype=torch.float32).reshape(
-                -1, layer.in_features
-            )
+            x_2d = x.to(device=compute_device).reshape(-1, layer.in_features)
+            if (
+                layer.activation is not None
+                and layer.activation.target == "linear_input"
+            ):
+                _, _, x_2d = fake_quantize_qvq_fp8_activation(
+                    x_2d,
+                    format=layer.activation.format,
+                    scale_method=layer.activation.scale_method,
+                )
+            x_2d = x_2d.to(torch.float32)
             transformed = x_2d * layer.SU.to(device=compute_device, dtype=torch.float32)
             if layer.input_hadamard:
                 transformed = matmul_hadU(transformed)
+            if (
+                layer.activation is not None
+                and layer.activation.target == "p32_operand"
+            ):
+                _, _, transformed = fake_quantize_qvq_fp8_activation(
+                    transformed,
+                    format=layer.activation.format,
+                    scale_method=layer.activation.scale_method,
+                )
+                canonical_levels = pgc16_levels_for_version(
+                    layer.codebook_version
+                ).to(device=compute_device, dtype=torch.float32)
+                fp8_max = float(torch.finfo(torch.float8_e4m3fn).max)
+                level_scale = float(canonical_levels.abs().amax().item() / fp8_max)
+                deployed_levels = torch.clamp(
+                    canonical_levels / level_scale,
+                    min=-fp8_max,
+                    max=fp8_max,
+                ).to(torch.float8_e4m3fn).to(torch.float32).mul(level_scale)
+                inner = deployed_levels[
+                    torch.searchsorted(canonical_levels, inner)
+                ]
             output = transformed @ inner
             if layer.output_hadamard:
                 output = matmul_hadU(output)

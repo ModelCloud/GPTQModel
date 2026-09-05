@@ -5,6 +5,9 @@ description: Optimize, benchmark, profile, or review GPT-QModel kernels on AMD R
 
 # GPT-QModel AMD kernels
 
+For QVQ optimization, first read [qvq-kernel-accuracy](../qvq-kernel-accuracy/SKILL.md) for accuracy-preserving math
+and the locked numerical contract; apply it before selecting lower precision or ranking performance candidates.
+
 Optimize the measured production path on the runtime-probed AMD architecture. Preserve CPU, CUDA, Metal, and
 unsupported-ROCm fallbacks. Also use `$gptqmodel-cuda-kernels` for the common numerical/JIT contract,
 `$gptqmodel-gpu-testing` for formal GPU runs, `$gptqmodel-gpu-profiling` for attribution, and

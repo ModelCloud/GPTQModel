@@ -1263,7 +1263,7 @@ __global__ __launch_bounds__(128) void p32_window_ampere_large_m2_kernel(
   const int split = static_cast<int>(blockIdx.z);
   p32_window_ampere_kernel_body<
       TransitionBits, true, 0, StaticN, 128, 4, StageKTiles,
-      false, false, StaticK, RowGroups>(
+      true, false, StaticK, RowGroups>(
       input + static_cast<int64_t>(row_offset) * size_k,
       trellis, levels, bank_ids, partial_output,
       output + static_cast<int64_t>(row_offset) * size_n, local_m, size_k,
@@ -2967,14 +2967,16 @@ int launch_p32_large_m(
         return -1; \
     }
     if (row_groups == 8) {
-      const bool supported_n1024_stage3 =
-          size_n == 1024 && config.stage_k_tiles == 3;
+      const bool supported_n1024_stage =
+          size_n == 1024 &&
+          (config.stage_k_tiles == 3 ||
+           (config.stage_k_tiles != 4 && size_m >= 2048));
       const bool supported_other_stage =
           size_n != 1024 && config.stage_k_tiles != 4;
-      if ((!supported_n1024_stage3 && !supported_other_stage) ||
+      if ((!supported_n1024_stage && !supported_other_stage) ||
           size_m % (8 * kRows) != 0) {
         set_last_error(
-            "QVQ P32 row_groups=8 requires aligned M and either N=1024/stage=3 or N!=1024/stage<4");
+            "QVQ P32 row_groups=8 requires aligned M and N=1024/stage=3 or N=1024/stage<4/M>=2048 or N!=1024/stage<4");
         return -1;
       }
       QVQ_LARGE_M2_STAGE(8)
@@ -2989,7 +2991,9 @@ int launch_p32_large_m(
     } else if (row_groups != QVQ_P32_ROW_GROUPS_AUTO) {
       set_last_error("QVQ P32 multi-row groups require 128 threads and aligned M");
       return -1;
-    } else if ((config.stage_k_tiles == 3 ||
+    } else if (((size_n == 1024 &&
+                 (config.stage_k_tiles == 3 ||
+                  (config.stage_k_tiles != 4 && size_m >= 2048))) ||
                 (size_n != 1024 && config.stage_k_tiles != 4)) &&
                size_m % (8 * kRows) == 0) {
       QVQ_LARGE_M2_STAGE(8)
