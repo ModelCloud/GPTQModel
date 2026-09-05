@@ -9,14 +9,16 @@ triton = pytest.importorskip("triton")
 @pytest.mark.parametrize("size_k", [5120, 6144])
 @pytest.mark.parametrize("block_n", [2, 4, 8])
 @pytest.mark.parametrize("residual", [False, True])
-@pytest.mark.parametrize("variant", ["full", "split", "dot2"])
+@pytest.mark.parametrize("variant", ["full", "split", "dot2", "dot2_loop", "gluon"])
 def test_full_k_gemv_reduction_and_padding(size_k, block_n, residual, variant):
     if not torch.cuda.is_available() or not torch.version.hip:
         pytest.skip("requires AMD GPU")
     if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
         pytest.skip("experiment targets gfx950")
     from scripts.qvq_p32_amd_butterfly_experiment import (
+        folded_gemv_dot2_gluon_kernel,
         folded_gemv_dot2_kernel,
+        folded_gemv_dot2_loop_kernel,
         folded_gemv_full_k_kernel,
         folded_gemv_split_k_kernel,
     )
@@ -28,14 +30,42 @@ def test_full_k_gemv_reduction_and_padding(size_k, block_n, residual, variant):
     effective = w.float() + low.float() if residual else w.float()
     reference = effective @ x.float()
     output = torch.full((36,), 999.0, device="cuda", dtype=torch.float16)
-    kernel = (folded_gemv_dot2_kernel if variant == "dot2" else
+    kernel = (folded_gemv_dot2_gluon_kernel if variant == "gluon" else
+              folded_gemv_dot2_loop_kernel if variant == "dot2_loop" else
+              folded_gemv_dot2_kernel if variant == "dot2" else
               folded_gemv_split_k_kernel if variant == "split" else folded_gemv_full_k_kernel)
+    block_k = 512 if variant in ("dot2_loop", "gluon") else triton.next_power_of_2(size_k)
     kernel[(32 // block_n,)](
-        x, w, low, output, size_k, block_n, triton.next_power_of_2(size_k), residual,
+        x, w, low, output, size_k, block_n, block_k, residual,
         num_warps=4, num_stages=1, waves_per_eu=0,
     )
     torch.testing.assert_close(output[:32].float(), reference, atol=2e-3, rtol=0)
     assert (output[32:] == 999.0).all()
+
+
+@pytest.mark.parametrize("size_k", [5120, 6144])
+@pytest.mark.parametrize("variant", ["dot2_loop", "gluon"])
+@pytest.mark.parametrize("value", [1.0, 2.0**-20])
+def test_looped_dot2_dependency_and_subnormal_inputs(size_k, variant, value):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("requires AMD GPU")
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("experiment targets gfx950")
+    from scripts.qvq_p32_amd_butterfly_experiment import (
+        folded_gemv_dot2_gluon_kernel,
+        folded_gemv_dot2_loop_kernel,
+    )
+
+    kernel = folded_gemv_dot2_gluon_kernel if variant == "gluon" else folded_gemv_dot2_loop_kernel
+    x = torch.full((size_k,), value, device="cuda", dtype=torch.float16)
+    w = torch.ones((4, size_k), device="cuda", dtype=torch.float16)
+    output = torch.empty(4, device="cuda", dtype=torch.float32)
+    expected = torch.full_like(output, size_k * value)
+    # Missing a dependency delay previously dropped exactly 128 ones in some rows.
+    for _ in range(10):
+        kernel[(1,)](x, w, w, output, size_k, 4, 512, False,
+                     num_warps=4, num_stages=1, waves_per_eu=0)
+        assert torch.equal(output, expected)
 
 
 @pytest.mark.parametrize("warps", [4, 8])

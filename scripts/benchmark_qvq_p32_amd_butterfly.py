@@ -36,6 +36,9 @@ def main():
     parser.add_argument("--recovery-warps", type=int, choices=(4, 8), default=8)
     parser.add_argument("--gemv-full-k", action="store_true")
     parser.add_argument("--gemv-dot2", action="store_true", help="Packed FP16 dot products accumulated in FP32")
+    parser.add_argument("--gemv-dot2-loop", action="store_true", help="Reduce once after the packed-dot K loop")
+    parser.add_argument("--gemv-gluon", action="store_true", help="Use explicit layouts for the packed-dot K loop")
+    parser.add_argument("--gemv-loop-k", type=int, choices=(256, 512, 1024), default=512)
     parser.add_argument("--gemv-split-k", action="store_true", help="Remove padded arithmetic from full-K GEMV")
     parser.add_argument("--graph-execute", action="store_true", help="Stage fresh inputs and clone graph outputs")
     parser.add_argument("--aiter-skinny", choices=("none", "wv", "llmm1"), default="none")
@@ -79,7 +82,9 @@ def main():
         composite_trim_kernel,
         fht128_kernel,
         fht128_split_kernel,
+        folded_gemv_dot2_gluon_kernel,
         folded_gemv_dot2_kernel,
+        folded_gemv_dot2_loop_kernel,
         folded_gemv_full_k_kernel,
         folded_gemv_split_k_kernel,
     )
@@ -206,7 +211,11 @@ def main():
                 size_n = grid[0] * kwargs["block_n"]
                 kwargs["block_n"] = args.gemv_block_n
                 kwargs["block_k"] = triton.next_power_of_2(kwargs["size_k"])
-                gemv = (folded_gemv_dot2_kernel if args.gemv_dot2 else
+                if args.gemv_dot2_loop or args.gemv_gluon:
+                    kwargs["block_k"] = args.gemv_loop_k
+                gemv = (folded_gemv_dot2_gluon_kernel if args.gemv_gluon else
+                        folded_gemv_dot2_loop_kernel if args.gemv_dot2_loop else
+                        folded_gemv_dot2_kernel if args.gemv_dot2 else
                         folded_gemv_split_k_kernel if args.gemv_split_k else folded_gemv_full_k_kernel)
                 return gemv[(size_n // args.gemv_block_n,)](*positional, **kwargs)
             return launch
@@ -272,7 +281,8 @@ def main():
             skinny_execute if name == "candidate" and aiter_skinny is not None else original_execute
         )
         candidate_amd._qvq_p32_folded_gemv_gfx950_kernel = (
-            full_k_gemv if name == "candidate" and (args.gemv_full_k or args.gemv_split_k or args.gemv_dot2)
+            full_k_gemv if name == "candidate" and (
+                args.gemv_full_k or args.gemv_split_k or args.gemv_dot2 or args.gemv_dot2_loop or args.gemv_gluon)
             else original_gemv
         )
         candidate_amd._qvq_p32_composite_recovery_gfx950_kernel = (
@@ -499,6 +509,7 @@ def main():
                 if aiter_skinny is not None and not qvq_p32_amd_folded_case_supported(m, k, n):
                     row["graph_check_status"] = "unchanged fallback: host validation is not graph-capture-safe"
                 if (args.graph_execute or (aiter_skinny is not None and m <= 4) or args.gemv_dot2
+                        or ((args.gemv_dot2_loop or args.gemv_gluon) and m == 1)
                         or ((k, n) == (17408, 5120) and m >= 1024)
                         or ((k, n) == (6144, 5120) and m >= 64)):
                     select("candidate")

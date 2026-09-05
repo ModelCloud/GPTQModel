@@ -2,6 +2,79 @@
 
 import triton
 import triton.language as tl
+from triton.experimental import gluon
+from triton.experimental.gluon import language as gl
+from triton.experimental.gluon.language import BlockedLayout, SliceLayout
+
+
+@gluon.jit
+def folded_gemv_dot2_gluon_kernel(
+    input_ptr, weight_ptr, residual_ptr, output_ptr,
+    size_k: gl.constexpr, block_n: gl.constexpr, block_k: gl.constexpr,
+    use_residual: gl.constexpr,
+):
+    """Explicit wave ownership; experimental FP32 reassociation, not a production path."""
+    gl.static_assert(size_k % block_k == 0)
+    layout: gl.constexpr = BlockedLayout([1, 4], [1, 64], [4, 1], [1, 0])
+    n = gl.program_id(0) * block_n + gl.arange(0, block_n, layout=SliceLayout(1, layout))
+    if use_residual:
+        k = gl.arange(0, block_k, layout=SliceLayout(0, layout))
+        partial = gl.full((block_n, block_k), 0, gl.float32, layout)
+        for offset in range(size_k // block_k):
+            c = offset * block_k + k
+            x = gl.load(input_ptr + c).to(gl.float32)
+            w = gl.load(weight_ptr + n[:, None] * size_k + c[None, :]).to(gl.float32)
+            w += gl.load(residual_ptr + n[:, None] * size_k + c[None, :]).to(gl.float32)
+            partial += w * x[None, :]
+    else:
+        pair = gl.arange(0, block_k // 2, layout=SliceLayout(0, layout))
+        partial = gl.full((block_n, block_k // 2), 0, gl.float32, layout)
+        for offset in range(size_k // block_k):
+            c = offset * (block_k // 2) + pair
+            x = gl.load(input_ptr.to(gl.pointer_type(gl.int32)) + c)
+            w = gl.load(weight_ptr.to(gl.pointer_type(gl.int32)) + n[:, None] * (size_k // 2) + c[None, :])
+            # Conservative dependency workaround validated on gfx950. The minimum
+            # delay is not established; removing it corrupts the all-ones test.
+            partial = gl.inline_asm_elementwise(
+                "v_dot2c_f32_f16 $0, $2, $3\n s_nop 7", "=v,0,v,v",
+                [partial, w, x[None, :]],
+                dtype=gl.float32, is_pure=True, pack=1,
+            )
+    gl.store(output_ptr + n, gl.sum(partial, 1))
+
+
+@triton.jit
+def folded_gemv_dot2_loop_kernel(
+    input_ptr, weight_ptr, residual_ptr, output_ptr,
+    size_k: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,
+    use_residual: tl.constexpr,
+):
+    """Accumulate packed FP32 partials across K tiles, then reduce once."""
+    tl.static_assert(size_k % block_k == 0)
+    n = tl.program_id(0) * block_n + tl.arange(0, block_n)
+    if use_residual:
+        k = tl.arange(0, block_k)
+        partial = tl.full((block_n, block_k), 0, tl.float32)
+        for offset in range(size_k // block_k):
+            c = offset * block_k + k
+            x = tl.load(input_ptr + c).to(tl.float32)
+            w = tl.load(weight_ptr + n[:, None] * size_k + c[None, :]).to(tl.float32)
+            w += tl.load(residual_ptr + n[:, None] * size_k + c[None, :]).to(tl.float32)
+            partial += w * x[None, :]
+    else:
+        pair = tl.arange(0, block_k // 2)
+        partial = tl.full((block_n, block_k // 2), 0, tl.float32)
+        for offset in range(size_k // block_k):
+            c = offset * (block_k // 2) + pair
+            x = tl.load(input_ptr.to(tl.pointer_type(tl.int32)) + c)
+            w = tl.load(weight_ptr.to(tl.pointer_type(tl.int32)) + n[:, None] * (size_k // 2) + c[None, :])
+            # Match the validated conservative delay in the Gluon experiment.
+            partial = tl.inline_asm_elementwise(
+                "v_dot2c_f32_f16 $0, $2, $3\n s_nop 7", "=v,0,v,v",
+                [partial, w, tl.broadcast_to(x[None, :], (block_n, block_k // 2))],
+                dtype=tl.float32, is_pure=True, pack=1,
+            )
+    tl.store(output_ptr + n, tl.sum(partial, 1))
 
 
 @triton.jit
