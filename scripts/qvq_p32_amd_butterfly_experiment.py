@@ -5,6 +5,34 @@ import triton.language as tl
 
 
 @triton.jit
+def folded_gemv_dot2_kernel(
+    input_ptr, weight_ptr, residual_ptr, output_ptr,
+    size_k: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,
+    use_residual: tl.constexpr,
+):
+    """FP16 packed products with FP32 accumulation, not FP16 product rounding."""
+    if use_residual:
+        folded_gemv_full_k_kernel(
+            input_ptr, weight_ptr, residual_ptr, output_ptr, size_k, block_n, block_k, use_residual,
+        )
+    else:
+        pair = tl.arange(0, block_k // 2)
+        n = tl.program_id(0) * block_n + tl.arange(0, block_n)
+        x = tl.load(input_ptr.to(tl.pointer_type(tl.int32)) + pair, pair < size_k // 2, 0)
+        w = tl.load(
+            weight_ptr.to(tl.pointer_type(tl.int32)) + n[:, None] * (size_k // 2) + pair[None, :],
+            pair[None, :] < size_k // 2, 0,
+        )
+        dot = tl.inline_asm_elementwise(
+            "v_dot2c_f32_f16 $0, $2, $3", "=v,0,v,v",
+            [tl.full((block_n, block_k // 2), 0, tl.float32), w,
+             tl.broadcast_to(x[None, :], (block_n, block_k // 2))],
+            dtype=tl.float32, is_pure=True, pack=1,
+        )
+        tl.store(output_ptr + n, tl.sum(dot, 1))
+
+
+@triton.jit
 def folded_gemv_split_k_kernel(
     input_ptr, weight_ptr, residual_ptr, output_ptr,
     size_k: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,

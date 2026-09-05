@@ -35,8 +35,10 @@ def main():
     parser.add_argument("--trim-composite", action="store_true", help="Experimentally remove padded recovery math")
     parser.add_argument("--recovery-warps", type=int, choices=(4, 8), default=8)
     parser.add_argument("--gemv-full-k", action="store_true")
+    parser.add_argument("--gemv-dot2", action="store_true", help="Packed FP16 dot products accumulated in FP32")
     parser.add_argument("--gemv-split-k", action="store_true", help="Remove padded arithmetic from full-K GEMV")
     parser.add_argument("--graph-execute", action="store_true", help="Stage fresh inputs and clone graph outputs")
+    parser.add_argument("--aiter-skinny", choices=("none", "wv", "llmm1"), default="none")
     parser.add_argument("--gemv-block-n", type=int, choices=(2, 4, 8), default=2)
     parser.add_argument("--shapes", nargs="+", choices=[shape[0] for shape in QWEN38_27B_SHAPES])
     parser.add_argument("--m-values", nargs="+", type=int, choices=REQUESTED_M)
@@ -59,6 +61,8 @@ def main():
         parser.error("Require iterations >= 2 and warmup >= 1")
     if args.folded_direct_ceiling and args.folded_residual_ceiling:
         parser.error("Choose only one raw operator ceiling")
+    if args.graph_execute and args.aiter_skinny != "none":
+        parser.error("Graph staging and skinny dispatch are separate experiments")
     hardware, valid = _idle_preflight(args)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["HIP_VISIBLE_DEVICES"] = str(args.physical_gpu)
@@ -72,6 +76,7 @@ def main():
         composite_trim_kernel,
         fht128_kernel,
         fht128_split_kernel,
+        folded_gemv_dot2_kernel,
         folded_gemv_full_k_kernel,
         folded_gemv_split_k_kernel,
     )
@@ -88,6 +93,11 @@ def main():
     original_recovery = candidate_amd._qvq_p32_composite_recovery_gfx950_kernel
     original_gemv = candidate_amd._qvq_p32_folded_gemv_gfx950_kernel
     original_execute = candidate_amd._qvq_p32_folded_execute
+    aiter_skinny = None
+    if args.aiter_skinny != "none":
+        import aiter
+
+        aiter_skinny = aiter.wvSpltK if args.aiter_skinny == "wv" else aiter.LLMM1
     baseline_source_dir = None
     if args.baseline_amd_commit:
         revision = subprocess.check_output(
@@ -187,13 +197,29 @@ def main():
                 size_n = grid[0] * kwargs["block_n"]
                 kwargs["block_n"] = args.gemv_block_n
                 kwargs["block_k"] = triton.next_power_of_2(kwargs["size_k"])
-                gemv = folded_gemv_split_k_kernel if args.gemv_split_k else folded_gemv_full_k_kernel
+                gemv = (folded_gemv_dot2_kernel if args.gemv_dot2 else
+                        folded_gemv_split_k_kernel if args.gemv_split_k else folded_gemv_full_k_kernel)
                 return gemv[(size_n // args.gemv_block_n,)](*positional, **kwargs)
             return launch
 
     full_k_gemv = FullKGemv()
 
     graph_entries = {}
+
+    def skinny_execute(x, operand, residual_operand=None, composite_recovery=None, **kwargs):
+        m, k = x.shape
+        n = kwargs["out_features"]
+        if (k, n) == (6144, 5120) and m <= 32:
+            residual_operand = None
+        if (composite_recovery is not None or residual_operand is not None or kwargs["output_fp32"]
+                or m > (4 if args.aiter_skinny == "wv" else 1) or not operand.T.is_contiguous()):
+            return original_execute(x, operand, residual_operand, composite_recovery, **kwargs)
+        output = torch.empty((m, n), device=x.device, dtype=x.dtype)
+        if args.aiter_skinny == "wv":
+            aiter_skinny(operand.T, x, output, m, props.multi_processor_count)
+        else:
+            aiter_skinny(operand.T, x, output, 4)
+        return output
 
     def graph_execute(x, operand, residual_operand=None, composite_recovery=None, **kwargs):
         # Single-threaded benchmark only. Preserve outer graph capture and autograd
@@ -220,10 +246,12 @@ def main():
 
     def select(name):
         candidate_amd._qvq_p32_folded_execute = (
-            graph_execute if name == "candidate" and args.graph_execute else original_execute
+            graph_execute if name == "candidate" and args.graph_execute else
+            skinny_execute if name == "candidate" and aiter_skinny is not None else original_execute
         )
         candidate_amd._qvq_p32_folded_gemv_gfx950_kernel = (
-            full_k_gemv if name == "candidate" and (args.gemv_full_k or args.gemv_split_k) else original_gemv
+            full_k_gemv if name == "candidate" and (args.gemv_full_k or args.gemv_split_k or args.gemv_dot2)
+            else original_gemv
         )
         candidate_amd._qvq_p32_composite_recovery_gfx950_kernel = (
             trimmed_recovery if name == "candidate" and args.trim_composite else original_recovery
@@ -258,6 +286,8 @@ def main():
             "gpu": props.name,
             "arch": props.gcnArchName,
             "cu_count": props.multi_processor_count,
+            "aiter_source": aiter.__file__ if aiter_skinny is not None else None,
+            "aiter_jit_dir": os.environ.get("AITER_JIT_DIR") if aiter_skinny is not None else None,
         },
         "config": vars(args) | {"output": str(args.output)},
         "valid": valid,
@@ -443,7 +473,8 @@ def main():
                         for e in graph_entries.values()
                     )
                     del saved, changed
-                if (args.graph_execute or ((k, n) == (17408, 5120) and m >= 1024)
+                if (args.graph_execute or aiter_skinny is not None or args.gemv_dot2
+                        or ((k, n) == (17408, 5120) and m >= 1024)
                         or ((k, n) == (6144, 5120) and m >= 64)):
                     select("candidate")
                     stream = torch.cuda.Stream()
