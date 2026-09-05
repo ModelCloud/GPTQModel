@@ -28,3 +28,9 @@ and full operator/model accuracy/performance scorecard remain outstanding.
 
 [Storage and timing](results/state-checkpoints/storage-and-timing.json), with raw
 per-module samples and exact-state assertions in the same directory.
+
+The smaller-launch follow-up completed for B=32 at 1 and 2 warps across all 94
+projections, again exactly matching states. Median direct/candidate ratio improves
+to 0.5001x, but the checkpoint kernel is still about 2x slower. This confirms that
+idle warp allocation explained part, not all, of the initial slowdown. Raw samples
+are in results/state-checkpoints/steps32-warp12.json.
