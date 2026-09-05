@@ -27,6 +27,7 @@ SOFTWARE.
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.amd.cdna4 import async_copy, mfma
+from triton.language import range as loop_range
 
 
 @gluon.jit
@@ -119,7 +120,7 @@ def folded_residual_prefetch_kernel(
         async_copy.wait_group(1)
         a, b, c = _load_tile(xs, hs, ls, 0, mma)
         gl.barrier()
-        for tile in range(size_k // block_k - 2):
+        for tile in loop_range(size_k // block_k - 2, loop_unroll_factor=2):
             write_index = tile % 2
             next_index = 1 - write_index
             offset = (tile + 2) * block_k
