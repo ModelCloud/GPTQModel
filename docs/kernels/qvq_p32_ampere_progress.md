@@ -4098,6 +4098,22 @@ IADD3 120->111, LEA 90->89).  The post-commit SSA/algebraic pass found no
 duplicated decode, redundant mask/shift, unnecessary conversion/permutation,
 address-expression regression, or spill.
 
+## v90 Qwen W2 M=4096 stage-4 sixteen-group reuse
+
+The stage-4 dynamic-shared probe was mixed when applied broadly: M=512
+regressed by 14--17%, M=2048 regressed by up to about 2%, and W2.5--W3.5 at
+M=4096 were neutral to slightly slower.  Those routes remain unchanged.
+The retained policy is restricted to Qwen3.8-27B, `M=4096`, W2
+(`TransitionBits=4`), and `N!=1024`.
+
+Three matched A100 repeats show every retained Qwen projection improving:
+full-Q 1.091x, attention-out 1.065x, linear-QKV 1.072x, linear-Z 1.077x,
+MLP gate/up 1.110x, and MLP-down 1.047x.  With the model projection
+multiplicities, the geometric mean is `1.0795x` versus v89.  Full-KV
+`N=1024` regressed by about 21% in the exploratory build and is explicitly
+excluded.  A randomized K=6144 attention-out comparison is bit-for-bit exact
+at split 8.
+
 ## Reproduction
 
 ```bash
