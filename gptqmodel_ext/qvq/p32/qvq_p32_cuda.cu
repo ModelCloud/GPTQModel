@@ -2962,8 +2962,7 @@ int launch_p32_large_m(
         set_last_error("QVQ P32 large-M2 stage_k_tiles must be in [1, 4]"); \
         return -1; \
     }
-    if (size_n != 1024 && config.stage_k_tiles != 4 &&
-        size_m % (8 * kRows) == 0) {
+    if (config.stage_k_tiles == 3 && size_m % (8 * kRows) == 0) {
       QVQ_LARGE_M2_STAGE(8)
     } else
     if (size_m % (4 * kRows) == 0) {

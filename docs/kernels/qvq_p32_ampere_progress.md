@@ -3744,6 +3744,36 @@ requires `0xc618`--`0x10820` bytes of static shared memory across the generated
 rate/N variants, exceeding Ampere's `0xc000` per-block limit.  The probe
 produced no binary and made no source change to the retained dispatch.
 
+## v80 stage-3 N=1024 eight-row reuse
+
+This WIP branch starts from freshly fetched `origin/main` at `8c131ac5` and
+keeps the merged eight-row schedule for wide projections unchanged.  The
+remaining fixed-N gap was the small `N=1024` projection: for `M=512/1024/2048/4096`
+and `stage_k_tiles=3`, the four-row CTA was substantially slower than the
+eight-row CTA even though the latter was previously excluded for this width.
+The dispatch now selects `RowGroups=8` only for that exact stage, while
+stages 1, 2, and 4 retain the prior four-row schedule.  This avoids the
+stage-1/2 regression seen in the broad guard probe.
+
+On the A100 SM80 target (`K=5120`, block variant, 128 threads, split 1), the
+four-rate `N=1024` stage-3 screen is exact for all M values and improves the
+candidate/control geometric mean by 1.153x (bits 4), 1.210x (bits 5),
+1.147x (bits 6), and 1.097x (bits 7).  At bits 4 the per-M speedups are
+1.064x/1.054x/1.154x/1.366x for `M=512/1024/2048/4096`.  The all-N stage-3
+matrix improves 1.024x because this specialization affects one of six N
+shapes; the targeted N=1024 result clears the requested 10% step.
+
+The random split-1 and split-8 comparisons match bit-for-bit for transition
+bits 4--7 (`M=512,N=1024`).  Resource usage for the new fixed-N, stage-3,
+eight-row entry is 96 registers/thread and 27,288 B static shared memory,
+with no local-memory spill; the retained four-row entry is 72 registers and
+15,000 B.  The broad stage-1/2 guard was rejected because it slowed the
+small-N screen and is recorded as a failed probe rather than enabled.
+
+The candidate library used for this screen was built directly from
+`gptqmodel_ext/qvq/p32/qvq_p32_cuda.cu` with CUDA 13.3, `-O3`,
+`--split-compile=64`, and `-gencode arch=compute_80,code=sm_80`.
+
 ## Reproduction
 
 ```bash
