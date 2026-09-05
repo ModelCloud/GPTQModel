@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from gptqmodel.quantization.qvq import yaqa_sketch_b
-from gptqmodel.quantization.qvq_yaqa import _sketch_b_gram_updates
+from gptqmodel.quantization.qvq_yaqa import YaqaGramSketch, _sketch_b_gram_updates
 from gptqmodel.utils.diagnostic_metrics import (
     greedy_trajectory_metrics,
     native_divergence_metrics_cuda,
@@ -1040,6 +1040,9 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
             "packed_symmetric_accumulators": False,
             "gram_strategy": "batched",
             "gram_projection_rank": None,
+            "gram_projection_distribution": None,
+            "gram_exact_diagonal": False,
+            "factor_approximate": False,
             "mps_cleanup_interval": 8,
         "mps_cleanup_count": 0,
         "minimum_sequences": 1,
@@ -1047,8 +1050,11 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
         "input_factor_elements": 4,
         "output_factor_elements": 4,
         "factor_storage_bytes": 32,
+        "dense_factor_storage_bytes": 32,
+        "factor_compression_ratio": 1.0,
         "tf32": False,
         "seed": 7,
+        "activation_quantization_error": None,
     }
     assert tuple(parameter.requires_grad for parameter in model.parameters()) == original_requires_grad
     assert all(parameter.grad is None for parameter in model.parameters())
@@ -1057,6 +1063,87 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
     invalid_average_input, invalid_average_output = yaqa_sketch_b(torch.stack(gradients).mean(dim=0, keepdim=True))
     assert not torch.allclose(input_hessians["proj"], invalid_average_input.float())
     assert not torch.allclose(output_hessians["proj"], invalid_average_output.float())
+
+
+def test_yaqa_streaming_projected_factor_is_compact_deterministic_and_materializable():
+    model = _TinyCausalModel().eval()
+    batches = [
+        {
+            "input_ids": torch.tensor([[1, 2], [3, 4]]),
+            "attention_mask": torch.ones((2, 2), dtype=torch.long),
+        },
+        {
+            "input_ids": torch.tensor([[5, 6]]),
+            "attention_mask": torch.ones((1, 2), dtype=torch.long),
+        },
+    ]
+    modules = {"proj": model.model.layers[0].proj}
+
+    exact_input, exact_output, _ = capture_yaqa_sketch_b(
+        model,
+        batches,
+        modules,
+        device=torch.device("cpu"),
+        seed=91,
+    )
+    captures = [
+        capture_yaqa_sketch_b(
+            model,
+            batches,
+            modules,
+            device=torch.device("cpu"),
+            seed=91,
+            gram_strategy="streaming_projected",
+            gram_projection_rank=4096,
+        )
+        for _ in range(2)
+    ]
+
+    first_input, first_output, stats = captures[0]
+    assert isinstance(first_input["proj"], YaqaGramSketch)
+    assert isinstance(first_output["proj"], YaqaGramSketch)
+    assert first_input["proj"].source.shape == (2, 4096)
+    assert first_output["proj"].source.shape == (2, 4096)
+    assert stats["gram_strategy"] == "streaming_projected"
+    assert stats["factor_storage_bytes"] == 2 * 2 * (4096 + 1) * 4
+    assert stats["dense_factor_storage_bytes"] == 2 * 2 * 2 * 4
+    torch.testing.assert_close(first_input["proj"].source, captures[1][0]["proj"].source)
+    torch.testing.assert_close(first_output["proj"].source, captures[1][1]["proj"].source)
+    torch.testing.assert_close(first_input["proj"].diagonal, exact_input["proj"].diagonal(), rtol=0, atol=1e-6)
+    torch.testing.assert_close(first_output["proj"].diagonal, exact_output["proj"].diagonal(), rtol=0, atol=1e-6)
+    torch.testing.assert_close(
+        first_input["proj"].materialize(device=torch.device("cpu")),
+        exact_input["proj"],
+        rtol=0.05,
+        atol=0.05,
+    )
+    torch.testing.assert_close(
+        first_output["proj"].materialize(device=torch.device("cpu")),
+        exact_output["proj"],
+        rtol=0.05,
+        atol=0.05,
+    )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_yaqa_streaming_projected_materialization_forces_ieee_fp32_and_restores_backend():
+    source = torch.randn((32, 64), dtype=torch.float32)
+    diagonal = (source @ source.T).diagonal() / 64.0
+    sketch = YaqaGramSketch(source=source, diagonal=diagonal, normalizer=64.0, seed=17)
+    expected = (source @ source.T) / sketch.normalizer
+    cuda_matmul = torch.backends.cuda.matmul
+    previous_precision = cuda_matmul.fp32_precision
+    try:
+        cuda_matmul.fp32_precision = "tf32"
+        actual = sketch.materialize(device=torch.device("cuda")).cpu()
+        assert cuda_matmul.fp32_precision == "tf32"
+    finally:
+        cuda_matmul.fp32_precision = previous_precision
+
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(actual.diagonal(), diagonal, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(sketch.source, source, rtol=0, atol=0)
 
 
 def test_yaqa_weighted_capture_tracks_effective_coverage_without_duplication():

@@ -403,6 +403,25 @@ the YAQA factors fixed is not an increase in YAQA Hessian evidence. `YaqaConfig.
 fail-closed lower-bound check; the actual treatment is the population supplied through `yaqa_calibration`. Report the
 observed `independent_sequences` and valid-output-token count, not only the configured minimum.
 
+Large dense models can make the two FP32 Sketch-B factors impractical to retain. For example, the 400 quantized
+linears in Qwen3.8-27B require about 299 GiB of dense factors. `YaqaConfig.gram_strategy="auto"` retains exact
+collection when the factors fit the safe accelerator working set and otherwise selects
+`"streaming_projected"`. The streaming collector applies seeded Gaussian projections to the concatenated
+per-sequence score matrices and retains `[features, rank]` sources plus the exact FP32 Fisher diagonal. It uses a
+diagonal congruence transform when materializing one dense PSD Gram, making every channel curvature exact while only
+the cross-channel correlations remain sketched. The default rank is 256 and can be changed with
+`gram_projection_rank`; use
+`gram_strategy="exact"` for an explicit dense control. Telemetry reports the configured and selected strategy,
+projection distribution/rank, exact-diagonal status, logical dense bytes, retained bytes, and compression ratio. The
+off-diagonal projected estimator is unbiased over its seeded projection but a single realization is approximate, so
+production rank changes still require post-quantization KL, Top-N, perplexity, and task-quality gates.
+
+`scripts/benchmark_qvq_yaqa_qwen38.py` is the strict H200 comparison harness and
+`scripts/profile_qvq_yaqa_streaming.py` isolates the generated collection kernels for NCU/SASS inspection. The
+Qwen3.8-27B architecture revision has 400 target linears and the same relevant 64-layer/5120-hidden/17408-MLP
+geometry as the locally available Qwen3.5-27B checkpoint used when exact Qwen3.8 weights are unavailable; benchmark
+payloads label that substitution explicitly rather than presenting it as a weight-identical run.
+
 The completed Llama-3.2-1B overlap controls held ordinary calibration at `[0,512)` and expanded only the nested YAQA
 population from `[0,512)` to `[0,1024)`. Their changes are mixed:
 
