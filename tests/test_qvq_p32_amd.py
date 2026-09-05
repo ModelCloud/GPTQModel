@@ -36,6 +36,42 @@ P32_RATES = (2.0, 2.5, 3.0, 3.5)
 REQUESTED_M = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
 
 
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available() or not torch.version.hip, reason="requires AMD GPU")
+@pytest.mark.parametrize("output_fp32", (False, True))
+@pytest.mark.parametrize("grad_input", (None, 0, 1, 2))
+def test_folded_correction_private_output_and_autograd_fallback(output_fp32, grad_input):
+    from gptqmodel.utils.qvq_amd import _qvq_p32_folded_execute
+
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("requires gfx950")
+    generator = torch.Generator(device="cuda").manual_seed(9506144)
+    x = torch.randn((64, 256), generator=generator, device="cuda", dtype=torch.float16) * 0.01
+    w = torch.randn((256, 256), generator=generator, device="cuda", dtype=torch.float16)
+    low = torch.randn((256, 256), generator=generator, device="cuda", dtype=torch.float16) * 0.001
+    tensors = (x, w, low)
+    saved = tuple(t.clone() for t in tensors)
+    reference = torch.addmm(torch.mm(x, w, out_dtype=torch.float32), x, low, out_dtype=torch.float32)
+    if grad_input is not None:
+        tensors[grad_input].requires_grad_(True)
+    with patch("torch.addmm", wraps=torch.addmm) as addmm:
+        actual = _qvq_p32_folded_execute(x, w, low, out_features=256, output_fp32=output_fp32)
+        arguments = addmm.call_args
+    assert ("out" in arguments.kwargs) == (grad_input is None)
+    if grad_input is None:
+        assert arguments.kwargs["out"] is arguments.args[0]
+    expected = reference if output_fp32 else reference.to(torch.float16)
+    assert torch.equal(actual, expected)
+    for tensor, prior in zip(tensors, saved):
+        assert torch.equal(tensor, prior)
+    previous = actual.clone()
+    changed = _qvq_p32_folded_execute(-x, w, low, out_features=256, output_fp32=output_fp32)
+    # Compare identical inputs/evaluation, not an assumed floating-point odd symmetry.
+    negative = torch.addmm(torch.mm(-x, w, out_dtype=torch.float32), -x, low, out_dtype=torch.float32)
+    assert torch.equal(changed, negative if output_fp32 else negative.to(torch.float16))
+    assert torch.equal(actual, previous)
+
+
 def test_qvq_p32_amd_benchmark_filters_rocm_processes_to_target_gpu():
     system = {
         "Driver version": "7.1.3",

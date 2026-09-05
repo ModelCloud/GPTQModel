@@ -633,11 +633,18 @@ def _qvq_p32_folded_execute(
         return output
     if residual_operand is not None:
         primary = torch.mm(x, operand, out_dtype=torch.float32)
+        # primary is fresh, private FP32 storage. Reusing it avoids addmm's
+        # device-to-device copy without changing the correction or rounding.
+        # The out= variant does not support autograd; preserve that fallback.
+        reuse_primary = not torch.is_grad_enabled() or not (
+            x.requires_grad or operand.requires_grad or residual_operand.requires_grad
+        )
         output = torch.addmm(
             primary,
             x,
             residual_operand,
             out_dtype=torch.float32,
+            **({"out": primary} if reuse_primary else {}),
         )
         return output if output_fp32 else output.to(x.dtype)
     return torch.mm(x, operand, out_dtype=torch.float32 if output_fp32 else x.dtype)

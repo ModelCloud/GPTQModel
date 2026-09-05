@@ -38,6 +38,9 @@ def main():
     parser.add_argument("--gemv-dot2", action="store_true", help="Packed FP16 dot products accumulated in FP32")
     parser.add_argument("--gemv-dot2-loop", action="store_true", help="Reduce once after the packed-dot K loop")
     parser.add_argument("--gemv-gluon", action="store_true", help="Use explicit layouts for the packed-dot K loop")
+    parser.add_argument("--inplace-correction", action="store_true",
+                        help="Reuse the private FP32 primary output for residual addmm")
+    parser.add_argument("--torch-profile-dir", type=Path, help="Capture warmed paired operator mapping traces")
     parser.add_argument("--gemv-loop-k", type=int, choices=(256, 512, 1024), default=512)
     parser.add_argument("--gemv-split-k", action="store_true", help="Remove padded arithmetic from full-K GEMV")
     parser.add_argument("--graph-execute", action="store_true", help="Stage fresh inputs and clone graph outputs")
@@ -69,6 +72,8 @@ def main():
         parser.error("Graph staging and skinny dispatch are separate experiments")
     if args.aiter_direct and args.aiter_skinny == "none":
         parser.error("--aiter-direct requires --aiter-skinny and a prebuilt AITER module_custom")
+    if args.inplace_correction and (args.graph_execute or args.aiter_skinny != "none"):
+        parser.error("In-place correction, graph staging, and skinny dispatch are separate experiments")
     hardware, valid = _idle_preflight(args)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["HIP_VISIBLE_DEVICES"] = str(args.physical_gpu)
@@ -275,8 +280,17 @@ def main():
         graph.replay()
         return static_y.clone()
 
+    def inplace_correction_execute(x, operand, residual_operand=None, composite_recovery=None, **kwargs):
+        if (composite_recovery is not None or residual_operand is None or x.shape[0] < 64
+                or (torch.is_grad_enabled() and any(t.requires_grad for t in (x, operand, residual_operand)))):
+            return original_execute(x, operand, residual_operand, composite_recovery, **kwargs)
+        primary = torch.mm(x, operand, out_dtype=torch.float32)
+        torch.addmm(primary, x, residual_operand, out_dtype=torch.float32, out=primary)
+        return primary if kwargs["output_fp32"] else primary.to(x.dtype)
+
     def select(name):
         candidate_amd._qvq_p32_folded_execute = (
+            inplace_correction_execute if name == "candidate" and args.inplace_correction else
             graph_execute if name == "candidate" and args.graph_execute else
             skinny_execute if name == "candidate" and aiter_skinny is not None else original_execute
         )
@@ -321,7 +335,8 @@ def main():
             "aiter_source": aiter.__file__ if aiter_skinny is not None else None,
             "aiter_jit_dir": os.environ.get("AITER_JIT_DIR") if aiter_skinny is not None else None,
         },
-        "config": vars(args) | {"output": str(args.output)},
+        "config": vars(args) | {"output": str(args.output),
+                                "torch_profile_dir": str(args.torch_profile_dir) if args.torch_profile_dir else None},
         "valid": valid,
         "rows": [],
         "kernel_source_sha256": hashlib.sha256(
@@ -331,6 +346,7 @@ def main():
             (root / "gptqmodel/nn_modules/qlinear/qvq.py").read_bytes()
         ).hexdigest(),
         "amd_source_sha256": hashlib.sha256((root / "gptqmodel/utils/qvq_amd.py").read_bytes()).hexdigest(),
+        "benchmark_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "status": "exploratory; not production promotion or model-quality evidence",
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -429,6 +445,16 @@ def main():
                     for _ in range(args.warmup):
                         run(name)
                 torch.cuda.synchronize()
+                if args.torch_profile_dir:
+                    args.torch_profile_dir.mkdir(parents=True, exist_ok=True)
+                    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                                           torch.profiler.ProfilerActivity.CUDA]) as prof:
+                        for name in ("baseline", "candidate"):
+                            select(name)
+                            with torch.profiler.record_function(f"qvq_{name}"):
+                                run(name)
+                            torch.cuda.synchronize()
+                    prof.export_chrome_trace(str(args.torch_profile_dir / f"{shape}_w{bits}_m{m}.json"))
                 _, okay = _timing_recheck(args, permitted)
                 report["valid"] &= okay
                 records = []
@@ -493,7 +519,8 @@ def main():
                     if row["accuracy_basis"] == "canonical_fp32"
                     else torch.equal(outputs["candidate"], outputs["baseline"])
                 )
-                if args.graph_execute:
+                row["exact_baseline_equal"] = torch.equal(outputs["candidate"], outputs["baseline"])
+                if args.graph_execute or args.inplace_correction or ((k, n) == (6144, 5120) and m >= 64):
                     select("candidate")
                     saved = outputs["candidate"].clone()
                     changed = run("candidate", -x)
