@@ -2955,8 +2955,9 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       "grouped QVQ P32 TMA WGMMA tensors must be contiguous");
   TORCH_CHECK(
       input.dim() == 2 && input.size(0) >= kRows &&
-          input.size(0) % kRows == 0 && input.size(0) <= 4096,
-      "grouped QVQ P32 TMA WGMMA requires M in [16, 4096] and divisible by 16");
+          input.size(0) % kRows == 0 &&
+          input.size(0) <= (RowTilesPerCta == 11 ? 4224 : 4096),
+      "grouped QVQ P32 TMA WGMMA row count exceeds its specialization limit");
   TORCH_CHECK(
       input.size(1) > 0 && input.size(1) % kKPerStage == 0,
       "grouped QVQ P32 TMA WGMMA K must be a positive multiple of 256");

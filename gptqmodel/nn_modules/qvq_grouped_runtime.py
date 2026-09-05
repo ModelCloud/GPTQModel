@@ -863,14 +863,15 @@ class QVQHopperGroupedRuntime:
             return partials
 
         use_h100_reuse11_gate_up = (
-            rows == 512
+            rows in (512, 4096)
             and self._h100_multiblock_intermediate_enabled
             and children[0].in_features == 2048
             and all(segment.split_count == 1 for segment in payload.plan.segments)
         )
         if use_h100_reuse11_gate_up:
+            reuse11_rows = 528 if rows == 512 else 4224
             reuse11_padded = torch.zeros(
-                (528, children[0].in_features),
+                (reuse11_rows, children[0].in_features),
                 device=padded.device,
                 dtype=padded.dtype,
             )

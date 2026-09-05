@@ -989,11 +989,11 @@ def qvq_p32_window_wgmma_grouped_reuse11_packed(
         input.ndim != 2
         or input.shape[1] != plan.in_features
         or rows < 176
-        or rows > 4096
+        or rows > 4224
         or rows % 176
     ):
         raise ValueError(
-            "grouped Hopper P32 reuse-11 input requires M in [176, 4096] "
+            "grouped Hopper P32 reuse-11 input requires M in [176, 4224] "
             "and divisible by 176"
         )
     if any(segment.split_count != 1 for segment in plan.segments):

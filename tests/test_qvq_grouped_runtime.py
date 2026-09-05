@@ -1074,7 +1074,8 @@ def test_h100_large_m_wide_gate_up_runtime_is_exact_graph_safe_and_observable():
     assert telemetry["plain_fallbacks"] == 0
 
 
-def test_h100_m512_reuse11_runtime_is_exact_graph_safe_and_observable():
+@pytest.mark.parametrize("logical_m", (512, 4096))
+def test_h100_reuse11_runtime_is_exact_graph_safe_and_observable(logical_m):
     device = _h100_device()
     if device is None:
         pytest.skip("requires the exclusive H100 validation device")
@@ -1095,7 +1096,9 @@ def test_h100_m512_reuse11_runtime_is_exact_graph_safe_and_observable():
         )
     )
     mlp = _MLP(children)
-    static_input = torch.randn((512, 2048), device=device, dtype=torch.float16) * 0.02
+    static_input = (
+        torch.randn((logical_m, 2048), device=device, dtype=torch.float16) * 0.02
+    )
     with torch.inference_mode():
         expected = (mlp.gate_proj(static_input), mlp.up_proj(static_input))
     assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}

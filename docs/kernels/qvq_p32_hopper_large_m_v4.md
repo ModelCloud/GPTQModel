@@ -32,8 +32,21 @@ the same K traversal, WGMMA instruction sequence, FP32 accumulation order, and
 FP16 recovery boundary. Padded rows are discarded before recovery.
 
 The specialization is deliberately narrow: physical NVIDIA H100, grouped
-Llama 2048-to-8192 gate/up, unsplit children, and logical M512. Other devices,
-shapes, rates, and row counts retain the merged production path.
+Llama 2048-to-8192 gate/up, unsplit children, and logical M512 or M4096. Other
+devices, shapes, rates, and row counts retain the merged production path.
+
+At M4096, padding to M4224 similarly replaces 32 reuse-8 row waves with 24
+reuse-11 waves:
+
+```text
+merged:    4096 / 128 = 32 row waves
+reuse-11:  4224 / 176 = 24 row waves
+```
+
+The same 3.125% zero-row tensor work therefore removes 25% of repeated P32
+decode/address CTAs. The runtime slices back to the 4096 logical rows before
+the fused gate/up recovery and down precondition, so neither model-visible
+shape nor the FP32/FP16 rounding contract changes.
 
 ## Rejected decode lookup
 
@@ -112,3 +125,20 @@ still requires sharing or eliminating decode/address work.
 
 NCU report:
 `artifacts/qvq_hopper_large_m/profiles/v4_w25_reuse11_coalesced_c5052486_ncu.ncu-rep`.
+
+## M4096 reuse-11 result
+
+| Weight | Gate/up M×K×N | Down M×K×N | Merged main | Reuse-11 | Speedup | vs Marlin W4 | vs Machete W4 | Better than last |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| W2 | 4096×2048×8192 | 4096×8192×2048 | 2447.298 µs | 2344.182 µs | 1.044× | 0.592× | 0.390× | Yes |
+| W2.5 | 4096×2048×8192 | 4096×8192×2048 | 2484.994 µs | 2390.654 µs | 1.039× | 0.581× | 0.382× | Yes |
+| W3 | 4096×2048×8192 | 4096×8192×2048 | 2503.269 µs | 2409.439 µs | 1.039× | 0.576× | 0.379× | Yes |
+| W3.5 | 4096×2048×8192 | 4096×8192×2048 | 2468.720 µs | 2397.978 µs | 1.030× | 0.579× | 0.381× | Yes |
+
+All four rows passed warmed CUDA Graph replay. The maximum absolute error is
+`1.0729e-6`, and the runtime test requires the sliced logical M4096 output to
+be bit-exact to ordinary child execution. No persistent or temporary decoded
+weight cache is introduced.
+
+Artifact:
+`artifacts/qvq_hopper_large_m/v4_reuse11_m4096_candidate.json`.
