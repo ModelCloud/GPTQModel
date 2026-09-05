@@ -13,12 +13,15 @@ ROOT = Path("/root/p32-native-recovery")
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
+    parser.add_argument("--names", nargs="+", default=["q_proj", "k_proj", "gate_proj", "down_proj"])
     args = parser.parse_args()
-    for name in ["q_proj", "k_proj", "gate_proj", "down_proj"]:
+    for name in args.names:
         root = args.root / name
         # Files were created by this experiment; no third-party pickle inputs.
         bundle = torch.load(root / "export.pt", map_location="cpu", weights_only=False)
         report = json.loads((root / "report.json").read_text())
+        if not report.get("complete"):
+            raise ValueError(f"Incomplete source study: {root}")
         k, n = bundle["a"].shape[0], bundle["b"].shape[1]
         records = []
         for rank in sorted(

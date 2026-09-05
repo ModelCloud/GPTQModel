@@ -22,6 +22,12 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--uuid", required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument(
+        "--export",
+        type=Path,
+        default=Path("/root/p32-low-rank/worker2/rank8-tail-float16.pt"),
+    )
+    p.add_argument("--channels", type=int, choices=[1, 2, 4, 8], default=1)
     args = p.parse_args()
     from scripts.p32_twenty.low_rank_sweep import SNAPSHOT, sha
 
@@ -65,7 +71,7 @@ def main():
 
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-    source = Path("/root/p32-low-rank/worker2/rank8-tail-float16.pt")
+    source = args.export
     digest = sha(source)
     op = RecoveredLinear(source)
     bundle = torch.load(source, map_location="cpu", weights_only=False)
@@ -166,26 +172,38 @@ def main():
         worst = int(original_error.argmax())
         channel = worst % n
         report["target_channel"] = channel
+        channels = torch.argsort(original_error.amax(0), descending=True, stable=True)[
+            : args.channels
+        ]
+        report["target_channels"] = channels.cpu().tolist()
         report["original_worst_token"] = worst // n
         report["original_window_max"] = float(original_error.max())
         yc, ye = teacher(xc), teacher(xe)
-        z = yc[:, channel].double() - raw(xc)[:, channel].double()
+        z = yc[:, channels].double() - raw(xc)[:, channels].double()
         x = xc.double()
         energy = x.square().sum(0)
-        score = (x.T @ z).square() / energy.clamp_min(1e-30)
-        support = torch.argsort(score, descending=True, stable=True)[:512]
+        score = (x.T @ z).square() / energy.clamp_min(1e-30)[:, None]
+        support = torch.argsort(score.flatten(), descending=True, stable=True)[:512]
         for budget in [0, 1, 4, 8, 16, 32, 64, 128, 256, 512]:
-            positions = support[:budget]
-            if budget:
-                u, s, vh = torch.linalg.svd(x[:, positions], full_matrices=False)
-                keep = s > s[0] * 1e-5
-                values = (vh[keep].T @ ((u[:, keep].T @ z) / s[keep])).float()
-            else:
-                values = torch.empty(0, device="cuda")
+            selected = support[:budget]
+            positions = selected // args.channels
+            output_positions = selected % args.channels
+            values = torch.empty(budget, device="cuda", dtype=torch.float32)
+            for column in range(args.channels):
+                chosen = output_positions == column
+                if not chosen.any():
+                    continue
+                u, singular, vh = torch.linalg.svd(
+                    x[:, positions[chosen]], full_matrices=False
+                )
+                keep = singular > singular[0] * 1e-5
+                values[chosen] = (
+                    vh[keep].T @ ((u[:, keep].T @ z[:, column]) / singular[keep])
+                ).float()
             export = dict(bundle)
             export.update(
                 sparse_input_indices=positions.int().cpu(),
-                sparse_output_indices=torch.full((budget,), channel, dtype=torch.int32),
+                sparse_output_indices=channels[output_positions].int().cpu(),
                 sparse_values=values.cpu(),
                 sparse_fit="calibration normalized correlation support; FP64 least-squares rcond1e-5; original development-case target channel",
             )
@@ -193,7 +211,7 @@ def main():
             torch.save(export, path)
             candidate = RecoveredLinear(path)
             item = {
-                "rank": 8,
+                "rank": op.a.shape[1],
                 "fit": "targeted_sparse",
                 "factor_dtype": "float16",
                 "nnz": budget,

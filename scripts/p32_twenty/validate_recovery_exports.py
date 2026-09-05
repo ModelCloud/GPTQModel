@@ -16,6 +16,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--uuid", required=True)
     p.add_argument("--name", required=True)
+    p.add_argument("--evaluation-root", type=Path, default=Path("/root/p32-timing-activations"))
     p.add_argument("--profile", action="store_true")
     p.add_argument("--profile-m", type=int, default=16)
     p.add_argument("--root", type=Path, default=Path("/root/p32-native-recovery"))
@@ -56,7 +57,7 @@ def main():
     report = json.loads((root / "report.json").read_text())
     module = report["module"]
     data = torch.load(
-        Path("/root/p32-timing-activations") / (module + ".pt"), weights_only=True
+        args.evaluation_root / (module + ".pt"), weights_only=True
     )
     x = data["input"].cuda().float().reshape(-1, data["input"].shape[-1])
     y = (

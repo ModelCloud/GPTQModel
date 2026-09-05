@@ -99,3 +99,8 @@ fixed-base rank sweep. Production-window comparisons and broader checks remain.
 
 Raw numerical, storage, replay and timing evidence is in
 [results/rank8-targeted](results/rank8-targeted). No production default is changed.
+
+A four-channel sparse follow-up also ran on ranks2/4/6/12. Rank6 plus32 exceptions
+passes the original nine window cases; rank2/4 remain failing throughout the tested
+budgets. These are targeted development results; broader replay and model checks
+remain. Generalized source keeps the original single-channel mode as its default.

@@ -1,0 +1,3135 @@
+{
+  "experiment": 19,
+  "joint_steps": 0,
+  "fp16_boundary": true,
+  "module": "model.layers.9.mlp.down_proj",
+  "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+  "scope": "one real projection; actual TorchAO INT4-storage BF16-activation tinygemm plus FP32 low-rank GEMMs; not INT4 activation IMMA or full-model evaluation",
+  "source_revision": "6c37ef51823cb65dba6f8dbc178808f03bc3973e",
+  "calibration": "/root/p32-low-rank/all-down-calibration",
+  "calibration_rows": 8192,
+  "evaluation": "/root/p32-low-rank/all-down-heldout",
+  "evaluation_scope": "separate C4 teacher activation capture; never used in fitting",
+  "activation_rcond": 1e-05,
+  "rows": [
+    {
+      "M": 1,
+      "planar_metrics": {
+        "elements": 2048,
+        "mean_abs": 6.635785075204126e-06,
+        "max_abs": 3.995373845100403e-05,
+        "relative_l2": 0.00012078180007476437,
+        "cosine": 0.9999999927417239,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "native_metrics": {
+        "elements": 2048,
+        "mean_abs": 0.003531012935587441,
+        "max_abs": 0.023220580857014284,
+        "relative_l2": 0.0651353322201724,
+        "cosine": 0.9978810985324446,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": false
+      },
+      "window_metrics": {
+        "elements": 2048,
+        "mean_abs": 6.6347331895144634e-06,
+        "max_abs": 3.997422754764557e-05,
+        "relative_l2": 0.00012075008833817326,
+        "cosine": 0.9999999927411256,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "window_ms": [
+        2.027519941329956,
+        1.9834879636764526,
+        1.968127965927124,
+        1.9496959447860718,
+        1.9640320539474487,
+        1.9691519737243652,
+        1.9691519737243652,
+        1.9834879636764526,
+        1.9496959447860718,
+        1.9568639993667603
+      ],
+      "planar_ms": [
+        1.9302400350570679,
+        1.955839991569519,
+        1.9302400350570679,
+        1.943552017211914,
+        1.9179519414901733,
+        1.9937280416488647,
+        1.921023964881897,
+        1.926144003868103,
+        1.9220479726791382,
+        1.9066879749298096
+      ],
+      "native_ms": [
+        0.187391996383667,
+        0.1812479943037033,
+        0.16896000504493713,
+        0.1669120043516159,
+        0.17612800002098083,
+        0.1658879965543747,
+        0.17203199863433838,
+        0.1669120043516159,
+        0.16896000504493713,
+        0.1730560064315796
+      ],
+      "ranks": [
+        {
+          "requested_rank": 0,
+          "actual_rank": 0,
+          "metrics": {
+            "elements": 2048,
+            "mean_abs": 0.0035310129210355257,
+            "max_abs": 0.023220580857014284,
+            "relative_l2": 0.0651353321808513,
+            "cosine": 0.9978810985350033,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0065854056012782484,
+            "max_abs": 0.1523182950913906,
+            "relative_l2": 0.10339912100224867,
+            "cosine": 0.9946974586830778,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.19968000054359436,
+            0.19148799777030945,
+            0.18534399569034576,
+            0.1812479943037033,
+            0.1812479943037033,
+            0.19660800695419312,
+            0.2590720057487488,
+            0.18943999707698822,
+            0.18432000279426575,
+            0.18943999707698822
+          ],
+          "factor_bytes": 0,
+          "tensor_payload_bpw": 4.25
+        },
+        {
+          "requested_rank": 2,
+          "actual_rank": 2,
+          "metrics": {
+            "elements": 2048,
+            "mean_abs": 0.003513559496473917,
+            "max_abs": 0.023739379685139284,
+            "relative_l2": 0.06482831802076973,
+            "cosine": 0.9979002051648929,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006238608022742882,
+            "max_abs": 0.1464589200913906,
+            "relative_l2": 0.09804633470399232,
+            "cosine": 0.9952277843215369,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.25600001215934753,
+            0.2590720057487488,
+            0.24371199309825897,
+            0.24166400730609894,
+            0.25804799795150757,
+            0.24063999950885773,
+            0.23347200453281403,
+            0.2385919988155365,
+            0.28467199206352234,
+            0.23756800591945648
+          ],
+          "factor_bytes": 81920,
+          "tensor_payload_bpw": 4.2890625
+        },
+        {
+          "requested_rank": 4,
+          "actual_rank": 4,
+          "metrics": {
+            "elements": 2048,
+            "mean_abs": 0.0034943432677376762,
+            "max_abs": 0.024273437302326784,
+            "relative_l2": 0.06447915890242716,
+            "cosine": 0.9979260790774246,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006128960816084295,
+            "max_abs": 0.1313222013413906,
+            "relative_l2": 0.09639617729705185,
+            "cosine": 0.9953864019218669,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.26316800713539124,
+            0.24268800020217896,
+            0.23552000522613525,
+            0.2611199915409088,
+            0.23244799673557281,
+            0.22835199534893036,
+            0.23449599742889404,
+            0.25702399015426636,
+            0.22937600314617157,
+            0.23552000522613525
+          ],
+          "factor_bytes": 163840,
+          "tensor_payload_bpw": 4.328125
+        },
+        {
+          "requested_rank": 6,
+          "actual_rank": 6,
+          "metrics": {
+            "elements": 2048,
+            "mean_abs": 0.003476506890086384,
+            "max_abs": 0.022076171677326784,
+            "relative_l2": 0.0642422699247625,
+            "cosine": 0.997942450880702,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.00606095394468995,
+            "max_abs": 0.06979374587535858,
+            "relative_l2": 0.0952243572775319,
+            "cosine": 0.9954972332360799,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.25702399015426636,
+            0.25600001215934753,
+            0.24985599517822266,
+            0.24473600089550018,
+            0.24063999950885773,
+            0.2519040107727051,
+            0.24883200228214264,
+            0.24166400730609894,
+            0.24883200228214264,
+            0.2396160066127777
+          ],
+          "factor_bytes": 245760,
+          "tensor_payload_bpw": 4.3671875
+        },
+        {
+          "requested_rank": 8,
+          "actual_rank": 8,
+          "metrics": {
+            "elements": 2048,
+            "mean_abs": 0.003468927771342223,
+            "max_abs": 0.022396606247639284,
+            "relative_l2": 0.06418987067686904,
+            "cosine": 0.9979450314266706,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0060001558750482145,
+            "max_abs": 0.060140348970890045,
+            "relative_l2": 0.09427825892716872,
+            "cosine": 0.9955857523557474,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.2529279887676239,
+            0.24473600089550018,
+            0.23347200453281403,
+            0.2519040107727051,
+            0.2457599937915802,
+            0.2385919988155365,
+            0.24268800020217896,
+            0.2396160066127777,
+            0.22835199534893036,
+            0.24371199309825897
+          ],
+          "factor_bytes": 327680,
+          "tensor_payload_bpw": 4.40625
+        },
+        {
+          "requested_rank": 12,
+          "actual_rank": 12,
+          "metrics": {
+            "elements": 2048,
+            "mean_abs": 0.0034644232587819346,
+            "max_abs": 0.022106689255451784,
+            "relative_l2": 0.06404809223702368,
+            "cosine": 0.9979548960760447,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005900272591606196,
+            "max_abs": 0.061977818608284,
+            "relative_l2": 0.09274468456463308,
+            "cosine": 0.9957277382909078,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.29183998703956604,
+            0.2611199915409088,
+            0.2457599937915802,
+            0.24883200228214264,
+            0.25702399015426636,
+            0.2519040107727051,
+            0.2457599937915802,
+            0.26214399933815,
+            0.2457599937915802,
+            0.24883200228214264
+          ],
+          "factor_bytes": 491520,
+          "tensor_payload_bpw": 4.484375
+        },
+        {
+          "requested_rank": 16,
+          "actual_rank": 16,
+          "metrics": {
+            "elements": 2048,
+            "mean_abs": 0.0034561567575277508,
+            "max_abs": 0.021755737107014284,
+            "relative_l2": 0.06360166848172291,
+            "cosine": 0.9979835563153975,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005818011634831341,
+            "max_abs": 0.062221959233284,
+            "relative_l2": 0.09147744050659865,
+            "cosine": 0.9958433368368416,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.26009601354599,
+            0.2396160066127777,
+            0.2457599937915802,
+            0.24985599517822266,
+            0.23449599742889404,
+            0.2385919988155365,
+            0.2303999960422516,
+            0.25088000297546387,
+            0.2396160066127777,
+            0.23552000522613525
+          ],
+          "factor_bytes": 655360,
+          "tensor_payload_bpw": 4.5625
+        }
+      ]
+    },
+    {
+      "M": 2,
+      "planar_metrics": {
+        "elements": 4096,
+        "mean_abs": 9.45292863274716e-06,
+        "max_abs": 5.858391523361206e-05,
+        "relative_l2": 0.0001751400156082293,
+        "cosine": 0.999999984665778,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "native_metrics": {
+        "elements": 4096,
+        "mean_abs": 0.004836530117402038,
+        "max_abs": 0.04611910879611969,
+        "relative_l2": 0.08899470020674614,
+        "cosine": 0.9960631386777304,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": false
+      },
+      "window_metrics": {
+        "elements": 4096,
+        "mean_abs": 9.452578486168761e-06,
+        "max_abs": 5.8554112911224365e-05,
+        "relative_l2": 0.00017514132558866217,
+        "cosine": 0.9999999846650915,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "window_ms": [
+        2.008064031600952,
+        1.9834879636764526,
+        1.9886080026626587,
+        1.9814399480819702,
+        2.0244479179382324,
+        1.9691519737243652,
+        1.97324800491333,
+        1.9660799503326416,
+        1.9548159837722778,
+        1.9445760250091553
+      ],
+      "planar_ms": [
+        1.8944000005722046,
+        1.9128320217132568,
+        1.9793920516967773,
+        1.9240959882736206,
+        1.9118080139160156,
+        1.903615951538086,
+        1.8862080574035645,
+        1.8892799615859985,
+        1.8862080574035645,
+        1.8892799615859985
+      ],
+      "native_ms": [
+        0.16281600296497345,
+        0.15667200088500977,
+        0.15564799308776855,
+        0.14950400590896606,
+        0.16076800227165222,
+        0.14643199741840363,
+        0.14847999811172485,
+        0.1454080045223236,
+        0.1454080045223236,
+        0.15360000729560852
+      ],
+      "ranks": [
+        {
+          "requested_rank": 0,
+          "actual_rank": 0,
+          "metrics": {
+            "elements": 4096,
+            "mean_abs": 0.0048365301101260805,
+            "max_abs": 0.04611910879611969,
+            "relative_l2": 0.08899470019321445,
+            "cosine": 0.9960631386789301,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0065854056012782484,
+            "max_abs": 0.1523182950913906,
+            "relative_l2": 0.10339912100224867,
+            "cosine": 0.9946974586830778,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.187391996383667,
+            0.187391996383667,
+            0.1740799993276596,
+            0.18432000279426575,
+            0.1730560064315796,
+            0.16998399794101715,
+            0.1740799993276596,
+            0.17203199863433838,
+            0.18329599499702454,
+            0.38092800974845886
+          ],
+          "factor_bytes": 0,
+          "tensor_payload_bpw": 4.25
+        },
+        {
+          "requested_rank": 2,
+          "actual_rank": 2,
+          "metrics": {
+            "elements": 4096,
+            "mean_abs": 0.0047981483680676895,
+            "max_abs": 0.04868258535861969,
+            "relative_l2": 0.08819400946389196,
+            "cosine": 0.996134532902839,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006238608022742882,
+            "max_abs": 0.1464589200913906,
+            "relative_l2": 0.09804633470399232,
+            "cosine": 0.9952277843215369,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.8632320165634155,
+            0.4546560049057007,
+            0.24473600089550018,
+            0.25088000297546387,
+            0.25600001215934753,
+            0.23449599742889404,
+            0.24473600089550018,
+            0.2764799892902374,
+            0.4249599874019623,
+            0.2467840015888214
+          ],
+          "factor_bytes": 81920,
+          "tensor_payload_bpw": 4.2890625
+        },
+        {
+          "requested_rank": 4,
+          "actual_rank": 4,
+          "metrics": {
+            "elements": 4096,
+            "mean_abs": 0.004759640362081985,
+            "max_abs": 0.03403414785861969,
+            "relative_l2": 0.08739050295772648,
+            "cosine": 0.9962082157977001,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006128960816084295,
+            "max_abs": 0.1313222013413906,
+            "relative_l2": 0.09639617729705185,
+            "cosine": 0.9953864019218669,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.2744320034980774,
+            0.2734079957008362,
+            0.2529279887676239,
+            0.24371199309825897,
+            0.24371199309825897,
+            0.2611199915409088,
+            0.24268800020217896,
+            0.24063999950885773,
+            0.25702399015426636,
+            0.24268800020217896
+          ],
+          "factor_bytes": 163840,
+          "tensor_payload_bpw": 4.328125
+        },
+        {
+          "requested_rank": 6,
+          "actual_rank": 6,
+          "metrics": {
+            "elements": 4096,
+            "mean_abs": 0.004716457752295344,
+            "max_abs": 0.0325959250330925,
+            "relative_l2": 0.08639267335962483,
+            "cosine": 0.9962947290565746,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.00606095394468995,
+            "max_abs": 0.06979374587535858,
+            "relative_l2": 0.0952243572775319,
+            "cosine": 0.9954972332360799,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.26316800713539124,
+            0.2611199915409088,
+            0.24371199309825897,
+            0.2385919988155365,
+            0.24166400730609894,
+            0.24268800020217896,
+            0.25088000297546387,
+            0.2467840015888214,
+            0.2539519965648651,
+            0.23654399812221527
+          ],
+          "factor_bytes": 245760,
+          "tensor_payload_bpw": 4.3671875
+        },
+        {
+          "requested_rank": 8,
+          "actual_rank": 8,
+          "metrics": {
+            "elements": 4096,
+            "mean_abs": 0.0047057897522511105,
+            "max_abs": 0.0330231711268425,
+            "relative_l2": 0.08625120808796302,
+            "cosine": 0.9963058489002108,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0060001558750482145,
+            "max_abs": 0.060140348970890045,
+            "relative_l2": 0.09427825892716872,
+            "cosine": 0.9955857523557474,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.2590720057487488,
+            0.25088000297546387,
+            0.24268800020217896,
+            0.24063999950885773,
+            0.23654399812221527,
+            0.2385919988155365,
+            0.25088000297546387,
+            0.2385919988155365,
+            0.2396160066127777,
+            0.2385919988155365
+          ],
+          "factor_bytes": 327680,
+          "tensor_payload_bpw": 4.40625
+        },
+        {
+          "requested_rank": 12,
+          "actual_rank": 12,
+          "metrics": {
+            "elements": 4096,
+            "mean_abs": 0.004653968144282761,
+            "max_abs": 0.0324738547205925,
+            "relative_l2": 0.08479562313725152,
+            "cosine": 0.9964300795642267,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005900272591606196,
+            "max_abs": 0.061977818608284,
+            "relative_l2": 0.09274468456463308,
+            "cosine": 0.9957277382909078,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.2734079957008362,
+            0.27033600211143494,
+            0.2467840015888214,
+            0.2385919988155365,
+            0.24985599517822266,
+            0.24166400730609894,
+            0.24473600089550018,
+            0.23756800591945648,
+            0.24985599517822266,
+            0.2385919988155365
+          ],
+          "factor_bytes": 491520,
+          "tensor_payload_bpw": 4.484375
+        },
+        {
+          "requested_rank": 16,
+          "actual_rank": 16,
+          "metrics": {
+            "elements": 4096,
+            "mean_abs": 0.004640519008490163,
+            "max_abs": 0.0325959250330925,
+            "relative_l2": 0.08441023021761457,
+            "cosine": 0.996462375351519,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005818011634831341,
+            "max_abs": 0.062221959233284,
+            "relative_l2": 0.09147744050659865,
+            "cosine": 0.9958433368368416,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.26009601354599,
+            0.2467840015888214,
+            0.24473600089550018,
+            0.26316800713539124,
+            0.2457599937915802,
+            0.23756800591945648,
+            0.2467840015888214,
+            0.23756800591945648,
+            0.23449599742889404,
+            0.2385919988155365
+          ],
+          "factor_bytes": 655360,
+          "tensor_payload_bpw": 4.5625
+        }
+      ]
+    },
+    {
+      "M": 4,
+      "planar_metrics": {
+        "elements": 8192,
+        "mean_abs": 1.0736296803592893e-05,
+        "max_abs": 6.306171417236328e-05,
+        "relative_l2": 0.0001933331659815789,
+        "cosine": 0.999999981311446,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "native_metrics": {
+        "elements": 8192,
+        "mean_abs": 0.005641587782193924,
+        "max_abs": 0.04611910879611969,
+        "relative_l2": 0.10118432159902326,
+        "cosine": 0.9949187030740947,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": false
+      },
+      "window_metrics": {
+        "elements": 8192,
+        "mean_abs": 1.0736175618308863e-05,
+        "max_abs": 6.318092346191406e-05,
+        "relative_l2": 0.00019333856304686845,
+        "cosine": 0.9999999813105876,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "window_ms": [
+        2.037760019302368,
+        2.027519941329956,
+        2.002943992614746,
+        2.016256093978882,
+        2.08076810836792,
+        1.9998719692230225,
+        2.0193281173706055,
+        2.0049920082092285,
+        2.0183041095733643,
+        1.9957760572433472
+      ],
+      "planar_ms": [
+        1.977344036102295,
+        1.9456000328063965,
+        1.9445760250091553,
+        2.708479881286621,
+        2.0039680004119873,
+        1.9159040451049805,
+        1.9251199960708618,
+        1.9292160272598267,
+        1.938431978225708,
+        1.921023964881897
+      ],
+      "native_ms": [
+        0.17612800002098083,
+        0.15769599378108978,
+        0.16179199516773224,
+        0.158720001578331,
+        0.159743994474411,
+        0.15769599378108978,
+        0.16076800227165222,
+        0.15360000729560852,
+        0.15462400019168854,
+        0.1515520066022873
+      ],
+      "ranks": [
+        {
+          "requested_rank": 0,
+          "actual_rank": 0,
+          "metrics": {
+            "elements": 8192,
+            "mean_abs": 0.005641587778555945,
+            "max_abs": 0.04611910879611969,
+            "relative_l2": 0.10118432159312288,
+            "cosine": 0.9949187030746887,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0065854056012782484,
+            "max_abs": 0.1523182950913906,
+            "relative_l2": 0.10339912100224867,
+            "cosine": 0.9946974586830778,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.21094399690628052,
+            0.187391996383667,
+            0.1730560064315796,
+            0.1740799993276596,
+            0.16896000504493713,
+            0.18534399569034576,
+            0.17203199863433838,
+            0.16896000504493713,
+            0.16793599724769592,
+            0.17612800002098083
+          ],
+          "factor_bytes": 0,
+          "tensor_payload_bpw": 4.25
+        },
+        {
+          "requested_rank": 2,
+          "actual_rank": 2,
+          "metrics": {
+            "elements": 8192,
+            "mean_abs": 0.0055397827129729516,
+            "max_abs": 0.04868258535861969,
+            "relative_l2": 0.09931856169171621,
+            "cosine": 0.9951046726531398,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006238608022742882,
+            "max_abs": 0.1464589200913906,
+            "relative_l2": 0.09804633470399232,
+            "cosine": 0.9952277843215369,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.2519040107727051,
+            0.24166400730609894,
+            0.2529279887676239,
+            0.24268800020217896,
+            0.23654399812221527,
+            0.24985599517822266,
+            0.23552000522613525,
+            0.23449599742889404,
+            0.2396160066127777,
+            0.2467840015888214
+          ],
+          "factor_bytes": 81920,
+          "tensor_payload_bpw": 4.2890625
+        },
+        {
+          "requested_rank": 4,
+          "actual_rank": 4,
+          "metrics": {
+            "elements": 8192,
+            "mean_abs": 0.0055008561755732766,
+            "max_abs": 0.03403414785861969,
+            "relative_l2": 0.09864555144771847,
+            "cosine": 0.9951736255213882,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006128960816084295,
+            "max_abs": 0.1313222013413906,
+            "relative_l2": 0.09639617729705185,
+            "cosine": 0.9953864019218669,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.2693119943141937,
+            0.2539519965648651,
+            0.24268800020217896,
+            0.2519040107727051,
+            0.24166400730609894,
+            0.2396160066127777,
+            0.23654399812221527,
+            0.2529279887676239,
+            0.23449599742889404,
+            0.23347200453281403
+          ],
+          "factor_bytes": 163840,
+          "tensor_payload_bpw": 4.328125
+        },
+        {
+          "requested_rank": 6,
+          "actual_rank": 6,
+          "metrics": {
+            "elements": 8192,
+            "mean_abs": 0.005472239956966107,
+            "max_abs": 0.0325959250330925,
+            "relative_l2": 0.09809017569425532,
+            "cosine": 0.9952273043146076,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.00606095394468995,
+            "max_abs": 0.06979374587535858,
+            "relative_l2": 0.0952243572775319,
+            "cosine": 0.9954972332360799,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.26521599292755127,
+            0.2734079957008362,
+            0.25088000297546387,
+            0.25600001215934753,
+            0.25804799795150757,
+            0.24371199309825897,
+            0.2467840015888214,
+            0.24883200228214264,
+            0.2539519965648651,
+            0.2457599937915802
+          ],
+          "factor_bytes": 245760,
+          "tensor_payload_bpw": 4.3671875
+        },
+        {
+          "requested_rank": 8,
+          "actual_rank": 8,
+          "metrics": {
+            "elements": 8192,
+            "mean_abs": 0.005445774717764196,
+            "max_abs": 0.0330231711268425,
+            "relative_l2": 0.0975863530346543,
+            "cosine": 0.9952767320866261,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0060001558750482145,
+            "max_abs": 0.060140348970890045,
+            "relative_l2": 0.09427825892716872,
+            "cosine": 0.9955857523557474,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.24883200228214264,
+            0.2396160066127777,
+            0.2611199915409088,
+            0.23347200453281403,
+            0.23244799673557281,
+            0.25088000297546387,
+            0.2314240038394928,
+            0.2303999960422516,
+            0.22835199534893036,
+            0.2457599937915802
+          ],
+          "factor_bytes": 327680,
+          "tensor_payload_bpw": 4.40625
+        },
+        {
+          "requested_rank": 12,
+          "actual_rank": 12,
+          "metrics": {
+            "elements": 8192,
+            "mean_abs": 0.005395348925369192,
+            "max_abs": 0.0324738547205925,
+            "relative_l2": 0.09658954734026826,
+            "cosine": 0.995372974536285,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005900272591606196,
+            "max_abs": 0.061977818608284,
+            "relative_l2": 0.09274468456463308,
+            "cosine": 0.9957277382909078,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.27750399708747864,
+            0.26009601354599,
+            0.2467840015888214,
+            0.23552000522613525,
+            0.24473600089550018,
+            0.23244799673557281,
+            0.22835199534893036,
+            0.24063999950885773,
+            0.23347200453281403,
+            0.23347200453281403
+          ],
+          "factor_bytes": 491520,
+          "tensor_payload_bpw": 4.484375
+        },
+        {
+          "requested_rank": 16,
+          "actual_rank": 16,
+          "metrics": {
+            "elements": 8192,
+            "mean_abs": 0.005386631385825624,
+            "max_abs": 0.0325959250330925,
+            "relative_l2": 0.09634000274481544,
+            "cosine": 0.9953960234032248,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005818011634831341,
+            "max_abs": 0.062221959233284,
+            "relative_l2": 0.09147744050659865,
+            "cosine": 0.9958433368368416,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.24883200228214264,
+            0.24780799448490143,
+            0.23449599742889404,
+            0.24063999950885773,
+            0.2314240038394928,
+            0.23552000522613525,
+            0.2303999960422516,
+            0.23244799673557281,
+            0.24063999950885773,
+            0.22732800245285034
+          ],
+          "factor_bytes": 655360,
+          "tensor_payload_bpw": 4.5625
+        }
+      ]
+    },
+    {
+      "M": 8,
+      "planar_metrics": {
+        "elements": 16384,
+        "mean_abs": 1.1541227011857558e-05,
+        "max_abs": 7.331371307373047e-05,
+        "relative_l2": 0.0001977791464588136,
+        "cosine": 0.9999999804435337,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "native_metrics": {
+        "elements": 16384,
+        "mean_abs": 0.005994237849301587,
+        "max_abs": 0.04611910879611969,
+        "relative_l2": 0.1027318816663536,
+        "cosine": 0.9947678229160202,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": false
+      },
+      "window_metrics": {
+        "elements": 16384,
+        "mean_abs": 1.1540986068675485e-05,
+        "max_abs": 7.30752944946289e-05,
+        "relative_l2": 0.00019777608068013706,
+        "cosine": 0.9999999804437593,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "window_ms": [
+        1.9343359470367432,
+        1.8534400463104248,
+        1.8647040128707886,
+        1.8380800485610962,
+        1.8411519527435303,
+        1.8268159627914429,
+        1.8268159627914429,
+        1.8288639783859253,
+        1.8237440586090088,
+        1.84934401512146
+      ],
+      "planar_ms": [
+        2.027519941329956,
+        2.0254719257354736,
+        2.0490241050720215,
+        2.0582399368286133,
+        2.0183041095733643,
+        2.1227519512176514,
+        2.016256093978882,
+        2.02239990234375,
+        2.0090880393981934,
+        2.0142080783843994
+      ],
+      "native_ms": [
+        0.17203199863433838,
+        0.16486400365829468,
+        0.159743994474411,
+        0.15667200088500977,
+        0.159743994474411,
+        0.15667200088500977,
+        0.15462400019168854,
+        0.15360000729560852,
+        0.15360000729560852,
+        0.16998399794101715
+      ],
+      "ranks": [
+        {
+          "requested_rank": 0,
+          "actual_rank": 0,
+          "metrics": {
+            "elements": 16384,
+            "mean_abs": 0.0059942378474825975,
+            "max_abs": 0.04611910879611969,
+            "relative_l2": 0.10273188166365192,
+            "cosine": 0.9947678229162962,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0065854056012782484,
+            "max_abs": 0.1523182950913906,
+            "relative_l2": 0.10339912100224867,
+            "cosine": 0.9946974586830778,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.20684799551963806,
+            0.1812479943037033,
+            0.18329599499702454,
+            0.16896000504493713,
+            0.18636800348758698,
+            0.17203199863433838,
+            0.16896000504493713,
+            0.1669120043516159,
+            0.16896000504493713,
+            0.18227200210094452
+          ],
+          "factor_bytes": 0,
+          "tensor_payload_bpw": 4.25
+        },
+        {
+          "requested_rank": 2,
+          "actual_rank": 2,
+          "metrics": {
+            "elements": 16384,
+            "mean_abs": 0.005817821957418257,
+            "max_abs": 0.04868258535861969,
+            "relative_l2": 0.09977123853675088,
+            "cosine": 0.9950632593028281,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006238608022742882,
+            "max_abs": 0.1464589200913906,
+            "relative_l2": 0.09804633470399232,
+            "cosine": 0.9952277843215369,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.27238398790359497,
+            0.2549760043621063,
+            0.24268800020217896,
+            0.25702399015426636,
+            0.2396160066127777,
+            0.2385919988155365,
+            0.23756800591945648,
+            0.26419198513031006,
+            0.23756800591945648,
+            0.2457599937915802
+          ],
+          "factor_bytes": 81920,
+          "tensor_payload_bpw": 4.2890625
+        },
+        {
+          "requested_rank": 4,
+          "actual_rank": 4,
+          "metrics": {
+            "elements": 16384,
+            "mean_abs": 0.00578310552598954,
+            "max_abs": 0.03403414785861969,
+            "relative_l2": 0.09923096540044947,
+            "cosine": 0.9951194814368123,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006128960816084295,
+            "max_abs": 0.1313222013413906,
+            "relative_l2": 0.09639617729705185,
+            "cosine": 0.9953864019218669,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.24985599517822266,
+            0.2539519965648651,
+            0.24063999950885773,
+            0.2396160066127777,
+            0.2396160066127777,
+            0.2549760043621063,
+            0.23654399812221527,
+            0.23552000522613525,
+            0.2457599937915802,
+            0.2396160066127777
+          ],
+          "factor_bytes": 163840,
+          "tensor_payload_bpw": 4.328125
+        },
+        {
+          "requested_rank": 6,
+          "actual_rank": 6,
+          "metrics": {
+            "elements": 16384,
+            "mean_abs": 0.005758174361328361,
+            "max_abs": 0.0325959250330925,
+            "relative_l2": 0.0987266290480943,
+            "cosine": 0.9951687588718502,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.00606095394468995,
+            "max_abs": 0.06979374587535858,
+            "relative_l2": 0.0952243572775319,
+            "cosine": 0.9954972332360799,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.26214399933815,
+            0.2539519965648651,
+            0.25600001215934753,
+            0.25088000297546387,
+            0.24473600089550018,
+            0.24473600089550018,
+            0.25702399015426636,
+            0.2467840015888214,
+            0.2457599937915802,
+            0.25600001215934753
+          ],
+          "factor_bytes": 245760,
+          "tensor_payload_bpw": 4.3671875
+        },
+        {
+          "requested_rank": 8,
+          "actual_rank": 8,
+          "metrics": {
+            "elements": 16384,
+            "mean_abs": 0.005737732775105531,
+            "max_abs": 0.0330231711268425,
+            "relative_l2": 0.09835885880312652,
+            "cosine": 0.9952027636746831,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0060001558750482145,
+            "max_abs": 0.060140348970890045,
+            "relative_l2": 0.09427825892716872,
+            "cosine": 0.9955857523557474,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.26521599292755127,
+            0.2467840015888214,
+            0.24063999950885773,
+            0.2519040107727051,
+            0.24063999950885773,
+            0.24063999950885773,
+            0.26009601354599,
+            0.24268800020217896,
+            0.2396160066127777,
+            0.23756800591945648
+          ],
+          "factor_bytes": 327680,
+          "tensor_payload_bpw": 4.40625
+        },
+        {
+          "requested_rank": 12,
+          "actual_rank": 12,
+          "metrics": {
+            "elements": 16384,
+            "mean_abs": 0.005674719218404067,
+            "max_abs": 0.0324738547205925,
+            "relative_l2": 0.09730382303875697,
+            "cosine": 0.9953056793726158,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005900272591606196,
+            "max_abs": 0.061977818608284,
+            "relative_l2": 0.09274468456463308,
+            "cosine": 0.9957277382909078,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.2662400007247925,
+            0.26521599292755127,
+            0.24985599517822266,
+            0.2549760043621063,
+            0.289792001247406,
+            0.2457599937915802,
+            0.2467840015888214,
+            0.24063999950885773,
+            0.24371199309825897,
+            0.24166400730609894
+          ],
+          "factor_bytes": 491520,
+          "tensor_payload_bpw": 4.484375
+        },
+        {
+          "requested_rank": 16,
+          "actual_rank": 16,
+          "metrics": {
+            "elements": 16384,
+            "mean_abs": 0.0056535385135162985,
+            "max_abs": 0.0325959250330925,
+            "relative_l2": 0.09689185432599035,
+            "cosine": 0.9953439015732171,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005818011634831341,
+            "max_abs": 0.062221959233284,
+            "relative_l2": 0.09147744050659865,
+            "cosine": 0.9958433368368416,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.2519040107727051,
+            0.2693119943141937,
+            0.24063999950885773,
+            0.23756800591945648,
+            0.23654399812221527,
+            0.24063999950885773,
+            0.2539519965648651,
+            0.23347200453281403,
+            0.23756800591945648,
+            0.23347200453281403
+          ],
+          "factor_bytes": 655360,
+          "tensor_payload_bpw": 4.5625
+        }
+      ]
+    },
+    {
+      "M": 16,
+      "planar_metrics": {
+        "elements": 32768,
+        "mean_abs": 1.2002731441584924e-05,
+        "max_abs": 0.0001004338264465332,
+        "relative_l2": 0.0002028248131438106,
+        "cosine": 0.9999999794331172,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "native_metrics": {
+        "elements": 32768,
+        "mean_abs": 0.006232527645768024,
+        "max_abs": 0.061541683971881866,
+        "relative_l2": 0.10510762713638017,
+        "cosine": 0.9945260515669643,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": false
+      },
+      "window_metrics": {
+        "elements": 32768,
+        "mean_abs": 1.2002549340229228e-05,
+        "max_abs": 0.00010041892528533936,
+        "relative_l2": 0.00020282349017303433,
+        "cosine": 0.9999999794329768,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "window_ms": [
+        2.125823974609375,
+        3.196928024291992,
+        3.0248959064483643,
+        2.974720001220703,
+        3.0300159454345703,
+        3.0310399532318115,
+        3.0842878818511963,
+        2.958336114883423,
+        2.5712640285491943,
+        1.9240959882736206
+      ],
+      "planar_ms": [
+        2.0060160160064697,
+        1.9875839948654175,
+        1.9793920516967773,
+        1.97324800491333,
+        1.9793920516967773,
+        2.0551679134368896,
+        1.99782395362854,
+        2.136064052581787,
+        1.955839991569519,
+        1.9701759815216064
+      ],
+      "native_ms": [
+        0.17203199863433838,
+        0.16281600296497345,
+        0.15667200088500977,
+        0.15462400019168854,
+        0.15769599378108978,
+        0.1515520066022873,
+        0.14950400590896606,
+        0.14950400590896606,
+        0.14847999811172485,
+        0.1730560064315796
+      ],
+      "ranks": [
+        {
+          "requested_rank": 0,
+          "actual_rank": 0,
+          "metrics": {
+            "elements": 32768,
+            "mean_abs": 0.006232527644858529,
+            "max_abs": 0.061541683971881866,
+            "relative_l2": 0.10510762713508516,
+            "cosine": 0.9945260515670996,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0065854056012782484,
+            "max_abs": 0.1523182950913906,
+            "relative_l2": 0.10339912100224867,
+            "cosine": 0.9946974586830778,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.1945600062608719,
+            0.17715199291706085,
+            0.17612800002098083,
+            0.17612800002098083,
+            0.17510400712490082,
+            0.18329599499702454,
+            0.1812479943037033,
+            0.17100800573825836,
+            0.1669120043516159,
+            0.1658879965543747
+          ],
+          "factor_bytes": 0,
+          "tensor_payload_bpw": 4.25
+        },
+        {
+          "requested_rank": 2,
+          "actual_rank": 2,
+          "metrics": {
+            "elements": 32768,
+            "mean_abs": 0.006043287219557755,
+            "max_abs": 0.06091001629829407,
+            "relative_l2": 0.10199950298579137,
+            "cosine": 0.9948439286228096,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006238608022742882,
+            "max_abs": 0.1464589200913906,
+            "relative_l2": 0.09804633470399232,
+            "cosine": 0.9952277843215369,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.27033600211143494,
+            0.2457599937915802,
+            0.2396160066127777,
+            0.27136000990867615,
+            0.2396160066127777,
+            0.23449599742889404,
+            0.23449599742889404,
+            0.24166400730609894,
+            0.24473600089550018,
+            0.2672640085220337
+          ],
+          "factor_bytes": 81920,
+          "tensor_payload_bpw": 4.2890625
+        },
+        {
+          "requested_rank": 4,
+          "actual_rank": 4,
+          "metrics": {
+            "elements": 32768,
+            "mean_abs": 0.006003065712764807,
+            "max_abs": 0.054858334362506866,
+            "relative_l2": 0.10127617483962643,
+            "cosine": 0.994918518132822,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006128960816084295,
+            "max_abs": 0.1313222013413906,
+            "relative_l2": 0.09639617729705185,
+            "cosine": 0.9953864019218669,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.24985599517822266,
+            0.2396160066127777,
+            0.25088000297546387,
+            0.24063999950885773,
+            0.23654399812221527,
+            0.23347200453281403,
+            0.2744320034980774,
+            0.23552000522613525,
+            0.23552000522613525,
+            0.23244799673557281
+          ],
+          "factor_bytes": 163840,
+          "tensor_payload_bpw": 4.328125
+        },
+        {
+          "requested_rank": 6,
+          "actual_rank": 6,
+          "metrics": {
+            "elements": 32768,
+            "mean_abs": 0.005978539976234473,
+            "max_abs": 0.033483877778053284,
+            "relative_l2": 0.10071969152769707,
+            "cosine": 0.9949732614465582,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.00606095394468995,
+            "max_abs": 0.06979374587535858,
+            "relative_l2": 0.0952243572775319,
+            "cosine": 0.9954972332360799,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.27033600211143494,
+            0.24985599517822266,
+            0.24985599517822266,
+            0.24371199309825897,
+            0.2529279887676239,
+            0.2396160066127777,
+            0.2385919988155365,
+            0.24985599517822266,
+            0.24780799448490143,
+            0.2385919988155365
+          ],
+          "factor_bytes": 245760,
+          "tensor_payload_bpw": 4.3671875
+        },
+        {
+          "requested_rank": 8,
+          "actual_rank": 8,
+          "metrics": {
+            "elements": 32768,
+            "mean_abs": 0.0059615221121796375,
+            "max_abs": 0.0330231711268425,
+            "relative_l2": 0.10034933246456425,
+            "cosine": 0.9950093709139919,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0060001558750482145,
+            "max_abs": 0.060140348970890045,
+            "relative_l2": 0.09427825892716872,
+            "cosine": 0.9955857523557474,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.24883200228214264,
+            0.24063999950885773,
+            0.24166400730609894,
+            0.27136000990867615,
+            0.23244799673557281,
+            0.2314240038394928,
+            0.2467840015888214,
+            0.23552000522613525,
+            0.22937600314617157,
+            0.2303999960422516
+          ],
+          "factor_bytes": 327680,
+          "tensor_payload_bpw": 4.40625
+        },
+        {
+          "requested_rank": 12,
+          "actual_rank": 12,
+          "metrics": {
+            "elements": 32768,
+            "mean_abs": 0.005911468547613638,
+            "max_abs": 0.03346307575702667,
+            "relative_l2": 0.0995105176585443,
+            "cosine": 0.9950926336744771,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005900272591606196,
+            "max_abs": 0.061977818608284,
+            "relative_l2": 0.09274468456463308,
+            "cosine": 0.9957277382909078,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.289792001247406,
+            0.2529279887676239,
+            0.24883200228214264,
+            0.2877439856529236,
+            0.24883200228214264,
+            0.24063999950885773,
+            0.2385919988155365,
+            0.25600001215934753,
+            0.24063999950885773,
+            0.23654399812221527
+          ],
+          "factor_bytes": 491520,
+          "tensor_payload_bpw": 4.484375
+        },
+        {
+          "requested_rank": 16,
+          "actual_rank": 16,
+          "metrics": {
+            "elements": 32768,
+            "mean_abs": 0.005886653335516898,
+            "max_abs": 0.03517206013202667,
+            "relative_l2": 0.09905789908956045,
+            "cosine": 0.9951359492383088,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005818011634831341,
+            "max_abs": 0.062221959233284,
+            "relative_l2": 0.09147744050659865,
+            "cosine": 0.9958433368368416,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.2754560112953186,
+            0.24268800020217896,
+            0.23552000522613525,
+            0.23654399812221527,
+            0.2385919988155365,
+            0.23449599742889404,
+            0.23347200453281403,
+            0.26419198513031006,
+            0.23347200453281403,
+            0.2314240038394928
+          ],
+          "factor_bytes": 655360,
+          "tensor_payload_bpw": 4.5625
+        }
+      ]
+    },
+    {
+      "M": 32,
+      "planar_metrics": {
+        "elements": 65536,
+        "mean_abs": 1.2362576419113099e-05,
+        "max_abs": 0.00013425946235656738,
+        "relative_l2": 0.0002034544580141447,
+        "cosine": 0.9999999793036907,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "native_metrics": {
+        "elements": 65536,
+        "mean_abs": 0.0063236717178011305,
+        "max_abs": 0.06247386336326599,
+        "relative_l2": 0.10395149205977929,
+        "cosine": 0.9946423496426182,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": false
+      },
+      "window_metrics": {
+        "elements": 65536,
+        "mean_abs": 1.2386625618870375e-05,
+        "max_abs": 0.00013914704322814941,
+        "relative_l2": 0.00020384844959206986,
+        "cosine": 0.9999999792754443,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "window_ms": [
+        1.9640320539474487,
+        1.9927040338516235,
+        1.9814399480819702,
+        2.0592639446258545,
+        1.9650559425354004,
+        1.9660799503326416,
+        1.97324800491333,
+        1.9650559425354004,
+        1.9589120149612427,
+        1.9752960205078125
+      ],
+      "planar_ms": [
+        2.0725760459899902,
+        1.985535979270935,
+        1.9824639558792114,
+        1.9875839948654175,
+        1.9752960205078125,
+        1.9824639558792114,
+        1.9886080026626587,
+        1.9742720127105713,
+        1.9793920516967773,
+        1.977344036102295
+      ],
+      "native_ms": [
+        0.1740799993276596,
+        0.17100800573825836,
+        0.1658879965543747,
+        0.17510400712490082,
+        0.1669120043516159,
+        0.16076800227165222,
+        0.17817600071430206,
+        0.159743994474411,
+        0.17510400712490082,
+        0.16076800227165222
+      ],
+      "ranks": [
+        {
+          "requested_rank": 0,
+          "actual_rank": 0,
+          "metrics": {
+            "elements": 65536,
+            "mean_abs": 0.006323671718369565,
+            "max_abs": 0.06247386336326599,
+            "relative_l2": 0.10395149206807273,
+            "cosine": 0.9946423496417606,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0065854056012782484,
+            "max_abs": 0.1523182950913906,
+            "relative_l2": 0.10339912100224867,
+            "cosine": 0.9946974586830778,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.20582400262355804,
+            0.18534399569034576,
+            0.1802240014076233,
+            0.17510400712490082,
+            0.18636800348758698,
+            0.187391996383667,
+            0.17510400712490082,
+            0.17715199291706085,
+            0.17817600071430206,
+            0.1730560064315796
+          ],
+          "factor_bytes": 0,
+          "tensor_payload_bpw": 4.25
+        },
+        {
+          "requested_rank": 2,
+          "actual_rank": 2,
+          "metrics": {
+            "elements": 65536,
+            "mean_abs": 0.006106108425439353,
+            "max_abs": 0.06091001629829407,
+            "relative_l2": 0.10046258780676395,
+            "cosine": 0.9949949067601974,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006238608022742882,
+            "max_abs": 0.1464589200913906,
+            "relative_l2": 0.09804633470399232,
+            "cosine": 0.9952277843215369,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.3461120128631592,
+            0.347135990858078,
+            0.3409920036792755,
+            0.35020801424980164,
+            0.34406399726867676,
+            0.3389439880847931,
+            0.34303998947143555,
+            0.3389439880847931,
+            0.33792001008987427,
+            0.3409920036792755
+          ],
+          "factor_bytes": 81920,
+          "tensor_payload_bpw": 4.2890625
+        },
+        {
+          "requested_rank": 4,
+          "actual_rank": 4,
+          "metrics": {
+            "elements": 65536,
+            "mean_abs": 0.00605431284455871,
+            "max_abs": 0.054858334362506866,
+            "relative_l2": 0.09950707573468281,
+            "cosine": 0.9950897668627711,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006128960816084295,
+            "max_abs": 0.1313222013413906,
+            "relative_l2": 0.09639617729705185,
+            "cosine": 0.9953864019218669,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.34508800506591797,
+            0.34508800506591797,
+            0.35020801424980164,
+            0.3491840064525604,
+            0.34303998947143555,
+            0.3409920036792755,
+            0.3420160114765167,
+            0.33792001008987427,
+            0.33484798669815063,
+            0.3420160114765167
+          ],
+          "factor_bytes": 163840,
+          "tensor_payload_bpw": 4.328125
+        },
+        {
+          "requested_rank": 6,
+          "actual_rank": 6,
+          "metrics": {
+            "elements": 65536,
+            "mean_abs": 0.006030335503527943,
+            "max_abs": 0.038966234773397446,
+            "relative_l2": 0.09893157570485749,
+            "cosine": 0.9951457957421989,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.00606095394468995,
+            "max_abs": 0.06979374587535858,
+            "relative_l2": 0.0952243572775319,
+            "cosine": 0.9954972332360799,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.35123199224472046,
+            0.34406399726867676,
+            0.3532800078392029,
+            0.34303998947143555,
+            0.33792001008987427,
+            0.34303998947143555,
+            0.3481599986553192,
+            0.3491840064525604,
+            0.4413439929485321,
+            0.33792001008987427
+          ],
+          "factor_bytes": 245760,
+          "tensor_payload_bpw": 4.3671875
+        },
+        {
+          "requested_rank": 8,
+          "actual_rank": 8,
+          "metrics": {
+            "elements": 65536,
+            "mean_abs": 0.006000809457146986,
+            "max_abs": 0.03494363650679588,
+            "relative_l2": 0.09838898883503026,
+            "cosine": 0.9951986650881,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0060001558750482145,
+            "max_abs": 0.060140348970890045,
+            "relative_l2": 0.09427825892716872,
+            "cosine": 0.9955857523557474,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.2590720057487488,
+            0.26316800713539124,
+            0.2539519965648651,
+            0.2590720057487488,
+            0.2662400007247925,
+            0.24473600089550018,
+            0.2457599937915802,
+            0.2529279887676239,
+            0.24473600089550018,
+            0.24473600089550018
+          ],
+          "factor_bytes": 327680,
+          "tensor_payload_bpw": 4.40625
+        },
+        {
+          "requested_rank": 12,
+          "actual_rank": 12,
+          "metrics": {
+            "elements": 65536,
+            "mean_abs": 0.005958110139670517,
+            "max_abs": 0.03437906131148338,
+            "relative_l2": 0.09765715803713705,
+            "cosine": 0.995269003424022,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005900272591606196,
+            "max_abs": 0.061977818608284,
+            "relative_l2": 0.09274468456463308,
+            "cosine": 0.9957277382909078,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.2764799892902374,
+            0.25088000297546387,
+            0.24780799448490143,
+            0.2590720057487488,
+            0.24371199309825897,
+            0.24371199309825897,
+            0.24166400730609894,
+            0.2836480140686035,
+            0.24166400730609894,
+            0.24371199309825897
+          ],
+          "factor_bytes": 491520,
+          "tensor_payload_bpw": 4.484375
+        },
+        {
+          "requested_rank": 16,
+          "actual_rank": 16,
+          "metrics": {
+            "elements": 65536,
+            "mean_abs": 0.005928784449460548,
+            "max_abs": 0.03517206013202667,
+            "relative_l2": 0.09716862354327739,
+            "cosine": 0.9953158164534188,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005818011634831341,
+            "max_abs": 0.062221959233284,
+            "relative_l2": 0.09147744050659865,
+            "cosine": 0.9958433368368416,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.30105599761009216,
+            0.2549760043621063,
+            0.24883200228214264,
+            0.26009601354599,
+            0.24780799448490143,
+            0.24473600089550018,
+            0.24473600089550018,
+            0.2529279887676239,
+            0.24473600089550018,
+            0.24268800020217896
+          ],
+          "factor_bytes": 655360,
+          "tensor_payload_bpw": 4.5625
+        }
+      ]
+    },
+    {
+      "M": 128,
+      "planar_metrics": {
+        "elements": 262144,
+        "mean_abs": 1.3580565061876537e-05,
+        "max_abs": 0.00013911724090576172,
+        "relative_l2": 0.00020713539096633095,
+        "cosine": 0.9999999785475462,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "native_metrics": {
+        "elements": 262144,
+        "mean_abs": 0.006907394196475443,
+        "max_abs": 0.09246230125427246,
+        "relative_l2": 0.10523438811715757,
+        "cosine": 0.9944974299417744,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": false
+      },
+      "window_metrics": {
+        "elements": 262144,
+        "mean_abs": 1.360402208410962e-05,
+        "max_abs": 0.00014728307723999023,
+        "relative_l2": 0.00020750142301011304,
+        "cosine": 0.9999999785314002,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "window_ms": [
+        2.026495933532715,
+        2.008064031600952,
+        2.0848639011383057,
+        2.011136054992676,
+        2.007040023803711,
+        1.9998719692230225,
+        2.0090880393981934,
+        2.0193281173706055,
+        2.007040023803711,
+        1.9896320104599
+      ],
+      "planar_ms": [
+        4.21068811416626,
+        4.1943039894104,
+        4.180992126464844,
+        4.124671936035156,
+        4.1902079582214355,
+        4.379648208618164,
+        4.216832160949707,
+        4.178944110870361,
+        4.198400020599365,
+        4.1902079582214355
+      ],
+      "native_ms": [
+        0.3317759931087494,
+        0.3102720081806183,
+        0.3123199939727783,
+        0.30822399258613586,
+        0.30822399258613586,
+        0.3102720081806183,
+        0.3051519989967346,
+        0.30617600679397583,
+        0.30720001459121704,
+        0.30822399258613586
+      ],
+      "ranks": [
+        {
+          "requested_rank": 0,
+          "actual_rank": 0,
+          "metrics": {
+            "elements": 262144,
+            "mean_abs": 0.006907394196731239,
+            "max_abs": 0.09246230125427246,
+            "relative_l2": 0.10523438811970366,
+            "cosine": 0.9944974299415077,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0065854056012782484,
+            "max_abs": 0.1523182950913906,
+            "relative_l2": 0.10339912100224867,
+            "cosine": 0.9946974586830778,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.3328000009059906,
+            0.32051199674606323,
+            0.3184640109539032,
+            0.319487988948822,
+            0.32153600454330444,
+            0.32972800731658936,
+            0.32051199674606323,
+            0.3184640109539032,
+            0.32256001234054565,
+            0.31539198756217957
+          ],
+          "factor_bytes": 0,
+          "tensor_payload_bpw": 4.25
+        },
+        {
+          "requested_rank": 2,
+          "actual_rank": 2,
+          "metrics": {
+            "elements": 262144,
+            "mean_abs": 0.006648920535155517,
+            "max_abs": 0.09441542625427246,
+            "relative_l2": 0.101361162754202,
+            "cosine": 0.9948929885375356,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006238608022742882,
+            "max_abs": 0.1464589200913906,
+            "relative_l2": 0.09804633470399232,
+            "cosine": 0.9952277843215369,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.3543039858341217,
+            0.3614720106124878,
+            0.3481599986553192,
+            0.3491840064525604,
+            0.35020801424980164,
+            0.3481599986553192,
+            0.347135990858078,
+            0.3420160114765167,
+            0.3420160114765167,
+            0.3461120128631592
+          ],
+          "factor_bytes": 81920,
+          "tensor_payload_bpw": 4.2890625
+        },
+        {
+          "requested_rank": 4,
+          "actual_rank": 4,
+          "metrics": {
+            "elements": 262144,
+            "mean_abs": 0.006622102464959831,
+            "max_abs": 0.08757948875427246,
+            "relative_l2": 0.1009346398975481,
+            "cosine": 0.9949375252634721,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006128960816084295,
+            "max_abs": 0.1313222013413906,
+            "relative_l2": 0.09639617729705185,
+            "cosine": 0.9953864019218669,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.35737600922584534,
+            0.3543039858341217,
+            0.35123199224472046,
+            0.3543039858341217,
+            0.3491840064525604,
+            0.347135990858078,
+            0.3624959886074066,
+            0.347135990858078,
+            0.3461120128631592,
+            0.3491840064525604
+          ],
+          "factor_bytes": 163840,
+          "tensor_payload_bpw": 4.328125
+        },
+        {
+          "requested_rank": 6,
+          "actual_rank": 6,
+          "metrics": {
+            "elements": 262144,
+            "mean_abs": 0.006594920449126531,
+            "max_abs": 0.06315559148788452,
+            "relative_l2": 0.10038055504165505,
+            "cosine": 0.9949964880468765,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.00606095394468995,
+            "max_abs": 0.06979374587535858,
+            "relative_l2": 0.0952243572775319,
+            "cosine": 0.9954972332360799,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.36454400420188904,
+            0.3491840064525604,
+            0.3624959886074066,
+            0.347135990858078,
+            0.34508800506591797,
+            0.3491840064525604,
+            0.3461120128631592,
+            0.3461120128631592,
+            0.347135990858078,
+            0.3420160114765167
+          ],
+          "factor_bytes": 245760,
+          "tensor_payload_bpw": 4.3671875
+        },
+        {
+          "requested_rank": 8,
+          "actual_rank": 8,
+          "metrics": {
+            "elements": 262144,
+            "mean_abs": 0.006564406147692727,
+            "max_abs": 0.05004909634590149,
+            "relative_l2": 0.09989546997896724,
+            "cosine": 0.9950440127824531,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0060001558750482145,
+            "max_abs": 0.060140348970890045,
+            "relative_l2": 0.09427825892716872,
+            "cosine": 0.9955857523557474,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.3676159977912903,
+            0.3624959886074066,
+            0.3491840064525604,
+            0.3481599986553192,
+            0.347135990858078,
+            0.3481599986553192,
+            0.35020801424980164,
+            0.3491840064525604,
+            0.3491840064525604,
+            0.34508800506591797
+          ],
+          "factor_bytes": 327680,
+          "tensor_payload_bpw": 4.40625
+        },
+        {
+          "requested_rank": 12,
+          "actual_rank": 12,
+          "metrics": {
+            "elements": 262144,
+            "mean_abs": 0.006513492453559801,
+            "max_abs": 0.04704231023788452,
+            "relative_l2": 0.09912625083651751,
+            "cosine": 0.9951191505730941,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005900272591606196,
+            "max_abs": 0.061977818608284,
+            "relative_l2": 0.09274468456463308,
+            "cosine": 0.9957277382909078,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.35737600922584534,
+            0.35225600004196167,
+            0.3553279936313629,
+            0.3481599986553192,
+            0.35839998722076416,
+            0.347135990858078,
+            0.34508800506591797,
+            0.3491840064525604,
+            0.3461120128631592,
+            0.35839998722076416
+          ],
+          "factor_bytes": 491520,
+          "tensor_payload_bpw": 4.484375
+        },
+        {
+          "requested_rank": 16,
+          "actual_rank": 16,
+          "metrics": {
+            "elements": 262144,
+            "mean_abs": 0.00648064962361324,
+            "max_abs": 0.04467800259590149,
+            "relative_l2": 0.09858646279148696,
+            "cosine": 0.9951725228836906,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005818011634831341,
+            "max_abs": 0.062221959233284,
+            "relative_l2": 0.09147744050659865,
+            "cosine": 0.9958433368368416,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.35737600922584534,
+            0.35020801424980164,
+            0.3481599986553192,
+            0.34508800506591797,
+            0.38809600472450256,
+            0.34508800506591797,
+            0.34406399726867676,
+            0.34406399726867676,
+            0.3420160114765167,
+            0.3563520014286041
+          ],
+          "factor_bytes": 655360,
+          "tensor_payload_bpw": 4.5625
+        }
+      ]
+    },
+    {
+      "M": 512,
+      "planar_metrics": {
+        "elements": 1048576,
+        "mean_abs": 1.4472553445349048e-05,
+        "max_abs": 0.000191420316696167,
+        "relative_l2": 0.00021153057830952015,
+        "cosine": 0.9999999776274268,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "native_metrics": {
+        "elements": 1048576,
+        "mean_abs": 0.007336118110428708,
+        "max_abs": 0.13585633039474487,
+        "relative_l2": 0.10711108184759492,
+        "cosine": 0.9943115156477398,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": false
+      },
+      "window_metrics": {
+        "elements": 1048576,
+        "mean_abs": 1.4499062785083998e-05,
+        "max_abs": 0.00019669532775878906,
+        "relative_l2": 0.00021191988346500973,
+        "cosine": 0.9999999776073898,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "window_ms": [
+        2.397183895111084,
+        2.431999921798706,
+        2.368511915206909,
+        2.3838720321655273,
+        2.4330239295959473,
+        2.4238080978393555,
+        2.4002559185028076,
+        2.4094719886779785,
+        2.3654398918151855,
+        2.3552000522613525
+      ],
+      "planar_ms": [
+        11.668479919433594,
+        11.695103645324707,
+        11.618304252624512,
+        11.683839797973633,
+        11.596799850463867,
+        11.6244478225708,
+        11.63980770111084,
+        11.576319694519043,
+        11.638784408569336,
+        11.581439971923828
+      ],
+      "native_ms": [
+        0.9472000002861023,
+        0.9185280203819275,
+        0.9175040125846863,
+        0.9154559969902039,
+        0.9134079813957214,
+        0.9113600254058838,
+        0.9144319891929626,
+        0.9113600254058838,
+        0.9113600254058838,
+        0.9103360176086426
+      ],
+      "ranks": [
+        {
+          "requested_rank": 0,
+          "actual_rank": 0,
+          "metrics": {
+            "elements": 1048576,
+            "mean_abs": 0.0073361181105219666,
+            "max_abs": 0.13585633039474487,
+            "relative_l2": 0.1071110818502006,
+            "cosine": 0.9943115156474622,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0065854056012782484,
+            "max_abs": 0.1523182950913906,
+            "relative_l2": 0.10339912100224867,
+            "cosine": 0.9946974586830778,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.936959981918335,
+            0.9441279768943787,
+            0.9359359741210938,
+            0.9328640103340149,
+            0.9256960153579712,
+            0.92467200756073,
+            0.9349120259284973,
+            0.9451519846916199,
+            0.9861119985580444,
+            0.9400320053100586
+          ],
+          "factor_bytes": 0,
+          "tensor_payload_bpw": 4.25
+        },
+        {
+          "requested_rank": 2,
+          "actual_rank": 2,
+          "metrics": {
+            "elements": 1048576,
+            "mean_abs": 0.007113786500201896,
+            "max_abs": 0.12743347883224487,
+            "relative_l2": 0.10397365030725735,
+            "cosine": 0.9946385538424007,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006238608022742882,
+            "max_abs": 0.1464589200913906,
+            "relative_l2": 0.09804633470399232,
+            "cosine": 0.9952277843215369,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.9830399751663208,
+            0.9779199957847595,
+            0.9768959879875183,
+            0.971776008605957,
+            0.9779199957847595,
+            0.9748479723930359,
+            0.9748479723930359,
+            0.971776008605957,
+            0.9687039852142334,
+            0.9820160269737244
+          ],
+          "factor_bytes": 81920,
+          "tensor_payload_bpw": 4.2890625
+        },
+        {
+          "requested_rank": 4,
+          "actual_rank": 4,
+          "metrics": {
+            "elements": 1048576,
+            "mean_abs": 0.007098303095249947,
+            "max_abs": 0.11266297101974487,
+            "relative_l2": 0.10370990396476934,
+            "cosine": 0.9946661370986982,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006128960816084295,
+            "max_abs": 0.1313222013413906,
+            "relative_l2": 0.09639617729705185,
+            "cosine": 0.9953864019218669,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.9932799935340881,
+            0.9850879907608032,
+            0.9779199957847595,
+            0.9789440035820007,
+            0.9779199957847595,
+            0.9789440035820007,
+            0.9738240242004395,
+            0.9758719801902771,
+            0.9768959879875183,
+            0.9758719801902771
+          ],
+          "factor_bytes": 163840,
+          "tensor_payload_bpw": 4.328125
+        },
+        {
+          "requested_rank": 6,
+          "actual_rank": 6,
+          "metrics": {
+            "elements": 1048576,
+            "mean_abs": 0.00707410462495467,
+            "max_abs": 0.06315559148788452,
+            "relative_l2": 0.10322797935462905,
+            "cosine": 0.9947173916409212,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.00606095394468995,
+            "max_abs": 0.06979374587535858,
+            "relative_l2": 0.0952243572775319,
+            "cosine": 0.9954972332360799,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.9789440035820007,
+            0.9748479723930359,
+            0.9748479723930359,
+            0.9738240242004395,
+            0.9738240242004395,
+            0.9707520008087158,
+            0.9697279930114746,
+            0.9738240242004395,
+            0.9687039852142334,
+            0.9697279930114746
+          ],
+          "factor_bytes": 245760,
+          "tensor_payload_bpw": 4.3671875
+        },
+        {
+          "requested_rank": 8,
+          "actual_rank": 8,
+          "metrics": {
+            "elements": 1048576,
+            "mean_abs": 0.0070502796190632004,
+            "max_abs": 0.059870511293411255,
+            "relative_l2": 0.10287322033144694,
+            "cosine": 0.9947534358614182,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0060001558750482145,
+            "max_abs": 0.060140348970890045,
+            "relative_l2": 0.09427825892716872,
+            "cosine": 0.9955857523557474,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.9830399751663208,
+            0.9789440035820007,
+            0.9738240242004395,
+            0.9768959879875183,
+            0.9728000164031982,
+            0.971776008605957,
+            0.9697279930114746,
+            0.9728000164031982,
+            0.9687039852142334,
+            0.9707520008087158
+          ],
+          "factor_bytes": 327680,
+          "tensor_payload_bpw": 4.40625
+        },
+        {
+          "requested_rank": 12,
+          "actual_rank": 12,
+          "metrics": {
+            "elements": 1048576,
+            "mean_abs": 0.006999210709934902,
+            "max_abs": 0.05997160077095032,
+            "relative_l2": 0.10214892996697167,
+            "cosine": 0.9948264328352323,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005900272591606196,
+            "max_abs": 0.061977818608284,
+            "relative_l2": 0.09274468456463308,
+            "cosine": 0.9957277382909078,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.9912319779396057,
+            0.9809920191764832,
+            0.9809920191764832,
+            0.9799680113792419,
+            0.9789440035820007,
+            0.9881600141525269,
+            0.9830399751663208,
+            0.9789440035820007,
+            0.9789440035820007,
+            0.9779199957847595
+          ],
+          "factor_bytes": 491520,
+          "tensor_payload_bpw": 4.484375
+        },
+        {
+          "requested_rank": 16,
+          "actual_rank": 16,
+          "metrics": {
+            "elements": 1048576,
+            "mean_abs": 0.006968638348766129,
+            "max_abs": 0.060267239809036255,
+            "relative_l2": 0.10169508787885473,
+            "cosine": 0.9948720881370887,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005818011634831341,
+            "max_abs": 0.062221959233284,
+            "relative_l2": 0.09147744050659865,
+            "cosine": 0.9958433368368416,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            0.9850879907608032,
+            0.9850879907608032,
+            0.9799680113792419,
+            0.9820160269737244,
+            0.9943040013313293,
+            0.9830399751663208,
+            0.9768959879875183,
+            0.9758719801902771,
+            0.9758719801902771,
+            0.9768959879875183
+          ],
+          "factor_bytes": 655360,
+          "tensor_payload_bpw": 4.5625
+        }
+      ]
+    },
+    {
+      "M": 2048,
+      "planar_metrics": {
+        "elements": 4194304,
+        "mean_abs": 1.4733369793884876e-05,
+        "max_abs": 0.00021844543516635895,
+        "relative_l2": 0.00021343046264705247,
+        "cosine": 0.9999999772237187,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "native_metrics": {
+        "elements": 4194304,
+        "mean_abs": 0.007474067144781629,
+        "max_abs": 0.17367824912071228,
+        "relative_l2": 0.10819916149210793,
+        "cosine": 0.9942007059384431,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": false
+      },
+      "window_metrics": {
+        "elements": 4194304,
+        "mean_abs": 1.4760172479418264e-05,
+        "max_abs": 0.00021916627883911133,
+        "relative_l2": 0.00021382775143595226,
+        "cosine": 0.9999999772035488,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "window_ms": [
+        7.155712127685547,
+        7.132160186767578,
+        7.159808158874512,
+        7.325695991516113,
+        7.3021440505981445,
+        7.13318395614624,
+        7.151616096496582,
+        7.148543834686279,
+        7.1393280029296875,
+        7.1444478034973145
+      ],
+      "planar_ms": [
+        44.17331314086914,
+        44.014591217041016,
+        44.030975341796875,
+        44.01356887817383,
+        44.005374908447266,
+        44.035072326660156,
+        44.00947189331055,
+        44.00844955444336,
+        43.9633903503418,
+        43.99923324584961
+      ],
+      "native_ms": [
+        3.3525760173797607,
+        3.329024076461792,
+        3.3228800296783447,
+        3.3269760608673096,
+        3.333120107650757,
+        3.3218560218811035,
+        3.324928045272827,
+        3.3259520530700684,
+        3.323904037475586,
+        3.31878399848938
+      ],
+      "ranks": [
+        {
+          "requested_rank": 0,
+          "actual_rank": 0,
+          "metrics": {
+            "elements": 4194304,
+            "mean_abs": 0.007474067144792954,
+            "max_abs": 0.17367824912071228,
+            "relative_l2": 0.10819916149300786,
+            "cosine": 0.9942007059383464,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0065854056012782484,
+            "max_abs": 0.1523182950913906,
+            "relative_l2": 0.10339912100224867,
+            "cosine": 0.9946974586830778,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            3.3566720485687256,
+            3.3474559783935547,
+            3.3515520095825195,
+            3.3515520095825195,
+            3.3525760173797607,
+            3.3464319705963135,
+            3.354624032974243,
+            3.348479986190796,
+            3.451904058456421,
+            3.349503993988037
+          ],
+          "factor_bytes": 0,
+          "tensor_payload_bpw": 4.25
+        },
+        {
+          "requested_rank": 2,
+          "actual_rank": 2,
+          "metrics": {
+            "elements": 4194304,
+            "mean_abs": 0.0072579587554271185,
+            "max_abs": 0.16412624716758728,
+            "relative_l2": 0.10513099785669384,
+            "cosine": 0.9945221262398224,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006238608022742882,
+            "max_abs": 0.1464589200913906,
+            "relative_l2": 0.09804633470399232,
+            "cosine": 0.9952277843215369,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            3.536895990371704,
+            3.476480007171631,
+            3.4785280227661133,
+            3.476480007171631,
+            3.476480007171631,
+            3.4734079837799072,
+            3.46726393699646,
+            3.4805760383605957,
+            3.468287944793701,
+            3.46726393699646
+          ],
+          "factor_bytes": 81920,
+          "tensor_payload_bpw": 4.2890625
+        },
+        {
+          "requested_rank": 4,
+          "actual_rank": 4,
+          "metrics": {
+            "elements": 4194304,
+            "mean_abs": 0.007244560335864865,
+            "max_abs": 0.14985927939414978,
+            "relative_l2": 0.10489334183426186,
+            "cosine": 0.9945478859375259,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.006128960816084295,
+            "max_abs": 0.1313222013413906,
+            "relative_l2": 0.09639617729705185,
+            "cosine": 0.9953864019218669,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            3.4754559993743896,
+            3.476480007171631,
+            3.4734079837799072,
+            3.4693119525909424,
+            3.4693119525909424,
+            3.4703359603881836,
+            3.4693119525909424,
+            3.4703359603881836,
+            3.4652159214019775,
+            3.4693119525909424
+          ],
+          "factor_bytes": 163840,
+          "tensor_payload_bpw": 4.328125
+        },
+        {
+          "requested_rank": 6,
+          "actual_rank": 6,
+          "metrics": {
+            "elements": 4194304,
+            "mean_abs": 0.007222699576452153,
+            "max_abs": 0.08621487021446228,
+            "relative_l2": 0.10443963268803053,
+            "cosine": 0.9945961246247098,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.00606095394468995,
+            "max_abs": 0.06979374587535858,
+            "relative_l2": 0.0952243572775319,
+            "cosine": 0.9954972332360799,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            3.476480007171631,
+            3.56659197807312,
+            3.4734079837799072,
+            3.4734079837799072,
+            3.471359968185425,
+            3.4785280227661133,
+            3.4703359603881836,
+            3.472383975982666,
+            3.468287944793701,
+            3.468287944793701
+          ],
+          "factor_bytes": 245760,
+          "tensor_payload_bpw": 4.3671875
+        },
+        {
+          "requested_rank": 8,
+          "actual_rank": 8,
+          "metrics": {
+            "elements": 4194304,
+            "mean_abs": 0.007199362500834578,
+            "max_abs": 0.08025270700454712,
+            "relative_l2": 0.1040795976187852,
+            "cosine": 0.9946328200203082,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.0060001558750482145,
+            "max_abs": 0.060140348970890045,
+            "relative_l2": 0.09427825892716872,
+            "cosine": 0.9955857523557474,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            3.4785280227661133,
+            3.4734079837799072,
+            3.472383975982666,
+            3.468287944793701,
+            3.4744319915771484,
+            3.4693119525909424,
+            3.4693119525909424,
+            3.468287944793701,
+            3.4703359603881836,
+            3.4662399291992188
+          ],
+          "factor_bytes": 327680,
+          "tensor_payload_bpw": 4.40625
+        },
+        {
+          "requested_rank": 12,
+          "actual_rank": 12,
+          "metrics": {
+            "elements": 4194304,
+            "mean_abs": 0.007151609789046045,
+            "max_abs": 0.07732301950454712,
+            "relative_l2": 0.10339321924825971,
+            "cosine": 0.9947031523633537,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005900272591606196,
+            "max_abs": 0.061977818608284,
+            "relative_l2": 0.09274468456463308,
+            "cosine": 0.9957277382909078,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            3.4795520305633545,
+            3.4785280227661133,
+            3.471359968185425,
+            3.477504014968872,
+            3.468287944793701,
+            3.4795520305633545,
+            3.4703359603881836,
+            3.4785280227661133,
+            3.4703359603881836,
+            3.468287944793701
+          ],
+          "factor_bytes": 491520,
+          "tensor_payload_bpw": 4.484375
+        },
+        {
+          "requested_rank": 16,
+          "actual_rank": 16,
+          "metrics": {
+            "elements": 4194304,
+            "mean_abs": 0.00712100812875768,
+            "max_abs": 0.07707887887954712,
+            "relative_l2": 0.102948894580842,
+            "cosine": 0.9947482143741943,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "calibration_metrics": {
+            "elements": 16777216,
+            "mean_abs": 0.005818011634831341,
+            "max_abs": 0.062221959233284,
+            "relative_l2": 0.09147744050659865,
+            "cosine": 0.9958433368368416,
+            "reference_zero_norm": false,
+            "equal_values": false,
+            "local_tolerance_pass": false
+          },
+          "samples_ms": [
+            3.482624053955078,
+            3.5921919345855713,
+            3.472383975982666,
+            3.4693119525909424,
+            3.468287944793701,
+            3.468287944793701,
+            3.471359968185425,
+            3.4703359603881836,
+            3.4795520305633545,
+            3.4703359603881836
+          ],
+          "factor_bytes": 655360,
+          "tensor_payload_bpw": 4.5625
+        }
+      ]
+    }
+  ],
+  "folded_calibration_metrics": {
+    "elements": 16777216,
+    "mean_abs": 7.200150790482759e-08,
+    "max_abs": 1.7583370208740234e-06,
+    "relative_l2": 1.1385834527618965e-06,
+    "cosine": 0.9999999999993516,
+    "reference_zero_norm": false,
+    "equal_values": false,
+    "local_tolerance_pass": true
+  },
+  "folded_evaluation_metrics": {
+    "elements": 8388608,
+    "mean_abs": 7.927068925377203e-08,
+    "max_abs": 2.0265579223632812e-06,
+    "relative_l2": 1.169599446067523e-06,
+    "cosine": 0.9999999999993161,
+    "reference_zero_norm": false,
+    "equal_values": false,
+    "local_tolerance_pass": true
+  },
+  "activation_rank": 7725,
+  "native_calibration_metrics": {
+    "elements": 16777216,
+    "mean_abs": 0.006585405601298621,
+    "max_abs": 0.1523182950913906,
+    "relative_l2": 0.10339912100258139,
+    "cosine": 0.9946974586830435,
+    "reference_zero_norm": false,
+    "equal_values": false,
+    "local_tolerance_pass": false
+  },
+  "native_payload_bytes": 8912896,
+  "storage_scope": "Standalone operator serialization includes native tensor metadata, packed codes/scales, factors, dimensions and arithmetic configuration; excludes the rest of the model and runtime buffers.",
+  "export_file_bytes": 9570963,
+  "complete": true,
+  "rank_exports": [
+    {
+      "requested_rank": 0,
+      "actual_rank": 0,
+      "file": "/root/p32-all-down/layer9/rank0.pt",
+      "serialized_operator_bytes": 8915721,
+      "serialized_operator_bpw": 4.251347064971924
+    },
+    {
+      "requested_rank": 2,
+      "actual_rank": 2,
+      "file": "/root/p32-all-down/layer9/rank2.pt",
+      "serialized_operator_bytes": 8997641,
+      "serialized_operator_bpw": 4.290409564971924
+    },
+    {
+      "requested_rank": 4,
+      "actual_rank": 4,
+      "file": "/root/p32-all-down/layer9/rank4.pt",
+      "serialized_operator_bytes": 9079561,
+      "serialized_operator_bpw": 4.329472064971924
+    },
+    {
+      "requested_rank": 6,
+      "actual_rank": 6,
+      "file": "/root/p32-all-down/layer9/rank6.pt",
+      "serialized_operator_bytes": 9161481,
+      "serialized_operator_bpw": 4.368534564971924
+    },
+    {
+      "requested_rank": 8,
+      "actual_rank": 8,
+      "file": "/root/p32-all-down/layer9/rank8.pt",
+      "serialized_operator_bytes": 9243401,
+      "serialized_operator_bpw": 4.407597064971924
+    },
+    {
+      "requested_rank": 12,
+      "actual_rank": 12,
+      "file": "/root/p32-all-down/layer9/rank12.pt",
+      "serialized_operator_bytes": 9407251,
+      "serialized_operator_bpw": 4.485726833343506
+    },
+    {
+      "requested_rank": 16,
+      "actual_rank": 16,
+      "file": "/root/p32-all-down/layer9/rank16.pt",
+      "serialized_operator_bytes": 9571091,
+      "serialized_operator_bpw": 4.563851833343506
+    }
+  ]
+}

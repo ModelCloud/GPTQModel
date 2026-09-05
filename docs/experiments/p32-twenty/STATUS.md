@@ -63,3 +63,8 @@ held-out captures are complete; per-layer native fits/selection remain.
 calibration-fitted sparse exceptions, fused expansion/add with Graph timings and
 executed Nsight/SASS evidence. [Full ARC](FULL_ARC.md) and canonical GSM8K-128
 are complete. Native-GEMM fusion and fused-model validation remain outstanding.
+
+[All-down rank screening](ALL_DOWN_RANKS.md): layers1–15 fitted ranks0–16;
+none passes every canonical case, so all retain window. 105 exports and 945
+reload metric comparisons are recorded. This does not complete broader/model
+validation for possible future alternatives.

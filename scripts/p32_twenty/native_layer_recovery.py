@@ -24,8 +24,10 @@ def main():
     parser.add_argument("--uuid", required=True)
     parser.add_argument("--module", required=True)
     parser.add_argument("--fp16-boundary", action="store_true")
+    parser.add_argument("--ranks", nargs="+", type=int, default=[16, 32, 64, 128])
+    parser.add_argument("--evaluation-root", type=Path, default=Path("/root/p32-timing-activations"))
     parser.add_argument("--joint-steps", type=int, default=0)
-    parser.add_argument("--joint-rank", type=int, choices=(16, 32, 64, 128), default=16)
+    parser.add_argument("--joint-rank", type=int, choices=(2, 4, 6, 8, 12, 16, 32, 64, 128), default=16)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--calibration-root",
@@ -33,6 +35,8 @@ def main():
         default=Path("/root/p32-recovery-calibration/activations"),
     )
     args = parser.parse_args()
+    if not args.ranks or any(r < 0 or r > 128 for r in args.ranks):
+        parser.error("Ranks must be between 0 and 128")
     if args.output.resolve().is_relative_to(SNAPSHOT.resolve()):
         parser.error("Output must be outside teacher snapshot")
     os.environ["CUDA_VISIBLE_DEVICES"] = args.uuid
@@ -150,7 +154,7 @@ def main():
         ].reshape(-1, n).cuda().float()
 
     xc, yc = capture(args.calibration_root)
-    xe, ye = capture("/root/p32-timing-activations")
+    xe, ye = capture(args.evaluation_root)
     if args.fp16_boundary:
         xc, xe = xc.half().float(), xe.half().float()
         # Recompute the canonical reference on IDENTICAL rounded input values.
@@ -173,7 +177,8 @@ def main():
         ).strip(),
         "calibration": str(args.calibration_root),
         "calibration_rows": xc.shape[0],
-        "evaluation": "separate C4 teacher activation capture; never used in fitting",
+        "evaluation": str(args.evaluation_root),
+        "evaluation_scope": "separate C4 teacher activation capture; never used in fitting",
         "activation_rcond": 1e-5,
         "rows": [],
     }
@@ -219,7 +224,7 @@ def main():
         u, s, vh = torch.linalg.svd(xc.double(), full_matrices=False)
         p = int((s > s[0] * report["activation_rcond"]).sum())
         left, values, right = torch.linalg.svd(u[:, :p].T @ z, full_matrices=False)
-        rank = min(args.joint_rank if args.joint_steps else 128, p, n)
+        rank = min(args.joint_rank if args.joint_steps else max(args.ranks), p, n)
         aa = ((vh[:p].T / s[:p]) @ (left[:, :rank] * values[:rank])).float()
         bb = right[:rank].float()
         report["activation_rank"] = p
@@ -324,12 +329,12 @@ def main():
                 "native_ms": timing(lambda x=x: native(x)),
                 "ranks": [],
             }
-            for r in [args.joint_rank] if args.joint_steps else [16, 32, 64, 128]:
+            for r in [args.joint_rank] if args.joint_steps else args.ranks:
                 rr = min(r, rank)
                 a, b = aa[:, :rr].contiguous(), bb[:rr].contiguous()
 
                 def corrected(x=x, a=a, b=b):
-                    return output_cast(native(x) + (x @ a) @ b)
+                    return output_cast(native(x) + (x @ a) @ b) if a.shape[1] else output_cast(native(x))
 
                 row["ranks"].append(
                     {

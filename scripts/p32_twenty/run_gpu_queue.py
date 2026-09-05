@@ -71,6 +71,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--state", type=Path, required=True)
+    parser.add_argument("--exit-when-drained", action="store_true")
     args = parser.parse_args()
     args.state.parent.mkdir(parents=True, exist_ok=True)
     with ExitStack() as resources:
@@ -186,7 +187,7 @@ def main():
                 live[job["id"]] = (proc, gpu, log)
                 print("STARTED", job["id"], proc.pid, gpu["uuid"], flush=True)
             save()
-            if all(r["status"] in ("complete", "failed") for r in records.values()):
+            if args.exit_when_drained and all(r["status"] in ("complete", "failed") for r in records.values()):
                 return
             time.sleep(5)
 
