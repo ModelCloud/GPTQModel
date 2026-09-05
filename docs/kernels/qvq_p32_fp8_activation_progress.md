@@ -1,6 +1,6 @@
 # QVQ P32 FP8 activation execution plan
 
-Status date: 2026-09-04. Validation GPU: one exclusive NVIDIA H200 (SM90).
+Status date: 2026-09-05. Validation GPU: one exclusive NVIDIA H200 (SM90).
 
 ## Non-negotiable contracts
 
@@ -52,7 +52,8 @@ W3.5A16 uses P32 weights with native BF16 model activations and KV cache:
 ```
 
 W3.5A8 uses the same P32 weight format and opts into the exact deployed FP8
-operand, replay, and KV-cache contracts:
+operand and KV-cache contracts. Module-local weight replay remains an explicit
+experiment rather than part of the recommended baseline:
 
 ```json
 {
@@ -69,7 +70,7 @@ operand, replay, and KV-cache contracts:
     "scale_method": "dynamic_per_token",
     "target": "p32_operand",
     "kernel_mode": "require",
-    "replay_passes": 1,
+    "replay_passes": 0,
     "replay_max_rows": 2048,
     "replay_validation_fraction": 0.125
   }
@@ -161,7 +162,7 @@ W2/W2.5/W3/W3.5 at M=1/16/17/32/64, and W3.5 at
 M=1/2/4/8/16/17/32/64/128/256/512/1024/2048/4096 across three seeds. The new
 grid is exact to the deployed E4M3 operand/weight reference at every point.
 
-### Phase 4.5 — recommended FP8-targeted quantization replay (complete)
+### Phase 4.5 — experimental FP8-targeted quantization replay (implemented, default disabled)
 
 The calibration objective now describes the exact scaled E4M3 operand grid
 used by the deployed kernel, following the NVFP4 branch's deployed-operand
@@ -192,15 +193,27 @@ weights:
    selection, source provenance, and native-kernel execution counters.
 
 The flow is optional: `replay_passes=0` disables it, while
-`target=linear_input` preserves the legacy calibration contract. A focused H200
-test passes the entire native-teacher/first-encode/FP8-replay/re-encode/held-out
-sequence and proves both candidates execute the native kernel.
+`replay_passes=1` explicitly enables the module-local experiment. A focused
+H200 test passes the entire native-teacher/first-encode/FP8-replay/re-encode/
+held-out sequence and proves both candidates execute the native kernel.
 
-The fresh Llama-3.2-1B W3.5A8 checkpoint recorded 112/112 first-candidate and
-112/112 second-candidate native H200 executions. The held-out safety gate kept
-the first encoding for all 112 modules: mean validation MSE was 0.000700 for
-the initial encode and 0.001931 for the correction. This is the intended safe
-outcome when replay cannot improve the serialized P32 candidate.
+Post-merge inspection of the fresh Llama-3.2-1B W3.5A8 artifact found that the
+module-local gate selected five second encodes: layer-0 Q/K/V and down, plus
+layer-1 down. All 112 first and second candidates executed natively. The five
+local improvements ranged from 18.1% to 34.0%, but their sequentially propagated
+checkpoint regressed on two disjoint real-text splits. With identical full-FP8
+execution, using the unreplayed A16 packed weights versus the replayed A8 packed
+weights produced:
+
+| held-out rows | shifted tokens | no-replay mean KL | replay mean KL | no-replay PPL | replay PPL |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 256--319 | 18,692 | 0.06345 | 0.06930 | 4.0861 | 4.1549 |
+| 320--383 | 18,501 | 0.05906 | 0.06200 | 3.8262 | 3.8556 |
+
+The locally accepted replay is therefore a clear negative at the propagated
+model boundary. `replay_passes` now defaults to zero while the implementation
+and explicit opt-in remain available for development of a block/logit-level
+acceptance gate.
 
 The comparison boundary is the real FP32 WGMMA accumulator followed by the
 existing output recovery and BF16 model cast. The accumulator itself is not

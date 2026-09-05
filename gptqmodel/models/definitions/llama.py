@@ -7,6 +7,7 @@ from ..base import BaseQModel
 
 
 class LlamaQModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"llama", "mistral", "gemma", "granite", "olmo2", "stablelm", "cohere", "cohere2"})
 
     pre_lm_head_norm_module = "model.norm"
 
@@ -20,8 +21,8 @@ class LlamaQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0:q", "k_proj:0:k", "v_proj:0:v", "o_proj:1:o"),
+            "self_attn": ("q_proj:0:q:in=x", "k_proj:0:k:in=x", "v_proj:0:v:in=x", "o_proj:1:o"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+            "mlp": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
         }
     ]

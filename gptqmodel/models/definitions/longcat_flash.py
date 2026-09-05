@@ -22,8 +22,8 @@ class LongCatFlashQModel(BaseQModel):
         {
             "input_layernorm": ("input_layernorm:!",),
             "self_attn": {
-                "0": ("q_a_proj:0:q", "q_b_proj:0:q", "kv_a_proj_with_mqa:0:k:v", "kv_b_proj:0:k:v", "o_proj:1"),
-                "1": ("q_a_proj:0:q", "q_b_proj:0:q", "kv_a_proj_with_mqa:0:k:v", "kv_b_proj:0:k:v", "o_proj:1")
+                "0": ("q_a_proj:0:q", "q_b_proj:0:q:in=q_a", "kv_a_proj_with_mqa:0:k:v", "kv_b_proj:0:k:v:in=kv_a", "o_proj:1"),
+                "1": ("q_a_proj:0:q", "q_b_proj:0:q:in=q_a", "kv_a_proj_with_mqa:0:k:v", "kv_b_proj:0:k:v:in=kv_a", "o_proj:1")
             },
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlps": {

@@ -97,7 +97,7 @@ def test_qvq_p32_a8_quantize_save_reload_and_native_inference(tmp_path: Path):
         bits=3.5,
         format="v2b2-g32",
         rounding="block_ldlq",
-        activation={"kernel_mode": "require"},
+        activation={"kernel_mode": "require", "replay_passes": 1},
         device="cuda:0",
         offload_to_disk=False,
     )

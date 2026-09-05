@@ -2262,6 +2262,13 @@ class HessianConfig:
         default=torch.float32,
         metadata={"help": "Stage Hessian chunks in a lower precision dtype when supported"},
     )
+    dedup_shared_inputs: bool = field(
+        default=True,
+        metadata={
+            "help": "Collect the Hessian once per explicit `:in=<tag>` shared-input group and copy it to the "
+                    "other group members instead of accumulating it separately for each module"
+        },
+    )
     length_aware: Union[bool, str, LengthAwareConfig] = field(
         default_factory=lambda: LengthAwareConfig(
             mode=LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT,
@@ -2274,6 +2281,9 @@ class HessianConfig:
 
     def __post_init__(self):
         """Validate Hessian chunking and staging dtype settings."""
+
+        if not isinstance(self.dedup_shared_inputs, bool):
+            raise ValueError("HessianConfig: `dedup_shared_inputs` must be a bool.")
 
         if self.chunk_size is not None:
             if not isinstance(self.chunk_size, int):
@@ -2318,6 +2328,7 @@ class HessianConfig:
             "chunk_size": self.chunk_size,
             "chunk_bytes": self.chunk_bytes,
             "staging_dtype": str(self.staging_dtype).split(".")[-1],
+            "dedup_shared_inputs": self.dedup_shared_inputs,
             "length_aware": self.length_aware.to_dict() if self.length_aware.mode is not LengthAwareMode.DISABLED else None,
         }
 
@@ -6265,7 +6276,10 @@ class QVQActivationConfig:
     scale_method: str = QVQ_FP8_ACTIVATION_SCALE_METHOD
     target: str = "p32_operand"
     kernel_mode: str = "auto"
-    replay_passes: int = 1
+    # Module-local replay is experimental until its candidate selection has a
+    # propagated block/logit gate. Keep it available, but never alter packed
+    # weights merely because A8 execution was enabled.
+    replay_passes: int = 0
     replay_max_rows: int = 2048
     replay_validation_fraction: float = 0.125
 

@@ -57,6 +57,31 @@ def batched(iterable, batch_size: int, process_func=None):
         yield batch
 
 
+def normalize_chat_calibration_sample(sample: Any) -> Any:
+    """Normalize text-like calibration rows to processor chat conversations."""
+
+    if isinstance(sample, dict):
+        if "messages" in sample:
+            return sample["messages"]
+        if isinstance(sample.get("text"), str):
+            sample = sample["text"]
+
+    if isinstance(sample, str):
+        return [{"role": "user", "content": [{"type": "text", "text": sample}]}]
+
+    return sample
+
+
+def batched_conversations(iterable, batch_size: int, process_func=None):
+    """Yield chat-normalized calibration samples in fixed-size batches."""
+
+    def normalize_and_process(sample):
+        sample = normalize_chat_calibration_sample(sample)
+        return process_func(sample) if process_func is not None else sample
+
+    yield from batched(iterable, batch_size, process_func=normalize_and_process)
+
+
 # Remote dataset identifiers (https://..., hf://..., s3://..., etc.) that are not arbitrary text.
 _CALIBRATION_URI_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://[^\s]+$")
 _CALIBRATION_URI_PREFIX_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")

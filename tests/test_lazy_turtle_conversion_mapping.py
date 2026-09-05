@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import save_file
 from torch import nn
 
+from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.deepseek_ocr2 import DeepSeekOCR2QModel
 from gptqmodel.models.definitions.deepseek_v4 import DeepSeekV4QModel
 from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ
@@ -34,6 +35,7 @@ def _build_lazy_turtle(
     tmp_path: Path,
     checkpoint_tensors: dict[str, torch.Tensor],
     *,
+    config=None,
     module_tree=None,
     hf_conversion_map_reversed=None,
     target_model: nn.Module | None = None,
@@ -45,7 +47,7 @@ def _build_lazy_turtle(
     _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
     turtle = LazyTurtle.maybe_create(
         model_local_path=str(model_dir),
-        config=SimpleNamespace(_experts_implementation=None),
+        config=config or SimpleNamespace(_experts_implementation=None),
         model_init_kwargs={"device_map": {"": "cpu"}},
         module_tree=module_tree,
         hf_conversion_map_reversed=hf_conversion_map_reversed,
@@ -166,6 +168,24 @@ class _MiniMaxM3Shell(nn.Module):
         self.model.language_model.layers = nn.ModuleList([_FusedDenseLayerShell()])
 
 
+class _Qwen4NgramShell(nn.Module):
+    _no_placement_params = ["ple.ple_embedding.ngram_embedding.weight"]
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(
+            model_type="qwen4_exp",
+            text_config=SimpleNamespace(split_ngram_parts=3),
+        )
+        self.model = nn.Module()
+        self.model.language_model = nn.Module()
+        layer = nn.Module()
+        layer.ple = nn.Module()
+        layer.ple.ple_embedding = nn.Module()
+        layer.ple.ple_embedding.ngram_embedding = nn.Embedding(6, 2, device="meta")
+        self.model.language_model.layers = nn.ModuleList([layer])
+
+
 class _MiniMaxM3SharedExpertsMlpShell(nn.Module):
     def __init__(self, hidden_dim: int = 4, intermediate_dim: int = 3):
         super().__init__()
@@ -255,8 +275,9 @@ class MergeModulelist:
 
 
 class Concatenate:
-    def __init__(self, dim: int = 0):
+    def __init__(self, dim: int = 0, num_shards_attribute: str | None = None):
         self.dim = dim
+        self.num_shards_attribute = num_shards_attribute
 
 
 class ErnieFuseAndSplitTextVisionExperts:
@@ -1079,6 +1100,56 @@ def test_lazy_turtle_materializes_fused_dense_mlp_from_split_gate_up_checkpoint(
     weight = target_submodule.mlp.gate_up_proj.weight
     assert weight.device.type != "meta"
     assert torch.equal(weight, torch.cat([gate, up], dim=0))
+
+
+def test_lazy_turtle_materializes_config_counted_shards_on_cpu_for_no_placement_param(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightConverterStub(
+                source_patterns="ngram_embedding.shard_*.weight",
+                target_patterns="ngram_embedding.weight",
+                operations=[Concatenate(dim=0, num_shards_attribute="split_ngram_parts")],
+            ),
+        ]
+    )
+    assert reversed_map is not None
+
+    shards = [
+        torch.arange(0, 4, dtype=torch.float32).reshape(2, 2),
+        torch.arange(4, 6, dtype=torch.float32).reshape(1, 2),
+        torch.arange(6, 12, dtype=torch.float32).reshape(3, 2),
+    ]
+    checkpoint_tensors = {
+        f"model.language_model.layers.0.ple.ple_embedding.ngram_embedding.shard_{index}.weight": shard
+        for index, shard in enumerate(shards)
+    }
+    shell = _Qwen4NgramShell()
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        checkpoint_tensors,
+        config=shell.config,
+        hf_conversion_map_reversed=reversed_map,
+        target_model=shell,
+    )
+
+    ngram_embedding = shell.model.language_model.layers[0].ple.ple_embedding.ngram_embedding
+    turtle.materialize_submodule(
+        target_model=shell,
+        target_submodule=ngram_embedding,
+        device=torch.device("cuda:0"),
+        module_path="model.language_model.layers.0.ple.ple_embedding.ngram_embedding",
+        show_progress=False,
+    )
+
+    assert ngram_embedding.weight.device.type == "cpu"
+    assert torch.equal(ngram_embedding.weight, torch.cat(shards, dim=0))
+
+    qmodel = BaseQModel.__new__(BaseQModel)
+    nn.Module.__init__(qmodel)
+    qmodel.model = shell
+    qmodel.turtle_model = turtle
+    assert qmodel.has_forward_device_overrides() is True
+    assert qmodel.forward_device_for_module(ngram_embedding, torch.device("cuda:0")) == torch.device("cpu")
 
 
 def test_lazy_turtle_sync_all_meta_materializes_fused_dense_mlp_from_split_gate_up_checkpoint(tmp_path):

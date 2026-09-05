@@ -32,6 +32,7 @@ log = setup_logger()
 
 _SWORDFISH_OPS_NAME = "gptqmodel_swordfish_ops"
 _SWORDFISH_OPS_NAMESPACE = "gptqmodel_swordfish"
+_SWORDFISH_TORCH_STABLE_ABI_TARGET = (2, 10)
 
 _SWORDFISH_GENCODE_SM_RE = re.compile(r"code=sm_(\d+)([a-z]?)")
 _SWORDFISH_GENCODE_PTX_RE = re.compile(r"code=compute_(\d+)([a-z]?)")
@@ -167,6 +168,7 @@ _SWORDFISH_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     force_rebuild_env="GPTQMODEL_SWORDFISH_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
+    torch_stable_abi_target=_SWORDFISH_TORCH_STABLE_ABI_TARGET,
     # The kernel targets sm100f/sm110f family; do not let PyTorch merge the
     # visible sm103 capability into the arch list and drop the family flag.
     merge_visible_cuda_arch_override=False,
@@ -227,6 +229,22 @@ _SWORDFISH_SUPPORTED_CAPABILITIES: Tuple[
 def _swordfish_static_runtime_error() -> str:
     if IS_ROCM:
         return "Swordfish kernel is not supported on ROCm."
+    torch_public = torch.__version__.partition("+")[0]
+    try:
+        torch_major_minor = tuple(int(part) for part in torch_public.split(".")[:2])
+    except (TypeError, ValueError):
+        major, minor = _SWORDFISH_TORCH_STABLE_ABI_TARGET
+        return (
+            f"Swordfish kernel cannot verify torch stable ABI requirement >= {major}.{minor}; "
+            f"unrecognized torch version {torch.__version__}."
+        )
+    if torch_major_minor < _SWORDFISH_TORCH_STABLE_ABI_TARGET:
+        major, minor = _SWORDFISH_TORCH_STABLE_ABI_TARGET
+        return (
+            f"Swordfish kernel requires torch >= {major}.{minor} "
+            f"(compiled against the torch {major}.{minor} stable ABI); "
+            f"found torch {torch.__version__}."
+        )
     if not torch.cuda.is_available():
         return "Swordfish kernel requires CUDA."
     major, minor = torch.cuda.get_device_capability()

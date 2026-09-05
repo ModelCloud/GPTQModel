@@ -7,6 +7,7 @@ from . import LlamaQModel
 
 
 class Qwen3QModel(LlamaQModel):
+    shared_input_verified_model_types = frozenset({"qwen3"})
     """
     Qwen3 inherits the Llama-style layout but inserts Q/K RMS norm layers
     ahead of the attention projections. We mark those helper modules as
@@ -22,12 +23,12 @@ class Qwen3QModel(LlamaQModel):
             "self_attn": (
                 "q_norm:!",
                 "k_norm:!",
-                "q_proj:0:q",
-                "k_proj:0:k",
-                "v_proj:0:v",
+                "q_proj:0:q:in=x",
+                "k_proj:0:k:in=x",
+                "v_proj:0:v:in=x",
                 "o_proj:1",
             ),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
-            "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+            "mlp": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
         },
     ]

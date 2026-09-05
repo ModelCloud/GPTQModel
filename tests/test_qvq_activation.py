@@ -606,7 +606,7 @@ def test_qvq_v2b2_g32_a8_config_round_trip(bits):
         "format": "float8_e4m3fn",
         "kernel_mode": "auto",
         "replay_max_rows": 2048,
-        "replay_passes": 1,
+        "replay_passes": 0,
         "replay_validation_fraction": 0.125,
         "scale_method": "dynamic_per_token",
         "target": "p32_operand",
@@ -674,6 +674,7 @@ def test_h200_fp8_replay_reencodes_from_immutable_dense_teacher_and_executes_nat
         activation={
             "kernel_mode": "require",
             "replay_max_rows": 16,
+            "replay_passes": 1,
             "replay_validation_fraction": 0.125,
         },
         offload_to_disk=False,
@@ -783,7 +784,7 @@ def test_qvq_fp8_replay_teacher_capture_survives_completed_pristine_hessian():
         bits=2,
         format="qvq_v2b2_p32",
         rounding="block_ldlq",
-        activation={"replay_max_rows": 16},
+        activation={"replay_max_rows": 16, "replay_passes": 1},
         device="cpu",
         offload_to_disk=False,
     )
@@ -802,6 +803,34 @@ def test_qvq_fp8_replay_teacher_capture_survives_completed_pristine_hessian():
     assert torch.equal(captured_source, source.reshape(-1, 16))
     assert torch.equal(captured_output, native_output.reshape(-1, 16))
     assert not task_entry["capture"]._device_hessian_partials
+
+
+def test_qvq_fp8_default_does_not_capture_experimental_replay_rows():
+    root = torch.nn.Module()
+    root.proj = torch.nn.Linear(16, 16, bias=False)
+    named = NamedModule(root.proj, name="proj", full_name="proj", layer_index=0)
+    config = QVQConfig(
+        bits=2,
+        format="qvq_v2b2_p32",
+        rounding="block_ldlq",
+        activation=True,
+        device="cpu",
+        offload_to_disk=False,
+    )
+    processor = _processor(config)
+    processor.preprocess(named)
+    source = torch.randn((1, 4, 16))
+
+    processor.pre_process_fwd_hook("proj")(
+        root.proj,
+        (source,),
+        root.proj(source),
+    )
+
+    task_entry = processor.tasks["proj"]
+    assert config.activation.replay_passes == 0
+    assert task_entry["fp8_replay_row_count"] == 0
+    assert not task_entry["fp8_replay_rows"]
 
 
 def test_qvq_processor_merges_device_local_activation_error_statistics():
