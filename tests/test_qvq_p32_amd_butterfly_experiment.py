@@ -11,7 +11,7 @@ triton = pytest.importorskip("triton")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 @pytest.mark.parametrize("interleave", [False, True])
 @pytest.mark.parametrize("m,n", [(128, 128), (65, 67), (65, 128), (128, 67)])
-@pytest.mark.parametrize("prefetch", [False, True])
+@pytest.mark.parametrize("prefetch", [False, True, "register"])
 def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, interleave, m, n, prefetch):
     if not torch.cuda.is_available() or not torch.version.hip:
         pytest.skip("requires AMD GPU")
@@ -26,6 +26,7 @@ def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, inter
 
     kernel = folded_residual_prefetch_kernel if prefetch else folded_residual_gemm_gluon_kernel
     block_k = 64 if prefetch else tile
+    prefetch_options = {"register_prefetch": prefetch == "register"} if prefetch else {}
 
     generator = torch.Generator(device="cuda").manual_seed(950 + size_k)
     x = torch.randn((m, size_k), generator=generator, device="cuda", dtype=torch.float16) * 0.01
@@ -34,14 +35,15 @@ def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, inter
     reference = x.float() @ (high.float() + low.float()).T
     output = torch.full((m * n + 128,), 999.0, device="cuda", dtype=dtype)
     kernel[(triton.cdiv(m, tile), triton.cdiv(n, tile))](
-        x, high, low, output, m, n, size_k, tile, tile, block_k, interleave, num_warps=4, num_stages=2,
+        x, high, low, output, m, n, size_k, tile, tile, block_k, interleave,
+        num_warps=4, num_stages=2, **prefetch_options,
     )
     torch.testing.assert_close(output[:m*n].view(m, n).float(), reference, atol=2e-3, rtol=0)
     assert (output[m*n:] == 999.0).all()
     control = torch.empty_like(output)
     kernel[(triton.cdiv(m, tile), triton.cdiv(n, tile))](
         x, high, low, control, m, n, size_k, tile, tile, block_k, interleave, False,
-        num_warps=4, num_stages=2,
+        num_warps=4, num_stages=2, **prefetch_options,
     )
     assert torch.equal(output[:m*n], control[:m*n])
     if prefetch:
@@ -52,9 +54,10 @@ def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, inter
         assert torch.equal(output[:m*n], control[:m*n])
 
 
-@pytest.mark.parametrize("size_k", [64, 192])
+@pytest.mark.parametrize("size_k", [64, 128, 192])
 @pytest.mark.parametrize("interleave", [False, True])
-def test_prefetch_ring_single_and_odd_tile_counts(size_k, interleave):
+@pytest.mark.parametrize("register_prefetch", [False, True])
+def test_prefetch_ring_single_and_odd_tile_counts(size_k, interleave, register_prefetch):
     if not torch.cuda.is_available() or not torch.version.hip:
         pytest.skip("requires AMD GPU")
     if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
@@ -70,7 +73,7 @@ def test_prefetch_ring_single_and_odd_tile_counts(size_k, interleave):
     for _ in range(10):
         folded_residual_prefetch_kernel[(2, 1)](
             x, high, low, output, 65, 67, size_k, 64, 128, 64, interleave,
-            num_warps=4, num_stages=2,
+            num_warps=4, num_stages=2, register_prefetch=register_prefetch,
         )
         assert (output[:65*67] == size_k * 1.5).all()
         assert (output[65*67:] == 999.0).all()

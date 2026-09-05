@@ -44,11 +44,30 @@ def _consume(x_shared, high_shared, low_shared, index, primary, correction,
 
 
 @gluon.jit
+def _load_tile(xs, hs, ls, index, mma: gl.constexpr):
+    a = xs.index(index).load(gl.DotOperandLayout(0, mma, 8))
+    b = hs.index(index).load(gl.DotOperandLayout(1, mma, 8))
+    c = ls.index(index).load(gl.DotOperandLayout(1, mma, 8))
+    return a, b, c
+
+
+@gluon.jit
+def _accumulate(a, b, c, primary, correction, interleave: gl.constexpr):
+    primary = mfma(a, b, primary)
+    if interleave:
+        primary = mfma(a, c, primary)
+    else:
+        correction = mfma(a, c, correction)
+    return primary, correction
+
+
+@gluon.jit
 def folded_residual_prefetch_kernel(
     x_ptr, high_ptr, low_ptr, output_ptr,
     size_m: gl.constexpr, size_n: gl.constexpr, size_k: gl.constexpr,
     block_m: gl.constexpr, block_n: gl.constexpr, block_k: gl.constexpr,
     interleave: gl.constexpr = False, prune_masks: gl.constexpr = True,
+    register_prefetch: gl.constexpr = False,
 ):
     gl.static_assert(size_k >= block_k and size_k % block_k == 0)
     gl.static_assert(block_k == 64 and (block_m == 64 or block_m == 128)
@@ -91,21 +110,49 @@ def folded_residual_prefetch_kernel(
     async_copy.commit_group()
     primary = gl.full((block_m, block_n), 0, gl.float32, mma)
     correction = gl.full((block_m, block_n), 0, gl.float32, mma)
-    for tile in range(size_k // block_k - 1):
-        read_index = tile % 2
-        write_index = 1 - read_index
-        offset = (tile + 1) * block_k
-        async_copy.buffer_load_to_shared(xs.index(write_index), x_ptr + offset, ao, amask, 0)
-        async_copy.buffer_load_to_shared(hs.index(write_index), high_ptr + offset, bo, bmask, 0)
-        async_copy.buffer_load_to_shared(ls.index(write_index), low_ptr + offset, bo, bmask, 0)
+    if register_prefetch and size_k // block_k > 1:
+        # Prime two LDS tiles and carry the first tile's operands in registers.
+        async_copy.buffer_load_to_shared(xs.index(1), x_ptr + block_k, ao, amask, 0)
+        async_copy.buffer_load_to_shared(hs.index(1), high_ptr + block_k, bo, bmask, 0)
+        async_copy.buffer_load_to_shared(ls.index(1), low_ptr + block_k, bo, bmask, 0)
         async_copy.commit_group()
         async_copy.wait_group(1)
-        primary, correction = _consume(xs, hs, ls, read_index, primary, correction, mma, interleave)
-        # Every wave must finish reading this slot before the next iteration reuses it.
+        a, b, c = _load_tile(xs, hs, ls, 0, mma)
         gl.barrier()
-    async_copy.wait_group(0)
-    primary, correction = _consume(xs, hs, ls, (size_k // block_k - 1) % 2,
-                                   primary, correction, mma, interleave)
+        for tile in range(size_k // block_k - 2):
+            write_index = tile % 2
+            next_index = 1 - write_index
+            offset = (tile + 2) * block_k
+            async_copy.buffer_load_to_shared(xs.index(write_index), x_ptr + offset, ao, amask, 0)
+            async_copy.buffer_load_to_shared(hs.index(write_index), high_ptr + offset, bo, bmask, 0)
+            async_copy.buffer_load_to_shared(ls.index(write_index), low_ptr + offset, bo, bmask, 0)
+            async_copy.commit_group()
+            async_copy.wait_group(1)
+            next_a, next_b, next_c = _load_tile(xs, hs, ls, next_index, mma)
+            primary, correction = _accumulate(a, b, c, primary, correction, interleave)
+            a, b, c = next_a, next_b, next_c
+            # All waves have read next_index before it can be reused next iteration.
+            gl.barrier()
+        async_copy.wait_group(0)
+        last_a, last_b, last_c = _load_tile(xs, hs, ls, (size_k // block_k - 1) % 2, mma)
+        primary, correction = _accumulate(a, b, c, primary, correction, interleave)
+        primary, correction = _accumulate(last_a, last_b, last_c, primary, correction, interleave)
+    else:
+        for tile in range(size_k // block_k - 1):
+            read_index = tile % 2
+            write_index = 1 - read_index
+            offset = (tile + 1) * block_k
+            async_copy.buffer_load_to_shared(xs.index(write_index), x_ptr + offset, ao, amask, 0)
+            async_copy.buffer_load_to_shared(hs.index(write_index), high_ptr + offset, bo, bmask, 0)
+            async_copy.buffer_load_to_shared(ls.index(write_index), low_ptr + offset, bo, bmask, 0)
+            async_copy.commit_group()
+            async_copy.wait_group(1)
+            primary, correction = _consume(xs, hs, ls, read_index, primary, correction, mma, interleave)
+            # Every wave must finish reading this slot before the next iteration reuses it.
+            gl.barrier()
+        async_copy.wait_group(0)
+        primary, correction = _consume(xs, hs, ls, (size_k // block_k - 1) % 2,
+                                       primary, correction, mma, interleave)
     result = primary if interleave else primary + correction
     om = gl.program_id(0) * block_m + gl.arange(0, block_m, layout=gl.SliceLayout(1, mma))
     on = gl.program_id(1) * block_n + gl.arange(0, block_n, layout=gl.SliceLayout(0, mma))
