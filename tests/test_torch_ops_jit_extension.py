@@ -259,6 +259,7 @@ def test_torch_ops_jit_extension_resolves_angle_bracket_local_includes(tmp_path)
 
 
 def test_swordfish_static_runtime_error_rejects_older_torch(monkeypatch):
+    monkeypatch.setattr(swordfish, "IS_ROCM", False)
     monkeypatch.setattr(swordfish.torch, "__version__", "2.9.1+cpu")
 
     error = swordfish._swordfish_static_runtime_error()
@@ -267,11 +268,19 @@ def test_swordfish_static_runtime_error_rejects_older_torch(monkeypatch):
 
 
 def test_swordfish_static_runtime_error_rejects_unparseable_torch(monkeypatch):
+    monkeypatch.setattr(swordfish, "IS_ROCM", False)
     monkeypatch.setattr(swordfish.torch, "__version__", "nightly")
 
     error = swordfish._swordfish_static_runtime_error()
 
     assert "cannot verify torch stable ABI requirement" in error
+
+
+def test_swordfish_static_runtime_error_rejects_rocm_before_abi(monkeypatch):
+    monkeypatch.setattr(swordfish, "IS_ROCM", True)
+    monkeypatch.setattr(swordfish.torch, "__version__", "nightly")
+
+    assert swordfish._swordfish_static_runtime_error() == "Swordfish kernel is not supported on ROCm."
 
 
 def test_torch_stable_abi_target_define_matches_libtorch_encoding():
