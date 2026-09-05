@@ -4050,6 +4050,88 @@ halves the decode grid, matched N=5120 timings regressed by roughly 21--27%
 at M=512/2048/4096.  Stage 1 needs the extra occupancy supplied by the
 eight-group kernel, so no stage-1 dispatch or instantiation is retained.
 
+## v89 Qwen3.8-27B stage-3 sixteen-group reuse
+
+After PR #126 merged, this phase was refreshed to `origin/main` at
+`83c8fc33` and narrowed to the actual Qwen3.8-27B projection set:
+`5120x{1024,6144,10240,12288,17408}`, `6144x5120`, and `17408x5120`.
+The stage-3 kernel now reuses each compressed-weight tile and decode across
+256 input rows.  Its double-buffered 49,152 B input tile uses opt-in dynamic
+shared memory; the packed words and bank IDs remain static.  Dispatch is
+restricted to those seven K/N pairs and the measured winning M/rate regions.
+
+The Qwen-only A100 matrix used `M=1024/2048/4096`, transition widths 4--7,
+10 warmups, and 50 timed iterations.  Projection weights match the model
+stack: full-Q 1, full-KV 2, attention-out 2, linear-QKV 1, linear-Z 1,
+MLP gate/up 2, and MLP-down 1.  All 71 affected cases improved versus the
+newly merged main, for a projection-weighted geometric mean of `1.1629x`.
+At M=1024, attention-out improves by 1.383--1.401x and MLP-down by
+1.391--1.410x.  At M=4096, every affected projection/rate improves by
+1.086--1.169x.  Randomized split-1 and split-8 comparisons are bit-for-bit
+exact for K=5120, 6144, and 17408.
+
+The bits-5 static-K resource entry uses 168 registers/thread, 1,952 B static
+shared memory, and 49,152 B dynamic shared memory, with zero stack/local
+storage.  A temporary flattened representation of the original static input
+tile shifted excluded-route timing by 0.3--1%; it was rejected.  Restoring
+the original two-dimensional static layout makes excluded M=512,
+M=1024/N=6144, and M=2048/N=1024 controls neutral to measurement resolution.
+Stage-3 sixteen-group reuse at M=512 was also rejected because N=5120
+regressed by roughly 5--9%; that tier remains on eight groups.
+
+The matched Qwen attention-out NCU captures are
+`/tmp/v89_ncu_qwen_attn_candidate.csv` and
+`/tmp/v89_ncu_qwen_attn_base.csv` for
+`M=1024,K=6144,N=5120,stage=3,bits=5`.  The grid falls from 640 to 320 CTAs,
+executed instructions from 239,629,440 to 148,370,240, and profiled duration
+from 1,049,120 ns to 748,704 ns (`1.401x`).  Memory throughput rises from
+62.06% to 75.06%; compute throughput moves from 37.92% to 32.85%.  The
+control uses 96 registers and 26,520 B static shared memory; the candidate
+uses 168 registers, 1,952 B static shared, and 49,152 B dynamic shared.
+
+The matched SASS extracts are `/tmp/v89_qwen_attn_candidate_rg16.sass` and
+`/tmp/v89_qwen_attn_base_rg8.sass`.  Static instructions rise from 1,584 to
+1,736 per CTA while doubled row work scales HMMA/LDSM/STG exactly 2x
+(48/24/32 to 96/48/64).  Decode work stays flat (LOP3 121, SHF 139, PRMT 18,
+and LDG 25 in both); address families change only slightly (IMAD 453->466,
+IADD3 120->111, LEA 90->89).  The post-commit SSA/algebraic pass found no
+duplicated decode, redundant mask/shift, unnecessary conversion/permutation,
+address-expression regression, or spill.
+
+## v90 Qwen W2 M=4096 stage-4 sixteen-group reuse
+
+The stage-4 dynamic-shared probe was mixed when applied broadly: M=512
+regressed by 14--17%, M=2048 regressed by up to about 2%, and W2.5--W3.5 at
+M=4096 were neutral to slightly slower.  Those routes remain unchanged.
+The retained policy is restricted to Qwen3.8-27B, `M=4096`, W2
+(`TransitionBits=4`), and `N!=1024`.
+
+Three matched A100 repeats show every retained Qwen projection improving:
+full-Q 1.091x, attention-out 1.065x, linear-QKV 1.072x, linear-Z 1.077x,
+MLP gate/up 1.110x, and MLP-down 1.047x.  With the model projection
+multiplicities, the geometric mean is `1.0795x` versus v89.  Full-KV
+`N=1024` regressed by about 21% in the exploratory build and is explicitly
+excluded.  A randomized K=6144 attention-out comparison is bit-for-bit exact
+at split 8.
+
+The matched NCU captures are `/tmp/v90_ncu_qwen_fullq_candidate.csv` and
+`/tmp/v90_ncu_qwen_fullq_base.csv` for
+`M=4096,K=5120,N=12288,stage=4,bits=4`.  The candidate replaces the
+four-group control, reducing the grid from 12,288 to 3,072 CTAs and executed
+instructions from 3,180,982,272 to 1,204,902,912.  Profiled duration falls
+from 17,137,184 ns to 15,696,448 ns.  The control uses 64 registers and
+18,464 B static shared memory; the candidate uses 168 registers, 2,080 B
+static shared, and 65,536 B dynamic shared.
+
+The matched SASS extracts are `/tmp/v90_qwen_fullq_candidate_rg16.sass` and
+`/tmp/v90_qwen_fullq_base_rg4.sass`.  Per-CTA static instructions rise from
+1,592 to 1,912 while the 4x row work scales HMMA/LDSM/STG exactly 4x
+(32/16/16 to 128/64/64).  Decode work stays flat (SHF 186, PRMT 24, LDG 33)
+or nearly flat (LOP3 173->177); address families change from IMAD 371 to
+411, IADD3 116 to 110, and LEA 133 to 128.  The post-commit SSA/algebraic
+pass found no duplicated decode, redundant mask/shift, unnecessary
+conversion/permutation, address-expression regression, or spill.
+
 ## Reproduction
 
 ```bash
