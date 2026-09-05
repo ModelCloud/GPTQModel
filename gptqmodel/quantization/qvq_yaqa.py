@@ -26,6 +26,7 @@ from .qvq_activation import (
     normalize_qvq_fp8_activation_format,
     normalize_qvq_fp8_activation_scale_method,
 )
+from .qvq_yaqa_cuda import project as _project_cuda
 
 YAQA_PAPER_REGULARIZATION = 1e-4
 YAQA_DEFAULT_REGULARIZATION = 0.05
@@ -58,6 +59,7 @@ class YaqaGramSketch:
     seed: int
     source_diagonal: torch.Tensor | None = None
     _source_diagonal_validated: bool = field(default=False, repr=False, compare=False)
+    _finite_nonnegative_validated: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.source.ndim != 2 or self.source.dtype != torch.float32:
@@ -72,7 +74,9 @@ class YaqaGramSketch:
             raise ValueError("YAQA compact Gram diagonal must be a matching rank-1 FP32 tensor")
         if self.diagonal.device.type != "cpu":
             raise ValueError("YAQA compact Gram diagonals must be stored on CPU")
-        if not bool(torch.isfinite(self.diagonal).all()) or not bool(self.diagonal.ge(0).all()):
+        if not self._finite_nonnegative_validated and (
+            not bool(torch.isfinite(self.diagonal).all()) or not bool(self.diagonal.ge(0).all())
+        ):
             raise ValueError("YAQA compact Gram diagonal must be finite and non-negative")
         if not math.isfinite(self.normalizer) or self.normalizer <= 0:
             raise ValueError("YAQA compact Gram normalizer must be finite and positive")
@@ -92,7 +96,9 @@ class YaqaGramSketch:
             raise ValueError("YAQA compact Gram source diagonal must be a matching rank-1 FP32 tensor")
         if source_diagonal.device.type != "cpu":
             raise ValueError("YAQA compact Gram source diagonals must be stored on CPU")
-        if not bool(torch.isfinite(source_diagonal).all()) or not bool(source_diagonal.ge(0).all()):
+        if not self._finite_nonnegative_validated and (
+            not bool(torch.isfinite(source_diagonal).all()) or not bool(source_diagonal.ge(0).all())
+        ):
             raise ValueError("YAQA compact Gram source diagonal must be finite and non-negative")
         if not source_diagonal_validated:
             if not bool(torch.isfinite(self.source).all()):
@@ -431,17 +437,38 @@ def _streaming_projected_updates(
     else:
         input_source = torch.bmm(
             activation_transpose,
-            torch.bmm(gradient, output_projection),
+            _project_cuda(gradient, output_projection),
         ).sum(dim=0)
         output_source = torch.bmm(
             gradient_transpose,
-            torch.bmm(activation, input_projection),
+            _project_cuda(activation, input_projection),
         ).sum(dim=0)
     gradient_token_gram = torch.bmm(gradient, gradient_transpose)
     activation_token_gram = torch.bmm(activation, activation_transpose)
     input_diagonal = (activation * torch.bmm(gradient_token_gram, activation)).sum(dim=(0, 1))
     output_diagonal = (gradient * torch.bmm(activation_token_gram, gradient)).sum(dim=(0, 1))
     return input_source, output_source, input_diagonal, output_diagonal
+
+
+class _YaqaFactorTransfer:
+    """Overlap final compact-factor copies with the remaining model backward."""
+
+    def __init__(self, device: torch.device) -> None:
+        self.stream = torch.cuda.Stream(device=device)
+
+    def submit(self, tensors: list[torch.Tensor]) -> list[torch.Tensor]:
+        self.stream.wait_stream(torch.cuda.current_stream(self.stream.device))
+        copied = []
+        with torch.cuda.stream(self.stream):
+            for tensor in tensors:
+                host = torch.empty_like(tensor, device="cpu", pin_memory=True)
+                host.copy_(tensor, non_blocking=True)
+                tensor.record_stream(self.stream)
+                copied.append(host)
+        return copied
+
+    def finish(self) -> None:
+        self.stream.synchronize()
 
 
 def capture_yaqa_sketch_b(
@@ -601,10 +628,21 @@ def capture_yaqa_sketch_b(
             reserve_bytes = max(16 * 1024**3, total_bytes // 4)
             if factor_bytes <= max(0, free_bytes - reserve_bytes):
                 accumulator_device = device
+    if accumulator_device.type == "cuda" and accumulator_device.index is None:
+        accumulator_device = torch.device("cuda", torch.cuda.current_device())
+    if device.type == "cuda" and device.index is None:
+        device = torch.device("cuda", torch.cuda.current_device())
     input_accumulators: dict[str, torch.Tensor] = {}
     output_accumulators: dict[str, torch.Tensor] = {}
     input_diagonal_accumulators: dict[str, torch.Tensor] = {}
     output_diagonal_accumulators: dict[str, torch.Tensor] = {}
+    input_source_diagonals: dict[str, torch.Tensor] = {}
+    output_source_diagonals: dict[str, torch.Tensor] = {}
+    factor_transfer = (
+        _YaqaFactorTransfer(device)
+        if gram_strategy == "streaming_projected" and device.type == "cuda" and accumulator_device == device
+        else None
+    )
     packed_symmetric_accumulators = (
         gram_strategy != "streaming_projected"
         and mps_pack_symmetric_grams
@@ -701,7 +739,7 @@ def capture_yaqa_sketch_b(
         if nonfinite_update is None:
             if not torch.isfinite(gradient).all():
                 raise ValueError(f"YAQA module {module_name} produced a non-finite full-model weight gradient")
-        else:
+        elif factor_transfer is None:
             nonfinite_update.logical_or_(~torch.isfinite(gradient).all())
         if gram_strategy == "streaming_projected":
             assert gram_projection_rank is not None
@@ -732,7 +770,10 @@ def capture_yaqa_sketch_b(
                 )
             if not updates_finite:
                 raise ValueError(f"YAQA module {module_name} produced an overflowing Sketch-B Gram update")
-        else:
+        elif factor_transfer is None:
+            # GPU streaming accumulators are validated when finalized. An
+            # infinity/NaN in an update cannot become finite through subsequent
+            # additions, and the source-square reduction checks every element.
             nonfinite_update.logical_or_(~torch.isfinite(input_update).all())
             nonfinite_update.logical_or_(~torch.isfinite(output_update).all())
             if gram_strategy == "streaming_projected":
@@ -765,6 +806,26 @@ def capture_yaqa_sketch_b(
             if gram_strategy == "streaming_projected":
                 input_diagonal_accumulators[module_name] = input_diagonal_update.contiguous()
                 output_diagonal_accumulators[module_name] = output_diagonal_update.contiguous()
+        if factor_transfer is not None and active_batch_index == len(batches):
+            # This module cannot receive another update in the final batch.
+            # Preserve the exact reduction and validation, then let the copy
+            # engine drain its factors while earlier layers backpropagate.
+            input_source_diagonals[module_name] = input_accumulators[module_name].square().sum(dim=1)
+            output_source_diagonals[module_name] = output_accumulators[module_name].square().sum(dim=1)
+            assert nonfinite_update is not None
+            for values in (
+                input_source_diagonals, output_source_diagonals,
+                input_diagonal_accumulators, output_diagonal_accumulators,
+            ):
+                nonfinite_update.logical_or_(~torch.isfinite(values[module_name]).all())
+            groups = (
+                input_accumulators, output_accumulators,
+                input_diagonal_accumulators, output_diagonal_accumulators,
+                input_source_diagonals, output_source_diagonals,
+            )
+            copied = factor_transfer.submit([group[module_name] for group in groups])
+            for group, host in zip(groups, copied):
+                group[module_name] = host
         sequence_counts[module_name] += batch_sequences
 
     if activation_format is not None:
@@ -964,9 +1025,11 @@ def capture_yaqa_sketch_b(
                 # Explicitly drop the autograd graph before the next sequence.
                 # MPS command buffers are asynchronous and otherwise keep the
                 # logits/loss graph live until allocator pressure forces a flush.
+                # CUDA releases this graph through reference counting; retain
+                # normal cyclic GC instead of scanning the entire model here.
                 del outputs, logits, loss
                 cleanup_due = batch_index == len(batches) or batch_index % mps_cleanup_interval == 0
-                if cleanup_due:
+                if device.type != "cuda" and cleanup_due:
                     phase_started = time.perf_counter()
                     gc.collect()
                     phase_seconds["python_gc"] += time.perf_counter() - phase_started
@@ -995,6 +1058,9 @@ def capture_yaqa_sketch_b(
         if previous_allow_tf32 is not None:
             cuda_matmul.allow_tf32 = previous_allow_tf32
 
+        if factor_transfer is not None:
+            factor_transfer.finish()
+
     if total_sequences < 1:
         raise ValueError("YAQA Sketch B observed no independent calibration sequences")
     if not math.isfinite(total_effective_sequence_weight) or total_effective_sequence_weight <= 0:
@@ -1003,9 +1069,7 @@ def capture_yaqa_sketch_b(
         if sequence_counts[name] != total_sequences or name not in input_accumulators:
             raise ValueError(f"YAQA module {name} did not produce one gradient for every sequence")
 
-    input_source_diagonals: dict[str, torch.Tensor] = {}
-    output_source_diagonals: dict[str, torch.Tensor] = {}
-    if gram_strategy == "streaming_projected":
+    if gram_strategy == "streaming_projected" and factor_transfer is None:
         for name in modules:
             input_source_diagonals[name] = input_accumulators[name].square().sum(dim=1)
             output_source_diagonals[name] = output_accumulators[name].square().sum(dim=1)
@@ -1024,14 +1088,12 @@ def capture_yaqa_sketch_b(
             from ..utils.qvq_mlx import qvq_mlx_unpack_symmetric_gram_to_torch_cpu
 
             input_accumulators[name] = qvq_mlx_unpack_symmetric_gram_to_torch_cpu(
-                input_accumulators[name],
-                width=module.in_features,
+                input_accumulators[name], width=module.in_features,
             )
             output_accumulators[name] = qvq_mlx_unpack_symmetric_gram_to_torch_cpu(
-                output_accumulators[name],
-                width=module.out_features,
+                output_accumulators[name], width=module.out_features,
             )
-        else:
+        elif factor_transfer is None:
             input_accumulators[name] = input_accumulators[name].to(device="cpu")
             output_accumulators[name] = output_accumulators[name].to(device="cpu")
             if gram_strategy == "streaming_projected":
@@ -1071,6 +1133,12 @@ def capture_yaqa_sketch_b(
                 seed=seed,
                 source_diagonal=input_source_diagonals[name].contiguous(),
                 _source_diagonal_validated=True,
+                # GPU finalization checked both unscaled vectors. Dividing by
+                # >= 1 cannot overflow; clamp_min makes the diagonal nonnegative.
+                # Keep CPU validation for small Fisher weights and CPU storage.
+                _finite_nonnegative_validated=(
+                    factor_transfer is not None and total_effective_sequence_weight * out_features >= 1
+                ),
             )
             output_hessians[name] = YaqaGramSketch(
                 source=output_accumulators[name].contiguous(),
@@ -1082,6 +1150,9 @@ def capture_yaqa_sketch_b(
                 seed=seed,
                 source_diagonal=output_source_diagonals[name].contiguous(),
                 _source_diagonal_validated=True,
+                _finite_nonnegative_validated=(
+                    factor_transfer is not None and total_effective_sequence_weight * in_features >= 1
+                ),
             )
         else:
             input_hessians[name] = input_accumulators[name].div(
@@ -1182,6 +1253,7 @@ def capture_yaqa_sketch_b(
             "activation_checkpointing": bool(checkpoint_modules),
             "checkpointed_modules": len(checkpoint_modules),
             "accumulator_device": accumulator_device.type,
+            "factor_transfer_overlap": factor_transfer is not None,
             "phase_wall_seconds": phase_seconds,
             "mps_cleanup_interval": mps_cleanup_interval,
             "mps_cleanup_count": mps_cleanup_count,
