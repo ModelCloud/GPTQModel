@@ -1,0 +1,601 @@
+{
+  "revision": "bcb6d1de",
+  "previous_prefetch_revision": "aeb9206c",
+  "production_baseline": "98afd5f0",
+  "profiles": {
+    "tall-profile": {
+      "csv": "/tmp/qvq-linear-tall-profile/raw/ubuntu2404-mi350x/829285_counter_collection.csv",
+      "csv_sha256": "1d82608d979f1c8bd0bc209675b2eeaf04132fc0b37ca3a338884c88f54eafaa",
+      "config": {
+        "physical_gpu": 0,
+        "idle_samples": 3,
+        "idle_interval": 1.0,
+        "idle_memory_tolerance_mib": 1024,
+        "allow_busy": false,
+        "full_sweep": true,
+        "trim_composite": false,
+        "recovery_warps": 8,
+        "gemv_full_k": false,
+        "gemv_dot2": false,
+        "gemv_dot2_loop": false,
+        "gemv_gluon": false,
+        "inplace_correction": false,
+        "fused_correction": true,
+        "fused_interleave": true,
+        "fused_keep_masks": false,
+        "fused_prefetch": true,
+        "fused_block_m": 128,
+        "fused_block_n": 64,
+        "fused_block_k": 64,
+        "torch_profile_dir": null,
+        "gemv_loop_k": 512,
+        "gemv_split_k": false,
+        "graph_execute": false,
+        "aiter_skinny": "none",
+        "aiter_direct": false,
+        "gemv_block_n": 2,
+        "shapes": [
+          "mlp_gate_up"
+        ],
+        "m_values": [
+          1024
+        ],
+        "folded_residual_ceiling": true,
+        "folded_direct_ceiling": false,
+        "baseline_forward_commit": null,
+        "baseline_amd_commit": "98afd5f0",
+        "iterations": 2,
+        "warmup": 1,
+        "butterfly": "none",
+        "block_rows": 4,
+        "hipblaslt_solution": -1,
+        "output": "/tmp/qvq-linear-tall-profile/report.json"
+      },
+      "source_sha256": "0a8a09bb8403c1a1e373561fce2a1d9dbd0cb7fdd13892ef0cae11fce396fb0d",
+      "kernels": [
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT144x256x64_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB512_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT9_4_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB4_WSGRA0_WSGRB0_WS64_WG16_16_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 16,
+              "min": 6733696.0,
+              "max": 6733696.0,
+              "mean": 6733696.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 16,
+              "min": 11151360.0,
+              "max": 11151360.0,
+              "mean": 11151360.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 16,
+              "min": 3861488.0,
+              "max": 3861488.0,
+              "mean": 3861488.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 16,
+              "min": 13588000.0,
+              "max": 13588000.0,
+              "mean": 13588000.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              123904
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              123392
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              128
+            ],
+            "Accum_VGPR_Count": [
+              272
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "folded_residual_prefetch_kernel.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 28,
+              "min": 11141120.0,
+              "max": 11141120.0,
+              "mean": 11141120.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 28,
+              "min": 22282240.0,
+              "max": 22282240.0,
+              "mean": 22282240.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 28,
+              "min": 20959232.0,
+              "max": 20959232.0,
+              "mean": 20959232.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 28,
+              "min": 25015296.0,
+              "max": 25015296.0,
+              "mean": 25015296.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              557056
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              116
+            ],
+            "Accum_VGPR_Count": [
+              4
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        }
+      ]
+    },
+    "square-profile": {
+      "csv": "/tmp/qvq-linear-square-profile/raw/ubuntu2404-mi350x/830229_counter_collection.csv",
+      "csv_sha256": "f6c17022ebef410745beacead8c19d1e67644446205c719682857aa71819ede8",
+      "config": {
+        "physical_gpu": 0,
+        "idle_samples": 3,
+        "idle_interval": 1.0,
+        "idle_memory_tolerance_mib": 1024,
+        "allow_busy": false,
+        "full_sweep": true,
+        "trim_composite": false,
+        "recovery_warps": 8,
+        "gemv_full_k": false,
+        "gemv_dot2": false,
+        "gemv_dot2_loop": false,
+        "gemv_gluon": false,
+        "inplace_correction": false,
+        "fused_correction": true,
+        "fused_interleave": true,
+        "fused_keep_masks": false,
+        "fused_prefetch": true,
+        "fused_block_m": 128,
+        "fused_block_n": 128,
+        "fused_block_k": 64,
+        "torch_profile_dir": null,
+        "gemv_loop_k": 512,
+        "gemv_split_k": false,
+        "graph_execute": false,
+        "aiter_skinny": "none",
+        "aiter_direct": false,
+        "gemv_block_n": 2,
+        "shapes": [
+          "mlp_gate_up"
+        ],
+        "m_values": [
+          1024
+        ],
+        "folded_residual_ceiling": true,
+        "folded_direct_ceiling": false,
+        "baseline_forward_commit": null,
+        "baseline_amd_commit": "98afd5f0",
+        "iterations": 2,
+        "warmup": 1,
+        "butterfly": "none",
+        "block_rows": 4,
+        "hipblaslt_solution": -1,
+        "output": "/tmp/qvq-linear-square-profile/report.json"
+      },
+      "source_sha256": "0a8a09bb8403c1a1e373561fce2a1d9dbd0cb7fdd13892ef0cae11fce396fb0d",
+      "kernels": [
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT144x256x64_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB512_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT9_4_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB4_WSGRA0_WSGRB0_WS64_WG16_16_1_WGMXCCn1.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 16,
+              "min": 6733696.0,
+              "max": 6733696.0,
+              "mean": 6733696.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 16,
+              "min": 11151360.0,
+              "max": 11151360.0,
+              "mean": 11151360.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 16,
+              "min": 3861488.0,
+              "max": 3861488.0,
+              "mean": 3861488.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 16,
+              "min": 13588000.0,
+              "max": 13588000.0,
+              "mean": 13588000.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              123904
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              123392
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              128
+            ],
+            "Accum_VGPR_Count": [
+              272
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "folded_residual_prefetch_kernel.kd",
+          "counters": {
+            "SQ_INSTS_LDS": {
+              "samples": 28,
+              "min": 8355840.0,
+              "max": 8355840.0,
+              "mean": 8355840.0
+            },
+            "SQ_INSTS_MFMA": {
+              "samples": 28,
+              "min": 22282240.0,
+              "max": 22282240.0,
+              "mean": 22282240.0
+            },
+            "SQ_INSTS_SALU": {
+              "samples": 28,
+              "min": 12220416.0,
+              "max": 12220416.0,
+              "mean": 12220416.0
+            },
+            "SQ_INSTS_VALU": {
+              "samples": 28,
+              "min": 24288512.0,
+              "max": 24288512.0,
+              "mean": 24288512.0
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              278528
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              72
+            ],
+            "Accum_VGPR_Count": [
+              128
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        }
+      ]
+    },
+    "tall-metrics": {
+      "csv": "/tmp/qvq-linear-tall-metrics/raw/ubuntu2404-mi350x/831085_counter_collection.csv",
+      "csv_sha256": "f15304a89ab97f5190e98e7ffa0f59bd3538e985668fc718526a0dfa5f11be99",
+      "config": {
+        "physical_gpu": 0,
+        "idle_samples": 3,
+        "idle_interval": 1.0,
+        "idle_memory_tolerance_mib": 1024,
+        "allow_busy": false,
+        "full_sweep": true,
+        "trim_composite": false,
+        "recovery_warps": 8,
+        "gemv_full_k": false,
+        "gemv_dot2": false,
+        "gemv_dot2_loop": false,
+        "gemv_gluon": false,
+        "inplace_correction": false,
+        "fused_correction": true,
+        "fused_interleave": true,
+        "fused_keep_masks": false,
+        "fused_prefetch": true,
+        "fused_block_m": 128,
+        "fused_block_n": 64,
+        "fused_block_k": 64,
+        "torch_profile_dir": null,
+        "gemv_loop_k": 512,
+        "gemv_split_k": false,
+        "graph_execute": false,
+        "aiter_skinny": "none",
+        "aiter_direct": false,
+        "gemv_block_n": 2,
+        "shapes": [
+          "mlp_gate_up"
+        ],
+        "m_values": [
+          1024
+        ],
+        "folded_residual_ceiling": true,
+        "folded_direct_ceiling": false,
+        "baseline_forward_commit": null,
+        "baseline_amd_commit": "98afd5f0",
+        "iterations": 2,
+        "warmup": 1,
+        "butterfly": "none",
+        "block_rows": 4,
+        "hipblaslt_solution": -1,
+        "output": "/tmp/qvq-linear-tall-metrics/report.json"
+      },
+      "source_sha256": "0a8a09bb8403c1a1e373561fce2a1d9dbd0cb7fdd13892ef0cae11fce396fb0d",
+      "kernels": [
+        {
+          "kernel": "Cijk_Alik_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT144x256x64_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA128_LBSPPB512_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT9_4_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB4_WSGRA0_WSGRB0_WS64_WG16_16_1_WGMXCCn1.kd",
+          "counters": {
+            "LDSBankConflict": {
+              "samples": 16,
+              "min": 0.0,
+              "max": 0.0,
+              "mean": 0.0
+            },
+            "MeanOccupancyPerCU": {
+              "samples": 16,
+              "min": 2.96188,
+              "max": 3.263645,
+              "mean": 3.202588875
+            },
+            "SQ_WAIT_INST_LDS": {
+              "samples": 16,
+              "min": 5777314.0,
+              "max": 5892716.0,
+              "mean": 5798181.0625
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              123904
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              123392
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              128
+            ],
+            "Accum_VGPR_Count": [
+              272
+            ],
+            "SGPR_Count": [
+              96
+            ]
+          }
+        },
+        {
+          "kernel": "folded_residual_prefetch_kernel.kd",
+          "counters": {
+            "LDSBankConflict": {
+              "samples": 28,
+              "min": 9.730423,
+              "max": 10.254839,
+              "mean": 10.019602928571429
+            },
+            "MeanOccupancyPerCU": {
+              "samples": 28,
+              "min": 6.603008,
+              "max": 6.75169,
+              "mean": 6.685769357142857
+            },
+            "SQ_WAIT_INST_LDS": {
+              "samples": 28,
+              "min": 22495793.0,
+              "max": 22688377.0,
+              "mean": 22593995.285714287
+            }
+          },
+          "resources": {
+            "Grid_Size": [
+              557056
+            ],
+            "Workgroup_Size": [
+              256
+            ],
+            "LDS_Block_Size": [
+              0
+            ],
+            "Scratch_Size": [
+              0
+            ],
+            "VGPR_Count": [
+              116
+            ],
+            "Accum_VGPR_Count": [
+              4
+            ],
+            "SGPR_Count": [
+              32
+            ]
+          }
+        }
+      ]
+    }
+  },
+  "code_objects": [
+    {
+      "asm": "/tmp/qvq-linear-profile-cache/XFW7E23UJED52JZJSB4SOSDZJ65QFRZY45A4HEUNRVT6EEQZSCQQ/folded_residual_prefetch_kernel.amdgcn",
+      "jit_key": "XFW7E23UJED52JZJSB4SOSDZJ65QFRZY45A4HEUNRVT6EEQZSCQQ",
+      "hsaco_sha256": "fbee930623578fe76c800d8dfbc7449a0e1310ddb558f692f1fcd586bb7c6093",
+      "static_total": 614,
+      "static_opcodes": {
+        "buffer_load_dwordx4": 24,
+        "ds_read_b128": 48,
+        "global_store_short": 32,
+        "global_store_short_d16_hi": 32,
+        "s_add_i32": 24,
+        "s_add_u32": 6,
+        "s_addc_u32": 6,
+        "s_and_b32": 10,
+        "s_barrier": 4,
+        "s_bfe_u32": 1,
+        "s_branch": 1,
+        "s_cbranch_scc1": 1,
+        "s_cmpk_lg_i32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx8": 1,
+        "s_lshl1_add_u32": 1,
+        "s_lshl_b32": 7,
+        "s_lshr_b32": 3,
+        "s_mov_b32": 13,
+        "s_movk_i32": 2,
+        "s_mul_i32": 1,
+        "s_mulk_i32": 1,
+        "s_nop": 18,
+        "s_or_b32": 1,
+        "s_waitcnt": 19,
+        "s_xor_b32": 1,
+        "v_add3_u32": 2,
+        "v_add_u32_e32": 22,
+        "v_and_b32_e32": 6,
+        "v_and_or_b32": 1,
+        "v_ashrrev_i32_e32": 17,
+        "v_cvt_pk_f16_f32": 32,
+        "v_lshl_add_u64": 32,
+        "v_lshl_or_b32": 1,
+        "v_lshlrev_b32_e32": 12,
+        "v_lshlrev_b64": 1,
+        "v_lshrrev_b32_e32": 2,
+        "v_mfma_f32_16x16x32_f16": 128,
+        "v_mov_b32_e32": 64,
+        "v_mul_lo_u32": 9,
+        "v_or3_b32": 1,
+        "v_or_b32_e32": 24,
+        "v_readfirstlane_b32": 1
+      },
+      "vmcnt_waits": [
+        "s_waitcnt vmcnt(12)",
+        "s_waitcnt vmcnt(0)"
+      ],
+      "buffer_load_lds_static": 24,
+      "shared_bytes": 101280,
+      "resources": [
+        ".agpr_count:     0",
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     28",
+        ".sgpr_spill_count: 0",
+        ".vgpr_count:     198",
+        ".vgpr_spill_count: 0"
+      ]
+    },
+    {
+      "asm": "/tmp/qvq-linear-profile-cache/KUOVXDE3N6D72R75R5BLVGRZJMRDFAFFY2DNAAB3E26TVZD4HTNA/folded_residual_prefetch_kernel.amdgcn",
+      "jit_key": "KUOVXDE3N6D72R75R5BLVGRZJMRDFAFFY2DNAAB3E26TVZD4HTNA",
+      "hsaco_sha256": "9d07d720d8256a93635e8fa07caa09ad2756f9d01e889d4759470f6411b7b070",
+      "static_total": 401,
+      "static_opcodes": {
+        "buffer_load_dwordx4": 16,
+        "ds_read_b128": 32,
+        "global_store_short": 16,
+        "global_store_short_d16_hi": 16,
+        "s_add_i32": 17,
+        "s_add_u32": 6,
+        "s_addc_u32": 6,
+        "s_and_b32": 10,
+        "s_barrier": 4,
+        "s_bfe_u32": 1,
+        "s_branch": 1,
+        "s_cbranch_scc1": 1,
+        "s_cmpk_lg_i32": 1,
+        "s_endpgm": 1,
+        "s_load_dwordx8": 1,
+        "s_lshl2_add_u32": 1,
+        "s_lshl_b32": 5,
+        "s_lshr_b32": 2,
+        "s_mov_b32": 11,
+        "s_movk_i32": 2,
+        "s_mul_i32": 3,
+        "s_mulk_i32": 2,
+        "s_nop": 9,
+        "s_waitcnt": 14,
+        "s_xor_b32": 1,
+        "v_add3_u32": 3,
+        "v_add_u32_e32": 23,
+        "v_and_b32_e32": 7,
+        "v_and_or_b32": 1,
+        "v_ashrrev_i32_e32": 17,
+        "v_cvt_pk_f16_f32": 16,
+        "v_lshl_add_u32": 1,
+        "v_lshl_add_u64": 32,
+        "v_lshl_or_b32": 2,
+        "v_lshlrev_b32_e32": 6,
+        "v_lshlrev_b64": 1,
+        "v_lshrrev_b32_e32": 2,
+        "v_mfma_f32_16x16x32_f16": 64,
+        "v_mov_b32_e32": 32,
+        "v_mul_lo_u32": 3,
+        "v_or_b32_e32": 11,
+        "v_readfirstlane_b32": 1
+      },
+      "vmcnt_waits": [
+        "s_waitcnt vmcnt(8)",
+        "s_waitcnt vmcnt(0)"
+      ],
+      "buffer_load_lds_static": 16,
+      "shared_bytes": 67488,
+      "resources": [
+        ".agpr_count:     0",
+        ".private_segment_fixed_size: 0",
+        ".sgpr_count:     27",
+        ".sgpr_spill_count: 0",
+        ".vgpr_count:     114",
+        ".vgpr_spill_count: 0"
+      ]
+    }
+  ],
+  "previous_profile": "artifacts/mi355x_p32/prefetch_aeb9206c_profile.json",
+  "unmeasured": [
+    "scheduler eligibility",
+    "achieved bandwidth",
+    "overlap percentage",
+    "general stall breakdown"
+  ]
+}

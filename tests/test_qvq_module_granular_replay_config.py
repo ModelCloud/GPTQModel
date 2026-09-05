@@ -292,6 +292,37 @@ def test_module_granular_replay_teacher_cache_uses_disjoint_rows_and_four_layer_
     assert metrics["top10_overlap"] == 1.0
 
 
+def test_fp8_replay_reuses_disjoint_final_logit_teacher_cache():
+    qcfg = QVQConfig(
+        bits=3.5,
+        format="qvq_v2b2_p32",
+        rounding="block_ldlq",
+        activation={"replay_passes": 1},
+        device="cpu",
+        offload_to_disk=False,
+    )
+    processor = QVQProcessor(
+        tokenizer=None,
+        qcfg=qcfg,
+        calibration=_replay_rows(21),
+        prepare_dataset_func=_prepared_calibration,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        batch_size=1,
+        module_replay_search_calibration=_replay_rows(1, 5),
+        module_replay_confirmation_calibration=_replay_rows(9, 13),
+    )
+    wrapper = type("TinyWrapper", (), {"model": _TinyFourLayerCausalLM().eval()})()
+
+    processor.prepare_module_granular_replay(wrapper)
+
+    assert len(processor._module_replay_teacher_logits["search"]) == 2
+    assert len(processor._module_replay_teacher_logits["confirmation"]) == 2
+    assert processor._module_replay_metrics("search")["kl_forward"] == pytest.approx(
+        0.0, abs=1e-7
+    )
+
+
 def test_module_granular_replay_metrics_exclude_padding_and_padding_boundaries():
     search = _replay_rows(1, 5)
     confirmation = _replay_rows(9, 13)

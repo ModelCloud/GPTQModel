@@ -82,6 +82,16 @@ def _calibration_dataset(tokenizer) -> list[dict[str, torch.Tensor]]:
     ]
 
 
+def _propagated_replay_dataset(*rows: tuple[int, ...]) -> list[dict[str, torch.Tensor]]:
+    return [
+        {
+            "input_ids": torch.tensor([row], dtype=torch.long),
+            "attention_mask": torch.ones((1, len(row)), dtype=torch.long),
+        }
+        for row in rows
+    ]
+
+
 def test_qvq_p32_a8_quantize_save_reload_and_native_inference(tmp_path: Path):
     if torch.cuda.get_device_capability() < (8, 9):
         pytest.skip(
@@ -113,6 +123,13 @@ def test_qvq_p32_a8_quantize_save_reload_and_native_inference(tmp_path: Path):
         batch_size=1,
         backend=BACKEND.QVQ,
         calibration_data_min_length=1,
+        module_replay_search_calibration=_propagated_replay_dataset(
+            (2, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 3),
+            (2, 59, 61, 67, 71, 73, 79, 83, 89, 97, 101, 3),
+        ),
+        module_replay_confirmation_calibration=_propagated_replay_dataset(
+            (2, 103, 107, 109, 113, 127, 11, 13, 17, 19, 23, 3),
+        ),
     )
     replay_stats = [
         row["fp8_target_replay"]
@@ -124,6 +141,8 @@ def test_qvq_p32_a8_quantize_save_reload_and_native_inference(tmp_path: Path):
     assert len(replay_stats) == 7
     assert all(
         stats["operand_dtype"] == "float8_e4m3fn"
+        and stats["selection_horizon"] == "final_logits"
+        and stats["search_folds"] == 2
         and stats["native_first_executed"] > 0
         and stats["native_second_executed"] > 0
         for stats in replay_stats

@@ -1063,11 +1063,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     if config.rounding == "yaqa" and yaqa_spec is None:
         yaqa_spec = calibration_spec
-    if config.module_granular_replay is not None and (
+    fp8_replay_enabled = bool(
+        config.activation is not None and config.activation.replay_passes == 1
+    )
+    if (config.module_granular_replay is not None or fp8_replay_enabled) and (
         replay_search_spec is None or replay_confirmation_spec is None
     ):
         raise ValueError(
-            "Module-granular replay requires explicit search and confirmation dataset slices"
+            "Propagated replay requires explicit search and confirmation dataset slices"
         )
     validate_disjoint_slices(
         {

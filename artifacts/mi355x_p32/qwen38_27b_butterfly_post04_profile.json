@@ -1,0 +1,228 @@
+{
+  "schema": "qvq.amd.butterfly.exploratory_profile.v1",
+  "commit": "04d3586b",
+  "baseline": "c89459e3",
+  "production_changed": false,
+  "profile": "/tmp/qvq-post04-profile/raw/ubuntu2404-mi350x/702650_kernel_trace.csv",
+  "capture": "sudo -n env TRITON_CACHE_DIR=/tmp/qvq-post04-profile-cache /opt/python314/bin/rocprofv3 --kernel-trace --stats --output-format csv -d /tmp/qvq-post04-profile/raw -- /opt/python314/bin/python scripts/benchmark_qvq_p32_amd_butterfly.py --warmup 20 --iterations 20 --output /tmp/qvq-post04-profile/report.json",
+  "scope": "M1024 K17408 N5120 rates 2,2.5,3,3.5; matched baseline/candidate in one process; summaries include warmups and graph/stream checks; not isolated timed-window statistics",
+  "trace": [
+    {
+      "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT160x128x64_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA2560_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW4_LWPMn1_MIAV0_MIWT5_4_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA5_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW1_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA1_VWB4_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1",
+      "calls": 4,
+      "p50_us": 1322.425,
+      "mean_us": 1327.395,
+      "p95_us": 1322.425,
+      "min_us": 1309.504,
+      "max_us": 1368.066,
+      "resources": {
+        "ns": 1368066,
+        "lds": 75776,
+        "scratch": 0,
+        "vgpr": 112,
+        "agpr": 208,
+        "sgpr": 96,
+        "grid": [
+          "65536",
+          "1",
+          "1"
+        ],
+        "block": [
+          "256",
+          "1",
+          "1"
+        ]
+      }
+    },
+    {
+      "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x64x16_MI16x16x1_SN_LDSB0_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB2_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB2_LPMXSA0_LPMXSB0_LPM0_LRVW2_LWPMn1_MIAV0_MIWT4_2_MXLIBL_MXSFNS_MO40_MGRIPM2_NTn1_NTA0_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1",
+      "calls": 4,
+      "p50_us": 15.84,
+      "mean_us": 15.42,
+      "p95_us": 15.84,
+      "min_us": 14.84,
+      "max_us": 16.08,
+      "resources": {
+        "ns": 16080,
+        "lds": 29184,
+        "scratch": 0,
+        "vgpr": 64,
+        "agpr": 32,
+        "sgpr": 96,
+        "grid": [
+          "262144",
+          "1",
+          "1"
+        ],
+        "block": [
+          "256",
+          "1",
+          "1"
+        ]
+      }
+    },
+    {
+      "kernel": "Cijk_Ailk_Bljk_S_B_Bias_HA_S_SAV_UserArgs_MT128x160x32_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA4_GRVWB4_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA0_LBSPPB128_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA0_LPB8_LPMXSA0_LPMXSB0_LPM0_LRVW4_LWPMn1_MIAV0_MIWT4_5_MXLIBL_MXSFNS_MO40_MGRIPM1_NTn1_NTA0_NTB4_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW4_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA4_VWB1_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1",
+      "calls": 164,
+      "p50_us": 22.961,
+      "mean_us": 23.071457317073172,
+      "p95_us": 25.8,
+      "min_us": 19.08,
+      "max_us": 26.801,
+      "resources": {
+        "ns": 23840,
+        "lds": 41984,
+        "scratch": 0,
+        "vgpr": 40,
+        "agpr": 208,
+        "sgpr": 96,
+        "grid": [
+          "65536",
+          "1",
+          "1"
+        ],
+        "block": [
+          "256",
+          "1",
+          "1"
+        ]
+      }
+    },
+    {
+      "kernel": "_qvq_p32_composite_base_gfx950_kernel",
+      "calls": 336,
+      "p50_us": 18.12,
+      "mean_us": 18.07233630952381,
+      "p95_us": 20.801,
+      "min_us": 14.64,
+      "max_us": 22.16,
+      "resources": {
+        "ns": 17120,
+        "lds": 0,
+        "scratch": 0,
+        "vgpr": 44,
+        "agpr": 4,
+        "sgpr": 32,
+        "grid": [
+          "524288",
+          "2",
+          "1"
+        ],
+        "block": [
+          "512",
+          "1",
+          "1"
+        ]
+      }
+    },
+    {
+      "kernel": "fht128_split_kernel",
+      "calls": 172,
+      "p50_us": 9.761,
+      "mean_us": 9.831808139534884,
+      "p95_us": 10.84,
+      "min_us": 8.48,
+      "max_us": 11.2,
+      "resources": {
+        "ns": 10400,
+        "lds": 0,
+        "scratch": 0,
+        "vgpr": 12,
+        "agpr": 4,
+        "sgpr": 32,
+        "grid": [
+          "2621440",
+          "1",
+          "1"
+        ],
+        "block": [
+          "256",
+          "1",
+          "1"
+        ]
+      }
+    }
+  ],
+  "main_gemm_trace": {
+    "calls": 336,
+    "mean_us": 221.75614881,
+    "min_us": 193.964,
+    "max_us": 261.725,
+    "tile": "256x256x64",
+    "source": "702650_kernel_stats.csv"
+  },
+  "post_commit_static_isa": {
+    "total": 92,
+    "counts": {
+      "s_load_dwordx2": 2,
+      "s_load_dwordx4": 1,
+      "s_waitcnt": 3,
+      "s_branch": 1,
+      "s_mov_b64": 1,
+      "v_readfirstlane_b32": 1,
+      "s_lshl_b32": 1,
+      "s_lshr_b32": 1,
+      "v_lshlrev_b32_e32": 1,
+      "s_or_b32": 1,
+      "v_and_b32_e32": 7,
+      "v_lshl_or_b32": 2,
+      "s_cmp_lt_i32": 1,
+      "v_bfrev_b32_e32": 1,
+      "s_cselect_b64": 1,
+      "s_and_b32": 2,
+      "s_mov_b32": 4,
+      "v_cndmask_b32_e32": 8,
+      "buffer_load_dwordx2": 1,
+      "v_lshrrev_b32_e32": 1,
+      "v_or_b32_e32": 1,
+      "v_bitop3_b32": 1,
+      "v_cmp_eq_u32_e32": 2,
+      "v_cmp_eq_u32_e64": 3,
+      "v_add_f32_e32": 7,
+      "v_sub_f32_e32": 7,
+      "s_nop": 10,
+      "v_mov_b32_dpp": 5,
+      "v_cndmask_b32_e64": 9,
+      "v_permlane16_swap_b32_e32": 1,
+      "v_permlane32_swap_b32_e32": 1,
+      "ds_bpermute_b32": 2,
+      "buffer_store_dwordx2": 1,
+      "s_endpgm": 1
+    },
+    "vgpr": 11,
+    "sgpr": 17,
+    "scratch": 0,
+    "lds": 0,
+    "jit_hash": "ca4234cd79e8364611f1be64f57e5979602377cf7d22c45b52c5a72331acdb79"
+  },
+  "preceding_gather_experiment": {
+    "static_instructions": 93,
+    "vgpr": 16,
+    "sgpr": 17,
+    "ds_bpermute": 14,
+    "waitcnt": 9,
+    "lds": 0,
+    "scratch": 0,
+    "source": "/tmp/qvq_fht128.py; /tmp/qvq-fht-stage-isa/4_4.amdgcn"
+  },
+  "math_review": [
+    "Walsh matrix H[i,j]=(-1)^popcount(i&j); seven sum/difference butterfly stages replace 128-term dense inner products. FP32 addition order changes and is separately numerically checked.",
+    "Split/join gives compiler explicit low/high ownership. Total static instructions change only 93 to 92, but ds_bpermute falls 14 to 2, waits 9 to 3, and VGPRs 16 to 11; DPP/permlane replace most gather routing.",
+    "Masks were not wholly eliminated: split formulation has 17 conditional masks vs gather13. Ten scalar nops remain. Do not characterize as universal opcode reduction.",
+    "Both four-row variants use no LDS allocation, barriers or scratch. Eight-row gather uses 4096 bytes LDS and three barriers, so larger tiles were rejected.",
+    "Post-commit ISA exactly retains 92 static instructions, two ds_bpermute and three waits. Resource descriptor VGPR11/SGPR17 differs from rounded profiler allocation VGPR12/SGPR32.",
+    "No GEMM or base-kernel production code changed. Source-level matrix FLOP reduction is not a claim about executed MFMA counts."
+  ],
+  "counters": {
+    "available": false,
+    "error": "aqlprofile API table load failed: HSA_STATUS_ERROR: A generic error has occurred.",
+    "log": "/tmp/qvq-post04-counters.log",
+    "command": "sudo -n env TRITON_CACHE_DIR=/tmp/qvq-post04-profile-cache /opt/python314/bin/rocprofv3 --pmc SQ_WAVES --kernel-include-regex fht128_split_kernel -d /tmp/qvq-post04-counters/raw -- /opt/python314/bin/python scripts/benchmark_qvq_p32_amd_butterfly.py --warmup 1 --iterations 2 --output /tmp/qvq-post04-counters/report.json",
+    "executed_instructions": null,
+    "occupancy": null,
+    "bank_conflicts": null,
+    "stalls": null
+  },
+  "promotion": "Not promoted: instruction counters unavailable; full layer speedup far below1.5x. GPU runtime correctness/timing and trace collected, not compilation-only evidence.",
+  "next": "Reduce main GEMM latency while keeping FP32 intermediate and FP16 public output; investigate tile/layout coverage against runtime-probed 256 CUs.80 CTAs for256x256 tile is a scheduling hypothesis, not proof of underutilization."
+}

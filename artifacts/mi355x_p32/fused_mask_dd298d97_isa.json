@@ -1,0 +1,255 @@
+{
+  "revision": "dd298d97",
+  "instruction_baseline": "c387f365",
+  "production_baseline": "34c406a8",
+  "configuration": "gate/up M1024 K5120 N17408, BM64 BN128 BK64, interleaved FP32 accumulator",
+  "old": {
+    "asm": "/tmp/qvq-fused-profile-cache/TRLQ45MIUC4C6JU7U44477P4QWYO2HDM4BH2XEMN4NYNAFGEQ2LA/folded_residual_gemm_gluon_kernel.amdgcn",
+    "jit_key": "TRLQ45MIUC4C6JU7U44477P4QWYO2HDM4BH2XEMN4NYNAFGEQ2LA",
+    "hsaco_sha256": "99da5925db5eeeae20497cd3aea65c7436c0fecf968511175fcea682b51523ac",
+    "static_instructions": 583,
+    "opcodes": {
+      "ds_read_b128": 28,
+      "ds_write_b128": 18,
+      "global_load_dwordx2": 20,
+      "global_store_dwordx2": 8,
+      "s_add_i32": 1,
+      "s_and_b32": 5,
+      "s_and_b64": 1,
+      "s_and_saveexec_b64": 21,
+      "s_barrier": 12,
+      "s_bfe_i32": 1,
+      "s_branch": 3,
+      "s_cbranch_execz": 21,
+      "s_cbranch_scc0": 1,
+      "s_cmpk_lg_i32": 1,
+      "s_endpgm": 1,
+      "s_load_dwordx2": 2,
+      "s_load_dwordx8": 1,
+      "s_lshl_b32": 4,
+      "s_mov_b32": 4,
+      "s_movk_i32": 20,
+      "s_or_b64": 20,
+      "s_waitcnt": 20,
+      "v_add_co_u32_e32": 1,
+      "v_add_u32_e32": 29,
+      "v_addc_co_u32_e32": 1,
+      "v_and_b32_e32": 15,
+      "v_and_or_b32": 2,
+      "v_ashrrev_i32_e32": 16,
+      "v_bfe_i32": 5,
+      "v_bitop3_b32": 16,
+      "v_cmp_eq_u32_e64": 2,
+      "v_cmp_gt_i32_e32": 1,
+      "v_cmp_gt_i32_e64": 2,
+      "v_cndmask_b32_e64": 2,
+      "v_cvt_pk_f16_f32": 16,
+      "v_lshl_add_u64": 31,
+      "v_lshl_or_b32": 3,
+      "v_lshlrev_b32_e32": 13,
+      "v_lshlrev_b64": 1,
+      "v_lshrrev_b32_e32": 1,
+      "v_mad_u32_u24": 1,
+      "v_mfma_f32_16x16x32_f16": 32,
+      "v_mov_b32_e32": 143,
+      "v_mul_lo_u32": 11,
+      "v_or3_b32": 5,
+      "v_or_b32_e32": 17,
+      "v_readfirstlane_b32": 1,
+      "v_xad_u32": 1,
+      "v_xor_b32_e32": 2
+    },
+    "shared_bytes": 32768,
+    "resources": [
+      ".agpr_count:     0",
+      ".private_segment_fixed_size: 0",
+      ".sgpr_count:     32",
+      ".sgpr_spill_count: 0",
+      ".vgpr_count:     164",
+      ".vgpr_spill_count: 0"
+    ]
+  },
+  "old_counters": {
+    "kernel": "folded_residual_gemm_gluon_kernel.kd",
+    "counters": {
+      "SQ_INSTS_LDS": {
+        "samples": 28,
+        "min": 21028864.0,
+        "max": 21028864.0,
+        "mean": 21028864.0
+      },
+      "SQ_INSTS_MFMA": {
+        "samples": 28,
+        "min": 22282240.0,
+        "max": 22282240.0,
+        "mean": 22282240.0
+      },
+      "SQ_INSTS_SALU": {
+        "samples": 28,
+        "min": 29558784.0,
+        "max": 29558784.0,
+        "mean": 29558784.0
+      },
+      "SQ_INSTS_VALU": {
+        "samples": 28,
+        "min": 106362880.0,
+        "max": 106362880.0,
+        "mean": 106362880.0
+      }
+    },
+    "resources": {
+      "Grid_Size": [
+        557056
+      ],
+      "Workgroup_Size": [
+        256
+      ],
+      "LDS_Block_Size": [
+        0
+      ],
+      "Scratch_Size": [
+        0
+      ],
+      "VGPR_Count": [
+        36
+      ],
+      "SGPR_Count": [
+        32
+      ]
+    }
+  },
+  "new": {
+    "asm": "/tmp/qvq-fused-mask-profile-cache/ITQHHYBUF6ZCJZQ5ENBN3B7XHJKJKBH72DLILC3XJYWSSDUTC3WA/folded_residual_gemm_gluon_kernel.amdgcn",
+    "jit_key": "ITQHHYBUF6ZCJZQ5ENBN3B7XHJKJKBH72DLILC3XJYWSSDUTC3WA",
+    "hsaco_sha256": "b4d46e5a854ec01875da73d6db58c4f94bfb2edbdb0da8d3351fb26697de8abf",
+    "static_instructions": 503,
+    "opcodes": {
+      "ds_read_b128": 28,
+      "ds_write_b128": 18,
+      "global_load_dwordx2": 20,
+      "global_store_dwordx2": 8,
+      "s_add_i32": 1,
+      "s_and_b32": 5,
+      "s_barrier": 12,
+      "s_bfe_i32": 1,
+      "s_branch": 1,
+      "s_cbranch_scc1": 1,
+      "s_cmp_lg_u32": 1,
+      "s_endpgm": 1,
+      "s_load_dwordx2": 2,
+      "s_load_dwordx8": 1,
+      "s_lshl_b32": 3,
+      "s_mov_b32": 7,
+      "s_mov_b64": 1,
+      "s_movk_i32": 19,
+      "s_mul_i32": 2,
+      "s_nop": 14,
+      "s_waitcnt": 32,
+      "v_add_co_u32_e64": 14,
+      "v_add_u32_e32": 21,
+      "v_addc_co_u32_e64": 14,
+      "v_and_b32_e32": 16,
+      "v_and_or_b32": 1,
+      "v_ashrrev_i32_e32": 10,
+      "v_bfe_i32": 5,
+      "v_bitop3_b32": 16,
+      "v_cmp_eq_u32_e32": 1,
+      "v_cmp_eq_u32_e64": 1,
+      "v_cndmask_b32_e64": 2,
+      "v_cvt_pk_f16_f32": 16,
+      "v_lshl_add_u64": 18,
+      "v_lshl_or_b32": 3,
+      "v_lshlrev_b32_e32": 13,
+      "v_lshlrev_b64": 6,
+      "v_lshrrev_b32_e32": 1,
+      "v_mad_u32_u24": 2,
+      "v_mfma_f32_16x16x32_f16": 32,
+      "v_mov_b32_e32": 103,
+      "v_mul_lo_u32": 5,
+      "v_mul_u32_u24_e32": 1,
+      "v_or3_b32": 6,
+      "v_or_b32_e32": 14,
+      "v_readfirstlane_b32": 1,
+      "v_xad_u32": 1,
+      "v_xor_b32_e32": 2
+    },
+    "resources": [
+      ".agpr_count:     0",
+      ".private_segment_fixed_size: 0",
+      ".sgpr_count:     30",
+      ".sgpr_spill_count: 0",
+      ".vgpr_count:     138",
+      ".vgpr_spill_count: 0"
+    ],
+    "shared_bytes": 32768,
+    "csv": "/tmp/qvq-fused-mask-profile/raw/ubuntu2404-mi350x/814481_counter_collection.csv",
+    "csv_sha256": "c5208656dee18c9860cb7b405a7750bd360798844625fd76f40f08268f6ff9b8",
+    "counters": {
+      "SQ_INSTS_LDS": {
+        "samples": 28,
+        "min": 21028864.0,
+        "max": 21028864.0
+      },
+      "SQ_INSTS_MFMA": {
+        "samples": 28,
+        "min": 22282240.0,
+        "max": 22282240.0
+      },
+      "SQ_INSTS_SALU": {
+        "samples": 28,
+        "min": 1723392.0,
+        "max": 1723392.0
+      },
+      "SQ_INSTS_VALU": {
+        "samples": 28,
+        "min": 77778944.0,
+        "max": 77778944.0
+      }
+    }
+  },
+  "opcode_delta": {
+    "s_and_b64": -1,
+    "s_and_saveexec_b64": -21,
+    "s_branch": -2,
+    "s_cbranch_execz": -21,
+    "s_cbranch_scc0": -1,
+    "s_cbranch_scc1": 1,
+    "s_cmp_lg_u32": 1,
+    "s_cmpk_lg_i32": -1,
+    "s_lshl_b32": -1,
+    "s_mov_b32": 3,
+    "s_mov_b64": 1,
+    "s_movk_i32": -1,
+    "s_mul_i32": 2,
+    "s_nop": 14,
+    "s_or_b64": -20,
+    "s_waitcnt": 12,
+    "v_add_co_u32_e32": -1,
+    "v_add_co_u32_e64": 14,
+    "v_add_u32_e32": -8,
+    "v_addc_co_u32_e32": -1,
+    "v_addc_co_u32_e64": 14,
+    "v_and_b32_e32": 1,
+    "v_and_or_b32": -1,
+    "v_ashrrev_i32_e32": -6,
+    "v_cmp_eq_u32_e32": 1,
+    "v_cmp_eq_u32_e64": -1,
+    "v_cmp_gt_i32_e32": -1,
+    "v_cmp_gt_i32_e64": -2,
+    "v_lshl_add_u64": -13,
+    "v_lshlrev_b64": 5,
+    "v_mad_u32_u24": 1,
+    "v_mov_b32_e32": -40,
+    "v_mul_lo_u32": -6,
+    "v_mul_u32_u24_e32": 1,
+    "v_or3_b32": 1,
+    "v_or_b32_e32": -3
+  },
+  "unmeasured": [
+    "occupancy",
+    "bank conflicts",
+    "scheduler eligibility",
+    "stall reasons",
+    "achieved bandwidth"
+  ]
+}

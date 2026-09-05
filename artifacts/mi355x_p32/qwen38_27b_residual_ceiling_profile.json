@@ -1,0 +1,151 @@
+{
+  "schema": "qvq.amd.residual_ceiling.v1",
+  "commit": "734ff624",
+  "baseline": "c89459e3",
+  "production_changes": false,
+  "full_sweep": {
+    "cases": 364,
+    "canonical_passes": 364,
+    "max_absolute_error": 0.0019664764404296875,
+    "all_fp16_rounding_floors_pass": true
+  },
+  "attention_post_profile": {
+    "cases": 28,
+    "passed": 28,
+    "min_raw_speedup": 2.9539642642273463,
+    "max_raw_speedup": 13.23012789702252
+  },
+  "contract": {
+    "input_output": "FP16",
+    "accumulation": "FP32",
+    "fixtures": "identical synthetic packed weights and unit SU/SV; not model-quality evidence",
+    "cache": "high=FP16(foldedFP32), residual=FP16(foldedFP32-FP32(high)); physical N,K; total4*K*N bytes",
+    "execution": "torch.mm(x,high.T,out_dtype=float32), torch.addmm(primary,x,residual.T,out_dtype=float32), castFP16",
+    "scope_warning": "Raw candidate bypasses layer cache guards, reshape and dtype dispatch. Must remeasure integrated public forward."
+  },
+  "profiler_fix": {
+    "verified": true,
+    "environment": "LD_LIBRARY_PATH=/opt/rocm/core-10.0/lib:/opt/rocm/core-10.0/lib/rocprofiler-sdk",
+    "scope": "per-process only, no global libraries replaced or packages installed",
+    "evidence": "Successful SQ_WAVES data in /tmp/qvq-residual-counters-ld/raw/ubuntu2404-mi350x/717739_results.db, and four issued-instruction counters in719682_counter_collection.csv",
+    "prior_error": "aqlprofile API table load failed: HSA_STATUS_ERROR",
+    "qualification": "The explicit library path resolves collection here; exact old dlopen failure mechanism was not independently traced."
+  },
+  "instruction_counters": {
+    "baseline": {
+      "n": 16,
+      "SQ_INSTS_LDS": {
+        "min": 371200,
+        "max": 371200,
+        "mean": 371200
+      },
+      "SQ_INSTS_MFMA": {
+        "min": 245760,
+        "max": 245760,
+        "mean": 245760
+      },
+      "SQ_INSTS_SALU": {
+        "min": 477636,
+        "max": 478632,
+        "mean": 478356.375
+      },
+      "SQ_INSTS_VALU": {
+        "min": 526720,
+        "max": 526720,
+        "mean": 526720
+      }
+    },
+    "primary": {
+      "n": 16,
+      "SQ_INSTS_LDS": {
+        "min": 371200,
+        "max": 371200,
+        "mean": 371200
+      },
+      "SQ_INSTS_MFMA": {
+        "min": 245760,
+        "max": 245760,
+        "mean": 245760
+      },
+      "SQ_INSTS_SALU": {
+        "min": 478168,
+        "max": 478422,
+        "mean": 478350.25
+      },
+      "SQ_INSTS_VALU": {
+        "min": 526720,
+        "max": 526720,
+        "mean": 526720
+      }
+    },
+    "residual": {
+      "n": 16,
+      "SQ_INSTS_LDS": {
+        "min": 371200,
+        "max": 371200,
+        "mean": 371200
+      },
+      "SQ_INSTS_MFMA": {
+        "min": 245760,
+        "max": 245760,
+        "mean": 245760
+      },
+      "SQ_INSTS_SALU": {
+        "min": 484876,
+        "max": 485184,
+        "mean": 485040.625
+      },
+      "SQ_INSTS_VALU": {
+        "min": 532160,
+        "max": 532160,
+        "mean": 532160
+      }
+    }
+  },
+  "counter_role_mapping": "Each rate has12 matched GEMM dispatches: baseline indices0,1,6,11; primary2,4,7,9; residual3,5,8,10. Corresponds to warmup1, initial correctness1, AB/BA2 iterations. Counts sum issued instructions per launch, not per-lane operations.",
+  "resources": {
+    "workgroup": 256,
+    "grid_threads": 61440,
+    "lds_bytes": 67584,
+    "scratch_bytes": 0,
+    "vgpr": 88,
+    "agpr": 144,
+    "sgpr": 96
+  },
+  "isa": {
+    "symbol": "Cijk_Alik_Bljk_HSS_BH_Bias_S_HA_S_SAV_UserArgs_MT64x64x256_MI16x16x1_SN_LDSB1_AFC0_AG0_AGGSUA0_AGNTAB0_AFEM1_AFEM1_ASEM1_BL1_BS1_CD1_1_CLR1_CLS0_CADS0_DTLA0_DTLB0_DTLM0_DTVA0_DTVB0_DTVMXSA0_DTVMXSB0_DTVSM0_DPLB0_EPS0_ELFLR0_EMLLn1_FDSI0_GRPM1_GRVWA8_GRVWB8_GSU0_GSUAMB_GLS0_HPLR0_ISA950_ICIW0_IU1_K1_LDSTI0_LBSPPA1024_LBSPPB1024_LBSPPMXSA0_LBSPPMXSB0_LBSPPM0_LPA16_LPB16_LPMXSA0_LPMXSB0_LPM0_LRVW8_LWPMn1_MIAV0_MIWT2_2_MXLIBL_MXSFNS_MO40_MGRIPM2_NTn1_NTA4_NTB0_NTC0_NTD0_NTE0_NTMXSA0_NTMXSB0_NTM0_NTWS0_NVn1_NVA0_NVB0_NVC0_NVD0_NVE0_NVMXSA0_NVMXSB0_NVM0_NVWS0_NEPBS0_NLCA1_NLCB1_ONLL1_PAP0_PGL0_PGR2_PLR1_PKA1_SGROB0_SIA3_SS1_SPO0_SRVW0_SSO0_SVW2_SK5_SKFTR0_SKFDPO0_SKWS0_SKXCCM0_SNLL0_SIP1_SGRO0_TDMI0_TDMIM0_TDMS0_TIN0_THn1_THA0_THB0_THC0_THD0_THE0_THMXSA0_THMXSB0_THM0_THWS0_TLDS1_TLDSM1_ULSGRO0_USL1_USLMX0_UDFMAC0_UIOFGRO0_UPLRP0_USFGRO0_USI0_VSn1_VWA2_VWB2_WSGRA0_WSGRB0_WS64_WG32_8_1_WGMXCCn1",
+    "source_bundle": "/opt/rocm/core-10.0/lib/hipblaslt/library/gfx950/TensileLibrary_HH_SH_HA_Bias_SAV_UA_Type_HS_HPA_Contraction_l_Alik_Bljk_Cijk_Dijk_ID75a0_gfx950.co",
+    "unbundled_sha256": "424e296a25535a3257f966cd4892015140a101691ae3b74117b15a4573d6e973",
+    "range_start": "0x8d18d00",
+    "range_stop": "0x8d2b200",
+    "dump": "/tmp/qvq-residual-attn-full-isa.txt",
+    "whole_symbol_static_instructions": 12406,
+    "whole_symbol_static_mfma": 100,
+    "note": "Entire global-symbol range includes optional activation epilogues and alternate argument paths. Do not claim its static opcodes all execute."
+  },
+  "algebra_review": [
+    "Two-term expansion keeps folded-weight rounding error small enough to pass all canonical fixtures; no tolerance or output dtype was relaxed.",
+    "The candidate removes per-forward input/output Hadamard and host finite checks but doubles GEMM work. Each baseline/primary/residual GEMM issues245760 MFMA and371200 LDS instructions.",
+    "Residual addmm incorporates FP32 primary addition into the second GEMM epilogue; VALU rises from526720 to532160 per launch, consistent with extra epilogue work.",
+    "Both GEMMs read the same activation and separate weight terms, with an FP32 M*N intermediate and final FP16 cast. Fusion/reduced-precision residual are hypotheses to reduce rereads/launches, not verified improvements.",
+    "All attention-output fallback sizes have credible headroom. The universal residual path regresses many already folded cases and must not be enabled globally."
+  ],
+  "unavailable_metrics": [
+    "occupancy",
+    "bank_conflicts",
+    "scheduler_stalls",
+    "VMEM issued counts"
+  ],
+  "artifacts": {
+    "trace": "/tmp/qvq-residual-attn-profile/raw/ubuntu2404-mi350x/716956_kernel_trace.csv",
+    "counters": "/tmp/qvq-residual-instructions/raw/ubuntu2404-mi350x/719682_counter_collection.csv",
+    "counter_log": "/tmp/qvq-residual-instructions.log",
+    "post_timing": "qwen38_27b_residual_attn_post_timing.json"
+  },
+  "next": [
+    "Integrate residual folded cache only for attention-output M>=64; retain the existing low-M operation sequence and test same-module transitions.",
+    "Validate integrated full364-case public-forward performance against separate baseline caches; shared baseline/candidate caches would contaminate this comparison.",
+    "Repeat trace/counters/ISA after every GPU-instruction-changing integration commit with the now-working profiler environment.",
+    "Continue large GEMM and decode work for remaining cases; no all-matrix1.5x claim."
+  ]
+}

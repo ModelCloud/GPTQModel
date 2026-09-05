@@ -33,11 +33,11 @@ _QWEN38_27B_FOLDED_SHAPES = frozenset(
     }
 )
 _QWEN38_27B_FOLDED_M_LIMITS = {
-    (6144, 5120): 32,
+    (6144, 5120): 4096,
     (5120, 17408): 512,
-    (17408, 5120): 512,
+    (17408, 5120): 4096,
 }
-_QWEN38_27B_RESIDUAL_FOLDED_SHAPES = frozenset({(17408, 5120)})
+_QWEN38_27B_RESIDUAL_FOLDED_SHAPES = frozenset({(17408, 5120), (6144, 5120)})
 _QWEN38_27B_COMPOSITE_RECOVERY_SHAPE = (17408, 5120)
 _COMPOSITE_HADAMARD_CACHE: dict[
     torch.device, tuple[torch.Tensor, torch.Tensor, int, int]
@@ -363,8 +363,9 @@ def _qvq_p32_folded_weight(
         # This shape narrowly misses the end-to-end 2e-3 error budget when the
         # FP32 folded matrix is rounded once.  A second FP16 expansion term
         # preserves that accuracy while remaining much cheaper than decoding
-        # P32 weights on every token.  Limit it to the measured down projection
-        # because it doubles that layer's persistent folded-cache footprint.
+        # P32 weights on every token. Attention output needs the second term at
+        # M>=64; keep it cached across mixed decode/prefill calls. This doubles
+        # these layers' persistent folded-cache footprint.
         residual = (folded_fp32 - folded.to(torch.float32)).to(torch.float16).contiguous()
         residual_operand = residual.T
     # The predecoded matrix is only a construction intermediate here. Keeping
@@ -461,6 +462,57 @@ def _qvq_p32_composite_recovery_gfx950_kernel(  # pragma: no cover - compiled an
 
 
 @triton.jit
+def _qvq_p32_composite_base_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
+    staged_ptr,
+    base_ptr,
+    sv_ptr,
+    output_ptr,
+    size_n: tl.constexpr,
+    base_size: tl.constexpr,
+    base_pad: tl.constexpr,
+    power_width: tl.constexpr,
+    block_p: tl.constexpr,
+    inv_sqrt_n: tl.constexpr,
+):
+    """Apply the small composite base after rocBLAS handles the power factor."""
+
+    row = tl.program_id(0)
+    position = tl.program_id(1) * block_p + tl.arange(0, block_p)
+    output_base = tl.arange(0, base_pad)
+    reduce_low = tl.arange(0, 32)
+    base_low = tl.load(
+        base_ptr + output_base[:, None] * base_pad + reduce_low[None, :]
+    )
+    staged_low = tl.load(
+        staged_ptr
+        + row * size_n
+        + reduce_low[:, None] * power_width
+        + position[None, :]
+    )
+    transformed = tl.dot(base_low, staged_low, input_precision="ieee")
+    reduce_high = 32 + tl.arange(0, 16)
+    base_high = tl.load(
+        base_ptr + output_base[:, None] * base_pad + reduce_high[None, :]
+    )
+    staged_high = tl.load(
+        staged_ptr
+        + row * size_n
+        + reduce_high[:, None] * power_width
+        + position[None, :],
+        mask=reduce_high[:, None] < base_size,
+        other=0.0,
+    )
+    transformed += tl.dot(base_high, staged_high, input_precision="ieee")
+    columns = output_base[:, None] * power_width + position[None, :]
+    scale = tl.load(sv_ptr + columns, mask=output_base[:, None] < base_size, other=0.0)
+    tl.store(
+        output_ptr + row * size_n + columns,
+        transformed * inv_sqrt_n * scale,
+        mask=output_base[:, None] < base_size,
+    )
+
+
+@triton.jit
 def _qvq_p32_folded_gemv_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
     input_ptr,
     weight_ptr,
@@ -509,6 +561,28 @@ def _qvq_p32_folded_execute(
             dtype=torch.float32 if output_fp32 else x.dtype,
         )
         block_p = 32 if m <= 64 else 64
+        if m == 1024:
+            staged = torch.mm(
+                pre_hadamard.view(m * base_size, power_width), power
+            ).view(m, base_size, power_width)
+            _qvq_p32_composite_base_gfx950_kernel[(m, power_width // block_p)](
+                staged,
+                padded_base,
+                sv,
+                output,
+                size_n=n,
+                base_size=base_size,
+                base_pad=padded_base.shape[0],
+                power_width=power_width,
+                block_p=block_p,
+                inv_sqrt_n=1.0 / math.sqrt(n),
+                num_warps=8,
+                num_stages=1,
+                waves_per_eu=0,
+                matrix_instr_nonkdim=16,
+                kpack=1,
+            )
+            return output
         _qvq_p32_composite_recovery_gfx950_kernel[(m, power_width // block_p)](
             pre_hadamard,
             power,
@@ -528,6 +602,10 @@ def _qvq_p32_folded_execute(
             kpack=1,
         )
         return output
+    if (k, n) == (6144, 5120) and m <= 32:
+        # Preserve the retained small-M arithmetic and single-weight read even
+        # when the same module previously populated its large-M residual cache.
+        residual_operand = None
     if m == 1 and not output_fp32 and qvq_p32_amd_folded_shape_supported(k, n):
         output = torch.empty((1, n), device=x.device, dtype=x.dtype)
         if n == 1024:
@@ -555,11 +633,18 @@ def _qvq_p32_folded_execute(
         return output
     if residual_operand is not None:
         primary = torch.mm(x, operand, out_dtype=torch.float32)
+        # primary is fresh, private FP32 storage. Reusing it avoids addmm's
+        # device-to-device copy without changing the correction or rounding.
+        # The out= variant does not support autograd; preserve that fallback.
+        reuse_primary = not torch.is_grad_enabled() or not (
+            x.requires_grad or operand.requires_grad or residual_operand.requires_grad
+        )
         output = torch.addmm(
             primary,
             x,
             residual_operand,
             out_dtype=torch.float32,
+            **({"out": primary} if reuse_primary else {}),
         )
         return output if output_fp32 else output.to(x.dtype)
     return torch.mm(x, operand, out_dtype=torch.float32 if output_fp32 else x.dtype)
