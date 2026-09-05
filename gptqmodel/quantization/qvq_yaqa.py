@@ -12,7 +12,7 @@ import zlib
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 from typing import Any
 
@@ -56,14 +56,14 @@ class YaqaGramSketch:
     diagonal: torch.Tensor
     normalizer: float
     seed: int
+    source_diagonal: torch.Tensor | None = None
+    _source_diagonal_validated: bool = field(default=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.source.ndim != 2 or self.source.dtype != torch.float32:
             raise ValueError("YAQA compact Gram source must be a rank-2 FP32 tensor")
         if self.source.device.type != "cpu":
             raise ValueError("YAQA compact Gram sources must be stored on CPU")
-        if not bool(torch.isfinite(self.source).all()):
-            raise ValueError("YAQA compact Gram source must be finite")
         if (
             self.diagonal.ndim != 1
             or self.diagonal.shape[0] != self.source.shape[0]
@@ -76,7 +76,29 @@ class YaqaGramSketch:
             raise ValueError("YAQA compact Gram diagonal must be finite and non-negative")
         if not math.isfinite(self.normalizer) or self.normalizer <= 0:
             raise ValueError("YAQA compact Gram normalizer must be finite and positive")
-        source_diagonal = self.source.square().sum(dim=1)
+        source_diagonal = self.source_diagonal
+        source_diagonal_validated = self._source_diagonal_validated
+        if source_diagonal is None:
+            if not bool(torch.isfinite(self.source).all()):
+                raise ValueError("YAQA compact Gram source must be finite")
+            source_diagonal = self.source.square().sum(dim=1)
+            object.__setattr__(self, "source_diagonal", source_diagonal)
+            source_diagonal_validated = True
+        elif (
+            source_diagonal.ndim != 1
+            or source_diagonal.shape[0] != self.source.shape[0]
+            or source_diagonal.dtype != torch.float32
+        ):
+            raise ValueError("YAQA compact Gram source diagonal must be a matching rank-1 FP32 tensor")
+        if source_diagonal.device.type != "cpu":
+            raise ValueError("YAQA compact Gram source diagonals must be stored on CPU")
+        if not bool(torch.isfinite(source_diagonal).all()) or not bool(source_diagonal.ge(0).all()):
+            raise ValueError("YAQA compact Gram source diagonal must be finite and non-negative")
+        if not source_diagonal_validated:
+            if not bool(torch.isfinite(self.source).all()):
+                raise ValueError("YAQA compact Gram source must be finite")
+            if not torch.equal(source_diagonal, self.source.square().sum(dim=1)):
+                raise ValueError("YAQA compact Gram source diagonal does not match its source")
         if bool(((self.diagonal > 0) & (source_diagonal == 0)).any()):
             raise ValueError("YAQA compact Gram source cannot represent a positive diagonal from a zero row")
 
@@ -93,6 +115,8 @@ class YaqaGramSketch:
 
         source = self.source.to(device=device, non_blocking=True)
         diagonal = self.diagonal.to(device=device, non_blocking=True)
+        assert self.source_diagonal is not None
+        source_diagonal = self.source_diagonal.to(device=device, non_blocking=True)
         cuda_matmul = torch.backends.cuda.matmul
         previous_fp32_precision = None
         previous_allow_tf32 = None
@@ -107,7 +131,6 @@ class YaqaGramSketch:
             # A diagonal congruence transform preserves positive
             # semidefiniteness while replacing the noisy projected diagonal
             # with the exact per-channel Fisher curvature.
-            source_diagonal = source.square().sum(dim=1)
             scale = torch.where(
                 diagonal > 0,
                 (diagonal * self.normalizer / source_diagonal.clamp_min(torch.finfo(source.dtype).tiny)).sqrt(),
@@ -563,7 +586,7 @@ def capture_yaqa_sketch_b(
     if gram_strategy == "streaming_projected":
         assert gram_projection_rank is not None
         factor_bytes = sum(
-            (module.in_features + module.out_features) * (gram_projection_rank + 1) * 4
+            (module.in_features + module.out_features) * (gram_projection_rank + 2) * 4
             for module in modules.values()
         )
     else:
@@ -980,6 +1003,17 @@ def capture_yaqa_sketch_b(
         if sequence_counts[name] != total_sequences or name not in input_accumulators:
             raise ValueError(f"YAQA module {name} did not produce one gradient for every sequence")
 
+    input_source_diagonals: dict[str, torch.Tensor] = {}
+    output_source_diagonals: dict[str, torch.Tensor] = {}
+    if gram_strategy == "streaming_projected":
+        for name in modules:
+            input_source_diagonals[name] = input_accumulators[name].square().sum(dim=1)
+            output_source_diagonals[name] = output_accumulators[name].square().sum(dim=1)
+            if nonfinite_update is not None and accumulator_device.type == device.type:
+                nonfinite_update.logical_or_(~torch.isfinite(input_source_diagonals[name]).all())
+                nonfinite_update.logical_or_(~torch.isfinite(output_source_diagonals[name]).all())
+                nonfinite_update.logical_or_(~torch.isfinite(input_diagonal_accumulators[name]).all())
+                nonfinite_update.logical_or_(~torch.isfinite(output_diagonal_accumulators[name]).all())
     if capture_end_event is not None:
         capture_end_event.record()
     transfer_started = time.perf_counter()
@@ -1003,9 +1037,17 @@ def capture_yaqa_sketch_b(
             if gram_strategy == "streaming_projected":
                 input_diagonal_accumulators[name] = input_diagonal_accumulators[name].to(device="cpu")
                 output_diagonal_accumulators[name] = output_diagonal_accumulators[name].to(device="cpu")
-        if not torch.isfinite(input_accumulators[name]).all() or not torch.isfinite(
-            output_accumulators[name]
-        ).all():
+                input_source_diagonals[name] = input_source_diagonals[name].to(device="cpu")
+                output_source_diagonals[name] = output_source_diagonals[name].to(device="cpu")
+        accelerator_streaming_validated = (
+            gram_strategy == "streaming_projected"
+            and nonfinite_update is not None
+            and accumulator_device.type == device.type
+        )
+        if not accelerator_streaming_validated and (
+            not torch.isfinite(input_accumulators[name]).all()
+            or not torch.isfinite(output_accumulators[name]).all()
+        ):
             raise ValueError(f"YAQA module {name} produced an overflowing Sketch-B accumulator")
     transfer_seconds = time.perf_counter() - transfer_started
     capture_cuda_ms = (
@@ -1027,6 +1069,8 @@ def capture_yaqa_sketch_b(
                 .contiguous(),
                 normalizer=total_effective_sequence_weight * out_features * gram_projection_rank,
                 seed=seed,
+                source_diagonal=input_source_diagonals[name].contiguous(),
+                _source_diagonal_validated=True,
             )
             output_hessians[name] = YaqaGramSketch(
                 source=output_accumulators[name].contiguous(),
@@ -1036,6 +1080,8 @@ def capture_yaqa_sketch_b(
                 .contiguous(),
                 normalizer=total_effective_sequence_weight * in_features * gram_projection_rank,
                 seed=seed,
+                source_diagonal=output_source_diagonals[name].contiguous(),
+                _source_diagonal_validated=True,
             )
         else:
             input_hessians[name] = input_accumulators[name].div(
@@ -1047,10 +1093,12 @@ def capture_yaqa_sketch_b(
 
     if gram_strategy == "streaming_projected":
         input_factor_elements = sum(
-            factor.source.numel() + factor.diagonal.numel() for factor in input_hessians.values()
+            factor.source.numel() + factor.diagonal.numel() + factor.source_diagonal.numel()
+            for factor in input_hessians.values()
         )
         output_factor_elements = sum(
-            factor.source.numel() + factor.diagonal.numel() for factor in output_hessians.values()
+            factor.source.numel() + factor.diagonal.numel() + factor.source_diagonal.numel()
+            for factor in output_hessians.values()
         )
         dense_factor_storage_bytes = sum(
             (module.in_features**2 + module.out_features**2) * 4 for module in modules.values()

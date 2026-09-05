@@ -1049,7 +1049,7 @@ def test_qvq_yaqa_streaming_projected_lifecycle_retains_compact_factors():
     assert processor._yaqa_stats["factor_passes"] == 1
     assert processor._yaqa_stats["selected_gram_strategy"] == "streaming_projected"
     assert processor._yaqa_stats["gram_projection_rank"] == 32
-    assert processor._yaqa_stats["factor_compression_ratio"] == pytest.approx(16 / 33)
+    assert processor._yaqa_stats["factor_compression_ratio"] == pytest.approx(16 / 34)
     assert all(isinstance(factor, YaqaGramSketch) for factor in processor._yaqa_input_hessians.values())
     assert all(isinstance(factor, YaqaGramSketch) for factor in processor._yaqa_output_hessians.values())
 
@@ -1075,6 +1075,43 @@ def test_qvq_yaqa_streaming_projected_lifecycle_retains_compact_factors():
     torch.testing.assert_close(quantize.call_args.kwargs["output_hessian"], expected_output)
     assert full_name not in processor._yaqa_input_hessians
     assert full_name not in processor._yaqa_output_hessians
+
+
+def test_qvq_yaqa_high_memory_streaming_plan_avoids_recomputation_and_uses_batch_16():
+    rows = [{"input_ids": torch.tensor([[1, 2]]), "attention_mask": torch.ones((1, 2), dtype=torch.long)}]
+    qcfg = QVQConfig(
+        bits=2,
+        rounding="yaqa",
+        yaqa={"minimum_sequences": 1, "gram_strategy": "streaming_projected"},
+        device="cuda",
+        offload_to_disk=False,
+    )
+    qmodel = _YaqaQModel(qcfg)
+    processor = QVQProcessor(
+        tokenizer=None,
+        qcfg=qcfg,
+        calibration=rows,
+        prepare_dataset_func=_prepared_calibration,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        batch_size=1,
+        yaqa_calibration=rows,
+    )
+
+    with patch("torch.cuda.mem_get_info", return_value=(140 * 1024**3, 141 * 1024**3)):
+        plan = processor.yaqa_execution_plan(qmodel, prepared_batches=rows)
+
+    assert plan["gram_strategy"] == "streaming_projected"
+    assert plan["high_memory_streaming"] is True
+    assert plan["batch_size"] == 16
+    assert plan["activation_checkpointing"] is False
+
+    qcfg.yaqa.batch_size = 4
+    qcfg.yaqa.activation_checkpointing = True
+    with patch("torch.cuda.mem_get_info", return_value=(140 * 1024**3, 141 * 1024**3)):
+        explicit_plan = processor.yaqa_execution_plan(qmodel, prepared_batches=rows)
+    assert explicit_plan["batch_size"] == 4
+    assert explicit_plan["activation_checkpointing"] is True
 
 
 @pytest.mark.cuda

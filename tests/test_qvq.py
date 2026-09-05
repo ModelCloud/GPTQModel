@@ -903,8 +903,8 @@ def test_yaqa_config_defaults_to_validated_rate_damping_and_sample_floor():
 
     assert config.yaqa.regularization == pytest.approx(0.05)
     assert config.yaqa.minimum_sequences == YAQA_PAPER_MINIMUM_SEQUENCES == 2_000
-    assert config.yaqa.batch_size == 8
-    assert config.yaqa.activation_checkpointing is True
+    assert config.yaqa.batch_size == "auto"
+    assert config.yaqa.activation_checkpointing == "auto"
     assert config.yaqa.mps_cleanup_interval == 8
     assert config.yaqa.sequence_sort == "desc"
     assert config.yaqa.source_weight_column is None
@@ -923,7 +923,9 @@ def test_yaqa_config_defaults_to_validated_rate_damping_and_sample_floor():
     (
         ({"batch_size": 0}, ValueError, "batch_size"),
         ({"batch_size": True}, ValueError, "batch_size"),
+        ({"batch_size": "fast"}, ValueError, "batch_size"),
         ({"activation_checkpointing": 1}, TypeError, "activation_checkpointing"),
+        ({"activation_checkpointing": "sometimes"}, ValueError, "activation_checkpointing"),
         ({"mps_cleanup_interval": 0}, ValueError, "mps_cleanup_interval"),
         ({"mps_cleanup_interval": True}, ValueError, "mps_cleanup_interval"),
         ({"sequence_sort": 1}, TypeError, "sequence_sort"),

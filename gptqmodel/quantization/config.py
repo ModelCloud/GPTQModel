@@ -160,9 +160,13 @@ class YaqaConfig:
     # above W4 use the global 0.05 fallback. Explicit overrides still win.
     regularization_by_rate: tuple[tuple[float, float], ...] = YAQA_DEFAULT_RATE_REGULARIZATION
     minimum_sequences: int = YAQA_PAPER_MINIMUM_SEQUENCES
-    batch_size: int = 8
+    # ``auto`` retains the exact-path batch of 8 and uses 16 for compact
+    # streaming collection on CUDA devices with at least 128 GiB.
+    batch_size: int | str = "auto"
     chat_template: ChatTemplateConfig = field(default_factory=ChatTemplateConfig)
-    activation_checkpointing: bool = True
+    # ``auto`` checkpoints by default, but avoids recomputation when compact
+    # streaming collection and ample accelerator memory make it unnecessary.
+    activation_checkpointing: bool | str = "auto"
     mps_cleanup_interval: int = 8
     sequence_sort: str = "desc"
     # Optional per-source Fisher importance weights. The source column is read
@@ -234,14 +238,22 @@ class YaqaConfig:
             or self.minimum_sequences < 1
         ):
             raise ValueError("YaqaConfig: `minimum_sequences` must be a positive integer.")
-        if isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size < 1:
-            raise ValueError("YaqaConfig: `batch_size` must be a positive integer.")
+        if isinstance(self.batch_size, str):
+            self.batch_size = self.batch_size.strip().lower()
+            if self.batch_size != "auto":
+                raise ValueError("YaqaConfig: `batch_size` must be `auto` or a positive integer.")
+        elif isinstance(self.batch_size, bool) or not isinstance(self.batch_size, int) or self.batch_size < 1:
+            raise ValueError("YaqaConfig: `batch_size` must be `auto` or a positive integer.")
         if isinstance(self.chat_template, dict):
             self.chat_template = ChatTemplateConfig(**self.chat_template)
         elif not isinstance(self.chat_template, ChatTemplateConfig):
             raise TypeError("YaqaConfig: `chat_template` must be a ChatTemplateConfig.")
-        if not isinstance(self.activation_checkpointing, bool):
-            raise TypeError("YaqaConfig: `activation_checkpointing` must be boolean.")
+        if isinstance(self.activation_checkpointing, str):
+            self.activation_checkpointing = self.activation_checkpointing.strip().lower()
+            if self.activation_checkpointing != "auto":
+                raise ValueError("YaqaConfig: `activation_checkpointing` must be `auto` or boolean.")
+        elif not isinstance(self.activation_checkpointing, bool):
+            raise TypeError("YaqaConfig: `activation_checkpointing` must be `auto` or boolean.")
         if (
             isinstance(self.mps_cleanup_interval, bool)
             or not isinstance(self.mps_cleanup_interval, int)
