@@ -3813,6 +3813,28 @@ families do not: IMAD 275 to 278, SHF 126 to 129, LOP3 127 to 132, and LEA
 conversion, permutation, or address expression to fold; the surviving
 integer instructions are shared trellis-address and circular-state indexing.
 
+## v81 N=1024 large-M stage-1/2 reuse
+
+This phase starts from the merged `origin/main` tip `f74ec0cc`, which includes
+the v80 implementation and the explicit row-group ABI from PR #112.  The
+automatic policy now retains eight-row reuse for `N=1024, stage_k_tiles=3` at
+all aligned large-M sizes and additionally selects it for stages 1 and 2 only
+when `M>=2048`.  The four-row route remains in place for `M=512/1024` and for
+stage 4, where the larger accumulator footprint is not beneficial.
+
+Against an exact SM80 build of `origin/main`, `K=5120`, block variant,
+128 threads, split 1, the `N=1024` stage-1 large-M geometric-mean speedups
+(`M=2048/4096`) are 1.070x/1.031x (bits 4--7 averaged), and stage 2 reaches
+1.024x/1.175x.  Per-rate stage-2 large-M means are 1.092x, 1.089x, 1.090x,
+and 1.115x for bits 4, 5, 6, and 7.  The M=512/1024 controls stay within
+timer noise, and stage 3/4 dispatch remains unchanged.  The strongest case,
+`N=1024,M=4096,stage=2`, clears the requested 10% step across every rate.
+
+Random split-8 comparisons for `M=2048` and `M=4096`, stages 1 and 2, and
+transition bits 4--7 remain bit-for-bit identical to the fetched baseline.
+The broad stage-1/2 guard from the earlier probe is not used: it regressed
+small M, so the retained condition is explicitly limited to `M>=2048`.
+
 ## Reproduction
 
 ```bash
