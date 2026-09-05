@@ -119,3 +119,8 @@ plus seven exact-K0 BM/BN/split arms. BM64/BN32 split1 is the fastest single
 run at M=2048 (1.425x), BM64/BN64 split1 reaches 1.401x, and every fused arm
 is slower at M=1 and decode. These model timing gains still need matched
 repeats before promotion.
+
+[Window model repeat wave25](WINDOW_MODEL_REPEAT_WAVE25.md) repeats the two
+leading geometries across four GPUs each. BM64/BN32 reaches a pooled 1.423x at
+M=2048 and BM64/BN64 reaches 1.402x; both remain slower at low M and decode.
+The large-prefill gain reproduces, but no full-model 2x result exists.
