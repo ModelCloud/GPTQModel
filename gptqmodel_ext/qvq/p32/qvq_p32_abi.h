@@ -11,7 +11,7 @@ extern "C" {
 // the ABI version describes this C surface; the kernel version invalidates
 // launch-autotune entries when implementation details change.
 #define QVQ_P32_OPERATION_VERSION 1
-#define QVQ_P32_ABI_VERSION 1
+#define QVQ_P32_ABI_VERSION 2
 #define QVQ_P32_KERNEL_VERSION 10
 #define QVQ_P32_COMPILED_SM 80
 
@@ -29,6 +29,9 @@ extern "C" {
 #define QVQ_P32_ROW_GROUPS_AUTO 0
 #define QVQ_P32_ROW_GROUPS_MIN 1
 #define QVQ_P32_ROW_GROUPS_MAX 16
+#define QVQ_P32_LAUNCH_PLAN_MAX_LAUNCHES 5
+#define QVQ_P32_LAUNCH_PLAN_MAX_ARGS 16
+#define QVQ_P32_LAUNCH_PLAN_HOST_STORAGE_WORDS 128
 
 // Kernel variants are compile-time specializations selected by the host
 // tuner. The scalar variant is intended for small M; the block variant
@@ -54,6 +57,49 @@ struct qvq_p32_config {
   int stage_k_tiles;
   int static_n;
   int reduction_mode;
+};
+
+// Framework-neutral CUDA launch metadata for compiler-owned command buffers.
+// `kernel_symbol` is the CUDA C++ host symbol accepted by
+// cudaGetFuncBySymbol. Device-pointer arguments store the device pointer
+// directly in `address`; host-value arguments point into the plan's inline
+// storage and are copied by the consuming compiler runtime. Dependencies are
+// launch indexes in this plan. The descriptor exposes launch structure without
+// introducing an XLA/PJRT dependency into QvQ.
+enum qvq_p32_launch_arg_type {
+  QVQ_P32_LAUNCH_ARG_DEVICE_POINTER = 1,
+  QVQ_P32_LAUNCH_ARG_HOST_VALUE = 2,
+};
+
+struct qvq_p32_launch_arg {
+  const void* address;
+  long long size;
+  int type;
+};
+
+struct qvq_p32_launch_descriptor {
+  const void* kernel_symbol;
+  const char* kernel_name;
+  unsigned grid_x;
+  unsigned grid_y;
+  unsigned grid_z;
+  unsigned block_x;
+  unsigned block_y;
+  unsigned block_z;
+  unsigned shared_memory_bytes;
+  int uses_pdl;
+  int arg_count;
+  struct qvq_p32_launch_arg args[QVQ_P32_LAUNCH_PLAN_MAX_ARGS];
+  int dependency_count;
+  int dependencies[QVQ_P32_LAUNCH_PLAN_MAX_LAUNCHES];
+};
+
+struct qvq_p32_launch_plan {
+  int launch_count;
+  struct qvq_p32_launch_descriptor
+      launches[QVQ_P32_LAUNCH_PLAN_MAX_LAUNCHES];
+  // Eight-byte alignment covers every by-value field in the current P32 ABI.
+  unsigned long long host_storage[QVQ_P32_LAUNCH_PLAN_HOST_STORAGE_WORDS];
 };
 
 // The ABI intentionally uses opaque pointers so framework adapters do not need
@@ -150,6 +196,36 @@ int qvq_p32_grouped_window(
     int n_tile_end_0,
     int n_tile_end_1,
     void* stream);
+
+// Build the exact launch sequence used by qvq_p32_grouped_window without
+// issuing work. ZML uses this to create/update native nodes in an XLA command
+// buffer after autotuning has selected a fixed configuration. Other framework
+// integrations can continue calling qvq_p32_grouped_window unchanged.
+int qvq_p32_grouped_launch_plan(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const void* bank_alt_ids,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int transition_bits,
+    int split_count,
+    int split_count_0,
+    int split_count_1,
+    int split_count_2,
+    int kernel_variant,
+    int threads,
+    int stage_k_tiles,
+    int static_n,
+    int reduction_mode,
+    int group_count,
+    int n_tile_end_0,
+    int n_tile_end_1,
+    struct qvq_p32_launch_plan* plan);
 
 #ifdef __cplusplus
 }

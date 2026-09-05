@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace {
@@ -2223,6 +2224,217 @@ int launch_p32_grouped_scalar(
   return 0;
 }
 
+template <int TransitionBits, int Rows, int Threads>
+const void* grouped_scalar_kernel_symbol(int stage_k_tiles) {
+  switch (stage_k_tiles) {
+    case 1:
+      return reinterpret_cast<const void*>(
+          p32_window_ampere_grouped_scalar_kernel<TransitionBits, Rows, Threads, 1>);
+    case 2:
+      return reinterpret_cast<const void*>(
+          p32_window_ampere_grouped_scalar_kernel<TransitionBits, Rows, Threads, 2>);
+    case 3:
+      return reinterpret_cast<const void*>(
+          p32_window_ampere_grouped_scalar_kernel<TransitionBits, Rows, Threads, 3>);
+    case 4:
+      return reinterpret_cast<const void*>(
+          p32_window_ampere_grouped_scalar_kernel<TransitionBits, Rows, Threads, 4>);
+    default:
+      return nullptr;
+  }
+}
+
+template <int TransitionBits, int Rows>
+const void* grouped_scalar_kernel_symbol(int threads, int stage_k_tiles) {
+  switch (threads) {
+    case 64:
+      return grouped_scalar_kernel_symbol<TransitionBits, Rows, 64>(stage_k_tiles);
+    case 128:
+      return grouped_scalar_kernel_symbol<TransitionBits, Rows, 128>(stage_k_tiles);
+    case 256:
+      return grouped_scalar_kernel_symbol<TransitionBits, Rows, 256>(stage_k_tiles);
+    default:
+      return nullptr;
+  }
+}
+
+template <int TransitionBits>
+const void* grouped_scalar_kernel_symbol(
+    int size_m, int threads, int stage_k_tiles) {
+  switch (size_m) {
+    case 1:
+      return grouped_scalar_kernel_symbol<TransitionBits, 1>(threads, stage_k_tiles);
+    case 2:
+      return grouped_scalar_kernel_symbol<TransitionBits, 2>(threads, stage_k_tiles);
+    case 3:
+      return grouped_scalar_kernel_symbol<TransitionBits, 3>(threads, stage_k_tiles);
+    case 4:
+      return grouped_scalar_kernel_symbol<TransitionBits, 4>(threads, stage_k_tiles);
+    default:
+      return nullptr;
+  }
+}
+
+template <int TransitionBits, int Threads, bool FullRows, int ActiveRows>
+const void* grouped_block_kernel_symbol(int stage_k_tiles) {
+  switch (stage_k_tiles) {
+    case 1:
+      return reinterpret_cast<const void*>(
+          p32_window_ampere_grouped_block_kernel<
+              TransitionBits, Threads, 1, FullRows, ActiveRows>);
+    case 2:
+      return reinterpret_cast<const void*>(
+          p32_window_ampere_grouped_block_kernel<
+              TransitionBits, Threads, 2, FullRows, ActiveRows>);
+    case 3:
+      return reinterpret_cast<const void*>(
+          p32_window_ampere_grouped_block_kernel<
+              TransitionBits, Threads, 3, FullRows, ActiveRows>);
+    case 4:
+      return reinterpret_cast<const void*>(
+          p32_window_ampere_grouped_block_kernel<
+              TransitionBits, Threads, 4, FullRows, ActiveRows>);
+    default:
+      return nullptr;
+  }
+}
+
+template <int TransitionBits, int Threads>
+const void* grouped_block_kernel_symbol(int size_m, int stage_k_tiles) {
+  if (size_m == 8) {
+    return grouped_block_kernel_symbol<TransitionBits, Threads, false, 8>(
+        stage_k_tiles);
+  }
+  if (size_m == 16) {
+    return grouped_block_kernel_symbol<TransitionBits, Threads, true, 0>(
+        stage_k_tiles);
+  }
+  return grouped_block_kernel_symbol<TransitionBits, Threads, false, 0>(
+      stage_k_tiles);
+}
+
+template <int TransitionBits>
+const void* grouped_block_kernel_symbol(
+    int size_m, int threads, int stage_k_tiles) {
+  switch (threads) {
+    case 64:
+      return grouped_block_kernel_symbol<TransitionBits, 64>(size_m, stage_k_tiles);
+    case 128:
+      return grouped_block_kernel_symbol<TransitionBits, 128>(size_m, stage_k_tiles);
+    case 256:
+      return grouped_block_kernel_symbol<TransitionBits, 256>(size_m, stage_k_tiles);
+    default:
+      return nullptr;
+  }
+}
+
+const void* grouped_kernel_symbol(
+    int transition_bits,
+    int size_m,
+    int kernel_variant,
+    int threads,
+    int stage_k_tiles) {
+#define QVQ_GROUPED_KERNEL_SYMBOL(BITS)                                      \
+  return kernel_variant == QVQ_P32_VARIANT_SCALAR                           \
+      ? grouped_scalar_kernel_symbol<BITS>(size_m, threads, stage_k_tiles)   \
+      : grouped_block_kernel_symbol<BITS>(size_m, threads, stage_k_tiles)
+  switch (transition_bits) {
+    case 4: QVQ_GROUPED_KERNEL_SYMBOL(4);
+    case 5: QVQ_GROUPED_KERNEL_SYMBOL(5);
+    case 6: QVQ_GROUPED_KERNEL_SYMBOL(6);
+    case 7: QVQ_GROUPED_KERNEL_SYMBOL(7);
+    default: return nullptr;
+  }
+#undef QVQ_GROUPED_KERNEL_SYMBOL
+}
+
+struct GroupedPlanStorage {
+  GroupedP32LaunchParams params;
+  int main_size_m;
+  int main_size_k;
+  int main_total_n_tiles;
+  struct ReductionValues {
+    int size_m;
+    int group_n;
+    int total_n;
+    int group_n_offset;
+    int split_count;
+  } reductions[kMaxGroupedP32Segments];
+};
+
+static_assert(
+    sizeof(GroupedPlanStorage) <=
+        sizeof(((qvq_p32_launch_plan*)nullptr)->host_storage),
+    "QVQ P32 launch-plan host storage is too small");
+
+void set_device_arg(
+    qvq_p32_launch_descriptor* launch, int index, const void* pointer) {
+  launch->args[index] = {
+      pointer,
+      0,
+      QVQ_P32_LAUNCH_ARG_DEVICE_POINTER,
+  };
+}
+
+template <typename T>
+void set_host_arg(
+    qvq_p32_launch_descriptor* launch, int index, const T* value) {
+  launch->args[index] = {
+      value,
+      static_cast<long long>(sizeof(T)),
+      QVQ_P32_LAUNCH_ARG_HOST_VALUE,
+  };
+}
+
+bool build_grouped_params(
+    int size_m,
+    int size_n,
+    int group_count,
+    int split_count_0,
+    int split_count_1,
+    int split_count_2,
+    int n_tile_end_0,
+    int n_tile_end_1,
+    GroupedP32LaunchParams* params) {
+  const int total_n_tiles = size_n / kTileColumns;
+  const int ends[kMaxGroupedP32Segments] = {
+      n_tile_end_0,
+      n_tile_end_1,
+      total_n_tiles,
+  };
+  *params = {};
+  params->segment_count = group_count;
+  params->split_count[0] = split_count_0;
+  params->split_count[1] = split_count_1;
+  params->split_count[2] = split_count_2;
+  int tile_start = 0;
+  int64_t output_offset = 0;
+  int64_t partial_offset = 0;
+  for (int segment = 0; segment < group_count; ++segment) {
+    const int tile_end = ends[segment];
+    if (tile_end <= tile_start || tile_end > total_n_tiles) {
+      set_last_error("QVQ P32 grouped N-tile boundaries are invalid");
+      return false;
+    }
+    params->n_tile_start[segment] = tile_start;
+    params->n_tiles[segment] = tile_end - tile_start;
+    params->output_offset[segment] = output_offset;
+    params->partial_offset[segment] = partial_offset;
+    output_offset += static_cast<int64_t>(size_m) *
+        params->n_tiles[segment] * kTileColumns;
+    if (params->split_count[segment] > 1) {
+      partial_offset += static_cast<int64_t>(params->split_count[segment]) *
+          size_m * params->n_tiles[segment] * kTileColumns;
+    }
+    tile_start = tile_end;
+  }
+  if (tile_start != total_n_tiles) {
+    set_last_error("QVQ P32 grouped boundaries must cover all output tiles");
+    return false;
+  }
+  return true;
+}
+
 template <int TransitionBits>
 int launch_p32(
     const void* input,
@@ -3556,4 +3768,187 @@ extern "C" int qvq_p32_grouped_window(
     set_last_error("QVQ P32 grouped launch failed");
   }
   return status;
+}
+
+extern "C" int qvq_p32_grouped_launch_plan(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const void* bank_alt_ids,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int transition_bits,
+    int split_count,
+    int split_count_0,
+    int split_count_1,
+    int split_count_2,
+    int kernel_variant,
+    int threads,
+    int stage_k_tiles,
+    int static_n,
+    int reduction_mode,
+    int group_count,
+    int n_tile_end_0,
+    int n_tile_end_1,
+    qvq_p32_launch_plan* plan) {
+  if (input == nullptr || trellis == nullptr || levels == nullptr ||
+      bank_ids == nullptr || bank_alt_ids == nullptr || output == nullptr ||
+      partial_output == nullptr || plan == nullptr) {
+    set_last_error("QVQ P32 grouped launch plan received a null pointer");
+    return -1;
+  }
+  if (size_m < 1 || size_m > QVQ_P32_GROUPED_M_MAX || size_k <= 0 ||
+      size_k % QVQ_P32_TILE_SIZE != 0 || size_n <= 0 ||
+      size_n % QVQ_P32_TILE_SIZE != 0) {
+    set_last_error("QVQ P32 grouped launch plan requires M in [1,16] and K/N divisible by 16");
+    return -1;
+  }
+  if (group_count < QVQ_P32_GROUP_COUNT_MIN ||
+      group_count > QVQ_P32_GROUP_COUNT_MAX) {
+    set_last_error("QVQ P32 grouped launch plan requires two or three groups");
+    return -1;
+  }
+  if (split_count < 1 || split_count > QVQ_P32_SPLIT_COUNT_MAX ||
+      split_count > size_k / kTileRows || split_count_0 < 1 ||
+      split_count_1 < 1 || split_count_2 < 1) {
+    set_last_error("QVQ P32 grouped launch plan split count is invalid");
+    return -1;
+  }
+  if (kernel_variant != QVQ_P32_VARIANT_SCALAR &&
+      kernel_variant != QVQ_P32_VARIANT_BLOCK) {
+    set_last_error("QVQ P32 grouped launch plan kernel variant is invalid");
+    return -1;
+  }
+  if ((kernel_variant == QVQ_P32_VARIANT_SCALAR &&
+       size_m > QVQ_P32_SCALAR_M_MAX) ||
+      (kernel_variant == QVQ_P32_VARIANT_BLOCK &&
+       size_m <= QVQ_P32_SCALAR_M_MAX) ||
+      static_n != 0 || reduction_mode != QVQ_P32_REDUCTION_NATIVE) {
+    set_last_error("QVQ P32 grouped launch plan variant does not match M or reduction configuration");
+    return -1;
+  }
+  if ((threads != 64 && threads != 128 && threads != 256) ||
+      stage_k_tiles < QVQ_P32_STAGE_K_TILES_MIN ||
+      stage_k_tiles > QVQ_P32_STAGE_K_TILES_MAX ||
+      transition_bits < QVQ_P32_TRANSITION_BITS_MIN ||
+      transition_bits > QVQ_P32_TRANSITION_BITS_MAX) {
+    set_last_error("QVQ P32 grouped launch plan specialization is invalid");
+    return -1;
+  }
+
+  std::memset(plan, 0, sizeof(*plan));
+  auto* storage = reinterpret_cast<GroupedPlanStorage*>(plan->host_storage);
+  if (!build_grouped_params(
+          size_m, size_n, group_count, split_count_0, split_count_1,
+          split_count_2, n_tile_end_0, n_tile_end_1, &storage->params)) {
+    return -1;
+  }
+  for (int segment = 0; segment < group_count; ++segment) {
+    if (storage->params.split_count[segment] > QVQ_P32_SPLIT_COUNT_MAX ||
+        storage->params.split_count[segment] > size_k / kTileRows) {
+      set_last_error("QVQ P32 grouped launch plan split count exceeds the K-tile count or 128");
+      return -1;
+    }
+  }
+
+  const int total_n_tiles = size_n / kTileColumns;
+  const int tiles_per_block = kernel_variant == QVQ_P32_VARIANT_SCALAR
+      ? 4 * (threads / 32)
+      : threads / 32;
+  int64_t grouped_work = 0;
+  for (int segment = 0; segment < group_count; ++segment) {
+    const int segment_blocks =
+        (storage->params.n_tiles[segment] + tiles_per_block - 1) /
+        tiles_per_block;
+    grouped_work += static_cast<int64_t>(segment_blocks) *
+        storage->params.split_count[segment];
+  }
+  if (grouped_work <= 0 ||
+      grouped_work > std::numeric_limits<unsigned>::max()) {
+    set_last_error("QVQ P32 grouped launch-plan work exceeds the CUDA grid limit");
+    return -1;
+  }
+
+  auto* main = &plan->launches[0];
+  main->kernel_symbol = grouped_kernel_symbol(
+      transition_bits, size_m, kernel_variant, threads, stage_k_tiles);
+  if (main->kernel_symbol == nullptr) {
+    set_last_error("QVQ P32 grouped launch-plan kernel symbol is unavailable");
+    return -1;
+  }
+  main->kernel_name = kernel_variant == QVQ_P32_VARIANT_SCALAR
+      ? "qvq_p32_grouped_scalar"
+      : "qvq_p32_grouped_block";
+  main->grid_x = static_cast<unsigned>(grouped_work);
+  main->grid_y = 1;
+  main->grid_z = 1;
+  main->block_x = static_cast<unsigned>(threads);
+  main->block_y = 1;
+  main->block_z = 1;
+  int arg = 0;
+  set_device_arg(main, arg++, input);
+  set_device_arg(main, arg++, trellis);
+  set_device_arg(main, arg++, levels);
+  set_device_arg(main, arg++, bank_ids);
+  set_device_arg(main, arg++, bank_alt_ids);
+  set_host_arg(main, arg++, &storage->params);
+  set_device_arg(main, arg++, partial_output);
+  set_device_arg(main, arg++, output);
+  storage->main_size_m = size_m;
+  storage->main_size_k = size_k;
+  storage->main_total_n_tiles = total_n_tiles;
+  if (kernel_variant == QVQ_P32_VARIANT_BLOCK) {
+    set_host_arg(main, arg++, &storage->main_size_m);
+  }
+  set_host_arg(main, arg++, &storage->main_size_k);
+  set_host_arg(main, arg++, &storage->main_total_n_tiles);
+  main->arg_count = arg;
+  plan->launch_count = 1;
+
+  for (int segment = 0; segment < group_count; ++segment) {
+    if (storage->params.split_count[segment] == 1) continue;
+    if (plan->launch_count >= QVQ_P32_LAUNCH_PLAN_MAX_LAUNCHES) {
+      set_last_error("QVQ P32 grouped launch plan exceeds launch capacity");
+      return -1;
+    }
+    auto* reduction = &plan->launches[plan->launch_count];
+    auto* values = &storage->reductions[segment];
+    values->size_m = size_m;
+    values->group_n = storage->params.n_tiles[segment] * kTileColumns;
+    values->total_n = size_n;
+    values->group_n_offset =
+        storage->params.n_tile_start[segment] * kTileColumns;
+    values->split_count = storage->params.split_count[segment];
+    const int output_values = values->size_m * values->group_n;
+    reduction->kernel_symbol = reinterpret_cast<const void*>(
+        reduce_split_grouped_kernel<>);
+    reduction->kernel_name = "qvq_p32_grouped_reduce";
+    reduction->grid_x = static_cast<unsigned>(
+        (output_values + 255) / 256);
+    reduction->grid_y = 1;
+    reduction->grid_z = 1;
+    reduction->block_x = 256;
+    reduction->block_y = 1;
+    reduction->block_z = 1;
+    int reduction_arg = 0;
+    set_device_arg(
+        reduction,
+        reduction_arg++,
+        partial_output + storage->params.partial_offset[segment]);
+    set_device_arg(reduction, reduction_arg++, output);
+    set_host_arg(reduction, reduction_arg++, &values->size_m);
+    set_host_arg(reduction, reduction_arg++, &values->group_n);
+    set_host_arg(reduction, reduction_arg++, &values->total_n);
+    set_host_arg(reduction, reduction_arg++, &values->group_n_offset);
+    set_host_arg(reduction, reduction_arg++, &values->split_count);
+    reduction->arg_count = reduction_arg;
+    reduction->dependency_count = 1;
+    reduction->dependencies[0] = 0;
+    ++plan->launch_count;
+  }
+  return 0;
 }
