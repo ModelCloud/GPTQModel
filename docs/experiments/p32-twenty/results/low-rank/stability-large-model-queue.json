@@ -1,0 +1,155 @@
+{
+  "scope": "Three independently calibrated rank6 model checks; queued not accepted",
+  "jobs": [
+    {
+      "id": "stability-71-16k-rank6-model-c4",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit16384-retry1/report.json",
+        "/root/p32-stability/seed71/fit16384-retry1/broader.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-stability/seed71/fit16384-retry1/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-stability/seed71/fit16384-retry1/model-rank6-tail-c4"
+      ],
+      "result": "/root/p32-stability/seed71/fit16384-retry1/model-rank6-tail-c4/report.json",
+      "log": "/root/p32-stability/seed71/fit16384-retry1/model-rank6-tail-c4.log"
+    },
+    {
+      "id": "stability-71-16k-rank6-model-arc",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit16384-retry1/report.json",
+        "/root/p32-stability/seed71/fit16384-retry1/broader.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-stability/seed71/fit16384-retry1/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-stability/seed71/fit16384-retry1/model-rank6-tail-arc",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172"
+      ],
+      "result": "/root/p32-stability/seed71/fit16384-retry1/model-rank6-tail-arc/report.json",
+      "log": "/root/p32-stability/seed71/fit16384-retry1/model-rank6-tail-arc.log"
+    },
+    {
+      "id": "stability-72-16k-rank6-model-c4",
+      "requires_complete": [
+        "/root/p32-stability/seed72/fit16384/report.json",
+        "/root/p32-stability/seed72/fit16384/broader.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-stability/seed72/fit16384/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-stability/seed72/fit16384/model-rank6-tail-c4"
+      ],
+      "result": "/root/p32-stability/seed72/fit16384/model-rank6-tail-c4/report.json",
+      "log": "/root/p32-stability/seed72/fit16384/model-rank6-tail-c4.log"
+    },
+    {
+      "id": "stability-72-16k-rank6-model-arc",
+      "requires_complete": [
+        "/root/p32-stability/seed72/fit16384/report.json",
+        "/root/p32-stability/seed72/fit16384/broader.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-stability/seed72/fit16384/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-stability/seed72/fit16384/model-rank6-tail-arc",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172"
+      ],
+      "result": "/root/p32-stability/seed72/fit16384/model-rank6-tail-arc/report.json",
+      "log": "/root/p32-stability/seed72/fit16384/model-rank6-tail-arc.log"
+    },
+    {
+      "id": "stability-73-16k-rank6-model-c4",
+      "requires_complete": [
+        "/root/p32-stability/seed73/fit16384/report.json",
+        "/root/p32-stability/seed73/fit16384/broader.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-stability/seed73/fit16384/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-stability/seed73/fit16384/model-rank6-tail-c4"
+      ],
+      "result": "/root/p32-stability/seed73/fit16384/model-rank6-tail-c4/report.json",
+      "log": "/root/p32-stability/seed73/fit16384/model-rank6-tail-c4.log"
+    },
+    {
+      "id": "stability-73-16k-rank6-model-arc",
+      "requires_complete": [
+        "/root/p32-stability/seed73/fit16384/report.json",
+        "/root/p32-stability/seed73/fit16384/broader.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-stability/seed73/fit16384/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-stability/seed73/fit16384/model-rank6-tail-arc",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172"
+      ],
+      "result": "/root/p32-stability/seed73/fit16384/model-rank6-tail-arc/report.json",
+      "log": "/root/p32-stability/seed73/fit16384/model-rank6-tail-arc.log"
+    }
+  ]
+}
