@@ -8,7 +8,7 @@ AGENTS.md. All changes and evidence share PR #137.
 
 | # | Experiment | Current evidence / outstanding implementation |
 |---:|---|---|
-|1|Decoder decomposition|Real-layer timing covers 12 projections and all nine row counts; fused-window Nsight wave18 adds eight projections at M=1/16/2048 with scheduler, warp-state, compute-workload, and source-counter CSVs. Tensor-core/register/occupancy/L2 fields were not emitted for the fused kernel, and decoder/GEMM overlap remains.|
+|1|Decoder decomposition|Real-layer timing covers 12 projections and all nine row counts; expanded fused-window Nsight wave22 adds eight projections at M=1/16/2048 with registers, occupancy, shared memory, instructions, scheduler, warp-state, DRAM/L2, and source-counter CSVs. Tensor-Core roofline has no eligible metric for this Triton `_gemm`, and decoder/GEMM overlap remains.|
 |2|Decode reuse across rows|Existing row-group reuse limits 2, 4, 8, and 16 now cover all 576 cases, with matched baselines for all 12 M values; extra launches/concatenation make all limits slower than no-reuse window as M grows. Direct fragment reuse remains.|
 |3|Persistent decoded tiles|New persistent scheduling/register-pressure sweep remains.|
 |4|Warp-specialized pipeline|Split-1, split-2, and split-4 direct decode/MMA tile baselines now cover 12 projections and 12 row counts with 1,872/1,872 local passes; split-K variants remain below split-1 performance and below the 2x target. Producer/consumer overlap implementation remains.|
