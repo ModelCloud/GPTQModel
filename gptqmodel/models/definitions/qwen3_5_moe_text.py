@@ -5,6 +5,7 @@ from .qwen3_moe import Qwen3MoeQModel
 
 
 class Qwen3_5_MoeTextQModel(Qwen3MoeQModel):
+    shared_input_verified_model_types = frozenset({"qwen3_5_moe_text"})
     """
     Text-only Qwen 3.5/3.6 MoE shells use the causal LM loader and keep routed
     experts under `model.layers`.
@@ -24,12 +25,12 @@ class Qwen3_5_MoeTextQModel(Qwen3MoeQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_norm:!", "q_proj:0:q", "k_norm:!", "k_proj:0:k", "v_proj:0:v", "o_proj:1"),
+            "self_attn": ("q_norm:!", "q_proj:0:q:in=x", "k_norm:!", "k_proj:0:k:in=x", "v_proj:0:v:in=x", "o_proj:1"),
             "linear_attn": (
                 "norm:!",
                 "conv1d:!",
-                "in_proj_qkv:0:k:q:v",
-                "in_proj_z:1",
+                "in_proj_qkv:0:k:q:v:in=x",
+                "in_proj_z:1:in=x",
                 "in_proj_b:!:1",
                 "in_proj_a:!:1",
                 "out_proj:2",
@@ -38,9 +39,9 @@ class Qwen3_5_MoeTextQModel(Qwen3MoeQModel):
             "mlp:moe:?": {
                 "gate": ("gate:!",),
                 "shared_expert_gate": ("shared_expert_gate:!",),
-                "shared_expert:0:shared": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+                "shared_expert:0:shared": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
                 "experts:0:routed:expert_activation=experts.act_fn": {
-                    "#": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
+                    "#": ("gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down"),
                 },
             },
         },

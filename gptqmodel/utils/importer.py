@@ -580,7 +580,7 @@ def select_quant_linear(
             supports_sharded_load = getattr(
                 cls,
                 "SUPPORTS_SHARDED_LOAD",
-                getattr(cls, "SUPPORTS_SHARDS", False),
+                getattr(cls, "SUPPORTS_SHARDS", True),
             )
             if is_sharded and not supports_sharded_load:
                 if os.environ.get("DEBUG"):
@@ -662,7 +662,7 @@ def select_quant_linear(
     supports_sharded_load = getattr(
         qlinear,
         "SUPPORTS_SHARDED_LOAD",
-        getattr(qlinear, "SUPPORTS_SHARDS", False),
+        getattr(qlinear, "SUPPORTS_SHARDS", True),
     )
     if is_sharded and not supports_sharded_load:
         raise ValueError(f"Selected backend `{backend}` with kernel `{qlinear.__name__}` does not support sharded checkpoints.")

@@ -139,6 +139,7 @@ _EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     force_rebuild_env="GPTQMODEL_EXLLAMAV2_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
+    python_abi_dependent=False,
 )
 
 # Shared AWQ singleton so every caller reuses the same torch.ops cache and
@@ -162,6 +163,7 @@ _EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     force_rebuild_env="GPTQMODEL_EXLLAMAV2_AWQ_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
+    python_abi_dependent=False,
 )
 
 

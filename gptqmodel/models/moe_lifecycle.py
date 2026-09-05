@@ -331,6 +331,16 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
     def take_input_replay(self, batch_index: int) -> Optional[torch.Tensor]:
         return self.input_replay.take(batch_index)
 
+    def apply_expert_activation(self, experts_module, expert, gate_out, up_out):
+        """Apply the model's fused expert gate when it exposes one."""
+
+        fused_gate = getattr(experts_module, "_apply_gate", None)
+        if callable(fused_gate):
+            return fused_gate(torch.cat([gate_out, up_out], dim=-1))
+        if hasattr(expert, "act_fn"):
+            return expert.act_fn(gate_out) * up_out
+        return torch.nn.functional.silu(gate_out) * up_out
+
     def _extract_moe_block_prefix(self, subset: Dict[str, Any], moe_block: nn.Module) -> Optional[str]:
         """
         Extract moe_block_prefix from subset keys.
@@ -399,6 +409,10 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             # moe_block_prefix is None fallback to original forward
             # this is normal for example glm4_moe has 1-3 :moe layers without experts
             return original_forward(hidden_states, **kwargs)
+
+        root_recorder = getattr(processor, "record_moe_root_input_feature", None)
+        if callable(root_recorder):
+            root_recorder(moe_block_prefix, hidden_states)
 
         expert_count = 0
         stop_forward_raised = False

@@ -40,6 +40,7 @@ from .glm import GlmQModel
 from .glmasr import GlmASRGPTQ
 from .glm_ocr import GlmOCRGPTQ
 from .glm_moe_dsa import GlmMoeDsaQModel
+from .glm5_next import Glm5NextQModel
 from .gpt2 import GPT2QModel
 from .gpt_bigcode import GptBigCodeQModel
 from .gpt_neo import GptNeoQModel
@@ -49,6 +50,7 @@ from .grinmoe import GrinMoeQModel
 from .hrm_text import HrmTextQModel
 from .hunyuan_v1_dense import HunYuanDenseV1QModel
 from .hunyuan_v1_moe import HunYuanMoEV1QModel
+from .hunyuan_vl import HunYuanVLQModel
 from .hy_v3 import HYV3QModel
 from .hymba import HymbaQModel
 from .instella import InstellaQModel
@@ -93,6 +95,7 @@ from .qwen2_vl import Qwen2VLQModel
 from .qwen3 import Qwen3QModel
 from .qwen3_moe import Qwen3MoeQModel
 from .qwen3_vl import Qwen3_VLQModel
+from .qwen4_exp import Qwen4ExpQModel
 from .rw import RwgQModel
 from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel
@@ -103,7 +106,8 @@ from .zamba import ZambaQModel
 from .zamba2 import Zamba2QModel
 from .pangu_alpha import PanguAlphaQModel
 from .longcat_flash import LongCatFlashQModel
-from .apertus import ApertusQModel
+from .locateanything import LocateAnythingQModel
+from .apertus import Apertus1p5QModel, Apertus1p5TextQModel, ApertusQModel
 from .axk2 import AXK2QModel
 from .klear import KlearQModel
 from .laguna import LagunaQModel

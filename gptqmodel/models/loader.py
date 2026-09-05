@@ -71,6 +71,7 @@ from ..utils.model import (
     _checkpoint_quantized_module_names,
     _checkpoint_tensor_keys,
     _quantized_weight_suffix,
+    apply_no_placement_to_device_map,
     auto_dtype,
     convert_gptq_v1_to_v2_format,
     find_config_seq_len,
@@ -84,6 +85,7 @@ from ..utils.model import (
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
     materialize_meta_tensors,
+    no_placement_module_names,
     simple_dispatch_model,
 )
 from ..utils.moe_dispatch import (
@@ -1754,6 +1756,17 @@ def ModelLoader(cls):
         else:
             device_map = dict(explicit_device_map)
             log.info(f"Loader: honoring explicit device_map request: {device_map}")
+        original_device_map = dict(device_map)
+        # Checkpoint loading needs a non-overlapping map: parent and child entries
+        # would otherwise make Accelerate read the same PLE tensor on both devices.
+        device_map = apply_no_placement_to_device_map(model, device_map)
+        if device_map != original_device_map:
+            cpu_modules = sorted(no_placement_module_names(model))
+            log.info(f"Loader: keeping no-placement modules on CPU: {cpu_modules}")
+        # Runtime dispatch keeps the parent entry so layer inputs still move to
+        # the right GPU, while the explicit CPU leaf blocks recursive PLE moves.
+        dispatch_device_map = dict(original_device_map)
+        dispatch_device_map.update(dict.fromkeys(no_placement_module_names(model), "cpu"))
         log.info(f"Loader: device_map = {device_map}")
 
         load_checkpoint_in_model = native_gguf_qspec is None
@@ -1891,13 +1904,13 @@ def ModelLoader(cls):
             # Any non-quant persistent parameters/buffers not covered by the GGUF
             # checkpoint are materialized after the load, then the model is dispatched.
             materialize_meta_tensors(model, device_map)
-            model = simple_dispatch_model(model, device_map)
+            model = simple_dispatch_model(model, dispatch_device_map)
         else:
             # Buffers not present in the checkpoint (e.g. RoPE inv_freq) can be left on
             # meta after init_empty_weights; allocate them on the right device before dispatch.
             materialize_meta_tensors(model, device_map)
             # TODO: Why are we using this custom function and not dispatch_model?
-            model = simple_dispatch_model(model, device_map)
+            model = simple_dispatch_model(model, dispatch_device_map)
 
         if backend == BACKEND.MLX and qcfg.method == METHOD.QVQ:
             # MLX QVQ keeps the format-native Torch shell until the conversion

@@ -105,6 +105,7 @@ from ._const import (
     META,
 )
 from .loader import ModelLoader, _setup_rotation_online_had
+from .shared_input import SharedInputPlan, build_shared_input_plan
 from .writer import ModelWriter
 
 
@@ -308,6 +309,11 @@ class BaseQModel(nn.Module):
     # Override module_tree according to different QUANT_METHOD
     module_tree_overrides: dict[METHOD, List[str]] = None
 
+    # Model types whose explicit ``:in=<tag>`` metadata was verified against a
+    # real forward. This set is intentionally not inherited: subclasses must
+    # opt in independently so unverified aliases stay singleton-only.
+    shared_input_verified_model_types: frozenset[str] = frozenset()
+
     # Cache of role/semantic module-tree flags keyed by the path within a layer.
     # Populated by ``_build_layer_modules_for_tree`` and consulted by the looper
     # when constructing ``NamedModule`` wrappers.
@@ -409,6 +415,9 @@ class BaseQModel(nn.Module):
     # The actual experts live inside submodules (e.g. Qwen3MoeModel.mlp.experts),
     # so `defuser_module_paths` is used to explicitly locate and defuse them.
     defuser_module_paths = None
+
+    # Multimodal wrappers can reuse the checkpoint rules of their text model.
+    hf_conversion_model_type_alias: Optional[str] = None
 
     def __init__(
         self,
@@ -647,6 +656,15 @@ class BaseQModel(nn.Module):
         configured_map = getattr(cls, "HF_CONVERSION_MAP_REVERSED", None)
         if configured_map is not None:
             return copy.deepcopy(configured_map)
+
+        model_type_alias = getattr(cls, "hf_conversion_model_type_alias", None)
+        if model_type_alias:
+            inferred_map = LazyTurtle.infer_hf_conversion_map_reversed(
+                target_model=target_model,
+                model_type=model_type_alias,
+            )
+            if inferred_map is not None:
+                return copy.deepcopy(inferred_map)
 
         inferred_map = LazyTurtle.infer_hf_conversion_map_reversed(target_model=target_model)
         return copy.deepcopy(inferred_map) if inferred_map is not None else None
@@ -923,6 +941,33 @@ class BaseQModel(nn.Module):
 
         # print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
+
+    @classmethod
+    def shared_input_verified(cls, model_config=None) -> bool:
+        model_type = getattr(model_config, "model_type", None)
+        if not isinstance(model_type, str):
+            return False
+        verified = cls.__dict__.get("shared_input_verified_model_types", ())
+        return model_type in verified
+
+    @classmethod
+    def shared_input_plan(
+        cls,
+        model_config=None,
+        quantize_config=None,
+        is_awq_quantize: bool = False,
+    ) -> SharedInputPlan:
+        """Build the conservative explicit shared-input plan for one layer."""
+        layer_modules = cls.simple_layer_modules(
+            model_config,
+            quantize_config,
+            is_awq_quantize=is_awq_quantize,
+        )
+        return build_shared_input_plan(
+            cls.module_tree,
+            layer_modules,
+            explicit_tags=cls.shared_input_verified(model_config),
+        )
 
     @classmethod
     def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False, include_capture_only: bool = False):
@@ -3016,6 +3061,34 @@ class BaseQModel(nn.Module):
         # Tie weights once for the whole layer rather than once per materialized submodule.
         if hasattr(self.model, "tie_weights"):
             self.model.tie_weights()
+    def forward_device_for_module(self, module: nn.Module, planned_device: torch.device) -> torch.device:
+        """Apply model-declared placement exclusions to subset replay planning."""
+
+        turtle_model = self.turtle_model
+        if not isinstance(turtle_model, LazyTurtle):
+            return planned_device
+
+        # LazyTurtle matches exclusions by dotted parameter path, not module type.
+        module_paths = getattr(self, "_forward_module_paths_by_id", None)
+        if module_paths is None or id(module) not in module_paths:
+            module_paths = {id(candidate): name for name, candidate in self.model.named_modules() if name}
+            self._forward_module_paths_by_id = module_paths
+        module_path = module_paths.get(id(module))
+        if module_path is None:
+            return planned_device
+        # Check only tensors owned by this leaf; descendants receive their own plan entry.
+        for rel_name, _ in module.named_parameters(recurse=False):
+            if turtle_model.is_no_placement_tensor(module_path, rel_name):
+                return torch.device(CPU)
+        return planned_device
+
+    def has_forward_device_overrides(self) -> bool:
+        """Return whether replay must preserve model-declared tensor placement."""
+
+        turtle_model = self.turtle_model
+        return isinstance(turtle_model, LazyTurtle) and bool(
+            getattr(turtle_model, "_no_placement_params", ())
+        )
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         #return self.offload_to_disk(module=module)
@@ -3575,6 +3648,32 @@ class BaseQModel(nn.Module):
     def awq_skip_modules_for_scaling(self) -> bool:
         pass
 
+    @classmethod
+    def awq_input_feature_aggregation(cls, module_name: str) -> Optional[Dict[str, Any]]:
+        """Declare bounded token-row aggregation for pointwise MoE modules."""
+
+        if not isinstance(module_name, str):
+            return None
+        for moe_root in cls.get_moe_module_name() or []:
+            root_match = (
+                module_name == moe_root
+                or module_name.endswith(f".{moe_root}")
+                or f".{moe_root}." in f".{module_name}."
+            )
+            if not root_match:
+                continue
+            if module_name == moe_root or module_name.endswith(f".{moe_root}"):
+                suffix = ""
+            elif module_name.startswith(f"{moe_root}."):
+                suffix = module_name[len(moe_root):]
+            else:
+                suffix = module_name.split(f".{moe_root}", 1)[1]
+            if suffix in ("", "."):
+                return {"mode": "token_rows", "capture_root": True}
+            if suffix.startswith("."):
+                return {"mode": "token_rows"}
+        return None
+
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
         nodes = []
         last_module = None  # most recent norm obj (from a '!...' block)
@@ -3693,6 +3792,7 @@ class BaseQModel(nn.Module):
                     n, root = generate_node_for_awq_scaling(inp=input_feat[name], prev_op=prev_op,
                                                             module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                             subset=subset, module2inspect=None)
+                    n["_input_feature_name"] = feature_name
                     if root is not None and last_module_root != root:
                         last_module_root = root
 
@@ -3758,6 +3858,7 @@ class BaseQModel(nn.Module):
                 n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
                                                         module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                         subset=subset, module2inspect=module2inspect)
+                n["_input_feature_name"] = feature_name
 
                 nodes.append(n)
 
