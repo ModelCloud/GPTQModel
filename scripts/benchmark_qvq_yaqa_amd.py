@@ -30,6 +30,7 @@ def main():
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--profile-dir", type=Path)
     parser.add_argument("--native", action="store_true", help="Compare experimental native recurrence with eager")
+    parser.add_argument("--public-native", action="store_true", help="Include public validation and dispatch")
     parser.add_argument("--q-chunk", type=int, choices=[4, 8, 16, 32], default=4)
     parser.add_argument("--graph", action="store_true", help="Time native replay separately from preparation")
     parser.add_argument("--codebook-dtype", choices=["fp16", "fp32"], default="fp32")
@@ -41,6 +42,8 @@ def main():
         parser.error("Require positive batches/warmup and at least two timing iterations")
     if args.graph and not args.native:
         parser.error("Experimental launch modes require --native")
+    if args.public_native and (not args.native or args.graph or args.q_chunk != 4):
+        parser.error("--public-native requires --native, no graph, and the default q-chunk")
     args.allow_busy = False
     hardware, valid = _idle_preflight(args)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -66,7 +69,8 @@ def main():
                      "arch": props.gcnArchName, "cu_count": props.multi_processor_count},
         "config": vars(args) | {"output": str(args.output),
                                 "profile_dir": str(args.profile_dir) if args.profile_dir else None},
-        "scope": "banked Viterbi core; graph replay excludes preparation; not full YAQA or model-quality evidence",
+        "scope": "banked Viterbi: --public-native includes public validation; other native modes use trusted inputs; "
+                 "graph replay excludes preparation; not full YAQA or model-quality evidence",
         "valid": valid, "completed": False, "rows": [],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -86,12 +90,20 @@ def main():
                                                           overlap=overlap, step_weights=weights)
 
                 expected = run()
+                reference_run = run
                 if args.native:
                     from gptqmodel.utils.qvq_yaqa_amd import banked_viterbi_trusted
 
                     def run(sequences=sequences, codebooks=codebooks, bits=bits, overlap=overlap, weights=weights):
                         return banked_viterbi_trusted(sequences, codebooks, bits=bits, q_chunk=args.q_chunk,
                                                      overlap=overlap, step_weights=weights)
+                if args.public_native:
+                    def run(reference_run=reference_run):
+                        os.environ["GPTQMODEL_QVQ_AMD_NATIVE_QUANTIZATION"] = "1"
+                        try:
+                            return reference_run()
+                        finally:
+                            os.environ["GPTQMODEL_QVQ_AMD_NATIVE_QUANTIZATION"] = "0"
                 for _ in range(args.warmup):
                     run()
                 torch.cuda.synchronize()
@@ -127,6 +139,18 @@ def main():
                        "reference_sha256": {name: hashlib.sha256(
                            getattr(expected, name).cpu().contiguous().numpy().tobytes()).hexdigest()
                            for name in ("states", "values", "squared_error", "segment_bank_ids")}}
+                if args.public_native:
+                    reference_ms = []
+                    for _ in range(args.iterations):
+                        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                        start.record()
+                        reference_run()
+                        end.record()
+                        end.synchronize()
+                        reference_ms.append(start.elapsed_time(end))
+                    row["eager_event_samples_ms"] = reference_ms
+                    row["eager_event_median_ms"] = statistics.median(reference_ms)
+                    row["public_speedup"] = row["eager_event_median_ms"] / row["event_median_ms"]
                 if args.profile_dir:
                     _timing_recheck(args, {os.getpid()})
                     args.profile_dir.mkdir(parents=True, exist_ok=True)

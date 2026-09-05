@@ -105,3 +105,29 @@ def test_native_nondefault_stream_and_graph_mutated_inputs(monkeypatch):
             for name in ("states", "values", "squared_error", "segment_bank_ids"):
                 assert torch.equal(getattr(actual, name), getattr(expected, name)), name
     torch.cuda.current_stream().wait_stream(stream)
+
+
+@pytest.mark.parametrize("case", ["fp64", "strided", "strict_pruning"])
+def test_opt_in_keeps_unsupported_fallbacks_and_strict_policy(monkeypatch, case):
+    from gptqmodel.utils import qvq_yaqa_amd
+
+    x = torch.zeros((1, 128, 2), device="cuda")
+    c = torch.zeros((2, 65536, 2), device="cuda")
+    if case == "fp64":
+        x = x.double()
+    if case == "strided":
+        x = torch.zeros((1, 256, 2), device="cuda")[:, ::2]
+
+    def reject_native(*args, **kwargs):
+        pytest.fail("Unsupported geometry/precision or strict pruning reached native recurrence")
+
+    monkeypatch.setattr(qvq_yaqa_amd, "banked_viterbi_trusted", reject_native)
+    monkeypatch.setenv("GPTQMODEL_QVQ_AMD_NATIVE_QUANTIZATION", "1")
+    if case == "strict_pruning":
+        with pytest.raises(RuntimeError, match="ROCm"):
+            batched_v2b2_p32_viterbi_quantize(x, c, bits=2.0, viterbi_pruning={"mode": "required"})
+    else:
+        actual = batched_v2b2_p32_viterbi_quantize(x, c, bits=2.0)
+        assert torch.count_nonzero(actual.states) == 0
+        assert torch.count_nonzero(actual.segment_bank_ids) == 0
+        assert actual.squared_error.dtype == (torch.float64 if case == "fp64" else torch.float32)

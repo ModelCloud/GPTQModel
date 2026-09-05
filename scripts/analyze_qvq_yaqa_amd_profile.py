@@ -40,6 +40,16 @@ def main():
                          "sha256": {ext: hashlib.sha256(path.with_suffix(ext).read_bytes()).hexdigest()
                                     for ext in (".amdgcn", ".hsaco", ".llir", ".ttgir")
                                     if path.with_suffix(ext).exists()}})
+        ir_path = path.with_suffix(".ttir")
+        ir = ir_path.read_text() if ir_path.exists() and path.stem == "_survivor_step" else ""
+        shapes = re.findall(r"tensor<(\d+)x(\d+)x(\d+)xf32>", ir)
+        if shapes:
+            shape = max((tuple(map(int, item)) for item in shapes), key=lambda item: item[0] * item[1] * item[2])
+            compiled[-1]["specialization"] = {
+                "banks": shape[0], "prefixes": shape[1], "q_chunk": shape[2],
+                "first": "tt.splat %Previous" not in ir, "merge": "%across" in ir,
+                "codebook_fp16": "%C: !tt.ptr<f16>" in ir,
+            }
     args.output.write_text(json.dumps({"counter_scope": "issued wave instructions; not FLOPs or bandwidth",
                                       "profile": str(args.profile), "counters": counters,
                                       "compiled": compiled}, indent=2))
