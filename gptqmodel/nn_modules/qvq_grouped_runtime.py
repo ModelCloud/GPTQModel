@@ -1808,7 +1808,13 @@ class QVQHopperGroupedRuntime:
             and not children[1].output_hadamard
             and not down.input_hadamard
         )
-        if rows == 32 and qwen_folded_intermediate:
+        # The two exact M16 tiles beat native M32 for W2.5-W3.5, while W2's
+        # smaller decoder remains faster in the native direct-down path.
+        if (
+            rows == 32
+            and qwen_folded_intermediate
+            and float(children[0].bits) != 2.0
+        ):
             self.telemetry.h100_qwen_m32_fused_tiles += 1
             return self._execute_mlp_chunked(x, 16)
         fp8_prefill = (

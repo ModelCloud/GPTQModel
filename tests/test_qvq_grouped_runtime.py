@@ -948,7 +948,10 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_safe(bits):
     assert telemetry["fused_mlp_fallbacks"] == 0
 
 
-def test_qwen38_m32_uses_fused_m16_tiles_in_cuda_graph():
+@pytest.mark.parametrize("bits, expected_fused_tiles", [(2.0, 0), (3.0, 2)])
+def test_qwen38_m32_rate_specific_path_is_cuda_graph_safe(
+    bits, expected_fused_tiles
+):
     device = _h100_device()
     if device is None:
         pytest.skip("requires the exclusive H100 validation device")
@@ -958,15 +961,15 @@ def test_qwen38_m32_uses_fused_m16_tiles_in_cuda_graph():
             super().__init__()
             shared = torch.ones(5120, device=device)
             self.gate_proj = _child(
-                "gate_proj", in_features=5120, out_features=17408, bits=3,
+                "gate_proj", in_features=5120, out_features=17408, bits=bits,
                 su=shared, seed=20261020, device=device, output_hadamard=False,
             )
             self.up_proj = _child(
-                "up_proj", in_features=5120, out_features=17408, bits=3,
+                "up_proj", in_features=5120, out_features=17408, bits=bits,
                 su=shared, seed=20261021, device=device, output_hadamard=False,
             )
             self.down_proj = _child(
-                "down_proj", in_features=17408, out_features=5120, bits=3,
+                "down_proj", in_features=17408, out_features=5120, bits=bits,
                 seed=20261022, device=device, input_hadamard=False,
             )
             self.act_fn = nn.SiLU()
@@ -991,8 +994,10 @@ def test_qwen38_m32_uses_fused_m16_tiles_in_cuda_graph():
 
     torch.testing.assert_close(eager, captured, rtol=0, atol=0)
     telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
-    assert telemetry["h100_qwen_m32_fused_tiles"] == 2
-    assert telemetry["h100_qwen_large_m_direct_down_launches"] == 0
+    assert telemetry["h100_qwen_m32_fused_tiles"] == expected_fused_tiles
+    assert telemetry["h100_qwen_large_m_direct_down_launches"] == (
+        0 if expected_fused_tiles else 2
+    )
     assert telemetry["fused_mlp_fallbacks"] == 0
 
 
