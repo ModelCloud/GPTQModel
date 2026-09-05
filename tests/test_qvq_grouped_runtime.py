@@ -949,6 +949,7 @@ def test_h100_large_m_wide_gate_up_runtime_is_exact_graph_safe_and_observable():
     )
     telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
     assert telemetry["h100_wide_reuse_gate_up_launches"] == 2
+    assert telemetry["h100_reuse8_gate_up_launches"] == 2
     assert telemetry["plain_fallbacks"] == 0
 
 

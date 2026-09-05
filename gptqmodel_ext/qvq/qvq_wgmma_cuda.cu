@@ -1178,7 +1178,8 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   static_assert(N64BlocksPerCta == 1 || N64BlocksPerCta == 2);
   static_assert(N64BlocksPerCta == 1 || FixedGateUp);
   static_assert(
-      RowTilesPerCta == 1 || RowTilesPerCta == 2 || RowTilesPerCta == 4);
+      RowTilesPerCta == 1 || RowTilesPerCta == 2 || RowTilesPerCta == 4 ||
+          RowTilesPerCta == 8);
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
   using TrellisSmemLayout =
       P32TrellisTmaSmemLayoutFor<TransitionBits, N64BlocksPerCta>;
@@ -1369,6 +1370,22 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
       cute::make_smem_ptr(
           shared.input.begin() + 3 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
       WgmmaTmaSmemLayoutB{});
+  auto s_input4 = cute::make_tensor(
+      cute::make_smem_ptr(
+          shared.input.begin() + 4 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
+      WgmmaTmaSmemLayoutB{});
+  auto s_input5 = cute::make_tensor(
+      cute::make_smem_ptr(
+          shared.input.begin() + 5 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
+      WgmmaTmaSmemLayoutB{});
+  auto s_input6 = cute::make_tensor(
+      cute::make_smem_ptr(
+          shared.input.begin() + 6 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
+      WgmmaTmaSmemLayoutB{});
+  auto s_input7 = cute::make_tensor(
+      cute::make_smem_ptr(
+          shared.input.begin() + 7 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
+      WgmmaTmaSmemLayoutB{});
   auto s_trellis = cute::make_tensor(
       cute::make_smem_ptr(shared.trellis.begin()), TrellisSmemLayout{});
   auto s_bank_ids = cute::make_tensor(
@@ -1415,6 +1432,46 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
       cute::Layout<cute::_1>{},
       cute::group_modes<0, 2>(s_input3),
       cute::group_modes<0, 2>(tiled_input3));
+  auto tiled_input4 = cute::local_tile(
+      full_input,
+      cute::make_shape(cute::_16{}, cute::_256{}),
+      cute::make_coord(row_tile_begin + 4, cute::_));
+  auto [tma_global_input4, tma_shared_input4] = cute::tma_partition(
+      input_tma,
+      cute::Int<0>{},
+      cute::Layout<cute::_1>{},
+      cute::group_modes<0, 2>(s_input4),
+      cute::group_modes<0, 2>(tiled_input4));
+  auto tiled_input5 = cute::local_tile(
+      full_input,
+      cute::make_shape(cute::_16{}, cute::_256{}),
+      cute::make_coord(row_tile_begin + 5, cute::_));
+  auto [tma_global_input5, tma_shared_input5] = cute::tma_partition(
+      input_tma,
+      cute::Int<0>{},
+      cute::Layout<cute::_1>{},
+      cute::group_modes<0, 2>(s_input5),
+      cute::group_modes<0, 2>(tiled_input5));
+  auto tiled_input6 = cute::local_tile(
+      full_input,
+      cute::make_shape(cute::_16{}, cute::_256{}),
+      cute::make_coord(row_tile_begin + 6, cute::_));
+  auto [tma_global_input6, tma_shared_input6] = cute::tma_partition(
+      input_tma,
+      cute::Int<0>{},
+      cute::Layout<cute::_1>{},
+      cute::group_modes<0, 2>(s_input6),
+      cute::group_modes<0, 2>(tiled_input6));
+  auto tiled_input7 = cute::local_tile(
+      full_input,
+      cute::make_shape(cute::_16{}, cute::_256{}),
+      cute::make_coord(row_tile_begin + 7, cute::_));
+  auto [tma_global_input7, tma_shared_input7] = cute::tma_partition(
+      input_tma,
+      cute::Int<0>{},
+      cute::Layout<cute::_1>{},
+      cute::group_modes<0, 2>(s_input7),
+      cute::group_modes<0, 2>(tiled_input7));
 
   auto p32_full_trellis = trellis_tma.get_tma_tensor(
       cute::make_shape(cute::Int<kWordsPerP32Tile>{}, total_n_tiles, k_tiles));
@@ -1499,6 +1556,36 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
               tma_global_input3(cute::_, global_stage),
               tma_shared_input3(cute::_, write_stage));
         }
+        if constexpr (RowTilesPerCta == 8) {
+          cute::copy(
+              input_tma.with(*barrier),
+              tma_global_input1(cute::_, global_stage),
+              tma_shared_input1(cute::_, write_stage));
+          cute::copy(
+              input_tma.with(*barrier),
+              tma_global_input2(cute::_, global_stage),
+              tma_shared_input2(cute::_, write_stage));
+          cute::copy(
+              input_tma.with(*barrier),
+              tma_global_input3(cute::_, global_stage),
+              tma_shared_input3(cute::_, write_stage));
+          cute::copy(
+              input_tma.with(*barrier),
+              tma_global_input4(cute::_, global_stage),
+              tma_shared_input4(cute::_, write_stage));
+          cute::copy(
+              input_tma.with(*barrier),
+              tma_global_input5(cute::_, global_stage),
+              tma_shared_input5(cute::_, write_stage));
+          cute::copy(
+              input_tma.with(*barrier),
+              tma_global_input6(cute::_, global_stage),
+              tma_shared_input6(cute::_, write_stage));
+          cute::copy(
+              input_tma.with(*barrier),
+              tma_global_input7(cute::_, global_stage),
+              tma_shared_input7(cute::_, write_stage));
+        }
         cute::copy(
             trellis_tma.with(*barrier),
             tma_global_trellis(cute::_, global_stage),
@@ -1524,6 +1611,14 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   auto fragment_b2 = thread_mma.make_fragment_B(thread_shared_b2);
   auto thread_shared_b3 = thread_mma.partition_B(s_input3);
   auto fragment_b3 = thread_mma.make_fragment_B(thread_shared_b3);
+  auto thread_shared_b4 = thread_mma.partition_B(s_input4);
+  auto fragment_b4 = thread_mma.make_fragment_B(thread_shared_b4);
+  auto thread_shared_b5 = thread_mma.partition_B(s_input5);
+  auto fragment_b5 = thread_mma.make_fragment_B(thread_shared_b5);
+  auto thread_shared_b6 = thread_mma.partition_B(s_input6);
+  auto fragment_b6 = thread_mma.make_fragment_B(thread_shared_b6);
+  auto thread_shared_b7 = thread_mma.partition_B(s_input7);
+  auto fragment_b7 = thread_mma.make_fragment_B(thread_shared_b7);
   static_assert(cute::size<2>(decltype(fragment_b){}) == 16);
 
   auto coordinate_a = cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_16{}));
@@ -1540,10 +1635,18 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   auto accumulator1 = cute::make_tensor<float>(thread_coordinate_c.shape());
   auto accumulator2 = cute::make_tensor<float>(thread_coordinate_c.shape());
   auto accumulator3 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto accumulator4 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto accumulator5 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto accumulator6 = cute::make_tensor<float>(thread_coordinate_c.shape());
+  auto accumulator7 = cute::make_tensor<float>(thread_coordinate_c.shape());
   cute::clear(accumulator);
   cute::clear(accumulator1);
   cute::clear(accumulator2);
   cute::clear(accumulator3);
+  cute::clear(accumulator4);
+  cute::clear(accumulator5);
+  cute::clear(accumulator6);
+  cute::clear(accumulator7);
   tiled_mma.accumulate_ = cute::GMMA::ScaleOut::Zero;
 
   const int warp = consumer_thread >> 5;
@@ -1628,6 +1731,43 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
             fragment_b3(cute::_, cute::_, k_block, read_stage),
             accumulator3);
       }
+      if constexpr (RowTilesPerCta == 8) {
+        cute::gemm(
+            tiled_mma,
+            fragment_a(cute::_, cute::_, cute::_0{}),
+            fragment_b1(cute::_, cute::_, k_block, read_stage),
+            accumulator1);
+        cute::gemm(
+            tiled_mma,
+            fragment_a(cute::_, cute::_, cute::_0{}),
+            fragment_b2(cute::_, cute::_, k_block, read_stage),
+            accumulator2);
+        cute::gemm(
+            tiled_mma,
+            fragment_a(cute::_, cute::_, cute::_0{}),
+            fragment_b3(cute::_, cute::_, k_block, read_stage),
+            accumulator3);
+        cute::gemm(
+            tiled_mma,
+            fragment_a(cute::_, cute::_, cute::_0{}),
+            fragment_b4(cute::_, cute::_, k_block, read_stage),
+            accumulator4);
+        cute::gemm(
+            tiled_mma,
+            fragment_a(cute::_, cute::_, cute::_0{}),
+            fragment_b5(cute::_, cute::_, k_block, read_stage),
+            accumulator5);
+        cute::gemm(
+            tiled_mma,
+            fragment_a(cute::_, cute::_, cute::_0{}),
+            fragment_b6(cute::_, cute::_, k_block, read_stage),
+            accumulator6);
+        cute::gemm(
+            tiled_mma,
+            fragment_a(cute::_, cute::_, cute::_0{}),
+            fragment_b7(cute::_, cute::_, k_block, read_stage),
+            accumulator7);
+      }
       tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
       cute::warpgroup_commit_batch();
     }
@@ -1640,6 +1780,15 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
       cute::warpgroup_fence_operand(accumulator1);
       cute::warpgroup_fence_operand(accumulator2);
       cute::warpgroup_fence_operand(accumulator3);
+    }
+    if constexpr (RowTilesPerCta == 8) {
+      cute::warpgroup_fence_operand(accumulator1);
+      cute::warpgroup_fence_operand(accumulator2);
+      cute::warpgroup_fence_operand(accumulator3);
+      cute::warpgroup_fence_operand(accumulator4);
+      cute::warpgroup_fence_operand(accumulator5);
+      cute::warpgroup_fence_operand(accumulator6);
+      cute::warpgroup_fence_operand(accumulator7);
     }
     pipeline.consumer_release(release_state);
     ++read_state;
@@ -1677,7 +1826,11 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
         const float value = row_local == 0 ? accumulator(index)
             : row_local == 1             ? accumulator1(index)
             : row_local == 2             ? accumulator2(index)
-                                         : accumulator3(index);
+            : row_local == 3             ? accumulator3(index)
+            : row_local == 4             ? accumulator4(index)
+            : row_local == 5             ? accumulator5(index)
+            : row_local == 6             ? accumulator6(index)
+                                         : accumulator7(index);
         output_scratch[output_row * kOutputColumns + p32_column] = value;
       }
       if (consumer_group == 0) {
@@ -1724,7 +1877,11 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
       const float value = row_local == 0 ? accumulator(index)
           : row_local == 1             ? accumulator1(index)
           : row_local == 2             ? accumulator2(index)
-                                       : accumulator3(index);
+          : row_local == 3             ? accumulator3(index)
+          : row_local == 4             ? accumulator4(index)
+          : row_local == 5             ? accumulator5(index)
+          : row_local == 6             ? accumulator6(index)
+                                       : accumulator7(index);
       if constexpr (OrderedSplit) {
         partial_output[
             partial_output_offset +
@@ -2936,6 +3093,35 @@ at::Tensor qvq_p32_window_wgmma_m64_tma_grouped_reuse4(
   }
 }
 
+at::Tensor qvq_p32_window_wgmma_m128_tma_grouped_reuse8(
+    const at::Tensor& input,
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t transition_bits,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef split_counts) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<4, false, false, 8>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 5:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<5, false, false, 8>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 6:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<6, false, false, 8>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    case 7:
+      return qvq_p32_window_wgmma_m16_tma_grouped_impl<7, false, false, 8>(
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+    default:
+      TORCH_CHECK(
+          false,
+          "M128-reuse grouped QVQ P32 transition bits must be in [4, 7]");
+  }
+}
+
 at::Tensor qvq_p32_window_wgmma_m64_tma_grouped_ordered_reuse4(
     const at::Tensor& input,
     const at::Tensor& trellis,
@@ -3400,6 +3586,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_m32_tma_grouped_ordered_reuse2(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m64_tma_grouped_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m64_tma_grouped_ordered_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
+  m.def("p32_window_m128_tma_grouped_reuse8(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_decode_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids) -> Tensor");
   m.def("p32_window_prepare_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
   m.def("p32_window_prepare_grouped_fp8(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, Tensor weight_scale, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
@@ -3420,6 +3607,7 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_m32_tma_grouped_ordered_reuse2", qvq_p32_window_wgmma_m32_tma_grouped_ordered_reuse2);
   m.impl("p32_window_m64_tma_grouped_reuse4", qvq_p32_window_wgmma_m64_tma_grouped_reuse4);
   m.impl("p32_window_m64_tma_grouped_ordered_reuse4", qvq_p32_window_wgmma_m64_tma_grouped_ordered_reuse4);
+  m.impl("p32_window_m128_tma_grouped_reuse8", qvq_p32_window_wgmma_m128_tma_grouped_reuse8);
   m.impl("p32_window_decode_grouped_fp16", qvq_p32_window_decode_grouped_fp16);
   m.impl("p32_window_prepare_grouped_fp16", qvq_p32_window_prepare_grouped_fp16);
   m.impl("p32_window_prepare_grouped_fp8", qvq_p32_window_prepare_grouped_fp8);

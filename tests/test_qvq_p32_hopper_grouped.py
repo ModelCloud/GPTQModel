@@ -31,6 +31,7 @@ from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_grouped_packed,
     qvq_p32_window_wgmma_grouped_reuse2_packed,
     qvq_p32_window_wgmma_grouped_reuse4_packed,
+    qvq_p32_window_wgmma_grouped_reuse8_packed,
     qvq_p32_window_wgmma_m16_tma,
     qvq_p32_window_wgmma_m16_tma_ordered_split,
     qvq_pack_p32_window_hopper_group,
@@ -692,15 +693,20 @@ def test_h100_gate_up_n128_reuse_is_exact_and_graph_safe(bits):
     )
     payload = qvq_pack_p32_window_hopper_group(windows, selectors, plan)
     expected = qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
-    actual = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
+    reuse4 = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
+    actual = qvq_p32_window_wgmma_grouped_reuse8_packed(input, payload, levels)
     assert all(
         torch.equal(child, reference)
-        for child, reference in zip(actual, expected, strict=True)
+        for child, reference in zip(reuse4, expected, strict=True)
+    )
+    assert all(
+        torch.equal(child, reference)
+        for child, reference in zip(actual, reuse4, strict=True)
     )
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        captured = qvq_p32_window_wgmma_grouped_reuse4_packed(
+        captured = qvq_p32_window_wgmma_grouped_reuse8_packed(
             input, payload, levels
         )
     graph.replay()

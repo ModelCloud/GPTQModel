@@ -43,6 +43,7 @@ from ..utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_grouped_packed,
     qvq_p32_window_wgmma_grouped_reuse2_packed,
     qvq_p32_window_wgmma_grouped_reuse4_packed,
+    qvq_p32_window_wgmma_grouped_reuse8_packed,
 )
 from .qlinear.qvq import QVQLinear
 
@@ -239,6 +240,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_multiblock_down_recovery_launches: int = 0
     h100_w25_n128_gate_up_launches: int = 0
     h100_wide_reuse_gate_up_launches: int = 0
+    h100_reuse8_gate_up_launches: int = 0
     h100_large_m_chunk_autotunes: int = 0
     h100_large_m_chunked_mlp_launches: int = 0
     h100_large_m_chunk_rows: int = 0
@@ -315,6 +317,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_multiblock_down_recovery_launches": self.h100_multiblock_down_recovery_launches,
             "h100_w25_n128_gate_up_launches": self.h100_w25_n128_gate_up_launches,
             "h100_wide_reuse_gate_up_launches": self.h100_wide_reuse_gate_up_launches,
+            "h100_reuse8_gate_up_launches": self.h100_reuse8_gate_up_launches,
             "h100_large_m_chunk_autotunes": self.h100_large_m_chunk_autotunes,
             "h100_large_m_chunked_mlp_launches": self.h100_large_m_chunked_mlp_launches,
             "h100_large_m_chunk_rows": self.h100_large_m_chunk_rows,
@@ -783,7 +786,16 @@ class QVQHopperGroupedRuntime:
             self.telemetry.ordered_split_launches += 1
             return partials
 
-        if padded.shape[0] >= 64 and padded.shape[0] % 64 == 0:
+        use_h100_reuse8_gate_up = (
+            padded.shape[0] >= 128
+            and padded.shape[0] % 128 == 0
+            and self._h100_multiblock_intermediate_enabled
+            and children[0].in_features == 2048
+            and all(segment.split_count == 1 for segment in payload.plan.segments)
+        )
+        if use_h100_reuse8_gate_up:
+            grouped_inner = qvq_p32_window_wgmma_grouped_reuse8_packed
+        elif padded.shape[0] >= 64 and padded.shape[0] % 64 == 0:
             grouped_inner = qvq_p32_window_wgmma_grouped_reuse4_packed
         elif padded.shape[0] >= 32 and padded.shape[0] % 32 == 0:
             grouped_inner = qvq_p32_window_wgmma_grouped_reuse2_packed
@@ -799,13 +811,18 @@ class QVQHopperGroupedRuntime:
             _pgc16_levels(x.device, children[0].codebook_version),
         )
         if (
-            grouped_inner is qvq_p32_window_wgmma_grouped_reuse4_packed
+            grouped_inner in (
+                qvq_p32_window_wgmma_grouped_reuse4_packed,
+                qvq_p32_window_wgmma_grouped_reuse8_packed,
+            )
             and padded.shape[0] >= 128
             and self._h100_multiblock_intermediate_enabled
             and children[0].in_features == 2048
             and all(segment.split_count == 1 for segment in payload.plan.segments)
         ):
             self.telemetry.h100_wide_reuse_gate_up_launches += 1
+        if grouped_inner is qvq_p32_window_wgmma_grouped_reuse8_packed:
+            self.telemetry.h100_reuse8_gate_up_launches += 1
         if grouped_inner in (
             qvq_p32_window_wgmma_grouped_ordered_packed,
             qvq_p32_window_wgmma_grouped_reuse2_packed,

@@ -120,6 +120,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m32_tma_grouped_ordered_reuse2",
         "p32_window_m64_tma_grouped_reuse4",
         "p32_window_m64_tma_grouped_ordered_reuse4",
+        "p32_window_m128_tma_grouped_reuse8",
         "p32_window_decode_grouped_fp16",
         "p32_window_prepare_grouped_fp8",
         "p32_window_prepare_grouped_fp8_half_fold",
@@ -825,6 +826,49 @@ def qvq_p32_window_wgmma_grouped_reuse4_packed(
     )
 
 
+def qvq_p32_window_wgmma_grouped_reuse8_packed(
+    input: torch.Tensor,
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Decode once for each group of eight M16 row tiles on Hopper."""
+
+    plan = payload.plan
+    rows = int(input.shape[0]) if input.ndim == 2 else 0
+    if (
+        input.ndim != 2
+        or input.shape[1] != plan.in_features
+        or rows < 128
+        or rows > 4096
+        or rows % 128
+    ):
+        raise ValueError(
+            "grouped Hopper P32 reuse-8 input requires M in [128, 4096] "
+            "and divisible by 128"
+        )
+    if any(segment.split_count != 1 for segment in plan.segments):
+        raise ValueError("grouped Hopper P32 reuse-8 requires unsplit children")
+    widths = [segment.out_features for segment in plan.segments]
+    output = _QVQ_WGMMA_EXTENSION.op("p32_window_m128_tma_grouped_reuse8")(
+        input,
+        payload.trellis,
+        levels,
+        payload.bank_ids,
+        plan.transition_bits,
+        widths,
+        [segment.bank_alt_id for segment in plan.segments],
+        [segment.split_count for segment in plan.segments],
+    )
+    return tuple(
+        child.reshape(rows, width)
+        for child, width in zip(
+            torch.split(output, [rows * width for width in widths]),
+            widths,
+            strict=True,
+        )
+    )
+
+
 def qvq_p32_window_decode_grouped_fp16_packed(
     payload: QVQHopperGroupedP32Payload,
     levels: torch.Tensor,
@@ -1098,6 +1142,7 @@ __all__ = [
     "qvq_p32_window_wgmma_grouped_packed",
     "qvq_p32_window_wgmma_grouped_reuse2_packed",
     "qvq_p32_window_wgmma_grouped_reuse4_packed",
+    "qvq_p32_window_wgmma_grouped_reuse8_packed",
     "qvq_p32_window_wgmma_m16_tma",
     "qvq_p32_window_wgmma_m16_tma_ordered_split",
     "qvq_p32_window_wgmma_single_large_m_packed",
