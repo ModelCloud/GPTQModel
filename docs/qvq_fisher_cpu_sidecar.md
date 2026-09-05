@@ -477,3 +477,77 @@ testing direct BF16 CPU reads with unchanged FP32 accumulation.
 [Triangular Gram audit](experiments/qvq_fisher_triangular_gram_20260905.json) and
 [GPU input-packing audit](experiments/qvq_fisher_gpu_input_pack_20260905.json)
 include the post-profile correctness and timing checks.
+
+Direct BF16 CPU reads remove packing entirely, while preserving FP32 FMA
+accumulation and the exact diagonal reduction tree. With four workers of sixteen
+threads, the B16 prototype took 1.846570 seconds. Reusing shared activation
+buffers/Grams and releasing buffers after their last consumer reduced this to
+1.766159 seconds. Both passed all 800 factor comparisons. An earlier cache that
+retained unique activations failed the 64 MiB GPU memory-accounting allowance
+twice at 69 MiB; those runs have no accepted timing. The tighter lifetime version
+passed under the unchanged allowance. Attribution of every unattributed byte
+was not established. [Direct BF16 evidence](experiments/qvq_fisher_direct_bf16_20260905.json).
+
+The smaller-batch check uses B4 over sixteen rows, row start 64, seed 20260908.
+Both CPU paths passed all 800 factor comparisons across four batches. The
+GPU-only median was 2.379557 seconds; the FP32-scratch hybrid was 2.361117 and
+the direct BF16/shared-activation hybrid was 2.371918 seconds. These 0.3–0.8%
+differences are not accepted as useful gains from separate process runs and
+are far below 1.5x. [Four-batch evidence](experiments/qvq_fisher_b4_hybrid_20260905.json).
+
+The B4 diagnostic traces show why offloading arithmetic has not translated into
+a useful gain: GPU kernel time falls from 1.990744 to 1.200072 seconds, but GPU
+activity gaps increase from 0.584982 to 1.617722 seconds. Profiler overhead is
+substantial, so these are attribution figures only. No automatic garbage
+collections occurred in the instrumented hybrid capture. Letting the producer
+use both reserved CPUs changed little; removing its affinity restriction reduced
+the warmed hybrid median to 2.318860 seconds.
+
+A bounded CUDA graph cache for source statistics retained exact seed behavior
+and passed all 800 factors across four batches. Its median was 2.206758 seconds,
+still below the required speedup. The first measured repeat was slower
+(2.807776 seconds, versus 2.206758 and 2.197202 subsequently), so this is not a
+stable promoted solution. Instruction profiling confirms unchanged FFMA/FADD
+counts, plus two small graph-generator state kernels. Graph buffer copies and
+output clones add data movement. Setup time is recorded separately; no cold
+end-to-end graph gain is claimed. [Launch-gap investigation](experiments/qvq_fisher_launch_gaps_20260905.json).
+
+
+Grouping eight modules reduced the GPU statistics stage from 272 to 87 kernels
+at B4/T64/I5120/O17408/R256. Post-profile real-input checks passed all seven
+captured geometries at B4 and B16 across two accumulation steps. The isolated
+GPU stage improved 1.23x for the large MLP geometry and 2.37x for O12288 at B4;
+these timings exclude CPU work and transfers.
+
+The complete grouped CPU/GPU collector passed all 800 factor comparisons.
+Processing groups after backward took 2.592333 seconds; submitting ready groups
+during backward reduced the median to 2.290638 seconds. Against the current
+2.379557-second GPU baseline, this is only 1.039x and is not promoted. An initial
+separate-capture-stream implementation exhausted GPU memory; sharing the capture
+stream fixed scratch reuse and completed within 82.85 GB reserved. CPU staging
+uses four fixed slots with sixteen physical cores per worker. Graph cache
+ownership, native dispatch and unsupported configurations remain prototype-only.
+[Grouped statistics evidence](experiments/qvq_fisher_group_statistics_20260905.json).
+
+
+Topology discovery accounted for approximately 0.44 seconds of per-capture setup.
+Caching the topology by process affinity and online CPU set reduced warmed setup
+to 2–3 ms. The first discovery remains a setup cost. This produced 1.842801 seconds
+at B4/16 rows (1.291x), while B16/64 rows remained slower than GPU-only at
+5.894998 seconds. Both retained all 800 factors exactly.
+
+A separately measured B2/16-row GPU baseline (same rows 64–79 and seed 20260908)
+took 3.971278 seconds. The grouped hybrid initially took 2.720498 seconds. Moving
+source-diagonal calculation to the final batch reduced its median to 2.484234
+seconds, a preliminary 1.5986x, again with all 800 factors bitwise equal. This is a
+warmed B2/T64/R256 result; it does not establish a B16 gain. Instruction auditing,
+post-profile confirmation and a grouped GPU-only ablation are still pending.
+
+
+The grouped GPU-only ablation subsequently passed all 800 factors and took
+2.320763 seconds, faster than the 2.484234-second all-Gram-offload hybrid. The
+initial 1.60x result therefore does **not** establish a benefit from CPU offload.
+Moving only MLP Grams to the CPU took 2.613114 seconds; offloading the complementary
+smaller groups took 2.372078 seconds. Neither improved on grouped GPU-only.
+The CPU source-diagonal experiment instead consumes source matrices already
+required on the host, avoiding additional transfers; its full timing is pending.
