@@ -1,4 +1,4 @@
-"""Experimental standalone W4A16 + FP32 low-rank operator loader.
+"""Experimental standalone W4A16 + typed low-rank operator loader.
 
 Only load exports produced by this campaign: torch.load uses trusted pickle data.
 Output preserves the caller's dtype; full-model FP16 boundaries need own validation.
@@ -32,5 +32,9 @@ class RecoveredLinear(torch.nn.Module):
     def forward(self, x):
         shape = x.shape[:-1]
         xf = x.reshape(-1, self.in_features).float()
-        y = self.base(xf.bfloat16()).float() + (xf @ self.a) @ self.b
+        y = self.base(xf.bfloat16()).float()
+        if self.a.shape[1]:
+            hidden = xf.to(self.a.dtype) @ self.a
+            correction = hidden.to(self.b.dtype) @ self.b
+            y = y + correction.float()
         return y.to(x.dtype).reshape(*shape, self.out_features)

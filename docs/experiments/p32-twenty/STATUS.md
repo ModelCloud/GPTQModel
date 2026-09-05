@@ -9,13 +9,13 @@ AGENTS.md. All changes and evidence share PR #137.
 | # | Experiment | Current evidence / outstanding implementation |
 |---:|---|---|
 |1|Decoder decomposition|Real-layer transform/decoder timing and four scoped Nsight captures; instruction-class breakdown and overlap remain.|
-|2|Decode reuse across rows|Five row-group limits, 45 passing cases on one projection; launch/concat confounding remains, controlled fused sweep needed.|
+|2|Decode reuse across rows|Fused BM16/32/64 split16 q sweep and layer1-down BM32 pass 36/36; modest/no gains against existing window. More configurations/model/profile remain.|
 |3|Persistent decoded tiles|New persistent scheduling/register-pressure sweep remains.|
 |4|Warp-specialized pipeline|Producer/consumer decode-MMA implementation and overlap measurement remain.|
 |5|Transition LUTs|GPU index/pair LUT decoders exact across all 94 projections; both slower overall in materialization, fused LUT study remains.|
 |6|Vectorized codebook output|Packed half2 output exact across all 94 projections at 1/4 warps; fused MMA-fragment output and model validation remain.|
-|7|Short reduced-precision accumulation|Promotion intervals 16–256 and real-model validation remain.|
-|8|Blockwise FP32 promotion|Reduction-order/promotion variants remain.|
+|7|Short reduced-precision accumulation|Real five-projection arithmetic sweep recorded; layer1-down FP16/BF16 partials fail some/all cases. Integrated decoder/model and executed profiling remain.|
+|8|Blockwise FP32 promotion|Blockwise FP32 promotion16–256 passes all 225 arithmetic-isolation cases across five projections; integrated kernel/model/profile remain.|
 |9|Output supertiles|Neighboring projections/channels implementation and matched evaluation remain.|
 |10|Lossless repack|All 94 projections bit/value exact; 108 layers, bounded model PPL/logits/ARC and large prefill speedups measured; full quality/profiling coverage remains.|
 |11|Independent trellis tiles|Requantized 64/128/256-tile exports and total BPW sweep remain.|
@@ -50,3 +50,7 @@ Additional partial evidence: [accumulation isolation](ACCUMULATION.md) records
 432 passing real layer-0 cases for experiments 7/8; execution profiling and
 integrated model results remain. [Bounded GSM8K](GSM8K_PARTIAL.md) records the
 completed BF16/window/joint-recovery arms; FP32 teacher evaluation is running.
+
+Experiments **31–40** are authorized in [the small-rank queue](LOW_RANK_QUEUE.md).
+The focused 31/32/33/35 layer-0 down sweep is executed; model jobs are automatically
+dispatched when their exports are ready. Full completion is still unproven.
