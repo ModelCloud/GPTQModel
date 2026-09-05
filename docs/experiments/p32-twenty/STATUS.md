@@ -58,3 +58,8 @@ dispatched when their exports are ready. Full completion is still unproven.
 [Small-rank model results](LOW_RANK_MODEL.md): all 28 focused model runs complete;
 full ARC and broader activation replays dispatched. All-16-down calibration and
 held-out captures are complete; per-layer native fits/selection remain.
+
+[Targeted rank8 results](RANK8_TARGETED.md) add a passing alpha1 rank8 fit,
+calibration-fitted sparse exceptions, fused expansion/add with Graph timings and
+executed Nsight/SASS evidence. [Full ARC](FULL_ARC.md) and canonical GSM8K-128
+are complete. Native-GEMM fusion and fused-model validation remain outstanding.

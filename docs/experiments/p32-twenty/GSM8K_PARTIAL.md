@@ -15,6 +15,6 @@ BF16/window exchanged 11 wins and 11 losses. Joint recovery versus window gained
 7 answers and lost 2; exact two-sided discordance p=0.1796875. The five-answer
 aggregate gain is promising but inconclusive on this small slice.
 
-The canonical FP32 teacher is still running. No P32 post-quant advantage or
+The canonical FP32 teacher completed at 58/128; see [the completed evaluation summary](FULL_ARC.md). No P32 post-quant advantage or
 unrestricted promotion is established. Archives retain prompt hashes and per-case
 scores in [results/gsm8k-128](results/gsm8k-128); full runtime outputs remain outside Git.
