@@ -1,0 +1,113 @@
+{
+  "scope": "layer baseline and window candidate; experiment 1/10 partial evidence; profiler and model gates pending",
+  "uuid": "GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855",
+  "worker": 0,
+  "torch": "2.13.0+cu130",
+  "device": "_CudaDeviceProperties(name='NVIDIA PG506-232', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=20f7fde4-d88c-d6ca-e324-bd4e5e9e0855, pci_bus_id=43, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "revision": "bc673eb793afc616d5507abcd01860a62a214849",
+  "rows": [
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 1,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "fused_metrics": {
+        "elements": 2048,
+        "mean_abs": 2.064627869913238e-05,
+        "max_abs": 0.0001251697540283203,
+        "relative_l2": 7.912340172331098e-05,
+        "cosine": 0.9999999969284213,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "fused_vs_window": {
+        "elements": 2048,
+        "mean_abs": 9.983505151467398e-07,
+        "max_abs": 7.62939453125e-06,
+        "relative_l2": 3.857154808103541e-06,
+        "cosine": 0.999999999999398,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one fused decode/MMA inner call after warmup",
+      "fused": {
+        "block_m": 64,
+        "block_n": 64,
+        "split": 1,
+        "promotion_k": 0
+      }
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 16,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "fused_metrics": {
+        "elements": 32768,
+        "mean_abs": 7.213555875495992e-05,
+        "max_abs": 0.0006875991821289062,
+        "relative_l2": 6.319582111723801e-05,
+        "cosine": 0.9999999980051056,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "fused_vs_window": {
+        "elements": 32768,
+        "mean_abs": 4.196299027703354e-06,
+        "max_abs": 3.814697265625e-05,
+        "relative_l2": 3.9473111822392915e-06,
+        "cosine": 0.9999999999995475,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one fused decode/MMA inner call after warmup",
+      "fused": {
+        "block_m": 64,
+        "block_n": 64,
+        "split": 1,
+        "promotion_k": 0
+      }
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 2048,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "fused_metrics": {
+        "elements": 4194304,
+        "mean_abs": 7.367839704374593e-05,
+        "max_abs": 0.0009489059448242188,
+        "relative_l2": 5.725256773326537e-05,
+        "cosine": 0.9999999983734973,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "fused_vs_window": {
+        "elements": 4194304,
+        "mean_abs": 4.555243848432904e-07,
+        "max_abs": 3.337860107421875e-06,
+        "relative_l2": 3.413317700736211e-07,
+        "cosine": 0.9999999999999418,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one fused decode/MMA inner call after warmup",
+      "fused": {
+        "block_m": 64,
+        "block_n": 64,
+        "split": 1,
+        "promotion_k": 0
+      }
+    }
+  ],
+  "complete": true
+}
