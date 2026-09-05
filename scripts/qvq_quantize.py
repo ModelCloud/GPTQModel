@@ -151,7 +151,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--bank-count", type=int, choices=(1, 2, 4))
-    parser.add_argument("--rounding", choices=("block_ldlq", "yaqa"), default="yaqa")
+    parser.add_argument(
+        "--rounding",
+        choices=("block_ldlq", "yaqa"),
+        default=None,
+        help=(
+            "Rounding method. Defaults to block_ldlq with --activation and yaqa "
+            "otherwise; an explicit incompatible selection still fails closed."
+        ),
+    )
     parser.add_argument(
         "--device",
         default="cuda:0",
@@ -378,6 +386,7 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
             )
         return QVQConfig(**payload)
 
+    rounding = args.rounding or ("block_ldlq" if args.activation else "yaqa")
     yaqa = YaqaConfig(
         seed=args.yaqa_seed,
         regularization=args.yaqa_regularization,
@@ -412,7 +421,7 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
         bits=args.bits,
         format=args.format,
         bank_count=args.bank_count or _automatic_bank_count(args.format),
-        rounding=args.rounding,
+        rounding=rounding,
         device=args.device,
         activation=args.activation,
         propagated_bank_selection=args.propagated_bank_selection,
@@ -430,7 +439,7 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
         ),
         # YAQA preparation performs an exact full-model backward for Sketch-B.
         # A checkpoint-backed LazyTurtle shell cannot participate in autograd.
-        offload_to_disk=args.rounding != "yaqa",
+        offload_to_disk=rounding != "yaqa",
     )
 
 

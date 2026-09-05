@@ -1,10 +1,17 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import json
+
 import pytest
 import torch
 
-from scripts.compare_qvq_activation_quality import _ArmAccumulator, _prediction_rows
+from scripts.compare_qvq_activation_quality import (
+    _A8_CONTRACT,
+    _ArmAccumulator,
+    _checkpoint_contract,
+    _prediction_rows,
+)
 
 
 def test_activation_quality_uses_shifted_nonpadding_next_token_positions():
@@ -76,3 +83,27 @@ def test_activation_quality_accumulator_reports_candidate_divergence_and_overlap
     assert result["next_token_top1_accuracy"] == 0
     assert result["next_token_top5_accuracy"] == 0
     assert result["next_token_top10_accuracy"] == 1
+
+
+def test_activation_quality_requires_explicit_experimental_replay_contract(tmp_path):
+    checkpoint = tmp_path / "a8"
+    checkpoint.mkdir()
+    activation = {**_A8_CONTRACT, "replay_passes": 1}
+    (checkpoint / "config.json").write_text(
+        json.dumps(
+            {
+                "quantization_config": {
+                    "method": "qvq",
+                    "bits": 3.5,
+                    "format": "qvq_v2b2_p32",
+                    "activation": activation,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="required A8 contract"):
+        _checkpoint_contract(checkpoint, expect_a8=True)
+    result = _checkpoint_contract(checkpoint, expect_a8=True, replay_passes=1)
+    assert result["quantization_config"]["activation"] == activation

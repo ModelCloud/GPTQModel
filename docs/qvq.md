@@ -783,6 +783,7 @@ qcfg = QVQConfig(
         "bits": 8,
         "format": "float8_e4m3fn",
         "scale_method": "dynamic_per_token",
+        "replay_passes": 0,
     },
 )
 ```
@@ -797,14 +798,15 @@ python scripts/qvq_quantize.py \
 
 One FP32 scale is derived from each logical activation row and shared across its hidden dimension. This dynamic
 contract has no calibration-order-dependent observer and adds no persistent per-module tensor. A zero row uses scale
-one. Both ordinary Block-LDLQ and YAQA consume the same fake-quantized values used by inference:
+one. The recommended `target="p32_operand"` flow keeps the first Block-LDLQ encoding on the native-input Hessian,
+then applies A8 only at the post-SU/Hadamard operand boundary used by inference. Per-module logs report A8 RMSE,
+relative RMSE, maximum absolute error, and observed scale range separately from the weight-codec loss.
 
-- the GPTQ-style input Hessian is accumulated from dequantized `Q_A8(X)`, so weight search is conditioned on the
-  activation grid the deployed module receives;
-- YAQA installs straight-through E4M3 input boundaries on every selected linear while collecting full-model Fisher
-  factors, so downstream gradients also observe the A8 forward values;
-- per-module logs report A8 RMSE, relative RMSE, maximum absolute error, and observed scale range separately from
-  the weight-codec loss.
+`replay_passes=1` explicitly opts into an experimental second encode fitted to the deployed E4M3 operand. It is
+default-disabled because module-local held-out MSE did not predict propagated model quality on Llama-3.2-1B. The
+legacy `target="linear_input"` experiment still accumulates the GPTQ-style input Hessian from dequantized
+`Q_A8(X)`. YAQA supports that linear-input boundary; it rejects `p32_operand` until its Sketch-B collector can observe
+the post-SU/Hadamard boundary directly.
 
 This follows the calibration boundary demonstrated by Together's
 [NVFP4 Hessian change](https://github.com/togethercomputer/GPTQModel/commit/96cc70621b86477ba01c10d678944f9796507f6c): curvature must be built from the activation values the deployed kernel
