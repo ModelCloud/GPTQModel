@@ -2638,8 +2638,8 @@ at::Tensor qvq_hadamard_pair_swiglu_precondition_multiblock_cuda(
               "fused recovery/precondition requires one through 4096 rows");
   TORCH_CHECK(
       rows64 <= 16 ||
-          (!pad_to_16 && !pair_tiles && !bounded_rounding && !packed_gate_up),
-      "large-M fused recovery/precondition requires unpadded, unpaired execution");
+          (!pad_to_16 && !bounded_rounding && !packed_gate_up),
+      "large-M fused recovery/precondition requires unpadded, unbounded execution");
 
   const auto check_float_vector = [&](const at::Tensor& tensor, const char* name) {
     TORCH_CHECK(tensor.is_cuda() && tensor.device() == input0.device(),

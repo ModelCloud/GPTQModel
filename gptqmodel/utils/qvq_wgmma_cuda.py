@@ -108,6 +108,7 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_WGMMA_NAME,
     namespace=_QVQ_WGMMA_NAMESPACE,
     required_ops=(
+        "fp16_to_fp8_e5m2_clamped",
         "p32_window_w3_m16",
         "p32_window_w3_m16_tma",
         "p32_window_m16_tma",
@@ -121,6 +122,10 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
         "p32_window_m32_tma_grouped_ordered_reuse2",
         "p32_window_m64_tma_grouped_reuse4",
         "p32_window_m64_tma_grouped_ordered_reuse4",
+        "p32_window_decode_grouped_fp16",
+        "p32_window_prepare_grouped_fp8",
+        "p32_window_prepare_grouped_fp8_half_fold",
+        "p32_window_prepare_grouped_fp16",
     ),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_WGMMA_BUILD_ROOT",
@@ -135,6 +140,16 @@ _QVQ_WGMMA_EXTENSION = TorchOpsJitExtension(
     requires_cuda=True,
     merge_visible_cuda_arch_override=False,
 )
+
+
+def qvq_fp16_to_fp8_e5m2_clamped(input: torch.Tensor) -> torch.Tensor:
+    """Convert finite FP16 values to E5M2 without overflowing to infinity."""
+
+    if input.device.type != "cuda" or input.dtype != torch.float16:
+        raise ValueError("Hopper FP8 prefill conversion requires FP16 CUDA input")
+    return _QVQ_WGMMA_EXTENSION.op("fp16_to_fp8_e5m2_clamped")(
+        input.contiguous()
+    )
 
 
 def _resolve_transition_bits(bits: float) -> int:
@@ -916,6 +931,167 @@ def qvq_p32_window_wgmma_grouped_reuse4_packed(
     )
 
 
+def qvq_p32_window_decode_grouped_fp16_packed(
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+) -> torch.Tensor:
+    """Decode a grouped canonical P32 payload once into temporary FP16 KxN."""
+
+    plan = payload.plan
+    if levels.device.type != "cuda" or levels.dtype != torch.float16:
+        raise ValueError("grouped P32 FP16 decoding requires FP16 CUDA levels")
+    if (
+        payload.trellis.device != levels.device
+        or payload.bank_ids.device != levels.device
+    ):
+        raise ValueError("grouped P32 FP16 decode tensors must share one device")
+    return _QVQ_WGMMA_EXTENSION.op("p32_window_decode_grouped_fp16")(
+        payload.trellis,
+        levels.contiguous(),
+        payload.bank_ids,
+        plan.transition_bits,
+        plan.in_features,
+        [segment.out_features for segment in plan.segments],
+        [segment.bank_alt_id for segment in plan.segments],
+    )
+
+
+def qvq_p32_window_grouped_prefill_fp16_packed(
+    input: torch.Tensor,
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+) -> tuple[torch.Tensor, ...]:
+    """Decode P32 once, then run one grouped FP16-by-FP16 prefill GEMM."""
+
+    plan = payload.plan
+    if (
+        input.ndim != 2
+        or input.device.type != "cuda"
+        or input.dtype != torch.float16
+        or input.shape[1] != plan.in_features
+    ):
+        raise ValueError("grouped P32 FP16 prefill requires a matching FP16 CUDA matrix")
+    decoded = qvq_p32_window_decode_grouped_fp16_packed(payload, levels)
+    output = torch.mm(input.contiguous(), decoded, out_dtype=torch.float32)
+    widths = [segment.out_features for segment in plan.segments]
+    return tuple(torch.split(output, widths, dim=1))
+
+
+def qvq_p32_window_prepare_grouped_fp16_packed(
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+    input_scale: torch.Tensor,
+    output_scales: Sequence[torch.Tensor],
+    output_hadamards: Sequence[bool],
+) -> torch.Tensor:
+    """Decode and fold grouped P32 into one temporary effective FP16 weight."""
+
+    plan = payload.plan
+    if (
+        levels.device.type != "cuda"
+        or levels.dtype != torch.float16
+        or input_scale.device != levels.device
+        or input_scale.dtype != torch.float32
+        or input_scale.shape != (plan.in_features,)
+    ):
+        raise ValueError(
+            "grouped folded-FP16 preparation requires matching CUDA FP16 levels "
+            "and contiguous FP32 input scale [K]"
+        )
+    if len(output_scales) != len(plan.segments) or len(output_hadamards) != len(
+        plan.segments
+    ):
+        raise ValueError(
+            "grouped folded-FP16 preparation requires one output scale and "
+            "Hadamard flag per segment"
+        )
+    for scale, segment in zip(output_scales, plan.segments, strict=True):
+        if (
+            scale.device != levels.device
+            or scale.dtype != torch.float32
+            or scale.shape != (segment.out_features,)
+        ):
+            raise ValueError(
+                "grouped folded-FP16 output scales must be matching FP32 CUDA vectors"
+            )
+    return _QVQ_WGMMA_EXTENSION.op("p32_window_prepare_grouped_fp16")(
+        payload.trellis,
+        levels.contiguous(),
+        payload.bank_ids,
+        input_scale.contiguous(),
+        [scale.contiguous() for scale in output_scales],
+        plan.transition_bits,
+        plan.in_features,
+        [segment.out_features for segment in plan.segments],
+        [segment.bank_alt_id for segment in plan.segments],
+        [int(enabled) for enabled in output_hadamards],
+    )
+
+
+def qvq_p32_window_prepare_grouped_fp8_packed(
+    payload: QVQHopperGroupedP32Payload,
+    levels: torch.Tensor,
+    input_scale: torch.Tensor,
+    output_scales: Sequence[torch.Tensor],
+    output_hadamards: Sequence[bool],
+    weight_scale: torch.Tensor,
+    *,
+    half_fold: bool = False,
+) -> torch.Tensor:
+    """Decode/fold P32 directly to column-major E4M3 for cuBLASLt."""
+
+    plan = payload.plan
+    if (
+        levels.device.type != "cuda"
+        or levels.dtype != torch.float16
+        or input_scale.device != levels.device
+        or input_scale.dtype != torch.float32
+        or input_scale.shape != (plan.in_features,)
+        or weight_scale.device != levels.device
+        or weight_scale.dtype != torch.float32
+        or weight_scale.numel() != 1
+    ):
+        raise ValueError(
+            "grouped folded-FP8 preparation requires matching CUDA levels, "
+            "FP32 scales, and one FP32 weight scale"
+        )
+    if len(output_scales) != len(plan.segments) or len(output_hadamards) != len(
+        plan.segments
+    ):
+        raise ValueError(
+            "grouped folded-FP8 preparation requires one output scale and "
+            "Hadamard flag per segment"
+        )
+    for scale, segment in zip(output_scales, plan.segments, strict=True):
+        if (
+            scale.device != levels.device
+            or scale.dtype != torch.float32
+            or scale.shape != (segment.out_features,)
+        ):
+            raise ValueError(
+                "grouped folded-FP8 output scales must be matching FP32 CUDA vectors"
+            )
+    op_name = (
+        "p32_window_prepare_grouped_fp8_half_fold"
+        if half_fold
+        else "p32_window_prepare_grouped_fp8"
+    )
+    transposed = _QVQ_WGMMA_EXTENSION.op(op_name)(
+        payload.trellis,
+        levels.contiguous(),
+        payload.bank_ids,
+        input_scale.contiguous(),
+        [scale.contiguous() for scale in output_scales],
+        weight_scale.contiguous(),
+        plan.transition_bits,
+        plan.in_features,
+        [segment.out_features for segment in plan.segments],
+        [segment.bank_alt_id for segment in plan.segments],
+        [int(enabled) for enabled in output_hadamards],
+    )
+    return transposed.t()
+
+
 def qvq_p32_window_wgmma_single_large_m_packed(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -1013,10 +1189,15 @@ __all__ = [
     "QVQHopperGroupedP32Payload",
     "QVQHopperGroupedP32Plan",
     "QVQHopperP32SegmentPlan",
+    "qvq_fp16_to_fp8_e5m2_clamped",
     "qvq_h100_grouped_ordered_split_counts",
     "qvq_h100_large_m_ordered_split_count",
     "qvq_h100_ordered_split_count",
     "qvq_p32_window_wgmma_fp8_m16",
+    "qvq_p32_window_decode_grouped_fp16_packed",
+    "qvq_p32_window_grouped_prefill_fp16_packed",
+    "qvq_p32_window_prepare_grouped_fp8_packed",
+    "qvq_p32_window_prepare_grouped_fp16_packed",
     "qvq_p32_window_wgmma_group_plan",
     "qvq_p32_window_wgmma_grouped",
     "qvq_p32_window_wgmma_grouped_ordered_packed",

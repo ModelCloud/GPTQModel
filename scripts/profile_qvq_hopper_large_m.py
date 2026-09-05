@@ -27,7 +27,7 @@ def _args() -> argparse.Namespace:
     parser.add_argument(
         "--m",
         type=int,
-        choices=(32, 64, 128, 256, 512, 1024, 2048, 4096),
+        choices=(32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384),
         default=64,
     )
     parser.add_argument("--warmup", type=int, default=20)

@@ -1517,10 +1517,10 @@ def qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
     if packed_gate_up and (not pair_tiles or not bounded_rounding):
         raise ValueError("fused QVQ recovery packed_gate_up requires paired bounded rounding")
     if input0.shape[0] > 16 and (
-        pad_to_16 or pair_tiles or bounded_rounding or packed_gate_up
+        pad_to_16 or bounded_rounding or packed_gate_up
     ):
         raise ValueError(
-            "large-M fused QVQ recovery requires unpadded, unpaired execution"
+            "large-M fused QVQ recovery requires unpadded, unbounded execution"
         )
     for name, tensor in (
         ("post_scale0", post_scale0),

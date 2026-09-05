@@ -1,0 +1,271 @@
+{
+  "comparison": "native grouped large-M QVQ versus ordinary QVQ and W4 baselines",
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_commit": "a7bce559fb3ce1853ade4ab7e371b1a524d3deba",
+  "previous_artifacts": [],
+  "rows": [
+    {
+      "better_than_last_benchmark": true,
+      "better_than_plain_qvq": true,
+      "bits": 2.0,
+      "dense_oracle_error": {
+        "max_abs": 1.0132789611816406e-06,
+        "mean_abs": 1.576398744873586e-07,
+        "relative_l2": 0.6753815089215659,
+        "rmse": 1.9908475170745752e-07
+      },
+      "down_mkn": [
+        8192,
+        8192,
+        2048
+      ],
+      "effective_tflops": 116.73583025584745,
+      "m": 8192,
+      "machete_w4": {
+        "max_us": 1732.2986920674641,
+        "mean_us": 1726.9791920979817,
+        "median_us": 1726.5599568684897,
+        "min_us": 1725.1200675964355,
+        "p95_us": 1732.2986920674641
+      },
+      "marlin_w4": {
+        "max_us": 2726.1972427368164,
+        "mean_us": 2716.0853068033857,
+        "median_us": 2715.1254018147783,
+        "min_us": 2711.4133834838867,
+        "p95_us": 2726.1972427368164
+      },
+      "mkn": [
+        8192,
+        2048,
+        8192
+      ],
+      "plain_qvq": {
+        "max_us": 358162.3942057292,
+        "mean_us": 358143.3675130209,
+        "median_us": 358141.11328125,
+        "min_us": 358130.3304036458,
+        "p95_us": 358162.3942057292
+      },
+      "previous_qvq": {
+        "max_us": 358162.3942057292,
+        "mean_us": 358143.3675130209,
+        "median_us": 358141.11328125,
+        "min_us": 358130.3304036458,
+        "p95_us": 358162.3942057292
+      },
+      "qvq": {
+        "max_us": 7117.855707804362,
+        "mean_us": 7043.059158325195,
+        "median_us": 7064.101219177246,
+        "min_us": 6968.405405680339,
+        "p95_us": 7117.855707804362
+      },
+      "selected_chunk_rows": 4096,
+      "speedup_vs_machete_w4": 0.24441325276898873,
+      "speedup_vs_marlin_w4": 0.38435539321604006,
+      "speedup_vs_plain_qvq": 50.6987516414668
+    },
+    {
+      "better_than_last_benchmark": true,
+      "better_than_plain_qvq": true,
+      "bits": 2.5,
+      "dense_oracle_error": {
+        "max_abs": 1.1324882507324219e-06,
+        "mean_abs": 1.5769144567912008e-07,
+        "relative_l2": 0.6751230461883678,
+        "rmse": 1.991450052392724e-07
+      },
+      "down_mkn": [
+        8192,
+        8192,
+        2048
+      ],
+      "effective_tflops": 115.90911665835007,
+      "m": 8192,
+      "machete_w4": {
+        "max_us": 1732.2986920674641,
+        "mean_us": 1726.9791920979817,
+        "median_us": 1726.5599568684897,
+        "min_us": 1725.1200675964355,
+        "p95_us": 1732.2986920674641
+      },
+      "marlin_w4": {
+        "max_us": 2726.1972427368164,
+        "mean_us": 2716.0853068033857,
+        "median_us": 2715.1254018147783,
+        "min_us": 2711.4133834838867,
+        "p95_us": 2726.1972427368164
+      },
+      "mkn": [
+        8192,
+        2048,
+        8192
+      ],
+      "plain_qvq": {
+        "max_us": 357295.8984375,
+        "mean_us": 357276.1271158854,
+        "median_us": 357277.6692708333,
+        "min_us": 357255.9814453125,
+        "p95_us": 357295.8984375
+      },
+      "previous_qvq": {
+        "max_us": 357295.8984375,
+        "mean_us": 357276.1271158854,
+        "median_us": 357277.6692708333,
+        "min_us": 357255.9814453125,
+        "p95_us": 357295.8984375
+      },
+      "qvq": {
+        "max_us": 7193.3441162109375,
+        "mean_us": 7099.609565734863,
+        "median_us": 7114.485422770182,
+        "min_us": 7035.370508829753,
+        "p95_us": 7193.3441162109375
+      },
+      "selected_chunk_rows": 4096,
+      "speedup_vs_machete_w4": 0.24268233811296722,
+      "speedup_vs_marlin_w4": 0.3816334197726959,
+      "speedup_vs_plain_qvq": 50.2183430058557
+    },
+    {
+      "better_than_last_benchmark": true,
+      "better_than_plain_qvq": true,
+      "bits": 3.0,
+      "dense_oracle_error": {
+        "max_abs": 1.0728836059570312e-06,
+        "mean_abs": 1.5772164374538988e-07,
+        "relative_l2": 0.6757849756677978,
+        "rmse": 1.9916977519573458e-07
+      },
+      "down_mkn": [
+        8192,
+        8192,
+        2048
+      ],
+      "effective_tflops": 117.25521644910378,
+      "m": 8192,
+      "machete_w4": {
+        "max_us": 1732.2986920674641,
+        "mean_us": 1726.9791920979817,
+        "median_us": 1726.5599568684897,
+        "min_us": 1725.1200675964355,
+        "p95_us": 1732.2986920674641
+      },
+      "marlin_w4": {
+        "max_us": 2726.1972427368164,
+        "mean_us": 2716.0853068033857,
+        "median_us": 2715.1254018147783,
+        "min_us": 2711.4133834838867,
+        "p95_us": 2726.1972427368164
+      },
+      "mkn": [
+        8192,
+        2048,
+        8192
+      ],
+      "plain_qvq": {
+        "max_us": 357697.3876953125,
+        "mean_us": 357652.0751953125,
+        "median_us": 357648.2137044271,
+        "min_us": 357627.4007161458,
+        "p95_us": 357697.3876953125
+      },
+      "previous_qvq": {
+        "max_us": 357697.3876953125,
+        "mean_us": 357652.0751953125,
+        "median_us": 357648.2137044271,
+        "min_us": 357627.4007161458,
+        "p95_us": 357697.3876953125
+      },
+      "qvq": {
+        "max_us": 7114.7308349609375,
+        "mean_us": 7034.023475646973,
+        "median_us": 7032.810529073079,
+        "min_us": 6946.48551940918,
+        "p95_us": 7114.7308349609375
+      },
+      "selected_chunk_rows": 4096,
+      "speedup_vs_machete_w4": 0.2455007069692875,
+      "speedup_vs_marlin_w4": 0.3860654841461555,
+      "speedup_vs_plain_qvq": 50.85423704021854
+    },
+    {
+      "better_than_last_benchmark": true,
+      "better_than_plain_qvq": true,
+      "bits": 3.5,
+      "dense_oracle_error": {
+        "max_abs": 1.0728836059570312e-06,
+        "mean_abs": 1.5762016403186863e-07,
+        "relative_l2": 0.6752273690188568,
+        "rmse": 1.9905745209773194e-07
+      },
+      "down_mkn": [
+        8192,
+        8192,
+        2048
+      ],
+      "effective_tflops": 113.09837376487582,
+      "m": 8192,
+      "machete_w4": {
+        "max_us": 1732.2986920674641,
+        "mean_us": 1726.9791920979817,
+        "median_us": 1726.5599568684897,
+        "min_us": 1725.1200675964355,
+        "p95_us": 1732.2986920674641
+      },
+      "marlin_w4": {
+        "max_us": 2726.1972427368164,
+        "mean_us": 2716.0853068033857,
+        "median_us": 2715.1254018147783,
+        "min_us": 2711.4133834838867,
+        "p95_us": 2726.1972427368164
+      },
+      "mkn": [
+        8192,
+        2048,
+        8192
+      ],
+      "plain_qvq": {
+        "max_us": 357489.4612630208,
+        "mean_us": 357478.1778971354,
+        "median_us": 357478.6783854166,
+        "min_us": 357463.2568359375,
+        "p95_us": 357489.4612630208
+      },
+      "previous_qvq": {
+        "max_us": 357489.4612630208,
+        "mean_us": 357478.1778971354,
+        "median_us": 357478.6783854166,
+        "min_us": 357463.2568359375,
+        "p95_us": 357489.4612630208
+      },
+      "qvq": {
+        "max_us": 7334.5387776692705,
+        "mean_us": 7272.804260253906,
+        "median_us": 7291.296005249023,
+        "min_us": 7130.453109741211,
+        "p95_us": 7334.5387776692705
+      },
+      "selected_chunk_rows": 4096,
+      "speedup_vs_machete_w4": 0.23679740276975927,
+      "speedup_vs_marlin_w4": 0.37237898445765366,
+      "speedup_vs_plain_qvq": 49.02813959659117
+    }
+  ],
+  "source_fingerprint": "c7b0e33c32dc3894f688aa9d1e62c3dcbac9d6c70eef6032f532aaf453cd6952",
+  "timing": {
+    "cpu_time_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 3,
+    "samples": 10,
+    "warmup": 3
+  },
+  "workload": "complete Llama 3.2 1B gate/up/SiLU/product/down MLP"
+}

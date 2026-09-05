@@ -22,7 +22,7 @@ from scripts import benchmark_qvq_a41_phase4_production as common
 from scripts import benchmark_qvq_hopper_large_m as large_m
 
 RATES = (2.0, 2.5, 3.0, 3.5)
-M_VALUES = (32, 64, 128, 256, 512, 1024, 2048, 4096)
+M_VALUES = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384)
 HIDDEN = 2048
 INTERMEDIATE = 8192
 SOURCE_PATHS = (
@@ -59,8 +59,8 @@ def _args() -> argparse.Namespace:
     args = parser.parse_args()
     if any(rate not in RATES for rate in args.rates):
         parser.error("rates must be W2, W2.5, W3, or W3.5")
-    if any(m < 17 or m > 4096 for m in args.m_values):
-        parser.error("large-M MLP rows must be in [17, 4096]")
+    if any(m < 1 or m > 16384 for m in args.m_values):
+        parser.error("MLP rows must be in [1, 16384]")
     if min(args.warmup, args.samples, args.replays_per_sample) <= 0:
         parser.error("timing counts must be positive")
     return args
@@ -194,6 +194,7 @@ def _main(args: argparse.Namespace) -> None:
             timing, (actual,) = large_m._graph_timing(
                 torch, lambda mlp=mlp, x=x: (mlp(x),), args, device_info
             )
+            runtime_telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
             gate = qvq_dense_oracle_forward(mlp.gate_proj, x, device=device).half()
             up = qvq_dense_oracle_forward(mlp.up_proj, x, device=device).half()
             intermediate = torch.nn.functional.silu(gate) * up
@@ -207,6 +208,13 @@ def _main(args: argparse.Namespace) -> None:
                 )
             marlin = comparator[("marlin", m)]
             machete = comparator[("machete", m)]
+            previous_qvq = previous.get((float(bits), m))
+            if previous_qvq is None and m > 4096:
+                # Before row multiplexing, these shapes fell through to the
+                # ordinary per-module CUDA path. Preserve that measured path
+                # as the strict pre-feature benchmark instead of emitting an
+                # unhelpful N/A for the first supported >4096 result.
+                previous_qvq = plain[m]
             logical_flops = 2 * m * (HIDDEN * INTERMEDIATE * 2 + INTERMEDIATE * HIDDEN)
             result = {
                 "bits": bits,
@@ -223,14 +231,18 @@ def _main(args: argparse.Namespace) -> None:
                 "effective_tflops": logical_flops / (timing["median_us"] * 1e6),
                 "better_than_plain_qvq": timing["median_us"]
                 < plain[m]["median_us"],
-                "previous_qvq": previous.get((float(bits), m)),
+                "previous_qvq": previous_qvq,
                 "better_than_last_benchmark": (
-                    timing["median_us"]
-                    < previous[(float(bits), m)]["median_us"]
-                    if (float(bits), m) in previous
+                    timing["median_us"] < previous_qvq["median_us"]
+                    if previous_qvq is not None
                     else None
                 ),
                 "dense_oracle_error": error,
+                "selected_chunk_rows": (
+                    runtime_telemetry["h100_large_m_chunk_rows"]
+                    if m > 4096
+                    else None
+                ),
             }
             results.append(result)
             print(

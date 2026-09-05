@@ -124,12 +124,12 @@ int main() {
                    "copy bank_alt_id");
   }
 
-  if (ok && qvq_p32_window(
+  if (ok && qvq_p32_window_with_row_groups(
                 device_input, device_trellis, device_levels, device_bank_ids,
                 device_bank_alt_id, device_native_output,
                 device_native_workspace, kM, kK, kN, kTransitionBits,
                 kSplitCount, QVQ_P32_VARIANT_SCALAR, 128, 2, 0,
-                QVQ_P32_REDUCTION_NATIVE, stream) != 0) {
+                QVQ_P32_REDUCTION_NATIVE, 1, stream) != 0) {
     std::fprintf(stderr, "native reduction failed: %s\n", qvq_last_error());
     ok = false;
   }

@@ -4,9 +4,13 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <cuda_fp8.h>
 #include <torch/library.h>
 #include <torch/types.h>
+
+#include <c10/util/Float8_e5m2.h>
 
 #include <cute/algorithm/gemm.hpp>
 #include <cute/tensor.hpp>
@@ -108,6 +112,20 @@ struct HopperGroupedP32LaunchParams {
   int work_item_start[kMaxGroupedP32Segments];
   int64_t output_offset[kMaxGroupedP32Segments];
   int64_t partial_output_offset[kMaxGroupedP32Segments];
+};
+
+struct HopperGroupedP32DecodeParams {
+  int segment_count;
+  int n64_end[kMaxGroupedP32Segments];
+  int bank_alt_id[kMaxGroupedP32Segments];
+};
+
+struct HopperGroupedP32FoldParams {
+  int segment_count;
+  int n_start[kMaxGroupedP32Segments];
+  int width[kMaxGroupedP32Segments];
+  int output_hadamard[kMaxGroupedP32Segments];
+  const float* output_scale[kMaxGroupedP32Segments];
 };
 
 struct HopperFixedGateUpLaunchParams {
@@ -934,6 +952,459 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
 #endif
 }
 
+template <int TransitionBits>
+__global__ __launch_bounds__(kThreads) void qvq_p32_window_decode_fp16_kernel(
+    const uint32_t* __restrict__ trellis,
+    const uint8_t* __restrict__ bank_ids,
+    const Element* __restrict__ levels,
+    Element* __restrict__ output,
+    HopperGroupedP32DecodeParams grouped_params,
+    int size_k,
+    int size_n,
+    bool transpose_output) {
+#if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  constexpr int kVectorsPerP32Tile = kWordsPerP32Tile / 4;
+  __shared__ __align__(16) uint32_t
+      packed_words[kP32K16TilesPerStage][kP32N16TilesPerBlock]
+                  [kWordsPerP32Tile];
+  __shared__ uint8_t
+      packed_bank_ids[kP32K16TilesPerStage][kP32N16TilesPerBlock];
+
+  const int thread = static_cast<int>(threadIdx.x);
+  const int warp = thread >> 5;
+  const int n64_block = static_cast<int>(blockIdx.x);
+  const int k256_stage = static_cast<int>(blockIdx.y);
+  const int n_tiles = size_n / kP32TileColumns;
+  const int n16_tile_base = n64_block * kP32N16TilesPerBlock;
+
+  auto* shared_vectors = reinterpret_cast<uint4*>(&packed_words[0][0][0]);
+  const auto* global_vectors = reinterpret_cast<const uint4*>(trellis);
+  constexpr int kVectorsPerBlock = kP32K16TilesPerStage *
+      kP32N16TilesPerBlock * kVectorsPerP32Tile;
+  for (int vector = thread; vector < kVectorsPerBlock; vector += kThreads) {
+    const int tile_local = vector / kVectorsPerP32Tile;
+    const int vector_in_tile = vector - tile_local * kVectorsPerP32Tile;
+    const int k16_local = tile_local / kP32N16TilesPerBlock;
+    const int n16_local =
+        tile_local - k16_local * kP32N16TilesPerBlock;
+    const int64_t global_tile =
+        static_cast<int64_t>(k256_stage * kP32K16TilesPerStage + k16_local) *
+            n_tiles +
+        n16_tile_base + n16_local;
+    shared_vectors[vector] =
+        global_vectors[global_tile * kVectorsPerP32Tile + vector_in_tile];
+  }
+  constexpr int kBankIdsPerBlock =
+      kP32K16TilesPerStage * kP32N16TilesPerBlock;
+  for (int index = thread; index < kBankIdsPerBlock; index += kThreads) {
+    const int k16_local = index / kP32N16TilesPerBlock;
+    const int n16_local = index - k16_local * kP32N16TilesPerBlock;
+    const int64_t global_tile =
+        static_cast<int64_t>(k256_stage * kP32K16TilesPerStage + k16_local) *
+            n_tiles +
+        n16_tile_base + n16_local;
+    packed_bank_ids[k16_local][n16_local] = bank_ids[global_tile];
+  }
+  __syncthreads();
+
+  int segment = 0;
+#pragma unroll
+  for (int candidate = 1; candidate < kMaxGroupedP32Segments; ++candidate) {
+    if (candidate < grouped_params.segment_count &&
+        n64_block >= grouped_params.n64_end[candidate - 1]) {
+      segment = candidate;
+    }
+  }
+  const uint32_t alternate_bank_mask =
+      qvq_wgmma_v2_alternate_bank_mask<TransitionBits>(
+          grouped_params.bank_alt_id[segment]);
+
+  WgmmaTiledMma tiled_mma;
+  auto thread_mma = tiled_mma.get_thread_slice(thread);
+  auto coordinate_a =
+      cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_16{}));
+  auto thread_coordinate_a = thread_mma.partition_A(coordinate_a);
+  auto fragment_a = cute::make_tensor<Element>(thread_coordinate_a.shape());
+  static_assert(cute::size(decltype(fragment_a){}) == 8);
+  const auto decode_plan =
+      qvq_p32_window_lane_plan<TransitionBits>(thread & 31);
+
+#pragma unroll
+  for (int k16_local = 0; k16_local < kP32K16TilesPerStage; ++k16_local) {
+    qvq_p32_window_decode_fragment<TransitionBits, false>(
+        fragment_a,
+        &packed_words[k16_local][warp][0],
+        decode_plan,
+        packed_bank_ids[k16_local][warp],
+        levels,
+        0,
+        0,
+        alternate_bank_mask);
+#pragma unroll
+    for (int index = 0; index < cute::size(decltype(fragment_a){}); ++index) {
+      const auto coordinate = thread_coordinate_a(index);
+      const int wgmma_column = static_cast<int>(cute::get<0>(coordinate));
+      const int k16_row = static_cast<int>(cute::get<1>(coordinate));
+      const int tile_column = wgmma_column & 15;
+      const int p32_column =
+          (wgmma_column & ~15) + ((tile_column & 7) << 1) +
+          (tile_column >> 3);
+      const int global_k =
+          k256_stage * kKPerStage + k16_local * kP32TileRows + k16_row;
+      const int global_n = n64_block * kOutputColumns + p32_column;
+      const int64_t output_index = transpose_output
+          ? static_cast<int64_t>(global_n) * size_k + global_k
+          : static_cast<int64_t>(global_k) * size_n + global_n;
+      output[output_index] = fragment_a(index);
+    }
+  }
+#endif
+}
+
+constexpr int kPrefillFoldThreads = 1024;
+constexpr int kPrefillTransposeTile = 32;
+constexpr int kPrefillTransposeRows = 8;
+
+// Phase-2 folded-FP16 preparation keeps the exact Phase-1 operation order:
+// normalized K-axis Hadamard, SU multiplication, normalized child-local
+// N-axis Hadamard, SV multiplication, then one FP16 rounding store.  The
+// decoder writes [N,K], so the first transform has contiguous rows and avoids
+// Phase 1's half->float cast plus transpose materialization.
+__global__ __launch_bounds__(kPrefillFoldThreads)
+void qvq_p32_prefill_fold_k_axis_kernel(
+    const __half* __restrict__ decoded_transposed,
+    float* __restrict__ transformed_transposed,
+    const float* __restrict__ input_scale,
+    int size_k) {
+  extern __shared__ float shared[];
+  const auto padded = [](int index) { return index + (index >> 5); };
+  const int row = static_cast<int>(blockIdx.x);
+  const int64_t row_offset = static_cast<int64_t>(row) * size_k;
+
+  for (int index = static_cast<int>(threadIdx.x); index < size_k;
+       index += static_cast<int>(blockDim.x)) {
+    shared[padded(index)] =
+        __half2float(decoded_transposed[row_offset + index]);
+  }
+  __syncthreads();
+
+  for (int bit = 1; bit < size_k; bit <<= 1) {
+    for (int index = static_cast<int>(threadIdx.x); index < size_k;
+         index += static_cast<int>(blockDim.x)) {
+      const int peer = index ^ bit;
+      if (index < peer) {
+        const float a = shared[padded(index)];
+        const float b = shared[padded(peer)];
+        shared[padded(index)] = a + b;
+        shared[padded(peer)] = a - b;
+      }
+    }
+    __syncthreads();
+  }
+
+  const float reciprocal = 1.0f / sqrtf(static_cast<float>(size_k));
+  for (int index = static_cast<int>(threadIdx.x); index < size_k;
+       index += static_cast<int>(blockDim.x)) {
+    float value = shared[padded(index)];
+    value *= reciprocal;
+    value *= input_scale[index];
+    transformed_transposed[row_offset + index] = value;
+  }
+}
+
+__global__ __launch_bounds__(kPrefillFoldThreads)
+void qvq_p32_prefill_fold_k_axis_fp16_kernel(
+    const __half* __restrict__ decoded_transposed,
+    __half* __restrict__ transformed_transposed,
+    const float* __restrict__ input_scale,
+    int size_k) {
+  extern __shared__ __half2 shared_pairs[];
+  const auto padded_pair = [](int index) { return index + (index >> 4); };
+  const int row = static_cast<int>(blockIdx.x);
+  const int64_t row_offset = static_cast<int64_t>(row) * size_k;
+  const int pair_count = size_k >> 1;
+
+  for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+       pair += static_cast<int>(blockDim.x)) {
+    shared_pairs[padded_pair(pair)] =
+        reinterpret_cast<const __half2*>(decoded_transposed + row_offset)[pair];
+  }
+  __syncthreads();
+
+  for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+       pair += static_cast<int>(blockDim.x)) {
+    const __half2 value = shared_pairs[padded_pair(pair)];
+    const __half a = __low2half(value);
+    const __half b = __high2half(value);
+    shared_pairs[padded_pair(pair)] =
+        __halves2half2(__hadd(a, b), __hsub(a, b));
+  }
+  __syncthreads();
+
+  for (int bit = 2; bit < size_k; bit <<= 1) {
+    const int pair_bit = bit >> 1;
+    for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+         pair += static_cast<int>(blockDim.x)) {
+      const int peer = pair ^ pair_bit;
+      if (pair < peer) {
+        const __half2 a = shared_pairs[padded_pair(pair)];
+        const __half2 b = shared_pairs[padded_pair(peer)];
+        shared_pairs[padded_pair(pair)] = __hadd2(a, b);
+        shared_pairs[padded_pair(peer)] = __hsub2(a, b);
+      }
+    }
+    __syncthreads();
+  }
+
+  const float reciprocal = 1.0f / sqrtf(static_cast<float>(size_k));
+  for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+       pair += static_cast<int>(blockDim.x)) {
+    const __half2 value = shared_pairs[padded_pair(pair)];
+    const int index = pair << 1;
+    transformed_transposed[row_offset + index] = __float2half_rn(
+        __half2float(__low2half(value)) * reciprocal * input_scale[index]);
+    transformed_transposed[row_offset + index + 1] = __float2half_rn(
+        __half2float(__high2half(value)) * reciprocal * input_scale[index + 1]);
+  }
+}
+
+__global__ void qvq_p32_prefill_transpose_fp32_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    int rows,
+    int columns) {
+  __shared__ float tile[kPrefillTransposeTile][kPrefillTransposeTile + 1];
+  int column = static_cast<int>(blockIdx.x) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.x);
+  int row = static_cast<int>(blockIdx.y) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.y);
+#pragma unroll
+  for (int offset = 0; offset < kPrefillTransposeTile;
+       offset += kPrefillTransposeRows) {
+    if (column < columns && row + offset < rows) {
+      tile[threadIdx.y + offset][threadIdx.x] =
+          input[static_cast<int64_t>(row + offset) * columns + column];
+    }
+  }
+  __syncthreads();
+
+  column = static_cast<int>(blockIdx.y) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.x);
+  row = static_cast<int>(blockIdx.x) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.y);
+#pragma unroll
+  for (int offset = 0; offset < kPrefillTransposeTile;
+       offset += kPrefillTransposeRows) {
+    if (column < rows && row + offset < columns) {
+      output[static_cast<int64_t>(row + offset) * rows + column] =
+          tile[threadIdx.x][threadIdx.y + offset];
+    }
+  }
+}
+
+__global__ void qvq_p32_prefill_transpose_fp16_kernel(
+    const __half* __restrict__ input,
+    __half* __restrict__ output,
+    int rows,
+    int columns) {
+  __shared__ __half tile[kPrefillTransposeTile][kPrefillTransposeTile + 1];
+  int column = static_cast<int>(blockIdx.x) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.x);
+  int row = static_cast<int>(blockIdx.y) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.y);
+#pragma unroll
+  for (int offset = 0; offset < kPrefillTransposeTile;
+       offset += kPrefillTransposeRows) {
+    if (column < columns && row + offset < rows) {
+      tile[threadIdx.y + offset][threadIdx.x] =
+          input[static_cast<int64_t>(row + offset) * columns + column];
+    }
+  }
+  __syncthreads();
+
+  column = static_cast<int>(blockIdx.y) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.x);
+  row = static_cast<int>(blockIdx.x) * kPrefillTransposeTile +
+      static_cast<int>(threadIdx.y);
+#pragma unroll
+  for (int offset = 0; offset < kPrefillTransposeTile;
+       offset += kPrefillTransposeRows) {
+    if (column < rows && row + offset < columns) {
+      output[static_cast<int64_t>(row + offset) * rows + column] =
+          tile[threadIdx.x][threadIdx.y + offset];
+    }
+  }
+}
+
+__global__ __launch_bounds__(kPrefillFoldThreads)
+void qvq_p32_prefill_fold_n_axis_fp16_to_fp8_kernel(
+    const __half* __restrict__ transformed,
+    c10::Float8_e4m3fn* __restrict__ output,
+    const float* __restrict__ weight_scale,
+    HopperGroupedP32FoldParams params,
+    int size_k,
+    int size_n) {
+  extern __shared__ __half2 shared_pairs[];
+  const auto padded_pair = [](int index) { return index + (index >> 4); };
+  const int segment = static_cast<int>(blockIdx.x) % params.segment_count;
+  const int row = static_cast<int>(blockIdx.x) / params.segment_count;
+  const int width = params.width[segment];
+  const int start = params.n_start[segment];
+  const int64_t row_offset = static_cast<int64_t>(row) * size_n + start;
+  const int pair_count = width >> 1;
+
+  if (params.output_hadamard[segment]) {
+    for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+         pair += static_cast<int>(blockDim.x)) {
+      shared_pairs[padded_pair(pair)] =
+          reinterpret_cast<const __half2*>(transformed + row_offset)[pair];
+    }
+    __syncthreads();
+
+    for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+         pair += static_cast<int>(blockDim.x)) {
+      const __half2 value = shared_pairs[padded_pair(pair)];
+      const __half a = __low2half(value);
+      const __half b = __high2half(value);
+      shared_pairs[padded_pair(pair)] =
+          __halves2half2(__hadd(a, b), __hsub(a, b));
+    }
+    __syncthreads();
+
+    for (int bit = 2; bit < width; bit <<= 1) {
+      const int pair_bit = bit >> 1;
+      for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+           pair += static_cast<int>(blockDim.x)) {
+        const int peer = pair ^ pair_bit;
+        if (pair < peer) {
+          const __half2 a = shared_pairs[padded_pair(pair)];
+          const __half2 b = shared_pairs[padded_pair(peer)];
+          shared_pairs[padded_pair(pair)] = __hadd2(a, b);
+          shared_pairs[padded_pair(peer)] = __hsub2(a, b);
+        }
+      }
+      __syncthreads();
+    }
+    const float reciprocal = 1.0f / sqrtf(static_cast<float>(width));
+    for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+         pair += static_cast<int>(blockDim.x)) {
+      const __half2 packed = shared_pairs[padded_pair(pair)];
+      const int index = pair << 1;
+      float low = __half2float(__low2half(packed));
+      low *= reciprocal;
+      low *= params.output_scale[segment][index];
+      low = __half2float(__float2half_rn(low));
+      low = __half2float(__float2half_rn(low / weight_scale[0]));
+      low = fminf(448.0f, fmaxf(-448.0f, low));
+      output[static_cast<int64_t>(start + index) * size_k + row] =
+          c10::Float8_e4m3fn(low);
+      float high = __half2float(__high2half(packed));
+      high *= reciprocal;
+      high *= params.output_scale[segment][index + 1];
+      high = __half2float(__float2half_rn(high));
+      high = __half2float(__float2half_rn(high / weight_scale[0]));
+      high = fminf(448.0f, fmaxf(-448.0f, high));
+      output[static_cast<int64_t>(start + index + 1) * size_k + row] =
+          c10::Float8_e4m3fn(high);
+    }
+  } else {
+    for (int pair = static_cast<int>(threadIdx.x); pair < pair_count;
+         pair += static_cast<int>(blockDim.x)) {
+      const int index = pair << 1;
+      const __half2 packed =
+          reinterpret_cast<const __half2*>(transformed + row_offset)[pair];
+      float low = __half2float(__low2half(packed));
+      low *= params.output_scale[segment][index];
+      low = __half2float(__float2half_rn(low));
+      low = __half2float(__float2half_rn(low / weight_scale[0]));
+      low = fminf(448.0f, fmaxf(-448.0f, low));
+      output[static_cast<int64_t>(start + index) * size_k + row] =
+          c10::Float8_e4m3fn(low);
+      float high = __half2float(__high2half(packed));
+      high *= params.output_scale[segment][index + 1];
+      high = __half2float(__float2half_rn(high));
+      high = __half2float(__float2half_rn(high / weight_scale[0]));
+      high = fminf(448.0f, fmaxf(-448.0f, high));
+      output[static_cast<int64_t>(start + index + 1) * size_k + row] =
+          c10::Float8_e4m3fn(high);
+    }
+  }
+}
+
+template <bool OutputFp8>
+__global__ __launch_bounds__(kPrefillFoldThreads)
+void qvq_p32_prefill_fold_n_axis_kernel(
+    const float* __restrict__ transformed,
+    std::conditional_t<OutputFp8, c10::Float8_e4m3fn, __half>*
+        __restrict__ output,
+    const float* __restrict__ weight_scale,
+    HopperGroupedP32FoldParams params,
+    int size_k,
+    int size_n) {
+  extern __shared__ float shared[];
+  const auto padded = [](int index) { return index + (index >> 5); };
+  const int segment = static_cast<int>(blockIdx.x) % params.segment_count;
+  const int row = static_cast<int>(blockIdx.x) / params.segment_count;
+  const int width = params.width[segment];
+  const int start = params.n_start[segment];
+  const int64_t row_offset = static_cast<int64_t>(row) * size_n + start;
+
+  if (params.output_hadamard[segment]) {
+    for (int index = static_cast<int>(threadIdx.x); index < width;
+         index += static_cast<int>(blockDim.x)) {
+      shared[padded(index)] = transformed[row_offset + index];
+    }
+    __syncthreads();
+    for (int bit = 1; bit < width; bit <<= 1) {
+      for (int index = static_cast<int>(threadIdx.x); index < width;
+           index += static_cast<int>(blockDim.x)) {
+        const int peer = index ^ bit;
+        if (index < peer) {
+          const float a = shared[padded(index)];
+          const float b = shared[padded(peer)];
+          shared[padded(index)] = a + b;
+          shared[padded(peer)] = a - b;
+        }
+      }
+      __syncthreads();
+    }
+    const float reciprocal = 1.0f / sqrtf(static_cast<float>(width));
+    for (int index = static_cast<int>(threadIdx.x); index < width;
+         index += static_cast<int>(blockDim.x)) {
+      float value = shared[padded(index)];
+      value *= reciprocal;
+      value *= params.output_scale[segment][index];
+      if constexpr (OutputFp8) {
+        // Match the persistent FP8 control exactly: the folded effective
+        // weight first crosses its FP16 boundary, then is quantized to E4M3.
+        const float rounded = __half2float(__float2half_rn(value));
+        const float normalized =
+            __half2float(__float2half_rn(rounded / weight_scale[0]));
+        output[static_cast<int64_t>(start + index) * size_k + row] =
+            c10::Float8_e4m3fn(normalized);
+      } else {
+        output[row_offset + index] = __float2half_rn(value);
+      }
+    }
+  } else {
+    for (int index = static_cast<int>(threadIdx.x); index < width;
+         index += static_cast<int>(blockDim.x)) {
+      float value = transformed[row_offset + index];
+      value *= params.output_scale[segment][index];
+      if constexpr (OutputFp8) {
+        const float rounded = __half2float(__float2half_rn(value));
+        const float normalized =
+            __half2float(__float2half_rn(rounded / weight_scale[0]));
+        output[static_cast<int64_t>(start + index) * size_k + row] =
+            c10::Float8_e4m3fn(normalized);
+      } else {
+        output[row_offset + index] = __float2half_rn(value);
+      }
+    }
+  }
+}
+
 __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_w3_m16_kernel(
     const Element* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -1564,6 +2035,65 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   }
 
   constexpr int kAccumulatorValuesPerThread = cute::size(decltype(thread_coordinate_c){});
+  constexpr bool kUseCoalescedOutput =
+      FixedGateUp && !OrderedSplit && N64BlocksPerCta == 2 &&
+      RowTilesPerCta == 4 && TransitionBits != 5;
+  if constexpr (kUseCoalescedOutput) {
+    // The RS-WGMMA accumulator mapping gives every consumer eight scattered
+    // FP32 values. Direct stores therefore generate almost twice the ideal
+    // number of global sectors on H100. All TMA stages are dead here, so
+    // reclaim the input buffer as one 16x64 scratch tile per consumer group,
+    // then write the tile as aligned float4 vectors. The first named barrier
+    // keeps either group from overwriting pipeline storage before the other
+    // group has completed its final WGMMA stage. Separate group-local
+    // barriers let the independent N64 consumers progress without meeting on
+    // every output row tile.
+    asm volatile("bar.sync 1, 256;" ::: "memory");
+    float* output_scratch =
+        reinterpret_cast<float*>(shared.input.begin()) + consumer_group * 1024;
+#pragma unroll
+    for (int row_local = 0; row_local < RowTilesPerCta; ++row_local) {
+#pragma unroll
+      for (int index = 0; index < kAccumulatorValuesPerThread; ++index) {
+        const auto coordinate = thread_coordinate_c(index);
+        const int wgmma_column = static_cast<int>(cute::get<0>(coordinate));
+        const int output_row = static_cast<int>(cute::get<1>(coordinate));
+        const int tile_column = wgmma_column & 15;
+        const int p32_column =
+            (wgmma_column & ~15) + ((tile_column & 7) << 1) +
+            (tile_column >> 3);
+        const float value = row_local == 0 ? accumulator(index)
+            : row_local == 1             ? accumulator1(index)
+            : row_local == 2             ? accumulator2(index)
+                                         : accumulator3(index);
+        output_scratch[output_row * kOutputColumns + p32_column] = value;
+      }
+      if (consumer_group == 0) {
+        asm volatile("bar.sync 2, 128;" ::: "memory");
+      } else {
+        asm volatile("bar.sync 3, 128;" ::: "memory");
+      }
+
+#pragma unroll
+      for (int vector = consumer_thread; vector < 256; vector += kThreads) {
+        const int output_row = vector >> 4;
+        const int output_column = (vector & 15) << 2;
+        const int global_output_row =
+            (row_tile_begin + row_local) * kRows + output_row;
+        const int64_t output_index =
+            output_offset + static_cast<int64_t>(global_output_row) * size_n +
+            n64_block * kOutputColumns + output_column;
+        *reinterpret_cast<float4*>(partial_output + output_index) =
+            reinterpret_cast<const float4*>(output_scratch)[vector];
+      }
+      if (consumer_group == 0) {
+        asm volatile("bar.sync 2, 128;" ::: "memory");
+      } else {
+        asm volatile("bar.sync 3, 128;" ::: "memory");
+      }
+    }
+    return;
+  }
 #pragma unroll
   for (int index = 0; index < kAccumulatorValuesPerThread; ++index) {
     const auto coordinate = thread_coordinate_c(index);
@@ -1642,6 +2172,105 @@ __global__ void qvq_wgmma_reduce_split_fixed_kernel(
   }
   reinterpret_cast<float4*>(output)[vector_index] =
       make_float4(value0, value1, value2, value3);
+}
+
+__global__ void qvq_fp16_to_fp8_e5m2_clamped_vector8_kernel(
+    const Element* __restrict__ input,
+    c10::Float8_e5m2* __restrict__ output,
+    int vector_count) {
+  const int vector_index = static_cast<int>(blockIdx.x) * blockDim.x +
+      static_cast<int>(threadIdx.x);
+  if (vector_index >= vector_count) {
+    return;
+  }
+  const auto* input2 = reinterpret_cast<const __half2*>(input);
+  const int pair_index = vector_index << 2;
+  const __half2 value0 = input2[pair_index];
+  const __half2 value1 = input2[pair_index + 1];
+  const __half2 value2 = input2[pair_index + 2];
+  const __half2 value3 = input2[pair_index + 3];
+  const auto packed0 = __nv_fp8x4_e5m2(value0, value1).__x;
+  const auto packed1 = __nv_fp8x4_e5m2(value2, value3).__x;
+  reinterpret_cast<uint2*>(output)[vector_index] = make_uint2(packed0, packed1);
+}
+
+__global__ void qvq_fp16_to_fp8_e5m2_clamped_vector4_kernel(
+    const Element* __restrict__ input,
+    c10::Float8_e5m2* __restrict__ output,
+    int vector_count) {
+  const int vector_index = static_cast<int>(blockIdx.x) * blockDim.x +
+      static_cast<int>(threadIdx.x);
+  if (vector_index >= vector_count) {
+    return;
+  }
+  const auto* input2 = reinterpret_cast<const __half2*>(input);
+  const int pair_index = vector_index << 1;
+  const __half2 value0 = input2[pair_index];
+  const __half2 value1 = input2[pair_index + 1];
+  reinterpret_cast<__nv_fp8x4_storage_t*>(output)[vector_index] =
+      __nv_fp8x4_e5m2(value0, value1).__x;
+}
+
+__global__ void qvq_fp16_to_fp8_e5m2_clamped_generic_kernel(
+    const Element* __restrict__ input,
+    c10::Float8_e5m2* __restrict__ output,
+    int64_t value_count) {
+  const int64_t pair_index = static_cast<int64_t>(blockIdx.x) * blockDim.x +
+      static_cast<int64_t>(threadIdx.x);
+  const int64_t pair_count = value_count >> 1;
+  if (pair_index < pair_count) {
+    const auto value = reinterpret_cast<const __half2*>(input)[pair_index];
+    reinterpret_cast<__nv_fp8x2_storage_t*>(output)[pair_index] =
+        __nv_fp8x2_e5m2(value).__x;
+  }
+  if ((value_count & 1) && pair_index == pair_count) {
+    float value = static_cast<float>(input[value_count - 1]);
+    if (isfinite(value)) {
+      value = fminf(57344.0f, fmaxf(-57344.0f, value));
+    }
+    output[value_count - 1] = c10::Float8_e5m2(value);
+  }
+}
+
+at::Tensor qvq_fp16_to_fp8_e5m2_clamped(const at::Tensor& input) {
+  TORCH_CHECK(input.is_cuda(), "FP8 prefill conversion requires CUDA input");
+  TORCH_CHECK(input.scalar_type() == at::kHalf, "FP8 prefill conversion requires FP16 input");
+  TORCH_CHECK(input.is_contiguous(), "FP8 prefill conversion requires contiguous input");
+  auto output = at::empty(input.sizes(), input.options().dtype(at::kFloat8_e5m2));
+  const int64_t value_count = input.numel();
+  constexpr int kConvertThreads = 256;
+  const int64_t pair_count = (value_count + 1) / 2;
+  const int64_t blocks = (pair_count + kConvertThreads - 1) / kConvertThreads;
+  const auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  if ((value_count & 7) == 0 &&
+      value_count / 8 <= std::numeric_limits<int>::max()) {
+    const int vector_count = static_cast<int>(value_count / 8);
+    const int vector_blocks =
+        (vector_count + kConvertThreads - 1) / kConvertThreads;
+    qvq_fp16_to_fp8_e5m2_clamped_vector8_kernel
+        <<<vector_blocks, kConvertThreads, 0, stream>>>(
+            reinterpret_cast<const Element*>(input.data_ptr<at::Half>()),
+            output.data_ptr<c10::Float8_e5m2>(),
+            vector_count);
+  } else if ((value_count & 3) == 0 &&
+      value_count / 4 <= std::numeric_limits<int>::max()) {
+    const int vector_count = static_cast<int>(value_count / 4);
+    const int vector_blocks =
+        (vector_count + kConvertThreads - 1) / kConvertThreads;
+    qvq_fp16_to_fp8_e5m2_clamped_vector4_kernel
+        <<<vector_blocks, kConvertThreads, 0, stream>>>(
+            reinterpret_cast<const Element*>(input.data_ptr<at::Half>()),
+            output.data_ptr<c10::Float8_e5m2>(),
+            vector_count);
+  } else {
+    qvq_fp16_to_fp8_e5m2_clamped_generic_kernel
+        <<<blocks, kConvertThreads, 0, stream>>>(
+            reinterpret_cast<const Element*>(input.data_ptr<at::Half>()),
+            output.data_ptr<c10::Float8_e5m2>(),
+            value_count);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
 }
 
 void qvq_wgmma_launch_ordered_split_reduction(
@@ -2856,9 +3485,429 @@ at::Tensor qvq_p32_window_wgmma_m64_tma_grouped_ordered_reuse4(
   }
 }
 
+template <int TransitionBits>
+at::Tensor qvq_p32_window_decode_grouped_fp16_impl(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    bool transpose_output = false) {
+  TORCH_CHECK(trellis.is_cuda(), "grouped P32 FP16 decoder requires CUDA tensors");
+  c10::cuda::CUDAGuard device_guard(trellis.device());
+  TORCH_CHECK(
+      levels.device() == trellis.device() && bank_ids.device() == trellis.device(),
+      "grouped P32 FP16 decoder tensors must share one CUDA device");
+  TORCH_CHECK(
+      trellis.scalar_type() == at::kInt && levels.scalar_type() == at::kHalf &&
+          bank_ids.scalar_type() == at::kByte,
+      "grouped P32 FP16 decoder requires int32 trellis, FP16 levels, and uint8 bank IDs");
+  TORCH_CHECK(
+      trellis.is_contiguous() && levels.is_contiguous() && bank_ids.is_contiguous(),
+      "grouped P32 FP16 decoder tensors must be contiguous");
+  TORCH_CHECK(
+      in_features > 0 && in_features % kKPerStage == 0,
+      "grouped P32 FP16 decoder K must be a positive multiple of 256");
+  const int64_t segment_count = static_cast<int64_t>(out_features.size());
+  TORCH_CHECK(
+      segment_count >= 1 && segment_count <= kMaxGroupedP32Segments &&
+          static_cast<int64_t>(bank_alt_ids.size()) == segment_count,
+      "grouped P32 FP16 decoder requires one to three matching segments");
+  TORCH_CHECK(
+      levels.numel() == 256,
+      "grouped P32 FP16 decoder requires 256 PGC16 levels");
+
+  cudaDeviceProp properties{};
+  C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, trellis.get_device()));
+  TORCH_CHECK(
+      properties.major == 9 && properties.minor == 0,
+      "grouped P32 FP16 decoder requires an SM90 H100/H200 device");
+
+  HopperGroupedP32DecodeParams grouped_params{};
+  grouped_params.segment_count = static_cast<int>(segment_count);
+  int64_t total_n = 0;
+  for (int segment = 0; segment < segment_count; ++segment) {
+    const int64_t width = out_features[segment];
+    const int64_t alt_id = bank_alt_ids[segment];
+    TORCH_CHECK(
+        width > 0 && width % kOutputColumns == 0,
+        "grouped P32 FP16 decoder widths must be positive multiples of 64");
+    TORCH_CHECK(
+        alt_id >= 0 && alt_id <= 3,
+        "grouped P32 FP16 decoder alternative bank IDs must be in [0, 3]");
+    total_n += width;
+    TORCH_CHECK(
+        total_n <= std::numeric_limits<int>::max(),
+        "grouped P32 FP16 decoder total N exceeds int32 range");
+    grouped_params.n64_end[segment] =
+        static_cast<int>(total_n / kOutputColumns);
+    grouped_params.bank_alt_id[segment] = static_cast<int>(alt_id);
+  }
+
+  constexpr int kWordsPerP32Tile = 4 * TransitionBits;
+  const int64_t k_tiles = in_features / kP32TileRows;
+  const int64_t n_tiles = total_n / kP32TileColumns;
+  TORCH_CHECK(
+      trellis.numel() == k_tiles * n_tiles * kWordsPerP32Tile,
+      "grouped P32 FP16 decoder trellis size mismatch");
+  TORCH_CHECK(
+      bank_ids.numel() == k_tiles * n_tiles,
+      "grouped P32 FP16 decoder bank-ID size mismatch");
+
+  auto output = transpose_output
+      ? at::empty({total_n, in_features}, levels.options().dtype(at::kHalf))
+      : at::empty({in_features, total_n}, levels.options().dtype(at::kHalf));
+  const cudaStream_t stream =
+      at::cuda::getCurrentCUDAStream(trellis.get_device());
+  const dim3 grid(
+      static_cast<unsigned>(total_n / kOutputColumns),
+      static_cast<unsigned>(in_features / kKPerStage),
+      1);
+  qvq_p32_window_decode_fp16_kernel<TransitionBits>
+      <<<grid, kThreads, 0, stream>>>(
+          reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+          bank_ids.data_ptr<uint8_t>(),
+          reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+          reinterpret_cast<Element*>(output.data_ptr<at::Half>()),
+          grouped_params,
+          static_cast<int>(in_features),
+          static_cast<int>(total_n),
+          transpose_output);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+at::Tensor qvq_p32_window_decode_grouped_fp16(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    int64_t transition_bits,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_decode_grouped_fp16_impl<4>(
+          trellis, levels, bank_ids, in_features, out_features, bank_alt_ids);
+    case 5:
+      return qvq_p32_window_decode_grouped_fp16_impl<5>(
+          trellis, levels, bank_ids, in_features, out_features, bank_alt_ids);
+    case 6:
+      return qvq_p32_window_decode_grouped_fp16_impl<6>(
+          trellis, levels, bank_ids, in_features, out_features, bank_alt_ids);
+    case 7:
+      return qvq_p32_window_decode_grouped_fp16_impl<7>(
+          trellis, levels, bank_ids, in_features, out_features, bank_alt_ids);
+    default:
+      TORCH_CHECK(
+          false,
+          "grouped P32 FP16 decoder transition bits must be in [4, 7]");
+  }
+}
+
+template <int TransitionBits, bool OutputFp8 = false, bool HalfFold = false>
+at::Tensor qvq_p32_window_prepare_grouped_fp16_impl(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    const at::Tensor& input_scale,
+    at::TensorList output_scales,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef output_hadamards,
+    const at::Tensor* weight_scale = nullptr) {
+  static_assert(!HalfFold || OutputFp8);
+  TORCH_CHECK(
+      in_features >= 256 && in_features <= 16384 &&
+          (in_features & (in_features - 1)) == 0,
+      "grouped P32 folded-FP16 preparation requires power-of-two K in [256, 16384]");
+  const int64_t segment_count = static_cast<int64_t>(out_features.size());
+  TORCH_CHECK(
+      segment_count >= 1 && segment_count <= kMaxGroupedP32Segments &&
+          static_cast<int64_t>(bank_alt_ids.size()) == segment_count &&
+          static_cast<int64_t>(output_scales.size()) == segment_count &&
+          static_cast<int64_t>(output_hadamards.size()) == segment_count,
+      "grouped P32 folded-FP16 preparation requires one to three matching segments");
+  TORCH_CHECK(
+      input_scale.is_cuda() && input_scale.device() == trellis.device() &&
+          input_scale.scalar_type() == at::kFloat && input_scale.is_contiguous() &&
+          input_scale.numel() == in_features,
+      "grouped P32 folded-FP16 preparation requires contiguous FP32 input scale [K]");
+  if constexpr (OutputFp8) {
+    TORCH_CHECK(
+        weight_scale != nullptr && weight_scale->is_cuda() &&
+            weight_scale->device() == trellis.device() &&
+            weight_scale->scalar_type() == at::kFloat &&
+            weight_scale->is_contiguous() && weight_scale->numel() == 1,
+        "grouped P32 folded-FP8 preparation requires one contiguous CUDA FP32 weight scale");
+  }
+
+  HopperGroupedP32FoldParams fold_params{};
+  fold_params.segment_count = static_cast<int>(segment_count);
+  int64_t total_n = 0;
+  int64_t max_hadamard_width = 0;
+  for (int segment = 0; segment < segment_count; ++segment) {
+    const int64_t width = out_features[segment];
+    const int64_t output_hadamard = output_hadamards[segment];
+    const at::Tensor& output_scale = output_scales[segment];
+    TORCH_CHECK(
+        output_scale.is_cuda() && output_scale.device() == trellis.device() &&
+            output_scale.scalar_type() == at::kFloat &&
+            output_scale.is_contiguous() && output_scale.numel() == width,
+        "grouped P32 folded-FP16 preparation requires contiguous FP32 output scales [N]");
+    TORCH_CHECK(
+        output_hadamard == 0 || output_hadamard == 1,
+        "grouped P32 folded-FP16 output-H flags must be zero or one");
+    if (output_hadamard) {
+      TORCH_CHECK(
+          width >= 2 && width <= 16384 && (width & (width - 1)) == 0,
+          "grouped P32 folded-FP16 output Hadamard requires power-of-two child N");
+      max_hadamard_width = std::max(max_hadamard_width, width);
+    }
+    fold_params.n_start[segment] = static_cast<int>(total_n);
+    fold_params.width[segment] = static_cast<int>(width);
+    fold_params.output_hadamard[segment] = static_cast<int>(output_hadamard);
+    fold_params.output_scale[segment] = output_scale.data_ptr<float>();
+    total_n += width;
+    TORCH_CHECK(
+        total_n <= std::numeric_limits<int>::max(),
+        "grouped P32 folded-FP16 preparation total N exceeds int32 range");
+  }
+
+  auto decoded_transposed = qvq_p32_window_decode_grouped_fp16_impl<TransitionBits>(
+      trellis,
+      levels,
+      bank_ids,
+      in_features,
+      out_features,
+      bank_alt_ids,
+      true);
+  auto transformed_transposed = at::empty(
+      {total_n, in_features},
+      levels.options().dtype(HalfFold ? at::kHalf : at::kFloat));
+  auto transformed = at::empty(
+      {in_features, total_n},
+      levels.options().dtype(HalfFold ? at::kHalf : at::kFloat));
+  auto output = OutputFp8
+      ? at::empty(
+            {total_n, in_features},
+            levels.options().dtype(at::kFloat8_e4m3fn))
+      : at::empty(
+            {in_features, total_n}, levels.options().dtype(at::kHalf));
+
+  const cudaStream_t stream =
+      at::cuda::getCurrentCUDAStream(trellis.get_device());
+  const size_t k_shared_bytes = static_cast<size_t>(
+      in_features + in_features / (HalfFold ? 16 : 32)) *
+      (HalfFold ? sizeof(__half) : sizeof(float));
+  if constexpr (HalfFold) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        qvq_p32_prefill_fold_k_axis_fp16_kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(k_shared_bytes)));
+    qvq_p32_prefill_fold_k_axis_fp16_kernel<<<
+        static_cast<unsigned>(total_n),
+        kPrefillFoldThreads,
+        k_shared_bytes,
+        stream>>>(
+            reinterpret_cast<const __half*>(decoded_transposed.const_data_ptr()),
+            reinterpret_cast<__half*>(transformed_transposed.mutable_data_ptr()),
+            input_scale.data_ptr<float>(),
+            static_cast<int>(in_features));
+  } else {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        qvq_p32_prefill_fold_k_axis_kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(k_shared_bytes)));
+    qvq_p32_prefill_fold_k_axis_kernel<<<
+        static_cast<unsigned>(total_n),
+        kPrefillFoldThreads,
+        k_shared_bytes,
+        stream>>>(
+            reinterpret_cast<const __half*>(decoded_transposed.const_data_ptr()),
+            transformed_transposed.data_ptr<float>(),
+            input_scale.data_ptr<float>(),
+            static_cast<int>(in_features));
+  }
+
+  const dim3 transpose_block(kPrefillTransposeTile, kPrefillTransposeRows, 1);
+  const dim3 transpose_grid(
+      static_cast<unsigned>(
+          (in_features + kPrefillTransposeTile - 1) / kPrefillTransposeTile),
+      static_cast<unsigned>(
+          (total_n + kPrefillTransposeTile - 1) / kPrefillTransposeTile),
+      1);
+  if constexpr (HalfFold) {
+    qvq_p32_prefill_transpose_fp16_kernel<<<
+        transpose_grid, transpose_block, 0, stream>>>(
+            reinterpret_cast<const __half*>(
+                transformed_transposed.const_data_ptr()),
+            reinterpret_cast<__half*>(transformed.mutable_data_ptr()),
+            static_cast<int>(total_n),
+            static_cast<int>(in_features));
+  } else {
+    qvq_p32_prefill_transpose_fp32_kernel<<<
+        transpose_grid, transpose_block, 0, stream>>>(
+            transformed_transposed.data_ptr<float>(),
+            transformed.data_ptr<float>(),
+            static_cast<int>(total_n),
+            static_cast<int>(in_features));
+  }
+
+  const size_t n_shared_bytes = static_cast<size_t>(
+      max_hadamard_width + max_hadamard_width / (HalfFold ? 16 : 32)) *
+      (HalfFold ? sizeof(__half) : sizeof(float));
+  if constexpr (HalfFold) {
+    if (n_shared_bytes > 0) {
+      C10_CUDA_CHECK(cudaFuncSetAttribute(
+          qvq_p32_prefill_fold_n_axis_fp16_to_fp8_kernel,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          static_cast<int>(n_shared_bytes)));
+    }
+    qvq_p32_prefill_fold_n_axis_fp16_to_fp8_kernel<<<
+        static_cast<unsigned>(in_features * segment_count),
+        kPrefillFoldThreads,
+        n_shared_bytes,
+        stream>>>(
+            reinterpret_cast<const __half*>(transformed.const_data_ptr()),
+            output.data_ptr<c10::Float8_e4m3fn>(),
+            weight_scale->data_ptr<float>(),
+            fold_params,
+            static_cast<int>(in_features),
+            static_cast<int>(total_n));
+  } else {
+    if (n_shared_bytes > 0) {
+      C10_CUDA_CHECK(cudaFuncSetAttribute(
+          qvq_p32_prefill_fold_n_axis_kernel<OutputFp8>,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          static_cast<int>(n_shared_bytes)));
+    }
+    qvq_p32_prefill_fold_n_axis_kernel<OutputFp8><<<
+        static_cast<unsigned>(in_features * segment_count),
+        kPrefillFoldThreads,
+        n_shared_bytes,
+        stream>>>(
+            transformed.data_ptr<float>(),
+            reinterpret_cast<std::conditional_t<
+                OutputFp8, c10::Float8_e4m3fn, __half>*>(
+                output.mutable_data_ptr()),
+            OutputFp8 ? weight_scale->data_ptr<float>() : nullptr,
+            fold_params,
+            static_cast<int>(in_features),
+            static_cast<int>(total_n));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return output;
+}
+
+at::Tensor qvq_p32_window_prepare_grouped_fp16(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    const at::Tensor& input_scale,
+    at::TensorList output_scales,
+    int64_t transition_bits,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef output_hadamards) {
+  switch (transition_bits) {
+    case 4:
+      return qvq_p32_window_prepare_grouped_fp16_impl<4>(
+          trellis, levels, bank_ids, input_scale, output_scales, in_features,
+          out_features, bank_alt_ids, output_hadamards);
+    case 5:
+      return qvq_p32_window_prepare_grouped_fp16_impl<5>(
+          trellis, levels, bank_ids, input_scale, output_scales, in_features,
+          out_features, bank_alt_ids, output_hadamards);
+    case 6:
+      return qvq_p32_window_prepare_grouped_fp16_impl<6>(
+          trellis, levels, bank_ids, input_scale, output_scales, in_features,
+          out_features, bank_alt_ids, output_hadamards);
+    case 7:
+      return qvq_p32_window_prepare_grouped_fp16_impl<7>(
+          trellis, levels, bank_ids, input_scale, output_scales, in_features,
+          out_features, bank_alt_ids, output_hadamards);
+    default:
+      TORCH_CHECK(
+          false,
+          "grouped P32 folded-FP16 preparation transition bits must be in [4, 7]");
+  }
+}
+
+at::Tensor qvq_p32_window_prepare_grouped_fp8(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    const at::Tensor& input_scale,
+    at::TensorList output_scales,
+    const at::Tensor& weight_scale,
+    int64_t transition_bits,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef output_hadamards) {
+#define QVQ_PREPARE_GROUPED_FP8(TRANSITION_BITS)                               \
+  return qvq_p32_window_prepare_grouped_fp16_impl<TRANSITION_BITS, true>(      \
+      trellis, levels, bank_ids, input_scale, output_scales, in_features,     \
+      out_features, bank_alt_ids, output_hadamards, &weight_scale)
+  switch (transition_bits) {
+    case 4:
+      QVQ_PREPARE_GROUPED_FP8(4);
+    case 5:
+      QVQ_PREPARE_GROUPED_FP8(5);
+    case 6:
+      QVQ_PREPARE_GROUPED_FP8(6);
+    case 7:
+      QVQ_PREPARE_GROUPED_FP8(7);
+    default:
+      TORCH_CHECK(
+          false,
+          "grouped P32 folded-FP8 preparation transition bits must be in [4, 7]");
+  }
+#undef QVQ_PREPARE_GROUPED_FP8
+}
+
+at::Tensor qvq_p32_window_prepare_grouped_fp8_half_fold(
+    const at::Tensor& trellis,
+    const at::Tensor& levels,
+    const at::Tensor& bank_ids,
+    const at::Tensor& input_scale,
+    at::TensorList output_scales,
+    const at::Tensor& weight_scale,
+    int64_t transition_bits,
+    int64_t in_features,
+    at::IntArrayRef out_features,
+    at::IntArrayRef bank_alt_ids,
+    at::IntArrayRef output_hadamards) {
+#define QVQ_PREPARE_GROUPED_FP8_HALF(TRANSITION_BITS)                          \
+  return qvq_p32_window_prepare_grouped_fp16_impl<                             \
+      TRANSITION_BITS, true, true>(                                            \
+      trellis, levels, bank_ids, input_scale, output_scales, in_features,     \
+      out_features, bank_alt_ids, output_hadamards, &weight_scale)
+  switch (transition_bits) {
+    case 4:
+      QVQ_PREPARE_GROUPED_FP8_HALF(4);
+    case 5:
+      QVQ_PREPARE_GROUPED_FP8_HALF(5);
+    case 6:
+      QVQ_PREPARE_GROUPED_FP8_HALF(6);
+    case 7:
+      QVQ_PREPARE_GROUPED_FP8_HALF(7);
+    default:
+      TORCH_CHECK(
+          false,
+          "grouped P32 half-folded FP8 preparation transition bits must be in [4, 7]");
+  }
+#undef QVQ_PREPARE_GROUPED_FP8_HALF
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
+  m.def("fp16_to_fp8_e5m2_clamped(Tensor input) -> Tensor");
   m.def("p32_window_w3_m16(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_w3_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
   m.def("p32_window_m16_tma(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
@@ -2872,9 +3921,14 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_m32_tma_grouped_ordered_reuse2(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m64_tma_grouped_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m64_tma_grouped_ordered_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
+  m.def("p32_window_decode_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids) -> Tensor");
+  m.def("p32_window_prepare_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
+  m.def("p32_window_prepare_grouped_fp8(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, Tensor weight_scale, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
+  m.def("p32_window_prepare_grouped_fp8_half_fold(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, Tensor weight_scale, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
+  m.impl("fp16_to_fp8_e5m2_clamped", qvq_fp16_to_fp8_e5m2_clamped);
   m.impl("p32_window_w3_m16", qvq_p32_window_wgmma_w3_m16);
   m.impl("p32_window_w3_m16_tma", qvq_p32_window_wgmma_w3_m16_tma);
   m.impl("p32_window_m16_tma", qvq_p32_window_wgmma_m16_tma);
@@ -2888,4 +3942,8 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_m32_tma_grouped_ordered_reuse2", qvq_p32_window_wgmma_m32_tma_grouped_ordered_reuse2);
   m.impl("p32_window_m64_tma_grouped_reuse4", qvq_p32_window_wgmma_m64_tma_grouped_reuse4);
   m.impl("p32_window_m64_tma_grouped_ordered_reuse4", qvq_p32_window_wgmma_m64_tma_grouped_ordered_reuse4);
+  m.impl("p32_window_decode_grouped_fp16", qvq_p32_window_decode_grouped_fp16);
+  m.impl("p32_window_prepare_grouped_fp16", qvq_p32_window_prepare_grouped_fp16);
+  m.impl("p32_window_prepare_grouped_fp8", qvq_p32_window_prepare_grouped_fp8);
+  m.impl("p32_window_prepare_grouped_fp8_half_fold", qvq_p32_window_prepare_grouped_fp8_half_fold);
 }

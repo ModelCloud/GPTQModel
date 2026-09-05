@@ -12,7 +12,7 @@ extern "C" {
 // launch-autotune entries when implementation details change.
 #define QVQ_P32_OPERATION_VERSION 1
 #define QVQ_P32_ABI_VERSION 1
-#define QVQ_P32_KERNEL_VERSION 9
+#define QVQ_P32_KERNEL_VERSION 10
 #define QVQ_P32_COMPILED_SM 80
 
 #define QVQ_P32_TILE_SIZE 16
@@ -26,6 +26,9 @@ extern "C" {
 #define QVQ_P32_GROUPED_M_MAX 16
 #define QVQ_P32_GROUP_COUNT_MIN 2
 #define QVQ_P32_GROUP_COUNT_MAX 3
+#define QVQ_P32_ROW_GROUPS_AUTO 0
+#define QVQ_P32_ROW_GROUPS_MIN 1
+#define QVQ_P32_ROW_GROUPS_MAX 8
 
 // Kernel variants are compile-time specializations selected by the host
 // tuner. The scalar variant is intended for small M; the block variant
@@ -88,6 +91,32 @@ int qvq_p32_window(
     int stage_k_tiles,
     int static_n,
     int reduction_mode,
+    void* stream);
+
+// Explicit large-M scheduling entry point for compiler-owned autotuners.
+// `row_groups` selects how many adjacent M16 tiles share one packed weight
+// decode and must be 1, 2, 4, or 8. The legacy qvq_p32_window entry point
+// retains QvQ's automatic row-group policy for framework callers that do not
+// own this tuning axis.
+int qvq_p32_window_with_row_groups(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const void* bank_alt_id,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int transition_bits,
+    int split_count,
+    int kernel_variant,
+    int threads,
+    int stage_k_tiles,
+    int static_n,
+    int reduction_mode,
+    int row_groups,
     void* stream);
 
 // Native grouped V2B2-P32 entry point. `bank_alt_ids` has one uint8 selector

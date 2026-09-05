@@ -272,6 +272,103 @@ mean.  The M128-and-larger gap therefore remains the next design target even
 after removing redundant transforms and increasing gate/up scheduler
 readiness.
 
+## Coalesced accumulator-store production result
+
+The H100 N128 by M64 gate/up kernel now transposes each final N64 by M16 FP32
+accumulator tile through reclaimed shared memory and issues aligned `float4`
+global stores for W2, W3, and W3.5.  W2.5 retains the previous direct stores
+because its measured geometric mean regressed by `0.54%` when the transpose
+was enabled.
+
+Across the 18 affected W2/W3/W3.5 cells at M128-M4096, every cell improves.
+Geometric-mean speedup over the preceding production artifact is `1.0169x`,
+with a `1.0049x` to `1.0300x` range.  Across the full 32-cell matrix,
+including unchanged M32/M64 and W2.5 paths, geometric-mean speedup is
+`1.0102x`.  Maximum dense-oracle error is `1.133e-6`; maximum mean absolute
+error is `1.585e-7`.
+
+| Rate | M; gate/up K,N; down K,N | QVQ us | vs Marlin W4 | vs Machete W4 | Better than last |
+| ---: | :--- | ---: | ---: | ---: | :---: |
+| W2 | 32; 2048,8192; 8192,2048 | 67.083 | 0.942x | 0.830x | Yes |
+| W2 | 64; 2048,8192; 8192,2048 | 82.717 | 1.131x | 0.756x | Yes |
+| W2 | 128; 2048,8192; 8192,2048 | 133.071 | 0.596x | 0.549x | Yes |
+| W2 | 256; 2048,8192; 8192,2048 | 238.818 | 0.401x | 0.349x | Yes |
+| W2 | 512; 2048,8192; 8192,2048 | 462.548 | 0.357x | 0.254x | Yes |
+| W2 | 1024; 2048,8192; 8192,2048 | 902.252 | 0.370x | 0.245x | Yes |
+| W2 | 2048; 2048,8192; 8192,2048 | 1754.747 | 0.398x | 0.256x | Yes |
+| W2 | 4096; 2048,8192; 8192,2048 | 3503.391 | 0.402x | 0.261x | Yes |
+| W2.5 | 32; 2048,8192; 8192,2048 | 74.384 | 0.850x | 0.749x | No |
+| W2.5 | 64; 2048,8192; 8192,2048 | 83.749 | 1.117x | 0.746x | Yes |
+| W2.5 | 128; 2048,8192; 8192,2048 | 133.417 | 0.595x | 0.548x | Yes |
+| W2.5 | 256; 2048,8192; 8192,2048 | 242.502 | 0.395x | 0.344x | No |
+| W2.5 | 512; 2048,8192; 8192,2048 | 465.763 | 0.355x | 0.253x | Yes |
+| W2.5 | 1024; 2048,8192; 8192,2048 | 917.515 | 0.364x | 0.241x | Yes |
+| W2.5 | 2048; 2048,8192; 8192,2048 | 1763.127 | 0.396x | 0.255x | Yes |
+| W2.5 | 4096; 2048,8192; 8192,2048 | 3528.274 | 0.399x | 0.259x | No |
+| W3 | 32; 2048,8192; 8192,2048 | 74.607 | 0.847x | 0.746x | No |
+| W3 | 64; 2048,8192; 8192,2048 | 84.814 | 1.103x | 0.737x | No |
+| W3 | 128; 2048,8192; 8192,2048 | 131.545 | 0.603x | 0.556x | Yes |
+| W3 | 256; 2048,8192; 8192,2048 | 240.707 | 0.398x | 0.346x | Yes |
+| W3 | 512; 2048,8192; 8192,2048 | 462.728 | 0.357x | 0.254x | Yes |
+| W3 | 1024; 2048,8192; 8192,2048 | 911.258 | 0.367x | 0.242x | Yes |
+| W3 | 2048; 2048,8192; 8192,2048 | 1758.878 | 0.397x | 0.255x | Yes |
+| W3 | 4096; 2048,8192; 8192,2048 | 3503.091 | 0.402x | 0.261x | Yes |
+| W3.5 | 32; 2048,8192; 8192,2048 | 74.389 | 0.850x | 0.748x | Yes |
+| W3.5 | 64; 2048,8192; 8192,2048 | 88.134 | 1.062x | 0.709x | Yes |
+| W3.5 | 128; 2048,8192; 8192,2048 | 134.142 | 0.592x | 0.545x | Yes |
+| W3.5 | 256; 2048,8192; 8192,2048 | 239.785 | 0.400x | 0.348x | Yes |
+| W3.5 | 512; 2048,8192; 8192,2048 | 476.671 | 0.346x | 0.247x | Yes |
+| W3.5 | 1024; 2048,8192; 8192,2048 | 940.895 | 0.355x | 0.235x | Yes |
+| W3.5 | 2048; 2048,8192; 8192,2048 | 1807.029 | 0.386x | 0.249x | Yes |
+| W3.5 | 4096; 2048,8192; 8192,2048 | 3605.106 | 0.391x | 0.254x | Yes |
+
+The `No` cells belong to paths whose executable kernel did not change and are
+retained as strict run-to-run telemetry.  The optimization's promotion gate
+is the 18 affected cells, all of which report `Yes`.
+
+## M8192 autotuned downward multiplexing
+
+Before this path, M8192 was rejected by the grouped runtime and fell back to
+ordinary per-module CUDA execution at roughly 357 milliseconds.  The runtime
+now graph-times row targets 512, 1024, 2048, and 4096 once per cached shape
+bucket.  Every rate selected 4096 rows on the physical H100.
+
+| Rate | M; gate/up K,N; down K,N | Selected rows | QVQ us | vs Marlin W4 | vs Machete W4 | Better than last |
+| ---: | :--- | ---: | ---: | ---: | ---: | :---: |
+| W2 | 8192; 2048,8192; 8192,2048 | 4096 | 7064.101 | 0.384x | 0.244x | Yes |
+| W2.5 | 8192; 2048,8192; 8192,2048 | 4096 | 7114.485 | 0.382x | 0.243x | Yes |
+| W3 | 8192; 2048,8192; 8192,2048 | 4096 | 7032.811 | 0.386x | 0.246x | Yes |
+| W3.5 | 8192; 2048,8192; 8192,2048 | 4096 | 7291.296 | 0.372x | 0.237x | Yes |
+
+Speedup over the preceding fallback ranges from `49.03x` to `50.85x`.
+Maximum dense-oracle error is `1.132e-6`.  M4097 also passes exact output
+equality across every candidate target and warmed-model/cold-plan CUDA Graph
+capture plus repeated replay.  The remaining W4 comparator gap is therefore
+not a >4096 dispatch cliff; it is the scaling cost of the existing M64
+internal row tile.
+
+### Generic grouped QKV at M8192
+
+The same row-plan autotuner now covers the generic recovered grouped
+projection path, rather than only the fused MLP.  This closes the QKV runtime
+fallback above M4096 while retaining child-local recovery, output shapes, and
+CUDA Graph replay.  Every candidate target is bit-exact at M4097, and all four
+rates select 4096 rows at M8192.
+
+| Rate | M x K x aggregate N | Selected rows | QVQ us | vs prior fallback | vs Marlin W4 | vs Machete W4 | Better than last | Effective TFLOP/s | Max error |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: | ---: |
+| W2 | 8192 x 2048 x 3072 | 4096 | 2280.032 | 19.975x | 0.132x | 0.102x | Yes | 45.210 | 1.708e-5 |
+| W2.5 | 8192 x 2048 x 3072 | 4096 | 2340.605 | 19.460x | 0.129x | 0.099x | Yes | 44.040 | 1.679e-5 |
+| W3 | 8192 x 2048 x 3072 | 4096 | 2331.434 | 19.522x | 0.130x | 0.099x | Yes | 44.213 | 1.634e-5 |
+| W3.5 | 8192 x 2048 x 3072 | 4096 | 2334.272 | 19.489x | 0.129x | 0.099x | Yes | 44.159 | 1.638e-5 |
+
+The previous per-child path is roughly 45.5 milliseconds, so multiplexing
+removes the catastrophic dispatch cliff.  It remains about 7.7 times slower
+than Marlin and 10.1 times slower than Machete.  This is expected from
+replaying a decoder-oriented M64 internal tile: the next large-M phase needs
+a true prefill tile that increases row reuse without retaining one FP32
+accumulator set per M16 tile.
+
 ## Rejected reuse-8 experiment
 
 An exact M128 CTA stored eight input tiles and eight accumulator fragments
@@ -288,3 +385,108 @@ Reuse-8 is not present in production.  The next design must share decoded
 weights without retaining eight independent FP32 accumulator fragments in one
 CTA—for example, a persistent/shared decoded-weight tile across smaller row
 consumer groups.
+
+## M8192 folded FP8 QKV prefill
+
+The physical-H100 prefill path algebraically folds the P32-reconstructed
+weight, input/output Hadamards, and child scales into one transient effective
+QKV weight.  It then performs a graph-safe packed E5M2 activation conversion
+and one E5M2-by-E4M3 FP8 matrix multiplication.  These rows use 20 warmups,
+31 samples, and 10 CUDA Graph replays per sample.  `Better than last` compares
+against the committed folded-FP8 pair-conversion benchmark rather than the
+much slower row-multiplexed result.
+
+| Rate | M x K x N | QVQ us | vs Marlin W4 | vs Machete W4 | Better than last | Effective TFLOP/s | Mean error | Max error |
+| ---: | ---: | ---: | ---: | ---: | :---: | ---: | ---: | ---: |
+| W2 | 8192 x 2048 x 3072 | 101.734 | 3.022x | 2.280x | Yes | 1013.219 | 8.495e-5 | 6.277e-4 |
+| W2.5 | 8192 x 2048 x 3072 | 102.016 | 3.014x | 2.274x | Yes | 1010.422 | 8.498e-5 | 5.856e-4 |
+| W3 | 8192 x 2048 x 3072 | 102.138 | 3.011x | 2.271x | Yes | 1009.219 | 8.496e-5 | 6.326e-4 |
+| W3.5 | 8192 x 2048 x 3072 | 101.696 | 3.024x | 2.281x | Yes | 1013.601 | 8.498e-5 | 6.360e-4 |
+
+Relative to the preceding exact row-multiplexed QVQ result, the complete
+speedup is `22.41-22.91x`.  Relative to the first folded-FP8 implementation,
+the promoted eight-value conversion adds another `1.085-1.094x`.  All four
+rates beat both W4 comparators and remain below the unchanged `2e-3`
+dense-P32 maximum-error gate.
+
+## Prefill-to-decode cache lifecycle
+
+The lifecycle benchmark requires every prefill M to be at least 8192 and
+asserts that each prefill advances the folded-FP8 launch counter.  It first
+times the cache-disabled exact P32 path, enables and constructs the cache at
+M8192, reuses that same payload at M8192 and M16384, and finally measures
+decode M1-M16.  Every decode measurement asserts that the FP8-prefill launch
+counter remains unchanged.  Thus a decode row cannot be mislabeled as a
+cached-prefill execution.
+
+Warm-prefill results:
+
+| Rate | M x K x N | QVQ us | vs Marlin W4 | vs Machete W4 | Better than exact P32 |
+| ---: | ---: | ---: | ---: | ---: | :---: |
+| W2 | 8192 x 2048 x 3072 | 101.814 | 3.017x | 2.256x | Yes |
+| W2 | 16384 x 2048 x 3072 | 202.384 | 3.073x | 2.351x | Yes |
+| W2.5 | 8192 x 2048 x 3072 | 102.022 | 3.011x | 2.251x | Yes |
+| W2.5 | 16384 x 2048 x 3072 | 202.384 | 3.073x | 2.351x | Yes |
+| W3 | 8192 x 2048 x 3072 | 101.821 | 3.017x | 2.255x | Yes |
+| W3 | 16384 x 2048 x 3072 | 202.416 | 3.073x | 2.350x | Yes |
+| W3.5 | 8192 x 2048 x 3072 | 102.029 | 3.011x | 2.251x | Yes |
+| W3.5 | 16384 x 2048 x 3072 | 203.421 | 3.057x | 2.339x | Yes |
+
+Speedup versus cache-disabled exact row multiplexing is `22.14-22.76x` at
+M8192 and `22.30-22.83x` at M16384.  Maximum dense-P32-oracle error is
+`6.66e-4` at M8192 and `6.22e-4` at M16384.
+
+Decode after the cache has been created:
+
+| Rate | M x K x N | QVQ us | vs Marlin W4 | vs Machete W4 | Better than before cache |
+| ---: | ---: | ---: | ---: | ---: | :---: |
+| W2 | 1 x 2048 x 3072 | 27.536 | 1.799x | 1.271x | Yes |
+| W2 | 2 x 2048 x 3072 | 27.702 | 2.105x | 1.269x | No |
+| W2 | 4 x 2048 x 3072 | 27.968 | 2.121x | 1.247x | Yes |
+| W2 | 8 x 2048 x 3072 | 28.477 | 1.792x | 1.225x | No |
+| W2 | 16 x 2048 x 3072 | 28.611 | 1.906x | 1.221x | No |
+| W2.5 | 1 x 2048 x 3072 | 27.507 | 1.800x | 1.272x | No |
+| W2.5 | 2 x 2048 x 3072 | 27.744 | 2.102x | 1.267x | No |
+| W2.5 | 4 x 2048 x 3072 | 27.728 | 2.140x | 1.258x | Yes |
+| W2.5 | 8 x 2048 x 3072 | 28.192 | 1.811x | 1.238x | Yes |
+| W2.5 | 16 x 2048 x 3072 | 28.432 | 1.918x | 1.229x | Yes |
+| W3 | 1 x 2048 x 3072 | 27.382 | 1.809x | 1.278x | No |
+| W3 | 2 x 2048 x 3072 | 27.747 | 2.102x | 1.267x | No |
+| W3 | 4 x 2048 x 3072 | 27.786 | 2.135x | 1.255x | No |
+| W3 | 8 x 2048 x 3072 | 28.160 | 1.813x | 1.239x | No |
+| W3 | 16 x 2048 x 3072 | 28.416 | 1.919x | 1.229x | No |
+| W3.5 | 1 x 2048 x 3072 | 27.494 | 1.801x | 1.273x | Yes |
+| W3.5 | 2 x 2048 x 3072 | 27.702 | 2.105x | 1.269x | Yes |
+| W3.5 | 4 x 2048 x 3072 | 27.939 | 2.123x | 1.248x | No |
+| W3.5 | 8 x 2048 x 3072 | 28.173 | 1.812x | 1.239x | Yes |
+| W3.5 | 16 x 2048 x 3072 | 28.461 | 1.916x | 1.227x | Yes |
+
+The strict cell count is 9 improvements and 11 regressions, but the geometric
+mean of before/after-cache decode ratios is `0.9995x`; the complete spread is
+`0.9906-1.0070x`.  This is run-to-run variation around an unchanged exact
+decode path, not a systematic decode gain or loss.
+
+### VRAM and construction cost
+
+| Quantity | Measured value |
+| :--- | ---: |
+| Persistent FP8 cache per QKV group | 6.000 MiB |
+| Persistent cache for 16 Llama layers | 96.000 MiB |
+| Fraction of this 97,871-MiB H100 | 0.0986% |
+| Warm per-layer construction | 8.50-8.96 ms |
+| Per-layer construction peak allocation | about 802 MiB |
+| First-process initialization plus W2 construction | 74.75 ms, 38.0 MiB live |
+
+The construction peak is temporary and is reused as layers are folded; it is
+not 802 MiB times sixteen.  Including fifteen already-built 6-MiB caches, the
+last sequential layer build stays below roughly 892 MiB, or 0.91% of this
+H100.  Persistent storage is model-wide and does not grow with M, number of
+requests, or decode steps.
+
+The cache is nevertheless large relative to the compressed QKV source: 4.0x
+the ideal W2 bitstream, 3.2x W2.5, 2.67x W3, and 2.29x W3.5.  The first request
+also pays construction.  At M8192 the 8.5-9.0-ms cold call breaks even around
+the fourth total prefill, after approximately three reuse calls save about
+2.2 ms each.  At M16384 it breaks even around the second total prefill.  The
+cache is therefore appropriate for a reused serving model with large
+prefills, not a one-shot request or a memory-constrained deployment.
