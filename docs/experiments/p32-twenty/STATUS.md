@@ -9,7 +9,7 @@ AGENTS.md. All changes and evidence share PR #137.
 | # | Experiment | Current evidence / outstanding implementation |
 |---:|---|---|
 |1|Decoder decomposition|Real-layer timing covers 12 projections and all nine row counts; four representative q/v/up/down Nsight counter captures now include instructions, occupancy, memory/L2, registers, and launch statistics. Tensor-Core-specific counters and decoder/GEMM overlap remain.|
-|2|Decode reuse across rows|Existing row-group reuse limits 2 and 4 now cover 252 collected cases with local passes; extra launches/concatenation make both slower than no-reuse window as M grows. Limit-2 GPU1 completion and direct fragment reuse remain.|
+|2|Decode reuse across rows|Existing row-group reuse limits 2 and 4 now cover all 288 cases, with matched baselines for all 12 M values; extra launches/concatenation make both slower than no-reuse window as M grows. Direct fragment reuse remains.|
 |3|Persistent decoded tiles|New persistent scheduling/register-pressure sweep remains.|
 |4|Warp-specialized pipeline|BM16, BM32, BM32/BN64, BM64/BN64, and BM64/BN32 direct decode/MMA baselines cover 12 projections and 12 row counts with 720/720 local passes; BM64/BN32 reaches 1.279x median at M=2048 but remains below 1.0x at small M and below the 2x target. Producer/consumer overlap implementation remains.|
 |5|Transition LUTs|GPU index/pair LUT decoders exact across all 94 projections; both slower overall in materialization, fused LUT study remains.|
