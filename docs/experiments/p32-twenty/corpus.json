@@ -1,0 +1,38 @@
+{
+  "source": "/monster/data/model/dataset/c4-train.00000-of-01024.json.gz",
+  "source_sha256": "8ef8d75b0e045dec4aa5123a671b4564466b0707086a7ed1ba8721626dfffbc9",
+  "token_limit": 512,
+  "tokenizer_sha256": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4",
+  "streams": {
+    "lifecycle": {
+      "path": "/root/work/p32-twenty-data/lifecycle.parquet",
+      "sha256": "46931b01a953fcd9f58630e12179219032a7d7f45148d6211fd457034649163b",
+      "rows": 128,
+      "tokens": 38856
+    },
+    "teacher_calibration": {
+      "path": "/root/work/p32-twenty-data/teacher_calibration.parquet",
+      "sha256": "e13ba40c1a4049b3e12567ac6f961779695cfdead8f43b5426146fedf3ce69be",
+      "rows": 10178,
+      "tokens": 3095923
+    },
+    "candidate_calibration": {
+      "path": "/root/work/p32-twenty-data/candidate_calibration.parquet",
+      "sha256": "653021017d9c3684030b2d14422223875664103144c7c949d054c14f032464b7",
+      "rows": 512,
+      "tokens": 154476
+    },
+    "tuning": {
+      "path": "/root/work/p32-twenty-data/tuning.parquet",
+      "sha256": "68ecee0735aa5b7f8139c57c9dfdfefedf4d541c8427ed99ea8a5c917dc7ee9b",
+      "rows": 128,
+      "tokens": 38567
+    },
+    "heldout": {
+      "path": "/root/work/p32-twenty-data/heldout.parquet",
+      "sha256": "b240cf363e44c1ca7bed39fe766996f07f2143bd3f1caeaf88a9244f7c7335e3",
+      "rows": 256,
+      "tokens": 79137
+    }
+  }
+}

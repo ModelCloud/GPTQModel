@@ -47,7 +47,7 @@ Model-quality gates and uncertainty policy must be locked with the teacher befor
 
 ## Ordered ledger
 
-All entries are pending teacher identification and execution.
+All entries are pending teacher quantization, baseline evaluation, and execution.
 
 | Wave | ID | Experiment | Required sweep |
 |---|---:|---|---|
@@ -122,3 +122,27 @@ Existing integration points inspected:
   it cannot be used unchanged for this fixed-checkpoint, ordinary-text-calibration study.
 
 Experiment completion remains 0/20. No kernel source or production dispatch has changed.
+
+
+### Authorized teacher: F6 seed 7
+
+The user selected F6 seed 7 on 2026-09-05 and authorized fresh Llama 3.2 1B quantization.
+This resolves checkpoint identity: use the resulting immutable checkpoint for all twenty experiments.
+`scripts/p32_twenty/f6_seed7.json` copies the documented F6 config, changing only YAQA seed 0 to 7.
+The study retains latest-main quantizer code, rather than reproducing the historical quantizer revision.
+
+To retain the original ordinary-text calibration requirement, `prepare_c4.py` uses the local C4 training shard,
+with URL and normalized whole-document deduplication across all streams and up to 512 tokens per document.
+This is an F6-settings C4 variant, not a historical F6 quality reproduction. No historical score is inherited.
+The checkpoint must establish its own BF16 comparison before any post-quant advantage is claimed.
+
+Prepared streams: lifecycle 128 documents, teacher calibration 10178, candidate calibration 512,
+tuning 128, heldout 256. Corpus bindings and ordered document hashes are stored in
+`/root/work/p32-twenty-data/manifest.json`. No benchmark is used for calibration.
+Exact duplicate/URL separation is not a claim of semantic near-duplicate decontamination.
+
+Run `bash scripts/p32_twenty/quantize_teacher.sh` after `prepare_c4.py`.
+Output: `/root/work/p32-twenty-data/f6-seed7-c4-checkpoint`.
+The launcher pins the physical UUID, passes a strict idle gate and caps build/CPU parallelism.
+Environment: `/root/venv-py3.14t`, Python 3.14, Torch 2.15.0.dev20260817+cu130, Transformers 5.15.0.
+The earlier Python 3.13 probe environment lacks model dependencies and is not used for quantization.
