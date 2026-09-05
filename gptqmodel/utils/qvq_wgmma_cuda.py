@@ -1215,7 +1215,27 @@ def qvq_p32_window_wgmma_single_large_m_packed(
         plan=plan,
     )
     rows = int(input.shape[0])
-    if split_count == 1 and rows >= 512 and rows % 128 == 0:
+    properties = torch.cuda.get_device_properties(input.device)
+    use_qwen_down_reuse11 = (
+        split_count == 1
+        and rows in (512, 1024, 2048, 4096)
+        and input.shape[1] == 17408
+        and out_features == 5120
+        and properties.name == "NVIDIA H100"
+        and (properties.major, properties.minor) == (9, 0)
+    )
+    if use_qwen_down_reuse11:
+        reuse11_rows = rows + rows // 32
+        reuse11_input = torch.zeros(
+            (reuse11_rows, input.shape[1]),
+            device=input.device,
+            dtype=input.dtype,
+        )
+        reuse11_input[:rows].copy_(input)
+        output = qvq_p32_window_wgmma_grouped_reuse11_packed(
+            reuse11_input, payload, levels
+        )
+    elif split_count == 1 and rows >= 512 and rows % 128 == 0:
         output = qvq_p32_window_wgmma_grouped_reuse8_packed(input, payload, levels)
     elif rows >= 64 and rows % 64 == 0:
         output = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
@@ -1227,7 +1247,7 @@ def qvq_p32_window_wgmma_single_large_m_packed(
             if split_count != 1
             else qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
         )
-    return output[0]
+    return output[0][:rows]
 
 
 def qvq_p32_window_wgmma_grouped(

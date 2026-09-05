@@ -25,6 +25,16 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--m", type=int, choices=bench.M_VALUES, default=32)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--replays", type=int, default=5)
+    parser.add_argument(
+        "--skip-oracle",
+        action="store_true",
+        help="Skip the dense reference after a matched benchmark already passed it.",
+    )
+    parser.add_argument(
+        "--eager-profile",
+        action="store_true",
+        help="Profile eager launches for kernel mapping when graph-node tracing is impractical.",
+    )
     parser.add_argument("--idle-samples", type=int, default=3)
     parser.add_argument("--idle-interval", type=float, default=0.2)
     parser.add_argument("--idle-memory-mib", type=int, default=0)
@@ -56,28 +66,37 @@ def _main(args: argparse.Namespace) -> None:
 
     with torch.inference_mode():
         actual = call()
-        gate = qvq_dense_oracle_forward(mlp.gate_proj, x, device=device).half()
-        up = qvq_dense_oracle_forward(mlp.up_proj, x, device=device).half()
-        intermediate = torch.nn.functional.silu(gate) * up
-        expected = (
-            qvq_dense_oracle_forward(mlp.down_proj, intermediate, device=device).half(),
-        )
-        max_abs = float((actual[0].float() - expected[0].float()).abs().max().item())
-        if max_abs > 2e-3:
-            raise RuntimeError(f"dense-P32 error gate failed: {max_abs}")
+        max_abs = None
+        if not args.skip_oracle:
+            gate = qvq_dense_oracle_forward(mlp.gate_proj, x, device=device).half()
+            up = qvq_dense_oracle_forward(mlp.up_proj, x, device=device).half()
+            intermediate = torch.nn.functional.silu(gate) * up
+            expected = (
+                qvq_dense_oracle_forward(mlp.down_proj, intermediate, device=device).half(),
+            )
+            max_abs = float(
+                (actual[0].float() - expected[0].float()).abs().max().item()
+            )
+            if max_abs > 2e-3:
+                raise RuntimeError(f"dense-P32 error gate failed: {max_abs}")
         for _ in range(args.warmup):
             call()
         torch.cuda.synchronize(device)
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            captured = call()
-        for _ in range(args.warmup):
-            graph.replay()
-        torch.cuda.synchronize(device)
+        if args.eager_profile:
+            captured = actual
+            replay = call
+        else:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = call()
+            for _ in range(args.warmup):
+                graph.replay()
+            torch.cuda.synchronize(device)
+            replay = graph.replay
         torch.cuda.cudart().cudaProfilerStart()
         torch.cuda.nvtx.range_push(f"qwen38_mlp_w{args.bits:g}_m{args.m}")
         for _ in range(args.replays):
-            graph.replay()
+            replay()
         torch.cuda.nvtx.range_pop()
         torch.cuda.synchronize(device)
         torch.cuda.cudart().cudaProfilerStop()
@@ -90,6 +109,7 @@ def _main(args: argparse.Namespace) -> None:
                 "gate_up_mkn": [args.m, bench.HIDDEN, bench.INTERMEDIATE],
                 "down_mkn": [args.m, bench.INTERMEDIATE, bench.HIDDEN],
                 "graph_replays": args.replays,
+                "execution": "eager-mapping" if args.eager_profile else "cuda-graph",
                 "max_abs_error": max_abs,
                 "captured_shape": list(captured[0].shape),
             },

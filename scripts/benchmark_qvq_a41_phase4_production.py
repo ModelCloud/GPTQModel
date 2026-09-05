@@ -91,16 +91,31 @@ def _args() -> argparse.Namespace:
 
 def _physical_h100() -> tuple[str, str]:
     output = subprocess.check_output(
-        ["nvidia-smi", "--query-gpu=uuid,name", "--format=csv,noheader"], text=True
+        [
+            "nvidia-smi",
+            "--query-gpu=index,uuid,name",
+            "--format=csv,noheader",
+        ],
+        text=True,
     )
     matches = []
     for line in output.splitlines():
-        uuid, name = (part.strip() for part in line.split(",", 1))
+        index_value, uuid, name = (part.strip() for part in line.split(",", 2))
         if "H100" in name:
-            matches.append((uuid, name))
+            matches.append((index_value, uuid, name))
+
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None and "," not in visible:
+        matches = [
+            match for match in matches if visible in {match[0], match[1]}
+        ]
     if len(matches) != 1:
-        raise RuntimeError(f"expected one physical H100, found {matches}")
-    return matches[0]
+        raise RuntimeError(
+            "expected CUDA_VISIBLE_DEVICES to select one physical H100, "
+            f"found {matches}"
+        )
+    _, uuid, name = matches[0]
+    return uuid, name
 
 
 def _idle_h100_preflight(args) -> None:
@@ -121,14 +136,16 @@ def _idle_h100_preflight(args) -> None:
         )
         if "H100" in name:
             matches.append((index_value, pci_bus_id, uuid, name))
-    if len(matches) != 1:
-        raise RuntimeError(f"expected one physical H100, found {matches}")
-    physical_index, pci_bus_id, uuid, name = matches[0]
     visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if visible not in {physical_index, uuid}:
+    selected = [
+        match for match in matches if visible in {match[0], match[2]}
+    ]
+    if len(selected) != 1:
         raise RuntimeError(
-            f"set CUDA_VISIBLE_DEVICES={physical_index} or {uuid} for the physical H100"
+            "set CUDA_VISIBLE_DEVICES to the index or UUID of exactly one "
+            f"physical H100; found {matches}"
         )
+    physical_index, pci_bus_id, uuid, name = selected[0]
 
     accepted = []
     for sample in range(args.idle_samples):

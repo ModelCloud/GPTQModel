@@ -1578,7 +1578,7 @@ def test_qvq_cuda_swiglu_precondition_graph_stream_overflow_and_guards():
         qvq_cuda_swiglu_precondition(gate, up[:, :-1], pre_scale)
 
 
-@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16, 32, 128))
 @pytest.mark.parametrize("with_bias", (False, True))
 def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(m, with_bias):
     if torch.cuda.get_device_capability()[0] != 9:
@@ -1618,9 +1618,10 @@ def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(m, w
         up_bias=up_bias,
         down_scale=down_scale,
     )
-    assert actual.shape == (16, n)
+    assert actual.shape == (max(16, m), n)
     assert torch.equal(actual[:m].view(torch.int16), reference.view(torch.int16))
-    assert torch.count_nonzero(actual[m:]) == 0
+    if m < 16:
+        assert torch.count_nonzero(actual[m:]) == 0
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):

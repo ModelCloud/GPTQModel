@@ -918,11 +918,21 @@ class QVQHopperGroupedRuntime:
             self.telemetry.ordered_split_launches += 1
             return partials
 
+        use_qwen_large_m_reuse = (
+            children[0].in_features == 5120
+            and tuple(child.out_features for child in children)
+            == (17408, 17408)
+        )
         use_h100_reuse11_gate_up = (
             rows in (512, 1024, 2048, 4096)
-            and self._h100_multiblock_intermediate_enabled
-            and children[0].in_features == 2048
             and all(segment.split_count == 1 for segment in payload.plan.segments)
+            and (
+                (
+                    self._h100_multiblock_intermediate_enabled
+                    and children[0].in_features == 2048
+                )
+                or use_qwen_large_m_reuse
+            )
         )
         if use_h100_reuse11_gate_up:
             reuse11_rows = rows + rows // 32
@@ -936,9 +946,15 @@ class QVQHopperGroupedRuntime:
         use_h100_reuse8_gate_up = (
             padded.shape[0] >= 128
             and padded.shape[0] % 128 == 0
-            and self._h100_multiblock_intermediate_enabled
-            and children[0].in_features == 2048
             and all(segment.split_count == 1 for segment in payload.plan.segments)
+            and (
+                self._h100_multiblock_intermediate_enabled
+                or use_qwen_large_m_reuse
+            )
+            and (
+                children[0].in_features == 2048
+                or use_qwen_large_m_reuse
+            )
         )
         if use_h100_reuse11_gate_up:
             grouped_inner = qvq_p32_window_wgmma_grouped_reuse11_packed
@@ -968,8 +984,13 @@ class QVQHopperGroupedRuntime:
                 qvq_p32_window_wgmma_grouped_reuse11_packed,
             )
             and padded.shape[0] >= 128
-            and self._h100_multiblock_intermediate_enabled
-            and children[0].in_features == 2048
+            and (
+                (
+                    self._h100_multiblock_intermediate_enabled
+                    and children[0].in_features == 2048
+                )
+                or use_qwen_large_m_reuse
+            )
             and all(segment.split_count == 1 for segment in payload.plan.segments)
         ):
             self.telemetry.h100_wide_reuse_gate_up_launches += 1
@@ -1916,29 +1937,44 @@ class QVQHopperGroupedRuntime:
             # route is graph-safe and avoids the planar GEMV fallback without
             # extending decode-only fused transform kernels beyond their
             # measured geometry.
-            gate, up = self._execute(x)
-            activated_gate = self._mlp_act_fn(gate)
-            intermediate = activated_gate * up
             if qwen_folded_intermediate:
                 # Qwen's architecture contract removes the 17,408-wide
                 # gate/up output transforms and the down input transform.
-                # Execute the remaining down transform directly so CUDA Graph
-                # capture does not also record QVQLinear's conservative BF16
-                # overflow retry for a composite input transform that is not
-                # present. The P32 inner result and output recovery stay FP32
-                # until the ordinary final model-dtype cast.
-                transformed = down._qvq_prepare_inference_input(
-                    intermediate.reshape(rows, down.in_features),
-                    torch.float16,
+                # Retain gate/up inner results in FP32 and fuse their two
+                # scale/cast stores, SiLU, product, and down-SU multiply into
+                # one exact kernel.  Every historical FP16 rounding boundary
+                # is explicit in that kernel; only intermediate global-memory
+                # materializations disappear.
+                inner_gate, inner_up = self._execute(x, recover=False)
+                transformed = qvq_cuda_folded_swiglu_precondition_fp32(
+                    inner_gate[:rows].contiguous(),
+                    inner_up[:rows].contiguous(),
+                    gate_scale=children[0]._cached_cast(
+                        "SV", torch.float16, torch.float32
+                    ),
+                    up_scale=children[1]._cached_cast(
+                        "SV", torch.float16, torch.float32
+                    ),
+                    gate_bias=children[0]._cached_cast(
+                        "bias", torch.float16, torch.float32
+                    ),
+                    up_bias=children[1]._cached_cast(
+                        "bias", torch.float16, torch.float32
+                    ),
+                    down_scale=down._cached_cast("SU", torch.float16),
                 )
                 recovered = down._forward_pretransformed_compute_dtype(
                     transformed,
                     torch.float16,
                 )
+                self.telemetry.h100_folded_qwen_fused_precondition_launches += 1
                 self.telemetry.h100_qwen_large_m_direct_down_launches += 1
                 return recovered.reshape(
                     *x.shape[:-1], down.out_features
                 ).to(x.dtype)
+            gate, up = self._execute(x)
+            activated_gate = self._mlp_act_fn(gate)
+            intermediate = activated_gate * up
             return down(intermediate)
         elif qwen_folded_intermediate:
             # Qwen3.8-27B has a 17*1024 intermediate width, for which no exact
