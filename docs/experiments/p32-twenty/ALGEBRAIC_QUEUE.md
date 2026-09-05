@@ -1,6 +1,6 @@
 # Additional P32 algebraic experiments: 21–30
 
-Status: queued, not executed. These extend experiments 1–20 in the same PR.
+Status: partial execution; see [coverage ledger](STATUS.md). These extend experiments 1–20 in the same PR.
 Use the existing [F6 seed-7 snapshot and complete saved config](F6_SEED7_SNAPSHOT.md)
 as the fixed teacher. Preserve its checkpoint and verified historical quantization datasets.
 Use the [common scorecard](README.md#common-scorecard), including original BF16 comparison,
