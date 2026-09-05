@@ -123,7 +123,8 @@ def test_qvq_p32_amd_folded_case_gate_enforces_accuracy_boundaries():
     assert qvq_p32_amd_folded_case_supported(512, 5120, 17408)
     assert not qvq_p32_amd_folded_case_supported(1024, 5120, 17408)
     assert qvq_p32_amd_folded_case_supported(512, 17408, 5120)
-    assert not qvq_p32_amd_folded_case_supported(1024, 17408, 5120)
+    assert qvq_p32_amd_folded_case_supported(1024, 17408, 5120)
+    assert not qvq_p32_amd_folded_case_supported(2048, 17408, 5120)
 
 
 def test_qvq_p32_amd_folded_output_dtype_gate_covers_measured_regressions():

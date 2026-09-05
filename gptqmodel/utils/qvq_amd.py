@@ -35,7 +35,7 @@ _QWEN38_27B_FOLDED_SHAPES = frozenset(
 _QWEN38_27B_FOLDED_M_LIMITS = {
     (6144, 5120): 32,
     (5120, 17408): 512,
-    (17408, 5120): 512,
+    (17408, 5120): 1024,
 }
 _QWEN38_27B_RESIDUAL_FOLDED_SHAPES = frozenset({(17408, 5120)})
 _QWEN38_27B_COMPOSITE_RECOVERY_SHAPE = (17408, 5120)
@@ -461,6 +461,46 @@ def _qvq_p32_composite_recovery_gfx950_kernel(  # pragma: no cover - compiled an
 
 
 @triton.jit
+def _qvq_p32_composite_base_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
+    staged_ptr,
+    base_ptr,
+    sv_ptr,
+    output_ptr,
+    size_n: tl.constexpr,
+    base_size: tl.constexpr,
+    base_pad: tl.constexpr,
+    power_width: tl.constexpr,
+    block_p: tl.constexpr,
+    inv_sqrt_n: tl.constexpr,
+):
+    """Apply the small composite base after rocBLAS handles the power factor."""
+
+    row = tl.program_id(0)
+    position = tl.program_id(1) * block_p + tl.arange(0, block_p)
+    output_base = tl.arange(0, base_pad)
+    reduce_base = tl.arange(0, base_pad)
+    base = tl.load(
+        base_ptr + output_base[:, None] * base_pad + reduce_base[None, :]
+    )
+    staged = tl.load(
+        staged_ptr
+        + row * size_n
+        + reduce_base[:, None] * power_width
+        + position[None, :],
+        mask=reduce_base[:, None] < base_size,
+        other=0.0,
+    )
+    transformed = tl.dot(base, staged, input_precision="ieee")
+    columns = output_base[:, None] * power_width + position[None, :]
+    scale = tl.load(sv_ptr + columns, mask=output_base[:, None] < base_size, other=0.0)
+    tl.store(
+        output_ptr + row * size_n + columns,
+        transformed * inv_sqrt_n * scale,
+        mask=output_base[:, None] < base_size,
+    )
+
+
+@triton.jit
 def _qvq_p32_folded_gemv_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
     input_ptr,
     weight_ptr,
@@ -509,6 +549,28 @@ def _qvq_p32_folded_execute(
             dtype=torch.float32 if output_fp32 else x.dtype,
         )
         block_p = 32 if m <= 64 else 64
+        if m == 1024:
+            staged = torch.mm(
+                pre_hadamard.view(m * base_size, power_width), power
+            ).view(m, base_size, power_width)
+            _qvq_p32_composite_base_gfx950_kernel[(m, power_width // block_p)](
+                staged,
+                padded_base,
+                sv,
+                output,
+                size_n=n,
+                base_size=base_size,
+                base_pad=padded_base.shape[0],
+                power_width=power_width,
+                block_p=block_p,
+                inv_sqrt_n=1.0 / math.sqrt(n),
+                num_warps=8,
+                num_stages=1,
+                waves_per_eu=0,
+                matrix_instr_nonkdim=16,
+                kpack=1,
+            )
+            return output
         _qvq_p32_composite_recovery_gfx950_kernel[(m, power_width // block_p)](
             pre_hadamard,
             power,
