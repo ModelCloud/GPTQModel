@@ -19,7 +19,7 @@ datasets>=5.0.1
 pyarrow>=25.0.1
 dill>=0.4.1
 torchao>=0.18.0
-defuser>=0.0.25
+defuser>=0.0.27
 scipy>=1.15.3; python_version < "3.11"
 scipy>=1.17.1; python_version >= "3.11" and python_version < "3.12"
 scipy>=1.18.1; python_version >= "3.12"

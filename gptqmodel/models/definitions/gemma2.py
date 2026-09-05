@@ -14,6 +14,8 @@ SUPPORT_ERR = "Currently, only vLLM/SGLang with flashinfer enabled can correctly
 
 
 class Gemma2QModel(LlamaQModel):
+    shared_input_verified_model_types = frozenset({"gemma2"})
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 

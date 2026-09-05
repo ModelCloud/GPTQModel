@@ -86,7 +86,7 @@ class TestKernelOutput(unittest.TestCase):
             for _ in range(self.input_samples_each_size):
                 inputs = torch.rand((dim_0, self.k), dtype=self.dtype)
                 self.x.append(inputs)
-                self.torch_kernel_outs.append(self.forward(self, self.torch_model, inputs, backend=BACKEND.TORCH))
+                self.torch_kernel_outs.append(self.forward(self.torch_model, inputs, backend=BACKEND.TORCH))
 
     def forward(self, model, x, backend: BACKEND):
         target_qlinear_cls = self.target_qliner_map[backend]

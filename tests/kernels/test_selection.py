@@ -1174,3 +1174,31 @@ def test_create_quant_layer_selects_marlin_for_4bit_and_trilin_for_3bit(monkeypa
     assert isinstance(model.proj, TrilinLinear)
     assert isinstance(model.lm_head, MarlinLinear)
     assert not isinstance(model.lm_head, TrilinLinear)
+
+
+def test_sharded_select_tolerates_kernel_without_shard_attrs(monkeypatch):
+    class BareKernel:
+        SUPPORTS_DEVICES = [DEVICE.ALL]
+
+        @classmethod
+        def validate(cls, **_):
+            return True, None
+
+    monkeypatch.setitem(
+        AUTO_BACKEND_KERNEL_MAPPING[METHOD.QQQ],
+        FORMAT.QQQ,
+        OrderedDict([(BACKEND.QQQ_TORCH, BareKernel)]),
+    )
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=torch.device("cpu"),
+        backend=BACKEND.AUTO,
+        format=FORMAT.QQQ,
+        quant_method=METHOD.QQQ,
+        pack_dtype=torch.int32,
+        is_sharded=True,
+    )
+    assert qlinear_cls is BareKernel

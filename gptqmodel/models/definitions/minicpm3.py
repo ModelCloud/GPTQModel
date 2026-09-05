@@ -15,7 +15,7 @@ class MiniCpm3QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_a_proj:0:q", "kv_a_proj_with_mqa:0:k:v", "q_b_proj:1:q", "kv_b_proj:1:k:v", "o_proj:2"),
+            "self_attn": ("q_a_proj:0:q", "kv_a_proj_with_mqa:0:k:v", "q_b_proj:1:q:in=q_a", "kv_b_proj:1:k:v:in=kv_a", "o_proj:2"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
         }
