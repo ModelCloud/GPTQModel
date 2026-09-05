@@ -19,6 +19,32 @@ raised the localized inference mean-error limit to **3e-3**. This overrides the
 2e-3 default above for that campaign; the maximum-error limit and finite-value
 requirements remain unchanged.
 
+## Human review of accuracy/performance exceptions
+
+When an accuracy gate blocks an optimization with a measured speed gain **over 25%**,
+explicitly present a scoped exception option to the user/human reviewer. Do not silently
+abandon the candidate or automatically relax its gate. Define speed gain as
+`100 * (baseline_latency / candidate_latency - 1)` on matched measurements:
+
+- **Over 25% (>1.25x):** surface the exception option in the next progress update.
+- **Over 100% (>2x):** escalate promptly once timing and the gate failure are verified;
+  do not wait for the rest of an experiment wave.
+- **Over 500% (>6x):** escalate immediately after verification as a priority review item.
+
+State the measured scope (inner kernel, full linear layer, or model inference), shapes,
+hardware, baseline, timing uncertainty, failing mean/max errors and thresholds, and
+candidate-versus-baseline error. Explain whether the baseline also fails. Include available
+held-out model-quality evidence, missing checks, and a concrete proposed exception scope
+or fallback. A synthetic or inner-kernel gain must not be presented as a model speedup.
+Do not wait for all model checks to surface a large measured gain; clearly mark pending evidence.
+
+The human reviewer makes the final exception decision. Continue authorized investigation,
+profiling, and review preparation while awaiting that decision; retain the existing gate,
+failure records, and production defaults until explicit approval. Approval applies only to
+its stated scope, must be recorded with the revised criterion, and must not silently waive
+other gates. Existing explicit user approvals persist, including the F6 seed-7 3e-3 limit above.
+See the [accuracy skill](.agents/skills/qvq-kernel-accuracy/SKILL.md#human-review-of-high-speedup-exceptions).
+
 ## Repository map
 
 - `gptqmodel/`: Python package, model adapters, quantization lifecycle, backend selection, and JIT wrappers.
