@@ -1,0 +1,201 @@
+{
+  "schema": "qvq_p32_gfx950_isa_profile_v2",
+  "date_utc": "2026-09-04",
+  "benchmark_valid": false,
+  "invalid_reason": "Foreign processes retained approximately 254936 MiB of VRAM; counter runs are exploratory.",
+  "hardware": {
+    "name": "AMD Instinct MI355X VF",
+    "arch": "gfx950:sramecc+:xnack-",
+    "compute_units": 256
+  },
+  "tools": {
+    "rocprof_compute": "3.8.0",
+    "rocm": "10.0",
+    "disassembler": "/opt/rocm/core-10.0/lib/llvm/bin/llvm-objdump",
+    "analysis_environment": "/home/ubuntu/.venvs/rocprof-compute"
+  },
+  "collection": {
+    "blocks": ["sol", "cu_ins"],
+    "direct_python_attempt": "failed: LLVM option 'spirv-expand-step' registered more than once",
+    "workaround": "Loaded the exact Triton cache HSACO with hipModuleLoad in a minimal HIP launcher, preserving grid, workgroup, dynamic LDS, and kernel arguments.",
+    "dispatch_repetitions": {
+      "baseline_m1": 100,
+      "baseline_m64": 100,
+      "gemv_m1": 100,
+      "mfma_stage3_m64": 100,
+      "mfma_stage2_m4096": 20,
+      "final_qwen_gemv_stage1_m1": 100,
+      "final_qwen_mfma_stage3_m64": 100,
+      "final_qwen_mfma_stage2_m2048": 20,
+      "final_qwen_mfma_stage1_m1024": 20
+    }
+  },
+  "static_isa": {
+    "baseline_m64_w3": {
+      "m": 64, "k": 4096, "n": 4096, "compiler_stages": 2,
+      "static_opcodes": 378, "valu": 234, "salu": 106, "vmem": 26,
+      "lds": 12, "mfma": 4, "vgpr": 68, "sgpr": 50,
+      "dynamic_lds_bytes": 6144
+    },
+    "gemv_m1_w3": {
+      "m": 1, "k": 4096, "n": 4096, "compiler_stages": 1,
+      "static_opcodes": 208, "valu": 115, "salu": 78, "vmem": 13,
+      "lds": 2, "mfma": 0, "vgpr": 26, "sgpr": 34,
+      "dynamic_lds_bytes": 256
+    },
+    "mfma_stage3_m64_w3": {
+      "m": 64, "k": 4096, "n": 4096, "compiler_stages": 3,
+      "static_opcodes": 343, "valu": 161, "salu": 137, "vmem": 25,
+      "lds": 20, "mfma": 4, "vgpr": 40, "sgpr": 40,
+      "dynamic_lds_bytes": 4096
+    },
+    "mfma_stage2_m4096_w3": {
+      "m": 4096, "k": 4096, "n": 4096, "compiler_stages": 2,
+      "static_opcodes": 410, "valu": 237, "salu": 127, "vmem": 32,
+      "lds": 14, "mfma": 16, "vgpr": 74, "sgpr": 46,
+      "dynamic_lds_bytes": 12352
+    }
+  },
+  "algebraic_reduction": {
+    "description": "Decode each adjacent output pair from one 16-bit trellis state, apply the bank/hash recurrence once, then interleave its high- and low-byte level lookups.",
+    "mfma_stage3_vs_baseline_m64": {
+      "static_valu_reduction_percent": 31.1966,
+      "vgpr_reduction_percent": 41.1765,
+      "dynamic_valu_reduction_percent": 57.3139,
+      "dynamic_vmem_reduction_percent": 33.5208,
+      "profile_median_speedup": 2.2519
+    },
+    "gemv_vs_baseline_m1_profile_median_speedup": 2.2768,
+    "gemv_rationale": "For tiny M, replace a mostly empty 16-row MFMA tile with one row per program and a vector FP32 reduction; dispatch is capped for M=2/4 to avoid excessive programs on wide projections."
+  },
+  "counters": {
+    "baseline_m1_w3": {
+      "mean_ns": 189373.67, "median_ns": 189299.5, "active_cus": 66,
+      "cu_utilization_percent": 22.8495, "valu_utilization_percent": 6.1023,
+      "mfma_utilization_percent": 1.7278, "vmem_utilization_percent": 0.9768,
+      "wavefront_occupancy_percent": 5.6975, "vl1d_hit_rate_percent": 99.3247,
+      "l2_hit_rate_percent": 32.7219
+    },
+    "baseline_m64_w3": {
+      "mean_ns": 192534.55, "median_ns": 192348.5, "active_cus": 127,
+      "cu_utilization_percent": 46.7839, "valu_utilization_percent": 12.1049,
+      "mfma_utilization_percent": 3.4294, "vmem_utilization_percent": 1.9357,
+      "wavefront_occupancy_percent": 11.6926, "vl1d_hit_rate_percent": 98.6012,
+      "l2_hit_rate_percent": 70.4573,
+      "dynamic_instructions": {
+        "valu": 14280704, "vmem": 2367488, "lds": 1572864, "mfma": 524288,
+        "salu": 2415616, "smem": 0, "branch": 261120
+      }
+    },
+    "gemv_m1_w3": {
+      "mean_ns": 83150.86, "median_ns": 83142.5, "active_cus": 63,
+      "cu_utilization_percent": 21.775, "valu_utilization_percent": 8.9261,
+      "mfma_utilization_percent": 0, "vmem_utilization_percent": 1.4047,
+      "wavefront_occupancy_percent": 5.4432, "vl1d_hit_rate_percent": 99.1654,
+      "l2_hit_rate_percent": 26.9176,
+      "dynamic_instructions": {
+        "valu": 5000704, "vmem": 786944, "lds": 1024, "mfma": 0,
+        "salu": 155648, "smem": 512, "branch": 65536
+      }
+    },
+    "mfma_stage3_m64_w3": {
+      "mean_ns": 162590.11, "median_ns": 85417, "active_cus": 115,
+      "cu_utilization_percent": 44.0139, "valu_utilization_percent": 11.1494,
+      "mfma_utilization_percent": 4.3143, "vmem_utilization_percent": 2.76,
+      "wavefront_occupancy_percent": 10.997, "vl1d_hit_rate_percent": 97.5664,
+      "l2_hit_rate_percent": 72.1305,
+      "dynamic_instructions": {
+        "valu": 6095872, "vmem": 1573888, "lds": 1310720, "mfma": 262144,
+        "salu": 2027520, "smem": 1024, "branch": 130048
+      }
+    },
+    "mfma_stage2_m4096_w3": {
+      "mean_ns": 542841, "median_ns": 540059, "active_cus": 253,
+      "cu_utilization_percent": 95.8782, "valu_utilization_percent": 35.1426,
+      "mfma_utilization_percent": 20.6327, "vmem_utilization_percent": 7.7574,
+      "wavefront_occupancy_percent": 54.9941, "vl1d_hit_rate_percent": 89.9465,
+      "l2_hit_rate_percent": 93.5152,
+      "dynamic_instructions": {
+        "valu": 97525824, "vmem": 25231360, "lds": 14680064, "mfma": 16777216,
+        "salu": 34005120, "smem": 16384, "branch": 2088960
+      }
+    }
+  },
+  "final_qwen_static_isa": {
+    "gemv_stage1_m1_w3_k5120_n12288": {
+      "compiler_stages": 1, "static_opcodes": 200, "valu": 106,
+      "salu": 79, "vmem": 13, "lds": 2, "mfma": 0,
+      "alignbit_b32": 2, "mad_u32_u24": 2, "mul_lo_u32": 1,
+      "vgpr": 26, "sgpr": 28, "dynamic_lds_bytes": 256
+    },
+    "mfma_stage3_m64_w3_k5120_n12288": {
+      "compiler_stages": 3, "block_m": 64, "block_n": 64, "block_k": 32,
+      "static_opcodes": 399, "valu": 209, "salu": 131, "vmem": 38,
+      "lds": 21, "mfma": 6, "alignbit_b32": 6, "mad_u32_u24": 8,
+      "mul_lo_u32": 2, "vgpr": 60, "sgpr": 37,
+      "dynamic_lds_bytes": 12512
+    },
+    "mfma_stage2_m2048_w3_k5120_n12288": {
+      "compiler_stages": 2, "block_m": 512, "block_n": 64, "block_k": 64,
+      "static_opcodes": 766, "valu": 456, "salu": 190, "vmem": 72,
+      "lds": 48, "mfma": 64, "alignbit_b32": 0, "mad_u32_u24": 15,
+      "mul_lo_u32": 4, "vgpr": 160, "sgpr": 40,
+      "dynamic_lds_bytes": 143328
+    },
+    "mfma_stage1_m1024_w3_k5120_n12288": {
+      "compiler_stages": 1, "block_m": 1024, "block_n": 64, "block_k": 64,
+      "static_opcodes": 796, "valu": 516, "salu": 164, "vmem": 68,
+      "lds": 48, "mfma": 64, "alignbit_b32": 0, "mad_u32_u24": 14,
+      "mul_lo_u32": 4, "vgpr": 244, "sgpr": 31,
+      "dynamic_lds_bytes": 131072
+    }
+  },
+  "final_qwen_counters": {
+    "gemv_stage1_m1_w3_k5120_n12288": {
+      "mean_ns": 103996.04, "median_ns": 103690, "active_cus": 179,
+      "cu_utilization_percent": 67.1012, "valu_utilization_percent": 26.1863,
+      "mfma_utilization_percent": 0, "vmem_utilization_percent": 4.3538,
+      "wavefront_occupancy_percent": 16.7746, "vl1d_hit_rate_percent": 99.1663,
+      "l2_hit_rate_percent": 28.5231,
+      "dynamic_instructions": {
+        "valu": 17746944, "vmem": 2950656, "lds": 3072, "mfma": 0,
+        "salu": 569856, "smem": 1536, "branch": 245760
+      }
+    },
+    "mfma_stage3_m64_w3_k5120_n12288": {
+      "mean_ns": 114936.08, "median_ns": 114461, "active_cus": 182,
+      "cu_utilization_percent": 67.9465, "valu_utilization_percent": 14.6625,
+      "mfma_utilization_percent": 2.6371, "vmem_utilization_percent": 3.9597,
+      "wavefront_occupancy_percent": 16.9707, "vl1d_hit_rate_percent": 95.9615,
+      "l2_hit_rate_percent": 80.2386,
+      "dynamic_instructions": {
+        "valu": 10440192, "vmem": 2952192, "lds": 1720320, "mfma": 491520,
+        "salu": 5225472, "smem": 3072, "branch": 242688
+      }
+    },
+    "mfma_stage2_m2048_w3_k5120_n12288": {
+      "mean_ns": 491186, "median_ns": 490142, "active_cus": 255,
+      "cu_utilization_percent": 96.8057, "valu_utilization_percent": 22.5944,
+      "mfma_utilization_percent": 21.3635, "vmem_utilization_percent": 4.7066,
+      "wavefront_occupancy_percent": 24.0504, "vl1d_hit_rate_percent": 81.7434,
+      "l2_hit_rate_percent": 92.6436,
+      "dynamic_instructions": {
+        "valu": 50810880, "vmem": 13860864, "lds": 11796480,
+        "mfma": 15728640, "salu": 12625920, "smem": 12288,
+        "branch": 485376
+      }
+    },
+    "mfma_stage1_m1024_w3_k5120_n12288": {
+      "mean_ns": 306417.45, "median_ns": 306843.5, "active_cus": 190,
+      "cu_utilization_percent": 71.0483, "valu_utilization_percent": 13.5572,
+      "mfma_utilization_percent": 16.7735, "vmem_utilization_percent": 2.385,
+      "wavefront_occupancy_percent": 17.6431, "vl1d_hit_rate_percent": 73.3979,
+      "l2_hit_rate_percent": 92.7487,
+      "dynamic_instructions": {
+        "valu": 17561088, "vmem": 4472832, "lds": 5898240,
+        "mfma": 7864320, "salu": 838656, "smem": 1536,
+        "branch": 122880
+      }
+    }
+  }
+}

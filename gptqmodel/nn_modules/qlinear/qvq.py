@@ -492,6 +492,7 @@ class QVQLinear(BaseQuantLinear):
             "fallback_reasons": {},
             "rejection_reasons": {},
         }
+        self._qvq_amd_folded_hot_cache: tuple | None = None
         pgc16_levels_for_version(self.codebook_version)
 
         missing = {"trellis", "SU", "SV"} - set(tensors) if tensors else set()
@@ -561,6 +562,7 @@ class QVQLinear(BaseQuantLinear):
         state["_qvq_cuda_bank_cache"] = None
         state["_qvq_cuda_window_cache"] = None
         state["_qvq_fp8_levels_cache"] = None
+        state["_qvq_amd_folded_hot_cache"] = None
         return state
 
     def __setstate__(self, state):
@@ -584,6 +586,7 @@ class QVQLinear(BaseQuantLinear):
             self._qvq_fp8_telemetry.setdefault("rejected", 0)
             self._qvq_fp8_telemetry.setdefault("fallback_reasons", {})
             self._qvq_fp8_telemetry.setdefault("rejection_reasons", {})
+        self._qvq_amd_folded_hot_cache = None
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         super()._save_to_state_dict(destination, prefix, keep_vars)
@@ -627,11 +630,11 @@ class QVQLinear(BaseQuantLinear):
         self,
         device: torch.device,
     ) -> torch.Tensor:
-        """Build and retain the storage-neutral P32 window payload for Hopper WGMMA.
+        """Build and retain the storage-neutral P32 window payload for direct kernels.
 
         Serialized checkpoints remain canonical planar P32.  The direct-window
-        Hopper kernel uses an equivalent bit layout, so convert once per module
-        after the weights reach CUDA and reuse the result for subsequent calls.
+        Hopper and gfx950 kernels use an equivalent bit layout, so convert once
+        per module after the weights reach the accelerator and reuse the result.
         """
 
         source = self.trellis
@@ -649,7 +652,7 @@ class QVQLinear(BaseQuantLinear):
         )
         if self.trellis is not source or source._version != source_version:
             raise RuntimeError(
-                "QVQ P32 trellis changed while preparing the Hopper window payload"
+                "QVQ P32 trellis changed while preparing the window payload"
             )
         self._qvq_cuda_window_cache = (source, source_version, device, window)
         return window
@@ -701,6 +704,203 @@ class QVQLinear(BaseQuantLinear):
                     "rejection_reasons": {},
                 }
         return result
+
+    def _prepare_amd_p32_metadata(
+        self,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        """Snapshot mutable P32 selectors and return the reusable gfx950 payload."""
+
+        with self._qvq_cuda_bank_cache_lock:
+            source = self.bank_ids
+            alternative = self.bank_alt_id
+            if source is None or alternative is None:
+                raise RuntimeError("AMD folded P32 requires bank selectors and alternative-bank metadata")
+            current_version = source._version
+            alternative_version = alternative._version
+            cached = self._qvq_cuda_bank_cache
+            if (
+                cached is not None
+                and cached[0] is source
+                and cached[1] == current_version
+                and cached[2] == device
+                and cached[3] is alternative
+                and cached[4] == alternative_version
+                and self.bank_ids is source
+                and source._version == current_version
+                and self.bank_alt_id is alternative
+                and alternative._version == alternative_version
+            ):
+                packed = cached[5]
+                bank_alt_id = cached[6]
+            else:
+                snapshot = None
+                snapshot_version = -1
+                for _ in range(3):
+                    if self.bank_ids is not source:
+                        break
+                    before = source._version
+                    candidate = source.detach().clone()
+                    after = source._version
+                    if before == after and self.bank_ids is source:
+                        snapshot = candidate
+                        snapshot_version = after
+                        break
+                if snapshot is None:
+                    raise RuntimeError("QVQ CUDA bank selector mutated during snapshot")
+                tile_count = (self.in_features // 16) * (self.out_features // 16)
+                packed = pack_qvq_binary_bank_ids(
+                    unpack_qvq_binary_bank_ids(snapshot, tile_count * 8)
+                ).to(device=device)
+                alternative_version = alternative._version
+                bank_alt_id = int(alternative.detach().item())
+                if (
+                    self.bank_alt_id is not alternative
+                    or alternative._version != alternative_version
+                    or not 1 <= bank_alt_id <= 3
+                ):
+                    raise RuntimeError("QVQ CUDA alternative-bank metadata changed during snapshot")
+                if self.bank_ids is not source:
+                    raise RuntimeError("QVQ CUDA bank selector replaced during snapshot")
+                self._qvq_cuda_bank_cache = (
+                    source,
+                    snapshot_version,
+                    device,
+                    alternative,
+                    alternative_version,
+                    packed,
+                    bank_alt_id,
+                )
+            window = self._prepare_hopper_p32_window(device)
+        return window, packed, bank_alt_id
+
+    def _qvq_amd_folded_forward(
+        self,
+        x_2d: torch.Tensor,
+        compute_dtype: torch.dtype,
+    ) -> torch.Tensor | None:
+        """Return the gfx950 full-layer folded-cache result when strictly eligible."""
+
+        if (
+            self.training
+            or x_2d.device.type != "cuda"
+            or torch.version.hip is None
+            or compute_dtype != torch.float16
+            or x_2d.dtype != torch.float16
+            or self.trellis_window != 16
+            or self.dual_v2
+            or not self.v2b2_p32
+            or self.vector_size != 2
+            or qvq_transition_bits(self.bits, vector_size=2) not in (4, 5, 6, 7)
+        ):
+            return None
+        from ...utils.qvq_amd import (
+            _qvq_p32_folded_execute,
+            qvq_p32_amd_folded,
+            qvq_p32_amd_folded_case_supported,
+            qvq_p32_amd_folded_prefers_fp32_output,
+            qvq_p32_amd_supported,
+        )
+        from ...utils.qvq_cuda import _pgc16_levels
+
+        if not qvq_p32_amd_folded_case_supported(
+            x_2d.shape[0], self.in_features, self.out_features
+        ):
+            return None
+        cached = self._qvq_amd_folded_hot_cache
+        if (
+            cached is not None
+            and len(cached) == 27
+            and cached[0] is self.trellis
+            and cached[1] == self.trellis._version
+            and cached[2] is self.bank_ids
+            and cached[3] == self.bank_ids._version
+            and cached[4] is self.bank_alt_id
+            and cached[5] == self.bank_alt_id._version
+            and cached[6] is self.SU
+            and cached[7] == self.SU._version
+            and cached[8] is self.SV
+            and cached[9] == self.SV._version
+            and cached[10] is self.bias
+            and cached[11] == (-1 if self.bias is None else self.bias._version)
+            and cached[12] == x_2d.device
+            and cached[13] == self.bits
+            and cached[14] == self.input_hadamard
+            and cached[15] == self.output_hadamard
+            and cached[16] == self.codebook_version
+        ):
+            bias = cached[23]
+            output = _qvq_p32_folded_execute(
+                x_2d,
+                cached[24],
+                cached[25],
+                cached[26],
+                out_features=self.out_features,
+                output_fp32=bias is not None
+                or qvq_p32_amd_folded_prefers_fp32_output(
+                    x_2d.shape[0], self.in_features, self.out_features
+                ),
+            )
+            return output if bias is None else output + bias
+        if not qvq_p32_amd_supported(x_2d.device):
+            return None
+        if not self._bank_ids_loaded or self.bank_ids is None or self.bank_ids.device.type == "meta":
+            raise RuntimeError("QVQ banked module cannot run before bank_ids selectors are loaded")
+        window, bank_ids, bank_alt_id = self._prepare_amd_p32_metadata(x_2d.device)
+        bias = self._cached_cast("bias", compute_dtype, torch.float32)
+        levels = _pgc16_levels(x_2d.device, self.codebook_version)
+        su = self._cached_cast("SU", compute_dtype)
+        sv = self._cached_cast("SV", compute_dtype)
+        output = qvq_p32_amd_folded(
+            x_2d.contiguous(),
+            window,
+            levels,
+            bank_ids,
+            su,
+            sv,
+            self.bits,
+            out_features=self.out_features,
+            bank_alt_id=bank_alt_id,
+            input_hadamard=self.input_hadamard,
+            output_hadamard=self.output_hadamard,
+            output_fp32=bias is not None
+            or qvq_p32_amd_folded_prefers_fp32_output(
+                x_2d.shape[0], self.in_features, self.out_features
+            ),
+        )
+        _, _, operand, _, residual_operand, composite_recovery = (
+            window._qvq_p32_amd_folded_cache
+        )
+        self._qvq_amd_folded_hot_cache = (
+            self.trellis,
+            self.trellis._version,
+            self.bank_ids,
+            self.bank_ids._version,
+            self.bank_alt_id,
+            self.bank_alt_id._version,
+            self.SU,
+            self.SU._version,
+            self.SV,
+            self.SV._version,
+            self.bias,
+            -1 if self.bias is None else self.bias._version,
+            x_2d.device,
+            self.bits,
+            self.input_hadamard,
+            self.output_hadamard,
+            self.codebook_version,
+            window,
+            levels,
+            bank_ids,
+            bank_alt_id,
+            su,
+            sv,
+            bias,
+            operand,
+            residual_operand,
+            composite_recovery,
+        )
+        return output if bias is None else output + bias
 
     def _cached_cast(self, name: str, *dtypes: torch.dtype) -> torch.Tensor | None:
         """Convert a constant auxiliary tensor (SU/SV/bias) to the requested
@@ -931,6 +1131,7 @@ class QVQLinear(BaseQuantLinear):
         with self._qvq_cuda_bank_cache_lock:
             self._qvq_cuda_bank_cache = None
             self._qvq_cuda_window_cache = None
+            self._qvq_amd_folded_hot_cache = None
         if self.trellis.device.type == "mps":
             from ...utils.qvq_mps import _prepare_qvq_mps_compander
 
@@ -955,6 +1156,7 @@ class QVQLinear(BaseQuantLinear):
         with self._qvq_cuda_bank_cache_lock:
             self._qvq_cuda_bank_cache = None
             self._qvq_cuda_window_cache = None
+            self._qvq_amd_folded_hot_cache = None
         # ModuleLooper performs device handoffs from inference-mode workers.
         # Letting Module._apply inherit that mode would recreate all cache-keyed
         # buffers without mutation counters immediately after post_init made
@@ -1263,6 +1465,29 @@ class QVQLinear(BaseQuantLinear):
                             cuda_bank_alt_id,
                         )
             if not qvq_cuda_device_supported(x.device):
+                if (
+                    torch.version.hip is not None
+                    and self.v2b2_p32
+                    and self.vector_size == 2
+                    and x.dtype == torch.float16
+                    and qvq_transition_bits(self.bits, vector_size=2) in (4, 5, 6, 7)
+                ):
+                    from ...utils.qvq_amd import qvq_p32_amd, qvq_p32_amd_supported
+                    from ...utils.qvq_cuda import _pgc16_levels
+
+                    if qvq_p32_amd_supported(x.device):
+                        with self._qvq_cuda_bank_cache_lock:
+                            window = self._prepare_hopper_p32_window(x.device)
+                        return qvq_p32_amd(
+                            x.contiguous(),
+                            window,
+                            _pgc16_levels(x.device, self.codebook_version),
+                            cuda_bank_ids,
+                            self.bits,
+                            out_features=self.out_features,
+                            bank_alt_id=cuda_bank_alt_id,
+                            output_fp32=True,
+                        )
                 return self._reference_inner_forward(x)
 
             # Hopper's RS-WGMMA path consumes the storage-neutral continuous
@@ -1576,6 +1801,14 @@ class QVQLinear(BaseQuantLinear):
         input_dtype = x.dtype
         compute_dtype = _qvq_compute_dtype(input_dtype, x.device.type)
         x_2d = x.reshape(-1, self.in_features)
+
+        # The folded gfx950 path has no low-precision butterfly intermediate,
+        # so it cannot trigger the transform-overflow rescue below. Return at
+        # this boundary to avoid an otherwise redundant device-wide finite
+        # reduction and host synchronization on every Qwen projection.
+        amd_folded = self._qvq_amd_folded_forward(x_2d, compute_dtype)
+        if amd_folded is not None:
+            return amd_folded.reshape(*x.shape[:-1], self.out_features).to(input_dtype)
 
         # The CUDA inner kernel accumulates and returns FP32. Preserve that
         # range through the output Hadamard/SV epilogue, then round only the

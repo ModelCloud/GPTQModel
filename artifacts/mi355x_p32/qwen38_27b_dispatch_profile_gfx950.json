@@ -1,0 +1,114 @@
+{
+  "schema": "qvq_p32_amd_dispatch_profile_v1",
+  "date": "2026-09-04",
+  "commit": "44fab49dfb8de52de2ad3ccf590d0c028a70ddd4",
+  "model": "Qwen/Qwen3.8-27B",
+  "hardware": {
+    "name": "AMD Instinct MI355X VF",
+    "architecture": "gfx950:sramecc+:xnack-",
+    "compute_units": 256,
+    "pci_bus_id": "0000:83:00.0",
+    "unique_id": "0x333ef6e01ec019b3"
+  },
+  "software": {
+    "torch": "2.13.0+rocm10.0.0",
+    "hip": "7.15.26333",
+    "rocprofiler_sdk": "1.1.0",
+    "rocm_compute_profiler": "3.8.0"
+  },
+  "dispatch_sweep": {
+    "shapes": 7,
+    "m_values": [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096],
+    "cases": 91,
+    "candidates": [
+      "current N-by-K cache through a transposed K-by-N view",
+      "physically contiguous K-by-N cache",
+      "default/hipBLAS/hipBLASLt/CK selection",
+      "N-split batched GEMM with 2/4/8/16 groups",
+      "M-split batched GEMM with 2/4/8/16 groups"
+    ],
+    "first_pass": {
+      "winner_speedup_min": 1.0,
+      "winner_speedup_geometric_mean": 1.0391725086162258,
+      "winner_speedup_max": 1.2608775684880702
+    },
+    "repeat_20_warmup_100_samples": {
+      "winner_speedup_min": 1.0,
+      "winner_speedup_geometric_mean": 1.0380135742638856,
+      "winner_speedup_max": 1.27511338331284
+    },
+    "conclusion": "Dispatch, physical layout, forced BLAS selection, and simple split GEMMs cannot supply a 1.5x geometric-mean gain."
+  },
+  "runtime_trace": {
+    "tool": "rocprofv3 --runtime-trace --kernel-trace --stats",
+    "warmup_launches": 20,
+    "profiled_launches": 200,
+    "note": "Trace durations identify selected kernels and resources; event medians from the uncontended sweep remain the performance authority.",
+    "cases": [
+      {"case": "m1_fullq_view", "mean_us": 20.504468, "macro_tile": "256x16x64", "lds_bytes": 37376, "vgpr": 88, "agpr": 16, "sgpr": 96, "scratch_bytes": 0},
+      {"case": "m32_fullq_view", "mean_us": 35.542473, "macro_tile": "16x32x1024", "lds_bytes": 99840, "vgpr": 96, "agpr": 136, "sgpr": 96, "scratch_bytes": 0},
+      {"case": "m32_fullq_contiguous", "mean_us": 28.069632, "macro_tile": "64x32x256", "lds_bytes": 52224, "vgpr": 48, "agpr": 136, "sgpr": 96, "scratch_bytes": 0},
+      {"case": "m128_qkv_view", "mean_us": 38.862041, "macro_tile": "64x128x128", "lds_bytes": 51200, "vgpr": 40, "agpr": 160, "sgpr": 96, "scratch_bytes": 0},
+      {"case": "m128_qkv_contiguous", "mean_us": 25.201318, "macro_tile": "192x128x64", "lds_bytes": 42496, "vgpr": 32, "agpr": 224, "sgpr": 96, "scratch_bytes": 0},
+      {"case": "m512_kv_view", "mean_us": 18.358191, "macro_tile": "64x64x256", "lds_bytes": 67584, "vgpr": 88, "agpr": 144, "sgpr": 96, "scratch_bytes": 0},
+      {"case": "m512_kv_msplit2", "mean_us": 17.002314, "macro_tile": "64x64x256", "lds_bytes": 67584, "vgpr": 88, "agpr": 144, "sgpr": 96, "scratch_bytes": 0},
+      {"case": "m4096_fullq_view", "mean_us": 297.142895, "macro_tile": "256x256x64", "lds_bytes": 67584, "vgpr": 120, "agpr": 384, "sgpr": 96, "scratch_bytes": 0},
+      {"case": "m4096_down_view", "mean_us": 473.929818, "macro_tile": "160x256x64", "lds_bytes": 124928, "vgpr": 128, "agpr": 288, "sgpr": 96, "scratch_bytes": 0}
+    ]
+  },
+  "static_isa_audit": {
+    "method": "Correlate each rocprofv3 kernel address to the exact gfx950 hipBLASLt code object, decompress the CCOB zstd payload, unbundle the gfx950 HSACO, and disassemble from the selected symbol to the next global function.",
+    "caveat": "hipBLASLt emits universal symbols containing guarded edge and activation paths. Static counts include paths that are not executed by this no-bias/no-activation GEMM and therefore are diagnostic, not dynamic instruction counts.",
+    "cases": [
+      {"case": "m1_fullq_view", "non_nop": 10108, "mfma": 28, "vmem": 540, "lds": 219, "salu": 2327, "valu_non_mfma": 6994, "scratch": 0},
+      {"case": "m32_fullq_view", "non_nop": 4101, "mfma": 50, "vmem": 276, "lds": 239, "salu": 2220, "valu_non_mfma": 1316, "scratch": 0},
+      {"case": "m32_fullq_contiguous", "non_nop": 7329, "mfma": 50, "vmem": 382, "lds": 421, "salu": 2062, "valu_non_mfma": 4414, "scratch": 0},
+      {"case": "m128_qkv_view", "non_nop": 20363, "mfma": 104, "vmem": 1362, "lds": 226, "salu": 3965, "valu_non_mfma": 14706, "scratch": 0},
+      {"case": "m128_qkv_contiguous", "non_nop": 56691, "mfma": 168, "vmem": 3850, "lds": 1824, "salu": 7939, "valu_non_mfma": 42910, "scratch": 0},
+      {"case": "m512_kv_view_or_msplit2", "non_nop": 11739, "mfma": 100, "vmem": 762, "lds": 264, "salu": 2947, "valu_non_mfma": 7666, "scratch": 0},
+      {"case": "m4096_fullq_view", "non_nop": 120540, "mfma": 448, "vmem": 7618, "lds": 1956, "salu": 11433, "valu_non_mfma": 99085, "scratch": 0},
+      {"case": "m4096_down_view", "non_nop": 66993, "mfma": 280, "vmem": 6666, "lds": 927, "salu": 10241, "valu_non_mfma": 48879, "scratch": 0}
+    ],
+    "ssa_algebra_conclusion": [
+      "The steady cached pass contains no P32 bit extraction, bank selection, xor-shift, hash, or level lookup; all of that algebra is eliminated into the one-time cache build.",
+      "The one-time predecode remains 156 static operations with 87 VALU, 52 SALU, 11 VMEM, 6 LDS, two v_alignbit_b32, two v_mad_u32_u24, 16 VGPR, 25 SGPR, and no scratch.",
+      "Every selected hipBLASLt GEMM has zero scratch. Remaining integer/address algebra belongs to the scheduled library GEMM and is not source-level QVQ redundancy."
+    ]
+  },
+  "counter_profile": {
+    "status": "bounded failure",
+    "detail": "Direct ROCm Compute Profiler counter injection into the PyTorch process aborts before dispatch because LLVM registers spirv-expand-step twice. The process was stopped without residual GPU work. Existing minimal-HSACO counter profiles remain valid for the compressed fallback, but no new BLAS PMCs are claimed here."
+  },
+  "algebraic_fold_candidate": {
+    "formula": "W_effective = diag(SU) * H_K * W_inner * H_N * diag(SV), omitting H_K or H_N where the architecture disables that axis",
+    "ceiling_sweep": {
+      "cases": 91,
+      "minimum_speedup": 1.9442056678677317,
+      "geometric_mean_speedup": 14.800259994312729,
+      "maximum_speedup": 43.98295488080732,
+      "cases_at_least_1_5x": 91,
+      "method": "Add measured input-transform and output-recovery medians to each measured steady GEMM median, then retain only GEMM time for the folded ceiling."
+    },
+    "fp16_storage_accuracy_probe": {
+      "method": "Synthetic unit-RMS Gaussian inner weights, FP16 folded cache, FP16 input scaled by 0.01, FP32 dense algebraic oracle, seed 20260904.",
+      "gate": 0.002,
+      "maximum_observed_abs_error": 0.0014767348766326904,
+      "rows": [
+        {"shape": "full_kv", "axes": "input+output", "m": 4096, "max_abs": 0.000756382942199707},
+        {"shape": "mlp_gate_up", "axes": "input-only", "m": 4096, "max_abs": 0.0008854866027832031},
+        {"shape": "mlp_down", "axes": "output-only", "m": 4096, "max_abs": 0.0014767348766326904}
+      ],
+      "qualification": "This proves the numeric idea at target dimensions but is not a checkpoint-level acceptance run."
+    }
+  },
+  "decision": {
+    "pursue": "A mutation-aware full-layer AMD cache of the algebraically folded effective weight, with raw activations going directly to one FP16-input/FP32-output GEMM.",
+    "do_not_pursue_next": "More global hipBLASLt forcing, simple physical-layout switching, or M/N split dispatch as the primary path.",
+    "required_acceptance": [
+      "Run all four P32 rates, all seven target geometries, and all 13 M values against the canonical FP32 full-layer oracle.",
+      "Include real Qwen3.8-27B checkpoint payloads and adversarial activation patterns; synthetic accuracy is only a probe.",
+      "Measure cold-cache construction and repeated-call break-even, including additional transient VRAM.",
+      "After any production GPU-instruction-changing commit, rerun rocprofv3 attribution and the exact gfx950 ISA/SSA audit."
+    ]
+  }
+}

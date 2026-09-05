@@ -1,0 +1,150 @@
+{
+  "schema": "qvq_p32_amd_folded_extra_shapes_profile_v1",
+  "date": "2026-09-04",
+  "commit": "8fa8e8f769b2c71a0489d9547ec6c2c783a2b7a4",
+  "model": "Qwen/Qwen3.8-27B",
+  "hardware": {
+    "name": "AMD Instinct MI355X VF",
+    "architecture": "gfx950:sramecc+:xnack-",
+    "compute_units": 256,
+    "pci_bus_id": "0000:83:00.0",
+    "unique_id": "0x333ef6e01ec019b3"
+  },
+  "software": {
+    "torch": "2.13.0+rocm10.0.0",
+    "hip": "7.15.26333",
+    "triton": "3.8.0+git4cff872c.rocm10.0.0",
+    "rocprofiler_sdk": "1.1.0"
+  },
+  "selection_policy": {
+    "attn_out": {
+      "k": 6144,
+      "n": 5120,
+      "maximum_m": 32
+    },
+    "mlp_gate_up": {
+      "k": 5120,
+      "n": 17408,
+      "maximum_m": 512
+    },
+    "mlp_down": {
+      "k": 17408,
+      "n": 5120,
+      "selected": false,
+      "reason": "Exploratory FP16 folded-cache errors reached 0.0030312538146972656, exceeding the 0.002 gate."
+    }
+  },
+  "certification": {
+    "artifact": "qwen38_27b_folded_extra_shapes_post_8fa8e8f7_certified_gfx950.json",
+    "cases": 364,
+    "accuracy_passes": 364,
+    "accuracy_failures": 0,
+    "max_abs": 0.00185394287109375,
+    "speedup_geometric_mean": 8.74840273803394,
+    "speedup_min": 0.9262516905293146,
+    "speedup_max": 30.18655034385382,
+    "improvement_vs_d4eacb4e": 1.5857511209343649,
+    "improvement_vs_762ef566": 1.8017976424690325,
+    "newly_selected_cases": 64,
+    "newly_selected": {
+      "attn_out": {
+        "cases": 24,
+        "speedup_geometric_mean": 27.295828272597493,
+        "speedup_min": 25.424065486867033,
+        "speedup_max": 29.051732451999694,
+        "max_abs": 0.0014696121215820312
+      },
+      "mlp_gate_up": {
+        "cases": 40,
+        "speedup_geometric_mean": 9.596705614157818,
+        "speedup_min": 5.223816414928237,
+        "speedup_max": 13.852429011328422,
+        "max_abs": 0.0015614032745361328
+      }
+    }
+  },
+  "post_commit_profiles": {
+    "method": "rocprofv3 --kernel-trace --stats -f csv with 20 warmups and 50 measured forwards under the strict idle gate",
+    "attn_out_m1": {
+      "kernel": "_qvq_p32_folded_gemv_gfx950_kernel",
+      "calls": 71,
+      "total_ns": 770412,
+      "mean_us": 10.850873239,
+      "min_us": 10.401,
+      "max_us": 16.04,
+      "standard_deviation_us": 0.632647248,
+      "passes_per_forward": 1,
+      "resources": {
+        "workgroup_threads": 256,
+        "grid_threads": 327680,
+        "workgroups": 1280,
+        "vgpr": 40,
+        "accum_vgpr": 0,
+        "sgpr": 32,
+        "scratch_bytes": 0,
+        "triton_metadata_shared_bytes": 2048
+      }
+    },
+    "mlp_gate_up_m512": {
+      "kernel_kind": "hipBLASLt",
+      "macro_tile": "160x256x64",
+      "calls": 71,
+      "total_ns": 7474270,
+      "mean_us": 105.271408451,
+      "min_us": 85.401,
+      "max_us": 121.121,
+      "standard_deviation_us": 11.295953654,
+      "passes_per_forward": 1,
+      "resources": {
+        "workgroup_threads": 256,
+        "grid_threads": 55808,
+        "workgroups": 218,
+        "lds_bytes": 120832,
+        "vgpr": 128,
+        "accum_vgpr": 288,
+        "sgpr": 96,
+        "scratch_bytes": 0
+      }
+    },
+    "raw_trace_policy": "Raw profiler CSVs remain local and uncommitted."
+  },
+  "attn_out_m1_static_isa": {
+    "exact_triton_cache_key": "KBMGYPNE5FYAMXKOQHXQ7CW66U4K5AYSKG5CWBKUBQUJNIFUD67Q",
+    "total_instructions": 211,
+    "non_nop": 190,
+    "nop": 21,
+    "salu_including_nop": 73,
+    "valu": 114,
+    "vmem": 7,
+    "lds": 17,
+    "mfma": 0,
+    "scratch": 0,
+    "barrier": 8,
+    "wait": 16,
+    "branch": 2,
+    "compare": 2,
+    "cndmask": 1
+  },
+  "attn_out_m1_ssa_audit": {
+    "count_method": "Lines beginning with an SSA result definition in each exact compiler IR.",
+    "ttir_definitions": 40,
+    "ttgir_definitions": 43,
+    "llvm_ir_definitions": 184,
+    "geometry_edge_predicates": 0,
+    "remaining_control_predicates": [
+      "The fixed 12-iteration K-loop exit.",
+      "The one-lane output-store selection after the wave reduction."
+    ]
+  },
+  "ssa_algebra_conclusion": [
+    "The activation commit changes dispatch coverage, not the GEMV source algebra; the exact new 6144-by-5120 specialization therefore retains the previously folded mask-free structure.",
+    "TTIR contains no row or K-boundary compare/select because N is exactly divisible by block_n and K by block_k.",
+    "The two remaining ISA comparisons implement the statically bounded K-loop exit and the required one-lane store. Removing either would change synchronization or write semantics.",
+    "The M512 path is one scratch-free hipBLASLt GEMM. No separate input transform, output transform, scale, cast, or reduction pass remains online."
+  ],
+  "decision": {
+    "accepted": true,
+    "full_sweep_50_percent_gain_met": true,
+    "next_candidate": "A residual or higher-precision folded representation for mlp_down could unlock its 52 cases, but it must first recover the 0.002 accuracy gate without erasing the bandwidth advantage."
+  }
+}
