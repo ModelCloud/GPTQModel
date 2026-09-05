@@ -4050,6 +4050,35 @@ halves the decode grid, matched N=5120 timings regressed by roughly 21--27%
 at M=512/2048/4096.  Stage 1 needs the extra occupancy supplied by the
 eight-group kernel, so no stage-1 dispatch or instantiation is retained.
 
+## v89 Qwen3.8-27B stage-3 sixteen-group reuse
+
+After PR #126 merged, this phase was refreshed to `origin/main` at
+`83c8fc33` and narrowed to the actual Qwen3.8-27B projection set:
+`5120x{1024,6144,10240,12288,17408}`, `6144x5120`, and `17408x5120`.
+The stage-3 kernel now reuses each compressed-weight tile and decode across
+256 input rows.  Its double-buffered 49,152 B input tile uses opt-in dynamic
+shared memory; the packed words and bank IDs remain static.  Dispatch is
+restricted to those seven K/N pairs and the measured winning M/rate regions.
+
+The Qwen-only A100 matrix used `M=1024/2048/4096`, transition widths 4--7,
+10 warmups, and 50 timed iterations.  Projection weights match the model
+stack: full-Q 1, full-KV 2, attention-out 2, linear-QKV 1, linear-Z 1,
+MLP gate/up 2, and MLP-down 1.  All 71 affected cases improved versus the
+newly merged main, for a projection-weighted geometric mean of `1.1629x`.
+At M=1024, attention-out improves by 1.383--1.401x and MLP-down by
+1.391--1.410x.  At M=4096, every affected projection/rate improves by
+1.086--1.169x.  Randomized split-1 and split-8 comparisons are bit-for-bit
+exact for K=5120, 6144, and 17408.
+
+The bits-5 static-K resource entry uses 168 registers/thread, 1,952 B static
+shared memory, and 49,152 B dynamic shared memory, with zero stack/local
+storage.  A temporary flattened representation of the original static input
+tile shifted excluded-route timing by 0.3--1%; it was rejected.  Restoring
+the original two-dimensional static layout makes excluded M=512,
+M=1024/N=6144, and M=2048/N=1024 controls neutral to measurement resolution.
+Stage-3 sixteen-group reuse at M=512 was also rejected because N=5120
+regressed by roughly 5--9%; that tier remains on eight groups.
+
 ## Reproduction
 
 ```bash
