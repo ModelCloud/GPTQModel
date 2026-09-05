@@ -1614,6 +1614,22 @@ class QVQHopperGroupedRuntime:
         )
 
     @staticmethod
+    def _execute_h100_fp8_mlp_down_quantized(
+        x_fp8: torch.Tensor,
+        input_scale: torch.Tensor,
+        payload: _H100FP8PrefillPayload,
+    ) -> torch.Tensor:
+        return torch._scaled_mm(
+            x_fp8,
+            payload.weight,
+            scale_a=input_scale,
+            scale_b=payload.weight_scale,
+            bias=payload.bias,
+            out_dtype=torch.float16,
+            use_fast_accum=True,
+        )
+
+    @staticmethod
     def _large_m_chunk_candidates() -> tuple[int, ...]:
         configured = os.environ.get("QVQ_HOPPER_LARGE_M_CHUNK_CANDIDATES")
         if configured is None:
@@ -1812,16 +1828,23 @@ class QVQHopperGroupedRuntime:
             )
             if fp8_down is not None:
                 if self._mlp_activation_is_exact_silu:
-                    from .triton_utils.kernels import fused_silu_mul
+                    from .triton_utils.kernels import fused_silu_mul_quant_fp8
 
-                    intermediate = fused_silu_mul(gate, up)
+                    intermediate_fp8, intermediate_scale = (
+                        fused_silu_mul_quant_fp8(gate, up)
+                    )
                     self.telemetry.h100_fp8_mlp_fused_silu_launches += 1
+                    recovered = self._execute_h100_fp8_mlp_down_quantized(
+                        intermediate_fp8,
+                        intermediate_scale,
+                        fp8_down,
+                    )
                 else:
                     intermediate = self._mlp_act_fn(gate) * up
+                    recovered = self._execute_h100_fp8_mlp_down(
+                        intermediate, fp8_down
+                    )
                 self.telemetry.h100_fp8_mlp_down_launches += 1
-                recovered = self._execute_h100_fp8_mlp_down(
-                    intermediate, fp8_down
-                )
                 return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
             activated_gate = self._mlp_act_fn(gate)
             transformed = qvq_cuda_swiglu_precondition_multiblock(

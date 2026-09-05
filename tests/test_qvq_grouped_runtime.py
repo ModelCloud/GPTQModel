@@ -1473,6 +1473,34 @@ def test_h100_fp8_mlp_prefill_is_independently_opt_in(monkeypatch):
     assert QVQHopperGroupedRuntime._h100_fp8_mlp_prefill_enabled()
 
 
+def test_h100_fused_silu_row_quant_matches_staged_reference_and_graph():
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    from gptqmodel.nn_modules.triton_utils.kernels import (
+        fused_silu_mul,
+        fused_silu_mul_quant_fp8,
+    )
+    from gptqmodel.utils.qvq_cuda import qvq_cuda_quantize_fp8_per_row
+
+    source = torch.randn((3, 16384), device=device, dtype=torch.float16)
+    gate, up = source[:, :8192], source[:, 8192:]
+    with torch.inference_mode():
+        intermediate = fused_silu_mul(gate, up)
+        expected, expected_scale = qvq_cuda_quantize_fp8_per_row(intermediate)
+        actual, actual_scale = fused_silu_mul_quant_fp8(gate, up)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured, captured_scale = fused_silu_mul_quant_fp8(gate, up)
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+    assert torch.equal(actual_scale, expected_scale)
+    assert torch.equal(captured.view(torch.uint8), actual.view(torch.uint8))
+    assert torch.equal(captured_scale, actual_scale)
+
+
 def test_h100_m16384_qkv_on_demand_fp8_is_bounded_and_replays_cuda_graph(
     monkeypatch,
 ):
