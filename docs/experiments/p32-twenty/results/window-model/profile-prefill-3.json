@@ -1,0 +1,60 @@
+[
+  {
+    "kernel": "void <unnamed>::qvq_gemv_kernel<__half, float, 32, 2, 6>(const T1 *, const int *, const unsigned char *, const unsigned char *, const __half *, T2 *, int, int, int, int, int, int, int, int)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "45.279264",
+        "unit": "ms"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "7758446592.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "80",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.061524",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "37.010205",
+        "unit": "%"
+      },
+      "launch__shared_mem_per_block": {
+        "value": "48.672000",
+        "unit": "Kbyte/block"
+      }
+    }
+  },
+  {
+    "kernel": "void <unnamed>::p32_window_ampere_large_m_kernel<6, 0, 0, 2>(const __half *, const unsigned int *, const __half *, const unsigned char *, float *, float *, int, int, int, int, int)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "3.902208",
+        "unit": "ms"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "1393065984.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "64",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "5.709322",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "46.580656",
+        "unit": "%"
+      },
+      "launch__shared_mem_per_block": {
+        "value": "8.240000",
+        "unit": "Kbyte/block"
+      }
+    }
+  }
+]

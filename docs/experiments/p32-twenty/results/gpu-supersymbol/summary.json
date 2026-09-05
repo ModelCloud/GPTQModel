@@ -1,0 +1,23 @@
+[
+  {
+    "group_steps": 2,
+    "modules": 94,
+    "direct_over_candidate_median": 0.8263365303990043,
+    "min": 0.735294130235221,
+    "max": 1.323943659085119
+  },
+  {
+    "group_steps": 4,
+    "modules": 94,
+    "direct_over_candidate_median": 0.9620253254908946,
+    "min": 0.7425742460135948,
+    "max": 1.1666667288543406
+  },
+  {
+    "group_steps": 8,
+    "modules": 94,
+    "direct_over_candidate_median": 0.9744406241697123,
+    "min": 0.764705869764779,
+    "max": 1.2465753165240778
+  }
+]

@@ -18,6 +18,7 @@ SNAPSHOT = Path(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--uuid", required=True)
+    parser.add_argument("--group-steps", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.output.resolve().is_relative_to(SNAPSHOT.resolve()):
@@ -63,7 +64,7 @@ def main():
         return tl.minimum(a + c, 16), ((b << c) ^ d) & 65535
 
     @triton.jit
-    def decode(W, Y, T: tl.constexpr, SCAN: tl.constexpr):
+    def decode(W, Y, T: tl.constexpr, SCAN: tl.constexpr, GROUP: tl.constexpr):
         tile = tl.program_id(0)
         i = tl.arange(0, 128)
         bit = (127 - i) * T
@@ -72,12 +73,30 @@ def main():
         hi = tl.load(W + tile * (4 * T) + (word + 1) % (4 * T)).to(tl.uint32)
         state = ((lo >> shift) | tl.where(shift > 0, hi << (32 - shift), 0)) & 65535
         if SCAN:
-            edge = state & ((1 << T) - 1)
-            shifts, suffix = tl.associative_scan(
-                (tl.full((128,), T, tl.int32), edge), 0, compose
-            )
-            initial = tl.sum(tl.where(i == 127, suffix, 0), 0)
-            state = ((initial << shifts) ^ suffix) & 65535
+            if GROUP == 1:
+                edge = state & ((1 << T) - 1)
+                shifts, suffix = tl.associative_scan(
+                    (tl.full((128,), T, tl.int32), edge), 0, compose
+                )
+                initial = tl.sum(tl.where(i == 127, suffix, 0), 0)
+                state = ((initial << shifts) ^ suffix) & 65535
+            else:
+                # Each packed group is an affine transfer; no exponential LUT.
+                group_shift: tl.constexpr = min(16, GROUP * T)
+                ends = tl.reshape(
+                    tl.where(i % GROUP == GROUP - 1, state, 0), (128 // GROUP, GROUP)
+                )
+                edges = tl.sum(ends, 1) & ((1 << group_shift) - 1)
+                shifts, suffix = tl.associative_scan(
+                    (tl.full((128 // GROUP,), group_shift, tl.int32), edges), 0, compose
+                )
+                g = tl.arange(0, 128 // GROUP)
+                initial = tl.sum(tl.where(g == 128 // GROUP - 1, suffix, 0), 0)
+                boundaries = ((initial << shifts) ^ suffix) & 65535
+                starts = tl.gather(boundaries, (i // GROUP + 128 // GROUP - 1) % (128 // GROUP), 0)
+                local_shift = tl.minimum(16, (i % GROUP + 1) * T)
+                partial = state & ((1 << local_shift) - 1)
+                state = ((starts << local_shift) ^ partial) & 65535
         tl.store(Y + tile * 128 + i, state)
 
     index = json.loads((SNAPSHOT / "model.safetensors.index.json").read_text())[
@@ -85,7 +104,8 @@ def main():
     ]
     modules = sorted(k[:-12] for k in index if k.endswith(".bank_alt_id"))
     report = {
-        "experiment": 21,
+        "experiment": 21 if args.group_steps == 1 else 24,
+        "group_steps": args.group_steps,
         "scope": "GPU state-only scan versus direct-window extraction; not linear-layer or model performance",
         "uuid": args.uuid,
         "revision": subprocess.check_output(
@@ -110,7 +130,12 @@ def main():
                     window=window, output=output, bits=bits, scan=scan, warps=warps
                 ):
                     decode[(window.numel() // window.shape[-1],)](
-                        window, output, int(2 * bits), scan, num_warps=warps
+                        window,
+                        output,
+                        int(2 * bits),
+                        scan,
+                        args.group_steps,
+                        num_warps=warps,
                     )
 
                 run()
