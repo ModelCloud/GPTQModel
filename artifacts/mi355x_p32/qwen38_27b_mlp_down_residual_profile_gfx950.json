@@ -1,0 +1,213 @@
+{
+  "schema": "qvq_p32_amd_mlp_down_residual_profile_v1",
+  "date": "2026-09-05",
+  "commit": "34ad89791729634aa7f9f285e80d3ec8e1c7cb89",
+  "model": "Qwen/Qwen3.8-27B",
+  "hardware": {
+    "name": "AMD Instinct MI355X VF",
+    "architecture": "gfx950:sramecc+:xnack-",
+    "compute_units": 256,
+    "pci_bus_id": "0000:83:00.0",
+    "unique_id": "0x333ef6e01ec019b3"
+  },
+  "software": {
+    "torch": "2.13.0+rocm10.0.0",
+    "hip": "7.15.26333",
+    "triton": "3.8.0+git4cff872c.rocm10.0.0",
+    "rocprofiler_compute": "3.8.0"
+  },
+  "selection_policy": {
+    "shape": "mlp_down",
+    "k": 17408,
+    "n": 5120,
+    "maximum_m": 512,
+    "representation": "FP16 high term plus FP16 residual term accumulated in FP32",
+    "folded_cache_bytes": 178257920,
+    "residual_cache_bytes": 178257920,
+    "total_cache_bytes": 356515840,
+    "additional_cache_mib": 170
+  },
+  "certification": {
+    "artifact": "qwen38_27b_mlp_down_residual_post_34ad8979_certified_gfx950.json",
+    "cases": 364,
+    "accuracy_passes": 364,
+    "accuracy_failures": 0,
+    "max_abs": 0.0019583702087402344,
+    "accuracy_gate": 0.002,
+    "speedup_geometric_mean": 10.57233293798265,
+    "speedup_min": 0.972867640973978,
+    "speedup_max": 29.78616327842225,
+    "improvement_vs_8fa8e8f7": 1.2084872238470594,
+    "newly_selected_cases": 40,
+    "newly_selected_speedup_geometric_mean": 5.145713822762211,
+    "newly_selected_speedup_min": 2.109958829274879,
+    "newly_selected_speedup_max": 7.807132460548132
+  },
+  "post_commit_profiles": {
+    "method": "rocprofv3 --kernel-trace --stats -f csv with 20 warmups and 50 measured forwards under the strict idle gate",
+    "mlp_down_m1": {
+      "kernel": "_qvq_p32_folded_gemv_gfx950_kernel",
+      "calls": 71,
+      "total_ns": 4019991,
+      "mean_us": 56.619591549,
+      "min_us": 54.64,
+      "max_us": 70.681,
+      "standard_deviation_us": 2.512095935,
+      "passes_per_forward": 1,
+      "resources": {
+        "workgroup_threads": 256,
+        "grid_threads": 327680,
+        "workgroups": 1280,
+        "vgpr": 44,
+        "accum_vgpr": 4,
+        "sgpr": 32,
+        "lds_bytes": 0,
+        "scratch_bytes": 0
+      }
+    },
+    "mlp_down_m512": {
+      "main_kernel_kind": "hipBLASLt",
+      "macro_tile": "160x256x64",
+      "main_calls": 142,
+      "main_mean_us": 99.464,
+      "main_min_us": 85.281,
+      "main_max_us": 120.081,
+      "post_kernel": "Cijk_SS_BiasS_HAS_ScaleAlphaVec_PostGSU4_VW4",
+      "post_calls": 142,
+      "post_mean_us": 11.12178169,
+      "steady_passes_per_forward": {
+        "gemm": 2,
+        "hipblaslt_post": 2,
+        "intermediate_copy": 1,
+        "fp32_to_fp16_cast": 1,
+        "total": 6
+      },
+      "main_resources": {
+        "workgroup_threads": 256,
+        "workgroups": 256,
+        "lds_bytes": 124928,
+        "vgpr": 128,
+        "accum_vgpr": 288,
+        "sgpr": 96,
+        "scratch_bytes": 0
+      }
+    },
+    "non_residual_full_q_m1_control": {
+      "kernel": "_qvq_p32_folded_gemv_gfx950_kernel",
+      "calls": 71,
+      "mean_us": 18.917323944,
+      "min_us": 18.04,
+      "max_us": 26.84,
+      "passes_per_forward": 1
+    },
+    "raw_trace_policy": "Raw profiler CSVs remain local and uncommitted."
+  },
+  "same_geometry_static_isa": {
+    "geometry": {
+      "k": 17408,
+      "n": 5120,
+      "block_n": 4,
+      "block_k": 512
+    },
+    "non_residual_control": {
+      "exact_triton_cache_key": "NFKUTIOHJN53SDX5SA763OC2QBF7S7TSF6WS2WFSCFBCRM6FF7RQ",
+      "total_instructions": 163,
+      "non_nop": 149,
+      "nop": 14,
+      "salu_including_nop": 59,
+      "valu": 87,
+      "vmem": 5,
+      "lds": 12,
+      "mfma": 0,
+      "barrier": 6,
+      "wait": 13,
+      "branch": 2,
+      "compare": 2,
+      "cndmask": 1,
+      "vgpr": 31,
+      "total_sgpr": 21,
+      "scratch_bytes": 0,
+      "occupancy": 8
+    },
+    "residual": {
+      "exact_triton_cache_key": "W7PO6RLMCYWAFTXONWLOZEVGQRB2ROX37C7G7MQPKL75KQCJKESA",
+      "total_instructions": 191,
+      "non_nop": 180,
+      "nop": 11,
+      "salu_including_nop": 61,
+      "valu": 111,
+      "vmem": 7,
+      "lds": 12,
+      "mfma": 0,
+      "barrier": 6,
+      "wait": 14,
+      "branch": 2,
+      "compare": 2,
+      "cndmask": 1,
+      "vgpr": 43,
+      "total_sgpr": 26,
+      "scratch_bytes": 0,
+      "occupancy": 8
+    },
+    "residual_delta": {
+      "total_instructions": 28,
+      "non_nop": 31,
+      "nop": -3,
+      "salu_including_nop": 2,
+      "valu": 24,
+      "vmem": 2,
+      "lds": 0,
+      "barrier": 0,
+      "branch": 0,
+      "compare": 0,
+      "cndmask": 0,
+      "vgpr": 12,
+      "total_sgpr": 5,
+      "occupancy": 0
+    }
+  },
+  "same_geometry_ssa_audit": {
+    "count_method": "Lines beginning with an SSA result definition in each exact compiler IR.",
+    "non_residual_control": {
+      "ttir_definitions": 40,
+      "ttgir_definitions": 43,
+      "llvm_ir_definitions": 139,
+      "residual_pointer_attribute": "readnone"
+    },
+    "residual": {
+      "ttir_definitions": 47,
+      "ttgir_definitions": 46,
+      "llvm_ir_definitions": 168,
+      "residual_pointer_attribute": "readonly"
+    },
+    "residual_delta": {
+      "ttir_definitions": 7,
+      "ttgir_definitions": 3,
+      "llvm_ir_definitions": 29
+    }
+  },
+  "counter_collection": {
+    "available_tools": [
+      "/opt/python314/bin/rocprofv3",
+      "/opt/rocm/core-10.0/bin/rocprof-compute",
+      "/opt/python314/bin/amd-smi"
+    ],
+    "status": "unavailable_due_to_installed_backend_failure",
+    "rocprof_compute_error": "LLVM ERROR: Option 'spirv-expand-step' registered more than once",
+    "rocprofv3_pmc_error": "aqlprofile API table load failed: HSA_STATUS_ERROR",
+    "valid_data_retained": "Kernel traces, timing statistics, resources, compiler IR, and static gfx950 ISA.",
+    "invalid_data_policy": "No hardware-counter values were reported or inferred from failed runs."
+  },
+  "ssa_algebra_conclusion": [
+    "The residual specialization is one online M1 pass: load FP16 activation, load FP16 high and residual weight terms, add the two weights in FP32, multiply, reduce in FP32, and store FP16.",
+    "The use_residual constexpr is fully folded. LLVM marks its pointer readnone in the non-residual specialization and readonly in the residual specialization; no dynamic residual branch reaches gfx950 ISA.",
+    "The same-geometry ISA delta adds only the two unrolled residual VMEM loads and their required FP16-to-FP32 conversion/add dataflow. Branch, compare, barrier, LDS, scratch, and occupancy counts do not increase.",
+    "M512 remains the clearest next optimization target because the functional mm plus addmm implementation requires two GEMMs, two hipBLASLt post passes, one intermediate copy, and one final cast per forward."
+  ],
+  "decision": {
+    "accepted": true,
+    "accuracy_gate_met": true,
+    "full_sweep_improvement_over_previous_certification": 0.2084872238470594,
+    "next_candidate": "Prototype a fused dual-term matrix kernel for M greater than one, beginning with M512, and separately evaluate a scaled FP8 residual cache for the bandwidth-bound M1 path."
+  }
+}

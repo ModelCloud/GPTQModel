@@ -1,0 +1,2558 @@
+{
+  "schema": "qvq_p32_gfx950_benchmark_v1",
+  "command": "/tmp/qvq-baseline-14928/scripts/benchmark_qvq_p32_amd.py --physical-gpu 0 --rates 2.0 2.5 3.0 3.5 --m-values 1 2 4 8 16 32 64 128 256 512 1024 2048 4096 --k 17408 --n 5120 --warmup 5 --iterations 20 --fallback-warmup 1 --fallback-iterations 1 --idle-samples 1 --idle-interval 1.0 --idle-memory-tolerance-mib 8 --output /home/ubuntu/qvq/artifacts/mi355x_p32/qwen38_27b_baseline_14928c96_gfx950_shapes/mlp_down.json --allow-busy",
+  "commit": "14928c96039d76e9d004a73d092b00e44be4f6dd",
+  "benchmark_valid": false,
+  "accuracy_gate": 0.002,
+  "hardware": {
+    "physical_gpu": 0,
+    "pci_bus_id": "0000:83:00.0",
+    "unique_id": "0x333ef6e01ec019b3",
+    "driver": "7.1.3.31500000",
+    "utilization_percent": 6,
+    "vram_total_bytes": 308902100992,
+    "vram_used_bytes": 290166919168,
+    "process_ids": [
+      1463574,
+      1463764,
+      1463785,
+      1557432
+    ],
+    "name": "AMD Instinct MI355X VF",
+    "gcn_arch": "gfx950:sramecc+:xnack-",
+    "compute_units": 256,
+    "torch_total_memory": 308902100992
+  },
+  "software": {
+    "python": "3.14.7",
+    "torch": "2.13.0+rocm10.0.0",
+    "hip": "7.15.26333",
+    "triton": "3.8.0"
+  },
+  "runtime_context": {
+    "physical_gpu": 0,
+    "pci_bus_id": "0000:83:00.0",
+    "unique_id": "0x333ef6e01ec019b3",
+    "driver": "7.1.3.31500000",
+    "utilization_percent": 7,
+    "vram_total_bytes": 308902100992,
+    "vram_used_bytes": 267837407232,
+    "process_ids": [
+      1463574,
+      1463764,
+      1463785,
+      1557432,
+      1586014
+    ]
+  },
+  "timing_rechecks": [
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 2,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 286910128128,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014,
+        1586122
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 6,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287136296960,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014,
+        1586122
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 27,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287136296960,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014,
+        1586122
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 33,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287136296960,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014,
+        1586122
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 16,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287138418688,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014,
+        1586122
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 12,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287138443264,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014,
+        1586122
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 29,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287138443264,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014,
+        1586122
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 13,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287149015040,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014,
+        1586122
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 30,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287149015040,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014,
+        1586122
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 42,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287149006848,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014,
+        1586122
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 41,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287148941312,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 44,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287148941312,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 49,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 287148941312,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 23,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853235712,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 15,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853252096,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 31,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853252096,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 36,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853252096,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 17,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853268480,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 13,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853284864,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 31,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853284864,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 14,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853301248,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 32,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853301248,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 36,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853301248,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 41,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853301248,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 43,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853301248,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 48,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853301248,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 25,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853317632,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 15,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853334016,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 33,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853334016,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 36,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853334016,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 15,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853350400,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 13,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853366784,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 31,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853366784,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 14,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853383168,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 32,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853383168,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 37,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853383168,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 41,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853383168,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 45,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853383168,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 51,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853383168,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 25,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853399552,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 15,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853415936,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 33,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853415936,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 38,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853415936,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 17,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853432320,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 13,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853448704,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 32,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853448704,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 14,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853465088,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 32,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853465088,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 37,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853465088,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 42,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853465088,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 45,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853465088,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    },
+    {
+      "physical_gpu": 0,
+      "pci_bus_id": "0000:83:00.0",
+      "unique_id": "0x333ef6e01ec019b3",
+      "driver": "7.1.3.31500000",
+      "utilization_percent": 51,
+      "vram_total_bytes": 308902100992,
+      "vram_used_bytes": 292853465088,
+      "process_ids": [
+        1463574,
+        1463764,
+        1463785,
+        1557432,
+        1586014
+      ]
+    }
+  ],
+  "rows": [
+    {
+      "bits": 2.0,
+      "m": 1,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.5964001089334487,
+        "median_ms": 0.5942319929599762,
+        "p95_ms": 0.6342930197715759
+      },
+      "p32_tflops": 0.29998034793122685,
+      "fallback": {
+        "mean_ms": 17.583372116088867,
+        "median_ms": 17.583372116088867,
+        "p95_ms": 17.583372116088867
+      },
+      "dense": {
+        "mean_ms": 0.032042599841952325,
+        "median_ms": 0.03138049878180027,
+        "p95_ms": 0.04460100084543228
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 9.775161743164062e-06,
+        "mean_abs": 1.081228560906311e-06,
+        "relative_l2": 1.099751102628943e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 2,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.5968254059553146,
+        "median_ms": 0.5957309901714325,
+        "p95_ms": 0.6283720135688782
+      },
+      "p32_tflops": 0.5984510557313898,
+      "fallback": {
+        "mean_ms": 17.060163497924805,
+        "median_ms": 17.060163497924805,
+        "p95_ms": 17.060163497924805
+      },
+      "dense": {
+        "mean_ms": 0.03211255008354783,
+        "median_ms": 0.03130050003528595,
+        "p95_ms": 0.04303999990224838
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 1.0967254638671875e-05,
+        "mean_abs": 1.0688086149457376e-06,
+        "relative_l2": 1.0715546068240656e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 4,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.5954433470964432,
+        "median_ms": 0.5935114920139313,
+        "p95_ms": 0.6308519840240479
+      },
+      "p32_tflops": 1.201378051805715,
+      "fallback": {
+        "mean_ms": 16.990442276000977,
+        "median_ms": 16.990442276000977,
+        "p95_ms": 16.990442276000977
+      },
+      "dense": {
+        "mean_ms": 0.032144649885594845,
+        "median_ms": 0.031420499086380005,
+        "p95_ms": 0.04364100098609924
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 8.58306884765625e-06,
+        "mean_abs": 1.0651814363882295e-06,
+        "relative_l2": 1.0711510185501538e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 8,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.5953117489814759,
+        "median_ms": 0.5944119989871979,
+        "p95_ms": 0.6191719770431519
+      },
+      "p32_tflops": 2.399116038084409,
+      "fallback": {
+        "mean_ms": 17.03241729736328,
+        "median_ms": 17.03241729736328,
+        "p95_ms": 17.03241729736328
+      },
+      "dense": {
+        "mean_ms": 0.0326026501134038,
+        "median_ms": 0.031840499490499496,
+        "p95_ms": 0.043561000376939774
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 1.1920928955078125e-05,
+        "mean_abs": 1.0672653161236667e-06,
+        "relative_l2": 1.0733627959780279e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 16,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.5969717979431153,
+        "median_ms": 0.5955320000648499,
+        "p95_ms": 0.6360129714012146
+      },
+      "p32_tflops": 4.789208169652379,
+      "fallback": {
+        "mean_ms": 17.004257202148438,
+        "median_ms": 17.004257202148438,
+        "p95_ms": 17.004257202148438
+      },
+      "dense": {
+        "mean_ms": 0.03286675047129393,
+        "median_ms": 0.03226100094616413,
+        "p95_ms": 0.043561000376939774
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 1.0013580322265625e-05,
+        "mean_abs": 1.0759655424408265e-06,
+        "relative_l2": 1.074868009709462e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 32,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.6109020471572876,
+        "median_ms": 0.6088919937610626,
+        "p95_ms": 0.6457719802856445
+      },
+      "p32_tflops": 9.368251674267253,
+      "fallback": {
+        "mean_ms": 16.970333099365234,
+        "median_ms": 16.970333099365234,
+        "p95_ms": 16.970333099365234
+      },
+      "dense": {
+        "mean_ms": 0.035084699653089045,
+        "median_ms": 0.03412050008773804,
+        "p95_ms": 0.043320998549461365
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 1.1444091796875e-05,
+        "mean_abs": 1.0720143563958118e-06,
+        "relative_l2": 1.076821718015708e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 64,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7211742520332336,
+        "median_ms": 0.717633992433548,
+        "p95_ms": 0.7603349685668945
+      },
+      "p32_tflops": 15.897389198793302,
+      "fallback": {
+        "mean_ms": 16.981416702270508,
+        "median_ms": 16.981416702270508,
+        "p95_ms": 16.981416702270508
+      },
+      "dense": {
+        "mean_ms": 0.03859069962054491,
+        "median_ms": 0.038040999323129654,
+        "p95_ms": 0.048601001501083374
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 1.33514404296875e-05,
+        "mean_abs": 1.1791753422585316e-06,
+        "relative_l2": 1.175050897472829e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 128,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.6966957479715348,
+        "median_ms": 0.69565349817276,
+        "p95_ms": 0.7232139706611633
+      },
+      "p32_tflops": 32.799394842306356,
+      "fallback": {
+        "mean_ms": 17.005935668945312,
+        "median_ms": 17.005935668945312,
+        "p95_ms": 17.005935668945312
+      },
+      "dense": {
+        "mean_ms": 0.04436099957674742,
+        "median_ms": 0.043820999562740326,
+        "p95_ms": 0.053961001336574554
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 1.430511474609375e-05,
+        "mean_abs": 1.1779814030887792e-06,
+        "relative_l2": 1.1762012945837341e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 256,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.69607774913311,
+        "median_ms": 0.6941935122013092,
+        "p95_ms": 0.7315739989280701
+      },
+      "p32_tflops": 65.7367531069155,
+      "fallback": {
+        "mean_ms": 17.00005531311035,
+        "median_ms": 17.00005531311035,
+        "p95_ms": 17.00005531311035
+      },
+      "dense": {
+        "mean_ms": 0.06307129934430122,
+        "median_ms": 0.062481001019477844,
+        "p95_ms": 0.07436099648475647
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 2.002716064453125e-05,
+        "mean_abs": 1.4415599025596748e-06,
+        "relative_l2": 1.4433217074838467e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 512,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 1.0060876965522767,
+        "median_ms": 1.0010199546813965,
+        "p95_ms": 1.0577800273895264
+      },
+      "p32_tflops": 91.17506061010411,
+      "fallback": {
+        "mean_ms": 17.025894165039062,
+        "median_ms": 17.025894165039062,
+        "p95_ms": 17.025894165039062
+      },
+      "dense": {
+        "mean_ms": 0.08995780013501645,
+        "median_ms": 0.08920200169086456,
+        "p95_ms": 0.10020200163125992
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 2.6226043701171875e-05,
+        "mean_abs": 1.8133431467504124e-06,
+        "relative_l2": 1.8644010424395674e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 1024,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 1.3583647012710571,
+        "median_ms": 1.3501459956169128,
+        "p95_ms": 1.4495090246200562
+      },
+      "p32_tflops": 135.19731249256125,
+      "fallback": {
+        "mean_ms": 17.121295928955078,
+        "median_ms": 17.121295928955078,
+        "p95_ms": 17.121295928955078
+      },
+      "dense": {
+        "mean_ms": 0.18267960026860236,
+        "median_ms": 0.1822035014629364,
+        "p95_ms": 0.18996299803256989
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 4.3392181396484375e-05,
+        "mean_abs": 2.313418235644349e-06,
+        "relative_l2": 2.511799266358139e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 2048,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 2.2039732933044434,
+        "median_ms": 2.1909629106521606,
+        "p95_ms": 2.3392860889434814
+      },
+      "p32_tflops": 166.62638075024867,
+      "fallback": {
+        "mean_ms": 17.315900802612305,
+        "median_ms": 17.315900802612305,
+        "p95_ms": 17.315900802612305
+      },
+      "dense": {
+        "mean_ms": 0.2894496485590935,
+        "median_ms": 0.28958599269390106,
+        "p95_ms": 0.3010460138320923
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 6.103515625e-05,
+        "mean_abs": 2.313340928594698e-06,
+        "relative_l2": 2.5100814582401654e-06
+      }
+    },
+    {
+      "bits": 2.0,
+      "m": 4096,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 4.141369414329529,
+        "median_ms": 4.1342809200286865,
+        "p95_ms": 4.205323219299316
+      },
+      "p32_tflops": 176.60736037137355,
+      "fallback": {
+        "mean_ms": 17.487703323364258,
+        "median_ms": 17.487703323364258,
+        "p95_ms": 17.487703323364258
+      },
+      "dense": {
+        "mean_ms": 0.571209242939949,
+        "median_ms": 0.570050984621048,
+        "p95_ms": 0.615011990070343
+      },
+      "storage": {
+        "compressed_bytes": 22630400,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 7.876923076923077
+      },
+      "accuracy": {
+        "max_abs": 4.4345855712890625e-05,
+        "mean_abs": 2.314305675099604e-06,
+        "relative_l2": 2.509705154807307e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 1,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7733412981033325,
+        "median_ms": 0.7722150087356567,
+        "p95_ms": 0.8036159873008728
+      },
+      "p32_tflops": 0.23083975056618064,
+      "fallback": {
+        "mean_ms": 17.56610679626465,
+        "median_ms": 17.56610679626465,
+        "p95_ms": 17.56610679626465
+      },
+      "dense": {
+        "mean_ms": 0.03167454972863197,
+        "median_ms": 0.031040499918162823,
+        "p95_ms": 0.043400999158620834
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 7.152557373046875e-06,
+        "mean_abs": 1.077876163435576e-06,
+        "relative_l2": 1.07049754660693e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 2,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7786711513996124,
+        "median_ms": 0.7768754959106445,
+        "p95_ms": 0.810975968837738
+      },
+      "p32_tflops": 0.45890987922343496,
+      "fallback": {
+        "mean_ms": 17.61342430114746,
+        "median_ms": 17.61342430114746,
+        "p95_ms": 17.61342430114746
+      },
+      "dense": {
+        "mean_ms": 0.03226259956136346,
+        "median_ms": 0.03133999928832054,
+        "p95_ms": 0.04256099835038185
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 7.3909759521484375e-06,
+        "mean_abs": 1.0783022617033566e-06,
+        "relative_l2": 1.0653385515979608e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 4,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7830612480640411,
+        "median_ms": 0.7803750038146973,
+        "p95_ms": 0.8126959800720215
+      },
+      "p32_tflops": 0.9137038943001714,
+      "fallback": {
+        "mean_ms": 17.7279052734375,
+        "median_ms": 17.7279052734375,
+        "p95_ms": 17.7279052734375
+      },
+      "dense": {
+        "mean_ms": 0.032846749760210514,
+        "median_ms": 0.031520500779151917,
+        "p95_ms": 0.058841999620199203
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 8.58306884765625e-06,
+        "mean_abs": 1.06581262571126e-06,
+        "relative_l2": 1.0707377668950357e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 8,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7904932975769043,
+        "median_ms": 0.7886149883270264,
+        "p95_ms": 0.8206959962844849
+      },
+      "p32_tflops": 1.8083137920384462,
+      "fallback": {
+        "mean_ms": 17.581621170043945,
+        "median_ms": 17.581621170043945,
+        "p95_ms": 17.581621170043945
+      },
+      "dense": {
+        "mean_ms": 0.032476499862968924,
+        "median_ms": 0.03188049979507923,
+        "p95_ms": 0.04259999841451645
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 1.0967254638671875e-05,
+        "mean_abs": 1.062279693542223e-06,
+        "relative_l2": 1.0756583606053027e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 16,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7998455971479416,
+        "median_ms": 0.7976954877376556,
+        "p95_ms": 0.8322960138320923
+      },
+      "p32_tflops": 3.575458008530194,
+      "fallback": {
+        "mean_ms": 17.615182876586914,
+        "median_ms": 17.615182876586914,
+        "p95_ms": 17.615182876586914
+      },
+      "dense": {
+        "mean_ms": 0.03287264984101057,
+        "median_ms": 0.032380999997258186,
+        "p95_ms": 0.041760001331567764
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 1.0609626770019531e-05,
+        "mean_abs": 1.0644773738022195e-06,
+        "relative_l2": 1.0683330629035481e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 32,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7480786979198456,
+        "median_ms": 0.7459949851036072,
+        "p95_ms": 0.7823359966278076
+      },
+      "p32_tflops": 7.646503735152814,
+      "fallback": {
+        "mean_ms": 17.618864059448242,
+        "median_ms": 17.618864059448242,
+        "p95_ms": 17.618864059448242
+      },
+      "dense": {
+        "mean_ms": 0.03459859993308782,
+        "median_ms": 0.03384099900722504,
+        "p95_ms": 0.04460100084543228
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 1.049041748046875e-05,
+        "mean_abs": 1.0669202765711816e-06,
+        "relative_l2": 1.0691810530261137e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 64,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7421905487775803,
+        "median_ms": 0.738754004240036,
+        "p95_ms": 0.7851750254631042
+      },
+      "p32_tflops": 15.442903611380151,
+      "fallback": {
+        "mean_ms": 17.6146240234375,
+        "median_ms": 17.6146240234375,
+        "p95_ms": 17.6146240234375
+      },
+      "dense": {
+        "mean_ms": 0.038394850119948386,
+        "median_ms": 0.0377810001373291,
+        "p95_ms": 0.04832100123167038
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 1.239776611328125e-05,
+        "mean_abs": 1.1781274906752515e-06,
+        "relative_l2": 1.1787268476837198e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 128,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7301582515239715,
+        "median_ms": 0.7282744944095612,
+        "p95_ms": 0.7688949704170227
+      },
+      "p32_tflops": 31.330238715140766,
+      "fallback": {
+        "mean_ms": 17.641864776611328,
+        "median_ms": 17.641864776611328,
+        "p95_ms": 17.641864776611328
+      },
+      "dense": {
+        "mean_ms": 0.04491284973919392,
+        "median_ms": 0.04400099813938141,
+        "p95_ms": 0.0546410009264946
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 1.430511474609375e-05,
+        "mean_abs": 1.177663762064185e-06,
+        "relative_l2": 1.1763082738980302e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 256,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7299383491277694,
+        "median_ms": 0.7285745143890381,
+        "p95_ms": 0.7760149836540222
+      },
+      "p32_tflops": 62.63467444818242,
+      "fallback": {
+        "mean_ms": 17.646785736083984,
+        "median_ms": 17.646785736083984,
+        "p95_ms": 17.646785736083984
+      },
+      "dense": {
+        "mean_ms": 0.06312125008553267,
+        "median_ms": 0.0624414999037981,
+        "p95_ms": 0.07560200244188309
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 2.193450927734375e-05,
+        "mean_abs": 1.4401241514860885e-06,
+        "relative_l2": 1.4429872408072697e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 512,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 1.0986871421337128,
+        "median_ms": 1.0932015180587769,
+        "p95_ms": 1.14998197555542
+      },
+      "p32_tflops": 83.48694502553087,
+      "fallback": {
+        "mean_ms": 17.64665985107422,
+        "median_ms": 17.64665985107422,
+        "p95_ms": 17.64665985107422
+      },
+      "dense": {
+        "mean_ms": 0.09185374863445758,
+        "median_ms": 0.0911019966006279,
+        "p95_ms": 0.1039619967341423
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 2.4318695068359375e-05,
+        "mean_abs": 1.813418066376471e-06,
+        "relative_l2": 1.8642699615156744e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 1024,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 1.4742605924606322,
+        "median_ms": 1.4596880078315735,
+        "p95_ms": 1.5609899759292603
+      },
+      "p32_tflops": 125.05145558547466,
+      "fallback": {
+        "mean_ms": 17.758623123168945,
+        "median_ms": 17.758623123168945,
+        "p95_ms": 17.758623123168945
+      },
+      "dense": {
+        "mean_ms": 0.18275564759969712,
+        "median_ms": 0.18330349773168564,
+        "p95_ms": 0.189083993434906
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 5.0067901611328125e-05,
+        "mean_abs": 2.3130635327106575e-06,
+        "relative_l2": 2.5109090984187787e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 2048,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 2.366586136817932,
+        "median_ms": 2.358665943145752,
+        "p95_ms": 2.4767279624938965
+      },
+      "p32_tflops": 154.77911198951017,
+      "fallback": {
+        "mean_ms": 17.896228790283203,
+        "median_ms": 17.896228790283203,
+        "p95_ms": 17.896228790283203
+      },
+      "dense": {
+        "mean_ms": 0.2867796003818512,
+        "median_ms": 0.2887459993362427,
+        "p95_ms": 0.29692599177360535
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 5.14984130859375e-05,
+        "mean_abs": 2.313133109055343e-06,
+        "relative_l2": 2.509736077627167e-06
+      }
+    },
+    {
+      "bits": 2.5,
+      "m": 4096,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 4.482266664505005,
+        "median_ms": 4.4805262088775635,
+        "p95_ms": 4.526647090911865
+      },
+      "p32_tflops": 162.95952892169595,
+      "fallback": {
+        "mean_ms": 18.02166748046875,
+        "median_ms": 18.02166748046875,
+        "p95_ms": 18.02166748046875
+      },
+      "dense": {
+        "mean_ms": 0.5766171485185623,
+        "median_ms": 0.5708509981632233,
+        "p95_ms": 0.6107720136642456
+      },
+      "storage": {
+        "compressed_bytes": 28200960,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 6.320987654320987
+      },
+      "accuracy": {
+        "max_abs": 4.7206878662109375e-05,
+        "mean_abs": 2.3134523416956654e-06,
+        "relative_l2": 2.5091037514357595e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 1,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.8195619493722915,
+        "median_ms": 0.8177160024642944,
+        "p95_ms": 0.8480560183525085
+      },
+      "p32_tflops": 0.21799490221885884,
+      "fallback": {
+        "mean_ms": 17.592382431030273,
+        "median_ms": 17.592382431030273,
+        "p95_ms": 17.592382431030273
+      },
+      "dense": {
+        "mean_ms": 0.03190264981240034,
+        "median_ms": 0.031080500222742558,
+        "p95_ms": 0.043081000447273254
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 9.5367431640625e-06,
+        "mean_abs": 1.066949494088476e-06,
+        "relative_l2": 1.0772137102321722e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 2,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.827352049946785,
+        "median_ms": 0.8255760073661804,
+        "p95_ms": 0.8570969700813293
+      },
+      "p32_tflops": 0.4318389061927632,
+      "fallback": {
+        "mean_ms": 17.55190086364746,
+        "median_ms": 17.55190086364746,
+        "p95_ms": 17.55190086364746
+      },
+      "dense": {
+        "mean_ms": 0.03221664959564805,
+        "median_ms": 0.031180999241769314,
+        "p95_ms": 0.042440999299287796
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 1.0013580322265625e-05,
+        "mean_abs": 1.0749309922175598e-06,
+        "relative_l2": 1.0825989420482074e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 4,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.8275421530008316,
+        "median_ms": 0.8269560039043427,
+        "p95_ms": 0.8638970255851746
+      },
+      "p32_tflops": 0.8622365357208039,
+      "fallback": {
+        "mean_ms": 17.562740325927734,
+        "median_ms": 17.562740325927734,
+        "p95_ms": 17.562740325927734
+      },
+      "dense": {
+        "mean_ms": 0.03244260009378195,
+        "median_ms": 0.0315604992210865,
+        "p95_ms": 0.04288100078701973
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 9.059906005859375e-06,
+        "mean_abs": 1.0691488796510384e-06,
+        "relative_l2": 1.0653965318851988e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 8,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.8323881566524506,
+        "median_ms": 0.831356018781662,
+        "p95_ms": 0.8625770211219788
+      },
+      "p32_tflops": 1.7153461667239402,
+      "fallback": {
+        "mean_ms": 17.55706024169922,
+        "median_ms": 17.55706024169922,
+        "p95_ms": 17.55706024169922
+      },
+      "dense": {
+        "mean_ms": 0.03212870005518198,
+        "median_ms": 0.03162050060927868,
+        "p95_ms": 0.04140099883079529
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 1.0967254638671875e-05,
+        "mean_abs": 1.0699881158870994e-06,
+        "relative_l2": 1.0743173106675385e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 16,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.841692253947258,
+        "median_ms": 0.840175986289978,
+        "p95_ms": 0.8784170150756836
+      },
+      "p32_tflops": 3.3946777419744274,
+      "fallback": {
+        "mean_ms": 17.576780319213867,
+        "median_ms": 17.576780319213867,
+        "p95_ms": 17.576780319213867
+      },
+      "dense": {
+        "mean_ms": 0.033570700138807294,
+        "median_ms": 0.032361000776290894,
+        "p95_ms": 0.046160999685525894
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 1.1682510375976562e-05,
+        "mean_abs": 1.064413027052069e-06,
+        "relative_l2": 1.0679318620532285e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 32,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7842210441827774,
+        "median_ms": 0.7813349962234497,
+        "p95_ms": 0.8222159743309021
+      },
+      "p32_tflops": 7.300650127757328,
+      "fallback": {
+        "mean_ms": 17.52693748474121,
+        "median_ms": 17.52693748474121,
+        "p95_ms": 17.52693748474121
+      },
+      "dense": {
+        "mean_ms": 0.034648700058460234,
+        "median_ms": 0.03376099839806557,
+        "p95_ms": 0.04460100084543228
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 1.2636184692382812e-05,
+        "mean_abs": 1.0677124464564258e-06,
+        "relative_l2": 1.0727538892751909e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 64,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7885471999645233,
+        "median_ms": 0.7851555049419403,
+        "p95_ms": 0.8422160148620605
+      },
+      "p32_tflops": 14.530251406495102,
+      "fallback": {
+        "mean_ms": 17.569419860839844,
+        "median_ms": 17.569419860839844,
+        "p95_ms": 17.569419860839844
+      },
+      "dense": {
+        "mean_ms": 0.038552699610590935,
+        "median_ms": 0.03794099949300289,
+        "p95_ms": 0.04944099858403206
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 1.6689300537109375e-05,
+        "mean_abs": 1.1767770047299564e-06,
+        "relative_l2": 1.1743825325538637e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 128,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7839490503072739,
+        "median_ms": 0.7819550037384033,
+        "p95_ms": 0.8191350102424622
+      },
+      "p32_tflops": 29.179445941154494,
+      "fallback": {
+        "mean_ms": 17.52025604248047,
+        "median_ms": 17.52025604248047,
+        "p95_ms": 17.52025604248047
+      },
+      "dense": {
+        "mean_ms": 0.0443828497081995,
+        "median_ms": 0.043760500848293304,
+        "p95_ms": 0.054040998220443726
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 1.2874603271484375e-05,
+        "mean_abs": 1.1785372180384002e-06,
+        "relative_l2": 1.1766378520405851e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 256,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7885912001132965,
+        "median_ms": 0.7848750054836273,
+        "p95_ms": 0.8506960272789001
+      },
+      "p32_tflops": 58.14177697234867,
+      "fallback": {
+        "mean_ms": 17.597700119018555,
+        "median_ms": 17.597700119018555,
+        "p95_ms": 17.597700119018555
+      },
+      "dense": {
+        "mean_ms": 0.06386325042694807,
+        "median_ms": 0.06280149891972542,
+        "p95_ms": 0.07668200135231018
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 1.6689300537109375e-05,
+        "mean_abs": 1.4410520634555724e-06,
+        "relative_l2": 1.4442877045439673e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 512,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 1.1863149464130402,
+        "median_ms": 1.1815024614334106,
+        "p95_ms": 1.2471040487289429
+      },
+      "p32_tflops": 77.24745230684724,
+      "fallback": {
+        "mean_ms": 17.696821212768555,
+        "median_ms": 17.696821212768555,
+        "p95_ms": 17.696821212768555
+      },
+      "dense": {
+        "mean_ms": 0.09003769978880882,
+        "median_ms": 0.08942149952054024,
+        "p95_ms": 0.10032200068235397
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 2.5153160095214844e-05,
+        "mean_abs": 1.8162475043936865e-06,
+        "relative_l2": 1.8664642311705393e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 1024,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 1.6314994394779205,
+        "median_ms": 1.6213114857673645,
+        "p95_ms": 1.7639939785003662
+      },
+      "p32_tflops": 112.58546656974178,
+      "fallback": {
+        "mean_ms": 17.627220153808594,
+        "median_ms": 17.627220153808594,
+        "p95_ms": 17.627220153808594
+      },
+      "dense": {
+        "mean_ms": 0.18363754823803902,
+        "median_ms": 0.1835234984755516,
+        "p95_ms": 0.19104400277137756
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 5.0067901611328125e-05,
+        "mean_abs": 2.3157278974395012e-06,
+        "relative_l2": 2.511366801627446e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 2048,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 2.6221824526786803,
+        "median_ms": 2.615689992904663,
+        "p95_ms": 2.661731004714966
+      },
+      "p32_tflops": 139.57014063222215,
+      "fallback": {
+        "mean_ms": 17.765419006347656,
+        "median_ms": 17.765419006347656,
+        "p95_ms": 17.765419006347656
+      },
+      "dense": {
+        "mean_ms": 0.2880294471979141,
+        "median_ms": 0.28940549492836,
+        "p95_ms": 0.2984049916267395
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 5.340576171875e-05,
+        "mean_abs": 2.31318017540616e-06,
+        "relative_l2": 2.510507556507946e-06
+      }
+    },
+    {
+      "bits": 3.0,
+      "m": 4096,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 5.007826423645019,
+        "median_ms": 5.002155780792236,
+        "p95_ms": 5.114738941192627
+      },
+      "p32_tflops": 145.9659539440334,
+      "fallback": {
+        "mean_ms": 18.109987258911133,
+        "median_ms": 18.109987258911133,
+        "p95_ms": 18.109987258911133
+      },
+      "dense": {
+        "mean_ms": 0.5692990481853485,
+        "median_ms": 0.5648109912872314,
+        "p95_ms": 0.5962110161781311
+      },
+      "storage": {
+        "compressed_bytes": 33771520,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 5.278350515463917
+      },
+      "accuracy": {
+        "max_abs": 5.1021575927734375e-05,
+        "mean_abs": 2.313242248419556e-06,
+        "relative_l2": 2.510431158952997e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 1,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.8390800952911377,
+        "median_ms": 0.8373759984970093,
+        "p95_ms": 0.8721370100975037
+      },
+      "p32_tflops": 0.21287679646891222,
+      "fallback": {
+        "mean_ms": 18.138748168945312,
+        "median_ms": 18.138748168945312,
+        "p95_ms": 18.138748168945312
+      },
+      "dense": {
+        "mean_ms": 0.03207859974354506,
+        "median_ms": 0.03136000037193298,
+        "p95_ms": 0.045520998537540436
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 7.152557373046875e-06,
+        "mean_abs": 1.0532804708418553e-06,
+        "relative_l2": 1.071733322532964e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 2,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.8470903515815735,
+        "median_ms": 0.8453765213489532,
+        "p95_ms": 0.8803369998931885
+      },
+      "p32_tflops": 0.42172432164441187,
+      "fallback": {
+        "mean_ms": 18.105867385864258,
+        "median_ms": 18.105867385864258,
+        "p95_ms": 18.105867385864258
+      },
+      "dense": {
+        "mean_ms": 0.03230860009789467,
+        "median_ms": 0.03172050043940544,
+        "p95_ms": 0.04292000085115433
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 1.1920928955078125e-05,
+        "mean_abs": 1.0669972425603191e-06,
+        "relative_l2": 1.076497483154526e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 4,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.8496042996644974,
+        "median_ms": 0.8478560149669647,
+        "p95_ms": 0.8846970200538635
+      },
+      "p32_tflops": 0.8409820387106437,
+      "fallback": {
+        "mean_ms": 18.07182502746582,
+        "median_ms": 18.07182502746582,
+        "p95_ms": 18.07182502746582
+      },
+      "dense": {
+        "mean_ms": 0.0328745998442173,
+        "median_ms": 0.03205999918282032,
+        "p95_ms": 0.04280100017786026
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 1.0013580322265625e-05,
+        "mean_abs": 1.052619040819991e-06,
+        "relative_l2": 1.0687801932363072e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 8,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.8513343960046769,
+        "median_ms": 0.8497564792633057,
+        "p95_ms": 0.8777369856834412
+      },
+      "p32_tflops": 1.6782023965693351,
+      "fallback": {
+        "mean_ms": 18.143268585205078,
+        "median_ms": 18.143268585205078,
+        "p95_ms": 18.143268585205078
+      },
+      "dense": {
+        "mean_ms": 0.032462649419903754,
+        "median_ms": 0.03170100040733814,
+        "p95_ms": 0.04540099948644638
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 1.1444091796875e-05,
+        "mean_abs": 1.0830550536411465e-06,
+        "relative_l2": 1.0888953738685814e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 16,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.8531063497066498,
+        "median_ms": 0.8507960140705109,
+        "p95_ms": 0.8914570212364197
+      },
+      "p32_tflops": 3.3523038105860543,
+      "fallback": {
+        "mean_ms": 18.13766860961914,
+        "median_ms": 18.13766860961914,
+        "p95_ms": 18.13766860961914
+      },
+      "dense": {
+        "mean_ms": 0.03320869989693165,
+        "median_ms": 0.03266100026667118,
+        "p95_ms": 0.043480999767780304
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 1.1205673217773438e-05,
+        "mean_abs": 1.0757086101875757e-06,
+        "relative_l2": 1.0805322290252661e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 32,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7945532947778702,
+        "median_ms": 0.7897554934024811,
+        "p95_ms": 0.8786969780921936
+      },
+      "p32_tflops": 7.222809448813743,
+      "fallback": {
+        "mean_ms": 18.128948211669922,
+        "median_ms": 18.128948211669922,
+        "p95_ms": 18.128948211669922
+      },
+      "dense": {
+        "mean_ms": 0.0348004998639226,
+        "median_ms": 0.03384000062942505,
+        "p95_ms": 0.044319998472929
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 1.0013580322265625e-05,
+        "mean_abs": 1.0662853355825064e-06,
+        "relative_l2": 1.0727379731179099e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 64,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7831990987062454,
+        "median_ms": 0.7800750136375427,
+        "p95_ms": 0.8328959941864014
+      },
+      "p32_tflops": 14.624884377210543,
+      "fallback": {
+        "mean_ms": 18.08682632446289,
+        "median_ms": 18.08682632446289,
+        "p95_ms": 18.08682632446289
+      },
+      "dense": {
+        "mean_ms": 0.03857874982059002,
+        "median_ms": 0.0379210002720356,
+        "p95_ms": 0.04920100048184395
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 1.2874603271484375e-05,
+        "mean_abs": 1.173651412500476e-06,
+        "relative_l2": 1.1748317092497018e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 128,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7813088476657868,
+        "median_ms": 0.7790150046348572,
+        "p95_ms": 0.810135006904602
+      },
+      "p32_tflops": 29.289569038140513,
+      "fallback": {
+        "mean_ms": 18.126468658447266,
+        "median_ms": 18.126468658447266,
+        "p95_ms": 18.126468658447266
+      },
+      "dense": {
+        "mean_ms": 0.044832850247621535,
+        "median_ms": 0.04420100152492523,
+        "p95_ms": 0.05560100078582764
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 1.4543533325195312e-05,
+        "mean_abs": 1.1758469327105558e-06,
+        "relative_l2": 1.1766119314415846e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 256,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 0.7794688493013382,
+        "median_ms": 0.777134507894516,
+        "p95_ms": 0.8294159770011902
+      },
+      "p32_tflops": 58.72088686891011,
+      "fallback": {
+        "mean_ms": 18.22182846069336,
+        "median_ms": 18.22182846069336,
+        "p95_ms": 18.22182846069336
+      },
+      "dense": {
+        "mean_ms": 0.06334920022636652,
+        "median_ms": 0.0627410002052784,
+        "p95_ms": 0.07336100190877914
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 1.8596649169921875e-05,
+        "mean_abs": 1.4413623148357146e-06,
+        "relative_l2": 1.4438642210734542e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 512,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 1.181394737958908,
+        "median_ms": 1.1773024797439575,
+        "p95_ms": 1.2448240518569946
+      },
+      "p32_tflops": 77.52302964642459,
+      "fallback": {
+        "mean_ms": 18.215150833129883,
+        "median_ms": 18.215150833129883,
+        "p95_ms": 18.215150833129883
+      },
+      "dense": {
+        "mean_ms": 0.09001174941658974,
+        "median_ms": 0.08910199999809265,
+        "p95_ms": 0.10092200338840485
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 2.2411346435546875e-05,
+        "mean_abs": 1.8129458112525754e-06,
+        "relative_l2": 1.8651799109647982e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 1024,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 1.632253062725067,
+        "median_ms": 1.6262710094451904,
+        "p95_ms": 1.7227120399475098
+      },
+      "p32_tflops": 112.24212263506622,
+      "fallback": {
+        "mean_ms": 18.257707595825195,
+        "median_ms": 18.257707595825195,
+        "p95_ms": 18.257707595825195
+      },
+      "dense": {
+        "mean_ms": 0.18258544951677322,
+        "median_ms": 0.18232349306344986,
+        "p95_ms": 0.19108399748802185
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 4.57763671875e-05,
+        "mean_abs": 2.312433935003355e-06,
+        "relative_l2": 2.5088436359510524e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 2048,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 2.6206243515014647,
+        "median_ms": 2.61503005027771,
+        "p95_ms": 2.666891098022461
+      },
+      "p32_tflops": 139.60536328109507,
+      "fallback": {
+        "mean_ms": 18.321792602539062,
+        "median_ms": 18.321792602539062,
+        "p95_ms": 18.321792602539062
+      },
+      "dense": {
+        "mean_ms": 0.2879574462771416,
+        "median_ms": 0.28848549723625183,
+        "p95_ms": 0.29848501086235046
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 4.5299530029296875e-05,
+        "mean_abs": 2.313718823643285e-06,
+        "relative_l2": 2.5111362447205465e-06
+      }
+    },
+    {
+      "bits": 3.5,
+      "m": 4096,
+      "k": 17408,
+      "n": 5120,
+      "p32": {
+        "mean_ms": 5.017763757705689,
+        "median_ms": 5.020236015319824,
+        "p95_ms": 5.071496963500977
+      },
+      "p32_tflops": 145.4402617908562,
+      "fallback": {
+        "mean_ms": 18.59407615661621,
+        "median_ms": 18.59407615661621,
+        "p95_ms": 18.59407615661621
+      },
+      "dense": {
+        "mean_ms": 0.565620893239975,
+        "median_ms": 0.5604904890060425,
+        "p95_ms": 0.6186919808387756
+      },
+      "storage": {
+        "compressed_bytes": 39342080,
+        "dense_fp16_bytes": 178257920,
+        "compression_ratio": 4.530973451327434
+      },
+      "accuracy": {
+        "max_abs": 6.198883056640625e-05,
+        "mean_abs": 2.313327513547847e-06,
+        "relative_l2": 2.5098090645769844e-06
+      }
+    }
+  ]
+}
