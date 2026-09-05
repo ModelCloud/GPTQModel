@@ -1,7 +1,8 @@
 # Dual-Xeon CPU sidecars for Sketch-B / Fisher collection
 
-Status: **queued investigation**. The hardware/AMX availability probe is complete;
-performance experiments have not launched. The tracked queue is
+Status: **baseline investigation started with the expanded CPU allocation**. The
+hardware/AMX availability probe and 16/32/64/96-thread baseline sweep are complete.
+CPU sidecar implementation experiments remain queued. The tracked queue is
 [`experiments/qvq_fisher_cpu_sidecar_queue_20260905.json`](experiments/qvq_fisher_cpu_sidecar_queue_20260905.json).
 
 The objective is additional end-to-end acceleration by overlapping suitable CPU
@@ -11,21 +12,45 @@ contains overlapped factor offload and Hopper FP32 projection tiles. Comparing
 against the older pre-optimization collector would double-count existing gains.
 The preceding measurements are in [the collection report](qvq_yaqa_collection_overlap.md).
 
-## Hardware and allocation verified on 2026-09-05
+## Expanded allocation verified on 2026-09-05
+
+The updated effective cpuset and process affinity expose **96 logical CPUs**,
+representing **71 physical cores** (34 on socket 0, 37 on socket 1). Twenty-five
+physical cores have both SMT siblings in this allocation. This is enough to begin
+substantial dual-socket experiments; it is not all 96 physical host cores.
+
+| NUMA node | Allowed logical CPUs |
+|---|---:|
+| 0, GPU-local sysfs hint | 23 |
+| 1 | 24 |
+| 2 | 28 |
+| 3 | 21 |
+
+The CPU cgroup has no time quota (`cpu.max = max 100000`); memory remains capped
+at 128,000,000,000 bytes. AMX BF16 and INT8 execution checks passed again after
+the allocation change. The queue preserves the original allocation in
+`hardware_history` and records the current per-core sibling groups.
+
+Use actual core groups for worker placement and reserve GPU-submission capacity.
+The new benchmark options `--cpu-threads` and `--cpu-interop-threads` make thread
+counts explicit; outputs now include affinity, physical-core groups, NUMA lists,
+cgroup limits, and thread-pool environment settings.
+
+## Initial allocation, before the host update
 
 | Item | Observation |
 |---|---|
 | CPU | Two Intel Xeon Platinum 8575C sockets |
 | Advertised topology | 48 cores/socket, 96 physical cores, 192 logical CPUs |
-| Current allocation | **16 logical CPUs**, constrained by effective cpuset and process affinity |
+| Initial allocation | **16 logical CPUs**, constrained by effective cpuset and process affinity |
 | NUMA | Four advertised nodes; all four memory nodes are available to this cpuset |
 | ISA flags | AVX-512, AVX-512 BF16, AVX-512 VNNI, AMX tile/BF16/INT8 |
 | AMX execution | Native BF16 and INT8 tile operations executed and returned the expected results |
 | GPU locality hint | H200 at PCI `0000:1c:00.0`; sysfs associates it with node 0 |
-| Local allocated CPUs | Only CPU 17 intersects the GPU-local CPU list in this allocation |
+| Initially local allocated CPUs | Only CPU 17 intersects the GPU-local CPU list in this allocation |
 
 `lscpu` describes the larger host topology; it does not grant access to those
-cores. The current affinity/cpuset is:
+cores. The initial affinity/cpuset was:
 
 ```text
 17,30,32,56,64,66,72,84,90,121,123,129,138,147,155,178
@@ -138,6 +163,120 @@ latency separately from collection.
    Retain CPU/non-target GPU fallbacks. A busy CPU or fast standalone AMX GEMM
    does not constitute a successful sidecar result.
 
-The queue is a persistent research backlog, not a running background job. The
-next executable step is cpu01 under the current allocation; cpu09 has a distinct
-full-core resource prerequisite.
+The queue is a persistent research backlog. The initial expanded-allocation
+baseline sweep is recorded below; further sidecar prototypes require separate
+measured trials. CPU09 can proceed within the expanded allocation, while claims
+about all 96 physical host cores still require that full physical-core allocation.
+
+## Expanded-allocation baseline sweep
+
+All runs use the unchanged committed GPU collector (source hashes recorded in
+JSON), all 96 allowed logical CPUs, one Torch inter-op thread, and the specified
+intra-op thread count. Qwen3.5-27B geometry proxy, BF16 model, FP32 statistics,
+all 400 targets, B16 / 64 sequences at rows 96–159, seed 20260909, T64/R256,
+CUDA accumulators, no activation checkpointing. Each independent process has
+two warmups and three measured repeats. Model loading is excluded; complete
+collection, host factor delivery, and drain are included. GPU preflight and
+pre-timing exclusivity passed with the documented 64 MiB driver allowance.
+
+```text
++---------+-----------+----------------------+------------+------------+
+| Threads | Median s  | Min..max s           | Forward s  | Back/sketch|
++---------+-----------+----------------------+------------+------------+
+|      16 |  3.996794 |  3.995769..4.004401 |   0.343179 |   3.279112 |
+|      32 |  4.007734 |  4.005361..4.015998 |   0.343175 |   3.285817 |
+|      64 |  3.995700 |  3.993620..3.998341 |   0.343473 |   3.277697 |
+|      96 |  4.007389 |  4.006633..4.027146 |   0.346590 |   3.287897 |
++---------+-----------+----------------------+------------+------------+
+```
+
+The medians differ by about 0.3%; this sweep establishes no meaningful gain from
+increasing the existing collector's thread count. Keep the 16-thread control
+for sidecar comparisons and allocate extra CPU capacity to explicit independent
+work rather than assuming a 96-thread setting creates overlap.
+
+Raw artifacts: `/tmp/qvq-sidecar-baseline-cpu{16,32,64,96}.json` and matching logs.
+The compact scorecard is
+[`experiments/qvq_fisher_cpu_scaling_20260905.json`](experiments/qvq_fisher_cpu_scaling_20260905.json).
+These are baseline timings, not an accepted sidecar optimization or a full-host
+SMT scaling result. No collection math or production thread default changed.
+
+```bash
+# Repeat for 16, 32, 64, and 96 in separate processes; allow an idle cooldown.
+OMP_NUM_THREADS=16 MKL_NUM_THREADS=16 OPENBLAS_NUM_THREADS=16 \
+CUDA_DEVICE_ORDER=PCI_BUS_ID \
+CUDA_VISIBLE_DEVICES=GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea \
+python scripts/benchmark_qvq_yaqa_qwen38.py \
+  --rows 64 --batch-size 16 --row-start 96 --seed 20260909 \
+  --all-targets --arms streaming_256 --accumulator-device cuda \
+  --no-activation-checkpointing --idle-max-driver-memory-mib 64 \
+  --warmup 2 --repeats 3 --cpu-threads 16 --cpu-interop-threads 1 \
+  --output /tmp/qvq-sidecar-baseline-cpu16.json
+```
+
+## Initial critical-path trace
+
+A separate warmed trace used the same B16/64-sequence workload and 16 host
+threads under the 96-CPU affinity. This is a **profiled diagnostic**, not a new
+speedup measurement. The active capture took 4.070 seconds; GPU kernel interval
+union was 3.776 seconds (92.8% of profiled wall). Including memcpy and memset,
+GPU activity occupied 3.850 seconds. There were 89,152 kernel launches.
+
+Dominant kernel families (top eight by total time, with all remaining work retained):
+
+```text
++-----------------------------+-------+----------+---------+
+| Family                      | Calls | GPU s    | Share % |
++-----------------------------+-------+----------+---------+
+| FP32 cuBLAS TN 32x32        |  3008 | 0.770689 |   20.41 |
+| Hopper FP32 projection      |  2368 | 0.402260 |   10.65 |
+| FP32 CUTLASS NT 128x128     |  3008 | 0.388579 |   10.29 |
+| Gaussian projection RNG     |  1600 | 0.252788 |    6.69 |
+| FP32 sums, shared family    |  6592 | 0.191689 |    5.08 |
+| BF16 model GEMM NNT         |  1476 | 0.182278 |    4.83 |
+| FP32 cuBLAS NN 32x32        |   640 | 0.143280 |    3.79 |
+| FP32 cuBLAS NT 32x32        |   384 | 0.134898 |    3.57 |
+| All remaining kernels       | 70076 | 1.309686 |   34.68 |
++-----------------------------+-------+----------+---------+
+```
+
+`_project_kernel` maps directly to `qvq_yaqa_cuda.py`; Gaussian generation maps
+to `projection.normal_` in `_streaming_projected_updates`. The prior executed
+collector audit identifies the small FP32 TN GEMM family in token-Gram
+contractions. FP32 GEMM and reduction family totals can span several call sites;
+the trace alone does not assign every shared-family call to one expression.
+Full kernel names, counts, and residual totals are retained in the scorecard.
+
+| Overlap observation | Diagnostic time | Implication / dependency |
+|---|---:|---|
+| Gaps inside GPU activity span | 0.171 s | Only an upper bound on launch/synchronization opportunities; dependencies must be checked. |
+| Factor D2H copies | 0.336 s | 2,400 copies, 7,016,939,520 bytes, copy stream 21. |
+| Factor copies overlapping kernels | 0.276 s / 82.2% | Existing offload already overlaps substantially with backward. |
+| Factor copy duration without compute overlap | 0.060 s | Test NUMA placement and handoff before assuming this is entirely removable. |
+
+The CPU `cudaLaunchKernel` API total was 1.393 seconds across 68,148 calls. It
+largely overlaps device execution and must not be added to GPU time or treated
+as fully reclaimable latency.
+
+| Candidate composition | Existing source boundary | Required gate |
+|---|---|---|
+| Copy completion -> grouped CPU diagonal normalization and descriptor construction | `_YaqaFactorTransfer` and final `YaqaGramSketch` construction in `qvq_yaqa.py` | Read only completed host buffers; preserve checks, divisor behavior, and exact returned factors. |
+| Batch mask/count preparation -> repeated collector consumers | `active_mask` preparation and `accumulate_gradient` masking in `qvq_yaqa.py` | Preserve token order, masking, weights, and reduction semantics; measure saved GPU work. |
+| Small GPU contraction -> CPU work overlapping another GPU operation | `_streaming_projected_updates` | Include all transfers/packing/drain; exact output and quantization gates precede promotion. |
+
+These are proposed experiment boundaries, not implemented fusion or offload wins.
+The trace prioritizes actual computation/copy crossover measurements over expecting
+large gains from host bookkeeping alone. AMX BF16/INT8 application experiments
+remain separate from the strict FP32 control.
+
+Artifacts:
+
+- `/tmp/qvq-sidecar-cpu16-trace.json` (295,385,174 bytes)
+- `/tmp/qvq-sidecar-cpu16-trace-metadata.json`
+- [Compact trace scorecard](experiments/qvq_fisher_cpu_trace_20260905.json)
+
+Capture command: use the 16-thread baseline command above with `--repeats 1`,
+`--trace-output /tmp/qvq-sidecar-cpu16-trace.json`, and a distinct output JSON.
+CPU01 is complete for this bounded baseline/trace scope. CPU02 (NUMA handoff)
+and CPU05 (full-path small-operation crossover) are the next prioritized trials;
+physical-core placement and SMT comparisons remain queued within CPU09.

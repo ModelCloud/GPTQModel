@@ -24,6 +24,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.cpu_runtime_inventory import cpu_runtime_inventory
 from scripts.gpu_idle_preflight import (
     add_gpu_idle_preflight_args,
     bootstrap_gpu_idle_preflight,
@@ -63,6 +64,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=20260905)
     parser.add_argument("--warmup", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--cpu-threads", type=int, help="Torch intra-op threads; defaults to the current environment")
+    parser.add_argument("--cpu-interop-threads", type=int, help="Torch inter-op threads; defaults to the runtime default")
     parser.add_argument("--quant-block-size", type=int, default=0)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--collector-source", type=Path, help="Benchmark a local qvq_yaqa.py revision")
@@ -203,11 +206,23 @@ def main() -> None:
     if any(_strategy(arm)[0] == "batched" for arm in args.arms) and _strategy(args.arms[0])[0] != "batched":
         raise ValueError("the exact benchmark arm must be first when present")
 
+    cpu_inventory = cpu_runtime_inventory()
+    for name in ("cpu_threads", "cpu_interop_threads"):
+        value = getattr(args, name)
+        available = cpu_inventory["allowed_logical_cpus"]
+        if value is not None and (value < 1 or (available is not None and value > available)):
+            raise ValueError(f"{name} must be positive and no larger than the effective CPU affinity")
     preflight = bootstrap_gpu_idle_preflight()
     if preflight is None:
         raise RuntimeError("formal Qwen YAQA timing requires the GPU idle preflight")
 
     import torch
+
+    if args.cpu_threads is not None:
+        torch.set_num_threads(args.cpu_threads)
+    if args.cpu_interop_threads is not None:
+        torch.set_num_interop_threads(args.cpu_interop_threads)
+
     from transformers import AutoModelForImageTextToText, AutoTokenizer
 
     from gptqmodel.quantization.qvq import quantize_qvq_linear
@@ -445,6 +460,9 @@ def main() -> None:
         "warmup": args.warmup,
         "repeats": args.repeats,
         "cpu_threads": torch.get_num_threads(),
+        "cpu_interop_threads": torch.get_num_interop_threads(),
+        "cpu_inventory": cpu_inventory,
+        "benchmark_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "factor_parity": parity_records,
         "reference_source_sha256": (
             None if args.verify_source is None else hashlib.sha256(args.verify_source.read_bytes()).hexdigest()

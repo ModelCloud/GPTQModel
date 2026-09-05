@@ -1,7 +1,7 @@
 {
   "schema": "qvq.fisher-cpu-sidecar.queue.v1",
-  "status": "queued",
-  "execution": "research backlog; no background benchmark supervisor launched",
+  "status": "baseline_complete_sidecars_queued",
+  "execution": "Expanded-allocation baseline sweep and critical-path trace completed in the foreground; no background supervisor remains.",
   "prepared_at_utc": "2026-09-05T19:12:58.625621+00:00",
   "baseline_code_commit": "1acd13b95bcb2c4bfc3556d7e710da1385f911f5",
   "branch": "perf/qvq-yaqa-fisher-next-2x",
@@ -14,24 +14,104 @@
     "threads_per_core": 2,
     "advertised_logical_cpus": 192,
     "allowed_logical_cpus": [
+      0,
+      1,
+      5,
+      7,
+      8,
+      14,
       17,
-      30,
-      32,
-      56,
+      19,
+      21,
+      22,
+      24,
+      25,
+      26,
+      27,
+      28,
+      31,
+      33,
+      36,
+      40,
+      41,
+      42,
+      43,
+      46,
+      47,
+      49,
+      51,
+      52,
+      53,
+      58,
+      59,
+      61,
       64,
+      65,
       66,
+      67,
+      68,
+      69,
+      70,
       72,
+      74,
+      80,
+      83,
       84,
-      90,
-      121,
-      123,
+      86,
+      87,
+      88,
+      92,
+      93,
+      94,
+      95,
+      96,
+      99,
+      100,
+      103,
+      106,
+      107,
+      108,
+      110,
+      112,
+      113,
+      115,
+      116,
+      117,
+      124,
+      126,
+      127,
       129,
+      131,
+      132,
+      136,
+      137,
       138,
-      147,
+      140,
+      144,
+      145,
+      146,
+      148,
+      150,
+      151,
+      152,
+      154,
       155,
-      178
+      159,
+      160,
+      164,
+      165,
+      166,
+      169,
+      171,
+      173,
+      176,
+      178,
+      180,
+      182,
+      185,
+      188
     ],
-    "cpuset_cpus_effective": "17,30,32,56,64,66,72,84,90,121,123,129,138,147,155,178",
+    "cpuset_cpus_effective": "0-1,5,7-8,14,17,19,21-22,24-28,31,33,36,40-43,46-47,49,51-53,58-59,61,64-70,72,74,80,83-84,86-88,92-96,99-100,103,106-108,110,112-113,115-117,124,126-127,129,131-132,136-138,140,144-146,148,150-152,154-155,159-160,164-166,169,171,173,176,178,180,182,185,188",
     "cpu_max": "max 100000",
     "memory_max": "128000000000",
     "flags": {
@@ -95,7 +175,29 @@
           119
         ],
         "allowed_cpus": [
-          17
+          0,
+          1,
+          5,
+          7,
+          8,
+          14,
+          17,
+          19,
+          21,
+          22,
+          96,
+          99,
+          100,
+          103,
+          106,
+          107,
+          108,
+          110,
+          112,
+          113,
+          115,
+          116,
+          117
         ]
       },
       "node1": {
@@ -150,12 +252,30 @@
           143
         ],
         "allowed_cpus": [
-          30,
-          32,
-          121,
-          123,
+          24,
+          25,
+          26,
+          27,
+          28,
+          31,
+          33,
+          36,
+          40,
+          41,
+          42,
+          43,
+          46,
+          47,
+          124,
+          126,
+          127,
           129,
-          138
+          131,
+          132,
+          136,
+          137,
+          138,
+          140
         ]
       },
       "node2": {
@@ -210,11 +330,34 @@
           167
         ],
         "allowed_cpus": [
-          56,
+          49,
+          51,
+          52,
+          53,
+          58,
+          59,
+          61,
           64,
+          65,
           66,
-          147,
-          155
+          67,
+          68,
+          69,
+          70,
+          144,
+          145,
+          146,
+          148,
+          150,
+          151,
+          152,
+          154,
+          155,
+          159,
+          160,
+          164,
+          165,
+          166
         ]
       },
       "node3": {
@@ -270,16 +413,55 @@
         ],
         "allowed_cpus": [
           72,
+          74,
+          80,
+          83,
           84,
-          90,
-          178
+          86,
+          87,
+          88,
+          92,
+          93,
+          94,
+          95,
+          169,
+          171,
+          173,
+          176,
+          178,
+          180,
+          182,
+          185,
+          188
         ]
       }
     },
     "gpu_pci_bus_id": "0000:1c:00.0",
     "gpu_numa_node_from_sysfs": 0,
     "gpu_local_allowed_cpus": [
-      17
+      0,
+      1,
+      5,
+      7,
+      8,
+      14,
+      17,
+      19,
+      21,
+      22,
+      96,
+      99,
+      100,
+      103,
+      106,
+      107,
+      108,
+      110,
+      112,
+      113,
+      115,
+      116,
+      117
     ],
     "topology_caveat": "nvidia-smi topo/hwloc reported inconsistent virtualized topology; sysfs locality is provisional and must be checked by transfer measurements.",
     "amx_runtime_probe": {
@@ -299,6 +481,531 @@
       "-mamx-tile",
       "-mamx-bf16",
       "-mamx-int8"
+    ],
+    "represented_physical_cores": 71,
+    "physical_core_groups": [
+      {
+        "socket": 0,
+        "core": 0,
+        "allowed_cpus": [
+          0,
+          96
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 1,
+        "allowed_cpus": [
+          1
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 3,
+        "allowed_cpus": [
+          99
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 4,
+        "allowed_cpus": [
+          100
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 5,
+        "allowed_cpus": [
+          5
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 7,
+        "allowed_cpus": [
+          7,
+          103
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 8,
+        "allowed_cpus": [
+          8
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 10,
+        "allowed_cpus": [
+          106
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 11,
+        "allowed_cpus": [
+          107
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 12,
+        "allowed_cpus": [
+          108
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 14,
+        "allowed_cpus": [
+          14,
+          110
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 16,
+        "allowed_cpus": [
+          112
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 17,
+        "allowed_cpus": [
+          17,
+          113
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 19,
+        "allowed_cpus": [
+          19,
+          115
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 20,
+        "allowed_cpus": [
+          116
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 21,
+        "allowed_cpus": [
+          21,
+          117
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 22,
+        "allowed_cpus": [
+          22
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 24,
+        "allowed_cpus": [
+          24
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 25,
+        "allowed_cpus": [
+          25
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 26,
+        "allowed_cpus": [
+          26
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 27,
+        "allowed_cpus": [
+          27
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 28,
+        "allowed_cpus": [
+          28,
+          124
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 30,
+        "allowed_cpus": [
+          126
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 31,
+        "allowed_cpus": [
+          31,
+          127
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 33,
+        "allowed_cpus": [
+          33,
+          129
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 35,
+        "allowed_cpus": [
+          131
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 36,
+        "allowed_cpus": [
+          36,
+          132
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 40,
+        "allowed_cpus": [
+          40,
+          136
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 41,
+        "allowed_cpus": [
+          41,
+          137
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 42,
+        "allowed_cpus": [
+          42,
+          138
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 43,
+        "allowed_cpus": [
+          43
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 44,
+        "allowed_cpus": [
+          140
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 46,
+        "allowed_cpus": [
+          46
+        ]
+      },
+      {
+        "socket": 0,
+        "core": 47,
+        "allowed_cpus": [
+          47
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 0,
+        "allowed_cpus": [
+          144
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 1,
+        "allowed_cpus": [
+          49,
+          145
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 2,
+        "allowed_cpus": [
+          146
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 3,
+        "allowed_cpus": [
+          51
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 4,
+        "allowed_cpus": [
+          52,
+          148
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 5,
+        "allowed_cpus": [
+          53
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 6,
+        "allowed_cpus": [
+          150
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 7,
+        "allowed_cpus": [
+          151
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 8,
+        "allowed_cpus": [
+          152
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 10,
+        "allowed_cpus": [
+          58,
+          154
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 11,
+        "allowed_cpus": [
+          59,
+          155
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 13,
+        "allowed_cpus": [
+          61
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 15,
+        "allowed_cpus": [
+          159
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 16,
+        "allowed_cpus": [
+          64,
+          160
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 17,
+        "allowed_cpus": [
+          65
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 18,
+        "allowed_cpus": [
+          66
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 19,
+        "allowed_cpus": [
+          67
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 20,
+        "allowed_cpus": [
+          68,
+          164
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 21,
+        "allowed_cpus": [
+          69,
+          165
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 22,
+        "allowed_cpus": [
+          70,
+          166
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 24,
+        "allowed_cpus": [
+          72
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 25,
+        "allowed_cpus": [
+          169
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 26,
+        "allowed_cpus": [
+          74
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 27,
+        "allowed_cpus": [
+          171
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 29,
+        "allowed_cpus": [
+          173
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 32,
+        "allowed_cpus": [
+          80,
+          176
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 34,
+        "allowed_cpus": [
+          178
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 35,
+        "allowed_cpus": [
+          83
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 36,
+        "allowed_cpus": [
+          84,
+          180
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 38,
+        "allowed_cpus": [
+          86,
+          182
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 39,
+        "allowed_cpus": [
+          87
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 40,
+        "allowed_cpus": [
+          88
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 41,
+        "allowed_cpus": [
+          185
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 44,
+        "allowed_cpus": [
+          92,
+          188
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 45,
+        "allowed_cpus": [
+          93
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 46,
+        "allowed_cpus": [
+          94
+        ]
+      },
+      {
+        "socket": 1,
+        "core": 47,
+        "allowed_cpus": [
+          95
+        ]
+      }
     ]
   },
   "tasks": [
@@ -310,8 +1017,9 @@
     },
     {
       "id": "cpu01",
-      "state": "queued",
-      "title": "Attribute the remaining critical path against the committed GPU-only baseline"
+      "state": "complete",
+      "title": "Attribute the remaining critical path against the committed GPU-only baseline",
+      "completed_scope": "16/32/64/96-thread controls and one warmed B16/64-sequence full-collector trace under the expanded allocation."
     },
     {
       "id": "cpu02",
@@ -350,9 +1058,11 @@
     },
     {
       "id": "cpu09",
-      "state": "queued_resource_required",
-      "title": "Scale across both full sockets and compare SMT",
-      "prerequisite": "A CPU allocation exposing the intended cores; current cpuset permits only 16 logical CPUs. Re-probe before launch."
+      "state": "queued",
+      "title": "Scale the expanded dual-socket allocation and compare SMT",
+      "allocation": "96 allowed logical CPUs, representing 71 physical cores. Full-host 96-physical-core coverage is not claimed.",
+      "completed_work": "Expanded allocation verified; basic thread-count controls complete.",
+      "remaining_work": "Explicit physical-core affinity, socket placement, and controlled SMT comparison."
     }
   ],
   "acceptance": {
@@ -360,5 +1070,313 @@
     "numerics": "Exact factor parity first; exact deterministic packed codes, bank IDs, and serialized metadata for quantization implementation changes.",
     "performance": "A reproducible net end-to-end improvement; kernel-only throughput and CPU utilization are diagnostic.",
     "resource_policy": "Respect the effective cpuset, reserve CPU capacity for GPU submission, bound pinned memory and work queues."
-  }
+  },
+  "hardware_history": [
+    {
+      "observed_at_utc": "2026-09-05T19:12:58.625621+00:00",
+      "hardware_observation": {
+        "cpu_model": "INTEL(R) XEON(R) PLATINUM 8575C",
+        "sockets": 2,
+        "cores_per_socket": 48,
+        "threads_per_core": 2,
+        "advertised_logical_cpus": 192,
+        "allowed_logical_cpus": [
+          17,
+          30,
+          32,
+          56,
+          64,
+          66,
+          72,
+          84,
+          90,
+          121,
+          123,
+          129,
+          138,
+          147,
+          155,
+          178
+        ],
+        "cpuset_cpus_effective": "17,30,32,56,64,66,72,84,90,121,123,129,138,147,155,178",
+        "cpu_max": "max 100000",
+        "memory_max": "128000000000",
+        "flags": {
+          "avx512f": true,
+          "avx512_bf16": true,
+          "avx512_vnni": true,
+          "amx_tile": true,
+          "amx_bf16": true,
+          "amx_int8": true
+        },
+        "numa_nodes": {
+          "node0": {
+            "advertised_cpus": [
+              0,
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              96,
+              97,
+              98,
+              99,
+              100,
+              101,
+              102,
+              103,
+              104,
+              105,
+              106,
+              107,
+              108,
+              109,
+              110,
+              111,
+              112,
+              113,
+              114,
+              115,
+              116,
+              117,
+              118,
+              119
+            ],
+            "allowed_cpus": [
+              17
+            ]
+          },
+          "node1": {
+            "advertised_cpus": [
+              24,
+              25,
+              26,
+              27,
+              28,
+              29,
+              30,
+              31,
+              32,
+              33,
+              34,
+              35,
+              36,
+              37,
+              38,
+              39,
+              40,
+              41,
+              42,
+              43,
+              44,
+              45,
+              46,
+              47,
+              120,
+              121,
+              122,
+              123,
+              124,
+              125,
+              126,
+              127,
+              128,
+              129,
+              130,
+              131,
+              132,
+              133,
+              134,
+              135,
+              136,
+              137,
+              138,
+              139,
+              140,
+              141,
+              142,
+              143
+            ],
+            "allowed_cpus": [
+              30,
+              32,
+              121,
+              123,
+              129,
+              138
+            ]
+          },
+          "node2": {
+            "advertised_cpus": [
+              48,
+              49,
+              50,
+              51,
+              52,
+              53,
+              54,
+              55,
+              56,
+              57,
+              58,
+              59,
+              60,
+              61,
+              62,
+              63,
+              64,
+              65,
+              66,
+              67,
+              68,
+              69,
+              70,
+              71,
+              144,
+              145,
+              146,
+              147,
+              148,
+              149,
+              150,
+              151,
+              152,
+              153,
+              154,
+              155,
+              156,
+              157,
+              158,
+              159,
+              160,
+              161,
+              162,
+              163,
+              164,
+              165,
+              166,
+              167
+            ],
+            "allowed_cpus": [
+              56,
+              64,
+              66,
+              147,
+              155
+            ]
+          },
+          "node3": {
+            "advertised_cpus": [
+              72,
+              73,
+              74,
+              75,
+              76,
+              77,
+              78,
+              79,
+              80,
+              81,
+              82,
+              83,
+              84,
+              85,
+              86,
+              87,
+              88,
+              89,
+              90,
+              91,
+              92,
+              93,
+              94,
+              95,
+              168,
+              169,
+              170,
+              171,
+              172,
+              173,
+              174,
+              175,
+              176,
+              177,
+              178,
+              179,
+              180,
+              181,
+              182,
+              183,
+              184,
+              185,
+              186,
+              187,
+              188,
+              189,
+              190,
+              191
+            ],
+            "allowed_cpus": [
+              72,
+              84,
+              90,
+              178
+            ]
+          }
+        },
+        "gpu_pci_bus_id": "0000:1c:00.0",
+        "gpu_numa_node_from_sysfs": 0,
+        "gpu_local_allowed_cpus": [
+          17
+        ],
+        "topology_caveat": "nvidia-smi topo/hwloc reported inconsistent virtualized topology; sysfs locality is provisional and must be checked by transfer measurements.",
+        "amx_runtime_probe": {
+          "amx_bf16_executed_and_checked": true,
+          "amx_int8_executed_and_checked": true,
+          "xcomp_supported": "0x602e7",
+          "xcomp_permission_before": "0x202e7",
+          "xcomp_permission_after": "0x602e7"
+        },
+        "amx_probe_source": "scripts/probe_qvq_cpu_amx.c",
+        "amx_probe_sha256": "46f25f88061d5ed8936f4cfbce2c6cad8dcff72dfb080f7cf858e1640cb245f7",
+        "amx_compiler": "15.2.0",
+        "amx_compile_flags": [
+          "-O2",
+          "-Wall",
+          "-Wextra",
+          "-mamx-tile",
+          "-mamx-bf16",
+          "-mamx-int8"
+        ]
+      }
+    }
+  ],
+  "allocation_refreshed_at_utc": "2026-09-05T19:21:20.004108+00:00",
+  "results": {
+    "thread_scaling": "docs/experiments/qvq_fisher_cpu_scaling_20260905.json",
+    "critical_path": "docs/experiments/qvq_fisher_cpu_trace_20260905.json"
+  },
+  "next_experiments": [
+    "cpu02",
+    "cpu05"
+  ]
 }
