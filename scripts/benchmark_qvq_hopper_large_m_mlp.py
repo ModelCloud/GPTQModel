@@ -28,7 +28,9 @@ INTERMEDIATE = 8192
 SOURCE_PATHS = (
     Path("gptqmodel/nn_modules/qlinear/qvq.py"),
     Path("gptqmodel/nn_modules/qvq_grouped_runtime.py"),
+    Path("gptqmodel/utils/qvq_cuda.py"),
     Path("gptqmodel/utils/qvq_wgmma_cuda.py"),
+    Path("gptqmodel_ext/qvq/qvq_hadamard_cuda.cu"),
     Path("gptqmodel_ext/qvq/qvq_wgmma_cuda.cu"),
     Path("scripts/benchmark_qvq_hopper_large_m_mlp.py"),
 )

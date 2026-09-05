@@ -434,3 +434,97 @@ Source-correlated SASS shows the scalar path dominated by 1.64M branches,
 unpacks. The low stage exposes warp butterflies and trims those totals; the
 high stage executes only 1.10M instructions including scale/bias/store. The
 reports are `/tmp/qvq_v3_phase6_output_{oneblock,multiblock_low,multiblock_high}_m512.ncu-rep`.
+
+## Phase 7: four-tile fused recovery ownership
+
+The remaining fused gate/up recovery, SiLU, product, and down-precondition
+stage launched one CTA for each pair of output tiles `t` and `t+16`. Phase 7
+gives one CTA the four tiles `t`, `t+8`, `t+16`, and `t+24`. The first three
+stages of each 32-tile recovery tree are identical for all four outputs and
+are now evaluated once. Two rounded sum/difference stages then produce the
+four required outputs:
+
+```text
+s0 = R(a0 + a1)       d0 = R(a0 - a1)
+s1 = R(a2 + a3)       d1 = R(a2 - a3)
+
+y[t]    = R(s0 + s1)  y[t+8]  = R(d0 + d1)
+y[t+16] = R(s0 - s1)  y[t+24] = R(d0 - d1)
+```
+
+Here `a0..a3` are the independently rounded results after ascending
+butterfly bits 1, 2, and 4, and `R` is the existing
+round-to-FP16-unless-overflow operation. This is exact value reuse: it does
+not reassociate a butterfly, contract an FP32 operation, move a scale, or
+remove a rounding boundary. Gate and up remain independent through recovery;
+all four recovered pairs cross the established FP16 SiLU/product/down-scale
+boundary before four independent packed low transforms. The static shared
+workspace grows from two to four 128-value `half2` arrays (1 to 2 KiB).
+
+Focused M32/M512 tests require exact FP16 bits against the previous fused
+operator and exact CUDA Graph replay. The high-magnitude overflow fallback
+test remains finite and exact. The production benchmark was regenerated from
+post-merge executable commit `66f2ef5e`, uses CUDA events inside CUDA Graph
+replay on physical GPU 1, and records the source fingerprint including both
+the CUDA Hadamard source and its Python wrapper.
+
+| Weight | MLP MKN (gate/up; down) | Phase 6 | Phase 7 | Speedup | vs Marlin W4 | vs Machete W4 | Better than last |
+|---|---|---:|---:|---:|---:|---:|:---:|
+| W2 | 128x2048x8192; 128x8192x2048 | 102.474 us | 98.174 us | 1.044x | 0.804x | 0.738x | Yes |
+| W2 | 512x2048x8192; 512x8192x2048 | 345.872 us | 330.770 us | 1.046x | 0.496x | 0.360x | Yes |
+| W2 | 4096x2048x8192; 4096x8192x2048 | 2589.795 us | 2444.683 us | 1.059x | 0.571x | 0.374x | Yes |
+| W2.5 | 128x2048x8192; 128x8192x2048 | 105.302 us | 102.419 us | 1.028x | 0.771x | 0.707x | Yes |
+| W2.5 | 512x2048x8192; 512x8192x2048 | 352.838 us | 343.794 us | 1.026x | 0.478x | 0.346x | Yes |
+| W2.5 | 4096x2048x8192; 4096x8192x2048 | 2620.768 us | 2487.670 us | 1.054x | 0.561x | 0.367x | Yes |
+| W3 | 128x2048x8192; 128x8192x2048 | 104.608 us | 101.942 us | 1.026x | 0.775x | 0.711x | Yes |
+| W3 | 512x2048x8192; 512x8192x2048 | 350.333 us | 340.650 us | 1.028x | 0.482x | 0.349x | Yes |
+| W3 | 4096x2048x8192; 4096x8192x2048 | 2630.230 us | 2497.064 us | 1.053x | 0.559x | 0.366x | Yes |
+| W3.5 | 128x2048x8192; 128x8192x2048 | 103.296 us | 100.055 us | 1.032x | 0.789x | 0.724x | Yes |
+| W3.5 | 512x2048x8192; 512x8192x2048 | 348.598 us | 335.826 us | 1.038x | 0.489x | 0.355x | Yes |
+| W3.5 | 4096x2048x8192; 4096x8192x2048 | 2595.162 us | 2473.226 us | 1.049x | 0.565x | 0.369x | Yes |
+
+All twelve cells improve. Phase 7 is `1.0403x` over Phase 6 and `1.2553x`
+cumulatively over merged PR-112 main, crossing the requested 25% speedup
+target. Marlin and Machete remain figurative W4 baselines; their geometric
+latency ratios are `0.5993x` and `0.4541x`. Maximum and maximum-row-mean
+dense-oracle absolute error remain `1.073e-6` and `1.585e-7`.
+
+### Exact-commit Nsight Compute and SASS audit
+
+The previous pair kernel was captured from commit `9ecae8ff` and the quad
+kernel from pushed commit `66f2ef5e`, using identical seeded M512 inputs and
+the same physical H100. Both reports use targeted SpeedOfLight, LaunchStats,
+Occupancy, SchedulerStats, WarpStateStats, InstructionStats, and
+MemoryWorkloadAnalysis sections.
+
+| Metric | Two-tile ownership | Four-tile ownership | Change |
+|---|---:|---:|---:|
+| Grid | 16x512 | 8x512 | -50% |
+| NCU duration | 63.584 us | 49.856 us | 1.275x |
+| Executed instructions | 51.14 M | 36.88 M | -27.89% |
+| Registers/thread | 40 | 48 | +8 |
+| Static shared memory/block | 1 KiB | 2 KiB | +1 KiB |
+| Achieved occupancy | 70.67% | 58.24% | -12.43 points |
+| Eligible warps/scheduler | 3.99 | 2.97 | -1.02 |
+| Warp cycles/issued instruction | 13.85 | 12.13 | -12.4% |
+| DRAM throughput | 24.45% | 30.73% | +6.28 points |
+| Local/shared spilling requests | 0 / 0 | 0 / 0 | unchanged |
+
+Source-correlated SASS confirms that shared recovery mathematics survived
+compilation. Dynamic global loads fall 4.85M to 2.75M (-43.2%), FP32 adds
+4.59M to 2.75M (-40.0%), `F2FP` conversions 5.37M to 3.44M (-36.0%),
+predicate compares 5.79M to 3.69M (-36.2%), selects 5.11M to 3.01M
+(-41.0%), and barriers by 50%. Address/movement overhead rises in a few
+families (`LEA` +16.8%, `PRMT` +25.0%, and register moves), but the net
+instruction count and stage latency fall substantially with zero spills.
+
+Nsight suggests contracting some remaining FP32 adds/multiplies. That is not
+eligible here: these instructions either surround an explicit FP16 narrowing
+boundary or intentionally preserve non-contracted reference evaluation.
+Source-level common-subexpression elimination of the four output-column
+addresses was also inspected, but the emitted immediate-offset loads already
+avoid four independent full address chains; forcing more live pointers would
+increase the 48-register pressure. The retained next target is therefore the
+P32 gate/up decode rather than unsafe algebraic contraction inside this exact
+epilogue. Local reports remain outside Git at
+`artifacts/qvq_hopper_large_m/profiles/v3_phase7_{pair,quad}_m512_*.ncu-rep`.
