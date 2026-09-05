@@ -100,3 +100,15 @@ Machete at 0.507x and 0.363x respectively.
 
 Artifact:
 `artifacts/qvq_hopper_large_m/v4_w25_reuse11_coalesced_candidate.json`.
+
+The exact `c5052486` NCU capture reports 124.768 microseconds, 54,884,628
+executed warp instructions, 166 registers/thread, 217.856 KiB dynamic shared
+memory, 0.743 eligible warps/scheduler/cycle, 7.22% DRAM throughput, and zero
+local/shared spills. Its dominant SASS remains decoder/address math:
+12.61M `IMAD`, 8.76M `R2UR`, 6.75M `LDS`, 4.76M `PRMT`, 4.39M `SHF`, and
+4.37M `LOP3`, versus 4.33M `HGMMA`. This confirms that the coalesced store did
+not trade the measured gain for spills or HBM pressure; the next large win
+still requires sharing or eliminating decode/address work.
+
+NCU report:
+`artifacts/qvq_hopper_large_m/profiles/v4_w25_reuse11_coalesced_c5052486_ncu.ncu-rep`.
