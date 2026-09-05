@@ -113,3 +113,8 @@ identical production-window ARC repeats at 390/1172 raw and 428/1172
 length-normalized, plus two identical production-window GSM8K repeats at
 59/128. Two policy ARC repeats now agree at 390/1172 raw and 429/1172
 length-normalized; policy GSM8K completed at 58/128 on both repeats.
+
+[Window model tile wave24 partial](WINDOW_MODEL_WAVE24_PARTIAL.md) has completed
+the production control and BM64/BN64 split1 exact-K0 arm. Six BM/BN/split arms
+remain active; the completed fused arm is slower at small M and decode and
+faster at M=512/2048 in the single model run.
