@@ -243,3 +243,74 @@ that scalar representation with 0.85M native packed FP16 add/sub operations.
 The added absolute-bound reduction accounts for 1.31M shuffle-down and part
 of the retained FP32-add stream. Reports remain outside Git at
 `/tmp/qvq_v3_phase3_{plain,packed}_low_w3_m512.ncu-rep`.
+
+## Phase 4: reuse-8 for the unsplit down projection
+
+At M512 and above the Llama 8192-to-2048 down projection no longer uses
+split-K, but the single-child wrapper still selected reuse-4. Phase 4 selects
+the already exact reuse-8 implementation for unsplit single children when M
+is at least 512 and divisible by 128. M128 stays on reuse-4 because reducing
+its down grid from 64 to only 32 blocks would underfill the 132-SM H100.
+
+The operation is the same Phase-1 algebra applied to a one-segment payload:
+one decoded P32 fragment supplies eight independent M16 WGMMA row tiles. It
+does not alter checkpoint packing, K accumulation, reduction, or output
+recovery. The all-rate production down-shape test requires reuse-8 to be bit
+exact to reuse-4 and verifies CUDA Graph replay at M512.
+
+A same-session W3 boundary sweep measured every requested intermediate row
+bucket before promotion:
+
+| M | MLP MKN (gate/up; down) | Reuse-4 down | Reuse-8 down | Speedup | Better than last |
+|---:|---|---:|---:|---:|:---:|
+| 512 | 512x2048x8192; 512x8192x2048 | 373.802 us | 371.251 us | 1.0069x | Yes |
+| 1024 | 1024x2048x8192; 1024x8192x2048 | 728.554 us | 720.122 us | 1.0117x | Yes |
+| 2048 | 2048x2048x8192; 2048x8192x2048 | 1449.098 us | 1429.728 us | 1.0135x | Yes |
+| 4096 | 4096x2048x8192; 4096x8192x2048 | 2832.893 us | 2798.778 us | 1.0122x | Yes |
+
+The committed all-rate artifact uses executable commit `060b9554` and the
+same strict idle admission, CUDA Graph replay, and CUDA-event protocol as the
+earlier phases.
+
+| Weight | MLP MKN (gate/up; down) | Phase 3 | Phase 4 | Speedup | vs merged main | vs Marlin W4 | vs Machete W4 | Better than last |
+|---|---|---:|---:|---:|---:|---:|---:|:---:|
+| W2 | 128x2048x8192; 128x8192x2048 | 107.290 us | 107.254 us | 1.000x | 1.141x | 0.740x | 0.680x | Yes |
+| W2 | 512x2048x8192; 512x8192x2048 | 369.216 us | 363.238 us | 1.016x | 1.131x | 0.457x | 0.322x | Yes |
+| W2 | 4096x2048x8192; 4096x8192x2048 | 2794.330 us | 2739.302 us | 1.020x | 1.152x | 0.497x | 0.318x | Yes |
+| W2.5 | 128x2048x8192; 128x8192x2048 | 109.856 us | 109.987 us | 0.999x | 1.126x | 0.722x | 0.663x | No |
+| W2.5 | 512x2048x8192; 512x8192x2048 | 373.018 us | 370.003 us | 1.008x | 1.143x | 0.448x | 0.316x | Yes |
+| W2.5 | 4096x2048x8192; 4096x8192x2048 | 2804.438 us | 2770.259 us | 1.012x | 1.157x | 0.492x | 0.314x | Yes |
+| W3 | 128x2048x8192; 128x8192x2048 | 109.011 us | 109.501 us | 0.996x | 1.119x | 0.725x | 0.666x | No |
+| W3 | 512x2048x8192; 512x8192x2048 | 372.019 us | 368.525 us | 1.009x | 1.140x | 0.450x | 0.317x | Yes |
+| W3 | 4096x2048x8192; 4096x8192x2048 | 2834.234 us | 2774.938 us | 1.021x | 1.147x | 0.491x | 0.314x | Yes |
+| W3.5 | 128x2048x8192; 128x8192x2048 | 107.578 us | 108.288 us | 0.993x | 1.140x | 0.733x | 0.673x | No |
+| W3.5 | 512x2048x8192; 512x8192x2048 | 377.283 us | 364.938 us | 1.034x | 1.188x | 0.455x | 0.320x | Yes |
+| W3.5 | 4096x2048x8192; 4096x8192x2048 | 2869.104 us | 2736.461 us | 1.048x | 1.200x | 0.498x | 0.318x | Yes |
+
+The code changes only M512 and M4096 in this matrix; all eight changed cells
+improve, with a `1.0212x` geometric mean. M128's three `No` cells and one
+sub-percent `Yes` are unchanged-code run variation. Across the complete
+matrix Phase 4 is `1.0131x` over Phase 3 and `1.1485x` cumulatively over
+merged PR-112 main. Maximum dense-oracle error remains `1.073e-6`.
+
+### Exact-commit Nsight Compute and SASS audit
+
+The W3 M512 reuse-4 and reuse-8 down kernels coexist in commit `060b9554` and
+were profiled with identical inputs and sections on the physical H100.
+
+| Metric | Reuse-4 down | Reuse-8 down | Change |
+|---|---:|---:|---:|
+| Grid blocks | 256 | 128 | -50% |
+| NCU duration | 98.24 us | 93.92 us | 1.046x |
+| Executed instructions | 50.61 M | 31.48 M | -37.79% |
+| Registers/thread | 93 | 147 | +54 |
+| Achieved occupancy | 15.01% | 7.78% | -7.23 points |
+| Eligible warps/scheduler | 0.84 | 0.41 | -0.43 |
+| DRAM throughput | 6.24% | 6.48% | +0.24 point |
+
+The emitted SASS has unchanged 2.10M WGMMA instructions. Decoder and address
+work is nearly halved: `IMAD` 9.91M to 5.02M, `PRMT` 6.33M to 3.17M,
+`LOP3` 5.51M to 2.79M, shared word and halfword loads 4.19M each to 2.10M,
+and 64-bit funnel shifts 2.10M to 1.05M. Thus the win is decoded-fragment
+reuse despite lower occupancy, not changed tensor work. Reports remain at
+`/tmp/qvq_v3_phase4_down_reuse{4,8}_w3_m512.ncu-rep`.
