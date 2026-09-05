@@ -685,7 +685,10 @@ def fused_silu_mul_quant_fp8(
     m, n = gate.shape
     if n != 8192:
         raise ValueError("fused_silu_mul_quant_fp8 currently requires N=8192")
-    output = torch.empty_like(gate, dtype=torch.float8_e4m3fn)
+    # The kernel writes a dense row-major E4M3 matrix.  ``gate`` may be a
+    # strided view of the grouped gate/up output, so do not preserve its
+    # strides here.
+    output = torch.empty(gate.shape, dtype=torch.float8_e4m3fn, device=gate.device)
     scale = torch.empty((m, 1), device=gate.device, dtype=torch.float32)
     with torch.cuda.device(gate.device):
         _fused_silu_mul_quant_fp8_kernel[(m,)](

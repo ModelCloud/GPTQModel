@@ -1495,6 +1495,8 @@ def test_h100_fused_silu_row_quant_matches_staged_reference_and_graph():
         graph.replay()
         torch.cuda.synchronize(device)
 
+    assert actual.is_contiguous()
+    assert captured.is_contiguous()
     assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
     assert torch.equal(actual_scale, expected_scale)
     assert torch.equal(captured.view(torch.uint8), actual.view(torch.uint8))
