@@ -153,3 +153,17 @@ The final seed72/8192 retry completed. All 15 broader replays now cover 360
 exports and 9,000 cases; [completed replay summary](results/low-rank/stability-broader-completed.json)
 retains every failed case. Completion here means evaluation ran, not every
 candidate passed or experiment36 met its full model/stability scorecard.
+
+## Three-subset 16K rank6 model results
+
+All three rank6 tail FP16 candidates completed C4 and full ARC, replacing only
+layer0 down and retaining window elsewhere. C4 PPL for seeds71/72/73 is
+26.98711266 / 26.98697176 / 26.98477121 (window 26.99152524).
+Raw ARC correct is 391 / 393 / 392; normalized correct is 433 for every subset
+(window raw390 / normalized428). Normalized paired wins/losses are 12/7, 12/7,
+and 11/6, with exact p=0.35928, 0.35928, 0.33231. No statistically established
+improvement follows. This supports bounded consistency across these fits, not
+universal stability, post-quant advantage, or replacement of other layers.
+
+[Reports and paired summary](results/low-rank-model/stability/interim-summary.json)
+retain complete metrics; 32K model arms are separate and still running.
