@@ -65,4 +65,25 @@ Artifact:
 `artifacts/qvq_hopper_large_m/v4_reuse11_m512_candidate.json`.
 
 This is the first v4 win, not the complete 1.25x target. Nsight Compute and
-source-correlated SASS analysis are recorded after committing the exact source.
+source-correlated SASS were captured from exact post-merge revision
+`ae90283c` with Nsight Compute hardware-counter replay.
+
+| Metric | Merged reuse-8 | Reuse-11 | Change |
+| --- | ---: | ---: | ---: |
+| Gate/up kernel duration | 147.104 µs | 127.168 µs | -13.6% |
+| Executed warp instructions | 63,657,414 | 54,759,720 | -14.0% |
+| CTAs | 512 | 384 | -25.0% |
+| Registers/thread | 139 | 168 | +20.9% |
+| Dynamic shared memory/CTA | 172.800 KiB | 221.952 KiB | +28.4% |
+| Eligible warps/scheduler/cycle | 0.688 | 0.742 | +8.0% |
+| DRAM throughput | 6.97% | 8.12% | +1.15 points |
+| Local/shared spills | 0 / 0 | 0 / 0 | unchanged |
+
+The SASS change matches the intended algebraic reuse. `PRMT` and
+`WARPGROUP` execute exactly 25% fewer times; `LDS`, `SHF`, and `LOP3` fall
+23–25%; and `IMAD` falls 15.8%. Tensor work increases only for the sixteen
+padded rows: `HGMMA` rises 3.1%. The kernel remains instruction/scheduler
+limited rather than HBM limited.
+
+NCU report:
+`artifacts/qvq_hopper_large_m/profiles/v4_reuse11_w3_m512_ae90283c_ncu.ncu-rep`.
