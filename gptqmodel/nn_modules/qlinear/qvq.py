@@ -2068,22 +2068,13 @@ class QVQLinear(BaseQuantLinear):
         *,
         output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
-        if (
-            x_2d.device.type == "cuda"
-            and x_2d.dtype == torch.bfloat16
-            and self.activation is not None
-            and self.activation.target == "p32_operand"
-        ):
-            # BF16 values can exceed FP16 before SU/Hadamard has reduced their
-            # range. Preserve them through that transform; the resulting row
-            # is bounded when it is converted to E4M3 below.
-            compute_dtype = torch.float32
-        x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(
-            x_2d,
-            compute_dtype,
-            straight_through=self.training,
-        )
         if self.training:
+            compute_dtype = self._qvq_operand_compute_dtype(x_2d, compute_dtype)
+            x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(
+                x_2d,
+                compute_dtype,
+                straight_through=True,
+            )
             # Keep the differentiable Python butterfly path for the reference
             # forward used in training.
             transformed_input = x_2d * self.SU.to(compute_dtype)
@@ -2128,21 +2119,8 @@ class QVQLinear(BaseQuantLinear):
             if self.bias is not None:
                 output = output + self.bias.to(compute_dtype)
         else:
-            if self.input_hadamard:
-                transformed = _qvq_hadamard_fused(
-                    x_2d,
-                    input_scale=input_scale,
-                    input_rounding_mode=input_rounding_mode,
-                    pre_scale=self._cached_cast("SU", compute_dtype),
-                    scale_mode=(
-                        2
-                        if compute_dtype == torch.float16
-                        and self.in_features >= _FP16_STABLE_HADAMARD_MIN_WIDTH
-                        else 1
-                    ),
-                )
-            else:
-                transformed = x_2d * self._cached_cast("SU", compute_dtype)
+            compute_dtype = self._qvq_operand_compute_dtype(x_2d, compute_dtype)
+            transformed = self._qvq_prepare_inference_input(x_2d, compute_dtype)
             return self._forward_pretransformed_compute_dtype(
                 transformed, compute_dtype, output_dtype=output_dtype
             )
@@ -2207,7 +2185,21 @@ class QVQLinear(BaseQuantLinear):
     ) -> torch.Tensor:
         output_dtype = output.dtype
         if self.output_hadamard:
-            return _qvq_hadamard_fused(
+            target_bf16 = (
+                target_dtype == torch.bfloat16
+                and output_dtype == torch.float32
+            )
+            native_bf16_store = (
+                target_bf16
+                and output.device.type == "cuda"
+                and output.is_contiguous()
+                and self.out_features >= 2
+                and self.out_features & (self.out_features - 1) == 0
+                and self.out_features <= _QVQ_HADAMARD_MAX_WIDTH
+                and qvq_cuda_device_supported(output.device)
+                and qvq_cuda_available()
+            )
+            recovered = _qvq_hadamard_fused(
                 output,
                 post_scale=self._cached_cast("SV", compute_dtype, output_dtype),
                 bias=self._cached_cast("bias", compute_dtype, output_dtype),
@@ -2219,14 +2211,32 @@ class QVQLinear(BaseQuantLinear):
                     if output_dtype == torch.float32
                     else 0
                 ),
-                output_bf16=(
-                    target_dtype == torch.bfloat16
-                    and output_dtype == torch.float32
-                ),
+                output_bf16=native_bf16_store,
             )
+            return recovered.to(torch.bfloat16) if target_bf16 else recovered
         output = output * self._cached_cast("SV", compute_dtype, output_dtype)
         cached_bias = self._cached_cast("bias", compute_dtype, output_dtype)
         return output if cached_bias is None else output + cached_bias
+
+    def _qvq_operand_compute_dtype(
+        self,
+        x_2d: torch.Tensor,
+        compute_dtype: torch.dtype,
+    ) -> torch.dtype:
+        """Select the shared runtime/replay dtype at the deployed operand boundary."""
+
+        if (
+            x_2d.device.type == "cuda"
+            and x_2d.dtype == torch.bfloat16
+            and self.activation is not None
+            and self.activation.target == "p32_operand"
+        ):
+            # BF16 values can exceed FP16 before SU/Hadamard has reduced their
+            # range. Preserve them through that transform; the resulting row
+            # is bounded when it is converted to E4M3 below. Replay calls the
+            # same helper, so its fitted operand cannot silently narrow first.
+            return torch.float32
+        return compute_dtype
 
     def _qvq_prepare_inference_input(
         self,
@@ -2243,7 +2253,10 @@ class QVQLinear(BaseQuantLinear):
         or subtly reordering QVQLinear's numerical contract.
         """
 
-        x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(x_2d, compute_dtype)
+        compute_dtype = self._qvq_operand_compute_dtype(x_2d, compute_dtype)
+        x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(
+            x_2d, compute_dtype
+        )
 
         if not self.input_hadamard:
             if pad_to_16:

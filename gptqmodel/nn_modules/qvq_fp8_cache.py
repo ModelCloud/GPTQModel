@@ -282,7 +282,19 @@ def qvq_fp8_attention_forward(
                 query_tokens=query.shape[-2],
                 key_tokens=key.shape[-2],
             )
-            dense_weights = dense_weights + normalized_mask.reshape(
+            # Keep the grouped head axes until after adding the mask.  Eager
+            # mask builders intentionally return singleton head dimensions,
+            # and direct 2D masks are singleton in both head and query axes;
+            # both must broadcast rather than be reshaped to materialized
+            # query-head storage.
+            dense_weights = dense_weights.reshape(
+                query.shape[0],
+                key.shape[1],
+                groups,
+                query.shape[-2],
+                key.shape[-2],
+            )
+            dense_weights = (dense_weights + normalized_mask).reshape(
                 query.shape[0], query.shape[1], query.shape[-2], key.shape[-2]
             )
         dense_weights = torch.softmax(dense_weights, dim=-1, dtype=torch.float32).to(
