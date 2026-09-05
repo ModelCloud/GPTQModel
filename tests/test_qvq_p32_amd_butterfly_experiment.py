@@ -9,12 +9,16 @@ triton = pytest.importorskip("triton")
 @pytest.mark.parametrize("size_k", [5120, 6144])
 @pytest.mark.parametrize("block_n", [2, 4, 8])
 @pytest.mark.parametrize("residual", [False, True])
-def test_full_k_gemv_reduction_and_padding(size_k, block_n, residual):
+@pytest.mark.parametrize("variant", ["full", "split"])
+def test_full_k_gemv_reduction_and_padding(size_k, block_n, residual, variant):
     if not torch.cuda.is_available() or not torch.version.hip:
         pytest.skip("requires AMD GPU")
     if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
         pytest.skip("experiment targets gfx950")
-    from scripts.qvq_p32_amd_butterfly_experiment import folded_gemv_full_k_kernel
+    from scripts.qvq_p32_amd_butterfly_experiment import (
+        folded_gemv_full_k_kernel,
+        folded_gemv_split_k_kernel,
+    )
 
     g = torch.Generator(device="cuda").manual_seed(20260905 + size_k)
     x = torch.randn(size_k, generator=g, device="cuda", dtype=torch.float16) * 0.01
@@ -23,7 +27,8 @@ def test_full_k_gemv_reduction_and_padding(size_k, block_n, residual):
     effective = w.float() + low.float() if residual else w.float()
     reference = effective @ x.float()
     output = torch.full((36,), 999.0, device="cuda", dtype=torch.float16)
-    folded_gemv_full_k_kernel[(32 // block_n,)](
+    kernel = folded_gemv_split_k_kernel if variant == "split" else folded_gemv_full_k_kernel
+    kernel[(32 // block_n,)](
         x, w, low, output, size_k, block_n, triton.next_power_of_2(size_k), residual,
         num_warps=4, num_stages=1, waves_per_eu=0,
     )

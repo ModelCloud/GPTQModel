@@ -35,6 +35,8 @@ def main():
     parser.add_argument("--trim-composite", action="store_true", help="Experimentally remove padded recovery math")
     parser.add_argument("--recovery-warps", type=int, choices=(4, 8), default=8)
     parser.add_argument("--gemv-full-k", action="store_true")
+    parser.add_argument("--gemv-split-k", action="store_true", help="Remove padded arithmetic from full-K GEMV")
+    parser.add_argument("--graph-execute", action="store_true", help="Stage fresh inputs and clone graph outputs")
     parser.add_argument("--gemv-block-n", type=int, choices=(2, 4, 8), default=2)
     parser.add_argument("--shapes", nargs="+", choices=[shape[0] for shape in QWEN38_27B_SHAPES])
     parser.add_argument("--m-values", nargs="+", type=int, choices=REQUESTED_M)
@@ -71,6 +73,7 @@ def main():
         fht128_kernel,
         fht128_split_kernel,
         folded_gemv_full_k_kernel,
+        folded_gemv_split_k_kernel,
     )
 
     import gptqmodel.nn_modules.qlinear.qvq as qvq_module
@@ -84,6 +87,7 @@ def main():
     baseline_amd = candidate_amd
     original_recovery = candidate_amd._qvq_p32_composite_recovery_gfx950_kernel
     original_gemv = candidate_amd._qvq_p32_folded_gemv_gfx950_kernel
+    original_execute = candidate_amd._qvq_p32_folded_execute
     baseline_source_dir = None
     if args.baseline_amd_commit:
         revision = subprocess.check_output(
@@ -183,14 +187,43 @@ def main():
                 size_n = grid[0] * kwargs["block_n"]
                 kwargs["block_n"] = args.gemv_block_n
                 kwargs["block_k"] = triton.next_power_of_2(kwargs["size_k"])
-                return folded_gemv_full_k_kernel[(size_n // args.gemv_block_n,)](*positional, **kwargs)
+                gemv = folded_gemv_split_k_kernel if args.gemv_split_k else folded_gemv_full_k_kernel
+                return gemv[(size_n // args.gemv_block_n,)](*positional, **kwargs)
             return launch
 
     full_k_gemv = FullKGemv()
 
+    graph_entries = {}
+
+    def graph_execute(x, operand, residual_operand=None, composite_recovery=None, **kwargs):
+        # Single-threaded benchmark only. Preserve outer graph capture and autograd
+        # by using the ordinary operator; production needs a bounded cache/lifetime policy.
+        if (torch.cuda.is_current_stream_capturing() or x.requires_grad or operand.requires_grad
+                or (residual_operand is not None and residual_operand.requires_grad)):
+            return original_execute(x, operand, residual_operand, composite_recovery, **kwargs)
+        key = (id(operand), id(residual_operand), id(composite_recovery), tuple(x.shape), x.dtype,
+               x.device, torch.cuda.current_stream().cuda_stream, tuple(sorted(kwargs.items())))
+        entry = graph_entries.get(key)
+        if entry is None:
+            static_x = torch.empty_like(x)
+            static_x.copy_(x)
+            original_execute(static_x, operand, residual_operand, composite_recovery, **kwargs)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                static_y = original_execute(static_x, operand, residual_operand, composite_recovery, **kwargs)
+            entry = (static_x, static_y, graph, operand, residual_operand, composite_recovery)
+            graph_entries[key] = entry
+        static_x, static_y, graph = entry[:3]
+        static_x.copy_(x)
+        graph.replay()
+        return static_y.clone()
+
     def select(name):
+        candidate_amd._qvq_p32_folded_execute = (
+            graph_execute if name == "candidate" and args.graph_execute else original_execute
+        )
         candidate_amd._qvq_p32_folded_gemv_gfx950_kernel = (
-            full_k_gemv if name == "candidate" and args.gemv_full_k else original_gemv
+            full_k_gemv if name == "candidate" and (args.gemv_full_k or args.gemv_split_k) else original_gemv
         )
         candidate_amd._qvq_p32_composite_recovery_gfx950_kernel = (
             trimmed_recovery if name == "candidate" and args.trim_composite else original_recovery
@@ -241,6 +274,7 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     try:
         for (shape, k, n), bits in itertools.product(shapes, (2.0, 2.5, 3.0, 3.5)):
+            graph_entries.clear()
             torch.mm = original_mm
             ih, oh = SHAPE_AXES[shape]
             g = torch.Generator(device="cuda").manual_seed(
@@ -396,7 +430,21 @@ def main():
                     if row["accuracy_basis"] == "canonical_fp32"
                     else torch.equal(outputs["candidate"], outputs["baseline"])
                 )
-                if ((k, n) == (17408, 5120) and m >= 1024) or ((k, n) == (6144, 5120) and m >= 64):
+                if args.graph_execute:
+                    select("candidate")
+                    saved = outputs["candidate"].clone()
+                    changed = run("candidate", -x)
+                    row["fresh_input_max_abs"] = (changed.float() + ref).abs().max().item()
+                    row["previous_output_unchanged"] = torch.equal(saved, outputs["candidate"])
+                    row["accuracy_pass"] &= row["fresh_input_max_abs"] <= 0.002
+                    row["accuracy_pass"] &= row["previous_output_unchanged"]
+                    row["graph_staging_bytes"] = sum(
+                        e[0].numel() * e[0].element_size() + e[1].numel() * e[1].element_size()
+                        for e in graph_entries.values()
+                    )
+                    del saved, changed
+                if (args.graph_execute or ((k, n) == (17408, 5120) and m >= 1024)
+                        or ((k, n) == (6144, 5120) and m >= 64)):
                     select("candidate")
                     stream = torch.cuda.Stream()
                     stream.wait_stream(torch.cuda.current_stream())
@@ -436,6 +484,8 @@ def main():
         torch.mm = original_mm
         candidate_amd._qvq_p32_composite_recovery_gfx950_kernel = original_recovery
         candidate_amd._qvq_p32_folded_gemv_gfx950_kernel = original_gemv
+        candidate_amd._qvq_p32_folded_execute = original_execute
+        graph_entries.clear()
         QVQLinear._qvq_amd_folded_forward = candidate_forward
         sys.modules["gptqmodel.utils.qvq_amd"] = candidate_amd
         if baseline_source_dir is not None:

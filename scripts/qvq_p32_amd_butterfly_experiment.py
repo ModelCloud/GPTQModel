@@ -5,6 +5,28 @@ import triton.language as tl
 
 
 @triton.jit
+def folded_gemv_split_k_kernel(
+    input_ptr, weight_ptr, residual_ptr, output_ptr,
+    size_k: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,
+    use_residual: tl.constexpr,
+):
+    """Remove full-K power-of-two padding with two exact power-of-two pieces."""
+    tl.static_assert(size_k == 5120 or size_k == 6144)
+    n = tl.program_id(0) * block_n + tl.arange(0, block_n)
+    k0 = tl.arange(0, 4096)
+    k1 = 4096 + tl.arange(0, size_k - 4096)
+    x0 = tl.load(input_ptr + k0).to(tl.float32)
+    x1 = tl.load(input_ptr + k1).to(tl.float32)
+    w0 = tl.load(weight_ptr + n[:, None] * size_k + k0[None, :]).to(tl.float32)
+    w1 = tl.load(weight_ptr + n[:, None] * size_k + k1[None, :]).to(tl.float32)
+    if use_residual:
+        w0 += tl.load(residual_ptr + n[:, None] * size_k + k0[None, :]).to(tl.float32)
+        w1 += tl.load(residual_ptr + n[:, None] * size_k + k1[None, :]).to(tl.float32)
+    total = tl.sum(w0 * x0[None, :], 1) + tl.sum(w1 * x1[None, :], 1)
+    tl.store(output_ptr + n, total)
+
+
+@triton.jit
 def folded_gemv_full_k_kernel(
     input_ptr, weight_ptr, residual_ptr, output_ptr,
     size_k: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,
