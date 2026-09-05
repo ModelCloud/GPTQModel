@@ -22,7 +22,7 @@ static_assert(QVQ_P32_GROUP_COUNT_MIN == 2);
 static_assert(QVQ_P32_GROUP_COUNT_MAX == 3);
 static_assert(QVQ_P32_ROW_GROUPS_AUTO == 0);
 static_assert(QVQ_P32_ROW_GROUPS_MIN == 1);
-static_assert(QVQ_P32_ROW_GROUPS_MAX == 8);
+static_assert(QVQ_P32_ROW_GROUPS_MAX == 16);
 
 static_assert(QVQ_P32_VARIANT_SCALAR == 1);
 static_assert(QVQ_P32_VARIANT_BLOCK == 2);

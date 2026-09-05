@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from statistics import median
 from threading import RLock
 from types import MethodType
@@ -298,6 +298,9 @@ class QVQGroupedRuntimeTelemetry:
     h100_qwen_linear_composite_recovery_launches: int = 0
     h100_qwen_linear_multiblock_recovery_launches: int = 0
     h100_qwen_composite_input_launches: int = 0
+    h100_qwen_large_m_direct_down_launches: int = 0
+    h100_qwen_m32_fused_tiles: int = 0
+    h100_qwen_large_m_unsplit_gate_up_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -394,6 +397,9 @@ class QVQGroupedRuntimeTelemetry:
             "h100_qwen_linear_composite_recovery_launches": self.h100_qwen_linear_composite_recovery_launches,
             "h100_qwen_linear_multiblock_recovery_launches": self.h100_qwen_linear_multiblock_recovery_launches,
             "h100_qwen_composite_input_launches": self.h100_qwen_composite_input_launches,
+            "h100_qwen_large_m_direct_down_launches": self.h100_qwen_large_m_direct_down_launches,
+            "h100_qwen_m32_fused_tiles": self.h100_qwen_m32_fused_tiles,
+            "h100_qwen_large_m_unsplit_gate_up_launches": self.h100_qwen_large_m_unsplit_gate_up_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -418,6 +424,7 @@ class QVQHopperGroupedRuntime:
         self.category = str(category)
         self.telemetry = QVQGroupedRuntimeTelemetry(self.category, self.member_names)
         self._payload: QVQHopperGroupedP32Payload | None = None
+        self._h100_qwen_large_m_unsplit_payload: QVQHopperGroupedP32Payload | None = None
         self._payload_source_key: tuple[Any, ...] | None = None
         self._h100_multiblock_intermediate_enabled = False
         self._h100_direct_padded_input_enabled = False
@@ -459,6 +466,7 @@ class QVQHopperGroupedRuntime:
         if self._payload is not None:
             self.telemetry.payload_drops += 1
         self._payload = None
+        self._h100_qwen_large_m_unsplit_payload = None
         self._payload_source_key = None
         self._h100_multiblock_intermediate_enabled = False
         self._h100_direct_padded_input_enabled = False
@@ -655,6 +663,25 @@ class QVQHopperGroupedRuntime:
             bank_ids=grouped_selectors,
             plan=plan,
         )
+        if (
+            properties.name == "NVIDIA H100"
+            and (properties.major, properties.minor) == (9, 0)
+            and self.category == "gate_up"
+            and children[0].in_features == 5120
+            and tuple(child.out_features for child in children)
+            == (17408, 17408)
+            and all(segment.split_count == 5 for segment in plan.segments)
+        ):
+            unsplit_plan = replace(
+                plan,
+                segments=tuple(
+                    replace(segment, split_count=1)
+                    for segment in plan.segments
+                ),
+            )
+            self._h100_qwen_large_m_unsplit_payload = replace(
+                payload, plan=unsplit_plan
+            )
 
         # A grouped window has exactly the same number of words as the child
         # windows it replaces.  Clear any plain-path windows/selectors left by
@@ -755,6 +782,9 @@ class QVQHopperGroupedRuntime:
         # Resolve it before preparing the first activation so a cold grouped
         # invocation follows the same path as all subsequent invocations.
         payload = self._ensure_payload()
+        if rows >= 128 and self._h100_qwen_large_m_unsplit_payload is not None:
+            payload = self._h100_qwen_large_m_unsplit_payload
+            self.telemetry.h100_qwen_large_m_unsplit_gate_up_launches += 1
         # Preserve BF16 until activation fake-quantization so its explicit
         # rounding contract matches ordinary child execution. The shared
         # input transform narrows the resulting operand to FP16 for WGMMA.
@@ -1804,6 +1834,15 @@ class QVQHopperGroupedRuntime:
             and not children[1].output_hadamard
             and not down.input_hadamard
         )
+        # The two exact M16 tiles beat native M32 for W2.5-W3.5, while W2's
+        # smaller decoder remains faster in the native direct-down path.
+        if (
+            rows == 32
+            and qwen_folded_intermediate
+            and float(children[0].bits) != 2.0
+        ):
+            self.telemetry.h100_qwen_m32_fused_tiles += 1
+            return self._execute_mlp_chunked(x, 16)
         fp8_prefill = (
             self._ensure_h100_fp8_prefill_payload()
             if self._h100_fp8_prefill_eligible(x, rows)
@@ -1867,7 +1906,28 @@ class QVQHopperGroupedRuntime:
             # measured geometry.
             gate, up = self._execute(x)
             activated_gate = self._mlp_act_fn(gate)
-            return down(activated_gate * up)
+            intermediate = activated_gate * up
+            if qwen_folded_intermediate:
+                # Qwen's architecture contract removes the 17,408-wide
+                # gate/up output transforms and the down input transform.
+                # Execute the remaining down transform directly so CUDA Graph
+                # capture does not also record QVQLinear's conservative BF16
+                # overflow retry for a composite input transform that is not
+                # present. The P32 inner result and output recovery stay FP32
+                # until the ordinary final model-dtype cast.
+                transformed = down._qvq_prepare_inference_input(
+                    intermediate.reshape(rows, down.in_features),
+                    torch.float16,
+                )
+                recovered = down._forward_pretransformed_compute_dtype(
+                    transformed,
+                    torch.float16,
+                )
+                self.telemetry.h100_qwen_large_m_direct_down_launches += 1
+                return recovered.reshape(
+                    *x.shape[:-1], down.out_features
+                ).to(x.dtype)
+            return down(intermediate)
         elif qwen_folded_intermediate:
             # Qwen3.8-27B has a 17*1024 intermediate width, for which no exact
             # composite Hadamard base exists.  Its model definition therefore

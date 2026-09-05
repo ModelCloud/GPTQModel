@@ -3016,7 +3016,37 @@ int launch_p32_large_m(
         input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
         output, partial_output, size_m, size_k, size_n, config.split_count, \
         use_static_n, cuda_stream)
-    if (row_groups == 8) {
+    if (row_groups == 16) {
+      const bool supported_stage2 =
+          config.stage_k_tiles == 2 &&
+          ((size_m == 1024 &&
+            (size_n == 5120 || size_n == 10240 || size_n == 17408)) ||
+           (size_m == 2048 && size_n == 5120 && TransitionBits >= 5) ||
+           (size_m >= 4096 && size_n != 1024));
+      const bool supported_stage3 =
+          config.stage_k_tiles == 3 && qwen38_27b_shape &&
+          ((size_m == 1024 &&
+            ((size_n == 1024 && TransitionBits >= 5) ||
+             size_n == 5120 || size_n == 10240 || size_n == 12288 ||
+             size_n == 17408)) ||
+           (size_m >= 2048 && size_n != 1024));
+      const bool supported_stage4 =
+          config.stage_k_tiles == 4 && qwen38_27b_shape &&
+          TransitionBits == 4 && size_m == 4096 && size_n != 1024;
+      if (size_m % (16 * kRows) != 0 ||
+          (!supported_stage2 && !supported_stage3 && !supported_stage4)) {
+        set_last_error(
+            "QVQ P32 row_groups=16 requires aligned M and a supported Qwen stage/shape");
+        return -1;
+      }
+      if (supported_stage2) {
+        QVQ_LARGE_M2_STAGE2(16);
+      } else if (supported_stage3) {
+        QVQ_LARGE_M2_STAGE3(16);
+      } else {
+        QVQ_LARGE_M2_STAGE4(16);
+      }
+    } else if (row_groups == 8) {
       const bool supported_n1024_stage =
           size_n == 1024 &&
           (config.stage_k_tiles == 3 ||
@@ -3245,8 +3275,9 @@ static int qvq_p32_window_impl(
     return -1;
   }
   if (row_groups != QVQ_P32_ROW_GROUPS_AUTO && row_groups != 1 &&
-      row_groups != 2 && row_groups != 4 && row_groups != 8) {
-    set_last_error("QVQ P32 row_groups must be auto, 1, 2, 4, or 8");
+      row_groups != 2 && row_groups != 4 && row_groups != 8 &&
+      row_groups != 16) {
+    set_last_error("QVQ P32 row_groups must be auto, 1, 2, 4, 8, or 16");
     return -1;
   }
   if (size_m <= QVQ_P32_GROUPED_M_MAX &&
