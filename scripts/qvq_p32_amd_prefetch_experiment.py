@@ -68,7 +68,8 @@ def folded_residual_prefetch_kernel(
         [[512, 16]], ar[:3] + al + aw + ar[3:], [], [block_m, block_k])
     b_shared_layout: gl.constexpr = gl.PaddedSharedLayout(
         [[512, 16]], br[:3] + bl + bw + br[3:], [], [block_k, block_n])
-    mma: gl.constexpr = gl.amd.AMDMFMALayout(4, [16, 16, 32], False, [2, 2])
+    # Match MFMA operand ownership to the vector/lane order of the padded LDS tiles.
+    mma: gl.constexpr = gl.amd.AMDMFMALayout(4, [16, 16, 32], True, [2, 2])
     xs = gl.allocate_shared_memory(gl.float16, [2, block_m, block_k], a_shared_layout)
     hs = gl.allocate_shared_memory(gl.float16, [2, block_k, block_n], b_shared_layout)
     ls = gl.allocate_shared_memory(gl.float16, [2, block_k, block_n], b_shared_layout)
