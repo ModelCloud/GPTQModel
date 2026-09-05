@@ -4114,6 +4114,24 @@ multiplicities, the geometric mean is `1.0795x` versus v89.  Full-KV
 excluded.  A randomized K=6144 attention-out comparison is bit-for-bit exact
 at split 8.
 
+The matched NCU captures are `/tmp/v90_ncu_qwen_fullq_candidate.csv` and
+`/tmp/v90_ncu_qwen_fullq_base.csv` for
+`M=4096,K=5120,N=12288,stage=4,bits=4`.  The candidate replaces the
+four-group control, reducing the grid from 12,288 to 3,072 CTAs and executed
+instructions from 3,180,982,272 to 1,204,902,912.  Profiled duration falls
+from 17,137,184 ns to 15,696,448 ns.  The control uses 64 registers and
+18,464 B static shared memory; the candidate uses 168 registers, 2,080 B
+static shared, and 65,536 B dynamic shared.
+
+The matched SASS extracts are `/tmp/v90_qwen_fullq_candidate_rg16.sass` and
+`/tmp/v90_qwen_fullq_base_rg4.sass`.  Per-CTA static instructions rise from
+1,592 to 1,912 while the 4x row work scales HMMA/LDSM/STG exactly 4x
+(32/16/16 to 128/64/64).  Decode work stays flat (SHF 186, PRMT 24, LDG 33)
+or nearly flat (LOP3 173->177); address families change from IMAD 371 to
+411, IADD3 116 to 110, and LEA 133 to 128.  The post-commit SSA/algebraic
+pass found no duplicated decode, redundant mask/shift, unnecessary
+conversion/permutation, address-expression regression, or spill.
+
 ## Reproduction
 
 ```bash
