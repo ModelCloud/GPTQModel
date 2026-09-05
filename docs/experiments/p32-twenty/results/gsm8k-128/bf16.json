@@ -1,0 +1,1612 @@
+{
+  "mode": "bf16",
+  "uuid": "GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855",
+  "torch": "2.13.0+cu130",
+  "device": "_CudaDeviceProperties(name='NVIDIA PG506-232', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=20f7fde4-d88c-d6ca-e324-bd4e5e9e0855, pci_bus_id=43, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "snapshot": "/root/qvq-results/calibration-fisher-frontier-wave14-v1/llama32-1b-f6_yaqa125x_seed7",
+  "source_revision": "757c8ae556caafdfdaed78a5cfab639908a86493",
+  "scope": "bounded downstream evaluation only; never calibration",
+  "quality": [],
+  "performance": [],
+  "task": "gsm8k_cot",
+  "task_max_rows": 128,
+  "task_result": {
+    "model": {
+      "path": "/monster/data/model/Llama-3.2-1B-Instruct",
+      "label": null,
+      "tokenizer": null,
+      "tokenizer_path": "/monster/data/model/Llama-3.2-1B-Instruct",
+      "revision": null,
+      "trust_remote_code": false,
+      "model_kwargs": {},
+      "tokenizer_kwargs": {}
+    },
+    "engine": {
+      "dtype": "bfloat16",
+      "batch_size": 1,
+      "max_new_tokens": 256,
+      "trust_remote_code": false,
+      "seed": 7,
+      "padding_side": "left",
+      "resolved_engine": "TransformersCompat",
+      "device": "cuda:0",
+      "attn_implementation": "eager",
+      "device_map": null,
+      "loglikelihood_prefix_cache": true,
+      "loglikelihood_prefix_cache_prewarm": true,
+      "loglikelihood_prefix_cache_prewarm_batch_size": 32,
+      "loglikelihood_prefix_cache_release_after_group": true,
+      "loglikelihood_prefix_cache_min_tokens": 256,
+      "loglikelihood_prefix_cache_max_entries": 32,
+      "execution": {
+        "requested_attn_implementation": "eager",
+        "effective_attn_implementation": "eager",
+        "paged_attention": false,
+        "generation_backend": "generate_compat",
+        "standard_batch_size_cap": null
+      }
+    },
+    "tests": [
+      {
+        "name": "gsm8k_cot",
+        "metrics": {
+          "acc,num": 0.4609375
+        },
+        "samples": [
+          {
+            "index": 0,
+            "target": "18",
+            "prediction": "Janet has 16 eggs per day. She eats 3 for breakfast, so she has 16 - 3 = 13 eggs left. She bakes muffins for 4, so she has 13 - 4 = 9 eggs left. She sells 9 eggs at $2 each, so she makes 9 x 2 = 18 dollars per day. The answer is 18.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "18"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "891866eeeb2a2497441cff4ed2537041da56e7d06783720414272322ffb873f7"
+          },
+          {
+            "index": 1,
+            "target": "3",
+            "prediction": "The robe takes 2 bolts of blue fiber. It also takes half that much white fiber, which is 2 / 2 = 1 bolt of white fiber. So in total, it takes 2 + 1 = 3 bolts of fiber. The answer is 3.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "3"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "2c56d05340bb7d74334e15665b2bfc4582772a072cf890bc989ae792da814196"
+          },
+          {
+            "index": 2,
+            "target": "70000",
+            "prediction": "Josh bought the house for $80,000. He put in $50,000 in repairs, so the total cost was $80,000 + $50,000 = $130,000. The value of the house increased by 150%, so the new value is 150% of $80,000, which is 1.5 x $80,000 = $120,000. The profit is the new value minus the cost, so $120,000 - $130,000 = -$10,000. The answer is -$10,000.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "10000"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "33278f2bff0577dc70cc745e1194c5a51595997ff25d90bda772f8b2ced9a498"
+          },
+          {
+            "index": 3,
+            "target": "540",
+            "prediction": "James runs 3 sprints 3 times a week. So that is 3 * 3 = 9 sprints per week. Each sprint is 60 meters. So he runs 9 * 60 = 540 meters per week. The answer is 540.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "540"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "7acc551ec136667805257abf040bcd76b874d5a2a839d775110f7c763952170f"
+          },
+          {
+            "index": 4,
+            "target": "20",
+            "prediction": "Wendi gives 15 cups of feed in the morning and 25 cups of feed in the afternoon. So in total, she gives 15 + 25 = 40 cups of feed. Since there are 20 chickens, she needs to divide the total cups of feed by 20. 40 / 20 = 2. The answer is 2.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "2"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "1605cbd01261eb13d4d32624aa3b57996734ca2e6ed370a294e89944d7519c7b"
+          },
+          {
+            "index": 5,
+            "target": "64",
+            "prediction": "Kylar needs 16 glasses. The first 8 glasses will cost 8 x 5 = 40 dollars. The next 8 glasses will cost 8 x 0.6 x 5 = 24 dollars. So the total cost is 40 + 24 = 64 dollars. The answer is 64.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "64"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "55d83f7a88744268400e3b6f553ffba2e324ddc2a9ea18401d00b9bbc909517e"
+          },
+          {
+            "index": 6,
+            "target": "260",
+            "prediction": "Seattle has 20 sheep. Charleston has 4 times as many sheep as Seattle, so Charleston has 4 x 20 = 80 sheep. Toulouse has twice as many sheep as Charleston, so Toulouse has 2 x 80 = 160 sheep. Together, Toulouse, Charleston, and Seattle have 160 + 80 + 20 = 250 sheep. The answer is 250.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "250"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "9dc5ebe0476d2166e7de81ac78fe470067a40ed0668777f447d8018a71d999df"
+          },
+          {
+            "index": 7,
+            "target": "160",
+            "prediction": "Carla is downloading a 200 GB file. She normally downloads 2 GB/minute. So in 200 GB, she would download 200 / 2 = 100 GB in 100 minutes. \n\nHowever, 40% of the way through the download, Windows forces a restart to install updates, which takes 20 minutes. So she will download 60% of 200 GB, which is 0.6 x 200 = 120 GB in 60 minutes.\n\nNow, she has to restart the download from the beginning, which takes 20 minutes. So the total time taken is 60 + 20 = 80 minutes.\n\nTo find the load, we need to divide the total time taken by the time taken to download 100 GB. The time taken to download 100 GB is 100 / 2 = 50 minutes.\n\nThe load is 80 / 50 = 1.6. The answer is 1.6.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "1.6"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "6a39dfcefa8c3a7fb04afd1ce4d0627e4e2841f4fc5306355a95af45b06d5710"
+          },
+          {
+            "index": 8,
+            "target": "45",
+            "prediction": "To find the distance John is from home, we need to calculate the distance he traveled in the first 2 hours of standstill traffic, and then the distance he traveled in the last 2 hours.\n\nDistance in the first 2 hours = speed x time = 60 mph x 2 hours = 120 miles\n\nDistance in the last 2 hours = speed x time = 80 mph x 2 hours = 160 miles\n\nTotal distance traveled = 120 miles + 160 miles = 280 miles\n\nSince John started with 0 miles, he is now 280 miles from home.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "280"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "6892d203c221892bff4b3f39d9453567102c6580adfee64f4d92bdfc8ff5f247"
+          },
+          {
+            "index": 9,
+            "target": "460",
+            "prediction": "Eliza's regular pay for 40 hours is 40 x 10 = 400 dollars. Her overtime pay is 1.2 x 10 = 12 dollars. So her total pay for 45 hours is 400 + 12 = 412 dollars. The answer is 412.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "412"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "3dd386f7fbee37e7e22c01f063ad3fcf654c5e47f339e8b2cefefec9274a8742"
+          },
+          {
+            "index": 10,
+            "target": "366",
+            "prediction": "The program had 60 downloads in the first month. In the second month, it had 3 times as many downloads, which is 3 * 60 = 180. Then it was reduced by 30%, so it had 180 - (30/100) * 180 = 180 - 54 = 126 downloads in the third month. 60 + 180 + 126 is 336. The answer is 336.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "336"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "35889527870debd269cca7ad0c1c40d7fa9979b7ad301b4f6699e0b607f3c076"
+          },
+          {
+            "index": 11,
+            "target": "694",
+            "prediction": "Toula bought 3 dozen donuts at $68 per dozen, so 3 x 68 = 204 dollars. She also bought 2 dozen mini cupcakes at $80 per dozen, so 2 x 80 = 160 dollars. Finally, she bought 6 dozen mini cheesecakes at $55 per dozen, so 6 x 55 = 330 dollars. The total cost is 204 + 160 + 330 = 734 dollars. The answer is 734.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "734"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "4719577a8052b09bd337cd4b9299b73b0873372495fb6169a247c245988c1c48"
+          },
+          {
+            "index": 12,
+            "target": "13",
+            "prediction": "The tree costs $90 to plant. Carlos will earn $1.5 per lemon, so he will earn 7 x 1.5 = $10.50 per year. He also spends $3 per year to water and feed the tree. So his net gain per year is 10.50 - 3 = $7.50. To find out how many years it will take before he starts earning money, we need to divide the cost of the tree by his net gain per year: 90 / 7.50 = 12. So it will take 12 years before Carlos starts earning money on the lemon tree.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "12"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "d824bc2271abe2e6303c9dbcb877571227950a8f6fc5a16e9f4262edc1b351bb"
+          },
+          {
+            "index": 13,
+            "target": "18",
+            "prediction": "Melanie started with x vacuum cleaners. She sold 1/3 of them at the green house, so she had 2/3x left. Then she sold 2 more to the red house, so she had 2/3x - 2 left. Then she sold half of what was left at the orange house, so she had (1/2)(2/3x - 2) left. We know this is equal to 5, so we can set up the equation:\n\n(1/2)(2/3x - 2) = 5\n\nTo solve for x, we can start by multiplying both sides by 2 to get rid of the fraction:\n\n(2/3x - 2) = 10\n\nNext, we can add 2 to both sides:\n\n2/3x = 12\n\nFinally, we can multiply both sides by 3/2 to solve for x:\n\nx = 18\n\nSo Melanie started with 18 vacuum cleaners.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "18"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "d9ab15e5f02bc8779dcba56f7baf20b834c86ac5da4e9039042f7f7f7b7c690b"
+          },
+          {
+            "index": 14,
+            "target": "60",
+            "prediction": "20 students enrolled in contemporary dance. 20% of 20 is 0.2 x 20 = 4. The remaining students are 20 - 4 = 16. 25% of 16 is 0.25 x 16 = 4. The rest of the students, which is 16 - 4 = 12, enrolled in hip-hop dance. So 12 out of 20 students enrolled in hip-hop dance. 12/20 is 0.6, or 60%. The answer is 60%.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "60"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "8422b2270a5023a2b00a9a2c29d077c70cceacaa96cee9b2d99eefd74d61bffc"
+          },
+          {
+            "index": 15,
+            "target": "125",
+            "prediction": "To maximize profit, the merchant should choose the plan with the higher profit margin. The profit margin for the jewelry plan is 2.5% of $5,000, which is 0.025 x 5000 = $125. The profit margin for the electronic gadgets plan is 1.2% of $8,000, which is 0.012 x 8000 = $96. \n\nSince $125 is greater than $96, the merchant should choose the jewelry plan to maximize profit. \n\nThe profit from the jewelry plan is $5,000 - $125 = $4,875.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "4875"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "f773075ad7b8906cc969329740ba281fbea2b719dcc149e23ed1382eaaaff31d"
+          },
+          {
+            "index": 16,
+            "target": "230",
+            "prediction": "Let's break this problem down step by step.\n\nDay 1: Both trains travel westward for 80 miles.\n\nDay 2: The first train travels northward for 150 miles, while the second train travels westward for 80 miles.\n\nTo find the total distance covered by each train, we need to add the distances traveled on both days.\n\nDistance covered by the first train = 80 miles (Day 1) + 150 miles (Day 2) = 230 miles\n\nDistance covered by the second train = 80 miles (Day 1) + 80 miles (Day 2) = 160 miles\n\nSo, the first train covers a total distance of 230 miles, and the second train covers a total distance of 160 miles.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "160"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "804ff49584d859baf34362ab2d8b42200ee7a60cd8669ab59a2e80e7b018fb81"
+          },
+          {
+            "index": 17,
+            "target": "57500",
+            "prediction": "Jill gets paid $20 per hour as a teacher. She works 35 hours a week as a teacher. 20 * 35 = 700 dollars per week. She works 50 weeks a year. 700 * 50 = 35,000 dollars per year. Jill gets paid $30 per hour as a cheerleading coach. She works 15 hours a week as a coach. 30 * 15 = 450 dollars per week. She works 50 weeks a year. 450 * 50 = 22,500 dollars per year. Jill's total annual salary is $35,000 + $22,500 = $57,500. The answer is $57,500.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "57500"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "3ed19f2294a6231b6033fffecb8f9d34eca572478fde1bd8b7b4de40a69dbd5e"
+          },
+          {
+            "index": 18,
+            "target": "7",
+            "prediction": "Claire makes 3 eggs per omelet. She eats 1 omelet per day. In 4 weeks, she will eat 4 x 7 = 28 days. 28 days x 3 eggs per day = 84 eggs. Since 1 dozen is 12 eggs, she will eat 84 / 12 = 7 dozens of eggs. The answer is 7.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "7"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "2f26a59abc6ac5d415dbe02b00159b6978f26c4c3fac99407537271f50c77e4c"
+          },
+          {
+            "index": 19,
+            "target": "6",
+            "prediction": "To find the speed, we need to first find the total time Marissa took to walk the first 6 miles. She took 1 hour to walk the first 4 miles and another hour to walk the next 2 miles, so the total time is 1 + 1 = 2 hours. \n\nSince she wants her average speed to be 4 miles per hour, we can use the formula: average speed = total distance / total time.\n\nWe know the total distance is 12 miles and the total time is 2 hours. So, we can plug in the values to get: 4 = 12 / 2.\n\nTo solve for the total distance, we can multiply both sides by 2: 8 = 12.\n\nSince the total distance is 8 miles, we can find the remaining distance by subtracting 8 from 12: 12 - 8 = 4.\n\nNow, we need to find the time it will take Marissa to walk the remaining 4 miles at a speed of 4 miles per hour. We can use the formula: time = distance / speed.\n\nPlugging in the values, we get: time = 4 / 4 = 1 hour.\n\nSo, Marissa needs to walk the",
+            "extracted": {
+              "numeric-extract": "1"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "a60bace16f7f290bbc63902643bff2df5cb2a457feb426f1fdd71b9dfd075f24"
+          },
+          {
+            "index": 20,
+            "target": "15",
+            "prediction": "You start with 10 liters of orange drink, which is 2/3 water. So the amount of water is 10 * (2/3) = 20/3 liters. You add 15 liters of pineapple drink, which is 3/5 water. So the amount of water is 15 * (3/5) = 9 liters. The total amount of liquid is 10 + 15 = 25 liters. After spilling 1 liter, you have 25 - 1 = 24 liters of liquid. The amount of water is 24 * (3/5) = 14.4 liters. The answer is 14.4.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "14.4"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "331b7233a5fdb6e9f59b9a282e7c9ed232926c03cbe9a1a5466b5888330a6569"
+          },
+          {
+            "index": 21,
+            "target": "14",
+            "prediction": "Samantha is now 31 years old. Raymond was born 6 years before Samantha. So Raymond was born 31 - 6 = 25 years ago.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "25"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "0f9697ad1a59333908c1e5fb4a3f8f368ca1b86e0d2a69c7a87e94c1f1ce196b"
+          },
+          {
+            "index": 22,
+            "target": "7",
+            "prediction": "Billy started with 0 DVDs. His first 3 customers bought 3 DVDs each, so that's 3 x 3 = 9 DVDs. His next 2 customers bought 2 x 2 = 4 DVDs. His last 3 customers didn't buy any DVDs, so that's 0 x 3 = 0 DVDs. 9 + 4 + 0 = 13. The answer is 13.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "13"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "6bbdb2e9fde6440e0e403fcf4a9d30ba9ffa506de9373b4534b74a114f9a1f41"
+          },
+          {
+            "index": 23,
+            "target": "8",
+            "prediction": "A candle melts 2 centimeters every hour. It burns from 1:00 PM to 5:00 PM, which is 4 hours. 4 hours * 2 centimeters/hour = 8 centimeters. The answer is 8.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "8"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "545b181b88d7ecbf2fbc0068a052100859fd6f0888b4d01b32785b317d98a1f7"
+          },
+          {
+            "index": 24,
+            "target": "26",
+            "prediction": "Let's call the original price of the book \"x\". Since there is a 25% discount, the amount Kyle paid is 75% of the original price. So 0.75x = 19.50.\n\nTo find the original price, we need to divide both sides by 0.75. x = 19.50 / 0.75\nx = 26\n\nThe original price of the book was 26 dollars.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "26"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "73700d389ed53355a42756a8911ea55cf12f454d4a4098bfa2dc69d35215e188"
+          },
+          {
+            "index": 25,
+            "target": "2",
+            "prediction": "Marie ordered 1 chicken meal for $12. 5 packs of milk for $3 each will be 5 x 3 = 15 dollars. 4 apples for $1.50 each will be 4 x 1.50 = 6 dollars. So the total cost of the non-pizza items is 12 + 15 + 6 = 33 dollars. Marie paid a total of $50. So she must have spent 50 - 33 = 17 dollars on pizza. 17 / 8.5 is 1 with a remainder of 6. So Marie ordered 1 box of pizza. The answer is 1.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "1"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "b93f6a775d487e57050fb68dcec742df852ef6e67112ec5a2420aa426272ba83"
+          },
+          {
+            "index": 26,
+            "target": "243",
+            "prediction": "Mishka bought 3 pairs of shorts, 3 pairs of pants, and 3 pairs of shoes. One pair of shorts costs $16.50. So 3 x 16.50 = 50.50 dollars for shorts. One pair of pants costs $22.50. So 3 x 22.50 = 67.50 dollars for pants. One pair of shoes costs $42. So 3 x 42 = 126 dollars for shoes. The total amount spent is 50.50 + 67.50 + 126 = 234 dollars. The answer is 234.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "234"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "ad1ca2196b7a8df73b49c5ca82b74462490cf7bceab066b12474864cf2384d1b"
+          },
+          {
+            "index": 27,
+            "target": "16",
+            "prediction": "Cynthia eats 1 serving per night. So in 60 days, she will eat 60 servings. 60 servings / 15 servings per carton = 4 cartons. Each carton costs $4.00. 4 cartons * $4.00 per carton = $16.00. The answer is 16.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "16"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "6fa0fd051a711f89311f41fb49fa16eb098cb4d24a01300775ccb6219845ad1f"
+          },
+          {
+            "index": 28,
+            "target": "25",
+            "prediction": "Henry started with 60 miles. He stopped after 20 miles, so he traveled 60 - 20 = 40 miles. His second stop was 15 miles before the end of the trip, so he traveled 40 - 15 = 25 miles. The answer is 25.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "25"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "d1f03bbb86182c66f6c727a6d0663490d28af59be0f92b569d0637d9e304685d"
+          },
+          {
+            "index": 29,
+            "target": "104",
+            "prediction": "Let's say the boots cost x dollars. Since the high heels cost $33 and together they cost $5 less than the boots, the high heels cost x + 5 dollars. \n\nSince the high heels cost twice as much as the boots, we can set up the equation: x + 5 = 2x.\n\nSubtracting x from both sides gives us: 5 = x.\n\nSo the boots cost 5 dollars. The answer is 5.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "5"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "6a231f74fdb989ca47d55a2d65747390dd9b1754728a4a5936283044c343bbf2"
+          },
+          {
+            "index": 30,
+            "target": "109",
+            "prediction": "Let's say Darrell's age is 7x and Allen's age is 11x. Since their total age is 162, we can set up the equation:\n\n7x + 11x = 162\n\nCombine like terms:\n\n18x = 162\n\nDivide by 18:\n\nx = 9\n\nSo Darrell's age is 7x = 7(9) = 63 and Allen's age is 11x = 11(9) = 99.\n\n10 years from now, Allen's age will be 99 + 10 = 109.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "109"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "6d23824c77717e3aaa5d1791e92042ae78ea67a52d95fd70d54cd38f0801397c"
+          },
+          {
+            "index": 31,
+            "target": "80",
+            "prediction": "To find the average guess, we need to calculate the total number of jelly beans and divide it by the number of guesses.\n\nThe first guess is 80.\nThe second guess is 20 more than half of 80, which is 20 + (80 / 2) = 20 + 40 = 60.\nThe third guess is 25% more than 80, which is 80 + (80 x 0.25) = 80 + 20 = 100.\n\nTotal number of jelly beans = 80 + 60 + 100 = 240\nNumber of guesses = 3\n\nAverage guess = Total number of jelly beans / Number of guesses = 240 / 3 = 80\n\nThe answer is 80.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "80"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "ffd774f653af7701a92b026b70acc9da1ef0191f99067cce6af03dbce62762bd"
+          },
+          {
+            "index": 32,
+            "target": "35",
+            "prediction": "John takes care of 10 dogs. Each dog takes 0.5 hours a day to walk and take care of their business. So 10 x 0.5 = 5 hours a day. There are 7 days in a week. 5 hours a day * 7 days a week = 35 hours a week. The answer is 35.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "35"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "46e4627c996663be9293e598dd04611a05654849008d4af78996b7843070a94b"
+          },
+          {
+            "index": 33,
+            "target": "70",
+            "prediction": "Gretchen has 110 coins. Let's say the number of silver coins is x. Then the number of gold coins is x + 30. We know that the total number of coins is 110, so x + (x + 30) = 110. Combine like terms: 2x + 30 = 110. Subtract 30 from both sides: 2x = 80. Divide both sides by 2: x = 40. So Gretchen has 40 silver coins and 40 + 30 = 70 gold coins. The answer is 70.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "70"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "64631c8af3b2f9ab1fa23aee62bb1e3b4c906173cba47f33ed07f484ca1c7df9"
+          },
+          {
+            "index": 34,
+            "target": "23",
+            "prediction": "Raymond has 40 jewels. Half of that is 40 / 2 = 20. Aaron has 5 more than that, so 20 + 5 = 25. Siobhan has 2 fewer than Aaron, so 25 - 2 = 23. The answer is 23.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "23"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "d8dfe47bf3c1b70c207065ffdb0b3d19678df0f25247fa72373c803d2ef379d0"
+          },
+          {
+            "index": 35,
+            "target": "9",
+            "prediction": "Mike played for 40 minutes. In the first 20 minutes, he scored 4 points. In the second 20 minutes, he scored 25% more points. 25% of 4 is 1. So he scored 4 + 1 = 5 more points. 4 + 5 = 9. The answer is 9.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "9"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "206ff874e514beb6c2a51d9c7409ffb1b0dab1246808d9b637c55f5439bac3af"
+          },
+          {
+            "index": 36,
+            "target": "75",
+            "prediction": "Terry eats 2 yogurts a day. Over 30 days, he eats 2 * 30 = 60 yogurts. The yogurts are currently on sale for 4 for $5.00. So 4 yogurts cost 5 dollars. 60 yogurts will cost 60 / 4 = 15 dollars. Terry spends 15 dollars on yogurt over 30 days. The answer is 15.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "15"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "e23b7b0dec1ba44d36fb94b09908b9782324134edb5edce76bf99f6e0fa2290b"
+          },
+          {
+            "index": 37,
+            "target": "2",
+            "prediction": "John started with 13 lego sets. He sold them for $15 each, so he made 13 x 15 = 195 dollars. He spent 8 x 20 = 160 dollars on video games. He had 5 dollars left. So he spent 195 - 160 - 5 = 30 dollars on lego sets. 13 - 30 is -17. The answer is -17.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "-17"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "8aa3a7892130247efb3a36191d957aa41c305616878f2f69522b453b154038d9"
+          },
+          {
+            "index": 38,
+            "target": "10",
+            "prediction": "John runs 60 miles a week. He runs 3 days a week. So he runs 60 / 3 = 20 miles per day. On the first day, he runs 3 hours. So that is 3 miles per hour. On the other two days, he runs half as much, which is 20 / 2 = 10 miles per hour. So his total speed is 3 + 10 = 13 miles per hour. The answer is 13.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "13"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "da546f8744337a27b72f5640c5acb68acf108a39833de10e7603b3335ba97663"
+          },
+          {
+            "index": 39,
+            "target": "18",
+            "prediction": "Let's break this problem down step by step.\n\nLet's say Dana's walking speed is x miles per hour. Then her running speed is 4x miles per hour (since she runs 4 times faster than she walks).\n\nHer skipping speed is half of her running speed, so it's 2x miles per hour.\n\nWe know that Dana skips at 3 miles per hour, so we can set up the equation:\n\n2x = 3\n\nTo solve for x, we can divide both sides by 2:\n\nx = 3/2\nx = 1.5 miles per hour\n\nNow that we know Dana's walking speed, we can calculate the time she spends walking and running:\n\nTime spent walking = 2/3\nTime spent running = 1/3\n\nWe know that the total time is 6 hours, so we can set up the equation:\n\nTime spent walking + Time spent running = 6\n\n2/3 + 1/3 = 6\n\n5/3 = 6\n\nTo solve for the time spent walking and running, we can multiply both sides by 3/5:\n\nTime spent walking = 6 x 3/5\nTime spent walking = 18/5\nTime spent walking =",
+            "extracted": {
+              "numeric-extract": "5"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "22d9fc83976669657a26496469f9c513fac52a966371d2c69c8f0f4100e9033a"
+          },
+          {
+            "index": 40,
+            "target": "8",
+            "prediction": "Suzy's iPhone is 1 year old. Since Ben's iPhone is two times older than Suzy's, it is 2 x 1 = 2 years old. Since Brandon's iPhone is four times as old as Ben's, it is 4 x 2 = 8 years old. The answer is 8.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "8"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "e81fad987a27e14431faecac3de3940ddbf2588fcdc4067f3d06561f044ab7ec"
+          },
+          {
+            "index": 41,
+            "target": "200",
+            "prediction": "Let's break this problem down step by step. \n\nWhen Polly holds the sapphire gemstone, she can throw the javelin 3 times farther than when not holding the gemstone. This means she can throw the javelin 3 * 400 = 1200 feet.\n\nSince the dragon's flames are 1000 feet away, Polly can throw the javelin 1200 - 1000 = 200 feet outside of the reach of the dragon's flames.\n\nThe answer is 200.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "200"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "bfa16a0b151da696f51e469f3294686f2ad9d9e5e68f6999b9c40997bb977c3b"
+          },
+          {
+            "index": 42,
+            "target": "26",
+            "prediction": "Grandma Jones baked 5 pies and cut each into 8 pieces. So she had 5 x 8 = 40 pieces of pie. After the guests ate 14 pieces, there were 40 - 14 = 26 pieces left. The answer is 26.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "26"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "14a15718735a143e407bd9702aad9be7c980d7382e0c6376b13bd834a42a3505"
+          },
+          {
+            "index": 43,
+            "target": "48",
+            "prediction": "To find out how many grams of chips you can eat, first, calculate how many calories you have left to reach your daily target. 2000 - 1800 = 200 calories. \n\nSince a 300g bag has 5 servings, and each serving has 250 calories, the total calories in the bag is 5 x 250 = 1250 calories.\n\nYou have 200 calories left, so you can eat 1250 / 200 = 6.25 bags of chips. Since you can't eat a fraction of a bag, you can eat 6 bags of chips. \n\nTo find out how many grams of chips you can eat, multiply the number of bags by the weight of each bag: 6 x 300g = 1800g.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "1800"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "80dcad97b9dfec70e96d8bb071c9480f931302af5e9b525a65871ededc17066a"
+          },
+          {
+            "index": 44,
+            "target": "20",
+            "prediction": "For every pound of beeswax, Charlie can make 10 candles. 20 candles will require 20 / 10 = 2 pounds of beeswax. 2 pounds of beeswax will cost 2 x 10 = 20 dollars. The cost of supplies is 20 dollars. Charlie will make 20 - 20 = 0 candles. He will not sell any candles. His net profit will be 0 - 20 = -20 dollars. The answer is -20.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "-20"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "e7684bd066a25412247acdca974642f32f9039077e14b56ee239fb7605721c86"
+          },
+          {
+            "index": 45,
+            "target": "104",
+            "prediction": "Meredith wrote 5 articles on Monday. On Tuesday, she wrote 2/5 times more articles than Monday, which is 2/5 * 5 = 2 articles. So she wrote 5 + 2 = 7 articles on Tuesday. On Wednesday, she wrote twice the number of articles she wrote on Tuesday, which is 2 * 7 = 14 articles. \n\nThe total number of articles she wrote is 5 + 7 + 14 = 26. The average time to write an article is 4 hours. So the total time she spent writing is 26 * 4 = 104 hours. The answer is 104.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "104"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "e430c3136b05e308c81db165223b3b21909ac691b25273520a29efc5ed2f8382"
+          },
+          {
+            "index": 46,
+            "target": "163",
+            "prediction": "Candice started with 80 post-it notes. She used 23, so she had 80 - 23 = 57 post-it notes left. At work, she used 220 post-it notes. So she had 57 - 220 = -163 post-it notes. This means she had 0 post-it notes in the package.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "0"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "d7628aa8805409173bc9dfc0e28bf470458775b67a4a0fb3f5b2fbde7deb1480"
+          },
+          {
+            "index": 47,
+            "target": "800",
+            "prediction": "John bought 2 blue ties for $40 each. So he spent 2 x 40 = 80 dollars on blue ties. The red ties cost 50% more than the blue ties. 50% of 40 is 20. So the red ties cost 40 + 20 = 60 dollars each. John bought 2 red ties for 60 dollars each. So he spent 2 x 60 = 120 dollars on red ties. 80 + 120 is 200 dollars. The answer is 200.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "200"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "f5c218dd9f8a789418d14ca0fd9708c6b8019482b8f2dd92a418d67211f37410"
+          },
+          {
+            "index": 48,
+            "target": "8",
+            "prediction": "To find the number of pieces, we need to divide the total length of the wire (4 feet) by the length of each piece (6 inches).\n\nFirst, let's convert the length of the wire from feet to inches: 4 feet = 4 x 12 = 48 inches\n\nNow, divide the total length by the length of each piece:\n48 inches / 6 inches = 8\n\nTracy obtained 8 pieces of wire.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "8"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "97a33fdc337ee896f9bda74901ba238b5e8fb382813cda3c530151ce2c797569"
+          },
+          {
+            "index": 49,
+            "target": "30",
+            "prediction": "There are 15 floors. Each floor has 8 units. So there are 15 x 8 = 120 units in total. 3/4 of the building is occupied, so 1/4 is unoccupied. 1/4 of 120 is 30. The answer is 30.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "30"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "41989bc0e86d4e93b2462a94258651c77201ec96981cfa2888d3e797dbe883fd"
+          },
+          {
+            "index": 50,
+            "target": "294",
+            "prediction": "Lloyd has 252 eggs per day. There are 7 days in a week. So he has 252 x 7 = 1754 eggs per week. Since he sells eggs for $2 per dozen, he makes 1754 / 12 = 146.17 dollars per week. The answer is 146.17.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "146.17"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "86e0630db9f49b2a6e288edeb4aa7c21629d8e71f5aeb37b326eed0c0fe5e034"
+          },
+          {
+            "index": 51,
+            "target": "5",
+            "prediction": "Tom sails from 1 to 4 PM, which is 3 hours. He travels at 10 mph. So in 3 hours, he travels 3 * 10 = 30 miles. To get back, he travels at 6 mph. So it will take him 30 / 6 = 5 hours. The answer is 5.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "5"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "96f8c3a3698735a505c131a6ee910a6ffda077305f7e04d8f53da34a02b1b93d"
+          },
+          {
+            "index": 52,
+            "target": "15",
+            "prediction": "Uriah's book bag is 15 pounds heavy. His comic books weigh 1/4 pound each, so 30 comic books will weigh 30 x 1/4 = 7.5 pounds. This leaves 15 - 7.5 = 7.5 pounds for the toys. Since toys weigh 1/2 pound each, he needs to remove 7.5 / 0.5 = 15 toys. The answer is 15.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "15"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "4be2d81a4031ff335861354b6f6a07d5c3161162f9add14bb8e03a0fc1fe98ce"
+          },
+          {
+            "index": 53,
+            "target": "40",
+            "prediction": "On Thursday, the mechanic repaired 6 truck tires and 4 car tires. So, 6 + 4 = 10 tires were repaired. The mechanic charges $60 for each tire, so 10 x 60 = 600 dollars. On Friday, the mechanic repaired 12 car tires and didn't repair any truck tires. So, 12 x 40 = 480 dollars. The difference in revenue is 600 - 480 = 120 dollars. The answer is 120.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "120"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "0f97ae1381ffcca0741baec22b698d5fb3f4d5e5eaa018a59ceb11b76c4d570e"
+          },
+          {
+            "index": 54,
+            "target": "40",
+            "prediction": "The Doubtfire family had 7 kittens. Patchy had thrice the number of adopted kittens, so Patchy had 3 x 7 = 21 kittens. Trixie had 12 kittens. So in total, they now have 21 + 12 = 33 kittens. The answer is 33.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "33"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "b43cb1ec7351fefd71bed1022587789183c4bb3386c2716c06fc4b903b3f3e38"
+          },
+          {
+            "index": 55,
+            "target": "14",
+            "prediction": "Jean started with 30 lollipops. She ate 2, so she has 30 - 2 = 28 lollipops left. She wants to package 2 lollipops in each bag. To find out how many bags she can fill, divide the remaining lollipops by 2. 28 / 2 = 14. The answer is 14.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "14"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "5e52abf123e7fe65b0552c20b59a907fc7e3cbfd947b96f9f80aebc6cc92940f"
+          },
+          {
+            "index": 56,
+            "target": "3",
+            "prediction": "Peter has 42 dollars. He spends 7 dollars for a ticket and 7 dollars for popcorn. So he spends 7 + 7 = 14 dollars per movie. 42 / 14 is 3. The answer is 3.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "3"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "52dc5c5a9a0f8698d895784e84255f6028425a2212c3e60c947dc1d08a344722"
+          },
+          {
+            "index": 57,
+            "target": "83",
+            "prediction": "To find the maximum number of boxes, we need to divide the weight limit of the bridge (5000 pounds) by the weight of a single box (15 pounds).\n\n5000 / 15 = 333.33\n\nSince we can't have a fraction of a box, we'll round down to the nearest whole number, which is 333.\n\nNow, let's calculate the total weight of the boxes:\n\n333 boxes * 15 pounds/box = 4995 pounds\n\nThis is less than the weight limit of the bridge (5000 pounds), so we can load 333 boxes onto the truck.\n\nThe answer is 333.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "333"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "c1490cf891c2275dcd3c2e2b3c64e15ebcdc62dd8bb9cf01384c7b15d726cd6f"
+          },
+          {
+            "index": 58,
+            "target": "57",
+            "prediction": "Stephen's final bill was $40.00. A 25% fee was added, so 25% of 40 is 0.25 x 40 = 10. The fee is $3.00, so the total fee is 10 + 3 = 13. The new total is 40 + 13 = 53. Then a $4.00 tip is added, so the final price is 53 + 4 = 57. The answer is 57.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "57"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "3b9e1ccd462fcb873cd01764cbea00a5098a827ef0ef5a29b101613a34a7c392"
+          },
+          {
+            "index": 59,
+            "target": "187",
+            "prediction": "There are 6 clusters of 20 fruit each, so that's 6 x 20 = 120 fruit. There are also 67 individual fruit. 120 + 67 is 187. The answer is 187.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "187"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "d49e0861b5099b997f0a07bbe347fa73e0bb93af105499bda741595dff67a9ca"
+          },
+          {
+            "index": 60,
+            "target": "17",
+            "prediction": "There are 25 oranges in total. 1 is bad, 20% are unripe, 2 are sour. 20% of 25 is 0.2 x 25 = 5. So 5 oranges are unripe. 25 - 5 = 20. 2 of the oranges are sour. 20 - 2 = 18. The answer is 18.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "18"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "0c2a3db7eae5ef23373a9b59522e370e9dc192d40905381a4afb2b57b4a3786b"
+          },
+          {
+            "index": 61,
+            "target": "1430",
+            "prediction": "Janet paid $500 for the material and $800 for the jeweler. So the total cost is 500 + 800 = 1300. To find 10% of 1300, multiply 1300 by 0.1. 1300 * 0.1 = 130. So Janet paid 130 for insurance. 1300 + 130 is 1430. The answer is 1430.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "1430"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "d249f5a388e80d8f1e7f421b926c16b6451bf12a6aec8457b80ee24365c39c6d"
+          },
+          {
+            "index": 62,
+            "target": "25000",
+            "prediction": "Marcy works for 40 years. She gets a pension of $50,000 per year for the first 20 years. So that's 20 x 50,000 = 1,000,000 dollars. For the next 10 years, she gets 5% of the value of the pension per year. 5% of 50,000 is 2,500. So for the next 10 years, she gets 2,500 per year. 2,500 x 10 = 25,000. So in total, she gets 1,000,000 + 25,000 = 1,025,000 dollars. The answer is 1,025,000.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "1025000"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "18724473dba7d2152a90f3a2c37d48b4172ff65daca8ccc6ba064f545202f3a2"
+          },
+          {
+            "index": 63,
+            "target": "1596",
+            "prediction": "The streaming service charges $140 per month. Since there are 6 months in a half year, the total amount charged for the first half of the year is 6 x 140 = 840 dollars. For the other half of the year, the company charges 10% less, which is 140 - (140 x 0.1) = 140 - 14 = 126 dollars. So the total amount charged for the second half of the year is 126 dollars. The total amount charged for the year is 840 + 126 = 966 dollars. The answer is 966.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "966"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "a7470c3c39f9a71531a24b55f7384d632de411f41b680d240440d4b7abe4be88"
+          },
+          {
+            "index": 64,
+            "target": "300",
+            "prediction": "Sophia has 4 gallons of gas left in her tank. Her tank holds 12 gallons. So she can drive 12 - 4 = 8 miles on a single tank of gas. The answer is 8.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "8"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "63d8c7eefaeabaf2502c4203d5b2597ee7b07fa9c8daf6c5e91cd5c3dfc8631f"
+          },
+          {
+            "index": 65,
+            "target": "36",
+            "prediction": "Jim spends 2 hours watching TV and then goes to bed and reads for half as long. So he reads for 2 / 2 = 1 hour. He does this 3 times a week, so that's 3 x 1 = 3 hours per week. In 4 weeks, he spends 3 x 4 = 12 hours on TV and reading. The answer is 12.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "12"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "72e38873d0a61d413b56181d6ec372facca8bcb6e067dc229edbea53d2e3243e"
+          },
+          {
+            "index": 66,
+            "target": "48",
+            "prediction": "There are 4 schools. Each school has 2 teams (girls' and boys') and 2 coaches. So each school has 2 + 2 = 4 people. Since there are 4 schools, the total number of people is 4 x 4 = 16. The answer is 16.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "16"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "8cdd491ea9e3e744ccbf95481d3fa2276618e52a82a32f46c0f76e4837cdf8e6"
+          },
+          {
+            "index": 67,
+            "target": "595",
+            "prediction": "There were 175 diamonds. There were 35 fewer rubies than diamonds, so there were 175 - 35 = 140 rubies. There were twice the number of emeralds than rubies, so there were 2 x 140 = 280 emeralds. 175 + 140 + 280 = 575. The answer is 575.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "575"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "1450f9f225ac6f9f1f642d9c96e325253eae41e15f6f5676645f7fbf1c629715"
+          },
+          {
+            "index": 68,
+            "target": "36",
+            "prediction": "There are 60 girls. Since there are twice as many boys, there are 60 / 2 = 30 boys. If there are 5 students to every teacher, then there are 30 / 5 = 6 teachers. The answer is 6.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "6"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "16c56d29a579ff871467ce8ccf99bcdd0890a067d625cac99d35285f60b3b6db"
+          },
+          {
+            "index": 69,
+            "target": "60",
+            "prediction": "Bailey starts with x dollars. She receives a weekly allowance of $5 for 8 weeks, so she receives 5 * 8 = 40 dollars. At the end of the 8 weeks, she has a total of 100 dollars. So x + 40 = 100. Subtracting 40 from both sides, x = 60. The answer is 60.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "60"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "7817924caf1b4e5e29927ed8791f1caa4bb89ffd322e0bd46e1981db8100612c"
+          },
+          {
+            "index": 70,
+            "target": "7425",
+            "prediction": "Judy teaches 5 dance classes on weekdays, which is 5 x 5 = 25 classes. She teaches 8 classes on Saturday, which is 8 classes. So in total, she teaches 25 + 8 = 33 classes. Each class has 15 students, so she has 33 x 15 = 495 students. She charges $15 per student, so she makes 495 x 15 = 7,475 dollars. The answer is 7,475.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "7475"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "7e319e961d44406789ceefb7fec1f0c20c37c859dce4adfd8d1dca3a1fd27ff1"
+          },
+          {
+            "index": 71,
+            "target": "60",
+            "prediction": "The first recipe has 20 instructions. The second recipe has twice as many instructions, so it has 2 x 20 = 40 instructions. To find the total number of instructions, add the two recipes together: 20 + 40 = 60. The answer is 60.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "60"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "fccccc5daaa6e6852129f3b6d69c187cfcedd45900374a9225f199c4e6a887c8"
+          },
+          {
+            "index": 72,
+            "target": "221",
+            "prediction": "Tommy sells brownies for $3 each and cheesecakes for $4 each. He sold 43 brownies for 43 x 3 = 129 dollars. He sold 23 slices of cheesecake for 23 x 4 = 92 dollars. So he raised 129 + 92 = 221 dollars. The answer is 221.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "221"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "a6610be7da6675f7b9ca41a471fa8bdb476ef90de86e64be2efb608edc2cc307"
+          },
+          {
+            "index": 73,
+            "target": "255",
+            "prediction": "Shiela bought 5 cell phones for $150 each. So the total cost is 5 x 150 = 750 dollars. 2% interest on 750 dollars is 0.02 x 750 = 15 dollars. So the total amount Shiela will pay is 750 + 15 = 765 dollars. Since this is for 3 months, the monthly payment will be 765 / 3 = 255 dollars. The answer is 255.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "255"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "d6039525f83cbbe97089bb2bfdfa680ab844bf54ccfd469aecf7b1390ee16f6d"
+          },
+          {
+            "index": 74,
+            "target": "88",
+            "prediction": "To find the total amount Artie will make, we need to calculate the total amount he will make from each type of flower and then add them together.\n\nFor marigolds: 12 pots * $2.74 per pot = $33.12\nFor petunias: 9 pots * $1.87 per pot = $16.73\nFor begonias: 17 pots * $2.12 per pot = $36.24\n\nAdding these amounts together: $33.12 + $16.73 + $36.24 = $86.09\n\nRounding to the nearest dollar, Artie will make $86.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "86"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "3792d05115e1c1b7ca42ad106b557cb4460fefceef6f8c4229ba49a36cbbfe58"
+          },
+          {
+            "index": 75,
+            "target": "60",
+            "prediction": "The top level has 16 square feet. The second level will have 16 / 2 = 8 square feet. The third level will have 8 / 2 = 4 square feet. The fourth level will have 4 / 2 = 2 square feet. To find the average, add the square footage of all levels and divide by the number of levels. 16 + 8 + 4 + 2 = 30. 30 / 4 = 7.5. The answer is 7.5.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "7.5"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "ed0bafedc27713f4252f04c6f40a6f2ba4042c0e5728ff380f5759b059cda1fb"
+          },
+          {
+            "index": 76,
+            "target": "5",
+            "prediction": "Cecilia will feed the puppy 1 cup for the first 180 days. So she will use 180 cups. For the rest of its life, the puppy will need 2 cups per day. There are 365 days in a year, so the puppy will need 2 * 365 = 730 cups. 180 + 730 is 910. The answer is 910.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "910"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "0cc841bb01b7ac6aad73dc05c3c30aeba71351febda1522796b1f23e27299633"
+          },
+          {
+            "index": 77,
+            "target": "100",
+            "prediction": "If Sarah does 4 times as much laundry as David, and David does x pounds of laundry, then Sarah does 4x pounds of laundry. Since Sarah does 400 pounds of laundry, 4x = 400. So x = 400 / 4 = 100. This means David does 100 pounds of laundry. Since Raymond does half as much laundry as Sarah, he does 100 / 2 = 50 pounds of laundry. The difference is 100 - 50 = 50. The answer is 50.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "50"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "846b9322499e5e8d9fba5f1c515e0b9e17b3f5130d97141385f4d1f964d1dc23"
+          },
+          {
+            "index": 78,
+            "target": "6",
+            "prediction": "Vincent can buy 18 flowers with 3 packages of 3 flowers each, which is 3 x 3 = 9 flowers. This costs 9 x 2.50 = 22.50 dollars. He can also buy 18 flowers with 2 packages of 2 flowers each, which is 2 x 2 = 4 flowers. This costs 4 x 1 = 4 dollars. So he saves 22.50 - 4 = 18.50 dollars by buying at the better price. The answer is 18.50.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "18.5"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "51399cf7f8423b12b149251255070a62182601644c9fa8ed8ba2930aaa75916a"
+          },
+          {
+            "index": 79,
+            "target": "70",
+            "prediction": "The groomer costs $100. A 30% discount means 30% of $100 is 0.3 x 100 = $30. So the discount is $30. The cost after the discount is $100 - $30 = $70. The answer is 70.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "70"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "8e3062cc1e6a014753fb69fa2d257ea683d3d7199b89a7e219f26fa152f7e972"
+          },
+          {
+            "index": 80,
+            "target": "10",
+            "prediction": "There were 24 liters of water. Two girls each got 1/6 of that, so 2 x 1/6 = 1/3 of the water. 1/3 of 24 is 8. So 2 x 8 = 16 liters were given away. 24 - 16 is 8. The answer is 8.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "8"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "e82866653cb980d914cd27ecbadeb58dd774a2c0b695983219de65bb11a1a889"
+          },
+          {
+            "index": 81,
+            "target": "17",
+            "prediction": "Charlie started with 10 stickers. He bought 21 more, so 10 + 21 = 31. He got 23 more, so 31 + 23 = 54. Then he gave 9 away, so 54 - 9 = 45. Charlie used 28 to decorate a card, so 45 - 28 = 17. The answer is 17.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "17"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "8384b96553d43c098e829ac5c3df2d3b41027810845b3dc4de9bfbd8158406e9"
+          },
+          {
+            "index": 82,
+            "target": "623",
+            "prediction": "Grace weighs 125 pounds. Alex weighs 2 pounds less than 4 times what Grace weighs. So Alex weighs 4 x 125 - 2 = 500 - 2 = 498 pounds. Combined weights are 125 + 498 = 623 pounds. The answer is 623.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "623"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "921857220d98725149a5741e0819b6f740a01c3e871d44b572345be6ffcc7d13"
+          },
+          {
+            "index": 83,
+            "target": "600",
+            "prediction": "There are 3 rose bushes. Each rose bush has 25 roses. So there are 3 x 25 = 75 roses. Each rose has 8 thorns. So there are 75 x 8 = 600 thorns. The answer is 600.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "600"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "586cb62f771790059c1c01a29345c1b0d857e7eb74e1cb9b4a72a7cae827eda3"
+          },
+          {
+            "index": 84,
+            "target": "15",
+            "prediction": "The team played 22 games. They won 8 more than they lost. So they lost 22 - 8 = 14 games. They won 14 + 8 = 22 games. The answer is 22.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "22"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "e2523c2535e50960cd01e5e1f0c05711dbd16803a13f8b69b9fcb76aa136c5e7"
+          },
+          {
+            "index": 85,
+            "target": "44",
+            "prediction": "Gene has one shirt from each of his 4 vacations. So he has 4 shirts. Each shirt is a quilt block. 4 quilt blocks.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "4"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "bfdd812f8a7f9abcd15578de901cb02e1b860a060f84fc140b2b84e8ef6aa5c2"
+          },
+          {
+            "index": 86,
+            "target": "22",
+            "prediction": "The alarm rang 4 times the first time. So 4 * 1 = 4. The second time it rang 3 times as long as the first time. So 4 * 3 = 12. The third time it rang 1/3 as long as the second time. So 12 * 1/3 = 4. The total number of times the alarm rang is 4 + 12 + 4 = 20. The answer is 20.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "20"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "b3fadfe5bdcfb6e9458c8888a9935f47fc2e2f7d844ec37de5cbcf1f22515ddc"
+          },
+          {
+            "index": 87,
+            "target": "9360",
+            "prediction": "Sylvie's initial salary is 600 dollars. The company increases her salary by 10% every year. So in the first year, her salary will be 600 + (600 * 0.10) = 660 dollars. In the second year, it will be 660 + (660 * 0.10) = 726 dollars. In the third year, it will be 726 + (726 * 0.10) = 798 dollars. In the fourth year, it will be 798 + (798 * 0.10) = 897 dollars. In the fifth year, it will be 897 + (897 * 0.10) = 1005 dollars. The answer is 1005.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "1005"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "565afee8a20290960375a298a789b1892003d13e9abbb74b8b63fc6d00a06d70"
+          },
+          {
+            "index": 88,
+            "target": "8000",
+            "prediction": "Let's say Harald sold x copies. Marilyn sold 10x copies. Together they sold 88,000 copies. So x + 10x = 88,000. 11x = 88,000. x = 8,000. The answer is 8,000.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "8000"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "ed2595c6b5af09c79eea2a1bb7caf194ff8ac93dd0c36b61b3420ff4f094091a"
+          },
+          {
+            "index": 89,
+            "target": "24",
+            "prediction": "Christina invited 16 friends. 1/4 of 16 is 4. So 4 friends don't show up. That means 16 - 4 = 12 friends will show up. 12 x .75 = 9. So she needs 9 gift bags. 9 x 2 = 18. The answer is 18.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "18"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "ac9a6856bedac0995d241a5e8aa6a2634d78c4330a53edc24ed1a4e9589415ee"
+          },
+          {
+            "index": 90,
+            "target": "225",
+            "prediction": "There are 20 adults, and each adult will eat 10 pounds of potato salad. So 20 x 10 = 200 pounds of potato salad are needed for the adults. There are 5 children, and each child will eat half as much as an adult, which is 10 / 2 = 5 pounds. So 5 x 5 = 25 pounds of potato salad are needed for the children. In total, Ted needs 200 + 25 = 225 pounds of potato salad. The answer is 225.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "225"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "cb4524f10d298291e65966fec9c45a8dcb7b8a5564babe6800a2170c9cb0ed69"
+          },
+          {
+            "index": 91,
+            "target": "28",
+            "prediction": "Cindy has 4 pets. Marcia has 2 more than Cindy, so Marcia has 4 + 2 = 6 pets. Jan has three times the number of pets as Marcia, so Jan has 3 x 6 = 18 pets. The total number of pets is 4 + 6 + 18 = 28. The answer is 28.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "28"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "48f5dec72350270e96a26b9f8284f935997a300d8d9c5501329efc0ee23207bf"
+          },
+          {
+            "index": 92,
+            "target": "4",
+            "prediction": "Let's break this down step by step:\n\n1. James is 10 and is 1 year younger than Corey, so Corey is 10 + 1 = 11.\n2. Amy is 2 years younger than Corey, so Amy is 11 - 2 = 9.\n3. Since Amy is 5 years older than Jackson, Jackson is 9 - 5 = 4.\n\nSo, Jackson is 4 years old.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "4"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "5a1ad41a170a60fc3a1060065501eddf24413c23c14461aa118321717d681eee"
+          },
+          {
+            "index": 93,
+            "target": "36",
+            "prediction": "Lee runs 2 seconds faster than Gerald. If Lee runs 38 seconds, then Gerald runs 38 - 2 = 36 seconds. Since Gerald's speed improved by 10%, his new speed is 36 * 1.1 = 39.8 seconds. The answer is 39.8.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "39.8"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "e48e9a5f0128d22b80d20bda6cf2333107ad8831c50e4e85750113b1f68b66ed"
+          },
+          {
+            "index": 94,
+            "target": "348",
+            "prediction": "There are 60 dogs. Since there are 2 cats for every dog, there are 2 x 60 = 120 cats. The total number of pets is 60 dogs + 120 cats = 180. The answer is 180.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "180"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "379d24bcf4baedce0d381b5e0c8ed6d9983b9193362a2b053f827117ac05acd6"
+          },
+          {
+            "index": 95,
+            "target": "40",
+            "prediction": "There are 200 students. 2/5 of them are boys. 2/5 * 200 = 80 boys. 200 - 80 = 120. 2/3 of the girls are in the girl scout. 2/3 * 120 = 80 girls. 120 - 80 = 40. The answer is 40.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "40"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "0960dc68b0255ab14d31fd929c1b65b0d73c08e141be08a87dab91ac5fffc389"
+          },
+          {
+            "index": 96,
+            "target": "3",
+            "prediction": "Harry slept 9 hours. James slept 2/3 of that, which is 2/3 * 9 = 6 hours. So James slept 6 hours. 9 - 6 is 3. The answer is 3.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "3"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "af47c1529cfe9f68df4812e4822d7b07df31cb7c69ae9fe16cd276074db8e1e4"
+          },
+          {
+            "index": 97,
+            "target": "12",
+            "prediction": "Freda's last batch of tomato sauce was 32 ounces. Since it lost half its volume, it was 32 / 2 = 16 ounces. Each can contains 3 tomatoes, so she used 16 / 3 = 5.33 cans. Since you can't use a fraction of a can, we'll round down to 5 cans. Each can contains 3 tomatoes, so she used 5 x 3 = 15 tomatoes. The answer is 15.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "15"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "8b488dcab7c8e9af98471af688887805def748637b8ac27b69cc41480afa8133"
+          },
+          {
+            "index": 98,
+            "target": "5",
+            "prediction": "There were 30 cars originally. 5 cars took an exit, so 30 - 5 = 25 cars drove through the traffic jam. 20 more cars drove through in the remaining 15 minutes. So 25 + 20 = 45 cars drove through the traffic jam. The answer is 45.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "45"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "ba87b94a98209706cc669b48afb996cddd872ec404a4a3a23394f119c04b1dd4"
+          },
+          {
+            "index": 99,
+            "target": "58",
+            "prediction": "Mary started with 2 potted plants on each of the 40 window ledges. So that's 2 * 40 = 80 potted plants. She gave 1 potted plant to each of the 40 ledges, so she gave away 40 potted plants. 80 - 40 = 40. The answer is 40.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "40"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "fb9d78d22c504f10a87d5b6549dae3e330d38c13f14af847ee6d2e0b3efcb453"
+          },
+          {
+            "index": 100,
+            "target": "175",
+            "prediction": "The fourth friend pressed the doorbell 60 times. The third friend pressed 10 times more than the fourth friend, so 60 + 10 = 70. The second friend pressed 1/4 times more than the third friend, so 70 + (1/4) * 70 = 70 + 17.5 = 87.5. The first friend pressed 20 times. To find the total number of doorbell rings, we add the rings of all friends: 20 + 87.5 + 70 + 60 = 247.5. The answer is 247.5.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "247.5"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "6e7eae31df760e6a84a664b9b39cb338d6ab606049a77928def6329aafe00109"
+          },
+          {
+            "index": 101,
+            "target": "6",
+            "prediction": "Solo has 4 textbooks with 4, 20, 7, and 8 pages respectively. 4 + 20 + 7 + 8 = 39 pages. He has read 15 pages. 39 - 15 = 24. He has 24 pages left. 24 / 4 = 6. The answer is 6.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "6"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "c8f264cc7ab394b37b1e55798c65a5bd7004f4977ca6597321926dee81f18001"
+          },
+          {
+            "index": 102,
+            "target": "26",
+            "prediction": "John has 3 glasses of water with breakfast, lunch, and dinner, 5 days a week. That's 3 x 5 = 15 glasses. On the weekends, he has 2 glasses. 15 + 2 = 17. The answer is 17.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "17"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "8961b8645ba1f41f3dc9aa575163db9cf49ae08750e80b6337e19f3765f1ee3a"
+          },
+          {
+            "index": 103,
+            "target": "140",
+            "prediction": "To find out how many minutes it will take for the fog bank to cover the whole city, we need to divide the total distance of the city by the rate at which the fog bank covers it.\n\nThe city is 42 miles across. The fog bank covers 3 miles every 10 minutes. \n\nFirst, let's find out how many 10-minute intervals are in 42 miles. 42 miles / 10 minutes = 4.2 intervals.\n\nSince we can't have a fraction of an interval, we'll round down to 4 intervals. \n\nNow, multiply the number of intervals by the time it takes to cover each interval: 4 intervals * 10 minutes/interval = 40 minutes.\n\nThe answer is 40.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "40"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "967d44df963f086e682fca7f2ea1e0a9d7d985a333cce2da2411c7438d450c79"
+          },
+          {
+            "index": 104,
+            "target": "500",
+            "prediction": "Poppy starts with 1000 pieces. A quarter of 1000 is 1000 / 4 = 250. So she places 250 pieces on the board. 1000 - 250 = 750. Her mom then places a third of the remaining 750 pieces, which is 750 / 3 = 250. So she places 250 more pieces. 750 - 250 = 500. The answer is 500.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "500"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "d1ae3cbe1a66e77e729c88f3d1ce668a368507e38e8571a0f344394215d2caae"
+          },
+          {
+            "index": 105,
+            "target": "20",
+            "prediction": "Amir eats 5 cookies. Cody eats three times as many, so he eats 3 x 5 = 15 cookies. Together they eat 5 + 15 = 20 cookies. The answer is 20.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "20"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "ebcb243e26568e486f97690fcde3bcfa8e6e1c03c9a2adce016223b5c36f191b"
+          },
+          {
+            "index": 106,
+            "target": "72",
+            "prediction": "To find the total inner volume of all 3 boxes, we need to subtract the thickness of the walls from the dimensions of each box.\n\nEach box is 5 inches by 6 inches by 4 inches. Subtracting the 1-inch thickness, we get:\n\n5 inches (length) - 2 inches (thickness) = 3 inches\n6 inches (width) - 2 inches (thickness) = 4 inches\n4 inches (height) - 2 inches (thickness) = 2 inches\n\nNow, we multiply the inner dimensions of each box by the number of boxes:\n\n3 boxes * 3 inches (length) * 4 inches (width) * 2 inches (height) = 144 cubic inches\n\nSo, the total inner volume of all 3 boxes is 144 cubic inches.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "144"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "f4646eb476de21ce33eabe538254e1d03398e9624f951220ca1d422888c7f481"
+          },
+          {
+            "index": 107,
+            "target": "3",
+            "prediction": "On Monday and Tuesday, Frankie watched 1-hour episodes, which is 1 x 2 = 2 hours. On Wednesday, he watched 30-minute episodes, which is 30/60 = 0.5 hours. On Thursday, he watched 1-hour and 30-minute episodes, which is 1.5 hours. In total, he watched 2 + 0.5 + 1.5 = 4 hours. Since he watched 7 hours of TV in all, he must have watched 7 - 4 = 3 hours of 30-minute episodes on Wednesday. The answer is 3.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "3"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "be0ec45acf410d24bbcdf79cd75dcf597599eca93f350309c84bc0e217a0e058"
+          },
+          {
+            "index": 108,
+            "target": "50",
+            "prediction": "Henry made twice as many cookies as he did last year. Let's call the number of cookies he made last year \"x\". Then he made 2x cookies. He made 2x + 15 cookies after realizing he had baked more. We know that the total number of cookies he has now is 110. So we can set up the equation: 2x + 15 = 110. Subtracting 15 from both sides gives us 2x = 95. Dividing both sides by 2 gives us x = 47.5. Since you can't make a fraction of a cookie, we'll round down to 47. Henry made 47 cookies last year.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "47"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "0f90a38c97250441d8675b878b1c2fc5bdb64dc0e39b3f58aeb57abc89afb489"
+          },
+          {
+            "index": 109,
+            "target": "28",
+            "prediction": "The gas station is selling gas for $3.00 a gallon. The app company is offering $.20 cashback per gallon. If someone buys 10 gallons of gas, the cost will be 3 x 10 = 30 dollars. The cashback will be 10 x 0.20 = 2 dollars. So the total amount paid will be 30 + 2 = 32 dollars. The answer is 32.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "32"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "0a06b4b09077d4321f5fdb99b11a3467fd619e3b29367b14b576d40e6b12f754"
+          },
+          {
+            "index": 110,
+            "target": "45",
+            "prediction": "To find the total number of fruit roll-ups eaten, we need to add the number of roll-ups Marcell and Beatrice ate. Marcell ate 3 x 14 = 42 roll-ups. Beatrice ate 2 x 24 = 48 roll-ups. So together they ate 42 + 48 = 90 roll-ups. To find the average, we divide the total number of roll-ups eaten by 2. 90 / 2 = 45. The answer is 45.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "45"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "9ca90b4d9a45ee4c866614f2562fd1aa1c3e39773faec3ca2120a51b9417cf98"
+          },
+          {
+            "index": 111,
+            "target": "16",
+            "prediction": "To find out how much water the boat took on, we need to first find out how much water it took on per second. Since it took 16 seconds to row 20 feet, it took 16 / 20 = 0.8 seconds per foot. Since it took 2 liters per 10 feet, it took 2 / 10 = 0.2 liters per foot. So it took 0.8 * 20 = 16 liters to row 20 feet. Since it took 16 seconds to row 20 feet, it took 16 / 16 = 1 second to row 64 feet. So it took 1 * 64 = 64 liters to row 64 feet. The boat took on 64 + 16 = 80 liters by the time Julia reached shore.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "80"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "3c0b2e3a17f874f42d7718fb423be8f2506c30c9e9cf7102e9c2797ca840d2f0"
+          },
+          {
+            "index": 112,
+            "target": "24",
+            "prediction": "There are 4 teachers who take turns using the classroom. Each teacher has 2 lessons per day. So, in total, there are 4 x 2 = 8 lessons per day. The whiteboard is cleaned 3 times per lesson. So, in a day, the whiteboard is cleaned 8 x 3 = 24 times. The answer is 24.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "24"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "55522ab2b785e68e1978e96b2fb6eb9615b1322dfc38b840586ed8f52dffaf09"
+          },
+          {
+            "index": 113,
+            "target": "25",
+            "prediction": "Ryan plants 2 flowers a day. After 15 days, he plants 2 * 15 = 30 flowers. But 5 did not grow, so he has 30 - 5 = 25 flowers. The answer is 25.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "25"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "f858719662308ab7a7c728b7f55d67c45587d5dc0c492350ca3e192a9374d9c9"
+          },
+          {
+            "index": 114,
+            "target": "6",
+            "prediction": "Jamal's phone can hold 1800 photographs. Brittany's phone can hold 50 times more photographs than Jamal's phone. So Brittany's phone can hold 1800 * 50 = 90000 photographs. Since the number of photographs is 50 times more than the number of ducks, we divide 90000 by 50 to find the number of ducks. 90000 / 50 = 1800. The answer is 1800.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "1800"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "47385e178e0cecb6b678564214dccc5e35ba28090f276fd76045bacc08aa0489"
+          },
+          {
+            "index": 115,
+            "target": "90",
+            "prediction": "Sasha has 10 leftover 2 x 4 x 10 boards. Each board costs $10. 10 x 10 = 100. So she has 100 dollars from selling the boards. She also has 5 leftover 4 x 4 x 10 boards. Each board costs $16. 5 x 16 = 80. So she has 80 dollars from selling the boards. Her total profit is 100 + 80 = 180. The answer is 180.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "180"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "747c1b639ad5c14d2b0a3eb7382a50e49cbbc284d8fd3b6490edacfee137af6f"
+          },
+          {
+            "index": 116,
+            "target": "42",
+            "prediction": "Katy uses 7 teaspoons of sugar for every 13 cups of water. She used a total of 120 teaspoons of sugar and cups of water. Let's say she used x cups of water. Then she used 7x teaspoons of sugar. We know that 7x + 13x = 120. Combining like terms, we get 20x = 120. Dividing both sides by 20, we get x = 6. So she used 7x = 7(6) = 42 teaspoons of sugar. The answer is 42.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "42"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "39d2314838fa503d23c4c3e225ecd2882c7a0a0f2da687153d5c0028f2f78c1d"
+          },
+          {
+            "index": 117,
+            "target": "360",
+            "prediction": "John buys 2 pairs of shoes for each of his 3 children. So that is 2 x 3 = 6 pairs of shoes. Each pair costs $60. 6 x 60 = 360. The answer is 360.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "360"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "4bc6558692fc0d254264cf7513f8a7a0f0165d0a0f0b45322c2bffe45bbc1798"
+          },
+          {
+            "index": 118,
+            "target": "4",
+            "prediction": "There were 2 containers with 5 vehicles each, so 2 x 5 = 10 vehicles. The total number of vehicles at the port was 30. So the number of vehicles in the 3 containers is 30 - 10 = 20. Since each container has 5 vehicles, the number of containers imported on the second day is 20 / 5 = 4. The answer is 4.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "4"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "48a96b802c09979d59595ee9be9e98dfc2c0790706c6e81f00e620a7a1c535eb"
+          },
+          {
+            "index": 119,
+            "target": "95200",
+            "prediction": "Adrien's salary four years ago was $40000. 30% of $40000 is 0.3 x 40000 = 12000. So his salary was $40000 + $12000 = $52000. \n\nHis salary increased by 40% four years later. 40% of $52000 is 0.4 x 52000 = 20800. So his salary four years later was $52000 + $20800 = $72800.\n\nLylah's salary four years ago was $40000. 40% of $40000 is 0.4 x 40000 = 16000. So her salary four years later was $40000 + $16000 = $56000.\n\nThe total salary the two were receiving four years later is $72800 + $56000 = $118800.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "118800"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "c7fe2d2aefc6d9db2b8fdd67961af5cc487b5e489452dc2cb9d143a968d11ca8"
+          },
+          {
+            "index": 120,
+            "target": "240",
+            "prediction": "Miguel uses 2 pads of paper a week. There are 52 weeks in a month. So he uses 2 * 52 = 104 pads of paper a month. Since there are 30 sheets of paper on a pad of paper, he uses 104 * 30 = 3120 sheets of paper a month. The answer is 3120.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "3120"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "749543931651b30943bde4b68c64ea1160cca22a7e2a05ac29776b822a272b4c"
+          },
+          {
+            "index": 121,
+            "target": "27",
+            "prediction": "Morisette brought 5 apples and 8 oranges. Kael brought twice the amount of apples, so 2 x 5 = 10 apples. Kael brought half the number of oranges, so 8 / 2 = 4 oranges. 5 + 8 + 10 + 4 = 27. The answer is 27.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "27"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "268ce3557b3e52193b34f05fd5481825edf3ff91c32e792cd9a2b4ea749ef5cf"
+          },
+          {
+            "index": 122,
+            "target": "48",
+            "prediction": "Sadie slept 8 hours on Monday. For the next two days, she slept 2 hours less each day, so that's 8 - 2 - 2 = 4 hours. For two days, that's 4 * 2 = 8 hours. For the rest of the week, she slept 1 hour more each day, so that's 8 + 1 = 9 hours. 8 + 8 + 9 = 25. The answer is 25.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "25"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "4659568e3ed873bcaceee8440e39655e3c81265540d83825ba694c0668d83d8c"
+          },
+          {
+            "index": 123,
+            "target": "50",
+            "prediction": "Rosie runs 10 miles per hour for 3 hours, so she runs 10 x 3 = 30 miles. Then she runs 5 miles per hour for 4 hours, so she runs 5 x 4 = 20 miles. In total, she runs 30 + 20 = 50 miles in 7 hours. The answer is 50.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "50"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "afc8880df47b94dc29f993479945cef36475ac1afd5557e94aa4d5fcca9856d5"
+          },
+          {
+            "index": 124,
+            "target": "10",
+            "prediction": "Jennie has 60 letters in total. She puts stamps on one-third of the letters needing stamps, which is 60 / 3 = 20 letters. So she put stamps on 20 letters. The pile of already-stamped letters is 30. To find out how many letters were in the pile when Jennie began, we need to add the letters she put stamps on to the letters already stamped. 30 + 20 = 50. The answer is 50.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "50"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "38fe9436f847bda87f54bcaa8361cab48d0fc998bedfe4d1aeb726659aa17666"
+          },
+          {
+            "index": 125,
+            "target": "10",
+            "prediction": "Let's say the package Julia bought had x spoons. She gave 5 spoons to her husband, so she had x - 5 spoons. She used 3 spoons to sample her stew, so she had x - 5 - 3 = x - 8 spoons. We know that she had a total of 12 spoons, so x - 8 = 12. To find x, we add 8 to both sides, so x = 20. The answer is 20.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "20"
+            },
+            "scores": {
+              "acc,num": 0.0
+            },
+            "prompt_sha256": "29df0c3bf65371fd6ab3c0bb868b876cf3028056f8b008dedf4c8b8df55b2c04"
+          },
+          {
+            "index": 126,
+            "target": "82",
+            "prediction": "Dylan bought 38 chicken sausages. He bought 6 more fish sausages than chicken sausages, so he bought 38 + 6 = 44 fish sausages. 38 + 44 = 82. The answer is 82.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "82"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "6e780432c9aadc2d6532816ae26022623777705011ffe47aa099728234fcf446"
+          },
+          {
+            "index": 127,
+            "target": "120",
+            "prediction": "Lily made 50 friends. Amy made 20 more friends than Lily. So Amy made 50 + 20 = 70 friends. Together they have 50 + 70 = 120 friends. The answer is 120.<|eot_id|>",
+            "extracted": {
+              "numeric-extract": "120"
+            },
+            "scores": {
+              "acc,num": 1.0
+            },
+            "prompt_sha256": "ca504bb50669a9736f6f11cfc45c34bc4194a24f638fb3a356f819b1b921e027"
+          }
+        ],
+        "metadata": {
+          "dataset_path": "/monster/data/model/dataset/gsm8k",
+          "dataset_name": "main",
+          "split": "test",
+          "order": "native",
+          "stream": false,
+          "generation_submission_mode": "continuous_refill",
+          "variant": "cot",
+          "num_fewshot": 8,
+          "apply_chat_template": true,
+          "fewshot_as_multiturn": true,
+          "scoring_mode": "numeric_format_insensitive",
+          "primary_metric": "acc,num"
+        }
+      }
+    ],
+    "versions": {}
+  },
+  "complete": true
+}
