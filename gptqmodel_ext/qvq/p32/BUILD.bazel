@@ -6,8 +6,17 @@ package(default_visibility = ["//visibility:public"])
 
 cc_library(
     name = "abi",
-    hdrs = ["qvq_p32_abi.h"],
+    hdrs = [
+        "qvq_p32_abi.h",
+        "qvq_p32_hadamard.h",
+    ],
     includes = ["."],
+)
+
+cc_test(
+    name = "hadamard_test",
+    srcs = ["qvq_p32_hadamard_test.cc"],
+    deps = [":abi"],
 )
 
 cc_test(

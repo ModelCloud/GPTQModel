@@ -4001,6 +4001,55 @@ about 0.3%), while stage-1/2/3 variants gained registers and slowed in the
 same build.  The pragma was reverted; the staged loop and generated schedule
 remain unchanged.
 
+## v88 selective stage-2 sixteen-group reuse
+
+The 50% campaign starts from fetched `origin/main` at `bdcf7f73`, which
+contains the merged PR #120 code.  The large-M stage-2 kernel now has a
+sixteen-row-group specialization which reuses each staged compressed-weight
+tile and decode across 256 input rows.  Automatic dispatch selects it only
+for the measured winning regions: `M=1024` at N=5120/10240/17408,
+`M=2048,N=5120` for transition widths 5--7, and `M>=4096,N!=1024`.
+All other shapes retain the merged eight-row-group policy.
+
+On the A100 with `K=5120`, 10 warmups, and 50 timed iterations, all 35
+selected M/N/rate cases improved versus the freshly merged main binary.  The
+geometric-mean speedup is `1.0565x`.  `M=1024,N=5120` improves by
+1.167--1.195x across transition widths 4--7; `M=4096,N=10240/12288` improves
+by about 1.057--1.062x.  The guarded split-1 and split-8 comparisons are
+bit-for-bit exact, as are representative excluded controls at M=512,
+N=1024, N=6144, and N=12288.
+
+The stage-2 sixteen-group resource entry uses 168 registers/thread and
+34,576 B static shared memory, with no local stack or spills.  This permits
+one 128-thread CTA per A100 SM and halves the grid relative to eight-group
+reuse.  The high register footprint explains why the specialization is
+profitable only once the grid has enough work to amortize decode and staged
+weight traffic.
+
+The matched Nsight Compute captures are `/tmp/v88_ncu_candidate_m1024.csv`
+and `/tmp/v88_ncu_base_m1024.csv` for
+`N=5120,M=1024,stage=2,bits=5`.  Sixteen-group reuse halves the grid from
+640 to 320 CTAs and lowers executed instructions from 208,359,040 to
+130,910,400.  Profiled duration falls from 1,252,320 ns to 1,046,272 ns;
+memory throughput rises from 71.56% to 78.22% while compute throughput moves
+from 27.63% to 20.73%.  For this rate, the candidate uses 168 registers and
+34,064 B static shared memory versus 96 registers and 17,680 B for the
+eight-group control.
+
+The source-correlated SASS extracts are `/tmp/v88_candidate_stage2_rg16.sass`
+and `/tmp/v88_base_stage2_rg8.sass`.  Static instructions rise from 1,384 to
+1,528 per CTA while the doubled row work scales HMMA/LDSM/STG exactly 2x
+(32/16/32 to 64/32/64).  Decode and address families remain nearly flat:
+IMAD 389->398, IADD3 105->96, LEA 92->91, SHF 126->126, LOP3 89->94, and
+PRMT 12->12.  The SSA/algebraic pass found no duplicated decode, redundant
+mask or shift, unnecessary conversion/permutation, address-expression
+regression, or spill introduced by the larger row group.
+
+The companion stage-1 sixteen-group probe was rejected.  Although it also
+halves the decode grid, matched N=5120 timings regressed by roughly 21--27%
+at M=512/2048/4096.  Stage 1 needs the extra occupancy supplied by the
+eight-group kernel, so no stage-1 dispatch or instantiation is retained.
+
 ## Reproduction
 
 ```bash

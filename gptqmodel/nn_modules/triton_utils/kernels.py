@@ -628,3 +628,81 @@ def fused_silu_mul(
             BLOCK_SIZE=1024,
         )
     return out
+
+
+@triton.jit
+def _fused_silu_mul_quant_fp8_kernel(
+    gate_ptr,
+    up_ptr,
+    out_ptr,
+    scale_ptr,
+    N: tl.constexpr,
+    stride_gm,
+    stride_gn,
+    stride_um,
+    stride_un,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """One-row SwiGLU plus dynamic E4M3 quantization for FP8 GEMM input."""
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK_SIZE)
+    mask = cols < N
+    gate = tl.load(
+        gate_ptr + row * stride_gm + cols * stride_gn,
+        mask=mask,
+        other=0.0,
+    )
+    up = tl.load(
+        up_ptr + row * stride_um + cols * stride_un,
+        mask=mask,
+        other=0.0,
+    )
+    gate_f = gate.to(tl.float32)
+    gate_silu = (gate_f * tl.sigmoid(gate_f)).to(gate.dtype)
+    intermediate = (gate_silu.to(tl.float32) * up.to(tl.float32)).to(gate.dtype)
+    intermediate_f = intermediate.to(tl.float32)
+    peak = tl.max(tl.where(mask, tl.abs(intermediate_f), 0.0), axis=0)
+    scale = tl.where(peak > 0.0, peak / 448.0, 1.0)
+    quantized = tl.maximum(tl.minimum(intermediate_f / scale, 448.0), -448.0)
+    tl.store(out_ptr + row * N + cols, quantized, mask=mask)
+    tl.store(scale_ptr + row, scale)
+
+
+def fused_silu_mul_quant_fp8(
+    gate: torch.Tensor,
+    up: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fuse exact FP16 SwiGLU narrowing with per-row E4M3 quantization."""
+    if gate.shape != up.shape or gate.dim() != 2:
+        raise ValueError(
+            f"fused_silu_mul_quant_fp8 requires equal 2-D shapes: "
+            f"{gate.shape} vs {up.shape}"
+        )
+    if gate.device != up.device or gate.dtype != up.dtype:
+        raise ValueError("gate and up must have the same device and dtype")
+    if gate.dtype != torch.float16:
+        raise TypeError("fused_silu_mul_quant_fp8 requires FP16 inputs")
+    m, n = gate.shape
+    if n != 8192:
+        raise ValueError("fused_silu_mul_quant_fp8 currently requires N=8192")
+    # The kernel writes a dense row-major E4M3 matrix.  ``gate`` may be a
+    # strided view of the grouped gate/up output, so do not preserve its
+    # strides here.
+    output = torch.empty(gate.shape, dtype=torch.float8_e4m3fn, device=gate.device)
+    scale = torch.empty((m, 1), device=gate.device, dtype=torch.float32)
+    with torch.cuda.device(gate.device):
+        _fused_silu_mul_quant_fp8_kernel[(m,)](
+            gate,
+            up,
+            output,
+            scale,
+            n,
+            gate.stride(0),
+            gate.stride(1),
+            up.stride(0),
+            up.stride(1),
+            BLOCK_SIZE=8192,
+            num_warps=8,
+            num_stages=1,
+        )
+    return output, scale
