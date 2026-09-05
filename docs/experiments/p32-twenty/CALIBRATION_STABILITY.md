@@ -112,3 +112,13 @@ A 2^24+1-element ordered-array check and a small Torch FP64 comparison validate
 the fallback. The first check caught NumPy preserving FP32 arithmetic; explicit
 FP64 conversion fixed that discrepancy before this commit. GPU model validation
 of the large-fit path remains pending the retry runs.
+
+## Five-fit interim evidence
+
+Five local fits are complete. Seed 72 at 2,048 tokens has no FP16 candidate
+passing all cases, unlike seed 71 at the same size. Seed 72 at 4,096 tokens
+passes rank-6 tail and ranks 8/12/16 with either fit. Thus the smallest passing
+rank varies with sample composition; the seed-71 rank-6 result is not a stable
+cross-subset acceptance claim. Broader replay and the remaining sizes are still
+required. The progress summary records every observed attempt and uses the
+newest retry directory without erasing original partial reports.

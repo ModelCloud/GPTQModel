@@ -19,8 +19,35 @@ def main():
     }
     for seed in (71, 72, 73):
         for tokens in (2048, 4096, 8192, 16384, 32768):
-            path = args.root / f"seed{seed}/fit{tokens}/report.json"
-            item = {"sampling_seed": seed, "tokens": tokens, "path": str(path)}
+            original = args.root / f"seed{seed}/fit{tokens}"
+            retries = sorted(
+                (
+                    p
+                    for p in original.parent.glob(original.name + "-retry*")
+                    if p.name.rsplit("-retry", 1)[-1].isdigit()
+                ),
+                key=lambda p: int(p.name.rsplit("-retry", 1)[-1]),
+            )
+            attempts = []
+            for directory in [original, *retries]:
+                report_path = directory / "report.json"
+                entry = {"path": str(report_path), "status": "missing"}
+                if report_path.exists():
+                    attempt_raw = report_path.read_bytes()
+                    attempt = json.loads(attempt_raw)
+                    entry.update(
+                        status="complete" if attempt.get("complete") else "partial",
+                        sha256=hashlib.sha256(attempt_raw).hexdigest(),
+                    )
+                attempts.append(entry)
+            # The newest started attempt is authoritative, even while partial.
+            path = (retries[-1] if retries else original) / "report.json"
+            item = {
+                "sampling_seed": seed,
+                "tokens": tokens,
+                "path": str(path),
+                "attempts": attempts,
+            }
             result["fits"].append(item)
             if not path.exists():
                 item["status"] = "missing"
