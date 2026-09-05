@@ -6,6 +6,31 @@ import torch
 triton = pytest.importorskip("triton")
 
 
+@pytest.mark.parametrize("warps", [4, 8])
+@pytest.mark.parametrize("block_p", [32, 64])
+def test_composite_trim_algebra_and_canary(warps, block_p):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("requires AMD GPU")
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("experiment targets gfx950")
+    from gptqmodel.utils.qvq_amd import _qvq_p32_composite_hadamard_constants
+    from scripts.qvq_p32_amd_butterfly_experiment import composite_trim_kernel
+
+    base, power, base_size, width = _qvq_p32_composite_hadamard_constants(torch.device("cuda", 0))
+    generator = torch.Generator(device="cuda").manual_seed(20260905)
+    x = torch.randn((3, 40, 128), generator=generator, device="cuda") * 0.01
+    sv = torch.randn(5120, generator=generator, device="cuda", dtype=torch.float16)
+    reference = ((base[:40, :40] @ (x @ power)).reshape(3, 5120) / 5120**0.5) * sv
+    output = torch.full((4, 5120), 999.0, device="cuda", dtype=torch.float16)
+    composite_trim_kernel[(3, width // block_p)](
+        x, power, base, sv, output, 5120, base_size, 64, width, block_p, 5120**-0.5,
+        num_warps=warps, num_stages=1, waves_per_eu=0, matrix_instr_nonkdim=16, kpack=1,
+    )
+    assert torch.isfinite(output).all()
+    torch.testing.assert_close(output[:3].float(), reference, atol=2e-3, rtol=0)
+    assert (output[3] == 999.0).all()
+
+
 @pytest.mark.parametrize("variant", ["gather", "split"])
 @pytest.mark.parametrize("rows", [1, 3, 128, 513])
 def test_butterfly128_algebra_and_tail(variant, rows):

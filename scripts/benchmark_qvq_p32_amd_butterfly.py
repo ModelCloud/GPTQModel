@@ -32,6 +32,8 @@ def main():
     parser.add_argument("--idle-memory-tolerance-mib", type=int, default=1024)
     parser.add_argument("--allow-busy", action="store_true")
     parser.add_argument("--full-sweep", action="store_true")
+    parser.add_argument("--trim-composite", action="store_true", help="Experimentally remove padded recovery math")
+    parser.add_argument("--recovery-warps", type=int, choices=(4, 8), default=8)
     parser.add_argument("--shapes", nargs="+", choices=[shape[0] for shape in QWEN38_27B_SHAPES])
     parser.add_argument("--m-values", nargs="+", type=int, choices=REQUESTED_M)
     parser.add_argument("--folded-residual-ceiling", action="store_true",
@@ -58,7 +60,11 @@ def main():
 
     import torch
     import triton
-    from qvq_p32_amd_butterfly_experiment import fht128_kernel, fht128_split_kernel
+    from qvq_p32_amd_butterfly_experiment import (
+        composite_trim_kernel,
+        fht128_kernel,
+        fht128_split_kernel,
+    )
 
     import gptqmodel.nn_modules.qlinear.qvq as qvq_module
     import gptqmodel.utils.qvq_amd as candidate_amd
@@ -69,6 +75,7 @@ def main():
     from gptqmodel.utils.qvq_amd import qvq_p32_amd_folded_case_supported
 
     baseline_amd = candidate_amd
+    original_recovery = candidate_amd._qvq_p32_composite_recovery_gfx950_kernel
     baseline_source_dir = None
     if args.baseline_amd_commit:
         revision = subprocess.check_output(
@@ -153,7 +160,19 @@ def main():
             return y
         return original_mm(x, w, *mm_args, **kwargs)
 
+    class TrimRecovery:
+        def __getitem__(self, grid):
+            def launch(*positional, **kwargs):
+                kwargs["num_warps"] = args.recovery_warps
+                return composite_trim_kernel[grid](*positional, **kwargs)
+            return launch
+
+    trimmed_recovery = TrimRecovery()
+
     def select(name):
+        candidate_amd._qvq_p32_composite_recovery_gfx950_kernel = (
+            trimmed_recovery if name == "candidate" and args.trim_composite else original_recovery
+        )
         sys.modules["gptqmodel.utils.qvq_amd"] = baseline_amd if name == "baseline" else candidate_amd
         QVQLinear._qvq_amd_folded_forward = baseline_forward if name == "baseline" else candidate_forward
         torch.mm = (candidate_mm if name == "candidate"
@@ -379,6 +398,7 @@ def main():
         raise
     finally:
         torch.mm = original_mm
+        candidate_amd._qvq_p32_composite_recovery_gfx950_kernel = original_recovery
         QVQLinear._qvq_amd_folded_forward = candidate_forward
         sys.modules["gptqmodel.utils.qvq_amd"] = candidate_amd
         if baseline_source_dir is not None:
