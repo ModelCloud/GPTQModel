@@ -1792,8 +1792,8 @@ class QVQHopperGroupedRuntime:
         if fp8_prefill is not None:
             self.telemetry.h100_fp8_prefill_launches += 1
             gate, up = self._execute_h100_fp8_prefill(x, fp8_prefill)
-            gate = gate.contiguous()
-            up = up.contiguous()
+            # Keep the two split views strided.  SiLU and multiplication can
+            # consume them directly, avoiding two full Mx8192 materializations.
             activated_gate = self._mlp_act_fn(gate)
             use_fp8_down = (
                 (down.in_features, down.out_features) == (8192, 2048)
