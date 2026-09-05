@@ -87,3 +87,16 @@ limited rather than HBM limited.
 
 NCU report:
 `artifacts/qvq_hopper_large_m/profiles/v4_reuse11_w3_m512_ae90283c_ncu.ncu-rep`.
+
+## W2.5 coalesced recovery store
+
+The earlier reuse-8 kernel excluded W2.5 from the shared-memory transpose used
+to coalesce FP32 accumulator stores. Re-testing under the reuse-11 geometry
+shows the balance has changed: enabling the same exact transpose for W2.5
+reduces its M512 full MLP from 335.828 to **324.326 microseconds**, a further
+**1.035x**, with bit-exact eager and CUDA Graph output. Against merged main the
+cumulative W2.5 gain is **1.049x**. The benchmark remains behind Marlin and
+Machete at 0.507x and 0.363x respectively.
+
+Artifact:
+`artifacts/qvq_hopper_large_m/v4_w25_reuse11_coalesced_candidate.json`.

@@ -2264,8 +2264,7 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   constexpr int kAccumulatorValuesPerThread = cute::size(decltype(thread_coordinate_c){});
   constexpr bool kUseCoalescedOutput =
       FixedGateUp && !OrderedSplit && N64BlocksPerCta == 2 &&
-      (RowTilesPerCta == 4 || RowTilesPerCta == 8 || RowTilesPerCta == 11) &&
-      TransitionBits != 5;
+      (RowTilesPerCta == 4 || RowTilesPerCta == 8 || RowTilesPerCta == 11);
   if constexpr (kUseCoalescedOutput) {
     // The RS-WGMMA accumulator mapping gives every consumer eight scattered
     // FP32 values. Direct stores therefore generate almost twice the ideal
