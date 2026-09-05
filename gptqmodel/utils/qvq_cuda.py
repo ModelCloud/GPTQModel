@@ -1417,8 +1417,9 @@ def qvq_cuda_folded_swiglu_precondition_fp32(
 ) -> torch.Tensor:
     """Fuse folded-axis FP32 recovery through the padded down input.
 
-    Hopper P32 consumes an M16 tile, so rows beyond ``gate.shape[0]`` in the
-    returned tensor are exactly zero.
+    Hopper P32 consumes an M16 tile for decode-sized inputs, so inputs below
+    M16 are zero-padded.  Native large-M inputs retain their logical row
+    count.
     """
 
     if gate.device.type != "cuda" or up.device.type != "cuda":
@@ -1432,10 +1433,10 @@ def qvq_cuda_folded_swiglu_precondition_fp32(
         or gate.shape != up.shape
         or not gate.is_contiguous()
         or not up.is_contiguous()
-        or not 0 < gate.shape[0] <= 16
+        or not 0 < gate.shape[0] <= 4096
     ):
         raise ValueError(
-            "folded QVQ SwiGLU inputs must be equal contiguous 2D tensors with M in [1, 16]"
+            "folded QVQ SwiGLU inputs must be equal contiguous 2D tensors with M in [1, 4096]"
         )
     n = gate.shape[1]
     for name, tensor, dtype in (
