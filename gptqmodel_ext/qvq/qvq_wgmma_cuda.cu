@@ -577,6 +577,17 @@ __device__ __forceinline__ int qvq_p32_wgmma_logical_column(int wgmma_column) {
   return (wgmma_column & ~15) + ((tile_column & 7) << 1) + (tile_column >> 3);
 }
 
+__device__ __forceinline__ void qvq_p32_copy_async_cg_16(
+    void* destination,
+    const void* source) {
+  const uint32_t shared_address =
+      static_cast<uint32_t>(__cvta_generic_to_shared(destination));
+  asm volatile(
+      "cp.async.cg.shared.global [%0], [%1], 16;\n"
+      :
+      : "r"(shared_address), "l"(source));
+}
+
 template <int TransitionBits, int RowTilesPerCta = 1>
 __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
     const Fp8Element* __restrict__ input,
@@ -705,11 +716,14 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
       const int column = (tile_index - row * kVectorsPerRow) * kVectorElements;
       const int shared_offset = row_tile * kInputTileElements +
           Fp8WgmmaSmemLayoutB{}(row, column);
-      *reinterpret_cast<uint4*>(shared_input + shared_offset) =
-          *reinterpret_cast<const uint4*>(input +
+      qvq_p32_copy_async_cg_16(
+          shared_input + shared_offset,
+          input +
               static_cast<int64_t>(row_base + row_tile * kRows + row) * size_k +
               k_base + column);
     }
+    asm volatile("cp.async.commit_group;\n");
+    asm volatile("cp.async.wait_group 0;\n");
     __syncthreads();
 
     // Each lane owns four K values for one adjacent pair of P32 N columns in
