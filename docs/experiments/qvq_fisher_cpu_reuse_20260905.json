@@ -1,0 +1,1156 @@
+{
+  "status": "Experiments rejected for performance; 1.5x hybrid goal not achieved",
+  "baseline_commit": "1acd13b95bcb2c4bfc3556d7e710da1385f911f5",
+  "scope": "Qwen3.5-27B geometry proxy, 400 targets, B16/16 rows, T64/R256, row start96, seed20260909; no checkpointing; all transfers and drains included",
+  "scope_limits": [
+    "These one-batch diagnostics do not replace the required 64-row multi-batch confirmation.",
+    "CPU worker topology, OpenMP waits, and GIL settings differ between historical arms; use the adjacent matched runtime controls.",
+    "Production collector unchanged.",
+    "Sample07 CPU-only BF16-scratch probe explicitly contiguizes input and compares CPU variants; it does not establish original-strided GPU diagonal parity."
+  ],
+  "runs": [
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-local.json",
+      "median_seconds": 1.6581868959983694,
+      "seconds": [
+        1.6581868959983694,
+        1.6484466260008048,
+        1.794345009002427
+      ],
+      "factor_parity": [
+        {
+          "arm": "streaming_256",
+          "bitwise_equal": true,
+          "factors_checked": 800
+        }
+      ],
+      "collector_sha256": "a37b66d0d6ca429281d29477b99eb98d4fc86458121093ab7ea826b14cadc8bf",
+      "reference_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+      "cpu_threads": 16,
+      "warmup": 2,
+      "repeats": 3
+    },
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-allstats-contiguous.json",
+      "median_seconds": 2.3485620920000656,
+      "seconds": [
+        2.3485620920000656,
+        2.3427232799986086,
+        2.4113891679990047
+      ],
+      "factor_parity": [
+        {
+          "arm": "streaming_256",
+          "bitwise_equal": true,
+          "factors_checked": 800
+        }
+      ],
+      "collector_sha256": "c287723dc2d6f2d77f1be7efd1ac15d5866dabb4d4a069b933b733f2ba68ba37",
+      "reference_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+      "cpu_threads": 16,
+      "warmup": 2,
+      "repeats": 3
+    },
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-allstats-two.json",
+      "median_seconds": 2.4220513879990904,
+      "seconds": [
+        2.4220513879990904,
+        2.29833562499698,
+        2.5043377920010244
+      ],
+      "factor_parity": [],
+      "collector_sha256": "c287723dc2d6f2d77f1be7efd1ac15d5866dabb4d4a069b933b733f2ba68ba37",
+      "reference_sha256": null,
+      "cpu_threads": 16,
+      "warmup": 2,
+      "repeats": 3
+    },
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-bound-scratch.json",
+      "median_seconds": 2.383519895003701,
+      "seconds": [
+        2.383519895003701,
+        2.4074714570015203,
+        2.3126483619998908
+      ],
+      "factor_parity": [],
+      "collector_sha256": "f558a0a70b01ffb7c610e2377f6b468361a01a584650a7446efb74e06284389a",
+      "reference_sha256": null,
+      "cpu_threads": 16,
+      "warmup": 2,
+      "repeats": 3
+    },
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-reuse.json",
+      "median_seconds": 1.8606593369986513,
+      "seconds": [
+        1.8606593369986513,
+        1.8791743320034584,
+        1.8323615520057501
+      ],
+      "factor_parity": [
+        {
+          "arm": "streaming_256",
+          "bitwise_equal": true,
+          "factors_checked": 800
+        }
+      ],
+      "collector_sha256": "8669a49fbbfd0d00ab3de3ba649539356aa1b99912304b26f4cbe467b55b1a2b",
+      "reference_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+      "cpu_threads": 16,
+      "warmup": 2,
+      "repeats": 3
+    },
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-gil0-control.json",
+      "median_seconds": 1.0658144460030599,
+      "seconds": [
+        1.0644983519960078,
+        1.0699379029974807,
+        1.0658144460030599
+      ],
+      "factor_parity": [],
+      "collector_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+      "reference_sha256": null,
+      "cpu_threads": 16,
+      "warmup": 2,
+      "repeats": 3
+    },
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-reuse-2x8.json",
+      "median_seconds": 2.3678778850007802,
+      "seconds": [
+        2.318483039998682,
+        2.3735582299996167,
+        2.3678778850007802
+      ],
+      "factor_parity": [],
+      "collector_sha256": "8669a49fbbfd0d00ab3de3ba649539356aa1b99912304b26f4cbe467b55b1a2b",
+      "reference_sha256": null,
+      "cpu_threads": 16,
+      "warmup": 2,
+      "repeats": 3
+    },
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-reuse-4x8.json",
+      "median_seconds": 2.1557168590006768,
+      "seconds": [
+        2.1557168590006768,
+        2.178840913999011,
+        2.1189526969974395
+      ],
+      "factor_parity": [],
+      "collector_sha256": "8669a49fbbfd0d00ab3de3ba649539356aa1b99912304b26f4cbe467b55b1a2b",
+      "reference_sha256": null,
+      "cpu_threads": 16,
+      "warmup": 2,
+      "repeats": 3
+    },
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-shared-activation.json",
+      "median_seconds": 2.5256895990023622,
+      "seconds": [
+        2.538961008001934,
+        2.5256895990023622,
+        2.5016580119990977
+      ],
+      "factor_parity": [
+        {
+          "arm": "streaming_256",
+          "bitwise_equal": true,
+          "factors_checked": 800
+        }
+      ],
+      "collector_sha256": "3bbf6d55ac05a4d468095e40332039b6937ca1b0fde4981de17a83f9c1df8670",
+      "reference_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+      "cpu_threads": 16,
+      "warmup": 2,
+      "repeats": 3
+    },
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-passive-local.json",
+      "median_seconds": 2.620763179998903,
+      "seconds": [
+        2.6333880060046795,
+        2.620763179998903,
+        2.603549011000723
+      ],
+      "factor_parity": [],
+      "collector_sha256": "8669a49fbbfd0d00ab3de3ba649539356aa1b99912304b26f4cbe467b55b1a2b",
+      "reference_sha256": null,
+      "cpu_threads": 16,
+      "warmup": 2,
+      "repeats": 3
+    },
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-single-main-control.json",
+      "median_seconds": 1.06341134399554,
+      "seconds": [
+        1.064332027999626,
+        1.0628985820003436,
+        1.06341134399554
+      ],
+      "factor_parity": [],
+      "collector_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+      "reference_sha256": null,
+      "cpu_threads": 1,
+      "warmup": 2,
+      "repeats": 3
+    },
+    {
+      "report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-single-main-hybrid.json",
+      "median_seconds": 2.62656915000116,
+      "seconds": [
+        2.6184258479988785,
+        2.62656915000116,
+        2.6289245120060514
+      ],
+      "factor_parity": [],
+      "collector_sha256": "8669a49fbbfd0d00ab3de3ba649539356aa1b99912304b26f4cbe467b55b1a2b",
+      "reference_sha256": null,
+      "cpu_threads": 1,
+      "warmup": 2,
+      "repeats": 3
+    }
+  ],
+  "packing_page_diagnostics": [
+    {
+      "input_pack_node": 0,
+      "shape": [
+        0,
+        16,
+        64,
+        17408
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 5.28039300115779,
+      "hot_pack_ms": 3.408456999750342
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        1,
+        16,
+        64,
+        5120
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 1.2325959978625178,
+      "hot_pack_ms": 0.28420600574463606
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        0,
+        16,
+        64,
+        5120
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 1.3238419996923767,
+      "hot_pack_ms": 0.36759700014954433
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        1,
+        16,
+        64,
+        17408
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 5.274317998555489,
+      "hot_pack_ms": 3.3558590002940036
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        0,
+        16,
+        64,
+        6144
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 1.4270889951149002,
+      "hot_pack_ms": 0.4828199962503277
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        1,
+        16,
+        64,
+        1024
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 0.2238870001747273,
+      "hot_pack_ms": 0.012809003237634897
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        1,
+        16,
+        64,
+        12288
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 2.9452500020852312,
+      "hot_pack_ms": 1.9749120037886314
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        0,
+        16,
+        64,
+        17408
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 5.1793099992210045,
+      "hot_pack_ms": 1.9784379983320832
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        1,
+        16,
+        64,
+        5120
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 1.5729799997643568,
+      "hot_pack_ms": 0.353082999936305
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        0,
+        16,
+        64,
+        5120
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 0.8725809966563247,
+      "hot_pack_ms": 0.14135399396764114
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        1,
+        16,
+        64,
+        17408
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 4.454775997146498,
+      "hot_pack_ms": 2.5588270000298508
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        1,
+        16,
+        64,
+        6144
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 1.3226080045569688,
+      "hot_pack_ms": 0.5374329994083382
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        0,
+        16,
+        64,
+        6144
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 1.336788001935929,
+      "hot_pack_ms": 0.9293640032410622
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        1,
+        16,
+        64,
+        6144
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 1.2614240040420555,
+      "hot_pack_ms": 0.47904099483275786
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        1,
+        16,
+        64,
+        1024
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 0.29841899959137663,
+      "hot_pack_ms": 0.014534998626913875
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        1,
+        16,
+        64,
+        12288
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 3.128891999949701,
+      "hot_pack_ms": 1.742079999530688
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        0,
+        16,
+        64,
+        5120
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 3.1083930007298477,
+      "hot_pack_ms": 0.37536599847953767
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        1,
+        16,
+        64,
+        17408
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 5.035009002313018,
+      "hot_pack_ms": 2.7036079991376027
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        0,
+        16,
+        64,
+        17408
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 10.97476200084202,
+      "hot_pack_ms": 7.1643080009380355
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        0,
+        16,
+        64,
+        6144
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 1.4569170016329736,
+      "hot_pack_ms": 0.5295940063660964
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        1,
+        16,
+        64,
+        5120
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 2.517023000109475,
+      "hot_pack_ms": 1.2492419991758652
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        1,
+        16,
+        64,
+        5120
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 1.8756870049401186,
+      "hot_pack_ms": 0.2825679985107854
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        1,
+        16,
+        64,
+        1024
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 0.42079900595126674,
+      "hot_pack_ms": 0.01376800355501473
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        0,
+        16,
+        64,
+        5120
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 3.3954499958781525,
+      "hot_pack_ms": 0.3666640041046776
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        0,
+        16,
+        64,
+        17408
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 4.209865997836459,
+      "hot_pack_ms": 2.5195940033881925
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        1,
+        16,
+        64,
+        12288
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 7.054428002447821,
+      "hot_pack_ms": 3.817757999058813
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        1,
+        16,
+        64,
+        6144
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 1.5434369997819886,
+      "hot_pack_ms": 0.6717630021739751
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        1,
+        16,
+        64,
+        17408
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 8.65011499990942,
+      "hot_pack_ms": 4.5888379972893745
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        0,
+        16,
+        64,
+        6144
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 1.9122990051982924,
+      "hot_pack_ms": 0.9506819988018833
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        1,
+        16,
+        64,
+        1024
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 0.6609929987462237,
+      "hot_pack_ms": 0.09293699986301363
+    },
+    {
+      "input_pack_node": 1,
+      "shape": [
+        1,
+        16,
+        64,
+        12288
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 3.5677940031746402,
+      "hot_pack_ms": 1.9418230003793724
+    },
+    {
+      "input_pack_node": 0,
+      "shape": [
+        1,
+        16,
+        64,
+        6144
+      ],
+      "input_nodes": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "query_code": 0,
+      "first_pack_ms": 3.2801919951452874,
+      "hot_pack_ms": 1.0183010017499328
+    }
+  ],
+  "operator_probes": {
+    "transposed_diagonal": [
+      {
+        "name": "input",
+        "B": 4,
+        "T": 64,
+        "K": 5120,
+        "median_ms": 0.08404950131080113,
+        "bitwise_equal": true,
+        "max_abs": 0.0,
+        "mismatch_count": 0
+      },
+      {
+        "name": "output",
+        "B": 4,
+        "T": 64,
+        "K": 17408,
+        "median_ms": 0.27013750150217675,
+        "bitwise_equal": true,
+        "max_abs": 0.0,
+        "mismatch_count": 0
+      },
+      {
+        "name": "input",
+        "B": 16,
+        "T": 64,
+        "K": 5120,
+        "median_ms": 0.3122744965367019,
+        "bitwise_equal": true,
+        "max_abs": 0.0,
+        "mismatch_count": 0
+      },
+      {
+        "name": "output",
+        "B": 16,
+        "T": 64,
+        "K": 17408,
+        "median_ms": 1.0698290025175083,
+        "bitwise_equal": true,
+        "max_abs": 0.0,
+        "mismatch_count": 0
+      }
+    ],
+    "tiled_pack": [
+      {
+        "sample": "sample-01.pt",
+        "name": "activation",
+        "shape": [
+          16,
+          64,
+          17408
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.3551525005605072
+      },
+      {
+        "sample": "sample-01.pt",
+        "name": "gradient",
+        "shape": [
+          16,
+          64,
+          5120
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.05736299863201566
+      },
+      {
+        "sample": "sample-02.pt",
+        "name": "activation",
+        "shape": [
+          16,
+          64,
+          5120
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.05944450094830245
+      },
+      {
+        "sample": "sample-02.pt",
+        "name": "gradient",
+        "shape": [
+          16,
+          64,
+          17408
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.352625000232365
+      },
+      {
+        "sample": "sample-03.pt",
+        "name": "activation",
+        "shape": [
+          16,
+          64,
+          6144
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.09262000094167888
+      },
+      {
+        "sample": "sample-03.pt",
+        "name": "gradient",
+        "shape": [
+          16,
+          64,
+          5120
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.05831949965795502
+      },
+      {
+        "sample": "sample-04.pt",
+        "name": "activation",
+        "shape": [
+          16,
+          64,
+          5120
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.06019349893904291
+      },
+      {
+        "sample": "sample-04.pt",
+        "name": "gradient",
+        "shape": [
+          16,
+          64,
+          1024
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.010043000656878576
+      },
+      {
+        "sample": "sample-05.pt",
+        "name": "activation",
+        "shape": [
+          16,
+          64,
+          5120
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.061413498769979924
+      },
+      {
+        "sample": "sample-05.pt",
+        "name": "gradient",
+        "shape": [
+          16,
+          64,
+          12288
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.2527824981370941
+      },
+      {
+        "sample": "sample-06.pt",
+        "name": "activation",
+        "shape": [
+          16,
+          64,
+          5120
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.05752949800807983
+      },
+      {
+        "sample": "sample-06.pt",
+        "name": "gradient",
+        "shape": [
+          16,
+          64,
+          6144
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.08987050023279153
+      },
+      {
+        "sample": "sample-07.pt",
+        "name": "activation",
+        "shape": [
+          16,
+          64,
+          5120
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.05914850044064224
+      },
+      {
+        "sample": "sample-07.pt",
+        "name": "gradient",
+        "shape": [
+          16,
+          64,
+          10240
+        ],
+        "bitwise_equal": true,
+        "median_ms": 0.2061695013253484
+      }
+    ],
+    "bf16_scratch": [
+      {
+        "sample": "sample-01.pt",
+        "shapes": [
+          [
+            16,
+            64,
+            17408
+          ],
+          [
+            16,
+            64,
+            5120
+          ]
+        ],
+        "packing_equal": true,
+        "gram_equal": true,
+        "diagonal_equal": true,
+        "fp32_scratch_ms": 2.95380399984424,
+        "bf16_scratch_ms": 4.020228498120559
+      },
+      {
+        "sample": "sample-02.pt",
+        "shapes": [
+          [
+            16,
+            64,
+            5120
+          ],
+          [
+            16,
+            64,
+            17408
+          ]
+        ],
+        "packing_equal": true,
+        "gram_equal": true,
+        "diagonal_equal": true,
+        "fp32_scratch_ms": 3.002342000399949,
+        "bf16_scratch_ms": 4.034441000840161
+      },
+      {
+        "sample": "sample-03.pt",
+        "shapes": [
+          [
+            16,
+            64,
+            6144
+          ],
+          [
+            16,
+            64,
+            5120
+          ]
+        ],
+        "packing_equal": true,
+        "gram_equal": true,
+        "diagonal_equal": true,
+        "fp32_scratch_ms": 1.3586499990196899,
+        "bf16_scratch_ms": 2.084517494949978
+      },
+      {
+        "sample": "sample-04.pt",
+        "shapes": [
+          [
+            16,
+            64,
+            5120
+          ],
+          [
+            16,
+            64,
+            1024
+          ]
+        ],
+        "packing_equal": true,
+        "gram_equal": true,
+        "diagonal_equal": true,
+        "fp32_scratch_ms": 0.8202309982152656,
+        "bf16_scratch_ms": 1.180102499347413
+      },
+      {
+        "sample": "sample-05.pt",
+        "shapes": [
+          [
+            16,
+            64,
+            5120
+          ],
+          [
+            16,
+            64,
+            12288
+          ]
+        ],
+        "packing_equal": true,
+        "gram_equal": true,
+        "diagonal_equal": true,
+        "fp32_scratch_ms": 2.252384500025073,
+        "bf16_scratch_ms": 3.1399069994222373
+      },
+      {
+        "sample": "sample-06.pt",
+        "shapes": [
+          [
+            16,
+            64,
+            5120
+          ],
+          [
+            16,
+            64,
+            6144
+          ]
+        ],
+        "packing_equal": true,
+        "gram_equal": true,
+        "diagonal_equal": true,
+        "fp32_scratch_ms": 1.3445939985103905,
+        "bf16_scratch_ms": 2.0809745001315605
+      },
+      {
+        "sample": "sample-07.pt",
+        "shapes": [
+          [
+            16,
+            64,
+            5120
+          ],
+          [
+            16,
+            64,
+            10240
+          ]
+        ],
+        "packing_equal": true,
+        "gram_equal": true,
+        "diagonal_equal": true,
+        "fp32_scratch_ms": 1.9970234970969614,
+        "bf16_scratch_ms": 2.8025589999742806
+      }
+    ]
+  },
+  "findings": [
+    "Full native thread-team inventory shows 16 threads on the intended 16-core affinity set per worker.",
+    "Explicit scratch pages are on each worker NUMA node; incoming pinned input pages sampled on node0.",
+    "Transposed input reuse passes all800 factor comparisons for the tested contiguous eligibility gate.",
+    "Shared activation cache eliminates96 duplicate transfers/Grams per352 CPU jobs and passes all800 factor comparisons, but costs2.52569s overall.",
+    "BF16 scratch halves scratch bytes and matches the FP32 CPU variant on all7 captured geometries, but extra conversion makes every tested operator slower.",
+    "Passive waits and a single main PyTorch CPU thread do not fix hybrid performance."
+  ],
+  "artifact_directory": "/root/qvq-sidecar-artifacts/20260905-reuse",
+  "sources": {
+    "/tmp/qvq-sidecar-prototype-reuse.py": "8669a49fbbfd0d00ab3de3ba649539356aa1b99912304b26f4cbe467b55b1a2b",
+    "/tmp/qvq-sidecar-prototype-shared-activation.py": "3bbf6d55ac05a4d468095e40332039b6937ca1b0fde4981de17a83f9c1df8670",
+    "/tmp/qvq-cpu-pack.cpp": "b39bac9a1762f44e80898827d82db7504699c3c78adf9f0c28c45de6e34a1e39",
+    "/tmp/qvq-cpu-diagonal.cpp": "a1551e5155fe54c894890fc5f861fa07645d302eec9af6bfd9e4b56bea7b4e0f",
+    "/tmp/qvq-cpu-strict-gram-prepared.cpp": "b24da234f21e3bb29d83da2c9862e44e695289a07fc75daa8408b21ce204ade1",
+    "/tmp/qvq-cpu-pack-bf16.cpp": "8b32b54f10f857827107ec7a202b81de791f0d776b4e2a3f407702a2483b80f7",
+    "/tmp/qvq-cpu-diagonal-bf16.cpp": "f7deb668fa071a3c07c7ff8b020fb465e9e9ea3e5d5b00bf58562aca542e0794",
+    "/tmp/qvq-cpu-strict-gram-bf16.cpp": "56795ae8fd3cf6ef5b7d73246997b6981ac0ac130d57be82e652cab2e8447537"
+  }
+}

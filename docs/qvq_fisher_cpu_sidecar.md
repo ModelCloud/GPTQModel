@@ -418,3 +418,62 @@ variant must repeat that gate before any promotion.
 records the source hashes, operator probes, fixed reference, and raw report paths.
 Experimental collector/native sources remain under `/tmp/qvq-sidecar-*` and
 `/tmp/qvq-cpu-strict-gram-*`; none is enabled in the production path.
+
+Further experiments preserve all 800 factors on the same one-batch real-model
+case, but still fail the hybrid performance target. Explicit worker-local
+scratch placement fixed the large standalone disparity between CPU workers.
+Full-model checks confirm local scratch pages and the intended OpenMP thread
+affinities. Incoming pinned input pages reside on node 0. Packing remains much
+slower during collection than in an isolated hot-buffer benchmark.
+
+Reusing the transposed activations for the CPU diagonal calculation reduced the
+hybrid to 1.860659 seconds with two workers of sixteen threads. A fresh GPU
+control with the GIL disabled measured 1.065814 seconds. Two workers of eight
+threads took 2.367878 seconds; four workers of eight took 2.155717 seconds.
+These results include copies, final drains, and factor construction. They are
+one-batch diagnostics, not the required 64-row confirmation.
+
+A separate activation cache recognizes shared storage, geometry, version, and
+batch identity. It assigns each activation to one CPU worker and reuses its
+transposed data and Gram. This removed 96 duplicate activation transfers and
+Grams among 352 CPU jobs and passed the complete factor comparison, but its
+allocation/lifetime implementation increased collection time to 2.525690
+seconds. It is not enabled. BF16 scratch also passed comparison with the FP32
+CPU operators on all seven captured geometries, but its additional conversions
+made every tested operator slower. Passive OpenMP waits and reducing the main
+PyTorch thread count to one did not resolve the slowdown.
+
+[CPU reuse evidence](experiments/qvq_fisher_cpu_reuse_20260905.json) records
+timings, parity scope, page diagnostics, and source hashes. Native sources,
+experimental collectors, logs, and profiler artifacts are preserved in
+`/root/qvq-sidecar-artifacts/20260905-reuse/` with a file manifest.
+
+An independent GPU source-update experiment reduces the B16 intermediate from
+sixteen per-sequence matrices to four partial sums. The first fusion was
+incorrect: Triton folded a batch addition into the dot accumulator despite
+`enable_fp_fusion=False`. An explicit rounding boundary restores the original
+operation order. Nsight Compute and SASS show the corrected variant retains
+the baseline's 142,606,336 executed FFMA and 2,646,016 FADD instructions, with
+no spills or excessive shared-memory wavefronts. Total executed warp
+instructions fall from 203,308,032 to 176,865,280.
+
+After profiling, real-input equality and warmed CUDA-event timing were rerun.
+The source operator improved from 0.112267 to 0.092605 ms at M5120 and from
+0.346093 to 0.297741 ms at M17408, both B16/T64/R256. This is an exact operator
+gain only; it has not passed full-model promotion or established a hybrid
+speedup. [Source partial-sum evidence](experiments/qvq_fisher_source_partial_20260905.json)
+contains the audit and post-profile checks. The 1.5x hybrid goal remains open.
+
+Two additional instruction-audited alternatives were rejected. Smaller,
+triangular GPU Gram tiles preserved exact results and removed 37.5% of FFMA
+instructions, but increased shared-memory conflicts and slowed the large Gram
+from 0.528275 to 0.687946 ms after profiling. Moving BF16 conversion and
+transpose together onto the GPU allowed a contiguous CPU conversion and passed
+all 800 factor comparisons, but the full hybrid still took 1.946860 seconds.
+The generic GPU transpose/cast adds considerable indexing work, and the CPU
+conversion remains expensive during collection. These experiments motivate
+testing direct BF16 CPU reads with unchanged FP32 accumulation.
+
+[Triangular Gram audit](experiments/qvq_fisher_triangular_gram_20260905.json) and
+[GPU input-packing audit](experiments/qvq_fisher_gpu_input_pack_20260905.json)
+include the post-profile correctness and timing checks.
