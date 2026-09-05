@@ -40,3 +40,15 @@ The first fused model C4 slice completed: PPL 26.97508702, versus separate alpha
 quality improvement. The report records FP16 factors, rank8, no sparse values,
 and fused eligibility; full ARC and propagated-logit comparisons remain pending.
 [Raw report](results/rank8-targeted/fused-model-c4.json).
+
+Fresh Nsight profiles completed for M=1/16/2048. Direct and integrated epilogues
+execute respectively 26,752 / 27,136 / 3,473,408 warp instructions at those shapes,
+with 26 registers and zero local spilling requests in each. The M16 executed
+opcode histograms match exactly and sum to the Nsight instruction total.
+[Resource evidence](results/rank8-targeted/fused-profile-resources.json),
+[opcode evidence](results/rank8-targeted/fused-M16-opcodes.json).
+This confirms the integration preserved the measured epilogue's instruction work;
+it does not prove all full-operator overhead is unchanged. No new masks, address
+operations or conversions were introduced into that epilogue. Native GEMM/input
+projection remain separate optimization opportunities. Post-profile normal
+correctness/Graph timing is queued; NCU replay durations are not speed evidence.

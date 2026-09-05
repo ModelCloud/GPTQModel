@@ -1,0 +1,116 @@
+{
+  "scope": "Fresh resource metrics; epilogue order direct/integrated/blockwise; profiler duration is not normal latency",
+  "shapes": [
+    {
+      "M": 1,
+      "source": "/root/p32-fused-model/profile-M1-metrics.csv",
+      "sha256": "9cdf56f77c3db09b4c73f343f15b67daf85defabdd0c726c528d1819e3c3fa7a",
+      "epilogues": [
+        {
+          "ID": "20",
+          "Kernel Name": "expansion_add",
+          "gpu__time_duration.sum": "3.776000",
+          "launch__registers_per_thread": "26",
+          "launch__shared_mem_per_block": "2.560000",
+          "smsp__inst_executed.sum": "26752.000000",
+          "derived__local_spilling_requests": "0",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "5.215719"
+        },
+        {
+          "ID": "25",
+          "Kernel Name": "expansion_add",
+          "gpu__time_duration.sum": "3.776000",
+          "launch__registers_per_thread": "26",
+          "launch__shared_mem_per_block": "2.560000",
+          "smsp__inst_executed.sum": "26752.000000",
+          "derived__local_spilling_requests": "0",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "5.209160"
+        },
+        {
+          "ID": "29",
+          "Kernel Name": "expansion_add",
+          "gpu__time_duration.sum": "4.000000",
+          "launch__registers_per_thread": "26",
+          "launch__shared_mem_per_block": "2.560000",
+          "smsp__inst_executed.sum": "26752.000000",
+          "derived__local_spilling_requests": "0",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "5.283833"
+        }
+      ]
+    },
+    {
+      "M": 16,
+      "source": "/root/p32-fused-model/profile-M16-metrics.csv",
+      "sha256": "0a267b51228187f5eadab7d4ac678ec13b3ab0a753dc27608b6489f8bde43980",
+      "epilogues": [
+        {
+          "ID": "20",
+          "Kernel Name": "expansion_add",
+          "gpu__time_duration.sum": "4.064000",
+          "launch__registers_per_thread": "26",
+          "launch__shared_mem_per_block": "2.560000",
+          "smsp__inst_executed.sum": "27136.000000",
+          "derived__local_spilling_requests": "0",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "6.074464"
+        },
+        {
+          "ID": "25",
+          "Kernel Name": "expansion_add",
+          "gpu__time_duration.sum": "4.000000",
+          "launch__registers_per_thread": "26",
+          "launch__shared_mem_per_block": "2.560000",
+          "smsp__inst_executed.sum": "27136.000000",
+          "derived__local_spilling_requests": "0",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "6.193010"
+        },
+        {
+          "ID": "29",
+          "Kernel Name": "expansion_add",
+          "gpu__time_duration.sum": "4.000000",
+          "launch__registers_per_thread": "26",
+          "launch__shared_mem_per_block": "2.560000",
+          "smsp__inst_executed.sum": "27136.000000",
+          "derived__local_spilling_requests": "0",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "6.213867"
+        }
+      ]
+    },
+    {
+      "M": 2048,
+      "source": "/root/p32-fused-model/profile-M2048-metrics.csv",
+      "sha256": "ac537862d357f8cc16468227e7ef183ef09c5dddeb652117c309193627785ddf",
+      "epilogues": [
+        {
+          "ID": "19",
+          "Kernel Name": "expansion_add",
+          "gpu__time_duration.sum": "0.014048",
+          "launch__registers_per_thread": "26",
+          "launch__shared_mem_per_block": "2.560000",
+          "smsp__inst_executed.sum": "3473408.000000",
+          "derived__local_spilling_requests": "0",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "76.089130"
+        },
+        {
+          "ID": "24",
+          "Kernel Name": "expansion_add",
+          "gpu__time_duration.sum": "0.014112",
+          "launch__registers_per_thread": "26",
+          "launch__shared_mem_per_block": "2.560000",
+          "smsp__inst_executed.sum": "3473408.000000",
+          "derived__local_spilling_requests": "0",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "76.229619"
+        },
+        {
+          "ID": "28",
+          "Kernel Name": "expansion_add",
+          "gpu__time_duration.sum": "0.014048",
+          "launch__registers_per_thread": "26",
+          "launch__shared_mem_per_block": "2.560000",
+          "smsp__inst_executed.sum": "3473408.000000",
+          "derived__local_spilling_requests": "0",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "76.504687"
+        }
+      ]
+    }
+  ]
+}

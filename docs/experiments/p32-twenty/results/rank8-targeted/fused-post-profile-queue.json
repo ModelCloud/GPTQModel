@@ -1,0 +1,15 @@
+{
+  "id": "fused-model-post-profile-runtime",
+  "command": [
+    "/root/venv-py3.14t-gil0/bin/python",
+    "scripts/p32_twenty/rank8_runtime.py",
+    "--uuid",
+    "{uuid}",
+    "--export",
+    "/root/p32-rank8-targeted/tail-alpha1/rank8-tail-float16.pt",
+    "--output",
+    "/root/p32-fused-model/runtime-post-profile.json"
+  ],
+  "result": "/root/p32-fused-model/runtime-post-profile.json",
+  "log": "/root/p32-fused-model/runtime-post-profile.log"
+}
