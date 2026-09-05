@@ -5,6 +5,9 @@ description: Add or debug fused QKV, gate/up, and activation fusion for quantize
 
 # GPT-QModel inference fusion
 
+For QVQ optimization, first read [qvq-kernel-accuracy](../qvq-kernel-accuracy/SKILL.md) for accuracy-preserving math
+and the locked numerical contract; apply it before selecting lower precision or ranking performance candidates.
+
 Use when optimizing quantized inference through weight concatenation, fused forwards, or `flash_attention_2`,
 especially on Laguna, Qwen3.5-27B, and Kimi-K3 proxy shapes.
 
