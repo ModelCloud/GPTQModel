@@ -304,7 +304,8 @@ def main():
         (args.output / "capture.json").write_text(
             json.dumps(
                 {
-                    "scope": "timing/kernel correctness only; not calibration for fitting",
+                    "scope": inputs.get("capture_scope", "timing/kernel correctness only; not calibration for fitting"),
+                    "input_manifest": str(args.inputs),
                     "modules": captured,
                 },
                 indent=2,

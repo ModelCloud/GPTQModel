@@ -1,0 +1,140 @@
+{
+  "source": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm10000.parquet",
+  "source_sha256": "5a2429da9754040e16baf47c569c14267b92126f37caafd4fafc8d5bfb5c3f39",
+  "scope": "bounded recovery calibration only; no evaluation benchmark; not historical re-quantization",
+  "rows_prepared": 16,
+  "prepared_input_manifest_sha256": "b3449fb66fb8966f5309d2889d1efa14fab1d68fc09da610a9a10b76606df91c",
+  "capture": {
+    "scope": "calibration-only activations for residual fitting; disjoint evaluation remains required",
+    "input_manifest": "/root/p32-recovery-calibration/inputs.json",
+    "modules": [
+      {
+        "module": "model.layers.0.self_attn.q_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.0.self_attn.q_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.0.self_attn.k_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.0.self_attn.k_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.0.self_attn.v_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.0.self_attn.v_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.0.self_attn.o_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.0.self_attn.o_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.0.mlp.gate_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.0.mlp.gate_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.0.mlp.up_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.0.mlp.up_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.0.mlp.down_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.0.mlp.down_proj.pt",
+        "shape": [
+          1,
+          2048,
+          8192
+        ]
+      },
+      {
+        "module": "model.layers.1.self_attn.q_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.1.self_attn.q_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.1.self_attn.k_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.1.self_attn.k_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.1.self_attn.v_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.1.self_attn.v_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.1.self_attn.o_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.1.self_attn.o_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.1.mlp.gate_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.1.mlp.gate_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.1.mlp.up_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.1.mlp.up_proj.pt",
+        "shape": [
+          1,
+          2048,
+          2048
+        ]
+      },
+      {
+        "module": "model.layers.1.mlp.down_proj",
+        "path": "/root/p32-recovery-calibration/activations/model.layers.1.mlp.down_proj.pt",
+        "shape": [
+          1,
+          2048,
+          8192
+        ]
+      }
+    ]
+  },
+  "capture_token_scope": "First 2048 concatenated prepared token IDs only; 16 prepared rows are not 16 captured sequences. Bounded prerequisite; broader calibration coverage remains required."
+}
