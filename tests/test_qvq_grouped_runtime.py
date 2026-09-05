@@ -1074,7 +1074,7 @@ def test_h100_large_m_wide_gate_up_runtime_is_exact_graph_safe_and_observable():
     assert telemetry["plain_fallbacks"] == 0
 
 
-@pytest.mark.parametrize("logical_m", (512, 4096))
+@pytest.mark.parametrize("logical_m", (512, 1024, 2048, 4096))
 def test_h100_reuse11_runtime_is_exact_graph_safe_and_observable(logical_m):
     device = _h100_device()
     if device is None:

@@ -32,8 +32,9 @@ the same K traversal, WGMMA instruction sequence, FP32 accumulation order, and
 FP16 recovery boundary. Padded rows are discarded before recovery.
 
 The specialization is deliberately narrow: physical NVIDIA H100, grouped
-Llama 2048-to-8192 gate/up, unsplit children, and logical M512 or M4096. Other
-devices, shapes, rates, and row counts retain the merged production path.
+Llama 2048-to-8192 gate/up, unsplit children, and logical M512, M1024, M2048,
+or M4096. Other devices, shapes, rates, and row counts retain the merged
+production path.
 
 At M4096, padding to M4224 similarly replaces 32 reuse-8 row waves with 24
 reuse-11 waves:
@@ -165,3 +166,24 @@ exactly 3.125%. The kernel remains instruction/scheduler limited, with only
 
 NCU report:
 `artifacts/qvq_hopper_large_m/profiles/v4_reuse11_w3_m4096_83f29ef9_ncu.ncu-rep`.
+
+## M1024 and M2048 extension
+
+The same exact `padded_M = 33*M/32` identity makes M1024 six M176 waves
+instead of eight M128 waves and M2048 twelve instead of sixteen. The runtime
+uses no new compiled kernel or cache.
+
+| Weight | Gate/up M×K×N | Down M×K×N | Reuse-8 | Reuse-11 | Speedup | vs Marlin W4 | vs Machete W4 | Better than last |
+| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| W2 | 1024×2048×8192 | 1024×8192×2048 | 635.222 µs | 614.218 µs | 1.034× | 0.545× | 0.345× | Yes |
+| W2.5 | 1024×2048×8192 | 1024×8192×2048 | 652.445 µs | 623.593 µs | 1.046× | 0.537× | 0.340× | Yes |
+| W3 | 1024×2048×8192 | 1024×8192×2048 | 647.979 µs | 628.754 µs | 1.031× | 0.533× | 0.337× | Yes |
+| W3.5 | 1024×2048×8192 | 1024×8192×2048 | 650.342 µs | 628.926 µs | 1.034× | 0.533× | 0.337× | Yes |
+| W2 | 2048×2048×8192 | 2048×8192×2048 | 1226.395 µs | 1190.070 µs | 1.031× | 0.584× | 0.378× | Yes |
+| W2.5 | 2048×2048×8192 | 2048×8192×2048 | 1273.994 µs | 1221.966 µs | 1.043× | 0.569× | 0.368× | Yes |
+| W3 | 2048×2048×8192 | 2048×8192×2048 | 1271.018 µs | 1219.674 µs | 1.042× | 0.570× | 0.369× | Yes |
+| W3.5 | 2048×2048×8192 | 2048×8192×2048 | 1231.838 µs | 1222.861 µs | 1.007× | 0.569× | 0.368× | Yes |
+
+All eight cells improve, replay through CUDA Graphs, and remain below
+`1.133e-6` maximum absolute error. Artifact:
+`artifacts/qvq_hopper_large_m/v4_reuse11_m1024_m2048_candidate.json`.
