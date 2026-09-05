@@ -10,6 +10,8 @@ import time
 from types import SimpleNamespace
 from pathlib import Path
 
+import pytest
+
 from gptqmodel.utils import cpp as cpp_module
 from gptqmodel.utils import swordfish
 
@@ -463,6 +465,53 @@ def test_cuda_cache_fingerprint_ignores_compiler_parallelism(tmp_path):
 
     assert serial == parallel
     assert serial != different_codegen
+
+
+def test_extension_fingerprint_ignores_unrelated_extension_sources(tmp_path):
+    """A QVQ edit must not produce a new Marlin or Machete cache identity."""
+
+    qvq_source = tmp_path / "qvq_kernel.cu"
+    marlin_source = tmp_path / "marlin_kernel.cu"
+    machete_source = tmp_path / "machete_kernel.cu"
+    qvq_source.write_text("int qvq_kernel() { return 1; }\n", encoding="utf-8")
+    marlin_source.write_text("int marlin_kernel() { return 2; }\n", encoding="utf-8")
+    machete_source.write_text("int machete_kernel() { return 3; }\n", encoding="utf-8")
+    qvq = _make_loader(tmp_path, name="qvq", sources=[str(qvq_source)])
+    marlin = _make_loader(tmp_path, name="marlin", sources=[str(marlin_source)])
+    machete = _make_loader(tmp_path, name="machete", sources=[str(machete_source)])
+
+    before = (qvq._cache_fingerprint(), marlin._cache_fingerprint(), machete._cache_fingerprint())
+    qvq_source.write_text("int qvq_kernel() { return 4; }\n", encoding="utf-8")
+    after = (qvq._cache_fingerprint(), marlin._cache_fingerprint(), machete._cache_fingerprint())
+
+    assert after[0] != before[0]
+    assert after[1:] == before[1:]
+
+
+def test_extension_specific_cache_clear_preserves_other_extensions(tmp_path):
+    """Extension-local rebuilds must never remove sibling kernel caches."""
+
+    qvq_root = tmp_path / "qvq"
+    marlin_root = tmp_path / "marlin"
+    qvq = _make_loader(tmp_path, default_build_root=lambda: qvq_root)
+    marlin = _make_loader(
+        tmp_path,
+        name="marlin",
+        namespace="marlin_ns",
+        required_ops=("gemm",),
+        default_build_root=lambda: marlin_root,
+    )
+    qvq_marker = qvq.build_root() / "qvq.so"
+    marlin_marker = marlin.build_root() / "marlin.so"
+    qvq_marker.parent.mkdir(parents=True)
+    marlin_marker.parent.mkdir(parents=True)
+    qvq_marker.write_bytes(b"qvq")
+    marlin_marker.write_bytes(b"marlin")
+
+    qvq.clear_cache()
+
+    assert not qvq_marker.exists()
+    assert marlin_marker.exists()
 
 
 def test_default_torch_ops_build_root_ignores_removed_global_override(monkeypatch):

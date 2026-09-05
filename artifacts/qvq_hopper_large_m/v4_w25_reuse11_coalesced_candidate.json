@@ -1,0 +1,87 @@
+{
+  "comparison": "native grouped large-M QVQ versus ordinary QVQ and W4 baselines",
+  "device": {
+    "compute_capability": "9.0",
+    "memory_bytes": 102077169664,
+    "name": "NVIDIA H100",
+    "sm_count": 132,
+    "uuid": "GPU-f5ea03cf-efa4-9807-7de5-b174957a1348"
+  },
+  "git_commit": "35e17be2ead12f26c685a893e0a462c3a6f4e36c",
+  "previous_artifacts": [
+    "artifacts/qvq_hopper_large_m/v4_reuse11_m512_candidate.json"
+  ],
+  "rows": [
+    {
+      "better_than_last_benchmark": true,
+      "better_than_plain_qvq": true,
+      "bits": 2.5,
+      "dense_oracle_error": {
+        "max_abs": 9.5367431640625e-07,
+        "mean_abs": 1.5778181250425405e-07,
+        "relative_l2": 0.6744150409458107,
+        "rmse": 1.9927558273749995e-07
+      },
+      "down_mkn": [
+        512,
+        8192,
+        2048
+      ],
+      "effective_tflops": 158.91277487581726,
+      "m": 512,
+      "machete_w4": {
+        "max_us": 120.77759504318237,
+        "mean_us": 117.44883179664612,
+        "median_us": 117.61279702186584,
+        "min_us": 115.9216046333313,
+        "p95_us": 120.39680480957031
+      },
+      "marlin_w4": {
+        "max_us": 166.20320081710815,
+        "mean_us": 164.20019245147705,
+        "median_us": 164.34720158576965,
+        "min_us": 162.4832034111023,
+        "p95_us": 165.8400058746338
+      },
+      "mkn": [
+        512,
+        2048,
+        8192
+      ],
+      "plain_qvq": {
+        "max_us": 559.3071937561035,
+        "mean_us": 541.998815536499,
+        "median_us": 540.4671907424927,
+        "min_us": 533.2352161407471,
+        "p95_us": 559.1616153717041
+      },
+      "previous_qvq": {
+        "max_us": 339.247989654541,
+        "mean_us": 335.03353548049927,
+        "median_us": 335.82799434661865,
+        "min_us": 329.3423891067505,
+        "p95_us": 337.57920265197754
+      },
+      "qvq": {
+        "max_us": 325.1231908798218,
+        "mean_us": 320.5809907913208,
+        "median_us": 324.32639598846436,
+        "min_us": 314.12479877471924,
+        "p95_us": 324.97119903564453
+      },
+      "selected_chunk_rows": null,
+      "speedup_vs_machete_w4": 0.36263714109180645,
+      "speedup_vs_marlin_w4": 0.5067339680598034,
+      "speedup_vs_plain_qvq": 1.6664298602501537
+    }
+  ],
+  "source_fingerprint": "94d8e1756fa0b9c726a11b3a646c9188db25d1d332f39534764d619da2c8d1df",
+  "timing": {
+    "cpu_time_included": false,
+    "method": "warmed CUDA Graph replay timed by CUDA events",
+    "replays_per_sample": 20,
+    "samples": 50,
+    "warmup": 20
+  },
+  "workload": "complete Llama 3.2 1B gate/up/SiLU/product/down MLP"
+}
