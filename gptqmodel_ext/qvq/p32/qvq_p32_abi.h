@@ -28,7 +28,7 @@ extern "C" {
 #define QVQ_P32_GROUP_COUNT_MAX 3
 #define QVQ_P32_ROW_GROUPS_AUTO 0
 #define QVQ_P32_ROW_GROUPS_MIN 1
-#define QVQ_P32_ROW_GROUPS_MAX 8
+#define QVQ_P32_ROW_GROUPS_MAX 16
 
 // Kernel variants are compile-time specializations selected by the host
 // tuner. The scalar variant is intended for small M; the block variant
@@ -95,7 +95,7 @@ int qvq_p32_window(
 
 // Explicit large-M scheduling entry point for compiler-owned autotuners.
 // `row_groups` selects how many adjacent M16 tiles share one packed weight
-// decode and must be 1, 2, 4, or 8. The legacy qvq_p32_window entry point
+// decode and must be 1, 2, 4, 8, or 16. The legacy qvq_p32_window entry point
 // retains QvQ's automatic row-group policy for framework callers that do not
 // own this tuning axis.
 int qvq_p32_window_with_row_groups(
