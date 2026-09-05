@@ -162,3 +162,84 @@ The opcode audit shows the decoder math is essentially unchanged; the small
 instruction increase is the shared transpose and vector-store plumbing. The
 win comes from eliminating conflicting/scattered output transactions, not
 from reducing arithmetic. No spills are reported.
+
+## Phase 3: paired, bounded FP16 recovery-low
+
+The Phase-2 trace identified the first eight gate/up output-Hadamard stages as
+the next largest removable boundary: two projection-major grids consumed
+about 52 microseconds at M512. Gate and up have identical butterfly geometry,
+but previously repeated CTA address/control/barrier work independently.
+
+One Phase-3 CTA now owns the matching gate and up 256-column tiles. It first
+computes conservative per-projection L1 bounds. When both bounds are at most
+64000, no intermediate in the eight-stage tile transform can overflow FP16,
+so gate and up occupy the low/high lanes of one `half2` value:
+
+```text
+packed[c] = half2(gate[c], up[c])
+packed[c], packed[c xor bit] =
+    half2_add_sub(packed[c], packed[c xor bit])
+```
+
+Every lane still receives the same independently rounded FP16 sum or
+difference as the prior scalar FP32-add-then-convert sequence. The 1504-value
+margin below FP16 maximum also absorbs floating reduction error. If either
+bound is unsafe, the entire CTA executes the original scalar FP32,
+`round_fp16_unless_overflow` path. The output workspace layout and the later
+recovery/SwiGLU/down-precondition kernel are unchanged.
+
+The focused physical-H100 tests cover M32 and M512 exactness, CUDA Graph
+capture/replay, and a deliberately high-magnitude M32 case that forces the
+overflow fallback. All three pass with exact FP16 bit equality.
+
+The production artifact was generated from executable commit `8f6eb84e` with
+CUDA Graph replay and CUDA-event timing after a three-sample idle-H100 gate.
+`Better than last` compares strict medians with Phase 2.
+
+| Weight | MLP MKN (gate/up; down) | Phase 2 | Phase 3 | Speedup | vs merged main | vs Marlin W4 | vs Machete W4 | Better than last |
+|---|---|---:|---:|---:|---:|---:|---:|:---:|
+| W2 | 128x2048x8192; 128x8192x2048 | 111.314 us | 107.290 us | 1.038x | 1.140x | 0.740x | 0.682x | Yes |
+| W2 | 512x2048x8192; 512x8192x2048 | 379.795 us | 369.216 us | 1.029x | 1.113x | 0.449x | 0.317x | Yes |
+| W2 | 4096x2048x8192; 4096x8192x2048 | 2887.635 us | 2794.330 us | 1.033x | 1.130x | 0.487x | 0.307x | Yes |
+| W2.5 | 128x2048x8192; 128x8192x2048 | 112.474 us | 109.856 us | 1.024x | 1.127x | 0.723x | 0.666x | Yes |
+| W2.5 | 512x2048x8192; 512x8192x2048 | 386.990 us | 373.018 us | 1.037x | 1.133x | 0.445x | 0.313x | Yes |
+| W2.5 | 4096x2048x8192; 4096x8192x2048 | 2915.539 us | 2804.438 us | 1.040x | 1.143x | 0.485x | 0.305x | Yes |
+| W3 | 128x2048x8192; 128x8192x2048 | 113.401 us | 109.011 us | 1.040x | 1.124x | 0.728x | 0.671x | Yes |
+| W3 | 512x2048x8192; 512x8192x2048 | 381.948 us | 372.019 us | 1.027x | 1.130x | 0.446x | 0.314x | Yes |
+| W3 | 4096x2048x8192; 4096x8192x2048 | 2946.670 us | 2834.234 us | 1.040x | 1.123x | 0.480x | 0.302x | Yes |
+| W3.5 | 128x2048x8192; 128x8192x2048 | 111.954 us | 107.578 us | 1.041x | 1.148x | 0.738x | 0.680x | Yes |
+| W3.5 | 512x2048x8192; 512x8192x2048 | 392.659 us | 377.283 us | 1.041x | 1.149x | 0.440x | 0.310x | Yes |
+| W3.5 | 4096x2048x8192; 4096x8192x2048 | 2978.757 us | 2869.104 us | 1.038x | 1.144x | 0.475x | 0.299x | Yes |
+
+All twelve cells improve. The geometric-mean speedup is `1.0355x` over Phase
+2 and `1.1337x` cumulatively over merged PR-112 main. The Marlin and Machete
+W4 geometric ratios are `0.5394x` and `0.4003x`. Maximum and maximum-row-mean
+absolute error against the dense P32 Torch oracle are `1.073e-6` and
+`1.585e-7`, respectively.
+
+### Exact-commit Nsight Compute and SASS audit
+
+Matched M512 reports were collected from commit `8f6eb84e` with Nsight
+Compute 2026.2.1 using the same seven profiling sections as Phases 1 and 2.
+The plain and paired kernels coexist in that executable, so compiler flags,
+inputs, and the physical H100 are identical.
+
+| Metric | Projection-major scalar | Paired bounded FP16 | Change |
+|---|---:|---:|---:|
+| Grid blocks | 1024 | 512 | -50% |
+| NCU duration | 51.07 us | 32.51 us | 1.571x |
+| Executed instructions | 38.27 M | 22.61 M | -40.93% |
+| Registers/thread | 18 | 28 | +10 |
+| Static shared memory/block | 1.06 KiB | 2.19 KiB | +1.13 KiB |
+| Achieved occupancy | 90.54% | 91.06% | +0.52 point |
+| Eligible warps/scheduler | 2.97 | 2.59 | -0.38 |
+| DRAM throughput | 38.03% | 59.30% | +21.27 points |
+
+Source-correlated emitted SASS confirms algebraic packing. Dynamic
+`F2FP.F16.F32.PACK_AB` falls from 3.93M to 0.66M, `HADD2.F32` unpack work
+from 3.93M to 0.79M, `FSETP`/`FSEL` overflow checks from 2.62M each to 0.52M
+each, and shuffle butterflies from 1.31M to 0.66M. The safe path replaces
+that scalar representation with 0.85M native packed FP16 add/sub operations.
+The added absolute-bound reduction accounts for 1.31M shuffle-down and part
+of the retained FP32-add stream. Reports remain outside Git at
+`/tmp/qvq_v3_phase3_{plain,packed}_low_w3_m512.ncu-rep`.
