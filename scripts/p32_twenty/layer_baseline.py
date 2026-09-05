@@ -21,6 +21,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--module")
+    parser.add_argument("--row-reuse", type=int, choices=(1, 2, 4, 8, 16))
     parser.add_argument(
         "--m-values", nargs="+", type=int, default=[1, 2, 4, 8, 16, 32, 128, 512, 2048]
     )
@@ -190,6 +191,13 @@ def main():
                 )
 
             def ampere(z):
+                if args.row_reuse and z.shape[0] > args.row_reuse:
+                    return torch.cat([
+                        qvq_p32_window_ampere(
+                            chunk, window, levels, bank, bits,
+                            out_features=N, bank_alt_id=aid,
+                        ) for chunk in z.split(args.row_reuse)
+                    ], dim=0)
                 return qvq_p32_window_ampere(
                     z, window, levels, bank, bits, out_features=N, bank_alt_id=aid
                 )
@@ -233,6 +241,8 @@ def main():
                 "K": K,
                 "N": N,
                 "bits": bits,
+                "row_reuse_limit": args.row_reuse,
+                "row_reuse_scope": "existing-kernel row-group ablation; includes extra launches and concatenation",
                 "output_dtype": "float32",
                 "operand_dtype": "float16",
                 "transforms_dtype": "float32",
