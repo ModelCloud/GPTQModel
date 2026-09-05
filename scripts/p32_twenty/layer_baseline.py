@@ -20,6 +20,9 @@ SNAPSHOT = Path(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", action="store_true")
+    parser.add_argument("--fused-block-m", type=int, choices=(16,32,64))
+    parser.add_argument("--fused-block-n", type=int, choices=(32,64), default=32)
+    parser.add_argument("--fused-split", type=int, default=1)
     parser.add_argument("--module")
     parser.add_argument("--row-reuse", type=int, choices=(1, 2, 4, 8, 16))
     parser.add_argument(
@@ -260,6 +263,29 @@ def main():
                 "payload_bytes": t.numel() * t.element_size(),
                 "resident_reference_bytes": inner.numel() * inner.element_size(),
             }
+            if args.fused_block_m:
+                from scripts.p32_twenty.fused_window_gemm import fused_window_mm
+
+                def fused(z):
+                    return fused_window_mm(
+                        z, window, levels, bank, bits, out_features=N,
+                        bank_alt_id=aid, block_m=args.fused_block_m,
+                        block_n=args.fused_block_n, split=args.fused_split,
+                    )
+
+                fused_output = full(fused)
+                row["fused"] = {
+                    "block_m": args.fused_block_m,
+                    "block_n": args.fused_block_n,
+                    "split": args.fused_split,
+                    "metrics": layer_metrics(fused_output, teacher),
+                    "vs_window": layer_metrics(fused_output, candidate),
+                    "inner": timing(lambda: fused(transformed)),
+                    "full": timing(lambda: full(fused)),
+                }
+                row["fused"]["speedup_vs_window"] = (
+                    row["candidate_full"]["median_ms"] / row["fused"]["full"]["median_ms"]
+                )
             row["full_speedup"] = (
                 row["baseline_full"]["median_ms"] / row["candidate_full"]["median_ms"]
             )

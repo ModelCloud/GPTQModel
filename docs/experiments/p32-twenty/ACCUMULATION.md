@@ -28,3 +28,9 @@ and model-quality confirmation remain outstanding. No kernel is promoted.
 On q projection, the fastest FP16-partial variants were approximately 0.962x,
 1.000x, and 1.001x the FP32 baseline at M=1,16,2048 respectively. These measurements
 do not establish a speed benefit. Layer 1 gate/down follow-ups are running.
+
+The layer-1 follow-up is complete: gate passes 144/144; down passes 84/144.
+Layer-1 down FP16 partials pass 30/45 (worst MAE 0.0134636, max 0.0623979);
+emulated BF16 passes 0/45 (worst MAE 0.0737277, max 0.340031).
+FP32 and blockwise FP32 pass all their cases, with worst MAE approximately
+0.0027303. These failures remain recorded; no further gate relaxation is applied.
