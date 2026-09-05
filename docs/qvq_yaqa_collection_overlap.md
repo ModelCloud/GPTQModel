@@ -325,3 +325,28 @@ source/SASS audit. No exclusions or mocked GPU math were added to raise coverage
 The first module-name coverage filter triggered a NumPy repeated-import error;
 using the source-directory filter completed normally. This is not a whole-repository
 coverage claim.
+
+## Commit-linked verification
+
+Code commit: `1acd13b95bcb2c4bfc3556d7e710da1385f911f5`.
+The post-commit reports `/tmp/qvq-next2x-committed-b{4,16}-audit.ncu-rep`
+record that revision and both final source hashes. All four projection captures
+have identical normalized SASS and executed opcode counts to the preceding
+phase-2 captures; see `/tmp/qvq-next2x-committed-audit-comparison.json`.
+
+After those captures, **142 tests passed, 105 deselected** in 8.66 seconds
+(`/tmp/qvq-next2x-committed-tests.log`). A fresh B16, 64-sequence, all-target run
+again compared all 800 factors bitwise to main, then performed two warmups and
+five timed repeats:
+
+```text
+repeat seconds: 3.987670, 3.988264, 3.989646, 3.989574, 4.007383
+median:         3.989574 seconds
+speedup:        2.018x versus the 8.049418-second reference median
+```
+
+The primary independent-process table above is retained rather than replacing
+its result with the slightly faster repeat. The confirmation is stored in
+`/tmp/qvq-next2x-committed-b16multi.json` with commit and source identities.
+Ruff and `git diff --check` also passed. Subsequent documentation-only changes
+do not alter the audited GPU code.
