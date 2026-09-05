@@ -10,7 +10,7 @@ from PIL import Image
 from torch import nn
 from transformers import AutoModelForCausalLM, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
@@ -41,7 +41,7 @@ class DeepSeekVLV2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_a_proj:0:q", "q_b_proj:0:q", "q_proj:0:q", "kv_a_proj_with_mqa:0:k:v", "kv_b_proj:0:k:v", "o_proj:1"),
+            "self_attn": ("q_a_proj:0:q", "q_b_proj:0:q:in=q_a", "q_proj:0:q", "kv_a_proj_with_mqa:0:k:v", "kv_b_proj:0:k:v:in=kv_a", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "": ("gate_proj:0:gate", "up_proj:0:up", "down_proj:1:down"),
@@ -164,7 +164,7 @@ class DeepSeekVLV2QModel(BaseQModel):
         del batch_size, kwargs
         processor = self.load_processor()
         calib_data = []
-        for batch in batched(calibration_dataset, 1, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(calibration_dataset, 1, process_func=self.preprocess_dataset):
             conversation = batch[0]
             inputs = processor(
                 conversations=conversation,

@@ -68,6 +68,12 @@ DEFAULT_LOG_COLUMNS: List[str] = [
 ]
 
 
+def _format_gib(value: float) -> str:
+    """Format a GiB value without unnecessary trailing zeros."""
+    text = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{text or '0'}G"
+
+
 class _SafeDict(dict):
     """Thread-safe dict subclass that protects reads, writes, and iteration.
 
@@ -954,16 +960,6 @@ class LoopProcessor:
         if not snapshot:
             return "n/a"
 
-        def _format_gib(value: float) -> str:
-            """Formats a GiB value without unnecessary trailing zeros."""
-
-            text = f"{value:.2f}"
-            if "." in text:
-                text = text.rstrip("0").rstrip(".")
-            if not text:
-                text = "0"
-            return f"{text}G"
-
         grouped: Dict[str, List[Tuple[str, float, int]]] = {}
         for order, (device_id, value) in enumerate(snapshot.items()):
             family, _, index = device_id.partition(":")
@@ -1151,6 +1147,34 @@ class LoopProcessor:
         """Override point for dropping per-subset sharing state after workers finish."""
 
         del subset, subset_index, subset_total
+
+    def begin_shared_input_capture(
+        self,
+        model: Any,
+        subset_names: List[str],
+        is_lm_head_module: bool = False,
+    ) -> Dict[str, str]:
+        """Elect Hessian capture leaders for an explicit shared-input group."""
+
+        del model, subset_names, is_lm_head_module
+        return {}
+
+    def end_shared_input_capture(self, subset_names: List[str]) -> Optional[Dict[str, Any]]:
+        """Propagate leader statistics and optionally return capture telemetry."""
+
+        del subset_names
+        return None
+
+    def register_moe_root_capture_hook(
+        self,
+        moe_block: Module,
+        moe_block_name: str,
+        handles: List[Any],
+    ) -> bool:
+        """Optionally register a processor-specific MoE-root capture hook."""
+
+        del moe_block, moe_block_name, handles
+        return False
 
     def clear_cache_data(self):
         """Drops transient task data and cached layer inputs after replay."""

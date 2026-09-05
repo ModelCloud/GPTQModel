@@ -3034,7 +3034,7 @@ def test_run_layer_stage_replays_untouched_layer_outputs_when_all_modules_skippe
         ) -> Dict[str, NamedModule]:
             subset = {}
             for name in names:
-                full_name = f"{layers_prefix}.{layer_index}.{name}"
+                full_name = f"{layers_prefix}.{name}"
                 if self.gptq_model.quantize_config.dynamic_get(layer_name=full_name) is False:
                     continue
                 subset[name] = NamedModule(
