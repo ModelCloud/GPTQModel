@@ -126,7 +126,9 @@ def test_qvq_p32_amd_folded_case_gate_enforces_accuracy_boundaries():
     assert not qvq_p32_amd_folded_case_supported(1024, 5120, 17408)
     assert qvq_p32_amd_folded_case_supported(512, 17408, 5120)
     assert qvq_p32_amd_folded_case_supported(1024, 17408, 5120)
-    assert not qvq_p32_amd_folded_case_supported(2048, 17408, 5120)
+    assert qvq_p32_amd_folded_case_supported(2048, 17408, 5120)
+    assert qvq_p32_amd_folded_case_supported(4096, 17408, 5120)
+    assert not qvq_p32_amd_folded_case_supported(4097, 17408, 5120)
 
 
 def test_qvq_p32_amd_folded_output_dtype_gate_covers_measured_regressions():
@@ -743,3 +745,30 @@ def test_attention_residual_cache_preserves_decode_prefill_transitions(bits, has
             if has_bias:
                 expected = expected + hot[23]
             assert torch.equal(actual, expected.to(torch.float16))
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not _gfx950_available(), reason="requires a ROCm gfx950 GPU")
+@pytest.mark.parametrize("bits", P32_RATES)
+def test_down_composite_cache_large_m_transitions(bits):
+    k, n = 17408, 5120
+    _, planar, _, _, bank_ids, bank_alt_id = _case(bits, 1, k=k, n=n, seed=9970)
+    layer = QVQLinear(
+        bits=bits, in_features=k, out_features=n, bank_count=2, v2b2_p32=True,
+        input_hadamard=False, output_hadamard=True,
+        tensors={"trellis": planar, "bank_ids": bank_ids, "bank_alt_id": bank_alt_id,
+                 "SU": torch.ones(k, device="cuda"), "SV": torch.full((n,), .75, device="cuda")},
+    ).eval()
+    inner = layer.get_inner_weight_tensor()
+    generator = torch.Generator(device="cuda").manual_seed(9971)
+    cache = None
+    for m in (32, 2048, 4096, 32):
+        x = torch.randn((m, k), device="cuda", dtype=torch.float16, generator=generator) * .01
+        actual = layer(x)
+        hot = layer._qvq_amd_folded_hot_cache
+        assert hot[26] is not None
+        if cache is not None:
+            assert hot is cache
+        cache = hot
+        reference = matmul_hadU(x.float() @ inner) * layer.SV
+        torch.testing.assert_close(actual.float(), reference, atol=2e-3, rtol=0)

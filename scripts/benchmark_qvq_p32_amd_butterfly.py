@@ -168,10 +168,13 @@ def main():
     permitted = set(hardware["process_ids"]) | set(
         _rocm_snapshot(args.physical_gpu)["process_ids"]
     )
-    report = {
-        "baseline": subprocess.check_output(
+    candidate_revision = subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=root, text=True
-        ).strip(),
+        ).strip()
+    report = {
+        "baseline": args.baseline_amd_commit or args.baseline_forward_commit or candidate_revision,
+        "candidate_revision": candidate_revision,
+        "isolated_baseline_caches": bool(args.baseline_amd_commit),
         "retained_kernel_baseline": "c89459e3",
         "hardware": hardware,
         "software": {
@@ -191,6 +194,7 @@ def main():
         "qvq_source_sha256": hashlib.sha256(
             (root / "gptqmodel/nn_modules/qlinear/qvq.py").read_bytes()
         ).hexdigest(),
+        "amd_source_sha256": hashlib.sha256((root / "gptqmodel/utils/qvq_amd.py").read_bytes()).hexdigest(),
         "status": "exploratory; not production promotion or model-quality evidence",
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -337,7 +341,7 @@ def main():
                     if row["accuracy_basis"] == "canonical_fp32"
                     else torch.equal(outputs["candidate"], outputs["baseline"])
                 )
-                if (m, k, n) == (1024, 17408, 5120) or ((k, n) == (6144, 5120) and m >= 64):
+                if ((k, n) == (17408, 5120) and m >= 1024) or ((k, n) == (6144, 5120) and m >= 64):
                     select("candidate")
                     stream = torch.cuda.Stream()
                     stream.wait_stream(torch.cuda.current_stream())
