@@ -298,6 +298,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_qwen_linear_composite_recovery_launches: int = 0
     h100_qwen_linear_multiblock_recovery_launches: int = 0
     h100_qwen_composite_input_launches: int = 0
+    h100_qwen_large_m_direct_down_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -394,6 +395,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_qwen_linear_composite_recovery_launches": self.h100_qwen_linear_composite_recovery_launches,
             "h100_qwen_linear_multiblock_recovery_launches": self.h100_qwen_linear_multiblock_recovery_launches,
             "h100_qwen_composite_input_launches": self.h100_qwen_composite_input_launches,
+            "h100_qwen_large_m_direct_down_launches": self.h100_qwen_large_m_direct_down_launches,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -1867,7 +1869,28 @@ class QVQHopperGroupedRuntime:
             # measured geometry.
             gate, up = self._execute(x)
             activated_gate = self._mlp_act_fn(gate)
-            return down(activated_gate * up)
+            intermediate = activated_gate * up
+            if qwen_folded_intermediate:
+                # Qwen's architecture contract removes the 17,408-wide
+                # gate/up output transforms and the down input transform.
+                # Execute the remaining down transform directly so CUDA Graph
+                # capture does not also record QVQLinear's conservative BF16
+                # overflow retry for a composite input transform that is not
+                # present. The P32 inner result and output recovery stay FP32
+                # until the ordinary final model-dtype cast.
+                transformed = down._qvq_prepare_inference_input(
+                    intermediate.reshape(rows, down.in_features),
+                    torch.float16,
+                )
+                recovered = down._forward_pretransformed_compute_dtype(
+                    transformed,
+                    torch.float16,
+                )
+                self.telemetry.h100_qwen_large_m_direct_down_launches += 1
+                return recovered.reshape(
+                    *x.shape[:-1], down.out_features
+                ).to(x.dtype)
+            return down(intermediate)
         elif qwen_folded_intermediate:
             # Qwen3.8-27B has a 17*1024 intermediate width, for which no exact
             # composite Hadamard base exists.  Its model definition therefore
