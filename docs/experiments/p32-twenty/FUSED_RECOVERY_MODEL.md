@@ -89,3 +89,17 @@ The opt-in fused alpha1 rank8 arm scored 63/128 and fused joint-rank8 scored
 (seed72). These are exploratory task results; no paired significance or P32
 post-quant advantage is claimed. Complete reports are archived under
 `results/quality/`.
+
+## Cross-GPU runtime reproducibility
+
+The integrated alpha1 rank8 route completed all 81 harness cases on three
+additional A100-class devices. All nine integrated cases per device passed both
+local gates and matched CUDA Graph replay. Graph median latencies at M=1/16/2048
+were 0.027648/0.060416/3.334144 ms on GPU0,
+0.027648/0.060416/3.319808 ms on GPU2, and
+0.028672/0.060416/3.317760 ms on GPU3. These are operator timings, not
+full-model inference timings.
+
+[GPU0](results/rank8-targeted/cross-gpu/runtime-gpu0.json),
+[GPU2](results/rank8-targeted/cross-gpu/runtime-gpu2.json), and
+[GPU3](results/rank8-targeted/cross-gpu/runtime-gpu3.json).
