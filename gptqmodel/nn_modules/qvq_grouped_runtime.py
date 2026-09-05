@@ -906,11 +906,21 @@ class QVQHopperGroupedRuntime:
             self.telemetry.ordered_split_launches += 1
             return partials
 
+        use_qwen_large_m_reuse = (
+            children[0].in_features == 5120
+            and tuple(child.out_features for child in children)
+            == (17408, 17408)
+        )
         use_h100_reuse11_gate_up = (
             rows in (512, 1024, 2048, 4096)
-            and self._h100_multiblock_intermediate_enabled
-            and children[0].in_features == 2048
             and all(segment.split_count == 1 for segment in payload.plan.segments)
+            and (
+                (
+                    self._h100_multiblock_intermediate_enabled
+                    and children[0].in_features == 2048
+                )
+                or use_qwen_large_m_reuse
+            )
         )
         if use_h100_reuse11_gate_up:
             reuse11_rows = rows + rows // 32
@@ -924,9 +934,15 @@ class QVQHopperGroupedRuntime:
         use_h100_reuse8_gate_up = (
             padded.shape[0] >= 128
             and padded.shape[0] % 128 == 0
-            and self._h100_multiblock_intermediate_enabled
-            and children[0].in_features == 2048
             and all(segment.split_count == 1 for segment in payload.plan.segments)
+            and (
+                self._h100_multiblock_intermediate_enabled
+                or use_qwen_large_m_reuse
+            )
+            and (
+                children[0].in_features == 2048
+                or use_qwen_large_m_reuse
+            )
         )
         if use_h100_reuse11_gate_up:
             grouped_inner = qvq_p32_window_wgmma_grouped_reuse11_packed
@@ -956,8 +972,13 @@ class QVQHopperGroupedRuntime:
                 qvq_p32_window_wgmma_grouped_reuse11_packed,
             )
             and padded.shape[0] >= 128
-            and self._h100_multiblock_intermediate_enabled
-            and children[0].in_features == 2048
+            and (
+                (
+                    self._h100_multiblock_intermediate_enabled
+                    and children[0].in_features == 2048
+                )
+                or use_qwen_large_m_reuse
+            )
             and all(segment.split_count == 1 for segment in payload.plan.segments)
         ):
             self.telemetry.h100_wide_reuse_gate_up_launches += 1
