@@ -417,11 +417,11 @@ def _qvq_p32_composite_hadamard_constants(
 
 @triton.jit
 def _qvq_p32_composite_recovery_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
-    staged_ptr,
+    pre_hadamard_ptr,
+    power_ptr,
     base_ptr,
     sv_ptr,
     output_ptr,
-    size_m: tl.constexpr,
     size_n: tl.constexpr,
     base_size: tl.constexpr,
     base_pad: tl.constexpr,
@@ -429,22 +429,28 @@ def _qvq_p32_composite_recovery_gfx950_kernel(  # pragma: no cover - compiled an
     block_p: tl.constexpr,
     inv_sqrt_n: tl.constexpr,
 ):
-    """Finish the composite output Hadamard, SV scale, and output cast."""
+    """Fuse both composite output-Hadamard factors, SV scale, and cast."""
 
     row = tl.program_id(0)
     position = tl.program_id(1) * block_p + tl.arange(0, block_p)
     output_base = tl.arange(0, base_pad)
-    reduction_base = tl.arange(0, base_pad)
-    base = tl.load(base_ptr + output_base[:, None] * base_pad + reduction_base[None, :])
-    values = tl.load(
-        staged_ptr
+    power_input = tl.arange(0, power_width)
+    pre_hadamard = tl.load(
+        pre_hadamard_ptr
         + row * size_n
-        + reduction_base[:, None] * power_width
-        + position[None, :],
-        mask=reduction_base[:, None] < base_size,
+        + output_base[:, None] * power_width
+        + power_input[None, :],
+        mask=output_base[:, None] < base_size,
         other=0.0,
     )
-    transformed = tl.dot(base, values, input_precision="ieee")
+    power = tl.load(
+        power_ptr + power_input[:, None] * power_width + position[None, :]
+    )
+    staged = tl.dot(pre_hadamard, power, input_precision="ieee")
+    base = tl.load(
+        base_ptr + output_base[:, None] * base_pad + output_base[None, :]
+    )
+    transformed = tl.dot(base, staged, input_precision="ieee")
     columns = output_base[:, None] * power_width + position[None, :]
     scale = tl.load(sv_ptr + columns, mask=output_base[:, None] < base_size, other=0.0)
     tl.store(
@@ -497,22 +503,18 @@ def _qvq_p32_folded_execute(
     if composite_recovery is not None:
         padded_base, power, base_size, power_width, sv = composite_recovery
         pre_hadamard = torch.mm(x, operand, out_dtype=torch.float32)
-        staged = torch.mm(
-            pre_hadamard.view(m * base_size, power_width),
-            power,
-        ).view(m, base_size, power_width)
         output = torch.empty(
             (m, n),
             device=x.device,
             dtype=torch.float32 if output_fp32 else x.dtype,
         )
-        block_p = 16 if m <= 8 else 32 if m <= 64 else 64
+        block_p = 32 if m <= 64 else 64
         _qvq_p32_composite_recovery_gfx950_kernel[(m, power_width // block_p)](
-            staged,
+            pre_hadamard,
+            power,
             padded_base,
             sv,
             output,
-            size_m=m,
             size_n=n,
             base_size=base_size,
             base_pad=padded_base.shape[0],
