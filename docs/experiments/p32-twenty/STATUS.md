@@ -103,3 +103,7 @@ window and per-module policy on four GPUs each. It resolves the wave20 M=1
 control anomaly and measures a pooled policy speedup of 1.294x at M=512 and
 1.366x at M=2048, while policy remains slower at smaller M and in decode.
 Downstream quality and complete profiling remain open.
+
+[Window quality wave23 partial](WINDOW_QUALITY_WAVE23_PARTIAL.md) has two
+identical production-window ARC repeats at 390/1172 raw and 428/1172
+length-normalized. Policy ARC and both-arm GSM8K repeats are still running.
