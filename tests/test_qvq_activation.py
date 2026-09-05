@@ -679,33 +679,63 @@ def test_h200_fp8_replay_reencodes_from_immutable_dense_teacher_and_executes_nat
         },
         offload_to_disk=False,
     )
-    named = NamedModule(linear, name="proj", full_name="proj", layer_index=0)
+    root = torch.nn.Module()
+    root.proj = linear
+    named = NamedModule(root.proj, name="proj", full_name="proj", layer_index=0)
     task_entry = {
         "fp8_replay_rows": [(calibration_input, native_teacher)],
         "fp8_replay_stats": None,
     }
     processor = object.__new__(QVQProcessor)
-
-    selected = processor._fp8_replay_reencode(
-        named,
-        qcfg,
-        canonical_weight,
-        source_hessian,
-        quantization_kwargs,
-        first_result,
-        task_entry,
+    processor.qcfg = qcfg
+    processor._module_replay_model = SimpleNamespace(model=root)
+    processor._module_replay_lock = threading.RLock()
+    baseline = {
+        "kl_forward": 0.2,
+        "mean_nll": 1.0,
+        "top1_agreement": 0.99,
+        "top5_overlap": 0.99,
+        "top10_overlap": 0.99,
+        "tokens": 32,
+    }
+    better = {**baseline, "kl_forward": 0.1, "mean_nll": 0.9}
+    nll_regression = {**baseline, "kl_forward": 0.1, "mean_nll": 1.1}
+    propagated_improves = dtype == torch.float16
+    replay_metrics = (
+        [baseline, baseline, better, better, baseline, better]
+        if propagated_improves
+        else [baseline, baseline, nll_regression, nll_regression]
     )
+
+    with patch.object(processor, "_module_replay_metrics", side_effect=replay_metrics):
+        selected = processor._fp8_replay_reencode(
+            named,
+            qcfg,
+            canonical_weight,
+            source_hessian,
+            quantization_kwargs,
+            first_result,
+            task_entry,
+        )
 
     assert torch.equal(canonical_weight, immutable_weight)
     assert torch.equal(selected.SU, first_result.SU)
     assert torch.equal(selected.SV, first_result.SV)
     stats = task_entry["fp8_replay_stats"]
-    assert stats["schema"] == "qvq.fp8-target-replay.v1"
+    assert stats["schema"] == "qvq.fp8-target-replay.v2"
     assert stats["source"] == "immutable_original_dense_weight"
     assert stats["rows"] == 16
     assert stats["train_rows"] == 14
     assert stats["validation_rows"] == 2
     assert stats["ridge_prior"] == "immutable_original_dense_inner_target"
+    assert stats["selection_horizon"] == "final_logits"
+    assert stats["search_folds"] == 2
+    assert stats["search_passed"] is propagated_improves
+    assert stats["search_nll_passed"] is propagated_improves
+    assert stats["confirmation_passed"] is propagated_improves
+    assert stats["selected"] is propagated_improves
+    if not propagated_improves:
+        assert stats["search_worst_kl_ratio"] < 0.9
     assert stats["native_first_executed"] == 1
     assert stats["native_second_executed"] == 1
     assert selected.telemetry["fp8_target_replay"] == stats
@@ -726,6 +756,14 @@ def test_qvq_a8_rejects_incompatible_weight_formats_and_rates():
             format="qvq_v2b2_p32",
             rounding="block_ldlq",
             activation=True,
+            offload_to_disk=False,
+        )
+    with pytest.raises(ValueError, match="target=.*p32_operand"):
+        QVQConfig(
+            bits=2,
+            format="qvq_v2b2_p32",
+            rounding="block_ldlq",
+            activation={"target": "linear_input", "replay_passes": 1},
             offload_to_disk=False,
         )
 

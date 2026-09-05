@@ -802,11 +802,21 @@ one. The recommended `target="p32_operand"` flow keeps the first Block-LDLQ enco
 then applies A8 only at the post-SU/Hadamard operand boundary used by inference. Per-module logs report A8 RMSE,
 relative RMSE, maximum absolute error, and observed scale range separately from the weight-codec loss.
 
-`replay_passes=1` explicitly opts into an experimental second encode fitted to the deployed E4M3 operand. It is
-default-disabled because module-local held-out MSE did not predict propagated model quality on Llama-3.2-1B. The
-legacy `target="linear_input"` experiment still accumulates the GPTQ-style input Hessian from dequantized
-`Q_A8(X)`. YAQA supports that linear-input boundary; it rejects `p32_operand` until its Sketch-B collector can observe
-the post-SU/Hadamard boundary directly.
+`replay_passes=1` explicitly opts into an experimental second encode fitted to the deployed E4M3 operand. Candidate
+promotion requires explicit `module_replay_search_calibration` and `module_replay_confirmation_calibration` streams,
+both disjoint from ordinary calibration and from each other. Two search folds must each improve final-logit KL by at
+least 10% without increasing teacher-forced next-token NLL; a separate confirmation split must repeat both conditions
+without reducing Top-1/5/10 agreement by more than 0.25 percentage points. Module-local held-out MSE remains
+diagnostic and cannot promote a candidate.
+
+Ready-to-run configs are `scripts/configs/llama32_1b_v2b2_p32_w35a16.json`,
+`scripts/configs/llama32_1b_v2b2_p32_w35a8_fp8.json`, and the experimental
+`scripts/configs/llama32_1b_v2b2_p32_w35a8_fp8_replay.json`. With the replay config and
+`scripts/qvq_quantize.py`, also supply explicit `--replay-search-*` and `--replay-confirmation-*` dataset slices.
+Replay remains default-disabled. The legacy
+`target="linear_input"` experiment still accumulates the GPTQ-style input Hessian from dequantized `Q_A8(X)`. YAQA
+supports that linear-input boundary; it rejects `p32_operand` until its Sketch-B collector can observe the
+post-SU/Hadamard boundary directly.
 
 This follows the calibration boundary demonstrated by Together's
 [NVFP4 Hessian change](https://github.com/togethercomputer/GPTQModel/commit/96cc70621b86477ba01c10d678944f9796507f6c): curvature must be built from the activation values the deployed kernel

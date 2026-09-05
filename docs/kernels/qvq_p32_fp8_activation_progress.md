@@ -162,7 +162,7 @@ W2/W2.5/W3/W3.5 at M=1/16/17/32/64, and W3.5 at
 M=1/2/4/8/16/17/32/64/128/256/512/1024/2048/4096 across three seeds. The new
 grid is exact to the deployed E4M3 operand/weight reference at every point.
 
-### Phase 4.5 — experimental FP8-targeted quantization replay (implemented, default disabled)
+### Phase 4.5 — FP8-targeted quantization replay with propagated gate (implemented, opt-in)
 
 The calibration objective now describes the exact scaled E4M3 operand grid
 used by the deployed kernel, following the NVFP4 branch's deployed-operand
@@ -187,15 +187,25 @@ weights:
    This prior-centered ridge preserves null-space directions when replay rows
    are fewer than K. Perform exactly one new P32 encode of `W*`; reconstructed
    P32 weights are never recursively quantized.
-6. Run both serialized candidates through `kernel_mode=require` on disjoint
-   held-out native teacher rows. Select the re-encode only when its full module
-   output MSE is no worse. Persist row counts, G/C shapes, damping, both losses,
-   selection, source provenance, and native-kernel execution counters.
+6. Run both serialized candidates through `kernel_mode=require` on held-out
+   native teacher rows and retain full-module output MSE as diagnostic evidence.
+   It cannot promote a candidate.
+7. Install each complete candidate into the live sequentially quantized model.
+   On explicit prompt-disjoint replay streams, require two search folds to each
+   improve final-logit KL by at least 10% without increasing teacher-forced
+   next-token NLL, then require a separate confirmation split to repeat both
+   conditions while keeping Top-1/5/10 agreement within
+   0.25 percentage points of the first encoding. Restore the authoritative live
+   module transactionally after every comparison.
 
-The flow is optional: `replay_passes=0` disables it, while
-`replay_passes=1` explicitly enables the module-local experiment. A focused
-H200 test passes the entire native-teacher/first-encode/FP8-replay/re-encode/
-held-out sequence and proves both candidates execute the native kernel.
+The flow is optional: `replay_passes=0` disables it. `replay_passes=1` requires
+explicit search and confirmation calibration streams, caches immutable dense
+FP32 logits before quantization, and enables the propagated experiment. A
+focused H200 test passes the entire native-teacher/first-encode/FP8-replay/
+re-encode/final-logit-selection sequence and proves both candidates execute the
+native kernel. Telemetry schema `qvq.fp8-target-replay.v2` records local MSE,
+both search-fold metric sets, worst KL ratio, confirmation metrics, thresholds,
+native execution counts, and the final decision.
 
 Post-merge inspection of the fresh Llama-3.2-1B W3.5A8 artifact found that the
 module-local gate selected five second encodes: layer-0 Q/K/V and down, plus
@@ -210,10 +220,38 @@ weights produced:
 | 256--319 | 18,692 | 0.06345 | 0.06930 | 4.0861 | 4.1549 |
 | 320--383 | 18,501 | 0.05906 | 0.06200 | 3.8262 | 3.8556 |
 
-The locally accepted replay is therefore a clear negative at the propagated
-model boundary. `replay_passes` now defaults to zero while the implementation
-and explicit opt-in remain available for development of a block/logit-level
-acceptance gate.
+The locally accepted replay was therefore a clear negative at the propagated
+model boundary. `replay_passes` remains default-zero, and the implemented
+final-logit gate prevents local reconstruction MSE from deciding which packed
+candidate is serialized.
+
+A fresh H200 run then exercised the propagated gate across all 112 Llama-3.2-1B
+linears using ordinary calibration rows 0--127, search rows 128--135, and
+confirmation rows 136--143. A 0.1% KL floor admitted 13 candidates and still
+regressed held-out KL. Raising the floor to 2% and requiring non-increasing NLL
+on every search fold and confirmation admitted only layer-0 `q_proj` and
+layer-5 `v_proj`; this improved PPL and Top-1 on two untouched splits but mean
+KL was still 1.25% and 2.48% above the independent no-replay run. The strongest
+accepted candidate showed 7.1% worst-fold search improvement and 8.1%
+confirmation improvement, so the fail-closed floor is locked at 10%. None of
+the observed candidates can alter the deployed weights under that policy.
+
+The resulting safe baseline comparison, with no replay candidate promoted, is:
+
+| rows | format | PPL | mean KL | dense Top-1 | dense Top-5 | dense Top-10 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 256--319 | dense BF16 | 3.92341 | 0 | 1 | 1 | 1 |
+| 256--319 | W3.5A16 | 4.01642 | 0.040683 | 0.922159 | 0.880698 | 0.881580 |
+| 256--319 | W3.5A8 safe | 4.08612 | 0.063448 | 0.901669 | 0.851316 | 0.853098 |
+| 320--383 | dense BF16 | 3.66903 | 0 | 1 | 1 | 1 |
+| 320--383 | W3.5A16 | 3.75366 | 0.037104 | 0.926166 | 0.889541 | 0.887341 |
+| 320--383 | W3.5A8 safe | 3.82621 | 0.059059 | 0.904492 | 0.861532 | 0.859256 |
+
+Both A8 evaluations executed all 7,168 requested P32 linears natively with zero
+fallbacks or rejections. Their caches contained only E4M3 payloads plus FP32
+row scales, used 53.1--65.4% of dense BF16 cache storage, issued 8,192 native QK
+and 8,192 native PV FP8 launches, and reported zero dequantized elements or
+dense-prefix materializations.
 
 The comparison boundary is the real FP32 WGMMA accumulator followed by the
 existing output recovery and BF16 model cast. The accumulator itself is not

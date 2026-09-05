@@ -1,0 +1,18 @@
+{
+  "bits": 3.5,
+  "format": "qvq_v2b2_p32",
+  "bank_count": 2,
+  "rounding": "block_ldlq",
+  "device": "cuda:0",
+  "offload_to_disk": false,
+  "activation": {
+    "bits": 8,
+    "format": "float8_e4m3fn",
+    "scale_method": "dynamic_per_token",
+    "target": "p32_operand",
+    "kernel_mode": "require",
+    "replay_passes": 0,
+    "replay_max_rows": 2048,
+    "replay_validation_fraction": 0.125
+  }
+}

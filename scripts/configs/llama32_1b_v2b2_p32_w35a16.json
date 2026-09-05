@@ -1,0 +1,8 @@
+{
+  "bits": 3.5,
+  "format": "qvq_v2b2_p32",
+  "bank_count": 2,
+  "rounding": "block_ldlq",
+  "device": "cuda:0",
+  "offload_to_disk": false
+}

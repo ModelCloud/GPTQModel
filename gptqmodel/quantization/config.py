@@ -6263,12 +6263,12 @@ class EXL3Config(BaseQuantizeConfig):
 class QVQActivationConfig:
     """Optional FP8 activation target for the V2B2-P32 weight codec.
 
-    Dynamic per-token scaling is shared by calibration and inference, so the
-    Hessian sees the same A8 values consumed by the runtime without retaining
-    a calibration-sized activation cache or introducing order-dependent
-    observer state. Enabling A8 also requires FP8 E4M3 K/V-cache storage for
-    every cache-enabled decoder forward; callers cannot substitute a dense
-    Transformers cache.
+    Dynamic per-token scaling is shared by calibration and inference without
+    order-dependent observer state. The legacy ``linear_input`` target applies
+    it before Hessian capture; ``p32_operand`` applies it after SU/Hadamard and
+    can optionally fit one replay candidate to that deployed operand. Enabling
+    A8 also requires FP8 E4M3 K/V-cache storage for every cache-enabled decoder
+    forward; callers cannot substitute a dense Transformers cache.
     """
 
     bits: int = 8
@@ -6276,9 +6276,9 @@ class QVQActivationConfig:
     scale_method: str = QVQ_FP8_ACTIVATION_SCALE_METHOD
     target: str = "p32_operand"
     kernel_mode: str = "auto"
-    # Module-local replay is experimental until its candidate selection has a
-    # propagated block/logit gate. Keep it available, but never alter packed
-    # weights merely because A8 execution was enabled.
+    # Replay is experimental and therefore disabled by default. When enabled,
+    # candidate promotion is decided from explicit disjoint final-logit replay,
+    # never from the module-local reconstruction split used to fit candidate 2.
     replay_passes: int = 0
     replay_max_rows: int = 2048
     replay_validation_fraction: float = 0.125
@@ -6653,6 +6653,13 @@ class QVQConfig(BaseQuantizeConfig):
                 "activation.target=`linear_input`; `p32_operand` needs a "
                 "post-SU/Hadamard Sketch-B collector."
             )
+        if self.activation is not None and self.activation.replay_passes == 1:
+            if self.activation.target != "p32_operand":
+                raise ValueError(
+                    "QVQConfig: FP8 replay requires activation.target=`p32_operand`."
+                )
+            if self.rounding != "block_ldlq":
+                raise ValueError("QVQConfig: FP8 replay requires `rounding=block_ldlq`.")
         if isinstance(self.yaqa, dict):
             self.yaqa = YaqaConfig(**self.yaqa)
         elif isinstance(self.yaqa, YaqaConfig):
