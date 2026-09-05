@@ -21,11 +21,8 @@ import time
 from concurrent.futures import as_completed
 from typing import TYPE_CHECKING, Dict, List, Optional
 
-from defuser.modeling.replace_modules import materialize_model
-from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
-from ..nn_modules.converter import MODULE_CONVERTER_MAP
-from ..quantization.config import GcMode
 import torch
+from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.awq_processor import AWQProcessor
@@ -33,13 +30,17 @@ from ..looper.gptq_processor import GPTQProcessor
 from ..looper.named_module import NamedModule
 from ..looper.paroquant_processor import ParoQuantProcessor
 from ..looper.qqq_processor import QQQProcessor
+from ..nn_modules.converter import MODULE_CONVERTER_MAP
+from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
+from ..quantization.config import GcMode, QuantizeEmbed
 from ..utils.device import get_device, get_device_new
-from ..utils.looper_helpers import find_last_quantized_layer_index, normalize_device_like
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
+from ..utils.looper_helpers import find_last_quantized_layer_index, normalize_device_like
 from ..utils.model import find_modules, get_layer_name, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
+
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from .module_looper import ModuleLooper
@@ -361,6 +362,8 @@ def run_layer_stage(
     layer_count: int,
     region_timer,
     finalize_progress_cls,
+    embed_quant_mode: Optional[QuantizeEmbed] = None,
+    embed_only: Optional[bool] = None,
     logger=None,
 ) -> None:
     """Execute the main per-layer quantization loop."""
@@ -377,34 +380,70 @@ def run_layer_stage(
     log = logger or setup_logger()
     durable_progress_logs = live_renderables_suppressed()
     hook_skip_modules = _collect_hook_skip_modules(planning_layer_modules)
+    quant_input_embeddings = embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+    quant_output_embeddings = embed_quant_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH)
+    input_embeddings_name = getattr(looper, "input_embeddings_name", None)
+    output_embeddings_name = getattr(looper, "output_embeddings_name", None)
+    requant_endpoint_names = {
+        name
+        for enabled, name in (
+            (quant_input_embeddings, input_embeddings_name),
+            (quant_output_embeddings, output_embeddings_name),
+        )
+        if enabled and name
+    }
+    layer_index_offset = 1 if quant_input_embeddings else 0
     for layer_index in pb:
         # Iterate over every transformer layer (plus lm_head when enabled) as
         # progress-bar controlled units of work.
         if looper._check_loop_stop():
             break
-        is_lm_head_module = layer_index >= layer_count
+        progress_index = layer_index
+        is_input_embeddings_module = quant_input_embeddings and progress_index == 0
+        model_layer_index = progress_index - layer_index_offset
+        is_output_embeddings_module = quant_output_embeddings and model_layer_index >= layer_count
+        is_lm_head_module = (
+            not is_output_embeddings_module
+            and looper.gptq_model.quantize_config.lm_head
+            and model_layer_index >= layer_count
+        )
+        is_embeddings_module = (
+            is_input_embeddings_module or is_output_embeddings_module or is_lm_head_module
+        )
 
         if (
-            not is_lm_head_module
+            embed_quant_mode is None
+            and not is_embeddings_module
             and last_quantized_layer_index is not None
-            and layer_index > last_quantized_layer_index
+            and model_layer_index > last_quantized_layer_index
         ):
             # The remaining layers are fully skipped by dynamic config, so
             # avoid entering another layer-level quantization cycle.
             log.debug(
                 "StageLayer: early stop at layer=%s, last_quantized_layer=%s",
-                layer_index,
+                model_layer_index,
                 last_quantized_layer_index,
             )
             pb.close()
             break
 
-        if is_lm_head_module:
+        if is_input_embeddings_module:
+            layer_title = "Quantizing input embeddings"
+            module = looper.gptq_model.get_input_embeddings()
+            pristine_group_module = None
+            layer_name = ""
+        elif is_output_embeddings_module:
+            layer_title = "Quantizing output embeddings"
+            module = looper.gptq_model.get_output_embeddings()
+            pristine_group_module = None
+            layer_name = ""
+        elif is_lm_head_module:
             layer_title = "Quantizing lm_head"
             module = get_module(looper.gptq_model.model, key=looper.gptq_model.lm_head)
             pristine_group_module = None
             layer_name = ""
         else:
+            layer_index = model_layer_index
             layer_title = f"Quantizing layer {layer_index} of {layer_count - 1}"
             module = layers[layer_index]
             pristine_group_module = None
@@ -414,12 +453,13 @@ def run_layer_stage(
         if durable_progress_logs:
             log.info(
                 "StageLayer: start layer=%s/%s title=`%s`",
-                layer_index if not is_lm_head_module else "lm_head",
-                layer_count - 1 if not is_lm_head_module else "lm_head",
+                layer_index if not is_embeddings_module else layer_title.replace("Quantizing ", ""),
+                layer_count - 1 if not is_embeddings_module else layer_title.replace("Quantizing ", ""),
                 layer_title,
             )
 
-        if not looper.gptq_model.should_quantize_layer(
+        should_quantize_layer = getattr(looper.gptq_model, "should_quantize_layer", None)
+        if callable(should_quantize_layer) and not should_quantize_layer(
             module,
             layer_name,
             layer_index,
@@ -429,7 +469,14 @@ def run_layer_stage(
 
         module = looper.gptq_model.pre_quantize(module)
 
-        if is_lm_head_module:
+        embedding_module_name = None
+        if is_input_embeddings_module:
+            embedding_module_name = looper.gptq_model.get_input_embeddings_name()
+            layer_descriptor = embedding_module_name
+        elif is_output_embeddings_module:
+            embedding_module_name = looper.gptq_model.get_output_embeddings_name()
+            layer_descriptor = embedding_module_name
+        elif is_lm_head_module:
             layer_descriptor = looper.gptq_model.lm_head
         else:
             model_type = looper.gptq_model.model.config.model_type
@@ -467,7 +514,10 @@ def run_layer_stage(
         if getattr(cur_layer_device, "type", None) == "meta":
             # Lazy shell layers can stay meta until a later subset stage materializes them.
             cur_layer_device = normalize_device_like(looper.gptq_model.quantize_config.device) or CPU
-        full = find_modules(module, name=looper.gptq_model.lm_head if is_lm_head_module else "")
+        full = find_modules(
+            module,
+            name=embedding_module_name or (looper.gptq_model.lm_head if is_lm_head_module else ""),
+        )
 
         for p_index, processor in enumerate(looper.processors):
             # Each processor contributes a quantization phase; walk them in
@@ -478,8 +528,11 @@ def run_layer_stage(
             # one execution config instead of a group of unrelated flags.
             execution_config = processor.execution_config
 
-            layer_inputs = processor.inputs_cache.layer_inputs
-            if is_lm_head_module and layer_inputs:
+            if is_input_embeddings_module:
+                layer_inputs = processor.inputs_cache.src_inputs
+            else:
+                layer_inputs = processor.inputs_cache.layer_inputs
+            if (is_output_embeddings_module or is_lm_head_module) and layer_inputs:
                 layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
             layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
             position_ids = processor.inputs_cache.position_ids
@@ -493,19 +546,25 @@ def run_layer_stage(
             # starts running this layer. The rest of the layer stage can then
             # iterate plans instead of repeatedly re-deriving replay, batching,
             # and device-routing state inside the execution loop.
-            subset_plans = build_layer_subset_plans(
-                looper,
-                processor=processor,
-                module=module,
-                layer_modules=layer_modules,
-                planning_layer_modules=planning_layer_modules,
-                layer_inputs=layer_inputs,
-                full=full,
-                is_lm_head_module=is_lm_head_module,
-                layer_index=layer_index,
-                layers_prefix=layer_name,
-                fallback=fallback,
-            )
+            if embed_quant_mode is not None and embed_only is not False and not is_embeddings_module:
+                # Embedding-only operations replay loaded decoder blocks only
+                # to propagate calibration activations to the output endpoint.
+                subset_plans = []
+            else:
+                subset_plans = build_layer_subset_plans(
+                    looper,
+                    processor=processor,
+                    module=module,
+                    layer_modules=layer_modules,
+                    planning_layer_modules=planning_layer_modules,
+                    layer_inputs=layer_inputs,
+                    full=full,
+                    is_lm_head_module=is_lm_head_module,
+                    layer_index=layer_index,
+                    layers_prefix=layer_name,
+                    fallback=fallback,
+                    embedding_module_name=embedding_module_name,
+                )
             if durable_progress_logs:
                 log.info(
                     "StageLayer: layer=%s processor=%s begin subsets=%s",
@@ -535,7 +594,7 @@ def run_layer_stage(
             )
             pristine_group_module = None
 
-            is_last_module = layer_index == len(pb) - 1
+            is_last_module = progress_index == len(pb) - 1
             for subset_plan in subset_plans:
                 # Process the layer in smaller subsets so attention groups or
                 # MoE experts can be quantized independently within a layer.
@@ -570,7 +629,7 @@ def run_layer_stage(
                     position_ids=position_ids,
                     attention_masks=attention_masks,
                     cur_layer_device=cur_layer_device,
-                    is_lm_head_module=is_lm_head_module,
+                    is_lm_head_module=is_embeddings_module,
                     layer_descriptor=layer_descriptor,
                     layer_title=layer_title,
                     layer_index=layer_index,
@@ -638,7 +697,7 @@ def run_layer_stage(
                     position_ids=position_ids,
                     attention_masks=attention_masks,
                     cur_layer_device=cur_layer_device,
-                    is_lm_head_module=is_lm_head_module,
+                    is_lm_head_module=is_embeddings_module,
                     shared_kv_cache_dict=shared_kv_cache_dict,
                     layer_index=layer_index,
                     layer_descriptor=layer_descriptor,
@@ -652,10 +711,10 @@ def run_layer_stage(
             if p_index == len(looper.processors) - 1:
                 torch_sync()
 
-                if not is_lm_head_module:
-                    layers[layer_index] = looper.gptq_model.post_quantize(module)
-                else:
+                if is_embeddings_module:
                     looper.gptq_model.post_quantize(module)
+                else:
+                    layers[layer_index] = looper.gptq_model.post_quantize(module)
 
                 for finalized in processed_subset.values():
                     # Reset finalized modules to CPU to guarantee deterministic
@@ -731,28 +790,29 @@ def run_layer_stage(
                                 offload_path = getattr(quant_config, "offload_to_disk_path", None)
                                 if offload_path:
                                     module_full_name = getattr(module, "full_name", None)
-                                    target_module = (
-                                        looper.gptq_model.model.get_submodule(module_full_name)
-                                        if module_full_name
-                                        else module
-                                    )
-                                    offload_start = time.perf_counter() if region_timer is not None else None
-                                    with log_time_block(
-                                        "disk_offload",
-                                        logger=log,
-                                        module_name=resolved_label,
-                                    ):
-                                        offload_to_disk(
-                                            model=looper.gptq_model.model,
-                                            module=target_module,
-                                            disk_path=offload_path,
+                                    if module_full_name not in requant_endpoint_names:
+                                        target_module = (
+                                            looper.gptq_model.model.get_submodule(module_full_name)
+                                            if module_full_name
+                                            else module
                                         )
-                                    if region_timer is not None and offload_start is not None:
-                                        region_timer.record(
-                                            "submodule_finalize_offload",
-                                            time.perf_counter() - offload_start,
-                                            source=resolved_label,
-                                        )
+                                        offload_start = time.perf_counter() if region_timer is not None else None
+                                        with log_time_block(
+                                            "disk_offload",
+                                            logger=log,
+                                            module_name=resolved_label,
+                                        ):
+                                            offload_to_disk(
+                                                model=looper.gptq_model.model,
+                                                module=target_module,
+                                                disk_path=offload_path,
+                                            )
+                                        if region_timer is not None and offload_start is not None:
+                                            region_timer.record(
+                                                "submodule_finalize_offload",
+                                                time.perf_counter() - offload_start,
+                                                source=resolved_label,
+                                            )
                                 else:
                                     log.warning(
                                         "Skipping disk offload for %s: no offload path configured",

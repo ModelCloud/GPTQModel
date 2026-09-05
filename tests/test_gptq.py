@@ -8,6 +8,7 @@ import sys
 import textwrap
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 import pytest
@@ -147,6 +148,125 @@ def test_gptq_act_group_aware_rejects_non_positive_group_size():
 
     with pytest.raises(ValueError, match="group_size > 0"):
         GPTQ(layer, qcfg=qcfg)
+
+
+def _make_embedding_gptq(*, group_size: int = 2, desc_act: bool = False) -> GPTQ:
+    embedding = nn.Embedding(5, 3, dtype=torch.float32).eval()
+    with torch.no_grad():
+        embedding.weight.copy_(
+            torch.tensor(
+                [
+                    [-1.0, -0.8, -0.6],
+                    [-0.2, 0.0, 0.2],
+                    [0.4, 0.6, 0.8],
+                    [1.0, 1.2, 1.4],
+                    [1.6, 1.8, 2.0],
+                ]
+            )
+        )
+    gptq = GPTQ(
+        embedding,
+        qcfg=QuantizeConfig(bits=4, group_size=group_size, sym=True, desc_act=desc_act),
+    )
+    gptq.quantizer.configure(perchannel=True)
+    return gptq
+
+
+def test_embedding_hessian_tracks_token_frequencies_and_incremental_batches():
+    gptq = _make_embedding_gptq()
+    gptq.add_batch(torch.tensor([[0, 1, 1, 3]]), None)
+    gptq.add_batch(torch.tensor([[1, 4]]), None)
+
+    expected = 2.0 * torch.tensor([1, 3, 0, 1, 1], dtype=torch.float32) / 6.0
+    diagonal = gptq.finalize_hessian()
+
+    torch.testing.assert_close(diagonal, expected)
+    assert gptq.H is None
+    assert gptq.nsamples == 6
+    torch.testing.assert_close(gptq.finalize_hessian(), expected)
+
+    gptq.add_batch(torch.tensor([[4, 4]]), None)
+    expected = 2.0 * torch.tensor([1, 3, 0, 1, 3], dtype=torch.float32) / 8.0
+    torch.testing.assert_close(gptq.finalize_hessian(), expected)
+    assert gptq.H is None
+    assert gptq.nsamples == 8
+
+
+@pytest.mark.parametrize("token_ids", [torch.tensor([[-1]]), torch.tensor([[5]])])
+def test_embedding_hessian_rejects_invalid_token_ids(token_ids):
+    gptq = _make_embedding_gptq()
+
+    with pytest.raises(ValueError, match="token IDs must be"):
+        gptq.add_batch(token_ids, None)
+
+
+def test_embedding_quantization_is_group_exact_and_blocksize_independent():
+    first = _make_embedding_gptq(group_size=2)
+    second = _make_embedding_gptq(group_size=2)
+    token_ids = torch.tensor([[0, 1, 1, 3, 4, 4, 4]])
+    first.add_batch(token_ids, None)
+    second.add_batch(token_ids, None)
+
+    first_result = first.quantize(blocksize=1)
+    second_result = second.quantize(blocksize=128)
+
+    for first_tensor, second_tensor in zip(first_result[:4], second_result[:4]):
+        torch.testing.assert_close(first_tensor, second_tensor)
+
+    quantized, scale, zero, g_idx, _, loss, damp, nsamples = first_result
+    assert quantized.shape == first.module.weight.shape
+    assert scale.shape == zero.shape == (3, 3)
+    torch.testing.assert_close(g_idx, torch.tensor([0, 0, 1, 1, 2], dtype=torch.int32))
+    assert nsamples == token_ids.numel()
+    assert damp == first.qcfg.damp_percent
+
+    diagonal = first._H_diag
+    floor = max(diagonal.max().item(), 1.0) * 1e-6
+    effective_diagonal = torch.clamp(diagonal, min=floor) + damp * diagonal.mean()
+    column_error = (first.module.weight.float().T - quantized.float().T).square().sum(dim=0)
+    expected_loss = (0.5 * torch.sum(effective_diagonal * column_error) / nsamples).item()
+    assert loss == pytest.approx(expected_loss)
+
+
+def test_embedding_desc_act_uses_frequency_ordered_groups():
+    gptq = _make_embedding_gptq(group_size=2, desc_act=True)
+    gptq.add_batch(torch.tensor([[0, 1, 1, 1, 3, 3, 4]]), None)
+
+    _, scale, zero, g_idx, *_ = gptq.quantize(blocksize=3)
+
+    assert scale.shape == zero.shape == (3, 3)
+    torch.testing.assert_close(g_idx, torch.tensor([1, 0, 2, 0, 1], dtype=torch.int32))
+
+
+def test_embedding_group_aware_ordering_preserves_tail_group():
+    gptq = _make_embedding_gptq(group_size=2)
+    gptq.qcfg.act_group_aware = True
+    gptq.add_batch(torch.tensor([[0, 1, 1, 2, 3, 3, 3, 4]]), None)
+
+    quantized, scale, zero, g_idx, *_ = gptq.quantize(blocksize=3)
+
+    assert quantized.shape == gptq.module.weight.shape
+    assert scale.shape == zero.shape == (3, 3)
+    torch.testing.assert_close(g_idx, torch.tensor([0, 0, 1, 1, 2], dtype=torch.int32))
+    assert torch.isfinite(quantized).all()
+
+
+def test_embedding_capture_applies_rank_two_attention_mask():
+    from gptqmodel.looper.gptq_processor import GPTQProcessor
+
+    gptq = _make_embedding_gptq()
+    processor = object.__new__(GPTQProcessor)
+    processor.tasks = {"embed": gptq}
+    processor._mask_tls = SimpleNamespace(value=torch.tensor([[1, 1, 0], [1, 0, 0]], dtype=torch.bool))
+    processor.current_batch_index = lambda: 0
+    input_ids = torch.tensor([[0, 1, 4], [3, 2, 2]])
+    output = gptq.module(input_ids)
+
+    processor.pre_process_fwd_hook("embed")(gptq.module, (input_ids,), output)
+    diagonal = gptq.finalize_hessian()
+
+    torch.testing.assert_close(diagonal, 2.0 * torch.tensor([1, 1, 0, 1, 0]) / 3.0)
+    assert gptq.nsamples == 3
 
 
 @torch.inference_mode()

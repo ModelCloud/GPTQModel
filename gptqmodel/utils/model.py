@@ -2172,6 +2172,31 @@ def get_module_name(module: nn.Module, child_module: nn.Module) -> str:
     raise ValueError(f"Cannot find child_module {child_module} in module {module}")
 
 
+def untie_word_embeddings(model: nn.Module) -> nn.Module:
+    """Clone a tied output head so embedding endpoints can be quantized independently."""
+    if not getattr(model.config, "tie_word_embeddings", False):
+        return model
+
+    input_embeddings = model.get_input_embeddings()
+    output_embeddings = model.get_output_embeddings()
+    if input_embeddings is None or output_embeddings is None:
+        raise ValueError("Cannot untie word embeddings without both input and output embedding modules.")
+
+    model.config.tie_word_embeddings = False
+    new_head = nn.Linear(
+        input_embeddings.weight.shape[1],
+        input_embeddings.weight.shape[0],
+        bias=getattr(output_embeddings, "bias", None) is not None,
+        device=input_embeddings.weight.device,
+        dtype=input_embeddings.weight.dtype,
+    )
+    new_head.weight.data.copy_(input_embeddings.weight.data)
+    if new_head.bias is not None and output_embeddings.bias is not None:
+        new_head.bias.data.copy_(output_embeddings.bias.data)
+    model.set_output_embeddings(new_head)
+    return model
+
+
 def check_module_quantized_in_keys(keys, module_name: str) -> bool:
     return any(
         key.startswith(module_name + ".")

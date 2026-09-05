@@ -112,6 +112,42 @@ if TYPE_CHECKING:
     from ..looper.named_module import NamedModule
 
 
+class _QuantizedCheckpointSource:
+    """Expose an on-disk quantized checkpoint through the shard-map interface.
+
+    Embedding-only saves use this lightweight source when a model was loaded
+    through the regular quantized loader and therefore has no LazyTurtle.
+    """
+
+    def __init__(self, model_local_path: str):
+        self.model_local_path = model_local_path
+        index_path = os.path.join(model_local_path, "model.safetensors.index.json")
+        if os.path.exists(index_path):
+            with open(index_path, "r", encoding="utf-8") as handle:
+                index = json.load(handle)
+            weight_map = index.get("weight_map", {})
+            if not isinstance(weight_map, dict) or not weight_map:
+                raise ValueError(f"Checkpoint index at `{index_path}` has an empty or invalid `weight_map`.")
+            self._weight_map = {
+                str(tensor_name): str(shard_name)
+                for tensor_name, shard_name in weight_map.items()
+            }
+            return
+
+        single_shard = os.path.join(model_local_path, "model.safetensors")
+        if not os.path.exists(single_shard):
+            raise FileNotFoundError(
+                f"No `model.safetensors.index.json` or `model.safetensors` found under `{model_local_path}`."
+            )
+
+        from safetensors import safe_open
+
+        with safe_open(single_shard, framework="pt", device="cpu") as handler:
+            self._weight_map = {
+                tensor_name: "model.safetensors" for tensor_name in handler.keys()
+            }
+
+
 class _ClassPropertyDescriptor:
     def __init__(self, fget, fset=None):
         self.fget = fget
@@ -1104,6 +1140,7 @@ class BaseQModel(nn.Module):
                 backend=backend,
                 adapter_calibration_dataset=adapter_calibration_dataset,
                 calibration_concat_separator=calibration_concat_separator,
+                embed_quant_config=embed_quant_config,
             )
 
         timer = getattr(self, "quant_region_timer", None)
@@ -1153,7 +1190,20 @@ class BaseQModel(nn.Module):
         embed_quant_config = self._normalize_embed_quant_config(embed_quant_config, embed_quant_mode)
         if embed_quant_config is None:
             raise ValueError("`requantize()` requires `embed_quant_config` or `embed_quant_mode`.")
-        return self.quantize(
+
+        # Quantized checkpoint loading may use only a device map, leaving the
+        # quantization device unset. Requantization still needs a concrete
+        # device for kernel selection and calibration replay.
+        quantize_config = getattr(self, "quantize_config", None)
+        if quantize_config is not None and quantize_config.device is None:
+            input_endpoint = self.get_input_embeddings()
+            endpoint = input_endpoint if input_endpoint is not None else self.get_output_embeddings()
+            endpoint_device = get_device(endpoint) if endpoint is not None else get_device(self.model)
+            if endpoint_device.type == "meta":
+                endpoint_device = CPU
+            quantize_config.device = DEVICE(endpoint_device.type)
+
+        result = self.quantize(
             calibration=calibration,
             calibration_concat_size=calibration_concat_size,
             calibration_sort=calibration_sort,
@@ -1167,6 +1217,31 @@ class BaseQModel(nn.Module):
             embed_quant_config=embed_quant_config,
         )
 
+        # A loaded quantized model may contain inference-repacked or fused
+        # modules that cannot safely be serialized as a complete checkpoint.
+        # Preserve the source checkpoint and let the embedding-only writer
+        # replace only the shards owned by the requested endpoints.
+        prefixes = set(getattr(self, "_embedding_replacement_prefixes", set()))
+        mode = embed_quant_config.embed_quant_mode
+        if mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+            input_name = self.get_input_embeddings_name()
+            if input_name:
+                prefixes.add(input_name)
+        if mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH):
+            output_name = self.get_output_embeddings_name() or self.lm_head
+            if output_name:
+                prefixes.add(output_name)
+        self._embedding_replacement_prefixes = prefixes
+
+        if self.load_quantized_model and prefixes:
+            if self.turtle_model is None:
+                # Keep the shard-map-only source separate: shell materializers
+                # require a complete LazyTurtle implementation.
+                self._embedding_replacement_source = _QuantizedCheckpointSource(str(self.model_local_path))
+            self._model_free_weight_only_embeddings_only = True
+
+        return result
+
     def _quantize_with_calibration(
         self,
         *,
@@ -1177,6 +1252,7 @@ class BaseQModel(nn.Module):
         backend: Optional[BACKEND],
         adapter_calibration_dataset,
         calibration_concat_separator: Optional[str],
+        embed_quant_config: Optional[QuantizeEmbedConfig],
     ):
         from ..adapter.adapter import Lora
         from ..looper.eora_processor import EoraProcessor
@@ -1302,7 +1378,11 @@ class BaseQModel(nn.Module):
                 )
             )
 
-        module_looper = ModuleLooper(self, processors=processors)
+        module_looper = ModuleLooper(
+            self,
+            processors=processors,
+            embed_quant_config=embed_quant_config,
+        )
 
         gc_context = (
             DEVICE_THREAD_POOL.no_auto_gc()

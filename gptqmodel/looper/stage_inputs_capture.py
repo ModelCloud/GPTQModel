@@ -15,12 +15,14 @@ import torch
 from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
 from ..nn_modules.hooked_linear import STOP_FORWARD_EXCEPTION, StopForward
+from ..quantization.config import QuantizeEmbed
 from ..utils.ctx import ctx
 from ..utils.device import get_device
-from ..utils.looper_helpers import device_ctx, select_forward_devices
 from ..utils.logger import setup_logger
+from ..utils.looper_helpers import device_ctx, select_forward_devices
 from ..utils.model import get_module, get_module_by_name_prefix, move_to, nested_move_to
 from ..utils.torch import CPU, META
+
 
 if TYPE_CHECKING:  # pragma: no cover - import for typing only
     from .module_looper import ModuleLooper
@@ -44,7 +46,10 @@ class StageInputsCapture:
         self.logger = logger or setup_logger()
 
     def _materialize_modules_with_direct_meta_tensors(self, device: torch.device) -> None:
-        for module_name in self.gptq_model.get_modules_with_direct_meta_tensors(self.gptq_model.model):
+        get_modules = getattr(self.gptq_model, "get_modules_with_direct_meta_tensors", None)
+        if not callable(get_modules):
+            return
+        for module_name in get_modules(self.gptq_model.model):
             module = get_module(self.gptq_model.model, module_name)
             if isinstance(module, torch.nn.Module):
                 self.gptq_model.shell_direct_meta_materialize(
@@ -78,10 +83,12 @@ class StageInputsCapture:
         layers: Sequence[torch.nn.Module],
         calibration_data: Iterable[Dict[str, torch.Tensor]],
         use_cache: bool,
+        embed_quant_mode: Optional[QuantizeEmbed] = None,
         layer_names: Optional[List[str]] = None,
     ) -> InputCache:
         """Runs a short forward over calibration data and caches first-layer inputs."""
 
+        src_inputs: List[List[torch.Tensor]] = []
         layer_inputs: List[List[torch.Tensor]] = []
         attention_masks: List[torch.Tensor | None] = []
         position_ids: List[torch.Tensor] = []
@@ -246,11 +253,20 @@ class StageInputsCapture:
                     return name
             return None
 
+        get_input_embeddings = getattr(self.gptq_model, "get_input_embeddings", None)
+        input_embeddings = get_input_embeddings() if callable(get_input_embeddings) else None
+        get_input_embeddings_name = getattr(self.gptq_model, "get_input_embeddings_name", None)
+        input_embeddings_name = get_input_embeddings_name() if callable(get_input_embeddings_name) else None
         ori_outside_layer_module_devices: Dict[str, torch.device] = {}
         for module_name in self.gptq_model.get_base_modules(self.gptq_model.model):
             module, _ = get_module_by_name_prefix(self.gptq_model.model, [module_name])
 
             if module is None:
+                continue
+            if (
+                embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+                and module_name == input_embeddings_name
+            ):
                 continue
 
             resolved_name = _resolve_module_name(module)
@@ -277,7 +293,20 @@ class StageInputsCapture:
                         else cur_layer_device
                     )
                 forward_device = self._resolve_forward_device(example, forward_device)
+                if (
+                    embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+                    and "input_ids" in example
+                    and input_embeddings is not None
+                ):
+                    embedding_device = get_device(input_embeddings)
+                    if embedding_device != META:
+                        forward_device = embedding_device
                 example = self.gptq_model.move_input_capture_example(example, forward_device)
+                if (
+                    embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+                    and "input_ids" in example
+                ):
+                    src_inputs.append([move_to(example["input_ids"], device=CPU)])
                 try:
                     with ctx(
                         DEVICE_THREAD_POOL.read_lock(self.gptq_model.quantize_config.device),
@@ -318,6 +347,7 @@ class StageInputsCapture:
             layer_input_kwargs=layer_input_kwargs,
             position_ids=position_ids,
             attention_masks=attention_masks,
+            src_inputs=src_inputs,
         )
 
         if timer is not None and start_time is not None:

@@ -3,6 +3,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -53,6 +54,87 @@ def test_embedding_replacement_rewrites_only_affected_shard(tmp_path):
         assert set(handler.keys()) == {"embed_tokens.qweight", "final_norm.weight"}
     with safe_open(str(source / rewritten[0]), framework="pt", device="cpu") as handler:
         assert set(handler.keys()) == {"embed_tokens.weight", "final_norm.weight"}
+
+
+@pytest.mark.parametrize(
+    ("prefixes", "expected_removed", "expected_weight_map", "expected_keys"),
+    [
+        (
+            ["embed_tokens", "lm_head"],
+            ["embed_tokens.weight"],
+            {
+                "embed_tokens.qweight": "model.safetensors",
+                "lm_head.weight": "model.safetensors",
+            },
+            {"embed_tokens.qweight", "lm_head.weight"},
+        ),
+        (
+            ["embed_tokens"],
+            ["embed_tokens.weight"],
+            {
+                "embed_tokens.qweight": "model.safetensors",
+                "lm_head.weight": "model.safetensors",
+            },
+            {"embed_tokens.qweight", "lm_head.weight"},
+        ),
+        (
+            ["lm_head"],
+            [],
+            {
+                "embed_tokens.weight": "model.safetensors",
+                "lm_head.weight": "model.safetensors",
+            },
+            {"embed_tokens.weight", "lm_head.weight"},
+        ),
+    ],
+    ids=["both", "input-only", "output-only"],
+)
+def test_embedding_replacement_saves_tied_lm_head_omitted_from_checkpoint(
+    tmp_path, prefixes, expected_removed, expected_weight_map, expected_keys
+):
+    source = tmp_path / "source"
+    saved = tmp_path / "saved"
+    source.mkdir()
+    saved.mkdir()
+    shard_name = "model.safetensors"
+    save_file({"embed_tokens.weight": torch.ones(4, 3)}, str(source / shard_name))
+    (source / "config.json").write_text('{"tie_word_embeddings": true}\n', encoding="utf-8")
+
+    class TiedModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            # Requantization unties the runtime modules, while the source
+            # checkpoint still records that the omitted output weight was tied.
+            self.config = SimpleNamespace(tie_word_embeddings=False)
+            self.embed_tokens = nn.Module()
+            self.embed_tokens.register_buffer("qweight", torch.ones(2, 2, dtype=torch.int32))
+            self.lm_head = nn.Linear(3, 4, bias=False)
+
+        def get_input_embeddings(self):
+            return self.embed_tokens
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+    model = TiedModel()
+    turtle = SimpleNamespace(
+        model_local_path=str(source),
+        _weight_map={"embed_tokens.weight": shard_name},
+    )
+
+    rewritten, weight_map, _size, removed = _save_embedding_replacement_safetensors(
+        model,
+        turtle,
+        prefixes,
+        save_dir=str(saved),
+        metadata={"format": "pt"},
+    )
+
+    assert rewritten == [shard_name]
+    assert removed == expected_removed
+    assert weight_map == expected_weight_map
+    with safe_open(str(saved / shard_name), framework="pt", device="cpu") as handler:
+        assert set(handler.keys()) == expected_keys
 
 
 def test_model_save_routes_embedding_only_lifecycle_with_metadata(tmp_path):

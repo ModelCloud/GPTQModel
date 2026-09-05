@@ -15,17 +15,15 @@ thread pool.
 
 from __future__ import annotations
 
-import math
+import os
 import threading
 import time
-import logging
-import os
-from concurrent.futures import as_completed
-from typing import Dict, List, NamedTuple, Optional, TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
 
 import torch
 import torch.nn as nn
 
+from .. import DEVICE_THREAD_POOL
 from ..looper.dequantize_processor import DequantizeProcessor
 from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
@@ -35,17 +33,15 @@ from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
-from ..nn_modules.hooked_linear import HookedLinear, replace_module_with_hooked_legacy
-from ..quantization.config import METHOD, VramStrategy
+from ..nn_modules.hooked_linear import HookedLinear
+from ..quantization.config import METHOD, QuantizeEmbed, QuantizeEmbedConfig, VramStrategy
 from ..utils.attn_mask import apply_keep_mask_bt
-from ..utils.ctx import ctx
+from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
-from ..utils.device import get_device, get_device_new
 from ..utils.disk import estimate_disk_io_speed
-from ..utils.logger import setup_logger, log_time_block
+from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
-    device_ctx,
     forward_batch_worker,
     normalize_device_like,
     rehome_module_to_device,
@@ -55,20 +51,21 @@ from ..utils.model import (
     MoETopKState,
     get_layers_with_prefixes,
     get_module,
+    get_module_by_name_prefix,
     move_to,
     restore_moe_topk,
-    set_moe_topk, get_module_by_name_prefix,
+    set_moe_topk,
+    untie_word_embeddings,
 )
 from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
-from ..utils.torch import (CPU, META, timed_gc_collect, torch_sync, tf32_high_precision_guard)
-from .. import DEVICE_THREAD_POOL
+from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
-from .qqq_processor import QQQProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
+
 
 log = setup_logger()
 
@@ -166,11 +163,21 @@ class ModuleLooper():
     instance so tasks such as module reloading, forward passes, and finalisation
     reuse the same worker threads.
     """
-    def __init__(self, model: BaseQModel, processors: List[LoopProcessor]):
+    input_embeddings_name: Optional[str] = None
+    output_embeddings_name: Optional[str] = None
+
+    def __init__(
+        self,
+        model: BaseQModel,
+        processors: List[LoopProcessor],
+        embed_quant_config: Optional[QuantizeEmbedConfig] = None,
+    ):
         """Initialize loop state, device policy, and callback wiring."""
 
         self.processors = processors
         self.gptq_model = model
+        self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
+        self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
 
         self.support_batch_quantize = model.support_batch_quantize
         self.lock = threading.Lock()
@@ -326,6 +333,38 @@ class ModuleLooper():
 
         for processor in self.processors:
             self._processor_mask_tls(processor)
+
+        if self.embed_quant_mode is not None:
+            self.gptq_model.model = untie_word_embeddings(self.gptq_model.model)
+
+        # Endpoint discovery is only needed for the explicit embedding
+        # requantization flow. Keep the ordinary layer loop compatible with
+        # lightweight model doubles that implement the historical interface.
+        self.input_embeddings_module = None
+        self.output_embeddings_module = None
+        self.input_embeddings_name = None
+        self.output_embeddings_name = None
+        if self.embed_quant_mode is not None:
+            get_input_embeddings = getattr(self.gptq_model, "get_input_embeddings", None)
+            get_output_embeddings = getattr(self.gptq_model, "get_output_embeddings", None)
+            self.input_embeddings_module = (
+                get_input_embeddings() if callable(get_input_embeddings) else None
+            )
+            self.output_embeddings_module = (
+                get_output_embeddings() if callable(get_output_embeddings) else None
+            )
+            get_input_name = getattr(self.gptq_model, "get_input_embeddings_name", None)
+            get_output_name = getattr(self.gptq_model, "get_output_embeddings_name", None)
+            self.input_embeddings_name = (
+                get_input_name()
+                if self.input_embeddings_module is not None and callable(get_input_name)
+                else None
+            )
+            self.output_embeddings_name = (
+                get_output_name()
+                if self.output_embeddings_module is not None and callable(get_output_name)
+                else None
+            )
 
     def _emit_moe_parallel_quant_runtime(self) -> None:
         """Log the runtime knobs that decide whether MoE quant can fan out efficiently."""
@@ -1397,6 +1436,7 @@ class ModuleLooper():
             layers=layers,
             calibration_data=calibration_data,
             use_cache=use_cache,
+            embed_quant_mode=self.embed_quant_mode,
             layer_names=layer_names,
         )
 
@@ -1412,6 +1452,39 @@ class ModuleLooper():
 
         if fallback is None:
             fallback = getattr(self.gptq_model.quantize_config, "fallback", None)
+
+        if self.embed_quant_mode is not None:
+            requested_endpoints = []
+            if self.embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+                requested_endpoints.append(
+                    ("input", self.input_embeddings_name, self.input_embeddings_module)
+                )
+            if self.embed_quant_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH):
+                requested_endpoints.append(
+                    ("output", self.output_embeddings_name, self.output_embeddings_module)
+                )
+
+            default_config = {
+                "bits": 8,
+                "group_size": 32,
+                "sym": True,
+                "desc_act": False,
+                "mse": 2.4,
+            }
+            dynamic = self.gptq_model.quantize_config.dynamic or {}
+            missing_defaults = {}
+            for label, name, module in requested_endpoints:
+                if module is None or not name:
+                    raise ValueError(f"Could not resolve the {label} embedding module for requantization.")
+                if not isinstance(module, tuple(SUPPORTS_MODULE_TYPES)):
+                    raise NotImplementedError(
+                        f"{label.capitalize()} embedding type {type(module)} is not supported; "
+                        f"supported types are {SUPPORTS_MODULE_TYPES}."
+                    )
+                if self.gptq_model.quantize_config.dynamic_get(name, default=None) is None:
+                    missing_defaults[name] = dict(default_config)
+            if missing_defaults:
+                self.gptq_model.quantize_config.dynamic = {**missing_defaults, **dynamic}
 
         if self.gptq_model.quantize_config.lm_head:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
@@ -1470,9 +1543,17 @@ class ModuleLooper():
 
         if self.gptq_model.quantize_config.offload_to_disk:
             log.info("Offloading base modules to disk...")
+            base_modules = self.gptq_model.get_base_modules(model=self.gptq_model.model)
+            if self.embed_quant_mode is not None:
+                endpoint_names = {
+                    name
+                    for name in (self.input_embeddings_name, self.output_embeddings_name)
+                    if name
+                }
+                base_modules = [name for name in base_modules if name not in endpoint_names]
             offload_to_disk(
                 model=self.gptq_model.model,
-                module=self.gptq_model.get_base_modules(model=self.gptq_model.model),
+                module=base_modules,
                 disk_path=self.gptq_model.quantize_config.offload_to_disk_path
             )
 
@@ -1510,7 +1591,11 @@ class ModuleLooper():
             layer_modules = [sum(layer_modules, [])]
 
         layer_count = len(layers)
-        pb = (log.pb(layer_count + 1 if self.gptq_model.quantize_config.lm_head else layer_count)
+        quant_input_embeddings = self.embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+        quant_output_embeddings = self.embed_quant_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH)
+        extra_input_step = 1 if quant_input_embeddings else 0
+        extra_output_step = 1 if (quant_output_embeddings or self.gptq_model.quantize_config.lm_head) else 0
+        pb = (log.pb(layer_count + extra_input_step + extra_output_step)
                             .manual()
                             .set(left_steps_offset=1))
 
@@ -1542,6 +1627,8 @@ class ModuleLooper():
             layer_count=layer_count,
             region_timer=region_timer,
             finalize_progress_cls=FinalizeProgressInfo,
+            embed_quant_mode=self.embed_quant_mode,
+            embed_only=self.embed_only,
             logger=log,
         )
 
@@ -1645,7 +1732,10 @@ class ModuleLooper():
                 capture_only_flags[n] = True  # forward-only modules should not be finalized
         skipped_modules = []
         for name in subset:
-            layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{name}"
+            if name in (self.input_embeddings_name, self.output_embeddings_name):
+                layer_name = name
+            else:
+                layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layers_prefix}.{name}"
 
             # gptq task is created and stored inside processor
             if not isinstance(subset[name], NamedModule):

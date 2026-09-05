@@ -599,11 +599,15 @@ def build_layer_subset_plans(
     layer_index: int,
     layers_prefix: Optional[str],
     fallback,
+    embedding_module_name: Optional[str] = None,
 ) -> List[SubsetPlan]:
     """Build every subset plan for one processor before layer execution starts."""
 
     execution_config = processor.execution_config
-    module_name_groups = [[looper.gptq_model.lm_head]] if is_lm_head_module else layer_modules
+    if embedding_module_name is not None:
+        module_name_groups = [[embedding_module_name]]
+    else:
+        module_name_groups = [[looper.gptq_model.lm_head]] if is_lm_head_module else layer_modules
 
     if execution_config.fwd_all_modules_in_single_pass:
         # Native-style processors consume one merged replay over the whole layer.

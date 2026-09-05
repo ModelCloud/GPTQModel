@@ -27,8 +27,9 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
+from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FOEM, GPTAQ, GPTQ
-from ..quantization.config import METHOD, FOEMConfig, GPTAQConfig, HessianConfig, QuantizeConfig, resolve_quant_format
+from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
@@ -63,7 +64,7 @@ def clone_gptq_config_for_module(
     """Clones and applies per-module GPTQ dynamic overrides, or skips the module."""
 
     # entire module is skipped
-    if qcfg.dynamic_get(layer_name=module_full_name) == False:
+    if qcfg.dynamic_get(layer_name=module_full_name) is False:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)
@@ -207,7 +208,7 @@ class GPTQProcessor(LoopProcessor):
 
         # gptq has no dynamic method of full override (removal)
         t = self.tasks.get(module.name, False)
-        if t == False:
+        if t is False:
             return True
         else:
             return False
@@ -333,8 +334,15 @@ class GPTQProcessor(LoopProcessor):
     def shared_input_leader(self, name: str) -> Optional[str]:
         """Returns the module whose Hessian `name` will adopt in the current pass, if any."""
 
-        with self.lock:
-            return self._shared_input_leaders.get(name)
+        leaders = getattr(self, "_shared_input_leaders", None)
+        if not leaders:
+            return None
+
+        lock = getattr(self, "lock", None)
+        if lock is None:
+            return leaders.get(name)
+        with lock:
+            return leaders.get(name)
 
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the GPTQ task."""
@@ -355,6 +363,21 @@ class GPTQProcessor(LoopProcessor):
             keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
 
             if (
+                isinstance(getattr(g, "module", None), torch.nn.Embedding)
+                and torch.is_tensor(inp_tensor)
+                and torch.is_tensor(keep_mask)
+                and inp_tensor.dim() == 2
+                and keep_mask.ndim == 2
+                and keep_mask.shape == inp_tensor.shape
+            ):
+                keep_on_input = keep_mask.to(device=inp_tensor.device, dtype=torch.bool)
+                selected_ids = inp_tensor[keep_on_input].contiguous()
+                if torch.is_tensor(out) and out.shape[:2] == inp_tensor.shape:
+                    selected_out = out[keep_on_input].contiguous()
+                else:
+                    selected_out = out
+                g.add_batch(selected_ids.data, selected_out.data, batch_index=batch_idx)  # noqa: F821
+            elif (
                 torch.is_tensor(inp_tensor)
                 and torch.is_tensor(keep_mask)
                 and inp_tensor.dim() >= 3
@@ -633,7 +656,7 @@ class GPTQProcessor(LoopProcessor):
         # pack module
         qModules = {
             name: submodule
-            for name, submodule in find_modules(model.model, [model.qlinear_kernel]).items()
+            for name, submodule in find_modules(model.model, [model.qlinear_kernel, TorchQuantEmbeddings]).items()
             if name == module.full_name
         }
         pack_start = time.perf_counter() if timer is not None else None

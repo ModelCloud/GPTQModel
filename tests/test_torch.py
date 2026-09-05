@@ -8,6 +8,7 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from safetensors.torch import load_file, save_file
 
 import gptqmodel.utils.torch as torch_utils
 from gptqmodel.models._const import DEVICE
@@ -81,6 +82,51 @@ def test_torch_quant_embeddings_forward_matches_dequantized_lookup():
     input_ids = torch.tensor([[0, 7, 63], [12, 31, 2]], dtype=torch.long)
 
     torch.testing.assert_close(module(input_ids), F.embedding(input_ids, module.dequantize_weight()))
+
+
+def test_torch_quant_embeddings_pack_original_handles_unaligned_vocab(tmp_path):
+    vocab_size = 17
+    embedding_dim = 32
+    embedding = nn.Embedding(vocab_size, embedding_dim, dtype=torch.float32).eval()
+    module = TorchQuantEmbeddings(
+        bits=4,
+        group_size=32,
+        sym=True,
+        desc_act=False,
+        in_features=vocab_size,
+        out_features=embedding_dim,
+        pack_dtype=torch.int32,
+        bias=False,
+    )
+
+    module.pack_original(
+        embedding,
+        scales=torch.ones((embedding_dim, 1)),
+        zeros=torch.zeros((embedding_dim, 1), dtype=torch.int32),
+        g_idx=torch.zeros(vocab_size, dtype=torch.int32),
+    )
+    module.post_init()
+
+    dequantized = module.dequantize_weight()
+    assert dequantized.shape == embedding.weight.shape
+    input_ids = torch.tensor([[0, 8, 16]], dtype=torch.long)
+    torch.testing.assert_close(module(input_ids), F.embedding(input_ids, dequantized))
+
+    checkpoint_path = tmp_path / "embedding.safetensors"
+    save_file(module.state_dict(), str(checkpoint_path))
+    reloaded = TorchQuantEmbeddings(
+        bits=4,
+        group_size=32,
+        sym=True,
+        desc_act=False,
+        in_features=vocab_size,
+        out_features=embedding_dim,
+        pack_dtype=torch.int32,
+        bias=False,
+    )
+    reloaded.load_state_dict(load_file(str(checkpoint_path)))
+    reloaded.post_init()
+    torch.testing.assert_close(reloaded(input_ids), module(input_ids))
 
 
 def test_create_quant_module_uses_embedding_kernel_for_embedding_role():
