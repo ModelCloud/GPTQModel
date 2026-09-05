@@ -16,6 +16,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--uuid", required=True)
     p.add_argument("--name", required=True)
+    p.add_argument("--root", type=Path, default=Path("/root/p32-native-recovery"))
     args = p.parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.uuid
     for _ in range(3):
@@ -49,7 +50,7 @@ def main():
     from scripts.p32_twenty.scorecard import layer_metrics
 
     torch.backends.cuda.matmul.allow_tf32 = False
-    root = Path("/root/p32-native-recovery") / args.name
+    root = args.root / args.name
     report = json.loads((root / "report.json").read_text())
     module = report["module"]
     data = torch.load(
@@ -83,6 +84,9 @@ def main():
         bank_alt_id=alt,
         v2b2_p32=True,
     ).float()
+    if report.get("fp16_boundary"):
+        x = x.half()
+        y = matmul_hadU(matmul_hadU(x.float() * su.float()) @ inner) * sv.float()
     result = {
         "scope": "trusted export reload, original FP32 measurements and identical FP16 inputs versus FP32 canonical operator",
         "module": module,
@@ -116,7 +120,9 @@ def main():
                         "M": m,
                         "reload_metric_drift": drift,
                         "fp16_boundary_metrics": layer_metrics(candidate(xh), teacher),
-                        "teacher_fp16_rounding_metrics": layer_metrics(teacher.half(), teacher),
+                        "teacher_fp16_rounding_metrics": layer_metrics(
+                            teacher.half(), teacher
+                        ),
                     }
                 )
     result["complete"] = True

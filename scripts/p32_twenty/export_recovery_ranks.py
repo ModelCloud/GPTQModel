@@ -1,5 +1,6 @@
 """Serialize each tested rank and account for complete standalone operator files."""
 
+import argparse
 import json
 from pathlib import Path
 
@@ -10,8 +11,11 @@ ROOT = Path("/root/p32-native-recovery")
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=ROOT)
+    args = parser.parse_args()
     for name in ["q_proj", "k_proj", "gate_proj", "down_proj"]:
-        root = ROOT / name
+        root = args.root / name
         # Files were created by this experiment; no third-party pickle inputs.
         bundle = torch.load(root / "export.pt", map_location="cpu", weights_only=False)
         report = json.loads((root / "report.json").read_text())

@@ -19,18 +19,18 @@ AGENTS.md. All changes and evidence share PR #137.
 |9|Output supertiles|Neighboring projections/channels implementation and matched evaluation remain.|
 |10|Lossless repack|All 94 projections bit/value exact; 108 layers, bounded model PPL/logits/ARC and large prefill speedups measured; full quality/profiling coverage remains.|
 |11|Independent trellis tiles|Requantized 64/128/256-tile exports and total BPW sweep remain.|
-|12|Checkpointed states|Exact state derivation established; stored checkpoints and independent GPU blocks remain.|
+|12|Checkpointed states|Stored 8/16/32/64-step states and independent GPU blocks tested across 94 projections; slower than direct windows in initial state-only runs, full operator remains.|
 |13|Multi-symbol LUT|Factored affine alternative measured under #24; explicit LUT storage/traffic study remains.|
 |14|GPU-aligned banks|Constrained learned-bank implementation/calibration remains.|
 |15|Additive codebooks|CPU fitting reference/tests; calibrated GPU/model integration remains.|
 |16|Signed-basis P32|CPU fitting reference/tests; calibrated GPU/model integration remains.|
 |17|INT4 + exceptions|Sparse residual reference; deployed base/exception export and calibration remain.|
 |18|Hybrid native/trellis|Sensitivity selection, tile dispatch, and full BPW/latency tradeoff remain.|
-|19|Native base + low rank|Four deployed W4A16 projections, four ranks, nine row counts measured; down rank128 passes 9/9, q/k/gate fail. Not W4A4 IMMA; broad calibration/model export remain.|
+|19|Native base + low rank|Four W4A16 projections refit at FP16 boundary on 8192 tokens; down rank16 passes 9/9 and bounded model run has mixed PPL/ARC effects. Full coverage/export remains.|
 |20|Joint optimization|CPU alternating-callback reference; deployed alternating optimization remains.|
 |21|Associative scan|Exact GPU states across all 94 projections; unfused state-only scan slower overall than direct extraction. Fused scorecard remains.|
 |22|All-start decoding|CPU symbolic all-start reference; redundant GPU all-start or independently justified symbolic GPU variant remains.|
-|23|Sparse checkpoints|8/16/32/64-step checkpoint GPU export and storage sweep remain.|
+|23|Sparse checkpoints|8/16/32/64-step metadata and GPU decode measured exactly across 94 projections with full sidecar BPW; fused/model study remains.|
 |24|Super-symbol automaton|2/4/8-step compact affine GPU scans exact across 94 projections; no overall state-only speed win. Fused lookup/MMA and LUT alternatives remain.|
 |25|Bit-sliced decoder|CPU reference exact on sampled real tiles; actual Boolean GPU kernel remains.|
 |26|GF(2) jump-ahead|CPU matrix reference exact; GPU compact affine scan #21 is related evidence, matrix-form implementation remains.|
