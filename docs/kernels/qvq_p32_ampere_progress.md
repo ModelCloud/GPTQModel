@@ -3991,6 +3991,16 @@ template family materially increases the SM80 binary without a repeatable
 throughput gain, so the wrapper was reverted and split-K dispatch remains
 unchanged.
 
+## v87 rejected stage-tile unroll reduction
+
+The stage-4 row-group-8 specialization is register-heavy, so a temporary
+`#pragma unroll 1` probe reduced its resource entry from 126 to 122
+registers/thread.  It did not produce a repeatable latency improvement versus
+the retained v84 binary (the matched W2.5 `N=5120,M=2048` medians differed by
+about 0.3%), while stage-1/2/3 variants gained registers and slowed in the
+same build.  The pragma was reverted; the staged loop and generated schedule
+remain unchanged.
+
 ## Reproduction
 
 ```bash
