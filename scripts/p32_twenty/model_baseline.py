@@ -24,6 +24,15 @@ def main():
         required=True,
     )
     parser.add_argument("--ampere-min-rows", type=int, default=1)
+    parser.add_argument(
+        "--window-fused-promotion-k",
+        type=int,
+        choices=(0, 16, 32, 64, 128, 256),
+    )
+    parser.add_argument("--window-fused-policy", action="store_true")
+    parser.add_argument("--window-fused-block-m", type=int, choices=(16, 32, 64), default=64)
+    parser.add_argument("--window-fused-block-n", type=int, choices=(32, 64), default=64)
+    parser.add_argument("--window-fused-split", type=int, default=1)
     parser.add_argument("--capture-only", action="store_true")
     parser.add_argument("--capture-sequences", type=int, default=1)
     parser.add_argument("--capture-tokens", type=int, default=2048)
@@ -37,6 +46,10 @@ def main():
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.window_fused_policy and args.window_fused_promotion_k is not None:
+        parser.error("Choose --window-fused-policy or --window-fused-promotion-k")
+    if (args.window_fused_policy or args.window_fused_promotion_k is not None) and args.mode != "ampere":
+        parser.error("Window fused options require --mode ampere")
     if args.output.resolve().is_relative_to(SNAPSHOT.resolve()):
         parser.error("Output must be outside the snapshot")
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
@@ -108,6 +121,7 @@ def main():
             from gptqmodel.quantization.qvq import repack_p32_planar_to_window
             from gptqmodel.quantization.qvq_codecs import pgc16_levels_for_version
             from gptqmodel.utils.qvq_ampere_cuda import qvq_p32_window_ampere
+            from scripts.p32_twenty.fused_window_gemm import fused_window_mm
 
             caches = []
             for name, module in model.named_modules():
@@ -122,6 +136,22 @@ def main():
                 ).to(module.trellis.device)
                 module._study_alt = int(module.bank_alt_id.item())
                 module._study_min_rows = args.ampere_min_rows
+                module._study_fused = (
+                    args.window_fused_policy
+                    or args.window_fused_promotion_k is not None
+                )
+                module._study_promotion_k = (
+                    0
+                    if name == "model.layers.1.mlp.down_proj"
+                    and args.window_fused_policy
+                    else 256
+                    if args.window_fused_policy
+                    else args.window_fused_promotion_k
+                )
+                module._study_block_m = args.window_fused_block_m
+                module._study_block_n = args.window_fused_block_n
+                module._study_split = args.window_fused_split
+                module._study_bank = module.bank_ids.contiguous()
 
                 def study_inner(
                     self, x, *, return_ordered_partials=False, ordered_split_count=None
@@ -136,6 +166,20 @@ def main():
                             x,
                             return_ordered_partials=return_ordered_partials,
                             ordered_split_count=ordered_split_count,
+                        )
+                    if self._study_fused:
+                        return fused_window_mm(
+                            x.contiguous(),
+                            self._study_window,
+                            self._study_levels,
+                            self._study_bank,
+                            self.bits,
+                            out_features=self.out_features,
+                            bank_alt_id=self._study_alt,
+                            block_m=self._study_block_m,
+                            block_n=self._study_block_n,
+                            split=self._study_split,
+                            promotion_k=self._study_promotion_k,
                         )
                     return qvq_p32_window_ampere(
                         x.contiguous(),
@@ -155,9 +199,16 @@ def main():
                         * module._study_window.element_size(),
                         "levels_bytes": module._study_levels.numel()
                         * module._study_levels.element_size(),
+                        "fused_window": module._study_fused,
+                        "promotion_k": module._study_promotion_k,
                     }
                 )
             report["ampere_min_rows"] = args.ampere_min_rows
+            report["window_fused_promotion_k"] = args.window_fused_promotion_k
+            report["window_fused_policy"] = args.window_fused_policy
+            report["window_fused_block_m"] = args.window_fused_block_m
+            report["window_fused_block_n"] = args.window_fused_block_n
+            report["window_fused_split"] = args.window_fused_split
             report["runtime_repack_caches"] = caches
             report["runtime_extra_bytes"] = sum(
                 c["window_bytes"] + c["levels_bytes"] for c in caches
