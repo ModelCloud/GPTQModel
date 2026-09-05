@@ -23,6 +23,9 @@ def main():
     parser.add_argument("--fused-block-m", type=int, choices=(16,32,64))
     parser.add_argument("--fused-block-n", type=int, choices=(32,64), default=32)
     parser.add_argument("--fused-split", type=int, default=1)
+    parser.add_argument(
+        "--fused-promotion-k", type=int, choices=(0, 16, 32, 64, 128, 256), default=0
+    )
     parser.add_argument("--module")
     parser.add_argument("--row-reuse", type=int, choices=(1, 2, 4, 8, 16))
     parser.add_argument(
@@ -271,6 +274,7 @@ def main():
                         z, window, levels, bank, bits, out_features=N,
                         bank_alt_id=aid, block_m=args.fused_block_m,
                         block_n=args.fused_block_n, split=args.fused_split,
+                        promotion_k=args.fused_promotion_k,
                     )
 
                 fused_output = full(fused)
@@ -278,6 +282,7 @@ def main():
                     "block_m": args.fused_block_m,
                     "block_n": args.fused_block_n,
                     "split": args.fused_split,
+                    "promotion_k": args.fused_promotion_k,
                     "metrics": layer_metrics(fused_output, teacher),
                     "vs_window": layer_metrics(fused_output, candidate),
                     "inner": timing(lambda: fused(transformed)),

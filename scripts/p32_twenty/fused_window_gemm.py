@@ -24,6 +24,7 @@ def _gemm(
     BM: tl.constexpr,
     BN: tl.constexpr,
     SPLIT: tl.constexpr,
+    PROMOTION_K: tl.constexpr,
     DECODE_ONLY: tl.constexpr = False,
 ):
     rows = tl.program_id(0) * BM + tl.arange(0, BM)
@@ -31,6 +32,7 @@ def _gemm(
     npair = cols // 2
     kk = tl.arange(0, 16)
     acc = tl.full((BM, BN), 0, tl.float32)
+    partial = tl.full((BM, BN), 0, tl.float16)
     start = tl.program_id(2) * (K // SPLIT)
     for offset in range(0, K // SPLIT, 16):
         krow = start + offset + kk
@@ -52,7 +54,15 @@ def _gemm(
         if DECODE_ONLY:
             tl.store(Y + krow[:, None] * N + cols[None, :], b, cols[None, :] < N)
         a = tl.load(X + rows[:, None] * K + krow[None, :], rows[:, None] < M, 0)
-        acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+        if PROMOTION_K == 0:
+            acc = tl.dot(a, b, acc, out_dtype=tl.float32)
+        else:
+            partial = tl.dot(a, b, partial, out_dtype=tl.float16)
+            if (offset + 16) % PROMOTION_K == 0:
+                acc += partial.to(tl.float32)
+                partial = tl.full((BM, BN), 0, tl.float16)
+    if PROMOTION_K != 0:
+        acc += partial.to(tl.float32)
     tl.store(
         Y + tl.program_id(2) * M * N + rows[:, None] * N + cols[None, :],
         acc,
@@ -72,6 +82,7 @@ def fused_window_mm(
     block_m=16,
     block_n=32,
     split=1,
+    promotion_k=0,
 ):
     if x.dtype != torch.float16 or levels.dtype != torch.float16:
         raise ValueError("FP16 activation and canonical level buffers required")
@@ -99,6 +110,10 @@ def fused_window_mm(
         raise ValueError("Unsupported study configuration")
     if split < 1 or k % (16 * split) or n % 16:
         raise ValueError("Split must partition full K16 tiles")
+    if promotion_k not in (0, 16, 32, 64, 128, 256):
+        raise ValueError("Unsupported FP32 promotion interval")
+    if promotion_k and (k // split) % promotion_k:
+        raise ValueError("Promotion interval must divide each split K range")
     if window.numel() != (k // 16) * (n // 16) * 4 * t or bank.numel() != (k // 16) * (
         n // 16
     ):
@@ -126,6 +141,7 @@ def fused_window_mm(
         block_m,
         block_n,
         split,
+        promotion_k,
         num_warps=4,
         num_stages=2,
     )
