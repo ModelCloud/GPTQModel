@@ -778,11 +778,21 @@ class QVQHopperGroupedRuntime:
             self.telemetry.h100_large_m_chunked_group_launches += 1
             self.telemetry.h100_large_m_group_chunk_rows = chunk_rows
             return self._execute_group_chunked(x, chunk_rows, recover=recover)
+        native_fp8_children = (
+            recover
+            and not return_ordered_partials
+            and children[0].activation is not None
+            and children[0].activation.target == "p32_operand"
+        )
         # Payload construction also resolves physical-device feature gates.
-        # Resolve it before preparing the first activation so a cold grouped
-        # invocation follows the same path as all subsequent invocations.
-        payload = self._ensure_payload()
-        if rows >= 128 and self._h100_qwen_large_m_unsplit_payload is not None:
+        # Native FP8 dispatch returns through independent child kernels and
+        # must not build a grouped P32 window it cannot consume.
+        payload = None if native_fp8_children else self._ensure_payload()
+        if (
+            payload is not None
+            and rows >= 128
+            and self._h100_qwen_large_m_unsplit_payload is not None
+        ):
             payload = self._h100_qwen_large_m_unsplit_payload
             self.telemetry.h100_qwen_large_m_unsplit_gate_up_launches += 1
         # Preserve BF16 until activation fake-quantization so its explicit
@@ -895,6 +905,8 @@ class QVQHopperGroupedRuntime:
                     dtype=torch.float16,
                 )
                 padded[:rows].copy_(transformed)
+        if payload is None:
+            payload = self._ensure_payload()
         from ..utils.qvq_cuda import _pgc16_levels
 
         if return_ordered_partials:
