@@ -34,8 +34,8 @@ def _consume(x_shared, high_shared, low_shared, index, primary, correction,
              mma: gl.constexpr, interleave: gl.constexpr):
     a = x_shared.index(index).load(gl.DotOperandLayout(0, mma, 8))
     b = high_shared.index(index).load(gl.DotOperandLayout(1, mma, 8))
-    c = low_shared.index(index).load(gl.DotOperandLayout(1, mma, 8))
     primary = mfma(a, b, primary)
+    c = low_shared.index(index).load(gl.DotOperandLayout(1, mma, 8))
     if interleave:
         primary = mfma(a, c, primary)
     else:
