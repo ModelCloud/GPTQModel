@@ -269,7 +269,7 @@ whole-workload peaks; driver peak is sampled per-process NVML usage.
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | dense BF16 | 183,811 | 22.28 / 23.06 | 31.68 | 31.39 / 32.23 | 2.710 / 2.795 | 3,558 | 2.303 | 130.50 |
 | W3.5A16 | 37,435 | 109.42 / 131.48 | 20.69 | 48.02 / 49.05 | 2.052 / 2.225 | 2,976 | 0.900 | 130.50 |
-| W3.5A8 | 13,152 | 311.45 / 312.27 | 36.39 | 27.30 / 28.44 | 1.799 / 1.994 | 2,724 | 0.900 | 72.25 |
+| W3.5A8 | 13,178 | 310.82 / 311.70 | 36.43 | 27.35 / 28.03 | 1.799 / 1.994 | 2,724 | 0.900 | 72.25 |
 
 The static A8 cache reserved 4,352 token slots for the 4,176-token logical
 sequence and still used 44.64% fewer retained bytes than the BF16 cache,
@@ -286,11 +286,12 @@ A8 prefill from 803 to 3,993 tok/s (4.97x), decoded-weight row reuse raised it
 to 6,667 tok/s, and the FP8-specific allocation/launch reductions raised it to
 8,871 tok/s. Paired P32 state decode and simplified bank mixing raised it to
 9,926 tok/s, and vectorized E4M3 activation staging raised the final result to
-12,559 tok/s. Asynchronous activation staging then raised it to 13,152 tok/s.
-This is 3.294x over the 3,993 target baseline and 16.38x over the 803 tok/s
-correctness baseline. A8 decode rose from 11.28 to 36.39 tok/s and is now 1.15x
-dense decode. Matching dense prefill still requires another 13.98x; A16
-requires 2.85x.
+12,559 tok/s. Asynchronous activation staging raised it to 13,152 tok/s, and
+CTA-local row-scale caching raised the final result to 13,178 tok/s. This is
+3.301x over the 3,993 target baseline and 16.41x over the 803 tok/s correctness
+baseline. A8 decode rose from 11.28 to 36.43 tok/s and is now 1.15x dense
+decode. Matching dense prefill still requires another 13.95x; A16 requires
+2.84x.
 
 ### Phase 7 — FP8 decoded-weight row reuse (complete)
 
@@ -482,3 +483,46 @@ or rejection. The 72.25 MiB KV cache remained entirely E4M3 at 55.36% of its
 dense-equivalent storage; all 1,536 QK and 1,536 PV launches used native FP8
 attention, with zero cache dequantization or dense-prefix materialization. The
 machine-readable result is `clean-d4aea064-w35-a8-4096.json`.
+
+### Phase 12 — invariant FP8 scale caching and pipeline audit (complete)
+
+After asynchronous activation staging, 64 of the static global-load sites were
+row-scale reads inside the K32 accumulation loop. Each CTA uses only 16--128
+distinct scales, invariant across all K steps. Commit `96206dc9` cooperatively
+loads those scales once into at most 512 bytes of shared memory and preserves
+the original `accumulator * row_scale * level_scale` FP32 evaluation order.
+
+The apples-to-apples H200 NCU result at M4096, K2048, N2048 is:
+
+| revision | duration | speedup | registers/thread | static shared | long scoreboard | spills |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Phase 11 global row scales | 267.01 us | 1.000x | 168 | 4.10 KiB | 6,651 | 0 |
+| Phase 12 shared row scales | 261.76 us | 1.020x | 164 | 4.61 KiB | 6,232 | 0 |
+
+Static SASS changes from 66 global loads to 35 global plus 16 shared loads and
+one cooperative shared store. It retains seven activation `LDGSTS`, eight E4M3
+WGMMAs, 64 FP32 multiplies, and 64 FP32 fused multiply-adds. Direct M4096
+timing improves from 0.2704 to 0.2648 ms at N2048 (1.02x), and from 0.9638 to
+0.9416 ms at N8192 (1.02x). Post-commit NCU/SASS reproduces 164 registers per
+thread and zero local/shared spills. All-rate exact deployed-operand coverage,
+the three-seed M grid through 4096, and the 184-test focused QVQ suite pass.
+
+Three profiler-led alternatives were rejected:
+
+- double-buffering activation shared memory improved small M but regressed the
+  widest M4096/N8192 shape and reduced full-model prefill from 13,152 to 13,122
+  tok/s;
+- removing the post-WGMMA ownership barrier was timing-neutral and discarded
+  the conservative cross-warp overwrite boundary;
+- caching the randomly indexed 256-byte E4M3 level table in shared memory
+  introduced bank pressure and regressed M4096/N8192 from 0.9416 to 1.1940 ms.
+
+At the full Llama-3.2-1B W3.5A8 boundary, exclusive H200 prefill is 13,178.23
+tok/s with 310.82/311.70 ms median/p95 latency. Decode is 36.43 tok/s with
+27.35/28.03 ms median/p95. Peak allocation/reservation remains 1.799/1.994 GiB
+and sampled NVML peak remains 2,724 MiB. All 9,856 requested P32 calls execute
+with E4M3 operands and FP32 accumulation, with no fallback or rejection. The
+72.25 MiB KV cache remains entirely E4M3 at 55.36% of dense-equivalent storage;
+all 1,536 QK and 1,536 PV launches use native FP8 attention, with zero cache
+dequantization or dense-prefix materialization. The machine-readable result is
+`clean-96206dc9-w35-a8-4096.json`.
