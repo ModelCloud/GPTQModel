@@ -88,6 +88,13 @@ from .qvq_output_alignment import QVQOutputAlignmentAttachment
 
 log = setup_logger()
 
+_FP8_REPLAY_SEARCH_FOLDS = 2
+# Real-model H200 trials at 0.1% and 2% admitted candidates that improved
+# teacher-forced PPL/Top-1 but regressed held-out KL. Keep replay fail-closed
+# above the strongest observed candidate until broader evidence justifies it.
+_FP8_REPLAY_MINIMUM_RELATIVE_KL_IMPROVEMENT = 0.10
+_FP8_REPLAY_TOPN_REGRESSION_LIMIT = 0.0025
+
 
 def clone_qvq_config_for_module(qcfg: QVQConfig, module_full_name: str) -> Optional[QVQConfig]:
     """Clone QVQ config, apply supported dynamic overrides, or skip the module."""
@@ -449,18 +456,24 @@ class QVQProcessor(LoopProcessor):
         return target_device
 
     def prepare_module_granular_replay(self, gptq_model: BaseQModel) -> None:
-        """Cache exact dense FP32 logits for later propagated replay."""
+        """Cache exact dense FP32 logits for later propagated candidate replay."""
 
         replay_config = self.qcfg.module_granular_replay
-        if replay_config is None:
+        activation_config = self.qcfg.activation
+        fp8_replay_enabled = bool(
+            activation_config is not None
+            and activation_config.target == "p32_operand"
+            and activation_config.replay_passes == 1
+        )
+        if replay_config is None and not fp8_replay_enabled:
             return
         if self._module_replay_search_calibration is None or self._module_replay_confirmation_calibration is None:
-            raise ValueError("QVQ module-granular replay requires explicit search and confirmation streams.")
+            raise ValueError("QVQ propagated replay requires explicit search and confirmation streams.")
         if self._module_replay_model is not None:
-            raise RuntimeError("QVQ module-granular replay teacher targets were already prepared.")
+            raise RuntimeError("QVQ propagated replay teacher targets were already prepared.")
         model = gptq_model.model
         if any(isinstance(module, BaseQuantLinear) for module in model.modules()):
-            raise RuntimeError("QVQ module-granular replay teacher capture requires an entirely dense source model.")
+            raise RuntimeError("QVQ propagated replay teacher capture requires an entirely dense source model.")
         self._ensure_module_replay_residency(model)
         input_embeddings = model.get_input_embeddings()
         if input_embeddings is None:
@@ -470,7 +483,12 @@ class QVQProcessor(LoopProcessor):
             "search": list(self._module_replay_search_calibration),
             "confirmation": list(self._module_replay_confirmation_calibration),
         }
-        if len(streams["search"]) < replay_config.search_folds:
+        search_folds = (
+            replay_config.search_folds
+            if replay_config is not None
+            else _FP8_REPLAY_SEARCH_FOLDS
+        )
+        if len(streams["search"]) < search_folds:
             raise ValueError("QVQ module replay search rows must cover every configured search fold.")
         fingerprints = {
             name: {self._module_replay_row_fingerprint(row) for row in rows}
@@ -620,7 +638,7 @@ class QVQProcessor(LoopProcessor):
                 self._propagation_gates.pop(module_full_name, None)
 
     def _module_replay_metrics(self, split_name: str, *, fold_index: int = 0, folds: int = 1) -> Dict[str, float]:
-        """Replay one split and compare exact final logits against cached dense hidden states."""
+        """Replay one split and compare exact final logits against cached dense logits."""
 
         if self._module_replay_model is None:
             raise RuntimeError("QVQ module replay model is unavailable.")
@@ -633,7 +651,7 @@ class QVQProcessor(LoopProcessor):
         teacher_logits_rows = self._module_replay_teacher_logits[split_name][fold_index::folds]
         if not rows:
             raise ValueError("QVQ module replay produced an empty search fold.")
-        totals = {"kl": 0.0, "top1": 0.0, "top5": 0.0, "top10": 0.0, "tokens": 0}
+        totals = {"kl": 0.0, "nll": 0.0, "top1": 0.0, "top5": 0.0, "top10": 0.0, "tokens": 0}
         with torch.no_grad():
             for row, teacher_logits_cpu in zip(rows, teacher_logits_rows, strict=True):
                 student_logits = model(**self._module_replay_model_inputs(row, input_device), use_cache=False).logits[
@@ -653,12 +671,22 @@ class QVQProcessor(LoopProcessor):
                 student_logits = student_logits[valid]
                 if teacher_logits.numel() == 0:
                     continue
+                labels = row["input_ids"][:, 1:].to(device=student_logits.device)[valid]
                 teacher_log_probs = F.log_softmax(teacher_logits, dim=-1)
                 student_log_probs = F.log_softmax(student_logits, dim=-1)
                 token_count = int(teacher_logits.shape[0])
-                totals["kl"] += float(
-                    F.kl_div(student_log_probs, teacher_log_probs, reduction="sum", log_target=True).item()
+                totals["kl"] += max(
+                    0.0,
+                    float(
+                        F.kl_div(
+                            student_log_probs,
+                            teacher_log_probs,
+                            reduction="sum",
+                            log_target=True,
+                        ).item()
+                    ),
                 )
+                totals["nll"] += float(F.cross_entropy(student_logits, labels, reduction="sum").item())
                 teacher_top10 = teacher_logits.topk(10, dim=-1).indices
                 student_top10 = student_logits.topk(10, dim=-1).indices
                 totals["top1"] += float((teacher_top10[..., 0] == student_top10[..., 0]).sum().item())
@@ -674,6 +702,7 @@ class QVQProcessor(LoopProcessor):
             raise ValueError("QVQ module replay split contains no valid next-token positions.")
         return {
             "kl_forward": totals["kl"] / tokens,
+            "mean_nll": totals["nll"] / tokens,
             "top1_agreement": totals["top1"] / tokens,
             "top5_overlap": totals["top5"] / tokens,
             "top10_overlap": totals["top10"] / tokens,
@@ -2051,7 +2080,7 @@ class QVQProcessor(LoopProcessor):
         first_result,
         task_entry: Dict[str, Any],
     ):
-        """Re-encode once against exact deployed FP8 operands and native teacher targets."""
+        """Re-encode once, then promote only through disjoint final-logit replay."""
 
         config = module_qcfg.activation
         if (
@@ -2202,14 +2231,95 @@ class QVQProcessor(LoopProcessor):
             validation_target = validation_teacher.to(torch.float32)
             first_mse = float((first_validation - validation_target).square().mean().item())
             second_mse = float((second_validation - validation_target).square().mean().item())
+
+        if self._module_replay_model is None:
+            raise RuntimeError(
+                "QVQ FP8 replay requires prepared disjoint search and confirmation logits."
+            )
+        model = self._module_replay_model.model
+        self._ensure_module_replay_residency(model)
+        original = model.get_submodule(module.full_name)
+        if original is not module.module or not isinstance(original, torch.nn.Linear):
+            raise RuntimeError(
+                f"QVQ FP8 replay target `{module.full_name}` is not the authoritative live dense linear."
+            )
+        parent_name, _, child_name = module.full_name.rpartition(".")
+        parent = model.get_submodule(parent_name) if parent_name else model
+        baseline_folds = []
+        candidate_folds = []
+        baseline_confirmation = None
+        candidate_confirmation = None
+        with self._module_replay_lock:
+            try:
+                setattr(parent, child_name, first_candidate)
+                baseline_folds = [
+                    self._module_replay_metrics(
+                        "search",
+                        fold_index=fold_index,
+                        folds=_FP8_REPLAY_SEARCH_FOLDS,
+                    )
+                    for fold_index in range(_FP8_REPLAY_SEARCH_FOLDS)
+                ]
+                setattr(parent, child_name, second_candidate)
+                candidate_folds = [
+                    self._module_replay_metrics(
+                        "search",
+                        fold_index=fold_index,
+                        folds=_FP8_REPLAY_SEARCH_FOLDS,
+                    )
+                    for fold_index in range(_FP8_REPLAY_SEARCH_FOLDS)
+                ]
+                search_score = self._module_replay_score(candidate_folds, baseline_folds)
+                search_nll_passed = all(
+                    math.isfinite(candidate_fold["mean_nll"])
+                    and candidate_fold["mean_nll"] <= baseline_fold["mean_nll"]
+                    for candidate_fold, baseline_fold in zip(candidate_folds, baseline_folds, strict=True)
+                )
+                search_passed = bool(
+                    search_score
+                    <= 1.0 - _FP8_REPLAY_MINIMUM_RELATIVE_KL_IMPROVEMENT
+                    and search_nll_passed
+                )
+                confirmation_passed = False
+                if search_passed:
+                    setattr(parent, child_name, first_candidate)
+                    baseline_confirmation = self._module_replay_metrics("confirmation")
+                    setattr(parent, child_name, second_candidate)
+                    candidate_confirmation = self._module_replay_metrics("confirmation")
+                    required = (
+                        baseline_confirmation["kl_forward"]
+                        * _FP8_REPLAY_MINIMUM_RELATIVE_KL_IMPROVEMENT
+                    )
+                    confirmation_passed = bool(
+                        math.isfinite(candidate_confirmation["kl_forward"])
+                        and math.isfinite(candidate_confirmation["mean_nll"])
+                        and baseline_confirmation["kl_forward"]
+                        - candidate_confirmation["kl_forward"]
+                        >= required
+                        and candidate_confirmation["mean_nll"]
+                        <= baseline_confirmation["mean_nll"]
+                        and all(
+                            candidate_confirmation[metric]
+                            >= baseline_confirmation[metric]
+                            - _FP8_REPLAY_TOPN_REGRESSION_LIMIT
+                            for metric in (
+                                "top1_agreement",
+                                "top5_overlap",
+                                "top10_overlap",
+                            )
+                        )
+                    )
+            finally:
+                setattr(parent, child_name, original)
+
         first_telemetry = first_candidate.qvq_fp8_kernel_telemetry()
         second_telemetry = second_candidate.qvq_fp8_kernel_telemetry()
         if first_telemetry["executed"] < 1 or second_telemetry["executed"] < 1:
             raise RuntimeError("QVQ FP8 replay did not execute the required native FP8 P32 kernel.")
-        reencode_selected = second_mse <= first_mse
+        reencode_selected = search_passed and confirmation_passed
         selected = second_result if reencode_selected else first_result
         stats = {
-            "schema": "qvq.fp8-target-replay.v1",
+            "schema": "qvq.fp8-target-replay.v2",
             "teacher_dtype": str(train_teacher.dtype).removeprefix("torch."),
             "operand_dtype": "float8_e4m3fn",
             "accumulator_dtype": "float32",
@@ -2222,6 +2332,19 @@ class QVQProcessor(LoopProcessor):
             "ridge_prior": "immutable_original_dense_inner_target",
             "first_validation_mse": first_mse,
             "second_validation_mse": second_mse,
+            "local_mse_prefers_second": second_mse <= first_mse,
+            "selection_horizon": "final_logits",
+            "search_folds": _FP8_REPLAY_SEARCH_FOLDS,
+            "minimum_relative_kl_improvement": _FP8_REPLAY_MINIMUM_RELATIVE_KL_IMPROVEMENT,
+            "topn_regression_limit": _FP8_REPLAY_TOPN_REGRESSION_LIMIT,
+            "search_baseline": baseline_folds,
+            "search_candidate": candidate_folds,
+            "search_worst_kl_ratio": search_score if math.isfinite(search_score) else None,
+            "search_nll_passed": search_nll_passed,
+            "search_passed": search_passed,
+            "confirmation_baseline": baseline_confirmation,
+            "confirmation_candidate": candidate_confirmation,
+            "confirmation_passed": confirmation_passed,
             "selected": reencode_selected,
             "source": "immutable_original_dense_weight",
             "native_first_executed": int(first_telemetry["executed"]),

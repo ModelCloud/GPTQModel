@@ -1811,14 +1811,21 @@ class BaseQModel(nn.Module):
                 raise ValueError("`yaqa_calibration` requires QVQ `rounding='yaqa'`.")
 
         replay_config = getattr(self.quantize_config, "module_granular_replay", None)
+        activation_config = getattr(self.quantize_config, "activation", None)
+        fp8_replay_enabled = bool(
+            activation_config is not None
+            and activation_config.target == "p32_operand"
+            and activation_config.replay_passes == 1
+        )
+        propagated_replay_enabled = replay_config is not None or fp8_replay_enabled
         replay_streams = (module_replay_search_calibration, module_replay_confirmation_calibration)
-        if replay_config is None and any(stream is not None for stream in replay_streams):
+        if not propagated_replay_enabled and any(stream is not None for stream in replay_streams):
             raise ValueError(
-                "Module replay calibration streams require QVQ `module_granular_replay` to be enabled."
+                "Propagated replay calibration streams require QVQ module-granular replay or FP8 replay."
             )
-        if replay_config is not None and any(stream is None for stream in replay_streams):
+        if propagated_replay_enabled and any(stream is None for stream in replay_streams):
             raise ValueError(
-                "QVQ module-granular replay requires explicit search and confirmation calibration streams."
+                "QVQ propagated replay requires explicit search and confirmation calibration streams."
             )
 
         configured_preprocessors = getattr(self.quantize_config, "preprocessors", None) or []
@@ -1879,7 +1886,7 @@ class BaseQModel(nn.Module):
                     calibration_source_weight_column=self.quantize_config.yaqa.source_weight_column,
                     calibration_source_weights=self.quantize_config.yaqa.source_weights,
                 )
-            if replay_config is not None:
+            if propagated_replay_enabled:
                 qvq_args["module_replay_search_calibration"] = self.prepare_dataset(
                     calibration_dataset=module_replay_search_calibration,
                     calibration_dataset_concat_size=None,
