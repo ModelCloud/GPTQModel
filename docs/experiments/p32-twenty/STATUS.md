@@ -15,7 +15,7 @@ AGENTS.md. All changes and evidence share PR #137.
 |5|Transition LUTs|GPU index/pair LUT decoders exact across all 94 projections; both slower overall in materialization, fused LUT study remains.|
 |6|Vectorized codebook output|Packed half2 output exact across all 94 projections at 1/4 warps; fused MMA-fragment output and model validation remain.|
 |7|Short reduced-precision accumulation|Real five-projection arithmetic sweep recorded; layer1-down FP16/BF16 partials fail some/all cases. Integrated decoder/model and executed profiling remain.|
-|8|Blockwise FP32 promotion|Integrated BM64/BN64 fused-window K16/K32/K64/K128/K256 arms pass 143/144, 143/144, 142/144, 142/144, and 132/144. The per-module K256 policy with an exact layer-1 down fallback passes 144/144 and reaches 1.20x at M=2048 in the local median. Model and profile validation remain.|
+|8|Blockwise FP32 promotion|Integrated BM64/BN64 fused-window K16/K32/K64/K128/K256 arms pass 143/144, 143/144, 142/144, 142/144, and 132/144. The per-module K256 policy with an exact layer-1 down fallback passes 144/144 and reaches 1.20x at M=2048 in the local median. Wave20 model runs are complete, but matched timing repeats and downstream quality remain.|
 |9|Output supertiles|Neighboring projections/channels implementation and matched evaluation remain.|
 |10|Lossless repack|All 94 projections bit/value exact; 108 layers, bounded model PPL/logits/ARC and large prefill speedups measured; full quality/profiling coverage remains.|
 |11|Independent trellis tiles|Requantized 64/128/256-tile exports and total BPW sweep remain.|
@@ -90,3 +90,10 @@ validation for possible future alternatives.
 See [calibration stability](CALIBRATION_STABILITY.md) and
 [fused model evidence](FUSED_RECOVERY_MODEL.md). These updates do not close any
 experiment's missing full scorecard items or replace experiments 1–30.
+
+[Window model wave20](WINDOW_MODEL_WAVE20.md) completed eight full-model arms
+(production control, K0/K16/K32/K64/K128/K256, and the per-module policy) on
+the exact seed-7 snapshot. The wave records bounded C4-style PPL and full
+prefill/decode timing. The production control has an anomalous M=1 median, so
+model speed conclusions await matched repeats; ARC/GSM8K and full profiling
+remain open.
