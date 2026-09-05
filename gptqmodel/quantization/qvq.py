@@ -1817,7 +1817,25 @@ def batched_viterbi_quantize(
                 raise ValueError(f"QVQ tail-biting overlap must be in `[0, {overlap_limit - 1}]`.")
 
     if (
+        sequences.device.type == "cuda" and torch.version.hip is not None
+        and os.environ.get("GPTQMODEL_QVQ_AMD_NATIVE_QUANTIZATION", "0") == "1"
+    ):
+        from ..utils.qvq_yaqa_amd import banked_viterbi_trusted, native_banked_supported
+
+        native_codebooks = codebook.unsqueeze(0)
+        if native_banked_supported(sequences, native_codebooks, bits=bits, segment_steps=16,
+                                   work_dtype=work_dtype):
+            native = banked_viterbi_trusted(
+                sequences, native_codebooks, bits=bits,
+                overlap=None if overlap_i64 is None else overlap_i64.contiguous(),
+                step_weights=None if step_weights is None else step_weights.to(torch.float32).contiguous(),
+            )
+            return TrellisQuantizationResult(states=native.states, values=native.values,
+                                            squared_error=native.squared_error)
+
+    if (
         sequences.device.type == "cuda"
+        and torch.version.hip is None
         and state_count == 1 << 16
         and vector_size in (2, 4)
         and sequences.dtype == torch.float32
@@ -2159,6 +2177,19 @@ def _batched_v2_banked_viterbi_quantize(
         else:
             guard_reason = "the CUDA device is below compute capability 8.0"
         reject_viterbi_pruning_fallback_if_strict(pruning_policy, reason=guard_reason)
+    if (
+        sequences.device.type == "cuda" and torch.version.hip is not None
+        and os.environ.get("GPTQMODEL_QVQ_AMD_NATIVE_QUANTIZATION", "0") == "1"
+    ):
+        from ..utils.qvq_yaqa_amd import banked_viterbi_trusted, native_banked_supported
+
+        if native_banked_supported(sequences, codebooks, bits=bits, segment_steps=segment_steps,
+                                   work_dtype=work_dtype):
+            return banked_viterbi_trusted(
+                sequences, codebooks, bits=bits, segment_steps=segment_steps,
+                overlap=None if overlap_i64 is None else overlap_i64.contiguous(),
+                step_weights=None if work_weights is None else work_weights.contiguous(),
+            )
     if native_cuda_dispatch:
         from ..utils.qvq_cuda import (
             _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
@@ -2482,6 +2513,7 @@ def _tail_biting_v2_banked_quantize(
     if (
         _cuda_values_prevalidated
         and sequences.device.type == "cuda"
+        and torch.version.hip is None
         and torch.cuda.get_device_capability(sequences.device) == (8, 0)
         and shift in (3, 4, 5, 6)
     ):
@@ -2507,6 +2539,7 @@ def _tail_biting_v2_banked_quantize(
     if (
         _cuda_values_prevalidated
         and sequences.device.type == "cuda"
+        and torch.version.hip is None
         and torch.cuda.get_device_capability(sequences.device) == (8, 0)
         # Midpoint-only traceback wins at the two edge rates on SM80.  The
         # complete provisional result remains faster for the middle rates.
@@ -2643,6 +2676,7 @@ def tail_biting_viterbi_quantize(
         candidate_count == 1
         and _cuda_values_prevalidated
         and sequences.device.type == "cuda"
+        and torch.version.hip is None
         and vector_size == 2
         and torch.cuda.get_device_capability(sequences.device) >= (8, 0)
     ):
@@ -3632,7 +3666,10 @@ def block_ldlq_inner_v2b2_p32(
     )
     best_alt_id = 1
     best_loss = full_loss(bank0_weight)
-    if family_batch and inner_weight.device.type == "cuda" and kwargs.get("tail_biting_candidates", 1) == 1:
+    if (
+        family_batch and inner_weight.device.type == "cuda" and torch.version.hip is None
+        and kwargs.get("tail_biting_candidates", 1) == 1
+    ):
         family_stacks = torch.stack(
             tuple(
                 torch.stack((codebook_library[0], codebook_library[alt_id])).contiguous()
@@ -5238,7 +5275,10 @@ def yaqa_inner_v2b2_p32(
                 )
                 for alt_id in (1, 2, 3)
             )
-            if inner_weight.device.type == "cuda" and kwargs.get("tail_biting_candidates", 1) == 1:
+            if (
+                inner_weight.device.type == "cuda" and torch.version.hip is None
+                and kwargs.get("tail_biting_candidates", 1) == 1
+            ):
                 from ..utils.qvq_cuda import (
                     _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
                 )
@@ -5344,6 +5384,7 @@ def yaqa_inner_v2b2_p32(
     parallel_families = (
         _parallel_candidates
         and inner_weight.device.type == "cuda"
+        and torch.version.hip is None
         and len(alternative_ids) >= 1
         and kwargs.get("_incremental_cuda_factored_feedback", False)
     )
