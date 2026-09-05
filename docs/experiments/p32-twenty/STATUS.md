@@ -97,3 +97,9 @@ the exact seed-7 snapshot. The wave records bounded C4-style PPL and full
 prefill/decode timing. The production control has an anomalous M=1 median, so
 model speed conclusions await matched repeats; ARC/GSM8K and full profiling
 remain open.
+
+[Window model repeat wave21](WINDOW_MODEL_REPEAT_WAVE21.md) reran the production
+window and per-module policy on four GPUs each. It resolves the wave20 M=1
+control anomaly and measures a pooled policy speedup of 1.294x at M=512 and
+1.366x at M=2048, while policy remains slower at smaller M and in decode.
+Downstream quality and complete profiling remain open.
