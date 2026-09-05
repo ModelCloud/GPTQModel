@@ -317,7 +317,17 @@ def main():
         with torch.no_grad():
             initial = predict_factors(a, b)
             initial_error = (initial - yc).abs()
-            threshold = float(torch.quantile(initial_error.flatten(), 0.999))
+            if initial_error.numel() <= 2**24:
+                threshold = float(torch.quantile(initial_error.flatten(), 0.999))
+            else:
+                # torch.quantile limits input size to 2**24. Use every residual,
+                # with linear interpolation in FP64, rather than subsampling.
+                import numpy as np
+
+                residuals = initial_error.detach().float().cpu().numpy().reshape(-1)
+                threshold = float(
+                    np.quantile(residuals.astype(np.float64), 0.999, method="linear")
+                )
             weights = 1 + args.tail_alpha * (initial_error > threshold).float()
             denominator = float(((initial - yc).square() * weights).mean())
         a = a.clone().requires_grad_()

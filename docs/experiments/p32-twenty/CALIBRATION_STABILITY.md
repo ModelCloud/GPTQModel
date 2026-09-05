@@ -95,3 +95,20 @@ rank-6 sparse candidate, not the new subset-71 rank-6 fit.
 The original generic `recovery_contract` text incorrectly calls all corrections
 FP32; the archive annotates this without rewriting the recorded run. Future
 reports now record A/B dtypes, logical rank, and sparse count explicitly.
+
+## Large-capture percentile correction
+
+Seed-71 16K/32K workers terminated at `torch.quantile`: the residual arrays exceed
+its 2^24-element input limit. Their partial exports/reports are retained and are
+not counted as completed fits. Explicit retry1 fits and replay jobs use separate
+output directories. Original dependent replay jobs remain unsatisfied and must
+not be mistaken for runnable work or successful validation.
+
+Above the limit, tail fitting now computes the same linear-interpolated 99.9th
+percentile over every residual using CPU NumPy with explicit FP64 conversion.
+No residual subsampling is used. Smaller captures retain their original Torch
+path; rounding can differ between paths and is not claimed bit-identical.
+A 2^24+1-element ordered-array check and a small Torch FP64 comparison validate
+the fallback. The first check caught NumPy preserving FP32 arithmetic; explicit
+FP64 conversion fixed that discrepancy before this commit. GPU model validation
+of the large-fit path remains pending the retry runs.

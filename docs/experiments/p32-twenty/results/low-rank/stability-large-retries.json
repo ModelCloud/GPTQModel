@@ -1,0 +1,111 @@
+{
+  "reason": "Original seed71 16K/32K workers terminal: torch.quantile size limit. Original partial results retained. Original dependent replay jobs remain unsatisfied; retry replay jobs replace them.",
+  "jobs": [
+    {
+      "id": "stability-fit-71-16384-retry1",
+      "requires_complete": [
+        "/root/p32-stability/seed71/capture/capture.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/low_rank_sweep.py",
+        "--uuid",
+        "{uuid}",
+        "--calibration-root",
+        "/root/p32-stability/seed71/capture",
+        "--calibration-tokens",
+        "16384",
+        "--calibration-prefix",
+        "--ranks",
+        "2",
+        "4",
+        "6",
+        "8",
+        "12",
+        "16",
+        "--fits",
+        "l2",
+        "tail",
+        "--tail-alpha",
+        "1",
+        "--tail-steps",
+        "80",
+        "--output",
+        "/root/p32-stability/seed71/fit16384-retry1"
+      ],
+      "result": "/root/p32-stability/seed71/fit16384-retry1/report.json",
+      "log": "/root/p32-stability/seed71/fit16384-retry1.log"
+    },
+    {
+      "id": "stability-broader-71-16384-retry1",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit16384-retry1/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed71/fit16384-retry1/report.json",
+        "--output",
+        "/root/p32-stability/seed71/fit16384-retry1/broader.json"
+      ],
+      "result": "/root/p32-stability/seed71/fit16384-retry1/broader.json",
+      "log": "/root/p32-stability/seed71/fit16384-retry1/broader.json.log"
+    },
+    {
+      "id": "stability-fit-71-32768-retry1",
+      "requires_complete": [
+        "/root/p32-stability/seed71/capture/capture.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/low_rank_sweep.py",
+        "--uuid",
+        "{uuid}",
+        "--calibration-root",
+        "/root/p32-stability/seed71/capture",
+        "--calibration-tokens",
+        "32768",
+        "--calibration-prefix",
+        "--ranks",
+        "2",
+        "4",
+        "6",
+        "8",
+        "12",
+        "16",
+        "--fits",
+        "l2",
+        "tail",
+        "--tail-alpha",
+        "1",
+        "--tail-steps",
+        "80",
+        "--output",
+        "/root/p32-stability/seed71/fit32768-retry1"
+      ],
+      "result": "/root/p32-stability/seed71/fit32768-retry1/report.json",
+      "log": "/root/p32-stability/seed71/fit32768-retry1.log"
+    },
+    {
+      "id": "stability-broader-71-32768-retry1",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit32768-retry1/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed71/fit32768-retry1/report.json",
+        "--output",
+        "/root/p32-stability/seed71/fit32768-retry1/broader.json"
+      ],
+      "result": "/root/p32-stability/seed71/fit32768-retry1/broader.json",
+      "log": "/root/p32-stability/seed71/fit32768-retry1/broader.json.log"
+    }
+  ]
+}
