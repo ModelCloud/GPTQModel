@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+from gptqmodel.models.definitions.apertus import Apertus1p5QModel
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
 from gptqmodel.models.definitions.cohere_compass import CohereCompassQModel
@@ -9,6 +10,7 @@ from gptqmodel.models.definitions.deepseek_ocr2 import DeepSeekOCR2QModel
 from gptqmodel.models.definitions.deepseek_vl import DeepSeekVLQModel
 from gptqmodel.models.definitions.deepseek_vl_v2 import DeepSeekVLV2QModel
 from gptqmodel.models.definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
+from gptqmodel.models.definitions.hunyuan_vl import HunYuanVLQModel
 from gptqmodel.models.definitions.intern_s2_preview import InternS2PreviewQModel
 from gptqmodel.models.definitions.interns1 import InternS1QModel
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
@@ -22,6 +24,7 @@ from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel
 from gptqmodel.models.definitions.base_qwen3_vl import BaseQwen3VLGPTQ
+from gptqmodel.models.definitions.locateanything import LocateAnythingQModel
 
 
 def format_ovis_dataset(image, assistant):
@@ -65,6 +68,19 @@ def format_qwen2_vl_dataset(image, assistant):
     ]
 
 
+def format_apertus_v15_dataset(image, assistant):
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "url": image},
+                {"type": "text", "text": "generate a caption for this image"},
+            ],
+        },
+        {"role": "assistant", "content": assistant},
+    ]
+
+
 def format_deepseek_vl_v2_dataset(image, assistant):
     return [
         {
@@ -100,6 +116,38 @@ def format_deepseek_ocr2_dataset(image, assistant):
         "image": image,
         "text": "<image>\nFree OCR.",
     }
+
+
+def format_hunyuan_ocr_dataset(image, assistant):
+    del assistant
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {
+                    "type": "text",
+                    "text": (
+                        "提取文档图片中正文的所有信息用markdown格式表示，其中页眉、页脚部分忽略，"
+                        "表格用html格式表达，文档中公式用latex格式表示，按照阅读顺序组织进行解析。"
+                    ),
+                },
+            ],
+        }
+    ]
+
+
+def format_locateanything_dataset(image, assistant):
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": "Describe this image and transcribe any visible text."},
+            ],
+        },
+        {"role": "assistant", "content": assistant},
+    ]
 
 
 def format_qwen2_5_omni_dataset(image, assistant):
@@ -146,7 +194,18 @@ def prepare_deepseek_ocr2_dataset(n_sample: int = 20) -> list[dict]:
     return prepare_dataset(format_deepseek_ocr2_dataset, n_sample=n_sample)
 
 
+def prepare_hunyuan_ocr_dataset(n_sample: int = 20) -> list[list[dict]]:
+    return prepare_dataset(format_hunyuan_ocr_dataset, n_sample=n_sample)
+
+
+def prepare_locateanything_dataset(n_sample: int = 20) -> list[list[dict]]:
+    return prepare_dataset(format_locateanything_dataset, n_sample=n_sample)
+
+
 def get_calib_dataset(model):
+    if isinstance(model, Apertus1p5QModel):
+        return prepare_dataset(format_apertus_v15_dataset, n_sample=20)
+
     if isinstance(model, OvisQModel):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
 
@@ -185,5 +244,11 @@ def get_calib_dataset(model):
 
     if isinstance(model, DeepSeekOCR2QModel):
         return prepare_deepseek_ocr2_dataset(n_sample=20)
+
+    if isinstance(model, LocateAnythingQModel):
+        return prepare_locateanything_dataset(n_sample=20)
+
+    if isinstance(model, HunYuanVLQModel):
+        return prepare_hunyuan_ocr_dataset(n_sample=20)
 
     raise NotImplementedError(f"Unsupported MODEL: {model.__class__}")

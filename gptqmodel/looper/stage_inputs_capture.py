@@ -76,6 +76,24 @@ class StageInputsCapture:
                     module_path=module_name,
                 )
 
+    def _resolve_forward_device(
+        self,
+        example: Dict[str, Any],
+        fallback: torch.device,
+    ) -> torch.device:
+        """Resolve where token inputs must execute for the materialized embedding."""
+
+        if not torch.is_tensor(example.get("input_ids")):
+            return fallback
+        try:
+            embedding = self.gptq_model.get_input_embeddings()
+        except Exception:
+            return fallback
+        if not isinstance(embedding, torch.nn.Module):
+            return fallback
+        embedding_device = get_device(embedding)
+        return fallback if embedding_device == META else embedding_device
+
     def cache_inputs(
         self,
         layers: Sequence[torch.nn.Module],
@@ -300,6 +318,7 @@ class StageInputsCapture:
                     input_embeddings=input_embeddings,
                     fallback_device=data_device,
                 )
+                data_device = self._resolve_forward_device(example, data_device)
                 example = self.gptq_model.move_input_capture_example(example, data_device)
                 if (
                         embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)

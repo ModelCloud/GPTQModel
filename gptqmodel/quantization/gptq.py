@@ -13,7 +13,6 @@ import threading
 import time
 from typing import Dict, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 import transformers
@@ -217,7 +216,7 @@ def _is_base_quant_linear_like(layer: nn.Module) -> bool:
 
 
 def get_number_of_rows_and_cols(layer: nn.Module):
-    # return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
+    # return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
     if isinstance(layer, NamedModule):
         layer = layer.module
 
@@ -232,7 +231,7 @@ def get_number_of_rows_and_cols(layer: nn.Module):
         return layer.in_features, layer.out_features
     else:
         # weight shape is (n_out, n_in)
-        return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
+        return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 
 
 @torch.inference_mode()
@@ -327,7 +326,10 @@ class GPTQ:
             self.length_aware_config = LengthAwareConfig(mode=LengthAwareMode.DISABLED)
 
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig] = None, region_timer=None):
-        self.lock = threading.Lock()
+        # Hessian capture/materialization may run concurrently on multiple device
+        # workers when Python's GIL is disabled. Re-entrancy is required because
+        # target-device selection is also used while materialization holds the lock.
+        self.lock = threading.RLock()
         self.region_timer = region_timer
 
         # self.num_tied_handles = 0
@@ -1081,32 +1083,35 @@ class GPTQ:
         return batch_token_size, xtx, canonical_device
 
     def _select_hessian_target_device(self, requested: Optional[torch.device]) -> torch.device:
-        if requested is not None:
-            return torch.device(requested)
+        with self.lock:
+            if requested is not None:
+                return torch.device(requested)
 
-        hint = getattr(self, "_final_hessian_device_hint", None)
-        if hint is not None:
-            return torch.device(hint)
+            hint = getattr(self, "_final_hessian_device_hint", None)
+            if hint is not None:
+                return torch.device(hint)
 
-        # Prefer a device that already has partials
-        if self._device_hessian_partials:
-            partial_device = next(iter(self._device_hessian_partials.keys()))
-            return torch.device(partial_device)
-        if self._device_embedding_counts:
-            partial_device = next(iter(self._device_embedding_counts.keys()))
-            return torch.device(partial_device)
+            # Prefer a device that already has partials
+            if self._device_hessian_partials:
+                partial_device = next(iter(self._device_hessian_partials.keys()))
+                return torch.device(partial_device)
+            if self._device_embedding_counts:
+                partial_device = next(iter(self._device_embedding_counts.keys()))
+                return torch.device(partial_device)
 
-        return torch.device("cpu")
+            return torch.device("cpu")
 
     def materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
-        device = self._select_hessian_target_device(target_device)
-
-        shared_state = getattr(self, "_shared_hessian_state", None)
-        if shared_state is not None and not isinstance(self.module, nn.Embedding):
-            self.materialize_shared_hessian(shared_state, device)
-            return
-
         with self.lock:
+            # Select the destination under the same lock as partial-state reads;
+            # this closes the GIL=0 window between selection and merge.
+            device = self._select_hessian_target_device(target_device)
+
+            shared_state = getattr(self, "_shared_hessian_state", None)
+            if shared_state is not None and not isinstance(self.module, nn.Embedding):
+                self.materialize_shared_hessian(shared_state, device)
+                return
+
             # Embedding path: merge 1D counts
             if isinstance(self.module, nn.Embedding):
                 # The diagonal Hessian is materialized once and consumed by the
@@ -1264,6 +1269,46 @@ class GPTQ:
             # number of observed calibration tokens. The Hessian partials have
             # already been merged into ``self.H`` and are freed above.
             del result_accum
+
+    def adopt_hessian_from(self, leader: "GPTQ") -> None:
+        """Replace this task's Hessian statistics with a private copy of ``leader``'s."""
+        if leader is self:
+            return
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"GPTQ: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+
+        leader.materialize_global_hessian()
+        with leader.lock:
+            source = leader.H
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            if source is None:
+                source = leader.create_H(None)
+            target_device = self._select_hessian_target_device(
+                getattr(self.module, "target_device", None)
+            )
+            copied = source.detach().to(
+                device=target_device, dtype=torch.float32, copy=True
+            )
+
+        with self.lock:
+            self.H = copied
+            self.nsamples = nsamples
+            self._max_observed_nsamples = max(self._max_observed_nsamples, nsamples)
+            self.fwd_counter = fwd_counter
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            self._device_sequence_counts.clear()
+            self._hessian_dirty = False
+            self._hessian_rebuild_invalid = False
+            self._final_hessian_device_hint = copied.device
+            # Adoption is an independent task-local result. Do not let the
+            # existing QVQ shared-state cache repin or overwrite it later.
+            self._shared_hessian_state = None
+            self._shared_hessian_source = None
 
     def materialize_shared_hessian(self, shared_state, device: torch.device) -> None:
         """Materialize this task's Hessian from a same-input shared state.
@@ -1427,7 +1472,12 @@ class GPTQ:
         return torch.zeros((self.columns, self.columns), dtype=torch.float32,
                            device=self._select_hessian_target_device(target_device))
 
-    def _fallback_quantize(self, strategy: FallbackStrategy, blocksize: int):
+    def _fallback_quantize(
+        self,
+        strategy: FallbackStrategy,
+        blocksize: int,
+        target_device: Optional[torch.device] = None,
+    ):
         """Apply a lightweight quantization fallback using the requested strategy."""
         maxq = 2 ** self.qcfg.bits - 1
         sigma = 3.0
@@ -1440,7 +1490,8 @@ class GPTQ:
             mse_steps = smooth_method.steps
             mse_maxshrink = smooth_method.maxshrink
 
-        target_device = self.H.device if self.H is not None else self.module.weight.device
+        if target_device is None:
+            target_device = self.H.device if self.H is not None else self.module.weight.device
         W = self.clone_module(device=target_device)
         Q = torch.empty_like(W)
         scale_chunks = []
@@ -2434,9 +2485,17 @@ class GPTQ:
                 f"Quantization: Module `{self.name}` -> "
                 f"Using `{resolved_strategy.value}` fallback quantization (observed {self.nsamples} samples, threshold={threshold_text}{threshold_info}, max_total={self.expected_nsamples})."
             )
-            self.H = self.create_H(target_device=target_device)
-
-            return self._fallback_quantize(resolved_strategy, blocksize)
+            # RTN/MIDPOINT fallback does not read Hessian values. Resolve the
+            # compute device before releasing the potentially large partials.
+            with self.lock:
+                fallback_device = self._select_hessian_target_device(target_device)
+                self._device_hessian_partials.clear()
+                self._device_sample_counts.clear()
+                self._device_sequence_counts.clear()
+                self._hessian_dirty = False
+            return self._fallback_quantize(
+                resolved_strategy, blocksize, target_device=fallback_device
+            )
         else:
             use_hessian = True
             self.finalize_hessian(target_device=target_device)
@@ -3851,6 +3910,13 @@ class GPTQ:
 
         duration = time.time() - start
 
+        # Quantization is complete; retain the authoritative ``nsamples`` field
+        # but release per-device counters that were only needed to materialize
+        # (or detect an invalid mock-quantization rebuild of) the Hessian.
+        with self.lock:
+            self._device_sample_counts.clear()
+            self._device_sequence_counts.clear()
+
         return Q, scale, zero, g_idx, duration, avg_loss, damp, self.nsamples
 
     def borrow_materialized_chunk_stats(self, reset: bool = False) -> Dict[str, int]:
@@ -3946,6 +4012,11 @@ class GPTQ:
         self._borrow_workspace_last_chunk_rows = None
 
     def free(self):
+        with self.lock:
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            self._device_sequence_counts.clear()
+            self._hessian_dirty = False
         if hasattr(self, "H"):
             del self.H
         if hasattr(self, "_H_diag"):
