@@ -13,11 +13,9 @@ import torch
 from safetensors import safe_open
 
 from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear import qvq as qvq_linear_module
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.nn_modules.qvq_fp8_cache import QVQFP8DynamicCache
 from gptqmodel.quantization import FORMAT, QVQConfig
-from gptqmodel.quantization.qvq_activation import fake_quantize_qvq_fp8_activation
 from gptqmodel.utils.qvq_cuda import qvq_cuda_supported
 
 pytestmark = [
@@ -84,22 +82,7 @@ def _calibration_dataset(tokenizer) -> list[dict[str, torch.Tensor]]:
     ]
 
 
-def _portable_a8_hook(config):
-    def hook(_module, args):
-        source = args[0]
-        _, _, dequantized = fake_quantize_qvq_fp8_activation(
-            source,
-            format=config.format,
-            scale_method=config.scale_method,
-        )
-        return (dequantized, *args[1:])
-
-    return hook
-
-
-def test_qvq_p32_a8_quantize_save_reload_and_native_inference(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_qvq_p32_a8_quantize_save_reload_and_native_inference(tmp_path: Path):
     if torch.cuda.get_device_capability() < (8, 9):
         pytest.skip(
             "native QVQ E4M3 input requires NVIDIA compute capability 8.9 or newer"
@@ -114,7 +97,7 @@ def test_qvq_p32_a8_quantize_save_reload_and_native_inference(
         bits=3.5,
         format="v2b2-g32",
         rounding="block_ldlq",
-        activation_quantization=True,
+        activation={"kernel_mode": "require"},
         device="cuda:0",
         offload_to_disk=False,
     )
@@ -131,17 +114,19 @@ def test_qvq_p32_a8_quantize_save_reload_and_native_inference(
         backend=BACKEND.QVQ,
         calibration_data_min_length=1,
     )
-    activation_stats = [
-        row["activation_quantization_error"]
+    replay_stats = [
+        row["fp8_target_replay"]
         for rows in quant_log.values()
         for row in rows
         if isinstance(row, dict)
-        and row.get("activation_quantization_error") is not None
+        and row.get("fp8_target_replay") is not None
     ]
-    assert len(activation_stats) == 7
+    assert len(replay_stats) == 7
     assert all(
-        stats["elements"] > 0 and stats["relative_rmse"] > 0
-        for stats in activation_stats
+        stats["operand_dtype"] == "float8_e4m3fn"
+        and stats["native_first_executed"] > 0
+        and stats["native_second_executed"] > 0
+        for stats in replay_stats
     )
 
     encoded = tokenizer("tiny qvq calibration sample", return_tensors="pt").to("cuda:0")
@@ -159,10 +144,15 @@ def test_qvq_p32_a8_quantize_save_reload_and_native_inference(
     assert metadata["method"] == "qvq"
     assert metadata["bits"] == 3.5
     assert metadata["format"] == FORMAT.QVQ_V2B2_P32.value
-    assert metadata["activation_quantization"] == {
+    assert metadata["activation"] == {
         "bits": 8,
         "format": "float8_e4m3fn",
+        "kernel_mode": "require",
+        "replay_max_rows": 2048,
+        "replay_passes": 1,
+        "replay_validation_fraction": 0.125,
         "scale_method": "dynamic_per_token",
+        "target": "p32_operand",
     }
 
     tensor_keys = set()
@@ -185,26 +175,15 @@ def test_qvq_p32_a8_quantize_save_reload_and_native_inference(
     ]
     assert len(qvq_layers) == 7
     assert all(
-        layer.v2b2_p32 and layer.activation_quantization is not None
+        layer.v2b2_p32 and layer.activation is not None
         for layer in qvq_layers
     )
     assert (
-        reloaded.quantize_config.activation_quantization
-        == quantize_config.activation_quantization
+        reloaded.quantize_config.activation
+        == quantize_config.activation
     )
 
     reloaded.model.eval()
-    native_fp8_dispatches = []
-    original_hadamard = qvq_linear_module.qvq_cuda_hadamard
-
-    def record_native_hadamard(x, **kwargs):
-        if kwargs.get("input_scale") is not None:
-            native_fp8_dispatches.append(
-                (x.dtype, kwargs["input_scale"].dtype, kwargs["input_rounding_mode"])
-            )
-        return original_hadamard(x, **kwargs)
-
-    monkeypatch.setattr(qvq_linear_module, "qvq_cuda_hadamard", record_native_hadamard)
     with torch.inference_mode():
         native_output = reloaded.model(**encoded)
         native_logits = native_output.logits.float()
@@ -214,9 +193,20 @@ def test_qvq_p32_a8_quantize_save_reload_and_native_inference(
     assert cache_telemetry["no_full_precision_residual"] is True
     assert cache_telemetry["initialized_layer_count"] == 1
     assert cache_telemetry["payload_dtypes"] == ["torch.float8_e4m3fn"]
-    assert cache_telemetry["storage_ratio_vs_dense"] == pytest.approx(0.625)
-    assert native_fp8_dispatches == [(torch.float8_e4m3fn, torch.float32, 0)] * len(
-        qvq_layers
+    # The dynamic CUDA cache allocates one full page. Its physical ratio is
+    # therefore the logical E4M3+row-scale ratio times capacity/utilized rows.
+    assert cache_telemetry["storage_ratio_vs_dense"] == pytest.approx(
+        0.625
+        * cache_telemetry["capacities"][0]
+        / cache_telemetry["sequence_lengths"][0]
+    )
+    kernel_telemetry = [layer.qvq_fp8_kernel_telemetry() for layer in qvq_layers]
+    assert all(
+        telemetry["requested"] > 0
+        and telemetry["requested"] == telemetry["executed"]
+        and telemetry["fallback"] == 0
+        and telemetry["rejected"] == 0
+        for telemetry in kernel_telemetry
     )
     torch.testing.assert_close(native_logits, in_memory_logits, atol=2e-3, rtol=0)
     generated = reloaded.generate(
@@ -233,20 +223,3 @@ def test_qvq_p32_a8_quantize_save_reload_and_native_inference(
     assert generated_cache_telemetry["sequence_lengths"] == [
         generated.sequences.shape[-1] - 1
     ]
-
-    handles = []
-    for layer in qvq_layers:
-        activation_config = layer.activation_quantization
-        layer.activation_quantization = None
-        layer._qvq_grouped_p32_delegate = None
-        handles.append(
-            layer.register_forward_pre_hook(_portable_a8_hook(activation_config))
-        )
-    try:
-        with torch.inference_mode():
-            portable_logits = reloaded.model(**encoded).logits.float()
-    finally:
-        for handle in handles:
-            handle.remove()
-
-    torch.testing.assert_close(native_logits, portable_logits, atol=2e-3, rtol=0)

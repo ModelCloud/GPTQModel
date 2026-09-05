@@ -385,16 +385,17 @@ def test_qvq_v2b2_g32_a8_config_round_trip(bits):
         bits=bits,
         format="v2b2-g32",
         rounding="block_ldlq",
-        activation_quantization=True,
+        activation=True,
         offload_to_disk=False,
     )
 
     assert config.format == FORMAT.QVQ_V2B2_P32
     assert config.bank_count == 2
-    assert config.activation_quantization == QVQActivationConfig()
+    assert config.activation == QVQActivationConfig()
+    assert "activation_quantization" not in config.to_dict()
     reloaded = QVQConfig.from_quant_config(config.to_dict())
-    assert reloaded.activation_quantization == config.activation_quantization
-    assert reloaded.quant_linear_init_kwargs()["activation_quantization"] == {
+    assert reloaded.activation == config.activation
+    assert reloaded.quant_linear_init_kwargs()["activation"] == {
         "bits": 8,
         "format": "float8_e4m3fn",
         "kernel_mode": "auto",
@@ -404,6 +405,11 @@ def test_qvq_v2b2_g32_a8_config_round_trip(bits):
         "scale_method": "dynamic_per_token",
         "target": "p32_operand",
     }
+    legacy = config.to_dict()
+    legacy["activation_quantization"] = legacy.pop("activation")
+    assert QVQConfig.from_quant_config(legacy).activation == config.activation
+    with pytest.raises(ValueError, match="both `activation` and legacy"):
+        QVQConfig.from_quant_config({**config.to_dict(), "activation_quantization": {}})
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
@@ -454,7 +460,7 @@ def test_h200_fp8_replay_reencodes_from_immutable_dense_teacher_and_executes_nat
         bits=3.5,
         format="v2b2-g32",
         rounding="block_ldlq",
-        activation_quantization={
+        activation={
             "kernel_mode": "require",
             "replay_max_rows": 16,
             "replay_validation_fraction": 0.125,
@@ -499,7 +505,7 @@ def test_qvq_a8_rejects_incompatible_weight_formats_and_rates():
             bits=2,
             format="qvq",
             rounding="block_ldlq",
-            activation_quantization=True,
+            activation=True,
             offload_to_disk=False,
         )
     with pytest.raises(ValueError, match="W2 through W3.5"):
@@ -507,7 +513,7 @@ def test_qvq_a8_rejects_incompatible_weight_formats_and_rates():
             bits=1.5,
             format="qvq_v2b2_p32",
             rounding="block_ldlq",
-            activation_quantization=True,
+            activation=True,
             offload_to_disk=False,
         )
 
@@ -517,7 +523,7 @@ def test_qvq_v2b2_g32_alias_normalizes_in_dynamic_overrides():
         bits=2,
         format="v2b2-g32",
         rounding="block_ldlq",
-        activation_quantization=True,
+        activation=True,
         dynamic={"model.layers.0.*": {"format": "v2b2-g32", "bits": 3}},
         offload_to_disk=False,
     )
@@ -534,7 +540,7 @@ def test_qvq_processor_accumulates_hessian_on_dequantized_linear_input_a8_values
         bits=2,
         format="qvq_v2b2_p32",
         rounding="block_ldlq",
-        activation_quantization={"target": "linear_input"},
+        activation={"target": "linear_input"},
         device="cpu",
         offload_to_disk=False,
     )
@@ -566,7 +572,7 @@ def test_qvq_fp8_replay_teacher_capture_survives_completed_pristine_hessian():
         bits=2,
         format="qvq_v2b2_p32",
         rounding="block_ldlq",
-        activation_quantization={"replay_max_rows": 16},
+        activation={"replay_max_rows": 16},
         device="cpu",
         offload_to_disk=False,
     )
@@ -611,9 +617,7 @@ def test_qvq_processor_merges_device_local_activation_error_statistics():
                     "maximum_scale": torch.tensor(2.0),
                 },
             },
-            "qcfg": SimpleNamespace(
-                activation_quantization=QVQActivationConfig(target="linear_input")
-            ),
+            "qcfg": SimpleNamespace(activation=QVQActivationConfig(target="linear_input")),
         }
     )
 
@@ -630,7 +634,7 @@ def test_auto_loader_accepts_only_the_qvq_a8_contract():
         bits=2,
         format="qvq_v2b2_p32",
         rounding="block_ldlq",
-        activation_quantization=True,
+        activation=True,
         offload_to_disk=False,
     ).to_dict()
     assert _activation_quantization_mode(payload) is None
@@ -640,12 +644,12 @@ def test_auto_loader_accepts_only_the_qvq_a8_contract():
     )
 
     invalid = dict(payload)
-    invalid["activation_quantization"] = {
+    invalid["activation"] = {
         "bits": 4,
         "format": "float",
         "scale_method": "dynamic",
     }
-    assert _activation_quantization_mode(invalid) == "activation_quantization"
+    assert _activation_quantization_mode(invalid) == "activation"
 
     with_kv_cache = dict(payload, kv_cache_scheme={"num_bits": 8, "type": "float"})
     assert _activation_quantization_mode(with_kv_cache) == "kv_cache_scheme"
@@ -688,7 +692,7 @@ def test_yaqa_collects_fisher_factors_under_the_a8_forward_contract():
         {"proj": module},
         device=torch.device("cpu"),
         seed=23,
-        activation_quantization=QVQActivationConfig(target="linear_input"),
+        activation=QVQActivationConfig(target="linear_input"),
         activation_modules={"proj": module},
     )
 

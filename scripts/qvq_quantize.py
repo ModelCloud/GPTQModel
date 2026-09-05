@@ -140,7 +140,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bits", type=float, default=2.0)
     parser.add_argument("--format", choices=QVQ_FORMATS, default=FORMAT.QVQ.value)
     parser.add_argument(
+        "--activation",
         "--activation-quantization",
+        dest="activation",
         action=argparse.BooleanOptionalAction,
         default=False,
         help=(
@@ -362,6 +364,13 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise TypeError("--quant-config must contain one JSON object")
+        if "activation_quantization" in payload:
+            if "activation" in payload:
+                raise ValueError(
+                    "--quant-config cannot contain both `activation` and legacy `activation_quantization`."
+                )
+            payload["activation"] = payload.pop("activation_quantization")
+            print("[warn] `activation_quantization` is deprecated; use `activation`.", flush=True)
         if "rounding" not in payload:
             raise ValueError(
                 "--quant-config requires explicit `rounding` (`block_ldlq` or `yaqa`); "
@@ -405,7 +414,7 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
         bank_count=args.bank_count or _automatic_bank_count(args.format),
         rounding=args.rounding,
         device=args.device,
-        activation_quantization=args.activation_quantization,
+        activation=args.activation,
         propagated_bank_selection=args.propagated_bank_selection,
         yaqa=yaqa,
         output_alignment=alignment,

@@ -95,7 +95,7 @@ def test_qvq_quantize_parser_builds_v2b2_g32_a8_configuration():
             "v2b2-g32",
             "--bits",
             "3",
-            "--activation-quantization",
+            "--activation",
         ]
     )
 
@@ -104,9 +104,9 @@ def test_qvq_quantize_parser_builds_v2b2_g32_a8_configuration():
     assert config.format == FORMAT.QVQ_V2B2_P32
     assert config.bits == 3
     assert config.bank_count == 2
-    assert config.activation_quantization.bits == 8
-    assert config.activation_quantization.format == "float8_e4m3fn"
-    assert config.activation_quantization.scale_method == "dynamic_per_token"
+    assert config.activation.bits == 8
+    assert config.activation.format == "float8_e4m3fn"
+    assert config.activation.scale_method == "dynamic_per_token"
 
 
 def test_qvq_quantize_parser_exposes_fail_closed_disjointness_gate():
@@ -143,6 +143,38 @@ def test_qvq_quantize_json_requires_explicit_rounding(tmp_path):
 
     with pytest.raises(ValueError, match="explicit.*rounding"):
         build_quantize_config(args)
+
+
+def test_qvq_quantize_json_maps_legacy_activation_field(tmp_path, capsys):
+    config_path = tmp_path / "legacy-a8.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "bits": 3.5,
+                "format": "qvq_v2b2_p32",
+                "rounding": "block_ldlq",
+                "activation_quantization": {"kernel_mode": "require"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = build_quantize_parser().parse_args(
+        [
+            "--model",
+            "dense-model",
+            "--output",
+            "quantized-model",
+            "--calibration-dataset",
+            "dataset",
+            "--quant-config",
+            str(config_path),
+        ]
+    )
+
+    config = build_quantize_config(args)
+
+    assert config.activation.kernel_mode == "require"
+    assert "deprecated" in capsys.readouterr().out
 
 
 def test_qvq_quantize_aggregates_nested_telemetry_by_shape_and_module():

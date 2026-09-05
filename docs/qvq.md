@@ -779,7 +779,7 @@ from gptqmodel.quantization import QVQConfig
 qcfg = QVQConfig(
     bits=2,
     format="v2b2-g32",
-    activation_quantization={
+    activation={
         "bits": 8,
         "format": "float8_e4m3fn",
         "scale_method": "dynamic_per_token",
@@ -792,7 +792,7 @@ The production quantization harness exposes the same opt-in contract directly:
 ```bash
 python scripts/qvq_quantize.py \
   --model MODEL --output OUTPUT --calibration-dataset DATASET \
-  --format v2b2-g32 --bits 3 --activation-quantization
+  --format v2b2-g32 --bits 3 --activation
 ```
 
 One FP32 scale is derived from each logical activation row and shared across its hidden dimension. This dynamic
@@ -818,10 +818,9 @@ fusion shapes use the exact explicit-dequantization fallback. The grouped Hopper
 children to this child-local path. `output_alignment` is rejected with A8 until its dense replay explicitly models the
 same activation boundary.
 
-A8 linear inputs do not by themselves change the attention cache representation. Serving engines must separately
-enable an FP8 KV-cache mode; QVQ continues to reject `kv_cache_scheme` metadata because this repository does not yet
-own an end-to-end FP8 KV-cache implementation. The new activation metadata gives serving integrations an explicit
-W2--W3.5/A8 checkpoint contract without claiming that the Transformers fallback has compressed KV storage.
+A8 installs QVQ's fail-closed E4M3 dynamic KV cache whenever caching is enabled. Callers cannot substitute a dense
+Transformers cache or configure a separate `kv_cache_scheme`; both native QK and PV attention consume the stored FP8
+payload plus its dynamic row scale directly. Disabling caching remains valid and allocates no KV cache.
 
 YAQA level 1 now feeds each two-sided corrected tile through the same exact segmented recurrence. It evaluates all
 three complementary families as complete YAQA artifacts, selects one family per module under the complete Kronecker

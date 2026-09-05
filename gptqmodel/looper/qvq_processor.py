@@ -733,7 +733,7 @@ class QVQProcessor(LoopProcessor):
             dual_v2=module_qcfg.format == FORMAT.QVQ_DUAL_V2,
             v2b4_p64=module_qcfg.format == FORMAT.QVQ_V2B4_P64,
             v2b2_p32=module_qcfg.format == FORMAT.QVQ_V2B2_P32,
-            activation_quantization=module_qcfg.activation_quantization,
+            activation=module_qcfg.activation,
             input_hadamard=input_hadamard,
             output_hadamard=output_hadamard,
         ).eval()
@@ -1556,7 +1556,7 @@ class QVQProcessor(LoopProcessor):
                         progress_callback=log_progress,
                         mps_cleanup_interval=self.qcfg.yaqa.mps_cleanup_interval,
                         chat_template_config=self.qcfg.yaqa.chat_template,
-                        activation_quantization=self.qcfg.activation_quantization,
+                        activation=self.qcfg.activation,
                         activation_modules=targets,
                     )
                     input_hessians.update(pass_inputs)
@@ -1914,9 +1914,9 @@ class QVQProcessor(LoopProcessor):
             capture_output = None if prepared_output is None else prepared_output.data
             qcfg = task_entry["qcfg"]
             if (
-                qcfg.activation_quantization is not None
-                and qcfg.activation_quantization.target == "p32_operand"
-                and qcfg.activation_quantization.replay_passes == 1
+                qcfg.activation is not None
+                and qcfg.activation.target == "p32_operand"
+                and qcfg.activation.replay_passes == 1
                 and capture_output is not None
                 and capture_source.numel() > 0
             ):
@@ -1926,7 +1926,7 @@ class QVQProcessor(LoopProcessor):
                     raise RuntimeError("QVQ FP8 replay source/output row counts differ.")
                 with task_entry["fp8_replay_lock"]:
                     remaining = (
-                        qcfg.activation_quantization.replay_max_rows
+                        qcfg.activation.replay_max_rows
                         - task_entry["fp8_replay_row_count"]
                     )
                     take = min(max(0, remaining), int(source_rows.shape[0]))
@@ -1939,14 +1939,14 @@ class QVQProcessor(LoopProcessor):
                         )
                         task_entry["fp8_replay_row_count"] += take
             if (
-                qcfg.activation_quantization is not None
-                and qcfg.activation_quantization.target == "linear_input"
+                qcfg.activation is not None
+                and qcfg.activation.target == "linear_input"
                 and capture_source.numel() > 0
             ):
                 _, activation_scale, dequantized_source = fake_quantize_qvq_fp8_activation(
                     capture_source,
-                    format=qcfg.activation_quantization.format,
-                    scale_method=qcfg.activation_quantization.scale_method,
+                    format=qcfg.activation.format,
+                    scale_method=qcfg.activation.scale_method,
                     validate=False,
                 )
                 source_fp32 = capture_source.detach().to(torch.float32)
@@ -2024,7 +2024,7 @@ class QVQProcessor(LoopProcessor):
         source_square_sum = sum(float(accumulated["source_square_sum"].item()) for accumulated in accumulated_values)
         error_square_sum = sum(float(accumulated["error_square_sum"].item()) for accumulated in accumulated_values)
         epsilon = torch.finfo(torch.float32).tiny
-        config = task_entry["qcfg"].activation_quantization
+        config = task_entry["qcfg"].activation
         return {
             "bits": config.bits,
             "format": config.format,
@@ -2051,7 +2051,7 @@ class QVQProcessor(LoopProcessor):
     ):
         """Re-encode once against exact deployed FP8 operands and native teacher targets."""
 
-        config = module_qcfg.activation_quantization
+        config = module_qcfg.activation
         if (
             config is None
             or config.target != "p32_operand"
@@ -2096,7 +2096,7 @@ class QVQProcessor(LoopProcessor):
         validation_teacher = teacher_output[-validation_rows:]
 
         replay_qcfg = copy.deepcopy(module_qcfg)
-        replay_qcfg.activation_quantization.kernel_mode = "require"
+        replay_qcfg.activation.kernel_mode = "require"
         first_candidate = self._module_replay_qlinear(
             module.module,
             module.full_name,
@@ -2419,7 +2419,7 @@ class QVQProcessor(LoopProcessor):
                     module_qcfg.format == FORMAT.QVQ_V2B2_P32,
                     result.input_hadamard,
                     result.output_hadamard,
-                    copy.deepcopy(module_qcfg.activation_quantization),
+                    copy.deepcopy(module_qcfg.activation),
                 )
             restored_weight = self._restore_module_weight(module, result.weight)
             module.weight.data = restored_weight.to(dtype=module.weight.dtype)
@@ -2586,7 +2586,7 @@ class QVQProcessor(LoopProcessor):
                 v2b2_p32 = runtime_config[7] if len(runtime_config) > 7 else False
                 input_hadamard = runtime_config[8] if len(runtime_config) > 8 else True
                 output_hadamard = runtime_config[9] if len(runtime_config) > 9 else True
-                activation_quantization = runtime_config[10] if len(runtime_config) > 10 else None
+                activation = runtime_config[10] if len(runtime_config) > 10 else None
                 for tensor_name in ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"):
                     tensor = module.state.get(tensor_name)
                     if tensor is not None:
@@ -2615,7 +2615,7 @@ class QVQProcessor(LoopProcessor):
                 dual_v2=dual_v2,
                 v2b4_p64=v2b4_p64,
                 v2b2_p32=v2b2_p32,
-                activation_quantization=activation_quantization,
+                activation=activation,
                 input_hadamard=input_hadamard,
                 output_hadamard=output_hadamard,
             )

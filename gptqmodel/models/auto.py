@@ -381,7 +381,9 @@ def _is_qvq_fp8_activation_metadata(quantization_config: dict) -> bool:
 
     method = quantization_config.get("method", quantization_config.get("quant_method"))
     quant_format = quantization_config.get("format", quantization_config.get("quant_format"))
-    activation = quantization_config.get("activation_quantization")
+    activation = quantization_config.get("activation")
+    if activation is None:
+        activation = quantization_config.get("activation_quantization")
     if not isinstance(method, str) or method.lower() != METHOD.QVQ:
         return False
     if not isinstance(quant_format, str) or quant_format.strip().lower() not in {
@@ -424,10 +426,12 @@ def _activation_quantization_mode(quantization_config: dict) -> Optional[str]:
     if isinstance(kv_cache_scheme, dict) and kv_cache_scheme:
         return "kv_cache_scheme"
 
-    for key in ("input_activations", "activation_quantization", "activations"):
+    for key in ("input_activations", "activation", "activation_quantization", "activations"):
         value = quantization_config.get(key)
         if isinstance(value, dict) and value:
-            if key == "activation_quantization" and _is_qvq_fp8_activation_metadata(quantization_config):
+            if key in {"activation", "activation_quantization"} and _is_qvq_fp8_activation_metadata(
+                quantization_config
+            ):
                 continue
             return key
     return None

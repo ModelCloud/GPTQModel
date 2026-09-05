@@ -438,13 +438,13 @@ class QVQFP8CacheLayer(DynamicLayer):
 
     def __init__(
         self,
-        activation_quantization: QVQActivationConfig | dict[str, Any],
+        activation: QVQActivationConfig | dict[str, Any],
         *,
         max_cache_length: int | None = None,
         page_size: int = 256,
     ):
         super().__init__()
-        self.activation_quantization = _activation_config(activation_quantization)
+        self.activation = _activation_config(activation)
         if max_cache_length is not None:
             max_cache_length = int(max_cache_length)
         if max_cache_length is not None and max_cache_length < 1:
@@ -495,7 +495,7 @@ class QVQFP8CacheLayer(DynamicLayer):
         return capacity
 
     def _allocate(self, capacity: int, key_states: torch.Tensor) -> None:
-        fp8_dtype = getattr(torch, self.activation_quantization.format)
+        fp8_dtype = getattr(torch, self.activation.format)
         prefix = key_states.shape[:-2]
         width = key_states.shape[-1]
         new_keys = torch.zeros(
@@ -590,14 +590,14 @@ class QVQFP8CacheLayer(DynamicLayer):
         validate = key_states.device.type == "cpu"
         quantized_keys, key_scales = quantize_qvq_fp8_activation(
             key_states,
-            format=self.activation_quantization.format,
-            scale_method=self.activation_quantization.scale_method,
+            format=self.activation.format,
+            scale_method=self.activation.scale_method,
             validate=validate,
         )
         quantized_values, value_scales = quantize_qvq_fp8_activation(
             value_states,
-            format=self.activation_quantization.format,
-            scale_method=self.activation_quantization.scale_method,
+            format=self.activation.format,
+            scale_method=self.activation.scale_method,
             validate=validate,
         )
         old_length = self.sequence_length
@@ -652,7 +652,7 @@ class QVQFP8CacheLayer(DynamicLayer):
     def assert_fp8_storage(self) -> None:
         if not self.is_initialized:
             return
-        fp8_dtype = getattr(torch, self.activation_quantization.format)
+        fp8_dtype = getattr(torch, self.activation.format)
         if self.keys.dtype != fp8_dtype or self.values.dtype != fp8_dtype:
             raise RuntimeError(
                 f"QVQ A8 requires FP8 KV payloads, got K={self.keys.dtype}, V={self.values.dtype}."
@@ -804,12 +804,12 @@ class QVQFP8DynamicCache(Cache):
     def __init__(
         self,
         config,
-        activation_quantization: QVQActivationConfig | dict[str, Any],
+        activation: QVQActivationConfig | dict[str, Any],
         *,
         max_cache_length: int | None = None,
         page_size: int = 256,
     ):
-        activation_quantization = _activation_config(activation_quantization)
+        activation = _activation_config(activation)
         text_config = config.get_text_config(decoder=True)
         if getattr(text_config, "is_encoder_decoder", False):
             raise ValueError(
@@ -817,14 +817,14 @@ class QVQFP8DynamicCache(Cache):
             )
         layers = [
             QVQFP8CacheLayer(
-                activation_quantization,
+                activation,
                 max_cache_length=max_cache_length,
                 page_size=page_size,
             )
             for _ in range(text_config.num_hidden_layers)
         ]
         super().__init__(layers=layers)
-        self.activation_quantization = activation_quantization
+        self.activation = activation
         self.max_cache_length = max_cache_length
         self.page_size = page_size
 
@@ -872,8 +872,8 @@ class QVQFP8DynamicCache(Cache):
         )
         return {
             "schema": "qvq.fp8-kv-cache.v1",
-            "format": self.activation_quantization.format,
-            "scale_method": self.activation_quantization.scale_method,
+            "format": self.activation.format,
+            "scale_method": self.activation.scale_method,
             "layers": layers,
             "layer_count": len(layers),
             "initialized_layer_count": len(initialized),
@@ -942,12 +942,12 @@ def _set_argument(args, kwargs, names: list[str], name: str, value):
     return args, kwargs
 
 
-def install_qvq_fp8_kv_cache(model: torch.nn.Module, activation_quantization) -> None:
+def install_qvq_fp8_kv_cache(model: torch.nn.Module, activation) -> None:
     """Require FP8 K/V storage for every cache-enabled forward of an A8 model."""
 
-    activation_quantization = _activation_config(activation_quantization)
+    activation = _activation_config(activation)
     installed = getattr(model, "_qvq_fp8_kv_cache_config", None)
-    if installed == activation_quantization:
+    if installed == activation:
         return
     if installed is not None:
         raise RuntimeError(
@@ -978,7 +978,7 @@ def install_qvq_fp8_kv_cache(model: torch.nn.Module, activation_quantization) ->
             return args, kwargs
         cache = _argument_value(args, kwargs, forward_names, "past_key_values", None)
         if cache is None:
-            cache = QVQFP8DynamicCache(module.config, activation_quantization)
+            cache = QVQFP8DynamicCache(module.config, activation)
             return _set_argument(args, kwargs, forward_names, "past_key_values", cache)
         if not isinstance(cache, QVQFP8DynamicCache):
             raise TypeError(
@@ -1027,7 +1027,7 @@ def install_qvq_fp8_kv_cache(model: torch.nn.Module, activation_quantization) ->
                 )
             model_kwargs["past_key_values"] = QVQFP8DynamicCache(
                 this.config,
-                activation_quantization,
+                activation,
                 max_cache_length=max_cache_length,
             )
             return
@@ -1036,7 +1036,7 @@ def install_qvq_fp8_kv_cache(model: torch.nn.Module, activation_quantization) ->
             prepare_cache_for_generation, model
         )
 
-    model._qvq_fp8_kv_cache_config = activation_quantization
+    model._qvq_fp8_kv_cache_config = activation
 
 
 __all__ = [

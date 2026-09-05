@@ -310,7 +310,7 @@ class QVQLinear(BaseQuantLinear):
         dual_v2: bool = False,
         v2b4_p64: bool = False,
         v2b2_p32: bool = False,
-        activation_quantization: QVQActivationConfig | dict | bool | None = None,
+        activation: QVQActivationConfig | dict | bool | None = None,
         input_hadamard: bool = True,
         output_hadamard: bool = True,
         **kwargs,
@@ -407,10 +407,8 @@ class QVQLinear(BaseQuantLinear):
                 "QVQ V2B2-P32 requires vector_size=2, trellis_window=16, bank_count=2, and W1-W3.5"
             )
         self.v2b2_p32 = v2b2_p32
-        self.activation_quantization = _normalize_qvq_activation_config(
-            activation_quantization
-        )
-        if self.activation_quantization is not None and (
+        self.activation = _normalize_qvq_activation_config(activation)
+        if self.activation is not None and (
             not self.v2b2_p32 or self.bits not in (2, 2.5, 3, 3.5)
         ):
             raise ValueError("QVQ A8 requires V2B2-P32 weights at rates W2 through W3.5")
@@ -780,7 +778,7 @@ class QVQLinear(BaseQuantLinear):
         dual_v2: bool = False,
         v2b4_p64: bool = False,
         v2b2_p32: bool = False,
-        activation_quantization: QVQActivationConfig | dict | bool | None = None,
+        activation: QVQActivationConfig | dict | bool | None = None,
         input_hadamard: bool = True,
         output_hadamard: bool = True,
     ) -> QVQLinear:
@@ -797,7 +795,7 @@ class QVQLinear(BaseQuantLinear):
             dual_v2=dual_v2,
             v2b4_p64=v2b4_p64,
             v2b2_p32=v2b2_p32,
-            activation_quantization=activation_quantization,
+            activation=activation,
             input_hadamard=input_hadamard,
             output_hadamard=output_hadamard,
         )
@@ -1516,7 +1514,7 @@ class QVQLinear(BaseQuantLinear):
     ) -> tuple[torch.Tensor, torch.Tensor | None, int]:
         """Apply the checkpoint's A8 contract and retain FP8 for the fused CUDA transform."""
 
-        config = self.activation_quantization
+        config = self.activation
         if config is None:
             return x_2d.to(compute_dtype), None, 0
         if config.target == "p32_operand":
@@ -1595,9 +1593,9 @@ class QVQLinear(BaseQuantLinear):
         # serializes both prefill and decode.
         range_safe_p32_fp8 = (
             not self.training
-            and self.activation_quantization is not None
-            and self.activation_quantization.target == "p32_operand"
-            and self.activation_quantization.kernel_mode == "require"
+            and self.activation is not None
+            and self.activation.target == "p32_operand"
+            and self.activation.kernel_mode == "require"
         )
         if (
             input_dtype == torch.bfloat16
@@ -1737,7 +1735,7 @@ class QVQLinear(BaseQuantLinear):
         arithmetic semantics.
         """
 
-        config = self.activation_quantization
+        config = self.activation
         if config is None or config.target != "p32_operand":
             raise RuntimeError(
                 "prequantized QVQ input requires target=p32_operand"
@@ -1857,13 +1855,13 @@ class QVQLinear(BaseQuantLinear):
             else:
                 transformed = transformed_input
             if (
-                self.activation_quantization is not None
-                and self.activation_quantization.target == "p32_operand"
+                self.activation is not None
+                and self.activation.target == "p32_operand"
             ):
                 _, _, transformed = fake_quantize_qvq_fp8_activation(
                     transformed,
-                    format=self.activation_quantization.format,
-                    scale_method=self.activation_quantization.scale_method,
+                    format=self.activation.format,
+                    scale_method=self.activation.scale_method,
                     straight_through=True,
                     validate=True,
                 )
@@ -1910,7 +1908,7 @@ class QVQLinear(BaseQuantLinear):
         *,
         output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
-        config = self.activation_quantization
+        config = self.activation
         if config is not None and config.target == "p32_operand":
             quantized, scale = quantize_qvq_fp8_activation(
                 transformed,
@@ -2099,11 +2097,11 @@ def qvq_dense_oracle_forward(
                 ),
             ).to(dtype=torch.float32)
             x_2d = x.to(device=compute_device).reshape(-1, layer.in_features)
-            if layer.activation_quantization is not None:
+            if layer.activation is not None:
                 _, _, x_2d = fake_quantize_qvq_fp8_activation(
                     x_2d,
-                    format=layer.activation_quantization.format,
-                    scale_method=layer.activation_quantization.scale_method,
+                    format=layer.activation.format,
+                    scale_method=layer.activation.scale_method,
                 )
             x_2d = x_2d.to(torch.float32)
             transformed = x_2d * layer.SU.to(device=compute_device, dtype=torch.float32)

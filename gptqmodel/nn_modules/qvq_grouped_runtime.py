@@ -117,16 +117,16 @@ def _source_key(children: Sequence[QVQLinear]) -> tuple[Any, ...]:
                 bool(child.output_hadamard),
                 (
                     None
-                    if child.activation_quantization is None
+                    if child.activation is None
                     else (
-                        int(child.activation_quantization.bits),
-                        child.activation_quantization.format,
-                        child.activation_quantization.scale_method,
-                        child.activation_quantization.target,
-                        child.activation_quantization.kernel_mode,
-                        int(child.activation_quantization.replay_passes),
-                        int(child.activation_quantization.replay_max_rows),
-                        float(child.activation_quantization.replay_validation_fraction),
+                        int(child.activation.bits),
+                        child.activation.format,
+                        child.activation.scale_method,
+                        child.activation.target,
+                        child.activation.kernel_mode,
+                        int(child.activation.replay_passes),
+                        int(child.activation.replay_max_rows),
+                        float(child.activation.replay_validation_fraction),
                     )
                 ),
             )
@@ -195,7 +195,7 @@ def _validate_static_group(
     if any(child.input_hadamard != first.input_hadamard for child in resolved[1:]):
         raise _R0Fallback("R0 requires identical input-Hadamard state")
     if any(
-        child.activation_quantization != first.activation_quantization
+        child.activation != first.activation
         for child in resolved[1:]
     ):
         raise _R0Fallback("R0 requires identical activation-quantization state")
@@ -631,7 +631,7 @@ class QVQHopperGroupedRuntime:
         use_qwen_composite_input = (
             self._h100_fp16_recovery_store_enabled
             and x.dtype == torch.float16
-            and children[0].activation_quantization is None
+            and children[0].activation is None
             and children[0].input_hadamard
             and children[0].in_features == 5120
             and rows <= 16
@@ -658,7 +658,7 @@ class QVQHopperGroupedRuntime:
             self._h100_multiblock_input_hadamard_enabled
             and rows <= 16
             and x.dtype == torch.float16
-            and children[0].activation_quantization is None
+            and children[0].activation is None
         ):
             from ..utils.qvq_cuda import (
                 qvq_cuda_hadamard_input_fp16_padded_multiblock,
@@ -678,17 +678,17 @@ class QVQHopperGroupedRuntime:
                 pad_to_16=direct_pad,
             )
             if (
-                children[0].activation_quantization is not None
-                and children[0].activation_quantization.target == "linear_input"
+                children[0].activation is not None
+                and children[0].activation.target == "linear_input"
             ):
                 self.telemetry.shared_fp8_quantizations += 1
             if (
-                children[0].activation_quantization is not None
-                and children[0].activation_quantization.target == "p32_operand"
+                children[0].activation is not None
+                and children[0].activation.target == "p32_operand"
             ):
                 if return_ordered_partials or not recover:
                     raise _R0Fallback("P32 FP8 grouped split-partial execution is not implemented")
-                config = children[0].activation_quantization
+                config = children[0].activation
                 quantized, scale = quantize_qvq_fp8_activation(
                     transformed[:rows],
                     format=config.format,
@@ -746,7 +746,7 @@ class QVQHopperGroupedRuntime:
             payload,
             _pgc16_levels(x.device, children[0].codebook_version),
         )
-        if children[0].activation_quantization is not None:
+        if children[0].activation is not None:
             self.telemetry.grouped_a8_launches += 1
         if (
             grouped_inner is qvq_p32_window_wgmma_grouped_reuse4_packed

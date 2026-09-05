@@ -107,7 +107,7 @@ def _checkpoint_contract(path: Path, *, expect_a8: bool) -> dict[str, Any]:
         raise ValueError(f"Checkpoint is not W3.5: {path}")
     if quant.get("format") != FORMAT.QVQ_V2B2_P32.value:
         raise ValueError(f"Checkpoint is not QVQ P32: {path}")
-    activation = quant.get("activation_quantization")
+    activation = quant.get("activation", quant.get("activation_quantization"))
     if expect_a8 and activation != _A8_CONTRACT:
         raise ValueError(f"Checkpoint does not have the required A8 contract: {path}")
     if not expect_a8 and activation is not None:
@@ -319,12 +319,12 @@ def main(argv: list[str] | None = None) -> int:
     if not a16_layers or len(a16_layers) != len(a8_layers):
         raise RuntimeError("W3.5 checkpoints have inconsistent QVQ layer counts")
     if any(
-        layer.bits != 3.5 or layer.activation_quantization is not None
+        layer.bits != 3.5 or layer.activation is not None
         for layer in a16_layers
     ):
         raise RuntimeError("Loaded A16 modules do not satisfy W3.5A16")
     if any(
-        layer.bits != 3.5 or layer.activation_quantization is None
+        layer.bits != 3.5 or layer.activation is None
         for layer in a8_layers
     ):
         raise RuntimeError("Loaded A8 modules do not satisfy W3.5A8")

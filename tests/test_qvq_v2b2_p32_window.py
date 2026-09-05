@@ -62,7 +62,7 @@ def test_qvq_p32_fp8_dispatch_falls_back_in_auto_and_rejects_in_require_mode():
         },
         bank_count=2,
         v2b2_p32=True,
-        activation_quantization={"kernel_mode": "auto", "replay_passes": 0},
+        activation={"kernel_mode": "auto", "replay_passes": 0},
         input_hadamard=False,
         output_hadamard=False,
     ).eval()
@@ -88,7 +88,7 @@ def test_qvq_p32_fp8_dispatch_falls_back_in_auto_and_rejects_in_require_mode():
     assert auto_telemetry["fallback"] == 1
     assert auto_telemetry["fallback_reasons"] == {"non_cuda": 1}
 
-    layer.activation_quantization.kernel_mode = "require"
+    layer.activation.kernel_mode = "require"
     with pytest.raises(RuntimeError, match="required QVQ P32 FP8 WGMMA path is ineligible: non_cuda"):
         layer._forward_pretransformed_compute_dtype(transformed, torch.float16)
     require_telemetry = layer.qvq_fp8_kernel_telemetry()
@@ -671,7 +671,7 @@ def test_qvq_linear_h200_a8_executes_true_fp8_operand_path(logical_rows):
         },
         bank_count=2,
         v2b2_p32=True,
-        activation_quantization={"kernel_mode": "require"},
+        activation={"kernel_mode": "require"},
         input_hadamard=False,
         output_hadamard=False,
     ).eval()

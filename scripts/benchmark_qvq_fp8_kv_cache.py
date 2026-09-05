@@ -383,9 +383,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.arm == "w35-a8" and (
         not qvq_named_layers
         or any(
-            module.activation_quantization is None
-            or module.activation_quantization.target != "p32_operand"
-            or module.activation_quantization.kernel_mode != "require"
+            module.activation is None
+            or module.activation.target != "p32_operand"
+            or module.activation.kernel_mode != "require"
             for _, module in qvq_named_layers
         )
     ):
@@ -411,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.arm == "w35-a8":
             cache = QVQFP8DynamicCache(
                 model.config,
-                qvq_named_layers[0][1].activation_quantization,
+                qvq_named_layers[0][1].activation,
                 max_cache_length=(
                     args.prompt_length + args.decode_warmup + args.decode_steps
                 ),

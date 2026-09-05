@@ -77,7 +77,7 @@ def test_qvq_p32_a8_full_dispatch_matches_explicit_dequantization(bits, source_d
             # control. Boolean True now selects the recommended deployed
             # P32-operand target, whose quantization point is intentionally
             # different from fake_quantize_qvq_fp8_activation(source).
-            activation_quantization={"target": "linear_input", "replay_passes": 0},
+            activation={"target": "linear_input", "replay_passes": 0},
             dtype=source_dtype,
         )
         .eval()
@@ -90,7 +90,7 @@ def test_qvq_p32_a8_full_dispatch_matches_explicit_dequantization(bits, source_d
 
     actual = layer(source)
     _, _, dequantized = fake_quantize_qvq_fp8_activation(source)
-    layer.activation_quantization = None
+    layer.activation = None
     expected = layer(dequantized)
 
     assert torch.isfinite(actual).all()

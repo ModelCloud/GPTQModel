@@ -300,7 +300,7 @@ def capture_yaqa_sketch_b(
     gram_strategy: str = "batched",
     gram_projection_rank: int | None = None,
     chat_template_config=None,
-    activation_quantization=None,
+    activation=None,
     activation_modules: dict[str, nn.Linear] | None = None,
 ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, Any]]:
     """Collect exact per-sequence YAQA Sketch-B factors from full-model score gradients."""
@@ -317,20 +317,20 @@ def capture_yaqa_sketch_b(
         raise TypeError("YAQA Sketch B targets must all be linear modules")
     if len({id(module) for module in modules.values()}) != len(modules):
         raise ValueError("YAQA Sketch B target modules must be unique")
-    if activation_quantization is None:
+    if activation is None:
         activation_format = None
         activation_scale_method = None
         if activation_modules is not None:
             raise ValueError("YAQA activation modules require an activation-quantization config")
     else:
-        if isinstance(activation_quantization, dict):
-            activation_bits = activation_quantization.get("bits", 8)
-            activation_format = activation_quantization.get("format")
-            activation_scale_method = activation_quantization.get("scale_method")
+        if isinstance(activation, dict):
+            activation_bits = activation.get("bits", 8)
+            activation_format = activation.get("format")
+            activation_scale_method = activation.get("scale_method")
         else:
-            activation_bits = getattr(activation_quantization, "bits", 8)
-            activation_format = getattr(activation_quantization, "format", None)
-            activation_scale_method = getattr(activation_quantization, "scale_method", None)
+            activation_bits = getattr(activation, "bits", 8)
+            activation_format = getattr(activation, "format", None)
+            activation_scale_method = getattr(activation, "scale_method", None)
         if activation_bits != 8:
             raise ValueError("YAQA QVQ activation quantization requires 8 bits")
         activation_format = normalize_qvq_fp8_activation_format(activation_format)

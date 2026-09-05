@@ -6,7 +6,7 @@ Status date: 2026-09-04. Validation GPU: one exclusive NVIDIA H200 (SM90).
 
 - Standard `qvq_v2b2_p32` checkpoint tensors and their planar serialization do
   not change. FP8 is a transient execution operand, not a new P32 weight format.
-- `activation_quantization=None` is W2--W3.5A16 and preserves the historical
+- `activation=None` is W2--W3.5A16 and preserves the historical
   path. `QVQActivationConfig` is opt-in A8.
 - A8 always installs the fail-closed E4M3 KV cache. A dense Transformers cache
   is rejected instead of silently changing the requested mode.
@@ -47,7 +47,7 @@ W3.5A16 uses P32 weights with native BF16 model activations and KV cache:
   "trellis_window": 16,
   "bank_count": 2,
   "rounding": "block_ldlq",
-  "activation_quantization": null
+  "activation": null
 }
 ```
 
@@ -63,7 +63,7 @@ operand, replay, and KV-cache contracts:
   "trellis_window": 16,
   "bank_count": 2,
   "rounding": "block_ldlq",
-  "activation_quantization": {
+  "activation": {
     "bits": 8,
     "format": "float8_e4m3fn",
     "scale_method": "dynamic_per_token",

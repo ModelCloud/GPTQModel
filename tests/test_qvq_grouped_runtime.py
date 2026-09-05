@@ -41,7 +41,7 @@ def _child(
     device: torch.device | str = "cpu",
     input_hadamard: bool = True,
     output_hadamard: bool = True,
-    activation_quantization: dict | bool | None = None,
+    activation: dict | bool | None = None,
 ) -> QVQLinear:
     device = torch.device(device)
     generator = torch.Generator(device=device).manual_seed(seed)
@@ -83,7 +83,7 @@ def _child(
         v2b2_p32=True,
         input_hadamard=input_hadamard,
         output_hadamard=output_hadamard,
-        activation_quantization=activation_quantization,
+        activation=activation,
     ).eval()
 
 
@@ -240,7 +240,7 @@ def test_r0_accepts_shared_a8_contract_and_rejects_mixed_activation_state():
                 su=shared,
                 alt_id=index + 1,
                 seed=90 + index,
-                activation_quantization=True,
+                activation=True,
             )
             for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
         )
@@ -254,11 +254,11 @@ def test_r0_accepts_shared_a8_contract_and_rejects_mixed_activation_state():
             su=shared,
             alt_id=index + 1,
             seed=95 + index,
-            activation_quantization=True,
+            activation=True,
         )
         for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
     )
-    rejected_children[1].activation_quantization = None
+    rejected_children[1].activation = None
     assert install_qvq_hopper_groups(
         _Attention(rejected_children), gate_up=False
     ) == {"qkv": 0}
@@ -280,7 +280,7 @@ def test_h200_grouped_a8_executes_true_fp8_children_and_matches_independent_outp
             alt_id=index + 1,
             seed=105 + index,
             device=device,
-            activation_quantization=True,
+            activation=True,
         )
         for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
     )

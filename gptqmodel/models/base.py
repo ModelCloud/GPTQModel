@@ -3144,16 +3144,16 @@ class BaseQModel(nn.Module):
 
         if not (self.quantized or self.load_quantized_model):
             return
-        activation_quantization = getattr(
+        activation = getattr(
             getattr(self, "quantize_config", None),
-            "activation_quantization",
+            "activation",
             None,
         )
-        if activation_quantization is None:
+        if activation is None:
             return
         from ..nn_modules.qvq_fp8_cache import install_qvq_fp8_kv_cache
 
-        install_qvq_fp8_kv_cache(self.model, activation_quantization)
+        install_qvq_fp8_kv_cache(self.model, activation)
 
     def _modelopt_activation_quantization_mode(self) -> Optional[str]:
         """Describe unsupported ModelOpt activation quantization metadata when present."""

@@ -2897,6 +2897,9 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     "bnb_quant_type": FORMAT_FIELD_CODE,
     "bnb_block_size": "block_size",
     "bnb_compress_statistics": "compress_statistics",
+
+    # QVQ draft compatibility: `activation` is the canonical field.
+    "activation_quantization": "activation",
 }
 
 # compat (values are negated)
@@ -4682,6 +4685,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
     @classmethod
     def from_quant_config(cls, quantize_cfg, format: str = None):
+        if "activation" in quantize_cfg and "activation_quantization" in quantize_cfg:
+            raise ValueError(
+                "QuantizeConfig: cannot contain both `activation` and legacy `activation_quantization`."
+            )
         valid_formats = set(FORMAT)
         format_auto_inferred = False
         checkpoint_format_hint = quantize_cfg.get(FORMAT_FIELD_CHECKPOINT) if isinstance(quantize_cfg, dict) else None
@@ -6311,7 +6318,7 @@ def _normalize_qvq_activation_config(
     if isinstance(value, dict):
         return QVQActivationConfig(**value)
     raise TypeError(
-        "QVQConfig: `activation_quantization` must be a QVQActivationConfig, dictionary, boolean, or None."
+        "QVQConfig: `activation` must be a QVQActivationConfig, dictionary, boolean, or None."
     )
 
 
@@ -6462,7 +6469,7 @@ class QVQConfig(BaseQuantizeConfig):
     smooth_swiglu: Optional[SmoothSwiGLUConfig] = field(default=None)
     # Opt-in W2--W3.5/A8 calibration and inference. None preserves the exact
     # historical dense-activation QVQ contract.
-    activation_quantization: Optional[QVQActivationConfig] = field(default=None)
+    activation: Optional[QVQActivationConfig] = field(default=None)
     tensor_storage: Optional[Dict[str, Any]] = field(default=None)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
@@ -6605,11 +6612,11 @@ class QVQConfig(BaseQuantizeConfig):
             self.trellis_window = 16
             self.bank_count = 2
 
-        self.activation_quantization = _normalize_qvq_activation_config(self.activation_quantization)
-        if self.activation_quantization is not None:
+        self.activation = _normalize_qvq_activation_config(self.activation)
+        if self.activation is not None:
             if self.format != FORMAT.QVQ_V2B2_P32:
                 raise ValueError(
-                    "QVQConfig: FP8 `activation_quantization` requires `format=qvq_v2b2_p32` "
+                    "QVQConfig: FP8 `activation` requires `format=qvq_v2b2_p32` "
                     "(`qvq_v2b2_g32` is accepted as an input alias)."
                 )
             if self.bits not in (2, 2.5, 3, 3.5):
@@ -6675,7 +6682,7 @@ class QVQConfig(BaseQuantizeConfig):
         if self.viterbi_minimum_proxy_improvement > 0 and self.viterbi_objective != "hessian_diagonal":
             raise ValueError("QVQConfig: `viterbi_minimum_proxy_improvement` requires `hessian_diagonal` objective.")
         self.output_alignment = _normalize_qvq_output_alignment_config(self.output_alignment)
-        if self.activation_quantization is not None and self.output_alignment is not None:
+        if self.activation is not None and self.output_alignment is not None:
             raise ValueError("QVQConfig: FP8 activation quantization does not yet support output alignment.")
         if self.output_alignment is not None and self.lm_head:
             raise ValueError(
@@ -6838,9 +6845,7 @@ class QVQConfig(BaseQuantizeConfig):
             None if self.module_granular_replay is None else asdict(self.module_granular_replay)
         )
         out["smooth_swiglu"] = None if self.smooth_swiglu is None else asdict(self.smooth_swiglu)
-        out["activation_quantization"] = (
-            None if self.activation_quantization is None else asdict(self.activation_quantization)
-        )
+        out["activation"] = None if self.activation is None else asdict(self.activation)
         out["tensor_storage"] = self.tensor_storage
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
@@ -6852,9 +6857,7 @@ class QVQConfig(BaseQuantizeConfig):
             "dual_v2": self.format == FORMAT.QVQ_DUAL_V2,
             "v2b4_p64": self.format == FORMAT.QVQ_V2B4_P64,
             "v2b2_p32": self.format == FORMAT.QVQ_V2B2_P32,
-            "activation_quantization": (
-                None if self.activation_quantization is None else asdict(self.activation_quantization)
-            ),
+            "activation": None if self.activation is None else asdict(self.activation),
         }
 
 
