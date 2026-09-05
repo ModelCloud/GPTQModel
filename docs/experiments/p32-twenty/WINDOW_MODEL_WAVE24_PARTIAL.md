@@ -1,4 +1,6 @@
-# Window model tile wave 24 partial results
+# Window model tile wave 24 partial results (superseded)
+
+The complete comparison is now documented in [WINDOW_MODEL_WAVE24.md](WINDOW_MODEL_WAVE24.md).
 
 This wave tests model-level window tile shapes on the exact F6 seed-7 snapshot.
 The production window control and the BM64/BN64 split1 fused arm have
