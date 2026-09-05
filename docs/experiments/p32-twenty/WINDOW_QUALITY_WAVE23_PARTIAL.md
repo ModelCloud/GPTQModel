@@ -1,4 +1,6 @@
-# Window quality wave 23 partial results
+# Window quality wave 23 partial results (superseded)
+
+The complete result is now documented in [WINDOW_QUALITY_WAVE23.md](WINDOW_QUALITY_WAVE23.md).
 
 The first two production-window ARC-Challenge repeats completed from the
 wave23 downstream scorecard. Both used the exact F6 seed-7 snapshot and the

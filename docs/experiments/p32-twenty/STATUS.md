@@ -104,8 +104,12 @@ control anomaly and measures a pooled policy speedup of 1.294x at M=512 and
 1.366x at M=2048, while policy remains slower at smaller M and in decode.
 Downstream quality and complete profiling remain open.
 
-[Window quality wave23 partial](WINDOW_QUALITY_WAVE23_PARTIAL.md) has two
+[Window quality wave23](WINDOW_QUALITY_WAVE23.md) is complete: two production
+window repeats score 390/1172 raw ARC, 428/1172 normalized ARC, and 59/128
+GSM8K; two policy repeats score 390/1172 raw ARC, 429/1172 normalized ARC, and
+58/128 GSM8K. The differences do not establish a quality advantage.
+[The incremental record](WINDOW_QUALITY_WAVE23_PARTIAL.md) has two
 identical production-window ARC repeats at 390/1172 raw and 428/1172
 length-normalized, plus two identical production-window GSM8K repeats at
 59/128. Two policy ARC repeats now agree at 390/1172 raw and 429/1172
-length-normalized. Policy GSM8K remains running.
+length-normalized; policy GSM8K completed at 58/128 on both repeats.
