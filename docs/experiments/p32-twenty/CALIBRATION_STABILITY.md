@@ -32,3 +32,27 @@ alone does not establish a quality improvement. Full ARC remains in progress.
 The raw [model report](results/rank8-targeted/rank6-sparse32-c4.json) retains all
 timing samples. M=2 contains large latency excursions (roughly 40–337 ms),
 so this run cannot support a stable latency claim without matched remeasurement.
+
+## First completed subset: seed 71, 2,048 tokens
+
+The 24 exports (six ranks × two fits × two factor dtypes) completed all nine
+row counts and exact export-reload comparisons. Source export and all read
+teacher-shard hashes remained unchanged. [Raw evidence](results/low-rank/stability-seed71-2048.json).
+
+For FP16 factors, combined teacher/window passes are:
+
+| Rank | L2 | Tail alpha 1 |
+| ---: | ---: | ---: |
+| 2 | 7/9 | 7/9 |
+| 4 | 8/9 | 8/9 |
+| 6 | 9/9 | 9/9 |
+| 8 | 8/9 | 8/9 |
+| 12 | 7/9 | 7/9 |
+| 16 | 7/9 | 7/9 |
+
+Rank-6 tail has worst teacher MAE 0.00201621 and maximum error 0.04439910.
+Rank-16 tail lowers worst MAE to 0.00196325 but raises maximum error to
+0.12286758. This shows rank selection is sensitive to calibration composition
+and objective; it does not yet establish the cause of the large outlier or
+prove rank 6 stable. Broader replay and C4/full-ARC model checks are queued.
+No accuracy gate or production default changed.
