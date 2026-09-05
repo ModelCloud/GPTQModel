@@ -1,0 +1,53 @@
+{
+  "scope": "Matched cross-GPU runtime reproducibility for integrated rank8 fused path; queued",
+  "jobs": [
+    {
+      "id": "rank8-runtime-cross-gpu0",
+      "gpu_uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/rank8_runtime.py",
+        "--uuid",
+        "{uuid}",
+        "--export",
+        "/root/p32-rank8-targeted/tail-alpha1/rank8-tail-float16.pt",
+        "--output",
+        "/root/p32-rank8-targeted/runtime-cross-gpu0.json"
+      ],
+      "result": "/root/p32-rank8-targeted/runtime-cross-gpu0.json",
+      "log": "/root/p32-rank8-targeted/runtime-cross-gpu0.json.log"
+    },
+    {
+      "id": "rank8-runtime-cross-gpu2",
+      "gpu_uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/rank8_runtime.py",
+        "--uuid",
+        "{uuid}",
+        "--export",
+        "/root/p32-rank8-targeted/tail-alpha1/rank8-tail-float16.pt",
+        "--output",
+        "/root/p32-rank8-targeted/runtime-cross-gpu2.json"
+      ],
+      "result": "/root/p32-rank8-targeted/runtime-cross-gpu2.json",
+      "log": "/root/p32-rank8-targeted/runtime-cross-gpu2.json.log"
+    },
+    {
+      "id": "rank8-runtime-cross-gpu3",
+      "gpu_uuid": "GPU-471ecdd7-a171-4d5c-d61f-a1802dc76e4c",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/rank8_runtime.py",
+        "--uuid",
+        "{uuid}",
+        "--export",
+        "/root/p32-rank8-targeted/tail-alpha1/rank8-tail-float16.pt",
+        "--output",
+        "/root/p32-rank8-targeted/runtime-cross-gpu3.json"
+      ],
+      "result": "/root/p32-rank8-targeted/runtime-cross-gpu3.json",
+      "log": "/root/p32-rank8-targeted/runtime-cross-gpu3.json.log"
+    }
+  ]
+}
