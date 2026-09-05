@@ -255,3 +255,23 @@ The retained cache is 50,405,384 bytes (48.07 MiB) per Llama MLP layer:
 Sixteen Llama 3.2 1B layers retain 806,486,144 bytes (0.751 GiB).  There is no
 per-forward decoded-weight allocation.  Artifact:
 `artifacts/qvq_hopper_large_m/v4_fp8_cached_mlp_candidate.json`.
+
+Nsight Systems 2026.4 traced five CUDA Graph replays at exact revision
+`397915e4` with graph-node collection enabled.  Profiler projection totals
+3.809 ms, or 761.887 microseconds per replay; the small difference from the
+CUDA-event result is node-tracing overhead.
+
+| GPU work | Instances/replay | Time/replay | Share |
+| --- | ---: | ---: | ---: |
+| cuBLASLt FP8 matrix multiplication | 2 | 269.841 µs | 35.9% |
+| gate/up contiguous materialization | 2 | 179.992 µs | 24.0% |
+| E4M3 per-row activation quantization | 2 | 150.379 µs | 20.0% |
+| gate/up product | 1 | 92.044 µs | 12.3% |
+| SiLU | 1 | 58.752 µs | 7.8% |
+
+This phase changes runtime composition and cache policy but no CUDA kernel
+source, so it produces no new compiler/SASS delta.  The trace instead exposes
+the next algebraic boundary: the split gate/up views are copied into two
+contiguous tensors before SiLU/product, accounting for nearly one quarter of
+the warm operation.  Profile:
+`artifacts/qvq_hopper_large_m/profiles/v4_fp8_cached_mlp_w3_m4096_397915e4_nsys.nsys-rep`.
