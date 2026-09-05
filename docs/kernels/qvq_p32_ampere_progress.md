@@ -3744,6 +3744,23 @@ requires `0xc618`--`0x10820` bytes of static shared memory across the generated
 rate/N variants, exceeding Ampere's `0xc000` per-block limit.  The probe
 produced no binary and made no source change to the retained dispatch.
 
+## v79 compiler-owned large-M row-group tuning
+
+The framework-neutral runtime now exposes an additive
+`qvq_p32_window_with_row_groups` entry point for compiler integrations that
+own autotuning.  It accepts an explicit 1/2/4/8 multiplier describing how many
+adjacent M16 tiles reuse one packed weight decode.  The established
+`qvq_p32_window` ABI remains source- and behavior-compatible and continues to
+apply QvQ's automatic large-M row-group and fixed-N policy for PyTorch and
+other callers.
+
+Explicit calls also honor `static_n` literally instead of silently enabling a
+known-N specialization.  This lets a compiler represent row grouping, stage
+depth, thread count, split count, and fixed-N selection as visible graph
+attributes and benchmark the exact schedule it will emit.  The contract and
+runtime smoke tests pass against kernel contract version 10; end-to-end ZML
+autotune and model timing are tracked in the consuming integration.
+
 ## Reproduction
 
 ```bash
