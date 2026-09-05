@@ -59,3 +59,19 @@ and refuses to overwrite an existing report, allowing both reference comparisons
 without clobbering evidence. Early per-document results include nonzero
 fused/separate divergence; final aggregate KL/top-k results remain pending.
 These comparisons reuse completed C4 model runs without touching the teacher.
+
+## Full ARC and propagation checks
+
+Fused rank8 scored 390 raw / 431 normalized out of 1,172 ARC examples.
+Against window, paired wins/losses are 9/9 raw (p=1) and 9/6 normalized
+(p=0.60724); against separate alpha1 they are 1/0 and 2/0 (p=1 and 0.5).
+No task improvement is established. Prompts, targets and indices matched.
+[ARC report](results/rank8-targeted/fused-model-arc.json),
+[paired comparisons](results/rank8-targeted/fused-model-arc-paired.json).
+
+C4 fused-versus-separate logits KL is 1.13269545e-5, with top1/5/10 agreement
+0.9978027344 / 0.9991210938 / 0.9989013672. The paths are not bit-identical.
+[Logits evidence](results/rank8-targeted/fused-logits-vs-separate.json).
+Post-profile runtime checks again pass both local gates at all nine row counts.
+[Post-profile report](results/rank8-targeted/fused-post-profile-runtime.json).
+Full-model 2x speedup remains unproven; only one down projection is replaced.

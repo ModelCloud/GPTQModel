@@ -1,0 +1,26 @@
+{
+  "window": {
+    "accuracy,loglikelihood": {
+      "wins": 9,
+      "losses": 9,
+      "p": 1
+    },
+    "accuracy,loglikelihood_norm": {
+      "wins": 9,
+      "losses": 6,
+      "p": 0.60723876953125
+    }
+  },
+  "separate": {
+    "accuracy,loglikelihood": {
+      "wins": 1,
+      "losses": 0,
+      "p": 1
+    },
+    "accuracy,loglikelihood_norm": {
+      "wins": 2,
+      "losses": 0,
+      "p": 0.5
+    }
+  }
+}

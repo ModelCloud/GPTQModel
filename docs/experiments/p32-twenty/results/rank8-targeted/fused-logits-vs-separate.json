@@ -1,0 +1,190 @@
+{
+  "scope": "bounded C4 per-token logits; no downstream-task claim",
+  "candidate": "/root/p32-fused-model/c4",
+  "teacher": "/root/p32-rank8-targeted/models/alpha1-c4",
+  "rows": [
+    {
+      "file": "logits-000.pt",
+      "equal_logits": true,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.0,
+        "top1_agreement": 1.0,
+        "top5_agreement": 1.0,
+        "top10_agreement": 1.0
+      }
+    },
+    {
+      "file": "logits-001.pt",
+      "equal_logits": false,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 1.6542869444146082e-05,
+        "top1_agreement": 1.0,
+        "top5_agreement": 0.99765625,
+        "top10_agreement": 0.998828125
+      }
+    },
+    {
+      "file": "logits-002.pt",
+      "equal_logits": true,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.0,
+        "top1_agreement": 1.0,
+        "top5_agreement": 1.0,
+        "top10_agreement": 1.0
+      }
+    },
+    {
+      "file": "logits-003.pt",
+      "equal_logits": false,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 1.2658768213913926e-05,
+        "top1_agreement": 1.0,
+        "top5_agreement": 0.99921875,
+        "top10_agreement": 0.998828125
+      }
+    },
+    {
+      "file": "logits-004.pt",
+      "equal_logits": false,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 3.279921324361572e-05,
+        "top1_agreement": 0.9921875,
+        "top5_agreement": 0.99921875,
+        "top10_agreement": 0.997265625
+      }
+    },
+    {
+      "file": "logits-005.pt",
+      "equal_logits": false,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 3.554696413880707e-05,
+        "top1_agreement": 0.9921875,
+        "top5_agreement": 0.99609375,
+        "top10_agreement": 0.997265625
+      }
+    },
+    {
+      "file": "logits-006.pt",
+      "equal_logits": true,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.0,
+        "top1_agreement": 1.0,
+        "top5_agreement": 1.0,
+        "top10_agreement": 1.0
+      }
+    },
+    {
+      "file": "logits-007.pt",
+      "equal_logits": true,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.0,
+        "top1_agreement": 1.0,
+        "top5_agreement": 1.0,
+        "top10_agreement": 1.0
+      }
+    },
+    {
+      "file": "logits-008.pt",
+      "equal_logits": true,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.0,
+        "top1_agreement": 1.0,
+        "top5_agreement": 1.0,
+        "top10_agreement": 1.0
+      }
+    },
+    {
+      "file": "logits-009.pt",
+      "equal_logits": true,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.0,
+        "top1_agreement": 1.0,
+        "top5_agreement": 1.0,
+        "top10_agreement": 1.0
+      }
+    },
+    {
+      "file": "logits-010.pt",
+      "equal_logits": false,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 3.0673255699708934e-05,
+        "top1_agreement": 0.9921875,
+        "top5_agreement": 0.9953125,
+        "top10_agreement": 0.99609375
+      }
+    },
+    {
+      "file": "logits-011.pt",
+      "equal_logits": true,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.0,
+        "top1_agreement": 1.0,
+        "top5_agreement": 1.0,
+        "top10_agreement": 1.0
+      }
+    },
+    {
+      "file": "logits-012.pt",
+      "equal_logits": false,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 2.4743280190261153e-05,
+        "top1_agreement": 0.98828125,
+        "top5_agreement": 0.99921875,
+        "top10_agreement": 0.998828125
+      }
+    },
+    {
+      "file": "logits-013.pt",
+      "equal_logits": false,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 2.7137011139720824e-05,
+        "top1_agreement": 1.0,
+        "top5_agreement": 0.99921875,
+        "top10_agreement": 0.9953125
+      }
+    },
+    {
+      "file": "logits-014.pt",
+      "equal_logits": true,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.0,
+        "top1_agreement": 1.0,
+        "top5_agreement": 1.0,
+        "top10_agreement": 1.0
+      }
+    },
+    {
+      "file": "logits-015.pt",
+      "equal_logits": false,
+      "metrics": {
+        "tokens": 256,
+        "kl_teacher_candidate": 1.1299097169965028e-06,
+        "top1_agreement": 1.0,
+        "top5_agreement": 1.0,
+        "top10_agreement": 1.0
+      }
+    }
+  ],
+  "complete": true,
+  "aggregate": {
+    "kl_teacher_candidate": 1.1326954486698138e-05,
+    "top1_agreement": 0.997802734375,
+    "top5_agreement": 0.99912109375,
+    "top10_agreement": 0.9989013671875
+  }
+}
