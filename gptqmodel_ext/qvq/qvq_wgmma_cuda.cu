@@ -608,6 +608,7 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
   // Keep eight addressable tiles for the explicitly named CUTE tensor views.
   // Inactive views are compile-time dead for the narrower variants.
   __shared__ __align__(128) Fp8Element shared_input[8 * kInputTileElements];
+  __shared__ __align__(16) float shared_input_scale[8 * kRows];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int n64_block = static_cast<int>(blockIdx.x);
@@ -623,6 +624,11 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
   const uint32_t alternate_bank_mask =
       qvq_wgmma_v2_alternate_bank_mask<TransitionBits>(bank_alt_id);
   const uint32_t alternate_mix_mask = alternate_bank_mask & 0xff00u;
+
+  if (thread < RowTilesPerCta * kRows) {
+    shared_input_scale[thread] = input_scale[row_base + thread];
+  }
+  __syncthreads();
 
   auto sB = cute::make_tensor(cute::make_smem_ptr(shared_input), Fp8WgmmaSmemLayoutB{});
   auto sB1 = cute::make_tensor(
@@ -854,30 +860,30 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_wgmma_fp8_m16_kernel(
       const auto coordinate = thread_coordinate_c(index);
       const int output_row = static_cast<int>(cute::get<1>(coordinate));
       scaled_accumulator(index) +=
-          accumulator(index) * input_scale[row_base + output_row] * level_scale;
+          accumulator(index) * shared_input_scale[output_row] * level_scale;
       if constexpr (RowTilesPerCta >= 2) {
         scaled_accumulator1(index) += accumulator1(index) *
-            input_scale[row_base + kRows + output_row] * level_scale;
+            shared_input_scale[kRows + output_row] * level_scale;
       }
       if constexpr (RowTilesPerCta == 4) {
         scaled_accumulator2(index) += accumulator2(index) *
-            input_scale[row_base + 2 * kRows + output_row] * level_scale;
+            shared_input_scale[2 * kRows + output_row] * level_scale;
         scaled_accumulator3(index) += accumulator3(index) *
-            input_scale[row_base + 3 * kRows + output_row] * level_scale;
+            shared_input_scale[3 * kRows + output_row] * level_scale;
       }
       if constexpr (RowTilesPerCta == 8) {
         scaled_accumulator2(index) += accumulator2(index) *
-            input_scale[row_base + 2 * kRows + output_row] * level_scale;
+            shared_input_scale[2 * kRows + output_row] * level_scale;
         scaled_accumulator3(index) += accumulator3(index) *
-            input_scale[row_base + 3 * kRows + output_row] * level_scale;
+            shared_input_scale[3 * kRows + output_row] * level_scale;
         scaled_accumulator4(index) += accumulator4(index) *
-            input_scale[row_base + 4 * kRows + output_row] * level_scale;
+            shared_input_scale[4 * kRows + output_row] * level_scale;
         scaled_accumulator5(index) += accumulator5(index) *
-            input_scale[row_base + 5 * kRows + output_row] * level_scale;
+            shared_input_scale[5 * kRows + output_row] * level_scale;
         scaled_accumulator6(index) += accumulator6(index) *
-            input_scale[row_base + 6 * kRows + output_row] * level_scale;
+            shared_input_scale[6 * kRows + output_row] * level_scale;
         scaled_accumulator7(index) += accumulator7(index) *
-            input_scale[row_base + 7 * kRows + output_row] * level_scale;
+            shared_input_scale[7 * kRows + output_row] * level_scale;
       }
     }
     cute::clear(accumulator);
