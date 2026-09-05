@@ -22,7 +22,9 @@ N = 8192
 def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("variant", choices=("phase63", "paired"))
-    parser.add_argument("--m", type=int, choices=(1, 2, 4, 8, 16), default=16)
+    parser.add_argument(
+        "--m", type=int, choices=(1, 2, 4, 8, 16, 32, 128, 512), default=16
+    )
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--idle-samples", type=int, default=3)
     parser.add_argument("--idle-interval", type=float, default=0.5)

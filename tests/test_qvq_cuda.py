@@ -71,6 +71,7 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_folded_swiglu_precondition_ordered_fp32,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
+    qvq_cuda_hadamard_fp32_to_fp16_multiblock,
     qvq_cuda_hadamard_input_fp16_padded_multiblock,
     qvq_cuda_hadamard_ordered_split16_fp32_to_fp16,
     qvq_cuda_hadamard_pair_fp32_to_fp16,
@@ -502,6 +503,79 @@ def test_qvq_cuda_hadamard_multiblock_input_rescues_prescale_overflow_on_stream(
     stream.synchronize()
     assert torch.isfinite(actual).all()
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.parametrize("m", (32, 129, 512))
+def test_qvq_cuda_hadamard_multiblock_large_m_input_is_exact_padded_and_graph_safe(m):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 large-M input path")
+    generator = torch.Generator(device="cuda").manual_seed(20260907 + m)
+    x = torch.randn((m, 2048), generator=generator, device="cuda", dtype=torch.float16)
+    pre_scale = torch.randn(
+        (2048,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    expected = qvq_cuda_hadamard(x, pre_scale=pre_scale, scale_mode=2)
+    actual = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+        x, pre_scale=pre_scale
+    )
+    padded_rows = ((m + 63) // 64) * 64
+    assert actual.shape == (padded_rows, 2048)
+    assert torch.equal(actual[:m].view(torch.int16), expected.view(torch.int16))
+    assert torch.count_nonzero(actual[m:]) == 0
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+            x, pre_scale=pre_scale
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
+@pytest.mark.parametrize("m", (32, 512))
+@pytest.mark.parametrize("with_bias", (False, True))
+def test_qvq_cuda_hadamard_multiblock_large_m_output_is_exact_and_graph_safe(
+    m, with_bias
+):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 large-M output path")
+    generator = torch.Generator(device="cuda").manual_seed(20260908 + m)
+    x = torch.randn((m, 2048), generator=generator, device="cuda") * 20
+    post_scale = torch.randn((2048,), generator=generator, device="cuda")
+    bias = (
+        torch.randn((2048,), generator=generator, device="cuda")
+        if with_bias
+        else None
+    )
+    expected = qvq_cuda_hadamard(
+        x,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=3,
+        output_fp16=True,
+    )
+    actual = qvq_cuda_hadamard_fp32_to_fp16_multiblock(
+        x, post_scale=post_scale, bias=bias, scale_mode=3
+    )
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_fp32_to_fp16_multiblock(
+            x, post_scale=post_scale, bias=bias, scale_mode=3
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
 
 
 def test_qvq_cuda_float32_hadamard_preserves_postscale_and_bias_precision():
@@ -1376,6 +1450,45 @@ def test_qvq_cuda_large_m_fused_recovery_to_precondition_is_exact_and_graph_safe
     graph.replay()
     torch.cuda.synchronize()
     assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
+
+
+def test_qvq_cuda_large_m_paired_recovery_low_preserves_overflow_fallback():
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("large-M paired recovery-low requires Hopper")
+    m, n = 32, 8192
+    generator = torch.Generator(device="cuda").manual_seed(20260905)
+    input0 = torch.randn((m, n), generator=generator, device="cuda") * 5000
+    input1 = torch.randn((m, n), generator=generator, device="cuda") * 5000
+    scale0 = torch.full((n,), 2e-5, device="cuda")
+    scale1 = torch.full((n,), 2e-5, device="cuda")
+    pre_scale = torch.full((n,), 0.01, device="cuda", dtype=torch.float16)
+    gate, up = qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        scale_mode=3,
+        warp_low=True,
+    )
+    expected = qvq_cuda_swiglu_precondition_multiblock(
+        gate,
+        up,
+        pre_scale,
+        half2_high=True,
+        fuse_silu=True,
+        half2_low=True,
+    )
+    actual = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        pre_scale=pre_scale,
+        scale_mode=3,
+        pair_tiles=True,
+    )
+    assert torch.isfinite(actual).all()
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
 
 @pytest.mark.parametrize("scale_mode", (3, 4))
