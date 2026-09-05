@@ -310,7 +310,8 @@ template <
     bool HoistBankMasks = false,
     bool UpperRowsOnly = false,
     int StaticK = 0,
-    int RowGroups = 1>
+    int RowGroups = 1,
+    bool DynamicInputTile = false>
 __device__ __forceinline__ void p32_window_ampere_kernel_body(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -335,7 +336,11 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
   constexpr int kWordsPerTile = 4 * TransitionBits;
   constexpr int kStageColumnsForKernel = StageKTiles * kTileRows;
   constexpr int kRowsPerBlock = kRows * RowGroups;
-  __shared__ __align__(32) half input_tile[2][kRowsPerBlock * kStageColumnsForKernel];
+  constexpr int kInputStageElements =
+      kRowsPerBlock * kStageColumnsForKernel;
+  extern __shared__ __align__(32) half dynamic_input_tile[];
+  __shared__ __align__(32) half input_tile[
+      DynamicInputTile ? 1 : 2][kInputStageElements];
   __shared__ __align__(16) uint32_t packed_words[
       2][StageKTiles][TilesPerBlock][kWordsPerTile];
   __shared__ __align__(4) uint8_t packed_bank_ids[2][StageKTiles][TilesPerBlock];
@@ -354,8 +359,16 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(*bank_alt_id);
 
+  auto input_stage = [&](int destination) {
+    if constexpr (DynamicInputTile) {
+      return dynamic_input_tile + destination * kInputStageElements;
+    } else {
+      return input_tile[destination];
+    }
+  };
+
   auto stage = [&](int k_tile_base, int destination) {
-    auto* input_vectors = reinterpret_cast<uint4*>(input_tile[destination]);
+    auto* input_vectors = reinterpret_cast<uint4*>(input_stage(destination));
     for (int index = thread; index < kRowsPerBlock * kStageColumnsForKernel / 8; index += Threads) {
       const int row = index / (kStageColumnsForKernel / 8);
       const int vector = index - row * (kStageColumnsForKernel / 8);
@@ -540,7 +553,7 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
             const int address_column = ((lane >> 3) & 1) * 8;
             load_mma_fragment_a_upper(
                 input_fragment,
-                input_tile[parity] + row_group * kRows * kStageColumnsForKernel +
+                input_stage(parity) + row_group * kRows * kStageColumnsForKernel +
                     address_row * kStageColumnsForKernel +
                     stage_k_tile * kTileRows + address_column);
           } else {
@@ -548,7 +561,7 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
             const int address_column = (lane >> 4) * 8;
             load_mma_fragment_a(
                 input_fragment,
-                input_tile[parity] + row_group * kRows * kStageColumnsForKernel +
+                input_stage(parity) + row_group * kRows * kStageColumnsForKernel +
                     address_row * kStageColumnsForKernel +
                     stage_k_tile * kTileRows + address_column);
           }
@@ -1263,7 +1276,8 @@ __global__ __launch_bounds__(128) void p32_window_ampere_large_m2_kernel(
   const int split = static_cast<int>(blockIdx.z);
   p32_window_ampere_kernel_body<
       TransitionBits, true, 0, StaticN, 128, 4, StageKTiles,
-      true, false, StaticK, RowGroups>(
+      true, false, StaticK, RowGroups,
+      (RowGroups == 16 && StageKTiles == 3)>(
       input + static_cast<int64_t>(row_offset) * size_k,
       trellis, levels, bank_ids, partial_output,
       output + static_cast<int64_t>(row_offset) * size_n, local_m, size_k,
@@ -2817,9 +2831,25 @@ int launch_p32_large_m2_grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
       static_cast<unsigned>(size_m / (RowGroups * kRows)),
       static_cast<unsigned>(split_count));
+  constexpr bool kDynamicInputTile = RowGroups == 16 && StageKTiles == 3;
+  constexpr int kDynamicInputBytes =
+      kDynamicInputTile
+          ? 2 * RowGroups * kRows * StageKTiles * kTileRows * sizeof(half)
+          : 0;
+  if constexpr (kDynamicInputTile) {
+    const cudaError_t attribute_error = cudaFuncSetAttribute(
+        p32_window_ampere_large_m2_kernel<
+            TransitionBits, StaticN, StaticK, StageKTiles, RowGroups>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        kDynamicInputBytes);
+    if (attribute_error != cudaSuccess) {
+      set_last_error(cudaGetErrorString(attribute_error));
+      return static_cast<int>(attribute_error);
+    }
+  }
   p32_window_ampere_large_m2_kernel<
       TransitionBits, StaticN, StaticK, StageKTiles, RowGroups>
-      <<<grid, 128, 0, stream>>>(
+      <<<grid, 128, kDynamicInputBytes, stream>>>(
       input, trellis, levels, bank_ids, partial_output, output, size_m, size_k,
       size_n, split_count, bank_alt_id);
   if (split_count > 1) {
@@ -2933,6 +2963,11 @@ int launch_p32_large_m(
       (automatic_policy &&
        (size_n == 1024 || size_n == 5120 || size_n == 6144 ||
         size_n == 10240 || size_n == 12288 || size_n == 17408));
+  const bool qwen38_27b_shape =
+      (size_k == 5120 &&
+       (size_n == 1024 || size_n == 6144 || size_n == 10240 ||
+        size_n == 12288 || size_n == 17408)) ||
+      ((size_k == 6144 || size_k == 17408) && size_n == 5120);
   int status = -1;
   if (config.threads == 128 && size_m % (2 * kRows) == 0 &&
       row_groups != 1) {
@@ -2971,6 +3006,11 @@ int launch_p32_large_m(
         input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
         output, partial_output, size_m, size_k, size_n, config.split_count, \
         use_static_n, cuda_stream)
+#define QVQ_LARGE_M2_STAGE3(ROW_GROUPS) \
+    status = launch_p32_large_m2_grid_dispatch<TransitionBits, 3, ROW_GROUPS>( \
+        input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+        output, partial_output, size_m, size_k, size_n, config.split_count, \
+        use_static_n, cuda_stream)
     if (row_groups == 8) {
       const bool supported_n1024_stage =
           size_n == 1024 &&
@@ -3003,6 +3043,15 @@ int launch_p32_large_m(
                 (size_m == 2048 && size_n == 5120 && TransitionBits >= 5) ||
                 (size_m >= 4096 && size_n != 1024))) {
       QVQ_LARGE_M2_STAGE2(16);
+    } else if (config.stage_k_tiles == 3 &&
+               qwen38_27b_shape &&
+               size_m % (16 * kRows) == 0 &&
+               ((size_m == 1024 &&
+                 ((size_n == 1024 && TransitionBits >= 5) ||
+                  size_n == 5120 || size_n == 10240 || size_n == 12288 ||
+                  size_n == 17408)) ||
+                (size_m >= 2048 && size_n != 1024))) {
+      QVQ_LARGE_M2_STAGE3(16);
     } else if (((size_n == 1024 &&
                  (config.stage_k_tiles == 3 ||
                   (config.stage_k_tiles != 4 && size_m >= 2048))) ||
@@ -3018,6 +3067,7 @@ int launch_p32_large_m(
       QVQ_LARGE_M2_STAGE(2)
     }
     return status;
+#undef QVQ_LARGE_M2_STAGE3
 #undef QVQ_LARGE_M2_STAGE2
 #undef QVQ_LARGE_M2_STAGE
   }
