@@ -1546,6 +1546,7 @@ class QVQHopperGroupedRuntime:
         from ..utils.qvq_cuda import (
             qvq_cuda_folded_swiglu_precondition_fp32,
             qvq_cuda_folded_swiglu_precondition_ordered_fp32,
+            qvq_cuda_hadamard_fp32_to_fp16_multiblock,
             qvq_cuda_hadamard_ordered_split16_fp32_to_fp16,
             qvq_cuda_hadamard_pair_swiglu_precondition_multiblock,
             qvq_cuda_swiglu_precondition,
@@ -1808,6 +1809,23 @@ class QVQHopperGroupedRuntime:
             return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
 
         inner = down._inner_forward(transformed)
+        use_large_m_multiblock_down_recovery = (
+            rows > 16
+            and self._h100_multiblock_intermediate_enabled
+            and down.output_hadamard
+            and inner.dtype == torch.float32
+            and (down.in_features, down.out_features) == (8192, 2048)
+        )
+        if use_large_m_multiblock_down_recovery:
+            recovered = qvq_cuda_hadamard_fp32_to_fp16_multiblock(
+                inner[:rows].contiguous(),
+                post_scale=down._cached_cast("SV", torch.float16, torch.float32),
+                bias=down._cached_cast("bias", torch.float16, torch.float32),
+                scale_mode=3,
+            )
+            self.telemetry.h100_multiblock_down_recovery_launches += 1
+            self.telemetry.h100_fp16_recovery_store_launches += 1
+            return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
         if (
             self._h100_fp16_recovery_store_enabled
             and (down.in_features, down.out_features) == (17408, 5120)

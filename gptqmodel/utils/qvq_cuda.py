@@ -71,6 +71,7 @@ def _validate_viterbi_distance_range(
 _QVQ_CUDA_HADAMARD_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP: Callable | None = None
+_QVQ_CUDA_HADAMARD_OUTPUT_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = None
@@ -125,6 +126,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "hadamard",
         "hadamard_pair_fp32_to_fp16",
         "hadamard_input_fp16_padded_multiblock",
+        "hadamard_fp32_to_fp16_multiblock",
         "hadamard_ordered_split16_fp32_to_fp16",
         "hadamard_pair_fp32_to_fp16_multiblock",
         "hadamard_pair_swiglu_precondition_multiblock",
@@ -288,6 +290,19 @@ def _qvq_cuda_hadamard_input_multiblock_op() -> Callable:
                     "qvq_cuda", "hadamard_input_fp16_padded_multiblock"
                 )
     return _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP
+
+
+def _qvq_cuda_hadamard_output_multiblock_op() -> Callable:
+    """Resolve the Hopper N=2048 multiblock output-recovery operator once."""
+
+    global _QVQ_CUDA_HADAMARD_OUTPUT_MULTIBLOCK_OP
+    if _QVQ_CUDA_HADAMARD_OUTPUT_MULTIBLOCK_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_HADAMARD_OUTPUT_MULTIBLOCK_OP is None:
+                _QVQ_CUDA_HADAMARD_OUTPUT_MULTIBLOCK_OP = _extension_api().op(
+                    "qvq_cuda", "hadamard_fp32_to_fp16_multiblock"
+                )
+    return _QVQ_CUDA_HADAMARD_OUTPUT_MULTIBLOCK_OP
 
 
 def _qvq_cuda_hadamard_ordered_split16_op() -> Callable:
@@ -889,6 +904,39 @@ def qvq_cuda_hadamard_input_fp16_padded_multiblock(
     if torch.cuda.get_device_capability(x.device) < (9, 0):
         raise RuntimeError("multiblock QVQ input Hadamard requires Hopper")
     return _qvq_cuda_hadamard_input_multiblock_op()(x, pre_scale)
+
+
+def qvq_cuda_hadamard_fp32_to_fp16_multiblock(
+    x: torch.Tensor,
+    *,
+    post_scale: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    scale_mode: int = 3,
+) -> torch.Tensor:
+    """Recover an exact Hopper Mx2048 FP32 inner result through two stages."""
+
+    if x.device.type != "cuda" or post_scale.device != x.device:
+        raise ValueError("multiblock output recovery tensors must share one CUDA device")
+    if x.dtype != torch.float32 or post_scale.dtype != torch.float32:
+        raise TypeError("multiblock output recovery tensors must be float32")
+    if x.dim() != 2 or not 0 < x.shape[0] <= 4096 or x.shape[1] != 2048:
+        raise ValueError("multiblock output recovery requires Mx2048 with M in [1, 4096]")
+    if not x.is_contiguous() or not post_scale.is_contiguous():
+        raise ValueError("multiblock output recovery tensors must be contiguous")
+    if post_scale.numel() != 2048:
+        raise ValueError("multiblock output recovery scale must contain 2048 values")
+    if bias is not None and (
+        bias.device != x.device
+        or bias.dtype != torch.float32
+        or not bias.is_contiguous()
+        or bias.numel() != 2048
+    ):
+        raise ValueError("multiblock output recovery bias must be contiguous CUDA float32[2048]")
+    if scale_mode not in (3, 4):
+        raise ValueError("multiblock output recovery scale_mode must be 3 or 4")
+    if torch.cuda.get_device_capability(x.device)[0] != 9:
+        raise RuntimeError("multiblock output recovery requires Hopper")
+    return _qvq_cuda_hadamard_output_multiblock_op()(x, post_scale, bias, scale_mode)
 
 
 def qvq_cuda_hadamard_pair_fp32_to_fp16(
@@ -1785,6 +1833,7 @@ __all__ = [
     "qvq_cuda_error",
     "qvq_cuda_gemv",
     "qvq_cuda_hadamard",
+    "qvq_cuda_hadamard_fp32_to_fp16_multiblock",
     "qvq_cuda_qwen_composite_recovery_fp32_to_fp16",
     "qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16",
     "qvq_cuda_qwen_composite_input_fp16_padded",

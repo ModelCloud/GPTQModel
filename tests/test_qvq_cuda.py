@@ -71,6 +71,7 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_folded_swiglu_precondition_ordered_fp32,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
+    qvq_cuda_hadamard_fp32_to_fp16_multiblock,
     qvq_cuda_hadamard_input_fp16_padded_multiblock,
     qvq_cuda_hadamard_ordered_split16_fp32_to_fp16,
     qvq_cuda_hadamard_pair_fp32_to_fp16,
@@ -534,6 +535,47 @@ def test_qvq_cuda_hadamard_multiblock_large_m_input_is_exact_padded_and_graph_sa
     graph.replay()
     torch.cuda.synchronize()
     assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
+@pytest.mark.parametrize("m", (32, 512))
+@pytest.mark.parametrize("with_bias", (False, True))
+def test_qvq_cuda_hadamard_multiblock_large_m_output_is_exact_and_graph_safe(
+    m, with_bias
+):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 large-M output path")
+    generator = torch.Generator(device="cuda").manual_seed(20260908 + m)
+    x = torch.randn((m, 2048), generator=generator, device="cuda") * 20
+    post_scale = torch.randn((2048,), generator=generator, device="cuda")
+    bias = (
+        torch.randn((2048,), generator=generator, device="cuda")
+        if with_bias
+        else None
+    )
+    expected = qvq_cuda_hadamard(
+        x,
+        post_scale=post_scale,
+        bias=bias,
+        scale_mode=3,
+        output_fp16=True,
+    )
+    actual = qvq_cuda_hadamard_fp32_to_fp16_multiblock(
+        x, post_scale=post_scale, bias=bias, scale_mode=3
+    )
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_fp32_to_fp16_multiblock(
+            x, post_scale=post_scale, bias=bias, scale_mode=3
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
 
 
 def test_qvq_cuda_float32_hadamard_preserves_postscale_and_bias_precision():
