@@ -1,8 +1,8 @@
 # Dual-Xeon CPU sidecars for Sketch-B / Fisher collection
 
-Status: **baseline investigation started with the expanded CPU allocation**. The
-hardware/AMX availability probe and 16/32/64/96-thread baseline sweep are complete.
-CPU sidecar implementation experiments remain queued. The tracked queue is
+Status: **active investigation targeting at least 1.5x CPU/GPU hybrid speedup**.
+The hardware/AMX availability probe and 16/32/64/96-thread baseline sweep are
+complete. oneDNN setup, real-tensor capture, and crossover probes are underway. The tracked queue is
 [`experiments/qvq_fisher_cpu_sidecar_queue_20260905.json`](experiments/qvq_fisher_cpu_sidecar_queue_20260905.json).
 
 The objective is additional end-to-end acceleration by overlapping suitable CPU
@@ -280,3 +280,76 @@ Capture command: use the 16-thread baseline command above with `--repeats 1`,
 CPU01 is complete for this bounded baseline/trace scope. CPU02 (NUMA handoff)
 and CPU05 (full-path small-operation crossover) are the next prioritized trials;
 physical-core placement and SMT comparisons remain queued within CPU09.
+
+## oneDNN setup and dispatch probes
+
+The 1.5x hybrid investigation uses the unchanged current GPU collector as its
+control. Installing a CPU library does not itself change the collector.
+
+PyTorch reports built-in oneDNN 3.12.0, commit
+`80afa71049cd69a3df32adcccb623b12cd7baa22`, with OpenMP and AVX-512 support.
+A CPU BF16 matrix multiply with `ONEDNN_VERBOSE=1` selected
+`brg_matmul:avx10_1_512_amx` and returned the exact all-ones reference.
+
+The requested Intel packages were installed in `/root/venv-py3.14t-gil0`:
+`onednn==2026.0.2` and `onednn-devel==2026.0.2`, including their declared Intel
+runtime dependencies. This distribution contains oneDNN 3.11.4 with a DPC++
+runtime. Its standalone CPU engine failed because SYCL reported zero CPU devices
+in this VM. Package installation is therefore not sufficient evidence of usable
+CPU dispatch. No global library-path override was added.
+
+The existing system oneDNN reports 3.9.1 at runtime. The standalone
+[`probe_qvq_onednn.cpp`](../scripts/probe_qvq_onednn.cpp) verified all 65,536
+outputs for each of BF16, INT8, and FP32 matmul. BF16 and INT8 selected
+`brg_matmul:avx10_1_512_amx`; FP32 selected `brg_matmul:avx512_core`.
+These all-ones checks establish execution and elementary algebra only, not
+performance, collector rounding parity, or model quality.
+
+A native OpenMP build from upstream tag `v3.12` (the same commit as PyTorch's
+embedded version) was built and installed separately at `/opt/qvq/onednn-3.12.0`.
+The build enables all primitive and CPU ISA families, GPU runtime `NONE`, and
+uses eight compile jobs. The upstream option for disabling graph support is
+`ONEDNN_BUILD_GRAPH`; `DNNL_BUILD_GRAPH` is ignored, so this build also includes
+the default graph component. Build log: `/tmp/qvq-onednn-build.log`.
+
+Native build reproduction (graph enabled explicitly):
+
+```bash
+git clone --depth 1 --branch v3.12 https://github.com/uxlfoundation/oneDNN.git /tmp/qvq-onednn-src
+cmake -S /tmp/qvq-onednn-src -B /tmp/qvq-onednn-build \
+  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/opt/qvq/onednn-3.12.0 \
+  -DDNNL_CPU_RUNTIME=OMP -DDNNL_GPU_RUNTIME=NONE \
+  -DDNNL_BUILD_TESTS=OFF -DDNNL_BUILD_EXAMPLES=OFF -DONEDNN_BUILD_GRAPH=ON
+cmake --build /tmp/qvq-onednn-build -j8
+cmake --install /tmp/qvq-onednn-build
+g++ -O2 -Wall -Wextra -I/opt/qvq/onednn-3.12.0/include \
+  scripts/probe_qvq_onednn.cpp -L/opt/qvq/onednn-3.12.0/lib \
+  -Wl,-rpath,/opt/qvq/onednn-3.12.0/lib -ldnnl -o /tmp/qvq-onednn-native-probe
+ONEDNN_VERBOSE=1 OMP_NUM_THREADS=16 /tmp/qvq-onednn-native-probe
+```
+
+The installed native build passed the same standalone probe: AMX BF16 and INT8,
+and AVX-512 FP32, with all outputs verified. Runtime reports OpenMP, 16 threads,
+and no GPU runtime. Full verbose evidence: `/tmp/qvq-onednn-native-probe.log`.
+The installed library path is selected by an executable-local rpath; PyTorch's
+embedded oneDNN and the system library remain independently usable.
+
+### Initial real-input oneDNN crossover
+
+The [operator report](experiments/qvq_fisher_onednn_crossover_20260905.json)
+uses captured real Qwen3.5-27B activations and gradients, B4/B16, T64,
+K5120/17408, 16 CPU threads, and FP32 output. All captured inputs round-trip
+through BF16 exactly. GPU reference operations remain strict FP32.
+
+Direct synchronous offload did not win. For B16/T64/K17408 gradient Gram,
+GPU time was 0.542 ms, AMX CPU compute alone 0.175 ms, but full CPU roundtrip
+was 2.105 ms (0.257x GPU speed). FP32 AVX-512 roundtrip was 5.328 ms.
+Transfer and synchronization dominate; the promising compute-only ratio must
+not be presented as a collector gain. All eight tested CPU results differed
+bitwise from the GPU reference, including FP32 oneDNN. None is accepted as a
+quantization-preserving replacement. Next investigate advance staging/reuse and
+bounded overlap rather than synchronous per-hook offload.
+
+The capture run used zero warmups and serialized tensors while collecting; its
+latency is diagnostic only. Capture metadata and data are at
+`/tmp/qvq-sidecar-capture-metadata.json` and `/tmp/qvq-sidecar-real-tensors/`.

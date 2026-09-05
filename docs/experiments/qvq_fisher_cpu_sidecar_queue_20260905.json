@@ -1,7 +1,7 @@
 {
   "schema": "qvq.fisher-cpu-sidecar.queue.v1",
-  "status": "baseline_complete_sidecars_queued",
-  "execution": "Expanded-allocation baseline sweep and critical-path trace completed in the foreground; no background supervisor remains.",
+  "status": "sidecar_investigation_active",
+  "execution": "Active foreground investigation targeting at least 1.5x over the fixed current GPU collector; oneDNN installation and crossover probes underway.",
   "prepared_at_utc": "2026-09-05T19:12:58.625621+00:00",
   "baseline_code_commit": "1acd13b95bcb2c4bfc3556d7e710da1385f911f5",
   "branch": "perf/qvq-yaqa-fisher-next-2x",
