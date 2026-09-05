@@ -1009,6 +1009,64 @@ def test_torch_ops_jit_extension_fingerprint_tracks_transitive_local_includes(tm
     assert first_build_root != second_build_root
 
 
+def test_torch_ops_jit_extension_fingerprint_ignores_unrelated_sibling_files(monkeypatch, tmp_path):
+    """One kernel's source/header shadow must not change an unrelated extension's cache key."""
+
+    project_root = tmp_path / "project"
+    src_dir = project_root / "src"
+    src_dir.mkdir(parents=True)
+    include_dir = project_root / "includes"
+    include_dir.mkdir(parents=True)
+    other_kernel_dir = project_root / "other_kernel"
+    other_kernel_dir.mkdir(parents=True)
+
+    source = src_dir / "unit_test.cpp"
+    source.write_text(
+        '#include "local.h"\n#include <torch/all.h>\n',
+        encoding="utf-8",
+    )
+    (src_dir / "local.h").write_text("int local_value = 1;\n", encoding="utf-8")
+
+    loader = _make_loader(
+        tmp_path,
+        sources=[str(source)],
+        extra_include_paths=[str(src_dir), str(include_dir)],
+        python_abi_dependent=False,
+    )
+    monkeypatch.setattr(cpp_module, "_FINGERPRINT_ROOT", project_root)
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.8.0+cpu")
+
+    first_fingerprint = loader._cache_fingerprint()
+
+    # Simulate an unrelated kernel dropping a header that would shadow the
+    # angle-bracket ``<torch/all.h>`` include if the cache scanner resolved
+    # system-style includes against local search roots.
+    shadow = include_dir / "torch" / "all.h"
+    shadow.parent.mkdir(parents=True)
+    shadow.write_text("// unrelated shadow header\n", encoding="utf-8")
+    (other_kernel_dir / "kernel.cu").write_text(
+        "__global__ void unrelated() {}\n",
+        encoding="utf-8",
+    )
+
+    second_fingerprint = loader._cache_fingerprint()
+    assert second_fingerprint == first_fingerprint
+
+    # Ensure the final payload does not embed the temporary absolute path so the
+    # cache key is independent of checkout/install location.
+    payloads = []
+    real_sha256 = cpp_module.hashlib.sha256
+
+    def capture_sha256(data=b""):
+        payloads.append(data)
+        return real_sha256(data)
+
+    monkeypatch.setattr(cpp_module.hashlib, "sha256", capture_sha256)
+    loader._cache_fingerprint()
+    final_payload = payloads[-1].decode("utf-8")
+    assert str(tmp_path) not in final_payload
+
+
 def _spawn_flock_holder(lock_path: Path) -> subprocess.Popen:
     """Start a child process that holds an exclusive flock on `lock_path` until killed."""
 
