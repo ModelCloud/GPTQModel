@@ -70,7 +70,7 @@ from ..quantization.qvq_axis_policy import (
     set_qvq_transform_axis_metadata,
     validate_qvq_transform_axis_overrides,
 )
-from ..quantization.qvq_yaqa import capture_yaqa_sketch_b
+from ..quantization.qvq_yaqa import YaqaGramSketch, capture_yaqa_sketch_b
 from ..quantization.rotation.hadamard_utils import matmul_hadU
 from ..quantization.swiglu import (
     apply_swiglu_reparameterization,
@@ -190,8 +190,8 @@ class QVQProcessor(LoopProcessor):
         self.preserve_batch_keep_mask = True
         self.avg_losses = []
         self._stats_lock = threading.Lock()
-        self._yaqa_input_hessians: Dict[str, torch.Tensor] = {}
-        self._yaqa_output_hessians: Dict[str, torch.Tensor] = {}
+        self._yaqa_input_hessians: Dict[str, torch.Tensor | YaqaGramSketch] = {}
+        self._yaqa_output_hessians: Dict[str, torch.Tensor | YaqaGramSketch] = {}
         self._yaqa_stats: Dict[str, Any] = {}
         self._yaqa_factor_lock = threading.Lock()
         self._yaqa_prepared = qcfg.rounding != "yaqa"
@@ -1515,24 +1515,38 @@ class QVQProcessor(LoopProcessor):
         source_device = next(iter(source_devices))
         target_device = normalize_device_like(self.qcfg.device) or source_device
         targets, decoder_layers = self._yaqa_target_modules(gptq_model)
+        total_factor_bytes = sum(self._yaqa_factor_bytes(module) for module in targets.values())
         max_factor_bytes = self.qcfg.yaqa.max_factor_bytes_per_pass
         if max_factor_bytes is None:
-            total_factor_bytes = sum(self._yaqa_factor_bytes(module) for module in targets.values())
             max_factor_bytes = self._yaqa_default_max_factor_bytes(
                 target_device,
                 total_factor_bytes,
             )
-        packed_symmetric_accumulators = target_device.type == "mps"
-        target_chunks = self._yaqa_target_chunks(
-            targets,
-            decoder_layers,
-            max_factor_bytes,
-            packed_symmetric=packed_symmetric_accumulators,
+        gram_strategy = self.qcfg.yaqa.gram_strategy
+        if gram_strategy == "auto":
+            gram_strategy = "exact"
+            if target_device.type == "cuda":
+                free_bytes, total_bytes = torch.cuda.mem_get_info(target_device)
+                reserve_bytes = max(16 * 1024**3, total_bytes // 4)
+                exact_budget = min(max_factor_bytes, max(0, free_bytes - reserve_bytes))
+                if total_factor_bytes > exact_budget:
+                    gram_strategy = "streaming_projected"
+        packed_symmetric_accumulators = target_device.type == "mps" and gram_strategy == "exact"
+        target_chunks = (
+            [targets]
+            if gram_strategy == "streaming_projected"
+            else self._yaqa_target_chunks(
+                targets,
+                decoder_layers,
+                max_factor_bytes,
+                packed_symmetric=packed_symmetric_accumulators,
+            )
         )
         log.info(
             "QVQ YAQA: collecting full-model Sketch-B factors targets=%d batches=%d device=%s seed=%d "
             "minimum_sequences=%d regularization=%.6g batch_size=%d activation_checkpointing=%s "
-            "checkpointed_modules=%d factor_passes=%d max_factor_bytes_per_pass=%d packed_symmetric=%s",
+            "checkpointed_modules=%d factor_passes=%d max_factor_bytes_per_pass=%d packed_symmetric=%s "
+            "gram_strategy=%s gram_projection_rank=%s dense_factor_bytes=%d",
             len(targets),
             len(self.yaqa_calibration),
             target_device,
@@ -1545,6 +1559,9 @@ class QVQProcessor(LoopProcessor):
             len(target_chunks),
             max_factor_bytes,
             packed_symmetric_accumulators,
+            gram_strategy,
+            self.qcfg.yaqa.gram_projection_rank if gram_strategy == "streaming_projected" else None,
+            total_factor_bytes,
         )
         progress_stride = max(1, len(self.yaqa_calibration) // 16)
         moved = source_device != target_device
@@ -1589,6 +1606,12 @@ class QVQProcessor(LoopProcessor):
                         activation_modules=(
                             targets if self.qcfg.activation is not None else None
                         ),
+                        gram_strategy="streaming_projected" if gram_strategy == "streaming_projected" else "batched",
+                        gram_projection_rank=(
+                            self.qcfg.yaqa.gram_projection_rank
+                            if gram_strategy == "streaming_projected"
+                            else None
+                        ),
                     )
                     input_hessians.update(pass_inputs)
                     output_hessians.update(pass_outputs)
@@ -1611,15 +1634,21 @@ class QVQProcessor(LoopProcessor):
             "input_factor_elements",
             "output_factor_elements",
             "factor_storage_bytes",
+            "dense_factor_storage_bytes",
             "mps_cleanup_count",
         )
         for field in sum_fields:
             stats[field] = sum(item[field] for item in pass_stats)
+        stats["factor_compression_ratio"] = stats["dense_factor_storage_bytes"] / max(
+            1, stats["factor_storage_bytes"]
+        )
         stats["phase_wall_seconds"] = {
             phase: sum(item["phase_wall_seconds"][phase] for item in pass_stats)
             for phase in pass_stats[0]["phase_wall_seconds"]
         }
         stats["factor_passes"] = len(pass_stats)
+        stats["configured_gram_strategy"] = self.qcfg.yaqa.gram_strategy
+        stats["selected_gram_strategy"] = gram_strategy
         stats["max_factor_bytes_per_pass"] = max_factor_bytes
         stats["pass_target_counts"] = [len(chunk) for chunk in target_chunks]
         stats["pass_factor_bytes"] = [item["factor_storage_bytes"] for item in pass_stats]
@@ -2394,6 +2423,10 @@ class QVQProcessor(LoopProcessor):
                 output_hessian = task_entry["yaqa_output_hessian"]
                 if quantization_hessian is None or output_hessian is None:
                     raise RuntimeError(f"QVQ YAQA factors disappeared for module `{module.full_name}`.")
+                if isinstance(quantization_hessian, YaqaGramSketch):
+                    quantization_hessian = quantization_hessian.materialize(device=target_device)
+                if isinstance(output_hessian, YaqaGramSketch):
+                    output_hessian = output_hessian.materialize(device=target_device)
             else:
                 capture.finalize_hessian(target_device=target_device)
                 if capture.H is None:

@@ -172,6 +172,12 @@ class YaqaConfig:
     source_weight_column: str | None = None
     source_weights: tuple[tuple[str, float], ...] = ()
     max_factor_bytes_per_pass: int | None = None
+    # ``auto`` retains exact dense factors when they fit the CUDA working set
+    # and selects the compact streaming projection for models whose factors do
+    # not. Explicit ``exact`` and ``streaming_projected`` modes are available
+    # for reproducibility and quality sweeps.
+    gram_strategy: str = "auto"
+    gram_projection_rank: int = 256
     v2b2_family_mode: str = "reselect"
     sample_strategy: str = "full"
     spectral_refinement: bool = False
@@ -290,6 +296,19 @@ class YaqaConfig:
             or self.max_factor_bytes_per_pass < 1
         ):
             raise ValueError("YaqaConfig: `max_factor_bytes_per_pass` must be a positive integer or None.")
+        if not isinstance(self.gram_strategy, str):
+            raise TypeError("YaqaConfig: `gram_strategy` must be a string.")
+        self.gram_strategy = self.gram_strategy.strip().lower()
+        if self.gram_strategy not in {"auto", "exact", "streaming_projected"}:
+            raise ValueError(
+                "YaqaConfig: `gram_strategy` must be `auto`, `exact`, or `streaming_projected`."
+            )
+        if (
+            isinstance(self.gram_projection_rank, bool)
+            or not isinstance(self.gram_projection_rank, int)
+            or self.gram_projection_rank < 1
+        ):
+            raise ValueError("YaqaConfig: `gram_projection_rank` must be a positive integer.")
         if not isinstance(self.v2b2_family_mode, str):
             raise TypeError("YaqaConfig: `v2b2_family_mode` must be a string.")
         self.v2b2_family_mode = self.v2b2_family_mode.strip().lower()

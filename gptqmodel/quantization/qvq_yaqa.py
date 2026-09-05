@@ -8,9 +8,11 @@ from __future__ import annotations
 import gc
 import math
 import time
+import zlib
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import wraps
 from typing import Any
 
@@ -44,6 +46,55 @@ _YAQA_CHECKPOINT_RECOMPUTING: ContextVar[bool] = ContextVar(
     default=False,
 )
 _MISSING_FORWARD = object()
+
+
+@dataclass(frozen=True)
+class YaqaGramSketch:
+    """Compact randomized factor whose dense Gram is materialized on demand."""
+
+    source: torch.Tensor
+    normalizer: float
+    seed: int
+
+    def __post_init__(self) -> None:
+        if self.source.ndim != 2 or self.source.dtype != torch.float32:
+            raise ValueError("YAQA compact Gram source must be a rank-2 FP32 tensor")
+        if self.source.device.type != "cpu":
+            raise ValueError("YAQA compact Gram sources must be stored on CPU")
+        if not math.isfinite(self.normalizer) or self.normalizer <= 0:
+            raise ValueError("YAQA compact Gram normalizer must be finite and positive")
+
+    @property
+    def feature_count(self) -> int:
+        return self.source.shape[0]
+
+    @property
+    def rank(self) -> int:
+        return self.source.shape[1]
+
+    def materialize(self, *, device: torch.device) -> torch.Tensor:
+        """Build the dense PSD factor only for the module being quantized."""
+
+        source = self.source.to(device=device, non_blocking=True)
+        cuda_matmul = torch.backends.cuda.matmul
+        previous_fp32_precision = None
+        previous_allow_tf32 = None
+        try:
+            if device.type == "cuda":
+                if hasattr(cuda_matmul, "fp32_precision"):
+                    previous_fp32_precision = cuda_matmul.fp32_precision
+                    cuda_matmul.fp32_precision = "ieee"
+                else:  # pragma: no cover - older PyTorch
+                    previous_allow_tf32 = cuda_matmul.allow_tf32
+                    cuda_matmul.allow_tf32 = False
+            hessian = source @ source.T
+            hessian.div_(self.normalizer)
+            return _exact_symmetric_gram(hessian)
+        finally:
+            if previous_fp32_precision is not None:
+                cuda_matmul.fp32_precision = previous_fp32_precision
+            if previous_allow_tf32 is not None:
+                cuda_matmul.allow_tf32 = previous_allow_tf32
 
 
 @contextmanager
@@ -283,6 +334,59 @@ def _sketch_b_gram_updates(
     return _exact_symmetric_gram(input_update), _exact_symmetric_gram(output_update)
 
 
+def _streaming_projected_updates(
+    activation: torch.Tensor,
+    gradient: torch.Tensor,
+    *,
+    rank: int,
+    seed: int,
+    sequence_weights: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Project the concatenated per-sequence scores into two compact factors.
+
+    If ``X`` vertically concatenates every per-sequence weight score, the
+    input update is ``X.T @ R`` for an iid Gaussian ``R``. The output side
+    applies the same construction to the horizontal score concatenation.
+    Accumulating these sources across batches is therefore one streaming
+    random projection of the complete calibration set, without ever forming
+    a dense per-batch Gram matrix.
+    """
+
+    if activation.ndim != 3 or gradient.ndim != 3:
+        raise ValueError("YAQA streaming projection inputs must have [batch, sequence, channels] geometry")
+    if tuple(activation.shape[:2]) != tuple(gradient.shape[:2]):
+        raise ValueError("YAQA streaming projection activation and gradient token geometry must match")
+    if activation.dtype != torch.float32 or gradient.dtype != torch.float32:
+        raise TypeError("YAQA streaming projection inputs must be FP32")
+    batch_sequences, _, out_features = gradient.shape
+    in_features = activation.shape[-1]
+    if sequence_weights is not None:
+        gradient = gradient * sequence_weights.to(dtype=gradient.dtype).sqrt().view(-1, 1, 1)
+
+    projection_generator = torch.Generator(device=gradient.device).manual_seed(seed)
+    projection = torch.empty(
+        (batch_sequences, out_features + in_features, rank),
+        dtype=torch.float32,
+        device=gradient.device,
+    ).normal_(generator=projection_generator)
+    output_projection = projection[:, :out_features]
+    input_projection = projection[:, out_features:]
+
+    if batch_sequences == 1:
+        input_source = activation[0].T @ (gradient[0] @ output_projection[0])
+        output_source = gradient[0].T @ (activation[0] @ input_projection[0])
+    else:
+        input_source = torch.bmm(
+            activation.transpose(1, 2),
+            torch.bmm(gradient, output_projection),
+        ).sum(dim=0)
+        output_source = torch.bmm(
+            gradient.transpose(1, 2),
+            torch.bmm(activation, input_projection),
+        ).sum(dim=0)
+    return input_source, output_source
+
+
 def capture_yaqa_sketch_b(
     model: nn.Module,
     batches: list[dict[str, torch.Tensor]],
@@ -302,8 +406,12 @@ def capture_yaqa_sketch_b(
     chat_template_config=None,
     activation=None,
     activation_modules: dict[str, nn.Linear] | None = None,
-) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor], dict[str, Any]]:
-    """Collect exact per-sequence YAQA Sketch-B factors from full-model score gradients."""
+) -> tuple[
+    dict[str, torch.Tensor | YaqaGramSketch],
+    dict[str, torch.Tensor | YaqaGramSketch],
+    dict[str, Any],
+]:
+    """Collect exact or streaming-projected YAQA Sketch-B factors."""
 
     if model.training:
         raise ValueError("YAQA Sketch B requires the full model to be in eval mode")
@@ -360,9 +468,12 @@ def capture_yaqa_sketch_b(
         raise ValueError("YAQA MPS cleanup interval must be a positive integer")
     if not isinstance(mps_pack_symmetric_grams, bool):
         raise TypeError("YAQA MPS symmetric-Gram packing flag must be boolean")
-    if gram_strategy not in {"batched", "flattened", "projected", "token_space"}:
-        raise ValueError("YAQA Gram strategy must be `batched`, `flattened`, `projected`, or `token_space`")
-    if gram_strategy == "projected":
+    if gram_strategy not in {"batched", "flattened", "projected", "streaming_projected", "token_space"}:
+        raise ValueError(
+            "YAQA Gram strategy must be `batched`, `flattened`, `projected`, "
+            "`streaming_projected`, or `token_space`"
+        )
+    if gram_strategy in {"projected", "streaming_projected"}:
         if (
             isinstance(gram_projection_rank, bool)
             or not isinstance(gram_projection_rank, int)
@@ -415,10 +526,17 @@ def capture_yaqa_sketch_b(
             "add independent calibration sequences or explicitly reduce the minimum for a diagnostic-only run"
         )
 
-    factor_bytes = sum(
-        (module.in_features * module.in_features + module.out_features * module.out_features) * 4
-        for module in modules.values()
-    )
+    if gram_strategy == "streaming_projected":
+        assert gram_projection_rank is not None
+        factor_bytes = sum(
+            (module.in_features + module.out_features) * gram_projection_rank * 4
+            for module in modules.values()
+        )
+    else:
+        factor_bytes = sum(
+            (module.in_features * module.in_features + module.out_features * module.out_features) * 4
+            for module in modules.values()
+        )
     if accumulator_device is None:
         accumulator_device = torch.device("cpu")
         if device.type == "cuda":
@@ -429,7 +547,10 @@ def capture_yaqa_sketch_b(
     input_accumulators: dict[str, torch.Tensor] = {}
     output_accumulators: dict[str, torch.Tensor] = {}
     packed_symmetric_accumulators = (
-        mps_pack_symmetric_grams and device.type == "mps" and accumulator_device.type == "cpu"
+        gram_strategy != "streaming_projected"
+        and mps_pack_symmetric_grams
+        and device.type == "mps"
+        and accumulator_device.type == "cpu"
     )
     gram_projections: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     if gram_strategy == "projected":
@@ -459,6 +580,7 @@ def capture_yaqa_sketch_b(
     total_effective_weighted_tokens = 0.0
     active_mask: torch.Tensor | None = None
     active_sequence_weights: torch.Tensor | None = None
+    active_batch_index = 0
     active_calls: set[str] = set()
     tensor_hook_handles = []
     module_hook_handles = []
@@ -522,13 +644,25 @@ def capture_yaqa_sketch_b(
                 raise ValueError(f"YAQA module {module_name} produced a non-finite full-model weight gradient")
         else:
             nonfinite_update.logical_or_(~torch.isfinite(gradient).all())
-        input_update, output_update = _sketch_b_gram_updates(
-            activation,
-            gradient,
-            strategy=gram_strategy,
-            projections=gram_projections.get(module_name),
-            sequence_weights=active_sequence_weights,
-        )
+        if gram_strategy == "streaming_projected":
+            assert gram_projection_rank is not None
+            module_seed = zlib.crc32(module_name.encode("utf-8"), seed & 0xFFFFFFFF)
+            projection_seed = (module_seed + active_batch_index * 0x9E3779B1) & 0x7FFFFFFFFFFFFFFF
+            input_update, output_update = _streaming_projected_updates(
+                activation,
+                gradient,
+                rank=gram_projection_rank,
+                seed=projection_seed,
+                sequence_weights=active_sequence_weights,
+            )
+        else:
+            input_update, output_update = _sketch_b_gram_updates(
+                activation,
+                gradient,
+                strategy=gram_strategy,
+                projections=gram_projections.get(module_name),
+                sequence_weights=active_sequence_weights,
+            )
         if nonfinite_update is None:
             if not torch.isfinite(input_update).all() or not torch.isfinite(output_update).all():
                 raise ValueError(f"YAQA module {module_name} produced an overflowing Sketch-B Gram update")
@@ -651,6 +785,7 @@ def capture_yaqa_sketch_b(
 
         with _checkpoint_module_forwards(checkpoint_modules):
             for batch_index, batch in enumerate(batches, start=1):
+                active_batch_index = batch_index
                 template_mask = batch.get("chat_template_mask")
                 encoded = {
                     name: value.to(device)
@@ -819,21 +954,41 @@ def capture_yaqa_sketch_b(
         None if capture_start_event is None else capture_start_event.elapsed_time(capture_end_event)
     )
 
-    input_hessians: dict[str, torch.Tensor] = {}
-    output_hessians: dict[str, torch.Tensor] = {}
+    input_hessians: dict[str, torch.Tensor | YaqaGramSketch] = {}
+    output_hessians: dict[str, torch.Tensor | YaqaGramSketch] = {}
     for name, module in modules.items():
         if sequence_counts[name] != total_sequences or name not in input_accumulators:
             raise ValueError(f"YAQA module {name} did not produce one gradient for every sequence")
         out_features, in_features = module.weight.shape
-        input_hessians[name] = input_accumulators[name].div(
-            total_effective_sequence_weight * out_features
-        ).contiguous()
-        output_hessians[name] = output_accumulators[name].div(
-            total_effective_sequence_weight * in_features
-        ).contiguous()
+        if gram_strategy == "streaming_projected":
+            input_hessians[name] = YaqaGramSketch(
+                source=input_accumulators[name].contiguous(),
+                normalizer=total_effective_sequence_weight * out_features * gram_projection_rank,
+                seed=seed,
+            )
+            output_hessians[name] = YaqaGramSketch(
+                source=output_accumulators[name].contiguous(),
+                normalizer=total_effective_sequence_weight * in_features * gram_projection_rank,
+                seed=seed,
+            )
+        else:
+            input_hessians[name] = input_accumulators[name].div(
+                total_effective_sequence_weight * out_features
+            ).contiguous()
+            output_hessians[name] = output_accumulators[name].div(
+                total_effective_sequence_weight * in_features
+            ).contiguous()
 
-    input_factor_elements = sum(factor.numel() for factor in input_hessians.values())
-    output_factor_elements = sum(factor.numel() for factor in output_hessians.values())
+    if gram_strategy == "streaming_projected":
+        input_factor_elements = sum(factor.source.numel() for factor in input_hessians.values())
+        output_factor_elements = sum(factor.source.numel() for factor in output_hessians.values())
+        dense_factor_storage_bytes = sum(
+            (module.in_features**2 + module.out_features**2) * 4 for module in modules.values()
+        )
+    else:
+        input_factor_elements = sum(factor.numel() for factor in input_hessians.values())
+        output_factor_elements = sum(factor.numel() for factor in output_hessians.values())
+        dense_factor_storage_bytes = (input_factor_elements + output_factor_elements) * 4
     activation_error_summary = None
     if activation_format is not None:
         missing_activation_modules = set(activation_modules or {}) - set(activation_errors)
@@ -892,7 +1047,11 @@ def capture_yaqa_sketch_b(
         input_hessians,
         output_hessians,
         {
-            "method": "YAQA-v3 Sketch B real Fisher",
+            "method": (
+                "YAQA-v3 Sketch B streaming randomized Fisher"
+                if gram_strategy == "streaming_projected"
+                else "YAQA-v3 Sketch B real Fisher"
+            ),
             "full_model_backward": True,
             "independent_sequences": total_sequences,
             "unique_sequences": total_sequences,
@@ -921,6 +1080,10 @@ def capture_yaqa_sketch_b(
             "packed_symmetric_accumulators": packed_symmetric_accumulators,
             "gram_strategy": gram_strategy,
             "gram_projection_rank": gram_projection_rank,
+            "gram_projection_distribution": (
+                "gaussian" if gram_strategy == "streaming_projected" else None
+            ),
+            "factor_approximate": gram_strategy in {"projected", "streaming_projected"},
             "capture_wall_seconds": time.perf_counter() - capture_started,
             "capture_cuda_ms": capture_cuda_ms,
             "final_host_transfer_seconds": transfer_seconds,
@@ -929,6 +1092,9 @@ def capture_yaqa_sketch_b(
             "input_factor_elements": input_factor_elements,
             "output_factor_elements": output_factor_elements,
             "factor_storage_bytes": (input_factor_elements + output_factor_elements) * 4,
+            "dense_factor_storage_bytes": dense_factor_storage_bytes,
+            "factor_compression_ratio": dense_factor_storage_bytes
+            / max(1, (input_factor_elements + output_factor_elements) * 4),
             "tf32": False,
             "seed": seed,
             "activation_quantization_error": activation_error_summary,
@@ -942,6 +1108,7 @@ __all__ = [
     "YAQA_PAPER_MINIMUM_SEQUENCES",
     "YAQA_PAPER_RECOMMENDED_SEQUENCES",
     "YAQA_PAPER_REGULARIZATION",
+    "YaqaGramSketch",
     "capture_yaqa_sketch_b",
     "yaqa_real_fisher_loss",
 ]
