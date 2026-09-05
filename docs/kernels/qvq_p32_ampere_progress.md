@@ -3970,6 +3970,17 @@ IMAD 155->158, SHF 158->161, LOP3 164->171, and LEA 55->58.  The
 SSA/algebraic/data-movement pass found no redundant mask, shift, conversion,
 permutation, or address expression, and no spill was introduced.
 
+## v85 rejected M=1024 stage-4 eight-row reuse
+
+An explicit-row-group build temporarily allowed the stage-4 eight-row kernel at
+`M=1024` so the last unoptimized large-M tier could be screened without
+changing the automatic policy.  Five matched A100 repeats across wide N and
+W2.5--W3.5 were mixed: for example, `N=5120` W2.5 was 0.94x and `N=6144`
+W2.5 was 0.86x, while selected `N=10240` cases improved.  The 124-register
+specialization is therefore not a uniform win at this smaller M, so the ABI
+validation and automatic dispatch remain unchanged and no source change is
+retained from this probe.
+
 ## Reproduction
 
 ```bash
