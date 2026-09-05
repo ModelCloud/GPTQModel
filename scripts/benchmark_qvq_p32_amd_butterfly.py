@@ -56,6 +56,7 @@ def main():
     parser.add_argument("--aiter-skinny", choices=("none", "wv", "llmm1"), default="none")
     parser.add_argument("--aiter-direct", action="store_true", help="Measure private native binding with cached weight metadata")
     parser.add_argument("--flydsl-hgemm", action="store_true", help="Experimental same-type FP16 FlyDSL GEMM dispatch")
+    parser.add_argument("--flydsl-direct", action="store_true", help="Cache FlyDSL compiled launcher and splitK1 scratch")
     parser.add_argument("--gemv-block-n", type=int, choices=(2, 4, 8), default=2)
     parser.add_argument("--shapes", nargs="+", choices=[shape[0] for shape in QWEN38_27B_SHAPES])
     parser.add_argument("--m-values", nargs="+", type=int, choices=REQUESTED_M)
@@ -87,6 +88,8 @@ def main():
         parser.error("Choose one correction, graph staging, or skinny dispatch experiment")
     if args.flydsl_hgemm and (args.folded_direct_ceiling or args.folded_residual_ceiling):
         parser.error("FlyDSL trial must preserve public layer guards; do not combine with raw ceilings")
+    if args.flydsl_direct and not args.flydsl_hgemm:
+        parser.error("--flydsl-direct requires --flydsl-hgemm")
     if args.fused_prefetch and (not args.fused_correction or args.fused_block_k not in (32, 64)
                                or args.fused_block_m not in (64, 128) or args.fused_block_n not in (64, 128)):
         parser.error("Prefetch requires fused correction, BK32 or64, and BM/BN64 or128")
@@ -133,6 +136,11 @@ def main():
         from importlib.metadata import version as package_version
 
         from aiter.ops.flydsl import gemm_kernels as flydsl_module
+        if args.flydsl_direct:
+            import flydsl.compiler as flyc
+            import flydsl.expr as fx
+            from aiter.ops.flydsl.kernels.splitk_hgemm import compile_hgemm_kernel
+            from aiter.ops.flydsl.kernels.tensor_shim import ptr_arg
 
         flydsl_metadata = {
             "version": package_version("flydsl"),
@@ -274,6 +282,8 @@ def main():
     graph_entries = {}
     skinny_weights = {}
     flydsl_cases = set()
+    flydsl_entries = {}
+    flydsl_streams = {}
 
     def flydsl_execute(x, operand, residual_operand=None, composite_recovery=None, **kwargs):
         m, k = x.shape
@@ -287,7 +297,32 @@ def main():
         # Physical N-by-K immutable weights are already cached by the layer.
         # Keep all public mutation guards and do not create per-forward weight copies.
         config = flydsl_metadata["large_config" if min(m, n, k) >= 4096 else "config"]
-        output = flydsl_module.flydsl_hgemm(x, operand.T, **config)
+        if args.flydsl_direct:
+            stream = torch.cuda.current_stream(x.device)
+            stream_key = (x.device.index, stream.cuda_stream)
+            stream_entry = flydsl_streams.get(stream_key)
+            if stream_entry is None:
+                semaphore, signal = flydsl_module._get_split_k_tensors(x.device, stream)
+                stream_entry = (stream, semaphore, signal, ptr_arg(semaphore), ptr_arg(signal), fx.Stream(stream))
+                flydsl_streams[stream_key] = stream_entry
+            key = (id(operand), config["tile_m"])
+            entry = flydsl_entries.get(key)
+            output = torch.empty((m, n), device=x.device, dtype=x.dtype)
+            if entry is None:
+                kernel = compile_hgemm_kernel(
+                    "f16", n, k, TILE_M=config["tile_m"], TILE_N=config["tile_n"],
+                    TILE_K=config["tile_k"], STAGES=2, SPLIT_K=1, BLOCK_M_WARPS=2,
+                    BLOCK_N_WARPS=config["block_n_warps"], BLOCK_K_WARPS=1, B_TO_LDS=True, HAS_BIAS=False,
+                )
+                weight_ptr = ptr_arg(operand)
+                # compile executes once, as the installed _run_compiled wrapper does.
+                compiled = flyc.compile(kernel, ptr_arg(output), ptr_arg(x), weight_ptr, weight_ptr,
+                                        m, *stream_entry[3:])
+                flydsl_entries[key] = (operand, weight_ptr, compiled)
+            else:
+                entry[2](ptr_arg(output), ptr_arg(x), entry[1], entry[1], m, *stream_entry[3:])
+        else:
+            output = flydsl_module.flydsl_hgemm(x, operand.T, **config)
         flydsl_cases.add((m, k, n))
         return output
 
@@ -439,6 +474,8 @@ def main():
         for (shape, k, n), bits in itertools.product(shapes, (2.0, 2.5, 3.0, 3.5)):
             graph_entries.clear()
             skinny_weights.clear()
+            flydsl_entries.clear()
+            flydsl_streams.clear()
             torch.mm = original_mm
             ih, oh = SHAPE_AXES[shape]
             g = torch.Generator(device="cuda").manual_seed(
@@ -675,6 +712,8 @@ def main():
         candidate_amd._qvq_p32_folded_execute = original_execute
         graph_entries.clear()
         skinny_weights.clear()
+        flydsl_entries.clear()
+        flydsl_streams.clear()
         QVQLinear._qvq_amd_folded_forward = candidate_forward
         sys.modules["gptqmodel.utils.qvq_amd"] = candidate_amd
         if baseline_source_dir is not None:
