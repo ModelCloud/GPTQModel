@@ -2994,7 +2994,10 @@ int launch_p32_large_m(
     } else if (((size_n == 1024 &&
                  (config.stage_k_tiles == 3 ||
                   (config.stage_k_tiles != 4 && size_m >= 2048))) ||
-                (size_n != 1024 && config.stage_k_tiles != 4)) &&
+                (size_n != 1024 && config.stage_k_tiles != 4) ||
+                (TransitionBits >= 5 && size_n != 1024 && size_m >= 2048 &&
+                 !(TransitionBits == 7 && size_m == 2048 && size_n == 6144) &&
+                 config.stage_k_tiles == 4)) &&
                size_m % (8 * kRows) == 0) {
       QVQ_LARGE_M2_STAGE(8)
     } else if (size_m % (4 * kRows) == 0) {

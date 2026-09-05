@@ -3898,6 +3898,109 @@ instructions; HMMA.16816, LDSM, STG, LEA, and shuffle counts are unchanged.
 No new conversion, permutation, redundant address expression, or spill was
 found in the SSA/data-movement review.
 
+## v83 selective stage-4 eight-row reuse
+
+After v82 merged in PR #117, the branch was refreshed to `origin/main` at
+`9dcaf07e` (the benchmark control was built before the unrelated Hopper merge,
+which does not touch this Ampere source).  The next screen tested the remaining large-M stage-4 gap.  An
+unconditional eight-row policy regressed W2 (transition bits 4) by 2--3% on
+wide N, so that probe was rejected.  The retained dispatch instead selects
+eight-row reuse only when `TransitionBits>=5`, `N!=1024`, `M=4096`, and
+`stage_k_tiles=4`; W2 and all other shapes remain on the merged four-row
+route.
+
+On the A100 with `K=5120`, 10 warmups, and 50 timed iterations, the targeted
+`M=4096` stage-4 screen is exact under split-8 comparisons for every wide-N
+shape and bits 5--7.  Geometric-mean speedups versus the merged v82 main are
+1.0468x (W2.5), 1.0467x (W3), and 1.0588x (W3.5), including the neutral
+N=1024 control in each rate.  The five wide-N cases alone improve by about
+5.4%, 5.4%, and 7.1% respectively.  The 65-case Ampere test suite and the
+P32 contract smoke test pass.
+
+The matched NCU captures are `/tmp/v33_ncu_candidate_20260905.csv` and
+`/tmp/v33_ncu_baseline_20260905.csv` for `N=5120,M=4096,stage=4,bits=5`.
+The eight-row launch halves the grid from 5,120 to 2,560 CTAs and lowers
+executed instructions from 1,363,184,640 to 780,815,360.  Profiled duration
+falls from 7,216,288 ns to 6,808,288 ns; both variants report zero local or
+shared spill requests.  The candidate resource entry is 126 registers and
+35,360 B static shared memory, versus 64 registers and 18,976 B for the
+four-row control.
+
+The source-correlated SASS extracts are `/tmp/v33_base_stage4_sass.txt` and
+`/tmp/v33_cand_stage4_sass.txt`.  Per-CTA static instructions rise from 1,640
+to 1,704 while HMMA/LDSM/STG scale 2x with the doubled row work.  Decode and
+address families stay nearly flat (IMAD 155->158, SHF 158->161,
+LOP3 164->171, LEA 55->58); no new conversion, permutation, redundant
+address expression, or spill was found in the SSA/data-movement pass.
+
+## v84 selective stage-4 reuse at M=2048
+
+With the branch merged to the fetched `origin/main` tip `9dcaf07e`, the next
+screen extended the v83 high-rate stage-4 policy from `M=4096` to `M>=2048`.
+The broad probe stayed exact, but its `W3.5, N=6144, M=2048` case was 8--9%
+slower because the eight-row specialization uses 124 registers/thread.  The
+automatic policy therefore keeps that one shape on the four-row control:
+`TransitionBits==7 && M==2048 && N==6144` is explicitly excluded.  W2 remains
+on the four-row path for all wide N.
+
+Matched A100 medians (three runs, 10 warmups/50 iterations) for the affected
+`M=2048` wide-N matrix show 14 positive cases and one neutral control after
+that guard.  The geometric mean is 1.072x versus the retained v83 schedule
+(about 7.2% faster); per-rate means are 1.078x, 1.072x, and 1.079x for
+W2.5/W3/W3.5.  The strongest stable gains are 9--11% at `N=10240` and
+`N=12288`.  The untouched `M=512/1024` routes remain on their prior plans.
+
+The split-8 randomized comparison is bit-for-bit exact for every affected
+wide-N shape and transition width.  The contract smoke test and all 65
+Ampere tests pass.
+
+The matched NCU captures are `/tmp/v84_ncu_candidate_m2048.csv` and
+`/tmp/v84_ncu_baseline_m2048.csv` for `N=5120,M=2048,stage=4,bits=5`.
+Eight-row reuse halves the grid from 2,560 to 1,280 CTAs and lowers executed
+instructions from 681,592,320 to 390,407,680.  Profiled duration falls from
+3,626,560 ns to 3,587,360 ns; memory throughput is 88.43% versus 95.52%,
+and compute throughput is 18.06% versus 31.20%.  Both variants report zero
+local/shared spill requests.  The candidate uses 126 registers and 35,360 B
+static shared memory; the four-row control uses 64 registers and 18,976 B.
+
+The source-correlated SASS extracts are `/tmp/v84_candidate_stage4_exact.txt`
+and `/tmp/v84_baseline_stage4_exact.txt`.  Static instructions rise from
+1,640 to 1,704 per CTA while HMMA/LDSM/STG scale with the doubled row work;
+IMAD 155->158, SHF 158->161, LOP3 164->171, and LEA 55->58.  The
+SSA/algebraic/data-movement pass found no redundant mask, shift, conversion,
+permutation, or address expression, and no spill was introduced.
+
+## v85 rejected M=1024 stage-4 eight-row reuse
+
+An explicit-row-group build temporarily allowed the stage-4 eight-row kernel at
+`M=1024` so the last unoptimized large-M tier could be screened without
+changing the automatic policy.  Five matched A100 repeats across wide N and
+W2.5--W3.5 were mixed: for example, `N=5120` W2.5 was 0.94x and `N=6144`
+W2.5 was 0.86x, while selected `N=10240` cases improved.  The 124-register
+specialization is therefore not a uniform win at this smaller M, so the ABI
+validation and automatic dispatch remain unchanged and no source change is
+retained from this probe.
+
+## v86 rejected split-1 constant-fold wrapper
+
+A dedicated large-M kernel wrapper passed literal `split_count=1` and `split=0`
+to the inlined body, matching the automatic native single-wave policy.  It
+was exact for the affected `M=2048` matrix, but three-repeat medians changed
+by only 0.1--0.3% (with one noisy `W3.5,N=6144` regression).  The extra
+template family materially increases the SM80 binary without a repeatable
+throughput gain, so the wrapper was reverted and split-K dispatch remains
+unchanged.
+
+## v87 rejected stage-tile unroll reduction
+
+The stage-4 row-group-8 specialization is register-heavy, so a temporary
+`#pragma unroll 1` probe reduced its resource entry from 126 to 122
+registers/thread.  It did not produce a repeatable latency improvement versus
+the retained v84 binary (the matched W2.5 `N=5120,M=2048` medians differed by
+about 0.3%), while stage-1/2/3 variants gained registers and slowed in the
+same build.  The pragma was reverted; the staged loop and generated schedule
+remain unchanged.
+
 ## Reproduction
 
 ```bash
