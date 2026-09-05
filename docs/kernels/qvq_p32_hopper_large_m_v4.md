@@ -275,3 +275,55 @@ the next algebraic boundary: the split gate/up views are copied into two
 contiguous tensors before SiLU/product, accounting for nearly one quarter of
 the warm operation.  Profile:
 `artifacts/qvq_hopper_large_m/profiles/v4_fp8_cached_mlp_w3_m4096_397915e4_nsys.nsys-rep`.
+
+## Strided gate/up consumers
+
+The concatenated FP8 gate/up multiplication returns two M-by-8192 views with
+a 16384-element row stride.  Materializing both views made the following SiLU
+and product kernels contiguous, but copied 128 MiB at M4096.  The promoted
+path instead lets TensorIterator consume both views directly.  It changes no
+value, cache representation, scale, or rounding boundary.
+
+| Weight | Gate/up M×K×N | Down M×K×N | Strided QVQ | vs Marlin W4 | vs Machete W4 | Better than last |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| W2 | 512×2048×8192 | 512×8192×2048 | 101.694 µs | 1.614× | 1.153× | Yes |
+| W2 | 1024×2048×8192 | 1024×8192×2048 | 160.222 µs | 2.086× | 1.360× | Yes |
+| W2 | 2048×2048×8192 | 2048×8192×2048 | 323.067 µs | 2.158× | 1.400× | Yes |
+| W2 | 4096×2048×8192 | 4096×8192×2048 | 633.893 µs | 2.210× | 1.450× | Yes |
+| W2.5 | 512×2048×8192 | 512×8192×2048 | 102.490 µs | 1.602× | 1.144× | Yes |
+| W2.5 | 1024×2048×8192 | 1024×8192×2048 | 161.574 µs | 2.069× | 1.348× | Yes |
+| W2.5 | 2048×2048×8192 | 2048×8192×2048 | 324.794 µs | 2.147× | 1.392× | Yes |
+| W2.5 | 4096×2048×8192 | 4096×8192×2048 | 633.525 µs | 2.211× | 1.451× | Yes |
+| W3 | 512×2048×8192 | 512×8192×2048 | 102.326 µs | 1.604× | 1.145× | Yes |
+| W3 | 1024×2048×8192 | 1024×8192×2048 | 159.039 µs | 2.102× | 1.370× | Yes |
+| W3 | 2048×2048×8192 | 2048×8192×2048 | 322.314 µs | 2.163× | 1.403× | Yes |
+| W3 | 4096×2048×8192 | 4096×8192×2048 | 635.254 µs | 2.205× | 1.447× | Yes |
+| W3.5 | 512×2048×8192 | 512×8192×2048 | 101.798 µs | 1.613× | 1.151× | Yes |
+| W3.5 | 1024×2048×8192 | 1024×8192×2048 | 163.217 µs | 2.048× | 1.335× | Yes |
+| W3.5 | 2048×2048×8192 | 2048×8192×2048 | 325.360 µs | 2.143× | 1.390× | Yes |
+| W3.5 | 4096×2048×8192 | 4096×8192×2048 | 636.439 µs | 2.201× | 1.444× | Yes |
+
+The geometric gain over the preceding cached path is **1.117x**.  Aggregate
+speedups are **6.148x versus ordinary QVQ**, **1.996x versus Marlin W4**, and
+**1.331x versus Machete W4**.  All sixteen cells improve.  Arithmetic and
+accuracy are unchanged: maximum absolute error is `2.753e-4`, maximum mean
+absolute error is `3.826e-5`, and relative L2 remains
+`0.06476--0.06489`.  Artifact:
+`artifacts/qvq_hopper_large_m/v4_fp8_cached_strided_mlp_candidate.json`.
+
+The exact `b5d92ccd` Nsight Systems trace shows why the source-level deletion
+wins despite strided elementwise consumers:
+
+| GPU work | Before/replay | Strided/replay | Change |
+| --- | ---: | ---: | ---: |
+| Gate/up copies | 179.992 µs | 0 µs | -100% |
+| SiLU | 58.752 µs | 101.189 µs | +72.2% |
+| Gate/up product | 92.044 µs | 113.183 µs | +23.0% |
+| E4M3 row quantization | 150.379 µs | 148.018 µs | -1.6% |
+| FP8 matrix multiplications | 269.841 µs | 269.329 µs | -0.2% |
+| Total projected GPU time | 761.887 µs | 642.670 µs | -15.6% |
+
+No CUDA source changed, so SASS for every component is identical.  The win is
+purely algebraic removal of two kernels and their global-memory traffic.
+Profile:
+`artifacts/qvq_hopper_large_m/profiles/v4_fp8_strided_mlp_w3_m4096_b5d92ccd_nsys.nsys-rep`.
