@@ -1333,6 +1333,7 @@ def test_qvq_cuda_large_m_fused_recovery_to_precondition_is_exact_and_graph_safe
         bias0=bias0,
         pre_scale=pre_scale,
         scale_mode=3,
+        pair_tiles=True,
     )
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
@@ -1346,6 +1347,7 @@ def test_qvq_cuda_large_m_fused_recovery_to_precondition_is_exact_and_graph_safe
             bias0=bias0,
             pre_scale=pre_scale,
             scale_mode=3,
+            pair_tiles=True,
         )
     graph.replay()
     torch.cuda.synchronize()
