@@ -1,0 +1,182 @@
+{
+  "scope": "16 C4 documents; per-token KL and top-k overlap, not downstream tasks",
+  "rows": [
+    {
+      "row": 0,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.1650573917781003,
+        "top1_agreement": 0.82421875,
+        "top5_agreement": 0.8234375,
+        "top10_agreement": 0.837109375
+      }
+    },
+    {
+      "row": 1,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.1205859890053339,
+        "top1_agreement": 0.85546875,
+        "top5_agreement": 0.828125,
+        "top10_agreement": 0.8421875
+      }
+    },
+    {
+      "row": 2,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.07356908420202754,
+        "top1_agreement": 0.86328125,
+        "top5_agreement": 0.846875,
+        "top10_agreement": 0.851171875
+      }
+    },
+    {
+      "row": 3,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.05659248915933887,
+        "top1_agreement": 0.859375,
+        "top5_agreement": 0.85859375,
+        "top10_agreement": 0.869921875
+      }
+    },
+    {
+      "row": 4,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.15800277252700032,
+        "top1_agreement": 0.828125,
+        "top5_agreement": 0.83046875,
+        "top10_agreement": 0.8375
+      }
+    },
+    {
+      "row": 5,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.10670442722939205,
+        "top1_agreement": 0.8671875,
+        "top5_agreement": 0.84140625,
+        "top10_agreement": 0.866015625
+      }
+    },
+    {
+      "row": 6,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.08833682357529557,
+        "top1_agreement": 0.8671875,
+        "top5_agreement": 0.84296875,
+        "top10_agreement": 0.84609375
+      }
+    },
+    {
+      "row": 7,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.09233425458543418,
+        "top1_agreement": 0.8515625,
+        "top5_agreement": 0.85390625,
+        "top10_agreement": 0.848828125
+      }
+    },
+    {
+      "row": 8,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.04831898622434452,
+        "top1_agreement": 0.91015625,
+        "top5_agreement": 0.88671875,
+        "top10_agreement": 0.886328125
+      }
+    },
+    {
+      "row": 9,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.04760418721598452,
+        "top1_agreement": 0.8515625,
+        "top5_agreement": 0.871875,
+        "top10_agreement": 0.876953125
+      }
+    },
+    {
+      "row": 10,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.06147355524746076,
+        "top1_agreement": 0.88671875,
+        "top5_agreement": 0.846875,
+        "top10_agreement": 0.867578125
+      }
+    },
+    {
+      "row": 11,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.058381602224548086,
+        "top1_agreement": 0.8828125,
+        "top5_agreement": 0.85859375,
+        "top10_agreement": 0.8515625
+      }
+    },
+    {
+      "row": 12,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.10526226821478904,
+        "top1_agreement": 0.8046875,
+        "top5_agreement": 0.82578125,
+        "top10_agreement": 0.8421875
+      }
+    },
+    {
+      "row": 13,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.07421132875519962,
+        "top1_agreement": 0.828125,
+        "top5_agreement": 0.853125,
+        "top10_agreement": 0.858203125
+      }
+    },
+    {
+      "row": 14,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.07804624753784875,
+        "top1_agreement": 0.82421875,
+        "top5_agreement": 0.8640625,
+        "top10_agreement": 0.864453125
+      }
+    },
+    {
+      "row": 15,
+      "canonical_window_logits_equal": true,
+      "bf16_vs_p32_teacher": {
+        "tokens": 256,
+        "kl_teacher_candidate": 0.10379631557759501,
+        "top1_agreement": 0.8671875,
+        "top5_agreement": 0.8265625,
+        "top10_agreement": 0.807421875
+      }
+    }
+  ],
+  "complete": true
+}
