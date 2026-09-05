@@ -23,7 +23,7 @@ from scripts import benchmark_qvq_a41_phase4_production as common
 from scripts import benchmark_qvq_hopper_large_m as timing_utils
 
 RATES = (2.0, 2.5, 3.0, 3.5)
-M_VALUES = (1, 2, 4, 8, 16)
+M_VALUES = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096)
 HIDDEN = 5120
 INTERMEDIATE = 17408
 SOURCE_PATHS = (
@@ -61,7 +61,7 @@ def _args() -> argparse.Namespace:
     if any(rate not in RATES for rate in args.rates):
         parser.error("rates must be W2, W2.5, W3, or W3.5")
     if any(m not in M_VALUES for m in args.m_values):
-        parser.error("M must be one of 1, 2, 4, 8, or 16")
+        parser.error("M must be one of the native decode/prefill buckets through 4096")
     if min(args.warmup, args.samples, args.replays_per_sample) <= 0:
         parser.error("timing counts must be positive")
     return args
