@@ -948,7 +948,7 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_safe(bits):
     assert telemetry["fused_mlp_fallbacks"] == 0
 
 
-def test_qwen38_m32_down_avoids_absent_composite_input_rescue_in_cuda_graph():
+def test_qwen38_m32_uses_fused_m16_tiles_in_cuda_graph():
     device = _h100_device()
     if device is None:
         pytest.skip("requires the exclusive H100 validation device")
@@ -991,7 +991,8 @@ def test_qwen38_m32_down_avoids_absent_composite_input_rescue_in_cuda_graph():
 
     torch.testing.assert_close(eager, captured, rtol=0, atol=0)
     telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
-    assert telemetry["h100_qwen_large_m_direct_down_launches"] == 2
+    assert telemetry["h100_qwen_m32_fused_tiles"] == 2
+    assert telemetry["h100_qwen_large_m_direct_down_launches"] == 0
     assert telemetry["fused_mlp_fallbacks"] == 0
 
 

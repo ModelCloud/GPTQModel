@@ -299,6 +299,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_qwen_linear_multiblock_recovery_launches: int = 0
     h100_qwen_composite_input_launches: int = 0
     h100_qwen_large_m_direct_down_launches: int = 0
+    h100_qwen_m32_fused_tiles: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -396,6 +397,7 @@ class QVQGroupedRuntimeTelemetry:
             "h100_qwen_linear_multiblock_recovery_launches": self.h100_qwen_linear_multiblock_recovery_launches,
             "h100_qwen_composite_input_launches": self.h100_qwen_composite_input_launches,
             "h100_qwen_large_m_direct_down_launches": self.h100_qwen_large_m_direct_down_launches,
+            "h100_qwen_m32_fused_tiles": self.h100_qwen_m32_fused_tiles,
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -1806,6 +1808,9 @@ class QVQHopperGroupedRuntime:
             and not children[1].output_hadamard
             and not down.input_hadamard
         )
+        if rows == 32 and qwen_folded_intermediate:
+            self.telemetry.h100_qwen_m32_fused_tiles += 1
+            return self._execute_mlp_chunked(x, 16)
         fp8_prefill = (
             self._ensure_h100_fp8_prefill_payload()
             if self._h100_fp8_prefill_eligible(x, rows)
