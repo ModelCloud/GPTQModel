@@ -8,6 +8,8 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class GLM4MoEGPTQ(BaseQModel):
+    shared_input_verified_model_types = frozenset({"glm4_moe"})
+
     # GLM-4.5-Air MoE Model Structure:
     # Layer 0: Standard MLP (no MoE experts) - handled by ["mlp.down_proj"], ["mlp.gate_proj"], ["mlp.up_proj"]
     # Layers 1-46: MoE with shared_experts and individual experts (128 experts total) - handled by MoE components
@@ -34,21 +36,21 @@ class GLM4MoEGPTQ(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "q_norm:0:!", "k_proj:0", "k_norm:0:!", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0:in=x", "q_norm:0:!", "k_proj:0:in=x", "k_norm:0:!", "v_proj:0:in=x", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {  # MoE module - can be Glm4MoeMLP (layer 0) or Glm4MoeMoE (layers 1-46)
                 "gate": ("gate:!",),
                 # Glm4MoeTopKRouter, ~1.6MB float32 per layer.  We really do not quant to quantize this.
                 "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                    "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
                 },
                 "shared_experts": {
-                    "gate_proj": ("gate_proj:0",),
-                    "up_proj": ("up_proj:0",),
+                    "gate_proj": ("gate_proj:0:in=x",),
+                    "up_proj": ("up_proj:0:in=x",),
                     "down_proj": ("down_proj:1",),
                 },
                 # Standard MLP components for layer 0
-                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             },
         }
     ]

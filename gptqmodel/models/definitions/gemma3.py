@@ -10,7 +10,7 @@ from . import LlamaQModel
 
 
 class Gemma3QModel(LlamaQModel):
-    pass
+    shared_input_verified_model_types = frozenset({"gemma3_text"})
 
 
 class Gemma3ForConditionalGenerationGPTQ(BaseQModel):

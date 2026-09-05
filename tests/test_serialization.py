@@ -133,6 +133,7 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(meta["hessian"]["chunk_size"], cfg.hessian.chunk_size)
         self.assertEqual(meta["hessian"]["chunk_bytes"], cfg.hessian.chunk_bytes)
         self.assertEqual(meta["hessian"]["staging_dtype"], "bfloat16")
+        self.assertEqual(meta["hessian"]["dedup_shared_inputs"], cfg.hessian.dedup_shared_inputs)
         self.assertEqual(meta["dense_vram_strategy"], cfg.dense_vram_strategy.value)
         self.assertEqual(meta["dense_vram_strategy_devices"], cfg.dense_vram_strategy_devices)
         self.assertEqual(meta["moe_vram_strategy"], cfg.moe_vram_strategy.value)

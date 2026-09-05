@@ -8,6 +8,8 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class MixtralQModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"mixtral"})
+
     pre_lm_head_norm_module = "model.norm"
 
     dynamic_expert_index = "num_local_experts"
@@ -23,12 +25,12 @@ class MixtralQModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
+            "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp|block_sparse_moe:moe:?": {
                 "gate": ("gate:!",),
                 "experts": {
-                    "#": ("gate_proj|w1:0", "up_proj|w3:0", "down_proj|w2:1"),
+                    "#": ("gate_proj|w1:0:in=x", "up_proj|w3:0:in=x", "down_proj|w2:1"),
                 }
             }
         }

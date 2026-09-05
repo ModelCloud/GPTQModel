@@ -41,7 +41,7 @@ class DeepSeekVLV2QModel(BaseQModel):
         "#",
         {
             "input_layernorm": ("input_layernorm:!",),
-            "self_attn": ("q_a_proj:0", "q_b_proj:0", "q_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0", "o_proj:1"),
+            "self_attn": ("q_a_proj:0", "q_b_proj:0:in=q_a", "q_proj:0", "kv_a_proj_with_mqa:0", "kv_b_proj:0:in=kv_a", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
                 "": ("gate_proj:0", "up_proj:0", "down_proj:1"),

@@ -177,7 +177,10 @@ class GPTQ:
         return module
 
     def __init__(self, module: nn.Module, qcfg: Optional[QuantizeConfig] = None, region_timer=None):
-        self.lock = threading.Lock()
+        # Hessian capture/materialization can run on multiple device workers when
+        # GIL=0. Re-entrancy is required because target-device selection is also
+        # used from materialization while the task lock is held.
+        self.lock = threading.RLock()
         self.region_timer = region_timer
 
         # self.num_tied_handles = 0
@@ -593,23 +596,25 @@ class GPTQ:
         return batch_token_size, xtx, canonical_device
 
     def _select_hessian_target_device(self, requested: Optional[torch.device]) -> torch.device:
-        if requested is not None:
-            return torch.device(requested)
+        with self.lock:
+            if requested is not None:
+                return torch.device(requested)
 
-        hint = getattr(self, "_final_hessian_device_hint", None)
-        if hint is not None:
-            return torch.device(hint)
+            hint = getattr(self, "_final_hessian_device_hint", None)
+            if hint is not None:
+                return torch.device(hint)
 
-        if self._device_hessian_partials:
-            partial_device = next(iter(self._device_hessian_partials.keys()))
-            return torch.device(partial_device)
+            if self._device_hessian_partials:
+                partial_device = next(iter(self._device_hessian_partials.keys()))
+                return torch.device(partial_device)
 
-        return torch.device("cpu")
+            return torch.device("cpu")
 
     def materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
-        device = self._select_hessian_target_device(target_device)
-
         with self.lock:
+            # Select the destination under the same lock as partial-state reads;
+            # this closes the GIL=0 window between device selection and merge.
+            device = self._select_hessian_target_device(target_device)
             if not self._hessian_dirty and self.H is not None:
                 if self.H.device != device:
                     self.H = self.H.to(device=device)
@@ -672,6 +677,41 @@ class GPTQ:
             self._device_hessian_partials.clear()
             self._device_sample_counts.clear()
             del result_accum
+
+    def adopt_hessian_from(self, leader: "GPTQ") -> None:
+        """Replace this task's Hessian statistics with a private copy of ``leader``'s.
+
+        Both modules must consume the identical input tensor (see ``:in=<tag>`` in
+        ``module_tree``). The copy is independent because :meth:`quantize` mutates
+        ``self.H`` in place and :meth:`free` drops it.
+        """
+        if leader is self:
+            return
+        if leader.columns != self.columns:
+            raise ValueError(
+                f"GPTQ: cannot share Hessian from `{leader.name}` ({leader.columns} columns) "
+                f"with `{self.name}` ({self.columns} columns)."
+            )
+
+        leader.materialize_global_hessian()
+        with leader.lock:
+            source = leader.H
+            nsamples = leader.nsamples
+            fwd_counter = leader.fwd_counter
+            if source is None:
+                source = leader.create_H(None)
+
+            target_device = self._select_hessian_target_device(getattr(self.module, "target_device", None))
+            copy = source.detach().to(device=target_device, dtype=torch.float32, copy=True)
+
+        with self.lock:
+            self.H = copy
+            self.nsamples = nsamples
+            self.fwd_counter = fwd_counter
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            self._hessian_dirty = False
+            self._final_hessian_device_hint = copy.device
 
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
         self.materialize_global_hessian(target_device=target_device)
