@@ -16,6 +16,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--uuid", required=True)
     p.add_argument("--name", required=True)
+    p.add_argument("--profile", action="store_true")
+    p.add_argument("--profile-m", type=int, default=16)
     p.add_argument("--root", type=Path, default=Path("/root/p32-native-recovery"))
     args = p.parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = args.uuid
@@ -93,8 +95,42 @@ def main():
         "uuid": args.uuid,
         "rows": [],
     }
+    if args.profile:
+        candidate = RecoveredLinear(root / "rank16.pt")
+        xh = x[: args.profile_m].half()
+        with torch.no_grad():
+            for _ in range(10):
+                candidate(xh)
+            torch.cuda.synchronize()
+            procs = subprocess.check_output(
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=gpu_uuid,pid",
+                    "--format=csv,noheader,nounits",
+                ],
+                text=True,
+            )
+            for line in procs.splitlines():
+                gpu, pid = [v.strip() for v in line.split(",")]
+                if gpu == args.uuid and int(pid) != os.getpid():
+                    raise RuntimeError("Foreign process before profile")
+            torch.cuda.cudart().cudaProfilerStart()
+            candidate(xh)
+            torch.cuda.synchronize()
+            torch.cuda.cudart().cudaProfilerStop()
+        result["scope"] = (
+            "one warmed rank16 recovered operator; W4A16 base plus FP32 correction and FP16 output"
+        )
+        result["M"] = args.profile_m
+        result["complete"] = True
+        (root / f"profile-M{args.profile_m}.json").write_text(
+            json.dumps(result, indent=2) + "\n"
+        )
+        return
     with torch.no_grad():
-        for rank in [16, 32, 64, 128]:
+        for rank in sorted(
+            {fit["requested_rank"] for row in report["rows"] for fit in row["ranks"]}
+        ):
             candidate = RecoveredLinear(root / f"rank{rank}.pt")
             for row in report["rows"]:
                 m = row["M"]

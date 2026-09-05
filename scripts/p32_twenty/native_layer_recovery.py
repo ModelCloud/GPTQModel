@@ -24,6 +24,8 @@ def main():
     parser.add_argument("--uuid", required=True)
     parser.add_argument("--module", required=True)
     parser.add_argument("--fp16-boundary", action="store_true")
+    parser.add_argument("--joint-steps", type=int, default=0)
+    parser.add_argument("--joint-rank", type=int, choices=(16, 32, 64, 128), default=16)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument(
         "--calibration-root",
@@ -160,7 +162,8 @@ def main():
 
     args.output.mkdir(parents=True, exist_ok=True)
     report = {
-        "experiment": 19,
+        "experiment": 20 if args.joint_steps else 19,
+        "joint_steps": args.joint_steps,
         "fp16_boundary": args.fp16_boundary,
         "module": args.module,
         "uuid": args.uuid,
@@ -216,11 +219,66 @@ def main():
         u, s, vh = torch.linalg.svd(xc.double(), full_matrices=False)
         p = int((s > s[0] * report["activation_rcond"]).sum())
         left, values, right = torch.linalg.svd(u[:, :p].T @ z, full_matrices=False)
-        rank = min(128, p, n)
+        rank = min(args.joint_rank if args.joint_steps else 128, p, n)
         aa = ((vh[:p].T / s[:p]) @ (left[:, :rank] * values[:rank])).float()
         bb = right[:rank].float()
         report["activation_rank"] = p
         report["native_calibration_metrics"] = layer_metrics(yn, yc)
+
+        if args.joint_steps:
+            if args.joint_steps < 0:
+                raise ValueError("Joint steps must be nonnegative")
+            history = []
+
+            def measure_iteration(step):
+                prediction = output_cast(native(xc) + (xc @ aa) @ bb)
+                loss = float((prediction.double() - yc.double()).square().mean())
+                history.append(
+                    {
+                        "step": step,
+                        "calibration_mse": loss,
+                        "calibration_metrics": layer_metrics(prediction, yc),
+                        "evaluation_metrics": layer_metrics(
+                            output_cast(native(xe) + (xe @ aa) @ bb), ye
+                        ),
+                    }
+                )
+                return loss
+
+            best_loss = measure_iteration(0)
+            best = (linear, aa, bb, 0)
+            for step in range(1, args.joint_steps + 1):
+                # Quantize a new independent base; never mutate teacher tensors.
+                target = folded - aa @ bb
+                linear = torch.nn.Linear(
+                    k, n, bias=False, device="cuda", dtype=torch.bfloat16
+                ).eval()
+                linear.weight.copy_(target.T)
+                quantize_(
+                    linear,
+                    Int4WeightOnlyConfig(
+                        group_size=128,
+                        int4_packing_format=Int4PackingFormat.TILE_PACKED_TO_4D,
+                    ),
+                )
+                residual = yc.double() - native(xc).double()
+                left, values, right = torch.linalg.svd(
+                    u[:, :p].T @ residual, full_matrices=False
+                )
+                aa = ((vh[:p].T / s[:p]) @ (left[:, :rank] * values[:rank])).float()
+                bb = right[:rank].float()
+                loss = measure_iteration(step)
+                if loss < best_loss:
+                    best_loss = loss
+                    best = (linear, aa, bb, step)
+                print("JOINT_STEP", args.module, step, loss, flush=True)
+            linear, aa, bb, selected_step = best
+            report["joint_history"] = history
+            report["selected_step"] = selected_step
+            report["selection_rule"] = (
+                "minimum actual calibration-output MSE at fixed rank; evaluation never selects the iteration"
+            )
+            report["final_native_calibration_metrics"] = layer_metrics(native(xc), yc)
 
         # Flatten actual tensor-subclass payloads recursively for stored-byte accounting.
         def leaves(t):
@@ -266,7 +324,7 @@ def main():
                 "native_ms": timing(lambda x=x: native(x)),
                 "ranks": [],
             }
-            for r in [16, 32, 64, 128]:
+            for r in [args.joint_rank] if args.joint_steps else [16, 32, 64, 128]:
                 rr = min(r, rank)
                 a, b = aa[:, :rr].contiguous(), bb[:rr].contiguous()
 

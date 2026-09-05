@@ -27,12 +27,12 @@ AGENTS.md. All changes and evidence share PR #137.
 |17|INT4 + exceptions|Sparse residual reference; deployed base/exception export and calibration remain.|
 |18|Hybrid native/trellis|Sensitivity selection, tile dispatch, and full BPW/latency tradeoff remain.|
 |19|Native base + low rank|Four W4A16 projections refit at FP16 boundary on 8192 tokens; down rank16 passes 9/9 and bounded model run has mixed PPL/ARC effects. Full coverage/export remains.|
-|20|Joint optimization|CPU alternating-callback reference; deployed alternating optimization remains.|
+|20|Joint optimization|Two deployed rank16 rounds on four projections measured; calibration selects step0 for q/k, step2 for gate/down. Full rank allocation/model study remains.|
 |21|Associative scan|Exact GPU states across all 94 projections; unfused state-only scan slower overall than direct extraction. Fused scorecard remains.|
 |22|All-start decoding|CPU symbolic all-start reference; redundant GPU all-start or independently justified symbolic GPU variant remains.|
 |23|Sparse checkpoints|8/16/32/64-step metadata and GPU decode measured exactly across 94 projections with full sidecar BPW; fused/model study remains.|
 |24|Super-symbol automaton|2/4/8-step compact affine GPU scans exact across 94 projections; no overall state-only speed win. Fused lookup/MMA and LUT alternatives remain.|
-|25|Bit-sliced decoder|CPU reference exact on sampled real tiles; actual Boolean GPU kernel remains.|
+|25|Bit-sliced decoder|GPU bit-plane decoder exact across all 94 projections at 1/4 warps; state-only pipeline slower than direct windows. Fused/model scorecard remains.|
 |26|GF(2) jump-ahead|CPU matrix reference exact; GPU compact affine scan #21 is related evidence, matrix-form implementation remains.|
 |27|Tensor-product codebook|CPU reference/tests; calibrated learned representation, GPU execution and quality/BPW sweep remain.|
 |28|Signed/ternary basis|CPU reference/tests; trained GPU representation and model study remain.|

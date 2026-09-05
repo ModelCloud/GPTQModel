@@ -18,11 +18,18 @@ SNAPSHOT = Path(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--uuid", required=True)
-    parser.add_argument("--warp-counts", type=int, nargs="+", choices=(1, 2, 4, 8), default=[4, 8])
+    parser.add_argument("--worker", type=int, default=0)
+    parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--warp-counts", type=int, nargs="+", choices=(1, 2, 4, 8), default=[4, 8]
+    )
     parser.add_argument("--group-steps", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--bit-sliced", action="store_true")
     parser.add_argument("--checkpoint-steps", type=int, choices=(8, 16, 32, 64))
     args = parser.parse_args()
+    if not 0 <= args.worker < args.workers:
+        parser.error("worker must be in [0, workers)")
     if args.output.resolve().is_relative_to(SNAPSHOT.resolve()):
         parser.error("Output must be outside snapshot")
     os.environ["CUDA_VISIBLE_DEVICES"] = args.uuid
@@ -122,17 +129,61 @@ def main():
             state = ((state << T) | symbol) & 65535
             tl.store(Y + tile * 128 + i, state, tile < NT)
 
+    @triton.jit
+    def bitsliced_decode(W, Y, T: tl.constexpr, NT: tl.constexpr):
+        lane = tl.arange(0, 32)
+        bit_id = tl.arange(0, 16)
+        tile = tl.program_id(0) * 32 + lane
+        # Circular incoming state is the last output state (window offset zero).
+        incoming = tl.load(W + tile * (4 * T), tile < NT, 0).to(tl.uint32) & 65535
+        planes = tl.sum(
+            (((incoming[None, :] >> bit_id[:, None]) & 1) << lane[None, :]).to(
+                tl.uint32
+            ),
+            1,
+        )
+        for i in range(128):
+            position = (127 - i) * T
+            word, shift = position // 32, position % 32
+            lo = tl.load(W + tile * (4 * T) + word, tile < NT, 0).to(tl.uint32)
+            hi = tl.load(W + tile * (4 * T) + (word + 1) % (4 * T), tile < NT, 0).to(
+                tl.uint32
+            )
+            symbol = ((lo >> shift) | tl.where(shift > 0, hi << (32 - shift), 0)) & (
+                (1 << T) - 1
+            )
+            injected = tl.sum(
+                (((symbol[None, :] >> bit_id[:, None]) & 1) << lane[None, :]).to(
+                    tl.uint32
+                ),
+                1,
+            )
+            shifted = tl.gather(planes, (bit_id + 16 - T) % 16, 0)
+            planes = tl.where(bit_id < T, injected, shifted)
+            states = tl.sum(
+                (((planes[:, None] >> lane[None, :]) & 1) << bit_id[:, None]).to(
+                    tl.uint32
+                ),
+                0,
+            )
+            tl.store(Y + tile * 128 + i, states, tile < NT)
+
     index = json.loads((SNAPSHOT / "model.safetensors.index.json").read_text())[
         "weight_map"
     ]
     modules = sorted(k[:-12] for k in index if k.endswith(".bank_alt_id"))
     report = {
-        "experiment": 23
+        "experiment": 25
+        if args.bit_sliced
+        else 23
         if args.checkpoint_steps
         else (21 if args.group_steps == 1 else 24),
         "checkpoint_steps": args.checkpoint_steps,
         "warp_counts": args.warp_counts,
+        "bit_sliced": args.bit_sliced,
         "group_steps": args.group_steps,
+        "worker": args.worker,
+        "workers": args.workers,
         "scope": "GPU state-only scan versus direct-window extraction; not linear-layer or model performance",
         "uuid": args.uuid,
         "revision": subprocess.check_output(
@@ -141,7 +192,7 @@ def main():
         "rows": [],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    for prefix in modules:
+    for prefix in modules[args.worker :: args.workers]:
         key = prefix + ".trellis"
         with safe_open(str(SNAPSHOT / index[key]), framework="pt", device="cpu") as f:
             words = f.get_tensor(key).cuda()
@@ -181,6 +232,12 @@ def main():
                     warps=warps,
                     checkpoints=checkpoints,
                 ):
+                    if scan and args.bit_sliced:
+                        nt = window.numel() // window.shape[-1]
+                        bitsliced_decode[(triton.cdiv(nt, 32),)](
+                            window, output, int(bits * 2), nt, num_warps=warps
+                        )
+                        return
                     if scan and args.checkpoint_steps:
                         nt = window.numel() // window.shape[-1]
                         checkpoint_decode[

@@ -21,7 +21,9 @@ def main():
         report = json.loads((root / "report.json").read_text())
         k, n = bundle["a"].shape[0], bundle["b"].shape[1]
         records = []
-        for rank in [16, 32, 64, 128]:
+        for rank in sorted(
+            {fit["requested_rank"] for row in report["rows"] for fit in row["ranks"]}
+        ):
             r = min(rank, bundle["a"].shape[1])
             export = dict(bundle)
             # Clone both factors: contiguous row slices can retain a larger storage.
