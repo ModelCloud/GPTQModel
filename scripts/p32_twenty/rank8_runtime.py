@@ -188,7 +188,12 @@ def main():
         return out
 
     integrated = RecoveredLinear(args.export, fused_expansion=True)
-    variants = {"window": window, "separate": op, "fused_expansion": fused, "integrated": integrated}
+    variants = {
+        "window": window,
+        "separate": op,
+        "fused_expansion": fused,
+        "integrated": integrated,
+    }
     for promotion in [16, 32, 64, 128, 256]:
         variants[f"block_fp32_{promotion}"] = lambda x, promotion=promotion: fused(
             x, promotion
@@ -242,12 +247,24 @@ def main():
         if args.profile:
             x = xall[: args.profile_m]
             for _ in range(10):
-                for key in ["window", "separate", "fused_expansion", "block_fp32_64"]:
+                for key in [
+                    "window",
+                    "separate",
+                    "fused_expansion",
+                    "integrated",
+                    "block_fp32_64",
+                ]:
                     variants[key](x)
             torch.cuda.synchronize()
             exclusive()
             torch.cuda.cudart().cudaProfilerStart()
-            for key in ["window", "separate", "fused_expansion", "block_fp32_64"]:
+            for key in [
+                "window",
+                "separate",
+                "fused_expansion",
+                "integrated",
+                "block_fp32_64",
+            ]:
                 variants[key](x)
             torch.cuda.synchronize()
             torch.cuda.cudart().cudaProfilerStop()

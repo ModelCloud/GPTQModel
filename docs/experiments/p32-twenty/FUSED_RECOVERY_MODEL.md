@@ -24,3 +24,13 @@ Dependent C4/full-ARC jobs use the unchanged alpha1 rank8 export and retain
 window for all other projections. Results are queued, not yet accepted evidence.
 Fresh executed SASS/profile comparison is required after extraction/integration;
 prior profile results explain the hypothesis but do not certify this revision.
+
+## First integrated runtime validation
+
+The actual RecoveredLinear fused route completed all nine M values, passing
+both canonical/window local gates. All nine CUDA Graph outputs equaled their
+eager outputs. The full harness completed 81 cases across its nine variants.
+[Raw runtime evidence](results/rank8-targeted/fused-integrated-runtime.json).
+This validates the bounded real-activation layer path; it does not yet validate
+full-model quality, all fallback transitions, or speed under model execution.
+Fresh Nsight captures now include the integrated route at M=1/16/2048.
