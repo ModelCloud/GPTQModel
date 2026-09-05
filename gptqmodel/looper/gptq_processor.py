@@ -220,6 +220,12 @@ class GPTQProcessor(LoopProcessor):
         self._shared_input_plan_owner = owner
         return plan
 
+    @staticmethod
+    def _hessian_accumulation_settings(task: GPTQ) -> Tuple[str, Optional[int], Optional[int]]:
+        """Settings that alter the numerical result of Hessian accumulation; members must match to share `H`."""
+        hessian = task.qcfg.hessian
+        return (str(hessian.staging_dtype), hessian.chunk_size, hessian.chunk_bytes)
+
     def begin_shared_input_capture(
         self,
         model,
@@ -258,11 +264,19 @@ class GPTQProcessor(LoopProcessor):
                 continue
             leader = members[0]
             columns = tasks[leader].columns
+            leader_settings = self._hessian_accumulation_settings(tasks[leader])
             for follower in members[1:]:
                 if tasks[follower].columns != columns:
                     log.warn(
                         f"Quantization: shared-input group `{group.key}` mixes input widths "
                         f"({leader}={columns}, {follower}={tasks[follower].columns}); not sharing Hessian."
+                    )
+                    continue
+                follower_settings = self._hessian_accumulation_settings(tasks[follower])
+                if follower_settings != leader_settings:
+                    log.warn(
+                        f"Quantization: shared-input group `{group.key}` mixes Hessian accumulation settings "
+                        f"({leader}={leader_settings}, {follower}={follower_settings}); not sharing Hessian."
                     )
                     continue
                 leaders[follower] = leader

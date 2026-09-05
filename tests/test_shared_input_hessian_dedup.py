@@ -349,6 +349,42 @@ class TestProcessorLeaderElection:
         names = ["self_attn.q", "self_attn.k", "self_attn.v"]
         assert proc.begin_shared_input_capture(model, names) == {"self_attn.v": "self_attn.q"}
 
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"staging_dtype": "float32"},
+            {"chunk_size": 1},
+            {"chunk_bytes": 4096},
+        ],
+    )
+    def test_mismatched_hessian_accumulation_settings_are_not_shared(self, override):
+        qcfg = QuantizeConfig(
+            method=METHOD.GPTQ,
+            hessian=HessianConfig(staging_dtype="bfloat16"),
+            dynamic={r".*\.self_attn\.k$": {"hessian": override}},
+        )
+        proc = _processor(qcfg)
+        plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)
+        model = _fake_model(plan, proc.qcfg)
+        names = ["self_attn.q", "self_attn.k", "self_attn.v"]
+        _setup(proc, names)
+        assert proc.begin_shared_input_capture(model, names) == {"self_attn.v": "self_attn.q"}
+
+    def test_equal_non_default_hessian_settings_still_share(self):
+        qcfg = QuantizeConfig(
+            method=METHOD.GPTQ,
+            hessian=HessianConfig(staging_dtype="bfloat16", chunk_size=1),
+        )
+        proc = _processor(qcfg)
+        plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)
+        model = _fake_model(plan, proc.qcfg)
+        names = ["self_attn.q", "self_attn.k", "self_attn.v"]
+        _setup(proc, names)
+        assert proc.begin_shared_input_capture(model, names) == {
+            "self_attn.k": "self_attn.q",
+            "self_attn.v": "self_attn.q",
+        }
+
     def test_begin_resets_previous_election(self):
         proc = _processor()
         plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)
@@ -426,6 +462,44 @@ class TestProcessorCaptureAndAdopt:
         for name in names:
             assert torch.allclose(dedup.tasks[name].H, base.tasks[name].H, atol=1e-6), name
             assert dedup.tasks[name].nsamples == base.tasks[name].nsamples
+
+    def test_low_precision_staging_override_matches_independent_collection(self):
+        # fp16 activations whose values are not bf16-representable: bf16 staging on the
+        # leader must not leak into a follower that explicitly requests fp32 staging.
+        g = torch.Generator().manual_seed(7)
+        batches = [
+            (1.0 + torch.randint(1, 64, (1, 5, _IN), generator=g).to(torch.float16) * 2.0 ** -10)
+            for _ in range(3)
+        ]
+        names = ["self_attn.q", "self_attn.k"]
+        dynamic = {r".*\.self_attn\.k$": {"hessian": {"staging_dtype": "float32"}}}
+
+        def run(dedup: bool):
+            proc = _processor(QuantizeConfig(
+                method=METHOD.GPTQ,
+                hessian=HessianConfig(staging_dtype="bfloat16", chunk_size=1, dedup_shared_inputs=dedup),
+                dynamic=dynamic,
+            ))
+            plan = build_shared_input_plan(_QKV_TREE, _LAYER_MODULES)
+            modules = _setup(proc, names)
+            for nm in modules.values():
+                nm.module.half()
+            leaders = proc.begin_shared_input_capture(_fake_model(plan, proc.qcfg), names)
+            _feed(proc, modules, names, batches)
+            proc.end_shared_input_capture(names)
+            for task in proc.tasks.values():
+                task.materialize_global_hessian()
+            return proc, leaders
+
+        base, _ = run(dedup=False)
+        dedup, leaders = run(dedup=True)
+
+        assert leaders == {}
+        assert dedup.tasks["self_attn.k"].fwd_counter == len(batches)
+        # Sanity: the settings really do produce different Hessians, so sharing would have been wrong.
+        assert not torch.equal(base.tasks["self_attn.q"].H, base.tasks["self_attn.k"].H)
+        for name in names:
+            assert torch.equal(dedup.tasks[name].H, base.tasks[name].H), name
 
     def test_keep_mask_path_is_skipped_for_followers(self):
         proc = _processor()
