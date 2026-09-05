@@ -90,3 +90,35 @@ For 20, alternate native quantization of W_T-AB and fitting real output residual
 - This host supports Ampere experiments. H100/H200 FP8 and Blackwell NVFP4 performance require those devices.
 
 Validation so far: repository checkout and runtime property query only; no kernel benchmarks or model evaluation.
+
+### Follow-up preflight
+
+Nsight Compute 2026.2.1 successfully collected a `SpeedOfLight` section from a Torch elementwise addition.
+This is a profiler access probe, not a P32 experiment or benchmark. Three idle samples each showed 0 MiB,
+0% utilization and no compute process on the selected UUID. The probe's exact script, log and raw CSV are
+in `artifacts/p32_twenty/preflight/`. Reproduction from repository root:
+
+```bash
+ncu --profile-from-start off --section SpeedOfLight --launch-count 1 --csv \
+  --log-file /tmp/p32-counter-probe.csv \
+  /root/work/venv/bin/python artifacts/p32_twenty/preflight/counter_probe.py
+```
+
+The script intentionally identifies this host's physical GPU by UUID; substitute a verified target UUID
+when reproducing on another host. No P32 bottleneck conclusion is drawn from this probe.
+
+A config inventory of `/monster/data/model/Llama-3.2-1B*QVQ*/quantize_config.json` found 49 configs,
+all with top-level format `qvq`; a text search found no `p32` or `v2b2` marker in those configs.
+The documented best checkpoint was not found by its name under `/monster`, `/tmp`, `/root/work`, or `/qvq`.
+Teacher identification/access remains unresolved.
+
+Existing integration points inspected:
+
+- `qvq_dense_oracle_forward` in `gptqmodel/nn_modules/qlinear/qvq.py` reconstructs full FP32 operators,
+  including the layer metadata. Audit activation settings and math modes before fixing it as teacher.
+- `scripts/benchmark_qvq_p32_ampere.py` provides window/planar timing and runtime device checks, but its
+  generated fixture weights are not accepted checkpoint weights or model-quality evidence.
+- `scripts/benchmark_qvq_rotation_full_model_cuda.py` re-quantizes and selects WikiText validation streams;
+  it cannot be used unchanged for this fixed-checkpoint, ordinary-text-calibration study.
+
+Experiment completion remains 0/20. No kernel source or production dispatch has changed.
