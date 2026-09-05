@@ -62,6 +62,8 @@ def requant_embed_lm_head(args: argparse.Namespace) -> Path:
             signal.SIGUSR1, file=sys.stderr, all_threads=True, chain=False
         )
     except (AttributeError, ValueError):
+        # Best-effort only: some platforms/runtime contexts do not support SIGUSR1
+        # registration for faulthandler; continue without this diagnostic hook.
         pass
 
     mode = QuantizeEmbed(args.embed_quant_mode)
