@@ -1396,6 +1396,82 @@ def test_h100_m8192_qkv_uses_folded_fp8_prefill_and_replays_cuda_graph():
     assert telemetry["plain_fallbacks"] == 0
 
 
+def test_h100_m512_mlp_uses_versioned_fp8_prefill_and_replays_cuda_graph(
+    monkeypatch,
+):
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    monkeypatch.setenv("QVQ_HOPPER_FP8_MLP_PREFILL", "1")
+
+    class LlamaLikeMLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            shared = torch.ones(2048, device=device)
+            self.gate_proj = _child(
+                "gate_proj", in_features=2048, out_features=8192,
+                bits=3, su=shared, alt_id=1, seed=340, device=device,
+            )
+            self.up_proj = _child(
+                "up_proj", in_features=2048, out_features=8192,
+                bits=3, su=shared, alt_id=3, seed=341, device=device,
+            )
+            self.down_proj = _child(
+                "down_proj", in_features=8192, out_features=2048,
+                bits=3, su=torch.ones(8192, device=device), alt_id=2,
+                seed=342, device=device,
+            )
+            for child in (self.gate_proj, self.up_proj, self.down_proj):
+                child.bias = None
+                child.SV.fill_(0.002)
+                child._dtype_cache_clear()
+            self.act_fn = nn.SiLU()
+
+        def forward(self, x):
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+    mlp = LlamaLikeMLP().eval()
+    static_input = torch.randn((512, 2048), device=device, dtype=torch.float16)
+    with torch.inference_mode():
+        expected = mlp(static_input)
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+
+    with torch.inference_mode():
+        eager = mlp(static_input)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = mlp(static_input)
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    torch.testing.assert_close(eager.float(), expected.float(), rtol=0, atol=2e-3)
+    relative_l2 = torch.linalg.vector_norm(
+        eager.float() - expected.float()
+    ) / torch.linalg.vector_norm(expected.float())
+    assert relative_l2.item() < 0.08
+    assert torch.equal(captured, eager)
+    telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
+    assert telemetry["h100_fp8_prefill_launches"] == 2
+    assert telemetry["h100_fp8_mlp_down_launches"] == 2
+    assert telemetry["h100_fp8_prefill_bytes"] == 2048 * 16384 + 16384 * 4 + 4
+    assert telemetry["h100_fp8_mlp_down_bytes"] == 8192 * 2048 + 2048 * 4 + 4
+    assert telemetry["plain_fallbacks"] == 0
+
+    runtime = mlp._gptqmodel_qvq_fused_mlp_runtime
+    old_down_payload = runtime._h100_fp8_mlp_down_payload
+    mlp.down_proj.SV.add_(0.125)
+    with torch.inference_mode():
+        mlp(static_input)
+    assert runtime._h100_fp8_mlp_down_payload is not old_down_payload
+
+
+def test_h100_fp8_mlp_prefill_is_independently_opt_in(monkeypatch):
+    monkeypatch.delenv("QVQ_HOPPER_FP8_MLP_PREFILL", raising=False)
+    assert not QVQHopperGroupedRuntime._h100_fp8_mlp_prefill_enabled()
+    monkeypatch.setenv("QVQ_HOPPER_FP8_MLP_PREFILL", "1")
+    assert QVQHopperGroupedRuntime._h100_fp8_mlp_prefill_enabled()
+
+
 def test_h100_m16384_qkv_on_demand_fp8_is_bounded_and_replays_cuda_graph(
     monkeypatch,
 ):

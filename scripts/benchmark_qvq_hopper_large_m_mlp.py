@@ -164,7 +164,6 @@ def _main(args: argparse.Namespace) -> None:
                 generator=torch.Generator(device=device).manual_seed(12000 + m),
                 device=device,
             )
-            * 0.02
         ).half()
         for m in args.m_values
     }
@@ -245,6 +244,16 @@ def _main(args: argparse.Namespace) -> None:
                     if m > 4096
                     else None
                 ),
+                "fp8_gate_up_cache_bytes": runtime_telemetry[
+                    "h100_fp8_prefill_bytes"
+                ],
+                "fp8_down_cache_bytes": runtime_telemetry[
+                    "h100_fp8_mlp_down_bytes"
+                ],
+                "fp8_total_mlp_cache_bytes": (
+                    runtime_telemetry["h100_fp8_prefill_bytes"]
+                    + runtime_telemetry["h100_fp8_mlp_down_bytes"]
+                ),
             }
             results.append(result)
             print(
@@ -286,6 +295,10 @@ def _main(args: argparse.Namespace) -> None:
         },
         "workload": "complete Llama 3.2 1B gate/up/SiLU/product/down MLP",
         "comparison": "native grouped large-M QVQ versus ordinary QVQ and W4 baselines",
+        "runtime_mode": {
+            "h100_fp8_mlp_prefill": True,
+            "environment": "QVQ_HOPPER_FP8_MLP_PREFILL=1",
+        },
         "previous_artifacts": [str(path) for path in args.previous],
         "rows": results,
     }

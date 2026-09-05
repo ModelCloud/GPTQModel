@@ -187,3 +187,71 @@ uses no new compiled kernel or cache.
 All eight cells improve, replay through CUDA Graphs, and remain below
 `1.133e-6` maximum absolute error. Artifact:
 `artifacts/qvq_hopper_large_m/v4_reuse11_m1024_m2048_candidate.json`.
+
+## Optional persistent FP8 MLP execution cache
+
+The exact P32 kernels still repeat their decoder instruction stream for every
+prefill.  For applications that explicitly accept FP8 inference arithmetic,
+`QVQ_HOPPER_FP8_MLP_PREFILL=1` builds a source-versioned execution cache once
+for the measured H100 Llama MLP geometry and uses it at M512 through M4096.
+The default is disabled.  Canonical W2--W3.5 checkpoint tensors remain P32;
+the cache is transient, is never serialized, and is rebuilt when any source
+trellis, selector, transform scale, or output scale changes.
+
+For each gate/up child, cache construction folds the linear operations around
+the P32 inner matrix `Q`:
+
+```text
+Wfold = diag(SU) * Hin * Q * Hout * diag(SV)
+```
+
+Down uses the corresponding child-local formula.  Each folded weight is
+quantized to E4M3 with one FP32 scale per output column.  Every invocation
+quantizes each activation row to E4M3 with its own FP32 scale and executes the
+two matrix multiplications with Hopper cuBLASLt FP8 tensor cores.  SiLU and the
+gate/up product stay in their ordinary FP16 locations.  This is an approximate
+FP8 execution mode, not an exact rearrangement of the P32 arithmetic.
+
+The warm path is CUDA Graph replay safe.  Cache construction is deliberately
+forbidden during capture: a cold capture takes the exact P32 path, while an
+eager warmup constructs the cache before capture.  Telemetry reports separate
+gate/up and down launches and retained bytes.
+
+| Weight | Gate/up M×K×N | Down M×K×N | Cached QVQ | vs Marlin W4 | vs Machete W4 | Better than last |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| W2 | 512×2048×8192 | 512×8192×2048 | 110.027 µs | 1.510× | 1.060× | Yes |
+| W2 | 1024×2048×8192 | 1024×8192×2048 | 180.143 µs | 1.859× | 1.229× | Yes |
+| W2 | 2048×2048×8192 | 2048×8192×2048 | 361.521 µs | 1.928× | 1.243× | Yes |
+| W2 | 4096×2048×8192 | 4096×8192×2048 | 733.712 µs | 1.916× | 1.253× | Yes |
+| W2.5 | 512×2048×8192 | 512×8192×2048 | 108.666 µs | 1.529× | 1.073× | Yes |
+| W2.5 | 1024×2048×8192 | 1024×8192×2048 | 180.185 µs | 1.859× | 1.229× | Yes |
+| W2.5 | 2048×2048×8192 | 2048×8192×2048 | 363.778 µs | 1.916× | 1.235× | Yes |
+| W2.5 | 4096×2048×8192 | 4096×8192×2048 | 734.882 µs | 1.913× | 1.251× | Yes |
+| W3 | 512×2048×8192 | 512×8192×2048 | 108.660 µs | 1.529× | 1.074× | Yes |
+| W3 | 1024×2048×8192 | 1024×8192×2048 | 179.375 µs | 1.867× | 1.234× | Yes |
+| W3 | 2048×2048×8192 | 2048×8192×2048 | 363.770 µs | 1.916× | 1.235× | Yes |
+| W3 | 4096×2048×8192 | 4096×8192×2048 | 737.498 µs | 1.906× | 1.246× | Yes |
+| W3.5 | 512×2048×8192 | 512×8192×2048 | 108.863 µs | 1.526× | 1.072× | Yes |
+| W3.5 | 1024×2048×8192 | 1024×8192×2048 | 180.203 µs | 1.859× | 1.229× | Yes |
+| W3.5 | 2048×2048×8192 | 2048×8192×2048 | 364.371 µs | 1.913× | 1.233× | Yes |
+| W3.5 | 4096×2048×8192 | 4096×8192×2048 | 737.274 µs | 1.907× | 1.247× | Yes |
+
+Across all sixteen cells, the geometric speedups are **5.509x versus ordinary
+QVQ**, **1.796x versus Marlin W4**, and **1.194x versus Machete W4**.  Every
+cell improves over the preceding exact reuse-11 benchmark.  With unit-normal
+synthetic activations, maximum absolute error versus the dense-P32 Torch oracle
+is `2.753e-4`, maximum mean absolute error is `3.826e-5`, and relative L2 is
+`0.06476--0.06489`.  The locked absolute `2e-3` gate passes, but the relative
+error is recorded explicitly because the mode changes arithmetic.
+
+The retained cache is 50,405,384 bytes (48.07 MiB) per Llama MLP layer:
+
+| Payload | Bytes/layer |
+| --- | ---: |
+| Concatenated gate/up E4M3 weights and column scales | 33,619,972 |
+| Down E4M3 weight and column scales | 16,785,412 |
+| Total | 50,405,384 |
+
+Sixteen Llama 3.2 1B layers retain 806,486,144 bytes (0.751 GiB).  There is no
+per-forward decoded-weight allocation.  Artifact:
+`artifacts/qvq_hopper_large_m/v4_fp8_cached_mlp_candidate.json`.
