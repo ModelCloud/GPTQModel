@@ -3981,6 +3981,16 @@ specialization is therefore not a uniform win at this smaller M, so the ABI
 validation and automatic dispatch remain unchanged and no source change is
 retained from this probe.
 
+## v86 rejected split-1 constant-fold wrapper
+
+A dedicated large-M kernel wrapper passed literal `split_count=1` and `split=0`
+to the inlined body, matching the automatic native single-wave policy.  It
+was exact for the affected `M=2048` matrix, but three-repeat medians changed
+by only 0.1--0.3% (with one noisy `W3.5,N=6144` regression).  The extra
+template family materially increases the SM80 binary without a repeatable
+throughput gain, so the wrapper was reverted and split-K dispatch remains
+unchanged.
+
 ## Reproduction
 
 ```bash
