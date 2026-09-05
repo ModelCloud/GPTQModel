@@ -496,7 +496,9 @@ def main():
                         for e in graph_entries.values()
                     )
                     del saved, changed
-                if (args.graph_execute or aiter_skinny is not None or args.gemv_dot2
+                if aiter_skinny is not None and not qvq_p32_amd_folded_case_supported(m, k, n):
+                    row["graph_check_status"] = "unchanged fallback: host validation is not graph-capture-safe"
+                if (args.graph_execute or (aiter_skinny is not None and m <= 4) or args.gemv_dot2
                         or ((k, n) == (17408, 5120) and m >= 1024)
                         or ((k, n) == (6144, 5120) and m >= 64)):
                     select("candidate")
