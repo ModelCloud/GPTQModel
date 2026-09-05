@@ -26,7 +26,7 @@ def layer_metrics(candidate: torch.Tensor, teacher: torch.Tensor) -> dict:
         else None,
         "reference_zero_norm": norm_b == 0,
         "equal_values": torch.equal(candidate, teacher),
-        "local_tolerance_pass": mae <= 0.002 and maximum <= 0.046875,
+        "local_tolerance_pass": mae <= 0.003 and maximum <= 0.046875,
     }
 
 

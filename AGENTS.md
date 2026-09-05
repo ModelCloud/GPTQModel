@@ -14,6 +14,11 @@ Propagated final-logit differences are diagnostics, not kernel acceptance gates;
 Real-arithmetic equivalence and FP32 output alone do not prove numerical equivalence.
 The skill distinguishes kernel correctness, measured model propagation, and separately scoped precision experiments.
 
+For the F6 seed-7 P32 experiment campaign (`scripts/p32_twenty`), the user explicitly
+raised the localized inference mean-error limit to **3e-3**. This overrides the
+2e-3 default above for that campaign; the maximum-error limit and finite-value
+requirements remain unchanged.
+
 ## Repository map
 
 - `gptqmodel/`: Python package, model adapters, quantization lifecycle, backend selection, and JIT wrappers.

@@ -43,7 +43,7 @@ For every candidate, preserve raw per-case results and record:
   decoded caches separately and count shared tables once with an explicit amortization denominator.
 - Numerical failures, unsupported cases and unavailable metrics explicitly; never substitute zero.
 
-Localized inference gates: finite values, mean absolute drift <=0.002 AND maximum absolute drift <=0.046875
+Localized inference gates: finite values, mean absolute drift <=0.003 AND maximum absolute drift <=0.046875
 per case against the same-input canonical operator. Exactness claims additionally require exact reconstructed
 values and preserved checkpoint bits where applicable. Passing these tolerances does not prove bitwise math.
 Model-quality gates and uncertainty policy must be locked with the teacher before selection.
@@ -177,3 +177,5 @@ The cancelled C4 job log remains at `/root/work/p32-twenty-data/quantize.log` fo
 
 [Experiments 21–30 and prioritized combinations](ALGEBRAIC_QUEUE.md) are queued.
 Initial added order: 21 → 24 → 22 → 25 → 23. All share the fixed F6 seed-7 snapshot and common scorecard.
+
+User-approved gate update: inference MAE <=3e-3, with the maximum-error and finite-value requirements unchanged. See [gate reassessment](GATE_REASSESSMENT.md).
