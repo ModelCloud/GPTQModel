@@ -905,6 +905,8 @@ def test_qvq_yaqa_lifecycle_collects_full_model_factors_and_wires_them_to_quanti
         yaqa_spectral_absorption_efficiency=None,
         yaqa_spectral_selector_churn=None,
         yaqa_spectral_family_changed=None,
+        input_hadamard=True,
+        output_hadamard=True,
         serialized_tensors=lambda: {
             "trellis": fake_result.trellis,
             "SU": fake_result.SU,
@@ -1162,6 +1164,8 @@ def test_atomic_swiglu_propagates_selected_reconstructed_weights_before_finalize
             candidates[candidate_id] = {
                 "weight": weight,
                 "serialized_tensors": {"weight": weight},
+                "input_hadamard": True,
+                "output_hadamard": True,
             }
         records[full_name] = {
             "dense_weight": dense_weight,
@@ -1190,7 +1194,9 @@ def test_atomic_swiglu_propagates_selected_reconstructed_weights_before_finalize
     monkeypatch.setattr(
         processor,
         "_module_replay_qlinear_from_tensors",
-        lambda original, name, module_qcfg, tensors: torch.nn.Linear(4, 4, bias=False),
+        lambda original, name, module_qcfg, tensors, **kwargs: torch.nn.Linear(
+            4, 4, bias=False
+        ),
     )
     for named in subset.values():
         monkeypatch.setattr(named, "stream_sync", lambda: None)

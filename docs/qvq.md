@@ -1,6 +1,6 @@
 # QVQ (QTIP-derived) integration design
 
-Status as of 2026-08-12: **QVQ** names this repository's QTIP-derived quantizer plus the planar PGC16 codec, half-step
+Status as of 2026-09-04: **QVQ** names this repository's QTIP-derived quantizer plus the planar PGC16 codec, half-step
 W1, W1.5, ..., W8 coverage, and optimized inference backends. Production quantization, configuration, checkpoint
 loading, and Torch/MPS/MLX/CUDA inference accept only `pgc16-v1` with fixed Gaussian levels. Learned `pgc16-v2` is
 retired because repeated held-out tests showed that its lower local reconstruction proxy did not reliably improve
@@ -767,6 +767,60 @@ The initial reference implementation deliberately separates codec validation fro
 3. Score the complete serialized reconstruction with `tr(E H_x E^T)`.
 4. Accept only a finite strict improvement; otherwise emit the independent V2 path, all-zero selectors, and a
    deterministic alternative-family ID.
+
+##### Optional W2--W3.5/A8 target
+
+V2B2-P32 can opt into NVIDIA-oriented FP8 E4M3 input activations at W2, W2.5, W3, or W3.5. The input spelling
+`v2b2-g32` is accepted as an alias; checkpoints always serialize the canonical `qvq_v2b2_p32` format name.
+
+```python
+from gptqmodel.quantization import QVQConfig
+
+qcfg = QVQConfig(
+    bits=2,
+    format="v2b2-g32",
+    activation={
+        "bits": 8,
+        "format": "float8_e4m3fn",
+        "scale_method": "dynamic_per_token",
+    },
+)
+```
+
+The production quantization harness exposes the same opt-in contract directly:
+
+```bash
+python scripts/qvq_quantize.py \
+  --model MODEL --output OUTPUT --calibration-dataset DATASET \
+  --format v2b2-g32 --bits 3 --activation
+```
+
+One FP32 scale is derived from each logical activation row and shared across its hidden dimension. This dynamic
+contract has no calibration-order-dependent observer and adds no persistent per-module tensor. A zero row uses scale
+one. Both ordinary Block-LDLQ and YAQA consume the same fake-quantized values used by inference:
+
+- the GPTQ-style input Hessian is accumulated from dequantized `Q_A8(X)`, so weight search is conditioned on the
+  activation grid the deployed module receives;
+- YAQA installs straight-through E4M3 input boundaries on every selected linear while collecting full-model Fisher
+  factors, so downstream gradients also observe the A8 forward values;
+- per-module logs report A8 RMSE, relative RMSE, maximum absolute error, and observed scale range separately from
+  the weight-codec loss.
+
+This follows the calibration boundary demonstrated by Together's
+[NVFP4 Hessian change](https://github.com/togethercomputer/GPTQModel/commit/96cc70621b86477ba01c10d678944f9796507f6c): curvature must be built from the activation values the deployed kernel
+actually consumes. QVQ deliberately does not copy NVFP4's static global-scale sidecar because dynamic per-token E4M3
+has no dataset-global scale to freeze.
+
+At inference, Ada (SM89) and Hopper (SM90+) keep the transient E4M3 payload through QVQ's fused `SU -> Hadamard`
+input transform. The CUDA kernel reads FP8 plus the row scale directly and writes the established FP16 transformed
+activation expected by the P32 decoder. CPU, older CUDA devices, FP32 CUDA calls, and unsupported
+fusion shapes use the exact explicit-dequantization fallback. The grouped Hopper coordinator currently delegates A8
+children to this child-local path. `output_alignment` is rejected with A8 until its dense replay explicitly models the
+same activation boundary.
+
+A8 installs QVQ's fail-closed E4M3 dynamic KV cache whenever caching is enabled. Callers cannot substitute a dense
+Transformers cache or configure a separate `kv_cache_scheme`; both native QK and PV attention consume the stored FP8
+payload plus its dynamic row scale directly. Disabling caching remains valid and allocates no KV cache.
 
 YAQA level 1 now feeds each two-sided corrected tile through the same exact segmented recurrence. It evaluates all
 three complementary families as complete YAQA artifacts, selects one family per module under the complete Kronecker
