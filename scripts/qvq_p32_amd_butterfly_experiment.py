@@ -5,6 +5,22 @@ import triton.language as tl
 
 
 @triton.jit
+def folded_gemv_full_k_kernel(
+    input_ptr, weight_ptr, residual_ptr, output_ptr,
+    size_k: tl.constexpr, block_n: tl.constexpr, block_k: tl.constexpr,
+    use_residual: tl.constexpr,
+):
+    """Single full-K reduction instead of reducing and accumulating each K tile."""
+    n = tl.program_id(0) * block_n + tl.arange(0, block_n)
+    k = tl.arange(0, block_k)
+    x = tl.load(input_ptr + k, k < size_k, 0).to(tl.float32)
+    w = tl.load(weight_ptr + n[:, None] * size_k + k[None, :], k[None, :] < size_k, 0).to(tl.float32)
+    if use_residual:
+        w += tl.load(residual_ptr + n[:, None] * size_k + k[None, :], k[None, :] < size_k, 0).to(tl.float32)
+    tl.store(output_ptr + n, tl.sum(w * x[None, :], 1))
+
+
+@triton.jit
 def composite_trim_kernel(
     pre_hadamard_ptr, power_ptr, base_ptr, sv_ptr, output_ptr,
     size_n: tl.constexpr, base_size: tl.constexpr, base_pad: tl.constexpr,

@@ -34,10 +34,14 @@ def main():
     parser.add_argument("--full-sweep", action="store_true")
     parser.add_argument("--trim-composite", action="store_true", help="Experimentally remove padded recovery math")
     parser.add_argument("--recovery-warps", type=int, choices=(4, 8), default=8)
+    parser.add_argument("--gemv-full-k", action="store_true")
+    parser.add_argument("--gemv-block-n", type=int, choices=(2, 4, 8), default=2)
     parser.add_argument("--shapes", nargs="+", choices=[shape[0] for shape in QWEN38_27B_SHAPES])
     parser.add_argument("--m-values", nargs="+", type=int, choices=REQUESTED_M)
     parser.add_argument("--folded-residual-ceiling", action="store_true",
                         help="Benchmark a raw cached high+residual operator, not production dispatch")
+    parser.add_argument("--folded-direct-ceiling", action="store_true",
+                        help="Bypass layer guards for the unchanged cached production operator")
     parser.add_argument("--baseline-forward-commit", help="Compare the folded-forward method from this git revision")
     parser.add_argument("--baseline-amd-commit", help="Use isolated kernel module and layer caches from this git revision")
     parser.add_argument("--iterations", type=int, default=50)
@@ -51,6 +55,8 @@ def main():
     args = parser.parse_args()
     if args.iterations < 2 or args.warmup < 1:
         parser.error("Require iterations >= 2 and warmup >= 1")
+    if args.folded_direct_ceiling and args.folded_residual_ceiling:
+        parser.error("Choose only one raw operator ceiling")
     hardware, valid = _idle_preflight(args)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["HIP_VISIBLE_DEVICES"] = str(args.physical_gpu)
@@ -64,6 +70,7 @@ def main():
         composite_trim_kernel,
         fht128_kernel,
         fht128_split_kernel,
+        folded_gemv_full_k_kernel,
     )
 
     import gptqmodel.nn_modules.qlinear.qvq as qvq_module
@@ -76,6 +83,7 @@ def main():
 
     baseline_amd = candidate_amd
     original_recovery = candidate_amd._qvq_p32_composite_recovery_gfx950_kernel
+    original_gemv = candidate_amd._qvq_p32_folded_gemv_gfx950_kernel
     baseline_source_dir = None
     if args.baseline_amd_commit:
         revision = subprocess.check_output(
@@ -169,7 +177,21 @@ def main():
 
     trimmed_recovery = TrimRecovery()
 
+    class FullKGemv:
+        def __getitem__(self, grid):
+            def launch(*positional, **kwargs):
+                size_n = grid[0] * kwargs["block_n"]
+                kwargs["block_n"] = args.gemv_block_n
+                kwargs["block_k"] = triton.next_power_of_2(kwargs["size_k"])
+                return folded_gemv_full_k_kernel[(size_n // args.gemv_block_n,)](*positional, **kwargs)
+            return launch
+
+    full_k_gemv = FullKGemv()
+
     def select(name):
+        candidate_amd._qvq_p32_folded_gemv_gfx950_kernel = (
+            full_k_gemv if name == "candidate" and args.gemv_full_k else original_gemv
+        )
         candidate_amd._qvq_p32_composite_recovery_gfx950_kernel = (
             trimmed_recovery if name == "candidate" and args.trim_composite else original_recovery
         )
@@ -281,7 +303,21 @@ def main():
                 ref = ref @ inner
                 if oh:
                     ref = matmul_hadU(ref)
-                def run(name, input_tensor=x, high=high, low=low, layer=layer, baseline_layer=baseline_layer):
+                direct_cache = None
+                if args.folded_direct_ceiling and qvq_p32_amd_folded_case_supported(m, k, n):
+                    select("candidate")
+                    layer(x)
+                    direct_cache = layer._qvq_amd_folded_hot_cache
+                def run(
+                    name, input_tensor=x, high=high, low=low, layer=layer, baseline_layer=baseline_layer,
+                    direct_cache=direct_cache, m=m, k=k, n=n,
+                ):
+                    if name == "candidate" and direct_cache is not None:
+                        return candidate_amd._qvq_p32_folded_execute(
+                            input_tensor, direct_cache[24], direct_cache[25], direct_cache[26],
+                            out_features=n,
+                            output_fp32=candidate_amd.qvq_p32_amd_folded_prefers_fp32_output(m, k, n),
+                        ).to(input_tensor.dtype)
                     if name == "candidate" and args.folded_residual_ceiling:
                         primary = original_mm(input_tensor, high.T, out_dtype=torch.float32)
                         return torch.addmm(primary, input_tensor, low.T, out_dtype=torch.float32).to(torch.float16)
@@ -328,7 +364,7 @@ def main():
                     "dtype": "float16",
                 }
                 row["fp16_reference_rounding_floor"] = (ref.to(torch.float16).float() - ref).abs().max().item()
-                row["raw_candidate"] = args.folded_residual_ceiling
+                row["raw_candidate"] = args.folded_residual_ceiling or direct_cache is not None
                 row["candidate_weight_cache_bytes"] = 4 * k * n if args.folded_residual_ceiling else None
                 for name, value in outputs.items():
                     times = sorted(
@@ -399,6 +435,7 @@ def main():
     finally:
         torch.mm = original_mm
         candidate_amd._qvq_p32_composite_recovery_gfx950_kernel = original_recovery
+        candidate_amd._qvq_p32_folded_gemv_gfx950_kernel = original_gemv
         QVQLinear._qvq_amd_folded_forward = candidate_forward
         sys.modules["gptqmodel.utils.qvq_amd"] = candidate_amd
         if baseline_source_dir is not None:
