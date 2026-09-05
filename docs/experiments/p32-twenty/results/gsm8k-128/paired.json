@@ -1,0 +1,20 @@
+[
+  {
+    "baseline": "bf16",
+    "candidate": "window",
+    "rows": 128,
+    "identical_prompts_targets_indices": true,
+    "wins": 11,
+    "losses": 11,
+    "exact_two_sided_discordance_p": 1
+  },
+  {
+    "baseline": "window",
+    "candidate": "joint-down16",
+    "rows": 128,
+    "identical_prompts_targets_indices": true,
+    "wins": 7,
+    "losses": 2,
+    "exact_two_sided_discordance_p": 0.1796875
+  }
+]

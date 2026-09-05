@@ -45,3 +45,8 @@ Authoritative evidence links: [window model](WINDOW_MODEL.md), [row reuse](ROW_R
 Runtime progress logs live outside Git; record completed measurements before
 claiming a row has advanced. Small C4/ARC slices currently do not establish P32's
 post-quant advantage over original BF16.
+
+Additional partial evidence: [accumulation isolation](ACCUMULATION.md) records
+432 passing real layer-0 cases for experiments 7/8; execution profiling and
+integrated model results remain. [Bounded GSM8K](GSM8K_PARTIAL.md) records the
+completed BF16/window/joint-recovery arms; FP32 teacher evaluation is running.
