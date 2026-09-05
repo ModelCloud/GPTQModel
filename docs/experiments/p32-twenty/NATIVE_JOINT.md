@@ -27,3 +27,21 @@ This is partial experiment20 evidence, not a complete joint optimization study.
 [Reports](results/native-joint/down_proj.json) include every iteration's calibration
 and held-out errors, selection, final timings, exact serialized-byte counts and
 scope limitations. The original historical F6 seed-7 checkpoint remains read only.
+
+## First model and profile follow-up
+
+Joint down-only rank16 C4 PPL is **26.989909349246798**, versus window
+26.9915252378136 and one-shot down-only rank16 27.035818912832937. This is a
+bounded 4080-next-token slice, not a statistically established quality gain.
+No same-device whole-model speed ratio is inferred from these different runs.
+
+The warmed M=16 recovered operator profile contains nine kernels: dtype conversion,
+tinygemm INT4-storage/BF16 arithmetic, FP32 correction GEMMs/reduction, addition,
+and final FP16 conversion. The tinygemm kernel reports 3.67% Tensor Core activity
+in this replay. Full metric values and units are retained. This confirms Tensor
+Core work in the native base, not INT4-activation IMMA or high overall utilization.
+Instruction-class counts and an end-to-end timeline remain outstanding.
+
+GSM8K cot runs for FP32 teacher, original BF16, window and joint down-only are now
+running on four GPUs, with the same first 128 examples and 256-new-token cap.
+Any scores will be reported as that bounded/capped evaluation, not full GSM8K.

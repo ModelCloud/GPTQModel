@@ -1,0 +1,8 @@
+{
+  "scope": "one warmed rank16 recovered operator; W4A16 base plus FP32 correction and FP16 output",
+  "module": "model.layers.0.mlp.down_proj",
+  "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8",
+  "rows": [],
+  "M": 16,
+  "complete": true
+}

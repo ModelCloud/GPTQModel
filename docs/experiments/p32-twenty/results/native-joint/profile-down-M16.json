@@ -1,0 +1,227 @@
+[
+  {
+    "kernel": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "6.848000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "195584.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "30",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.000000",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "12.430337",
+        "unit": "%"
+      }
+    }
+  },
+  {
+    "kernel": "void at::vectorized_elementwise_kernel<4, at::bfloat16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "3.776000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "11776.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "28",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.000000",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "6.268293",
+        "unit": "%"
+      }
+    }
+  },
+  {
+    "kernel": "void at::tinygemm_m16n8k16_chunk_kernel<at::ALayout_RM<0>, at::BLayout_TC_int4<8, 128>, at::ALayout_RM<0>, 8, 8>(const void *, const void *, const void *, void *, int, int, int, int, int, int)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "47.520000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "3076864.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "61",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "3.669948",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "25.498705",
+        "unit": "%"
+      }
+    }
+  },
+  {
+    "kernel": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "7.200000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "48896.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "30",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.000000",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "6.242555",
+        "unit": "%"
+      }
+    }
+  },
+  {
+    "kernel": "ampere_sgemm_32x32_sliced1x4_nn",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "11.392000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "552080.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "86",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.000000",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "6.245012",
+        "unit": "%"
+      }
+    }
+  },
+  {
+    "kernel": "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, 0, float, float, float, 1, 0, 0, 0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "6.560000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "4816.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "32",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.003179",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "24.438002",
+        "unit": "%"
+      }
+    }
+  },
+  {
+    "kernel": "void gemmSN_NN_kernel<float, 256, 4, 2, 8, 4, 4, 0, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<const float>, cublasGemvTensorStridedBatched<float>>(cublasGemmSmallNParams<T9, T10, T11, T1>)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "5.472000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "229888.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "64",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.083530",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "12.889972",
+        "unit": "%"
+      }
+    }
+  },
+  {
+    "kernel": "void at::vectorized_elementwise_kernel<4, at::CUDAFunctor_add<float>, std::array<char *, 3>>(int, T2, T3)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "3.584000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "3840.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "32",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.005060",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "6.151626",
+        "unit": "%"
+      }
+    }
+  },
+  {
+    "kernel": "void at::vectorized_elementwise_kernel<4, at::float16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>>(int, T2, T3)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "3.328000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "2944.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "28",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.000000",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "6.156785",
+        "unit": "%"
+      }
+    }
+  }
+]
