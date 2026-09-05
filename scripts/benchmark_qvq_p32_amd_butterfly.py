@@ -39,6 +39,7 @@ def main():
     parser.add_argument("--gemv-split-k", action="store_true", help="Remove padded arithmetic from full-K GEMV")
     parser.add_argument("--graph-execute", action="store_true", help="Stage fresh inputs and clone graph outputs")
     parser.add_argument("--aiter-skinny", choices=("none", "wv", "llmm1"), default="none")
+    parser.add_argument("--aiter-direct", action="store_true", help="Measure private native binding with cached weight metadata")
     parser.add_argument("--gemv-block-n", type=int, choices=(2, 4, 8), default=2)
     parser.add_argument("--shapes", nargs="+", choices=[shape[0] for shape in QWEN38_27B_SHAPES])
     parser.add_argument("--m-values", nargs="+", type=int, choices=REQUESTED_M)
@@ -63,6 +64,8 @@ def main():
         parser.error("Choose only one raw operator ceiling")
     if args.graph_execute and args.aiter_skinny != "none":
         parser.error("Graph staging and skinny dispatch are separate experiments")
+    if args.aiter_direct and args.aiter_skinny == "none":
+        parser.error("--aiter-direct requires --aiter-skinny and a prebuilt AITER module_custom")
     hardware, valid = _idle_preflight(args)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["HIP_VISIBLE_DEVICES"] = str(args.physical_gpu)
@@ -98,6 +101,12 @@ def main():
         import aiter
 
         aiter_skinny = aiter.wvSpltK if args.aiter_skinny == "wv" else aiter.LLMM1
+        if args.aiter_direct:
+            from aiter.jit.core import _pybind_develop_hooks, get_module
+
+            skinny_module = get_module("module_custom")
+            skinny_native = getattr(skinny_module, "wvSpltK" if args.aiter_skinny == "wv" else "LLMM1")
+            skinny_convert, _, skinny_raw_stream, skinny_current_device = _pybind_develop_hooks()
     baseline_source_dir = None
     if args.baseline_amd_commit:
         revision = subprocess.check_output(
@@ -205,6 +214,7 @@ def main():
     full_k_gemv = FullKGemv()
 
     graph_entries = {}
+    skinny_weights = {}
 
     def skinny_execute(x, operand, residual_operand=None, composite_recovery=None, **kwargs):
         m, k = x.shape
@@ -215,6 +225,18 @@ def main():
                 or m > (4 if args.aiter_skinny == "wv" else 1) or not operand.T.is_contiguous()):
             return original_execute(x, operand, residual_operand, composite_recovery, **kwargs)
         output = torch.empty((m, n), device=x.device, dtype=x.dtype)
+        if args.aiter_direct:
+            weight_entry = skinny_weights.get(id(operand))
+            if weight_entry is None:
+                weight_entry = (operand, skinny_convert(operand.T))
+                skinny_weights[id(operand)] = weight_entry
+            # Same stream-setting contract as AITER's develop=True wrapper.
+            skinny_module._set_current_hip_stream(skinny_raw_stream(skinny_current_device()))
+            if args.aiter_skinny == "wv":
+                skinny_native(weight_entry[1], skinny_convert(x), skinny_convert(output), m, props.multi_processor_count)
+            else:
+                skinny_native(weight_entry[1], skinny_convert(x), skinny_convert(output), 4)
+            return output
         if args.aiter_skinny == "wv":
             aiter_skinny(operand.T, x, output, m, props.multi_processor_count)
         else:
@@ -305,6 +327,7 @@ def main():
     try:
         for (shape, k, n), bits in itertools.product(shapes, (2.0, 2.5, 3.0, 3.5)):
             graph_entries.clear()
+            skinny_weights.clear()
             torch.mm = original_mm
             ih, oh = SHAPE_AXES[shape]
             g = torch.Generator(device="cuda").manual_seed(
@@ -517,6 +540,7 @@ def main():
         candidate_amd._qvq_p32_folded_gemv_gfx950_kernel = original_gemv
         candidate_amd._qvq_p32_folded_execute = original_execute
         graph_entries.clear()
+        skinny_weights.clear()
         QVQLinear._qvq_amd_folded_forward = candidate_forward
         sys.modules["gptqmodel.utils.qvq_amd"] = candidate_amd
         if baseline_source_dir is not None:

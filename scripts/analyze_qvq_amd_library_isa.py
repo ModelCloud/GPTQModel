@@ -39,10 +39,13 @@ def main():
     starts = sorted(set(addresses.values()))
     results = []
     for name, dispatches in selected.items():
-        if name not in addresses:
+        # rocprofv3 --mangled-kernels may report the AMD kernel descriptor.
+        # Resolve its exact paired function symbol, never a fuzzy name match.
+        symbol = name.removesuffix(".kd")
+        if symbol not in addresses:
             results.append({"kernel": name, "error": "symbol not in supplied code object"})
             continue
-        start = addresses[name]
+        start = addresses[symbol]
         index = starts.index(start)
         if index + 1 == len(starts):
             raise RuntimeError("Cannot infer terminal symbol extent; provide a known text-section end")
@@ -57,7 +60,7 @@ def main():
         for row in dispatches:
             counters[row["Counter_Name"]].append(float(row["Counter_Value"]))
         results.append({
-            "kernel": name, "start": hex(start), "stop": hex(stop), "asm": str(output),
+            "kernel": name, "function_symbol": symbol, "start": hex(start), "stop": hex(stop), "asm": str(output),
             "static_total": sum(opcodes.values()), "static_opcodes": dict(sorted(opcodes.items())),
             "issued_counters": {key: {"records": len(values), "min": min(values), "max": max(values),
                                       "mean": statistics.mean(values)} for key, values in counters.items()},
