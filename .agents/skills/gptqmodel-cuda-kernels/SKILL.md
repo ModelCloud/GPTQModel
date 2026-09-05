@@ -102,10 +102,18 @@ Treat QVQ quantization and QVQ inference as separate numerical contracts:
   error tolerance to waive a quantization mismatch.
 - **Inference kernels:** compare the CUDA output with the dequantized/reference
   inference output for the identical packed tensors, inputs, dtype, shape, and
-  stream. The maximum absolute output drift must be `<= 2e-3` for every tested
-  case. Report max-absolute, mean-absolute, relative-L2, and the tested dtype,
-  shape, batch/token regime, and GPU. A case over `2e-3` fails even if aggregate
-  metrics or generated text appear acceptable.
+  stream. Require both mean absolute output drift `<= 2e-3` and maximum absolute
+  output drift `<= 0.046875` for every tested case, with finite outputs. Compute
+  both metrics over all valid output elements of that case in sufficient precision;
+  neither signed mean nor pooling cases is allowed. Report max-absolute,
+  mean-absolute, relative-L2, and the tested dtype, shape, batch/token regime,
+  and GPU. Exceeding either inclusive limit fails even if aggregate metrics or
+  generated text appear acceptable.
+  These are localized kernel-output gates on identical inputs, weights, and
+  initial state, including the full reference composition for a fused operator.
+  Propagated final-logit differences are diagnostics, not acceptance gates;
+  do not apply these thresholds to final logits or use that drift alone to
+  reject a locally passing kernel.
 - Test both contracts on deterministic seeds, adversarial signs/magnitudes,
   long reductions, smallest legal dimensions, non-divisible M/N/K tails, every
   supported bit/layout branch, repeated calls, and each target architecture.

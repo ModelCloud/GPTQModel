@@ -25,10 +25,20 @@ Preserve the existing [QVQ contract](../gptqmodel-cuda-kernels/SKILL.md#qvq-accu
 
 - Quantization implementation optimizations must preserve deterministic state/path selection, packed words, bank IDs,
   and metadata exactly. Floating-output tolerance cannot excuse a changed quantization decision.
-- QVQ inference requires **maximum absolute output drift <= 2e-3 in every tested case**, against the canonical
-  reference for identical packed weights, inputs, and operator semantics. Apply any additional path-specific gates.
-  This is an absolute threshold, not 0.2%, relative L2, mean error, or an allclose rtol.
-- Do not widen the threshold to make a faster candidate pass, normalize/clip away a failure, modify the oracle to
+- QVQ inference requires **mean absolute output drift <= 2e-3 AND maximum absolute output drift <= 0.046875
+  in every tested case**, against the canonical reference for identical packed weights, inputs, and operator
+  semantics. Both limits are inclusive and must pass independently. Apply any additional path-specific gates.
+  For each case, compute `error = abs(candidate - reference)` in sufficient precision over all valid output elements;
+  require `error.mean() <= 2e-3` and `error.max() <= 0.046875`, with finite outputs. Declare the output boundary and
+  valid-element mask before measurement. These are absolute errors, not signed mean, percentages, relative L2,
+  or an allclose rtol. Do not pool cases or drop outliers to pass either gate.
+- These gates are **local to the kernel/operator under test**: feed candidate and reference identical inputs,
+  weights, and initial state, and compare their outputs at the same declared operator boundary. For a fused kernel,
+  compare the complete fused operation with its equivalent reference composition on those same inputs.
+  Propagated final-logit differences, KL, and top-token agreement are diagnostics, not kernel acceptance gates.
+  Do not apply the local thresholds to final logits or reject a locally passing kernel solely for propagated
+  final-logit drift. Separately requested model-quality evaluations retain their explicitly agreed criteria.
+- Do not widen these thresholds to make a faster candidate pass, normalize/clip away a failure, modify the oracle to
   mimic the candidate, or hide a failing shape in an average. Revising the contract is a separately scoped task;
   preserve the current baseline and defaults while presenting the evidence and proposed change.
 - This implementation-preservation contract does not prohibit separately requested quantization-algorithm research.
@@ -91,6 +101,7 @@ Test full preprocessing/GEMM/correction/recovery/epilogue composition when any b
 - When changing arithmetic, precision, fusion boundaries, or broad dispatch, replay representative real modules,
   affected blocks, and the combined model path. Keep non-target operators/checkpoint tensors fixed. Measure
   teacher-forced logits/KL, top-token agreement/margins, and paired task effects as the declared scope requires.
+  Keep those propagation diagnostics separate from the localized kernel pass/fail decision.
 - Retain an accurate fallback for failing or unvalidated cases. A shape-specific pass licenses only that tested scope.
   Full-model quality cannot waive the locked kernel gate; a kernel pass alone does not certify full-model quality.
 

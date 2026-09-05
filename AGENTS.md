@@ -7,8 +7,11 @@ This file governs the whole repository. Keep changes narrowly scoped, preserve C
 For QVQ kernel optimization, use [$qvq-kernel-accuracy](.agents/skills/qvq-kernel-accuracy/SKILL.md) before choosing
 math transformations, precision changes, or MKNE autotune winners. First pursue accuracy-preserving algebra,
 redundant-work elimination, and data reuse. Preserve the existing exact quantization contract and the inference
-**maximum absolute drift <= 2e-3 per case** contract; do not reinterpret it as relative L2 or relax it to admit a
-faster candidate. Real-arithmetic equivalence and FP32 output alone do not prove numerical equivalence.
+**mean absolute drift <= 2e-3 AND maximum absolute drift <= 0.046875 per case** contract. Both limits are
+inclusive and must pass independently; relative L2 or averaging across cases cannot replace either gate.
+These gates apply only to localized kernel outputs against the reference on identical inputs, weights, and state.
+Propagated final-logit differences are diagnostics, not kernel acceptance gates; do not apply these limits to them.
+Real-arithmetic equivalence and FP32 output alone do not prove numerical equivalence.
 The skill distinguishes kernel correctness, measured model propagation, and separately scoped precision experiments.
 
 ## Repository map
