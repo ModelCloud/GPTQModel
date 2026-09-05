@@ -2908,6 +2908,7 @@ int launch_p32_large_m(
     int size_k,
     int size_n,
     const qvq_p32_config& config,
+    int row_groups,
     void* stream) {
   if (config.reduction_mode != QVQ_P32_REDUCTION_NATIVE) {
     set_last_error("QVQ P32 large-M batching requires native reduction");
@@ -2927,11 +2928,14 @@ int launch_p32_large_m(
   // Every supported model projection has a fixed N tile count.  Large-M
   // launches use that specialization by default; callers can still pass
   // static_n=0 for nonstandard N values, which take the generic path.
+  const bool automatic_policy = row_groups == QVQ_P32_ROW_GROUPS_AUTO;
   const bool use_static_n = config.static_n != 0 ||
-      size_n == 1024 || size_n == 5120 || size_n == 6144 ||
-      size_n == 10240 || size_n == 12288 || size_n == 17408;
+      (automatic_policy &&
+       (size_n == 1024 || size_n == 5120 || size_n == 6144 ||
+        size_n == 10240 || size_n == 12288 || size_n == 17408));
   int status = -1;
-  if (config.threads == 128 && size_m % (2 * kRows) == 0) {
+  if (config.threads == 128 && size_m % (2 * kRows) == 0 &&
+      row_groups != 1) {
 #define QVQ_LARGE_M2_STAGE(ROW_GROUPS) \
     switch (config.stage_k_tiles) { \
       case 1: \
@@ -2962,17 +2966,38 @@ int launch_p32_large_m(
         set_last_error("QVQ P32 large-M2 stage_k_tiles must be in [1, 4]"); \
         return -1; \
     }
-    if (size_n != 1024 && config.stage_k_tiles != 4 &&
-        size_m % (8 * kRows) == 0) {
+    if (row_groups == 8) {
+      if (size_n == 1024 || config.stage_k_tiles == 4 ||
+          size_m % (8 * kRows) != 0) {
+        set_last_error("QVQ P32 row_groups=8 requires aligned M, N!=1024, and stage<4");
+        return -1;
+      }
       QVQ_LARGE_M2_STAGE(8)
-    } else
-    if (size_m % (4 * kRows) == 0) {
+    } else if (row_groups == 4) {
+      if (size_m % (4 * kRows) != 0) {
+        set_last_error("QVQ P32 row_groups=4 requires M divisible by 64");
+        return -1;
+      }
+      QVQ_LARGE_M2_STAGE(4)
+    } else if (row_groups == 2) {
+      QVQ_LARGE_M2_STAGE(2)
+    } else if (row_groups != QVQ_P32_ROW_GROUPS_AUTO) {
+      set_last_error("QVQ P32 multi-row groups require 128 threads and aligned M");
+      return -1;
+    } else if (size_n != 1024 && config.stage_k_tiles != 4 &&
+               size_m % (8 * kRows) == 0) {
+      QVQ_LARGE_M2_STAGE(8)
+    } else if (size_m % (4 * kRows) == 0) {
       QVQ_LARGE_M2_STAGE(4)
     } else {
       QVQ_LARGE_M2_STAGE(2)
     }
     return status;
 #undef QVQ_LARGE_M2_STAGE
+  }
+  if (row_groups != QVQ_P32_ROW_GROUPS_AUTO && row_groups != 1) {
+    set_last_error("QVQ P32 multi-row groups require 128 threads and aligned M");
+    return -1;
   }
 #define QVQ_LARGE_M_STAGE(THREADS) \
   switch (config.stage_k_tiles) { \
@@ -3068,7 +3093,7 @@ extern "C" const char* qvq_last_error(void) {
   return last_error;
 }
 
-extern "C" int qvq_p32_window(
+static int qvq_p32_window_impl(
     const void* input,
     const void* trellis,
     const void* levels,
@@ -3086,6 +3111,7 @@ extern "C" int qvq_p32_window(
     int stage_k_tiles,
     int static_n,
     int reduction_mode,
+    int row_groups,
     void* stream) {
   if (input == nullptr || trellis == nullptr || levels == nullptr ||
       bank_ids == nullptr || bank_alt_id == nullptr || output == nullptr ||
@@ -3130,6 +3156,16 @@ extern "C" int qvq_p32_window(
   if (reduction_mode != QVQ_P32_REDUCTION_NATIVE &&
       reduction_mode != QVQ_P32_REDUCTION_PARTIALS) {
     set_last_error("QVQ P32 reduction mode must be native (1) or graph-visible (2)");
+    return -1;
+  }
+  if (row_groups != QVQ_P32_ROW_GROUPS_AUTO && row_groups != 1 &&
+      row_groups != 2 && row_groups != 4 && row_groups != 8) {
+    set_last_error("QVQ P32 row_groups must be auto, 1, 2, 4, or 8");
+    return -1;
+  }
+  if (size_m <= QVQ_P32_GROUPED_M_MAX &&
+      row_groups != QVQ_P32_ROW_GROUPS_AUTO && row_groups != 1) {
+    set_last_error("QVQ P32 multi-row groups require M > 16");
     return -1;
   }
   if (size_m > QVQ_P32_GROUPED_M_MAX &&
@@ -3177,7 +3213,7 @@ extern "C" int qvq_p32_window(
                                  config, stream)
           : launch_p32_large_m<4>(input, trellis, levels, bank_ids, bank_alt_id,
                                   output, partial_output, size_m, size_k, size_n,
-                                  config, stream);
+                                  config, row_groups, stream);
       break;
     case 5:
       status = size_m <= 16
@@ -3186,7 +3222,7 @@ extern "C" int qvq_p32_window(
                                  config, stream)
           : launch_p32_large_m<5>(input, trellis, levels, bank_ids, bank_alt_id,
                                   output, partial_output, size_m, size_k, size_n,
-                                  config, stream);
+                                  config, row_groups, stream);
       break;
     case 6:
       status = size_m <= 16
@@ -3195,7 +3231,7 @@ extern "C" int qvq_p32_window(
                                  config, stream)
           : launch_p32_large_m<6>(input, trellis, levels, bank_ids, bank_alt_id,
                                   output, partial_output, size_m, size_k, size_n,
-                                  config, stream);
+                                  config, row_groups, stream);
       break;
     case QVQ_P32_TRANSITION_BITS_MAX:
       status = size_m <= 16
@@ -3204,7 +3240,7 @@ extern "C" int qvq_p32_window(
                                  config, stream)
           : launch_p32_large_m<7>(input, trellis, levels, bank_ids, bank_alt_id,
                                   output, partial_output, size_m, size_k, size_n,
-                                  config, stream);
+                                  config, row_groups, stream);
       break;
     default:
       set_last_error("QVQ P32 transition_bits must be in [4,7]");
@@ -3212,6 +3248,58 @@ extern "C" int qvq_p32_window(
       break;
   }
   return status;
+}
+
+extern "C" int qvq_p32_window(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const void* bank_alt_id,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int transition_bits,
+    int split_count,
+    int kernel_variant,
+    int threads,
+    int stage_k_tiles,
+    int static_n,
+    int reduction_mode,
+    void* stream) {
+  return qvq_p32_window_impl(
+      input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
+      size_m, size_k, size_n, transition_bits, split_count, kernel_variant,
+      threads, stage_k_tiles, static_n, reduction_mode,
+      QVQ_P32_ROW_GROUPS_AUTO, stream);
+}
+
+extern "C" int qvq_p32_window_with_row_groups(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const void* bank_alt_id,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int transition_bits,
+    int split_count,
+    int kernel_variant,
+    int threads,
+    int stage_k_tiles,
+    int static_n,
+    int reduction_mode,
+    int row_groups,
+    void* stream) {
+  return qvq_p32_window_impl(
+      input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
+      size_m, size_k, size_n, transition_bits, split_count, kernel_variant,
+      threads, stage_k_tiles, static_n, reduction_mode, row_groups, stream);
 }
 
 extern "C" int qvq_p32_grouped_window(
