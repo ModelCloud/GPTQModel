@@ -314,3 +314,64 @@ work is nearly halved: `IMAD` 9.91M to 5.02M, `PRMT` 6.33M to 3.17M,
 and 64-bit funnel shifts 2.10M to 1.05M. Thus the win is decoded-fragment
 reuse despite lower occupancy, not changed tensor work. Reports remain at
 `/tmp/qvq_v3_phase4_down_reuse{4,8}_w3_m512.ncu-rep`.
+
+## Phase 5: packed multiblock shared-input transform at large M
+
+The grouped gate/up path must compute the shared 2048-wide input transform
+before P32. Large M still used one 1024-thread CTA per row, with scalar
+half-to-float arithmetic and a full-row shared-memory butterfly. The exact
+decode multiblock transform already factorizes the same ascending transform
+into eight independent 256-column low tiles followed by three tile-index high
+stages. Phase 5 extends that implementation through M4096.
+
+For logical M above 16 the operator returns a multiple-of-64 row allocation,
+updates only logical rows in its low grid, and has the high grid write exact
+zero to padded rows. Native `half2` add/sub retains both FP16 lanes' original
+rounding boundary. No butterfly is reassociated or reordered.
+
+Focused M32, M129, and M512 tests require exact FP16 bits versus the original
+transform, exact-zero padding, and exact CUDA Graph replay. The existing
+prescale-overflow test also remains exact and finite.
+
+| Weight | MLP MKN (gate/up; down) | Phase 4 | Phase 5 | Speedup | vs merged main | vs Marlin W4 | vs Machete W4 | Better than last |
+|---|---|---:|---:|---:|---:|---:|---:|:---:|
+| W2 | 128x2048x8192; 128x8192x2048 | 107.254 us | 103.923 us | 1.032x | 1.177x | 0.764x | 0.704x | Yes |
+| W2 | 512x2048x8192; 512x8192x2048 | 363.238 us | 353.501 us | 1.028x | 1.162x | 0.469x | 0.332x | Yes |
+| W2 | 4096x2048x8192; 4096x8192x2048 | 2739.302 us | 2653.184 us | 1.032x | 1.190x | 0.512x | 0.322x | Yes |
+| W2.5 | 128x2048x8192; 128x8192x2048 | 109.987 us | 106.458 us | 1.033x | 1.163x | 0.746x | 0.687x | Yes |
+| W2.5 | 512x2048x8192; 512x8192x2048 | 370.003 us | 360.288 us | 1.027x | 1.173x | 0.460x | 0.326x | Yes |
+| W2.5 | 4096x2048x8192; 4096x8192x2048 | 2770.259 us | 2684.922 us | 1.032x | 1.193x | 0.506x | 0.319x | Yes |
+| W3 | 128x2048x8192; 128x8192x2048 | 109.501 us | 106.397 us | 1.029x | 1.152x | 0.746x | 0.687x | Yes |
+| W3 | 512x2048x8192; 512x8192x2048 | 368.525 us | 361.469 us | 1.020x | 1.163x | 0.459x | 0.325x | Yes |
+| W3 | 4096x2048x8192; 4096x8192x2048 | 2774.938 us | 2697.293 us | 1.029x | 1.180x | 0.504x | 0.317x | Yes |
+| W3.5 | 128x2048x8192; 128x8192x2048 | 108.288 us | 105.088 us | 1.030x | 1.175x | 0.756x | 0.696x | Yes |
+| W3.5 | 512x2048x8192; 512x8192x2048 | 364.938 us | 354.000 us | 1.031x | 1.225x | 0.469x | 0.332x | Yes |
+| W3.5 | 4096x2048x8192; 4096x8192x2048 | 2736.461 us | 2662.349 us | 1.028x | 1.233x | 0.510x | 0.321x | Yes |
+
+All twelve cells improve. Phase 5 is `1.0292x` over Phase 4 and `1.1821x`
+cumulatively over merged PR-112 main. Marlin and Machete W4 geometric ratios
+are `0.5620x` and `0.4177x`; they remain figurative W4 baselines. Maximum and
+maximum-row-mean dense-oracle absolute error remain `1.073e-6` and
+`1.585e-7`.
+
+### Exact-commit Nsight Compute and SASS audit
+
+Commit `1dd7ca29` contains both the original and multiblock input transforms.
+Matched M512 captures on the physical H100 report:
+
+| Metric | One-block scalar | Multiblock low | Multiblock high | Combined change |
+|---|---:|---:|---:|---:|
+| NCU duration | 19.90 us | 7.62 us | 4.03 us | 1.708x |
+| Executed instructions | 14.30 M | 3.62 M | 0.11 M | -73.88% |
+| Registers/thread | 25 | 16 | 24 | no increase |
+| Achieved occupancy | 88.41% | 82.43% | 17.02% | staged grids |
+| Eligible warps/scheduler | 4.21 | 2.14 | 0.10 | staged grids |
+| DRAM throughput | 4.35% | 11.38% | 21.37% | higher useful rate |
+
+The SASS representation changes materially. The low stage's leading useful
+work is 229K native `HADD2`, 164K packed multiply-add, and 164K shuffle
+butterflies; the high tail needs only 24.6K packed adds and 24.6K packed
+multiply-adds. The original kernel instead executes 1.82M branches, 1.18M
+predicate comparisons, 0.79M barrier-sync operations, and 0.67M scalar
+half-unpack adds. Reports remain at
+`/tmp/qvq_v3_phase5_input_{oneblock,multiblock_low,multiblock_high}_m512.ncu-rep`.

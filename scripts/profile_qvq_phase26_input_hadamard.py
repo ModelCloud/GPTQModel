@@ -20,7 +20,9 @@ from scripts import benchmark_qvq_a41_phase4_production as common
 def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--variant", choices=("one_block", "multiblock"), required=True)
-    parser.add_argument("--m", type=int, choices=(1, 2, 4, 8, 16), default=1)
+    parser.add_argument(
+        "--m", type=int, choices=(1, 2, 4, 8, 16, 32, 128, 512, 4096), default=1
+    )
     parser.add_argument("--idle-samples", type=int, default=3)
     parser.add_argument("--idle-interval", type=float, default=0.5)
     parser.add_argument("--idle-memory-mib", type=int, default=4)
@@ -46,7 +48,7 @@ def _run(args: argparse.Namespace) -> None:
 
     def one_block():
         return qvq_cuda_hadamard(
-            x, pre_scale=pre_scale, scale_mode=2, pad_to_16=True
+            x, pre_scale=pre_scale, scale_mode=2, pad_to_16=args.m <= 16
         )
 
     def multiblock():
@@ -57,7 +59,9 @@ def _run(args: argparse.Namespace) -> None:
     expected = one_block()
     candidate = multiblock()
     torch.cuda.synchronize()
-    if not torch.equal(expected.view(torch.int16), candidate.view(torch.int16)):
+    if not torch.equal(
+        expected.view(torch.int16), candidate[: args.m].view(torch.int16)
+    ) or torch.count_nonzero(candidate[args.m:]):
         raise RuntimeError("Phase-26 profiler controls are not bit-exact")
     call = multiblock if args.variant == "multiblock" else one_block
     for _ in range(20):
@@ -67,7 +71,8 @@ def _run(args: argparse.Namespace) -> None:
     output = call()
     torch.cuda.synchronize()
     torch.cuda.cudart().cudaProfilerStop()
-    if not torch.equal(output.view(torch.int16), expected.view(torch.int16)):
+    checked = output if args.variant == "one_block" else output[: args.m]
+    if not torch.equal(checked.view(torch.int16), expected.view(torch.int16)):
         raise RuntimeError("profiled Phase-26 output changed")
     print(
         f"profiled variant={args.variant} M={args.m} exact=True "
