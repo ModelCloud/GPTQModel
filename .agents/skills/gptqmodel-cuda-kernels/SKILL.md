@@ -124,6 +124,39 @@ A compilation-only result must be labeled compilation-only. A passing kernel uni
 
 Put reproducible benchmarks in `scripts/`. Warm up compilation and steady-state launches, synchronize correctly or use CUDA events, report distribution statistics rather than one timing, and compare against both the reference and the nearest production kernel. Include shapes, tokens/batch regime, dtype, quantization config, GPU properties, software stack, latency, throughput, and memory. Present the complete result table in ASCII.
 
+## Audit generated instructions after every kernel commit
+
+Every commit or named phase that can change generated GPU instructions requires
+a matched generated-code audit on the target GPU. This includes source changes,
+template/specialization changes, launch geometry, compiler flags, and constants
+that affect unrolling or control flow.
+
+1. Profile the affected steady-state kernel with Nsight Compute or an equivalent
+   profiler that reports executed instructions. Bind the report to the exact
+   committed revision, binary/JIT fingerprint, shape, dtype, rate, and launch.
+2. Export and inspect source-correlated SASS. Compare with the preceding committed
+   implementation at an identical workload; source-level operation counts are
+   not evidence of generated instruction reduction.
+3. Perform an explicit math/algebra and movement review against the new hot SASS:
+   fold equivalent expressions, eliminate common subexpressions, deduplicate
+   decode/address work, reuse values across consumers, and remove redundant
+   masks, shifts, conversions, permutations, and store/load round trips.
+4. Check for compiler regressions even when the source looks simpler. A new
+   compilation can reintroduce opcode families removed by an earlier phase or
+   exchange fewer instructions for more registers, spills, bank conflicts,
+   barriers, dependency latency, or scheduler stalls.
+5. Record before/after executed instructions and dominant opcode families,
+   registers, spills/local memory, shared-memory conflicts, occupancy, scheduler
+   eligibility, dominant stalls, achieved memory/compute throughput, exact
+   commands, and report paths.
+6. Re-run numerical correctness and warmed CUDA-event end-to-end timing after the
+   profiler capture. Promote only when those gates pass; an instruction-count win
+   alone is not a latency win.
+
+If the target GPU or instruction profiler is unavailable, mark the result
+compilation-only. Do not describe the commit/phase as complete or as a kernel
+performance win until this audit can run.
+
 ## Reference: modern CUDA SIMT and warp specialization
 
 Modern CUDA still issues one common instruction to active threads in a warp, but the classic “all 32 threads execute exactly the same instruction at the same time” mental model is incomplete.

@@ -31,3 +31,15 @@ Inspect `gptqmodel/utils/marlin.py`, `gptqmodel/utils/grasshopper.py`, and their
 4. Separate decode-like small-M and prefill-like larger-M cases.
 5. Compare matched outputs and configs; never compare different precision, layout, or effective work without labeling it.
 6. Inspect occupancy, memory traffic, and instruction mix only after end-to-end timing identifies the bottleneck.
+7. For each commit/phase that changes generated GPU instructions, capture the
+   affected kernel from that exact committed revision with Nsight Compute (or an
+   equivalent executed-instruction profiler) and export source-correlated SASS.
+8. Compare against the preceding committed binary at the same workload. Audit
+   math/algebra and data movement for folding, common-subexpression elimination,
+   deduplicated decode/address generation, value reuse, and redundant
+   mask/shift/conversion/permutation/store-load sequences. Recheck opcode
+   families removed in earlier phases because compiler changes can reintroduce
+   them.
+9. Record instruction/opcode deltas, registers, spills, bank conflicts,
+   occupancy, scheduler/stalls, exact revisions and report paths; then repeat
+   correctness and warmed CUDA-event timing before promotion.

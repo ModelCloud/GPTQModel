@@ -1429,8 +1429,8 @@ def qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
         or pre_scale.numel() != 8192
     ):
         raise ValueError("fused QVQ recovery/precondition requires contiguous 2D N=8192 tensors")
-    if not 0 < input0.shape[0] <= 16:
-        raise ValueError("fused QVQ recovery/precondition requires one through sixteen rows")
+    if not 0 < input0.shape[0] <= 4096:
+        raise ValueError("fused QVQ recovery/precondition requires one through 4096 rows")
     if scale_mode not in (3, 4):
         raise ValueError("fused QVQ recovery scale_mode must be 3 or 4")
     if not isinstance(pad_to_16, bool):
@@ -1443,6 +1443,12 @@ def qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
         raise TypeError("fused QVQ recovery packed_gate_up must be a bool")
     if packed_gate_up and (not pair_tiles or not bounded_rounding):
         raise ValueError("fused QVQ recovery packed_gate_up requires paired bounded rounding")
+    if input0.shape[0] > 16 and (
+        pad_to_16 or pair_tiles or bounded_rounding or packed_gate_up
+    ):
+        raise ValueError(
+            "large-M fused QVQ recovery requires unpadded, unpaired execution"
+        )
     for name, tensor in (
         ("post_scale0", post_scale0),
         ("post_scale1", post_scale1),

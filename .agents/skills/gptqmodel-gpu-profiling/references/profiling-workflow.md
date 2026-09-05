@@ -56,3 +56,15 @@ Use this workflow after Nsight Systems has identified a custom CUDA kernel and a
 7. Gate production acceptance separately with warmed CUDA-event timing and numerical/model-quality tests. An exact instruction reduction is useful evidence even when sub-microsecond event timing is noisy; record both facts without presenting profiler duration as application speedup.
 
 Do not infer a fusion opportunity solely from adjacent source expressions. The proposed ownership and routing must cost less than the work removed; fixed warp transposes and gathers can dominate an otherwise cheaper decoder.
+
+### Per-commit kernel audit invariant
+
+Repeat this workflow after every committed phase that can change generated GPU
+instructions, not only after large source rewrites. Template selection, constants,
+launch geometry, compiler flags, or a nearby helper can change SASS and can
+reintroduce address, mask, shift, conversion, permutation, or synchronization
+work previously removed. Always compare the exact new committed binary with the
+preceding committed binary at a matched workload and revisit algebraic folding,
+common-subexpression elimination, decode/address deduplication, and value reuse.
+If the target GPU or executed-instruction profiler is unavailable, report
+compilation-only status and defer performance promotion.

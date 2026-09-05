@@ -1294,6 +1294,64 @@ def test_qvq_cuda_bounded_recovery_rounding_preserves_high_magnitude_fallback():
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
 
+@pytest.mark.parametrize("m", (32, 512))
+def test_qvq_cuda_large_m_fused_recovery_to_precondition_is_exact_and_graph_safe(m):
+    if torch.cuda.get_device_capability()[0] != 9:
+        pytest.skip("large-M fused recovery/precondition requires Hopper")
+    n = 8192
+    generator = torch.Generator(device="cuda").manual_seed(20260904 + m)
+    input0 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    input1 = torch.randn((m, n), generator=generator, device="cuda") * 20
+    scale0 = torch.randn((n,), generator=generator, device="cuda")
+    scale1 = torch.randn((n,), generator=generator, device="cuda")
+    bias0 = torch.randn((n,), generator=generator, device="cuda")
+    pre_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    gate, up = qvq_cuda_hadamard_pair_fp32_to_fp16_multiblock(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        bias0=bias0,
+        scale_mode=3,
+        warp_low=True,
+    )
+    expected = qvq_cuda_swiglu_precondition_multiblock(
+        gate,
+        up,
+        pre_scale,
+        half2_high=True,
+        fuse_silu=True,
+        half2_low=True,
+    )
+    actual = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+        input0,
+        input1,
+        post_scale0=scale0,
+        post_scale1=scale1,
+        bias0=bias0,
+        pre_scale=pre_scale,
+        scale_mode=3,
+    )
+    assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_pair_swiglu_precondition_multiblock(
+            input0,
+            input1,
+            post_scale0=scale0,
+            post_scale1=scale1,
+            bias0=bias0,
+            pre_scale=pre_scale,
+            scale_mode=3,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
+
+
 @pytest.mark.parametrize("scale_mode", (3, 4))
 @pytest.mark.parametrize("with_bias", (False, True))
 def test_qvq_cuda_packed_gate_up_recovery_is_bit_exact_and_graph_stable(

@@ -114,6 +114,22 @@ Compare exact rendered prompts and input IDs as well as aggregate scores.
     propagated final-logit KL and Top-K agreement improve materially, remain finite, and pass the predeclared
     uncertainty/guardrail policy. Do not trade demonstrated final-model recovery for a lower local error solely to
     make the proxy look better.
+11. Treat generated GPU code as a per-commit deliverable. After every commit or
+    experimental phase that can change GPU instructions (CUDA/C++, Triton,
+    CUTLASS, templates, launch geometry, compiler flags, or relevant constants),
+    capture the affected kernel with Nsight Compute or an equivalent executed
+    instruction profiler and inspect source-correlated SASS. Compare against the
+    preceding committed kernel at the same shape/configuration, then perform an
+    explicit math/algebra and data-movement pass for folding, common-subexpression
+    elimination, deduplication, address reuse, and removal of redundant
+    masks/shifts/conversions/permutations. Compiler output may reintroduce work
+    removed in an earlier phase, so do not assume a source-level simplification
+    survived compilation. Record total/opcode deltas, registers, spills, shared
+    conflicts, occupancy, scheduler/stall changes, profiler artifact paths, and
+    the exact source revisions. Re-run correctness and warmed CUDA-event timing
+    after the profile. If target-hardware profiling is unavailable, label the
+    result compilation-only and do not call the phase complete or promote it as a
+    kernel performance win.
 
 ## Typical checks
 
