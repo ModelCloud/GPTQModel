@@ -22,7 +22,7 @@ from scripts import benchmark_qvq_a41_phase4_production as common
 from scripts import benchmark_qvq_hopper_large_m as large_m
 
 RATES = (2.0, 2.5, 3.0, 3.5)
-M_VALUES = (32, 64, 128, 256, 512, 1024, 2048, 4096, 8192)
+M_VALUES = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384)
 HIDDEN = 2048
 INTERMEDIATE = 8192
 SOURCE_PATHS = (
@@ -59,8 +59,8 @@ def _args() -> argparse.Namespace:
     args = parser.parse_args()
     if any(rate not in RATES for rate in args.rates):
         parser.error("rates must be W2, W2.5, W3, or W3.5")
-    if any(m < 17 for m in args.m_values):
-        parser.error("large-M MLP rows must be at least 17")
+    if any(m < 1 or m > 16384 for m in args.m_values):
+        parser.error("MLP rows must be in [1, 16384]")
     if min(args.warmup, args.samples, args.replays_per_sample) <= 0:
         parser.error("timing counts must be positive")
     return args

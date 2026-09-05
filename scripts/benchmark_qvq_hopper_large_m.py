@@ -25,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts import benchmark_qvq_a41_phase4_production as common
 
 RATES = (2.0, 2.5, 3.0, 3.5)
-M_VALUES = (16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192)
+M_VALUES = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384)
 SOURCE_PATHS = (
     Path("gptqmodel/nn_modules/qlinear/qvq.py"),
     Path("gptqmodel/nn_modules/qvq_grouped_runtime.py"),
@@ -64,8 +64,8 @@ def _args() -> argparse.Namespace:
     args = parser.parse_args()
     if any(rate not in RATES for rate in args.rates):
         parser.error("rates must be W2, W2.5, W3, or W3.5")
-    if any(value < 1 or value > 8192 for value in args.m_values):
-        parser.error("M must be in [1, 8192]")
+    if any(value < 1 or value > 16384 for value in args.m_values):
+        parser.error("M must be in [1, 16384]")
     if min(args.warmup, args.samples, args.replays_per_sample) <= 0:
         parser.error("timing counts must be positive")
     if args.idle_samples < 3 or args.idle_interval < 0 or args.idle_memory_mib < 0:

@@ -462,7 +462,92 @@ pair butterflies.  This targets arithmetic and loop-control work together;
 the rejected Phase-3 coordinate specialization showed that prologue-only
 instruction removal is insufficient.
 
-## Phase 5: on-chip FP8 execution
+## Phase 5: explicit half2 transform ownership
+
+Phase 4's CUDA used scalar `half` source expressions.  Although the compiler
+emitted `HADD2` in parts of the butterflies, it retained scalar control,
+addressing, and shared-memory traffic around those operations.  Phase 5 makes
+the packed independence explicit:
+
+```text
+pair p = (value[2p], value[2p+1])
+
+bit 1:  one lane-local add/sub inside p
+bits >= 2:
+        p' = p xor (bit / 2)
+        p_low  = half2_add(p, p')
+        p_high = half2_sub(p, p')
+```
+
+The two lanes never mix after the bit-1 butterfly.  Thus each `half2`
+instruction executes two independent scalar FP16 butterflies in the original
+ascending order and with the same FP16 rounding after every add/subtract.  The
+K-axis and child-local N-axis transforms both use this ownership.  Shared
+storage is padded once per 16 pairs rather than once per 32 scalar halves.
+
+The focused test constructs an independent scalar-FP16 Hadamard reference and
+requires byte-exact E4M3 output for W2, W2.5, W3, and W3.5.  Repeated CUDA Graph
+replay is also byte exact, and full-runtime output remains inside the dense-P32
+error gate.
+
+### Physical-H100 Phase-5 result
+
+The committed-SHA run used 20 warmups, 31 CUDA-event samples, and 10 CUDA Graph
+replays per sample at `ab7b8252`.  `Better than last` compares with the
+committed Phase-4 matrix.
+
+| Rate | M x K x aggregate N | Phase-5 us | vs Phase 4 | vs Marlin W4 | vs Machete W4 | Better than last | Max error |
+| ---: | ---: | ---: | ---: | ---: | ---: | :---: | ---: |
+| W2 | 16384 x 2048 x 3072 | 457.568 | 1.063x | 1.355x | 1.002x | Yes | 5.954e-4 |
+| W2.5 | 16384 x 2048 x 3072 | 457.453 | 1.067x | 1.355x | 1.002x | Yes | 5.908e-4 |
+| W3 | 16384 x 2048 x 3072 | 459.219 | 1.060x | 1.350x | 0.998x | Yes | 6.234e-4 |
+| W3.5 | 16384 x 2048 x 3072 | 460.918 | 1.054x | 1.345x | 0.994x | Yes | 5.909e-4 |
+
+The geometric speedup is `1.0608x` versus Phase 4, `1.3513x` versus Marlin W4,
+and `0.9989x` versus Machete W4.  W2/W2.5 narrowly beat Machete; W3/W3.5 are
+within 0.6%.  Explicit scratch remains 42 MiB and retained state remains two
+FP32 scale scalars.
+
+### Phase-5 NCU, SASS, and algebra audit
+
+Nsight Compute 2026.2.1 captured the exact committed W3/M16384 kernels with 19
+replay passes and targeted `SpeedOfLight`, `LaunchStats`, `Occupancy`,
+`SchedulerStats`, `WarpStateStats`, `InstructionStats`, and
+`MemoryWorkloadAnalysis` sections.
+
+| Stage | Phase-4 instructions | Phase-5 instructions | Change | Phase-4 NCU us | Phase-5 NCU us | Registers | Shared memory | Spills |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|
+| K-axis FP16 fold | 62.816M | 40.649M | -35.3% | 77.536 | 52.800 | 30/thread | 4.35 KiB | 0 |
+| N-axis FP16 fold + E4M3 | 75.296M | 56.691M | -24.7% | 182.144 | 176.190 | 31/thread | 4.35 KiB | 0 |
+
+For K, paired ownership halves shared loads/stores from 3.342M each to 1.671M
+each and reduces `HADD2` from 3.342M to 1.130M; 0.737M native `HFMA2`
+instructions replace scalar scale plumbing.  Branches fall from 7.471M to
+4.915M and address `LEA` from 7.766M to 4.030M.
+
+For N, shared loads/stores fall from 2.720M each to 1.360M each and `HADD2`
+from 3.146M to 1.352M.  The compiler emits 0.598M `HFMA2`.  However, coordinate
+recovery becomes the next visible algebraic cost: `IMAD` increases from 6.065M
+to 7.343M and `SHF` from 0.985M to 2.164M.  Scheduler eligibility also falls
+from 1.532 to 1.06 warps/cycle while issued-instruction latency rises from
+32.34 to 39.43 cycles.  This explains why the N kernel's 24.7% instruction
+reduction yields only a 3.3% profiled-duration reduction.
+
+The next folding/deduplication experiment should therefore avoid scalar pair
+coordinate reconstruction in the N stage—either a fixed child-local launch
+geometry or a direct lower-pair thread mapping—while preserving CTA locality.
+The earlier 2-D-grid experiment showed that fewer coordinate operations can
+still lose when block scheduling changes, so any rewrite needs matched event
+timing and a fresh generated-SASS audit.
+
+Reports are outside Git at:
+
+```text
+/root/qvq-profiler-artifacts/prefill-phase5/w3_m16384_half2_k_ab7b8252.ncu-rep
+/root/qvq-profiler-artifacts/prefill-phase5/w3_m16384_half2_n_ab7b8252.ncu-rep
+```
+
+## Phase 6: on-chip FP8 execution
 
 After Phase 3 establishes tile ownership and synchronization, replace the
 decoded shared FP16 weight tile with E4M3 and convert each activation tile to
@@ -484,7 +569,7 @@ larger row tile or more resident CTAs.  It is promoted only if the complete
 operation beats Phase 3, not merely if its WGMMA instruction has higher peak
 throughput.
 
-## Phase 6: grouped QKV recovery and launch removal
+## Phase 7: grouped QKV recovery and launch removal
 
 Once a native inner kernel wins, fuse only boundaries shown material by an
 Nsight Systems trace:
@@ -498,7 +583,7 @@ This phase must keep the group descriptor role-blind: child widths, bank IDs,
 split policy, and output-recovery flags come from R0 descriptors rather than
 hard-coded Q/K/V semantics.
 
-## Phase 6: shape coverage and production policy
+## Phase 8: shape coverage and production policy
 
 Promote measured policies for:
 
