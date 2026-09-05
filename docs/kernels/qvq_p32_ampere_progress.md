@@ -3901,7 +3901,8 @@ found in the SSA/data-movement review.
 ## v83 selective stage-4 eight-row reuse
 
 After v82 merged in PR #117, the branch was refreshed to `origin/main` at
-`0c6b8a38`.  The next screen tested the remaining large-M stage-4 gap.  An
+`9dcaf07e` (the benchmark control was built before the unrelated Hopper merge,
+which does not touch this Ampere source).  The next screen tested the remaining large-M stage-4 gap.  An
 unconditional eight-row policy regressed W2 (transition bits 4) by 2--3% on
 wide N, so that probe was rejected.  The retained dispatch instead selects
 eight-row reuse only when `TransitionBits>=5`, `N!=1024`, `M=4096`, and
@@ -3931,6 +3932,43 @@ to 1,704 while HMMA/LDSM/STG scale 2x with the doubled row work.  Decode and
 address families stay nearly flat (IMAD 155->158, SHF 158->161,
 LOP3 164->171, LEA 55->58); no new conversion, permutation, redundant
 address expression, or spill was found in the SSA/data-movement pass.
+
+## v84 selective stage-4 reuse at M=2048
+
+With the branch merged to the fetched `origin/main` tip `9dcaf07e`, the next
+screen extended the v83 high-rate stage-4 policy from `M=4096` to `M>=2048`.
+The broad probe stayed exact, but its `W3.5, N=6144, M=2048` case was 8--9%
+slower because the eight-row specialization uses 124 registers/thread.  The
+automatic policy therefore keeps that one shape on the four-row control:
+`TransitionBits==7 && M==2048 && N==6144` is explicitly excluded.  W2 remains
+on the four-row path for all wide N.
+
+Matched A100 medians (three runs, 10 warmups/50 iterations) for the affected
+`M=2048` wide-N matrix show 14 positive cases and one neutral control after
+that guard.  The geometric mean is 1.072x versus the retained v83 schedule
+(about 7.2% faster); per-rate means are 1.078x, 1.072x, and 1.079x for
+W2.5/W3/W3.5.  The strongest stable gains are 9--11% at `N=10240` and
+`N=12288`.  The untouched `M=512/1024` routes remain on their prior plans.
+
+The split-8 randomized comparison is bit-for-bit exact for every affected
+wide-N shape and transition width.  The contract smoke test and all 65
+Ampere tests pass.
+
+The matched NCU captures are `/tmp/v84_ncu_candidate_m2048.csv` and
+`/tmp/v84_ncu_baseline_m2048.csv` for `N=5120,M=2048,stage=4,bits=5`.
+Eight-row reuse halves the grid from 2,560 to 1,280 CTAs and lowers executed
+instructions from 681,592,320 to 390,407,680.  Profiled duration falls from
+3,626,560 ns to 3,587,360 ns; memory throughput is 88.43% versus 95.52%,
+and compute throughput is 18.06% versus 31.20%.  Both variants report zero
+local/shared spill requests.  The candidate uses 126 registers and 35,360 B
+static shared memory; the four-row control uses 64 registers and 18,976 B.
+
+The source-correlated SASS extracts are `/tmp/v84_candidate_stage4_exact.txt`
+and `/tmp/v84_baseline_stage4_exact.txt`.  Static instructions rise from
+1,640 to 1,704 per CTA while HMMA/LDSM/STG scale with the doubled row work;
+IMAD 155->158, SHF 158->161, LOP3 164->171, and LEA 55->58.  The
+SSA/algebraic/data-movement pass found no redundant mask, shift, conversion,
+permutation, or address expression, and no spill was introduced.
 
 ## Reproduction
 
