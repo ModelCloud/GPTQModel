@@ -451,6 +451,30 @@ def _dedupe_path_strings(paths: Sequence[str]) -> list[str]:
     return deduped
 
 
+# Directory that contains the ``gptqmodel`` package.  In editable installs this
+# is the repository root; in wheel installs it is the site-packages root.
+# Fingerprint paths below this root are emitted as relative POSIX strings so the
+# cache key does not depend on checkout location or unrelated sibling files.
+_FINGERPRINT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _fingerprint_path_key(path: Path) -> str:
+    """Return a stable, location-independent key for *path*.
+
+    Paths inside the package/project root are returned relative to that root so
+    the cache key is not tied to where the repository is cloned or installed.
+    Paths outside the project root (system CUDA headers, third-party wheels,
+    etc.) are kept absolute because they are toolchain/dependency inputs.
+    """
+
+    normalized = path.expanduser().resolve(strict=False)
+    try:
+        relative = normalized.relative_to(_FINGERPRINT_ROOT)
+    except ValueError:
+        return str(normalized)
+    return relative.as_posix()
+
+
 def detected_cuda_wheel_include_paths() -> list[str]:
     """Discover CUDA developer headers shipped via NVIDIA Python wheels."""
 
@@ -907,7 +931,7 @@ class TorchOpsJitExtension:
             if normalized in visited:
                 return
             visited.add(normalized)
-            payload.append(str(normalized))
+            payload.append(_fingerprint_path_key(normalized))
 
             if not normalized.exists():
                 payload.append("missing")
@@ -923,14 +947,21 @@ class TorchOpsJitExtension:
 
             source_text = source_bytes.decode("utf-8", errors="ignore")
             for delimiter, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
+                # Only quoted includes are part of the extension's source graph.
+                # Angle-bracket includes name system/dependency headers whose
+                # precise content is captured by the ABI/toolchain flags in the
+                # cache key; resolving them against local search roots would let
+                # unrelated sibling files (e.g. a new kernel dropping a ``torch/``
+                # header) leak into this extension's fingerprint.
+                if delimiter != '"':
+                    continue
                 included_path = _resolve_local_include_path(
                     include_name,
                     including_path=normalized,
                     include_search_roots=include_search_roots,
                 )
                 if included_path is None:
-                    if delimiter == '"':
-                        payload.append(f"missing_include={normalized}:{include_name}")
+                    payload.append(f"missing_include={_fingerprint_path_key(normalized)}:{include_name}")
                     continue
                 visit(included_path)
 
@@ -954,7 +985,11 @@ class TorchOpsJitExtension:
             except OSError:
                 return
             texts.append((normalized, source_text))
-            for _, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
+            for delimiter, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
+                # ABI detection only needs the extension's own source graph.
+                # System headers use angle brackets and are covered by ABI/toolchain flags.
+                if delimiter != '"':
+                    continue
                 included_path = _resolve_local_include_path(
                     include_name,
                     including_path=normalized,
@@ -979,7 +1014,7 @@ class TorchOpsJitExtension:
             for item in self._source_texts(source, include_paths)
         ]
         source_key = tuple(
-            (str(path), hashlib.sha256(text.encode("utf-8")).hexdigest())
+            (_fingerprint_path_key(path), hashlib.sha256(text.encode("utf-8")).hexdigest())
             for path, text in source_texts
         )
         cache_key = (source_key, tuple(include_paths))
@@ -1079,7 +1114,7 @@ class TorchOpsJitExtension:
 
         payload.extend(extra_cflags)
         payload.extend(_cuda_cache_relevant_flags(extra_cuda_cflags))
-        payload.extend(include_paths)
+        payload.extend(_fingerprint_path_key(Path(include_path)) for include_path in include_paths)
         payload.extend(self._resolve_sequence(self.extra_ldflags))
         digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
         return digest[:16]
