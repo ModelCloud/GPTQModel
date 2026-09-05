@@ -1065,7 +1065,9 @@ def qvq_p32_window_wgmma_single_large_m_packed(
         plan=plan,
     )
     rows = int(input.shape[0])
-    if rows >= 64 and rows % 64 == 0:
+    if split_count == 1 and rows >= 512 and rows % 128 == 0:
+        output = qvq_p32_window_wgmma_grouped_reuse8_packed(input, payload, levels)
+    elif rows >= 64 and rows % 64 == 0:
         output = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
     elif rows >= 32 and rows % 32 == 0:
         output = qvq_p32_window_wgmma_grouped_reuse2_packed(input, payload, levels)
