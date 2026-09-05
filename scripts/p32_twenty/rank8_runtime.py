@@ -70,36 +70,8 @@ def main():
     from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
     from gptqmodel.utils.qvq_ampere_cuda import qvq_p32_window_ampere
     from scripts.p32_twenty.recovered_linear import RecoveredLinear
+    from scripts.p32_twenty.recovery_epilogue import expansion_add
     from scripts.p32_twenty.scorecard import layer_metrics
-
-    @triton.jit
-    def expansion_add(
-        H, B, BASE, OUT, M: tl.constexpr, N: tl.constexpr, R: tl.constexpr
-    ):
-        rows = tl.program_id(0) * 16 + tl.arange(0, 16)
-        cols = tl.program_id(1) * 32 + tl.arange(0, 32)
-        rank = tl.arange(0, 16)
-        h = tl.load(
-            H + rows[:, None] * R + rank[None, :],
-            (rows[:, None] < M) & (rank[None, :] < R),
-            0,
-        )
-        b = tl.load(
-            B + rank[:, None] * N + cols[None, :],
-            (rank[:, None] < R) & (cols[None, :] < N),
-            0,
-        )
-        correction = tl.dot(h, b, out_dtype=tl.float32).to(tl.float16).to(tl.float32)
-        base = tl.load(
-            BASE + rows[:, None] * N + cols[None, :],
-            (rows[:, None] < M) & (cols[None, :] < N),
-            0,
-        ).to(tl.float32)
-        tl.store(
-            OUT + rows[:, None] * N + cols[None, :],
-            base + correction,
-            (rows[:, None] < M) & (cols[None, :] < N),
-        )
 
     @triton.jit
     def project_blockwise(
@@ -215,7 +187,8 @@ def main():
         )
         return out
 
-    variants = {"window": window, "separate": op, "fused_expansion": fused}
+    integrated = RecoveredLinear(args.export, fused_expansion=True)
+    variants = {"window": window, "separate": op, "fused_expansion": fused, "integrated": integrated}
     for promotion in [16, 32, 64, 128, 256]:
         variants[f"block_fp32_{promotion}"] = lambda x, promotion=promotion: fused(
             x, promotion

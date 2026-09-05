@@ -1,0 +1,70 @@
+{
+  "scope": "Experimental integration validation pending; not a fused native GEMM",
+  "jobs": [
+    {
+      "id": "fused-model-runtime-validation",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/rank8_runtime.py",
+        "--uuid",
+        "{uuid}",
+        "--export",
+        "/root/p32-rank8-targeted/tail-alpha1/rank8-tail-float16.pt",
+        "--output",
+        "/root/p32-fused-model/runtime.json"
+      ],
+      "result": "/root/p32-fused-model/runtime.json",
+      "log": "/root/p32-fused-model/runtime.log"
+    },
+    {
+      "id": "fused-model-c4",
+      "requires_complete": [
+        "/root/p32-fused-model/runtime.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-rank8-targeted/tail-alpha1/rank8-tail-float16.pt",
+        "--recovered-fused-expansion",
+        "--output",
+        "/root/p32-fused-model/c4"
+      ],
+      "result": "/root/p32-fused-model/c4/report.json",
+      "log": "/root/p32-fused-model/c4.log"
+    },
+    {
+      "id": "fused-model-arc",
+      "requires_complete": [
+        "/root/p32-fused-model/runtime.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-rank8-targeted/tail-alpha1/rank8-tail-float16.pt",
+        "--recovered-fused-expansion",
+        "--output",
+        "/root/p32-fused-model/arc",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172"
+      ],
+      "result": "/root/p32-fused-model/arc/report.json",
+      "log": "/root/p32-fused-model/arc.log"
+    }
+  ]
+}

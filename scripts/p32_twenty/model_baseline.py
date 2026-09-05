@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--capture-tokens", type=int, default=2048)
     parser.add_argument("--capture-layers", nargs="+", type=int, default=[0, 1])
     parser.add_argument("--capture-suffix")
+    parser.add_argument("--recovered-fused-expansion", action="store_true")
     parser.add_argument("--recovered-export", type=Path, action="append", default=[])
     parser.add_argument("--task", choices=("arc_challenge", "gsm8k_cot"))
     parser.add_argument("--task-max-rows", type=int, default=128)
@@ -262,7 +263,9 @@ def main():
             )
         replacements = []
         for path in args.recovered_export:
-            candidate = RecoveredLinear(path)
+            candidate = RecoveredLinear(
+                path, fused_expansion=args.recovered_fused_expansion
+            )
             name = candidate.source_module
             original = model.get_submodule(name)
             if (original.in_features, original.out_features) != (
@@ -279,6 +282,7 @@ def main():
                     "factor_a_dtype": str(candidate.a.dtype),
                     "factor_b_dtype": str(candidate.b.dtype),
                     "logical_rank": candidate.a.shape[1],
+                    "fused_expansion_eligible": candidate.fused_expansion,
                     "sparse_nnz": candidate.sparse_nnz,
                     "bytes": path.stat().st_size,
                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),

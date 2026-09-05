@@ -9,7 +9,7 @@ import torchao  # noqa: F401 -- register exported tensor classes
 
 
 class RecoveredLinear(torch.nn.Module):
-    def __init__(self, path, device="cuda"):
+    def __init__(self, path, device="cuda", fused_expansion=False):
         super().__init__()
         bundle = torch.load(path, map_location="cpu", weights_only=False)
         self.in_features = bundle["in_features"]
@@ -44,10 +44,51 @@ class RecoveredLinear(torch.nn.Module):
             bundle.get("sparse_values", torch.empty(0, dtype=torch.float32)).to(device),
         )
         self.sparse_nnz = self.sparse_values.numel()
+        self.fused_expansion = bool(
+            fused_expansion
+            and self.a.is_cuda
+            and torch.cuda.get_device_capability(self.a.device) == (8, 0)
+            and self.a.dtype == self.b.dtype == torch.float16
+            and self.a.shape[1] in (8, 12, 16)
+            and self.a.is_contiguous()
+            and self.b.is_contiguous()
+            and not self.sparse_nnz
+        )
         self.eval()
 
     def forward(self, x):
         shape = x.shape[:-1]
+        if (
+            self.fused_expansion
+            and x.dtype == torch.float16
+            and x.is_cuda
+            and x.device == self.a.device
+            and x.numel()
+            and not torch.is_grad_enabled()
+        ):
+            import triton
+
+            from scripts.p32_twenty.recovery_epilogue import expansion_add
+
+            flat = x.reshape(-1, self.in_features).contiguous()
+            base = self.base(flat.bfloat16())
+            hidden = flat @ self.a
+            out = torch.empty(
+                (len(flat), self.out_features), device=x.device, dtype=x.dtype
+            )
+            expansion_add[
+                (triton.cdiv(len(flat), 16), triton.cdiv(self.out_features, 32))
+            ](
+                hidden,
+                self.b,
+                base,
+                out,
+                len(flat),
+                self.out_features,
+                self.a.shape[1],
+                num_warps=4,
+            )
+            return out.reshape(*shape, self.out_features)
         xf = x.reshape(-1, self.in_features).float()
         y = self.base(xf.bfloat16()).float()
         if self.a.shape[1]:
