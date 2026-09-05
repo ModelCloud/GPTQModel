@@ -69,7 +69,7 @@ def test_qvq_p32_fp8_dispatch_falls_back_in_auto_and_rejects_in_require_mode():
     transformed = torch.randn((3, in_features), generator=generator, dtype=torch.float16) * 0.05
     quantized, scale = quantize_qvq_fp8_activation(transformed)
     deployed = dequantize_qvq_fp8_activation(quantized, scale, dtype=torch.float32)
-    dense = reconstruct_qvq_inner_weight(
+    canonical_inner = reconstruct_qvq_inner_weight(
         planar,
         bits=bits,
         in_features=in_features,
@@ -78,9 +78,14 @@ def test_qvq_p32_fp8_dispatch_falls_back_in_auto_and_rejects_in_require_mode():
         v2b2_p32=True,
         bank_alt_id=bank_alt_id,
     )
+    fp8_levels, level_scale = layer._prepare_hopper_fp8_levels(transformed.device)
+    canonical_levels = pgc16_levels_for_version(layer.codebook_version)
+    deployed_inner = (fp8_levels.float() * level_scale)[
+        torch.searchsorted(canonical_levels, canonical_inner)
+    ]
 
     actual = layer._forward_pretransformed_compute_dtype(transformed, torch.float16)
-    torch.testing.assert_close(actual.float(), deployed @ dense, atol=2e-3, rtol=0.0)
+    torch.testing.assert_close(actual.float(), deployed @ deployed_inner, atol=2e-3, rtol=0.0)
     auto_telemetry = layer.qvq_fp8_kernel_telemetry(reset=True)
     assert auto_telemetry["requested"] == 1
     assert auto_telemetry["eligible"] == 0
