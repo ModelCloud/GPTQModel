@@ -2132,6 +2132,7 @@ def _batched_v2_banked_viterbi_quantize(
 
     native_cuda_dispatch = (
         sequences.device.type == "cuda"
+        and torch.version.hip is None
         and work_dtype == torch.float32
         and sequences.dtype == torch.float32
         and codebooks.dtype in (torch.float16, torch.float32)
@@ -2153,6 +2154,8 @@ def _batched_v2_banked_viterbi_quantize(
             guard_reason = f"codebook dtype `{codebooks.dtype}` is not supported by the native op"
         elif not sequences.is_contiguous() or not codebooks.is_contiguous():
             guard_reason = "the sequences or codebooks are not contiguous"
+        elif torch.version.hip is not None:
+            guard_reason = "the call runs on ROCm, not the native NVIDIA CUDA backend"
         else:
             guard_reason = "the CUDA device is below compute capability 8.0"
         reject_viterbi_pruning_fallback_if_strict(pruning_policy, reason=guard_reason)
