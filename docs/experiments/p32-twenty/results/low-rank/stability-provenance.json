@@ -1,0 +1,545 @@
+{
+  "scope": "Historical Fisher sampling audit; not accuracy results",
+  "subsets": [
+    {
+      "seed": 71,
+      "manifest": "/root/p32-stability/seed71/inputs32768.json",
+      "sha256": "797e17e3694c456da10966939bcde77e600800d410cffeb37e73be93075b2225",
+      "source_sha256": "5a2429da9754040e16baf47c569c14267b92126f37caafd4fafc8d5bfb5c3f39",
+      "union_indices": [
+        6191,
+        54,
+        4871,
+        158,
+        7391,
+        5331,
+        5397,
+        128,
+        318,
+        3375,
+        2483,
+        4469,
+        9380,
+        9913,
+        5116,
+        1567,
+        3114,
+        6842,
+        3844,
+        7392,
+        7903,
+        329,
+        817,
+        3414,
+        7777,
+        9084,
+        6210,
+        1430,
+        266,
+        7664,
+        4583,
+        7130,
+        9719,
+        9386,
+        5399,
+        591,
+        9090,
+        3115,
+        8379,
+        4968,
+        7691,
+        1776,
+        9176,
+        6845,
+        7810,
+        8040,
+        2783,
+        1187,
+        8293,
+        9889,
+        8738,
+        43,
+        1319,
+        5660,
+        7255,
+        2495,
+        9273,
+        1281,
+        641,
+        5839,
+        5281,
+        3149,
+        1551,
+        3280
+      ],
+      "tokens_per_document": 512,
+      "sizes": [
+        2048,
+        4096,
+        8192,
+        16384,
+        32768
+      ]
+    },
+    {
+      "seed": 72,
+      "manifest": "/root/p32-stability/seed72/inputs32768.json",
+      "sha256": "8f013059ed9422a6bcee495011f43b920e46f68694d61c56361448929e418c08",
+      "source_sha256": "5a2429da9754040e16baf47c569c14267b92126f37caafd4fafc8d5bfb5c3f39",
+      "union_indices": [
+        3836,
+        1732,
+        9297,
+        2386,
+        5574,
+        2582,
+        8586,
+        8293,
+        6103,
+        5339,
+        6673,
+        8995,
+        8187,
+        7129,
+        6191,
+        4804,
+        4181,
+        9010,
+        1394,
+        5110,
+        17,
+        8901,
+        9153,
+        4408,
+        10165,
+        5682,
+        10099,
+        7175,
+        4419,
+        4221,
+        3384,
+        2352,
+        3269,
+        4767,
+        67,
+        5046,
+        8180,
+        1339,
+        3181,
+        5071,
+        7284,
+        4424,
+        975,
+        7698,
+        4273,
+        653,
+        906,
+        9648,
+        6841,
+        4925,
+        5176,
+        114,
+        6377,
+        9245,
+        2914,
+        1190,
+        1743,
+        8636,
+        7142,
+        6221,
+        3168,
+        2947,
+        5894,
+        7541
+      ],
+      "tokens_per_document": 512,
+      "sizes": [
+        2048,
+        4096,
+        8192,
+        16384,
+        32768
+      ]
+    },
+    {
+      "seed": 73,
+      "manifest": "/root/p32-stability/seed73/inputs32768.json",
+      "sha256": "a3720c7f57871df786535e117b5fad0730d4a885629a22af10c1610e89146686",
+      "source_sha256": "5a2429da9754040e16baf47c569c14267b92126f37caafd4fafc8d5bfb5c3f39",
+      "union_indices": [
+        9251,
+        8647,
+        8607,
+        2691,
+        7475,
+        5144,
+        882,
+        169,
+        8738,
+        3966,
+        1885,
+        8251,
+        9627,
+        628,
+        3621,
+        8792,
+        8637,
+        9077,
+        7119,
+        5264,
+        10103,
+        5952,
+        9599,
+        5112,
+        2472,
+        111,
+        1442,
+        870,
+        7453,
+        3286,
+        9862,
+        71,
+        710,
+        2873,
+        131,
+        6889,
+        94,
+        1682,
+        6724,
+        6223,
+        3486,
+        2829,
+        8912,
+        1325,
+        8979,
+        499,
+        9421,
+        5128,
+        8232,
+        1883,
+        5524,
+        1124,
+        3322,
+        9314,
+        4105,
+        4658,
+        8312,
+        1236,
+        27,
+        9731,
+        5113,
+        5889,
+        3995,
+        902
+      ],
+      "tokens_per_document": 512,
+      "sizes": [
+        2048,
+        4096,
+        8192,
+        16384,
+        32768
+      ]
+    }
+  ],
+  "overlap": [
+    {
+      "seeds": [
+        71,
+        72
+      ],
+      "shared_documents": [
+        6191,
+        8293
+      ]
+    },
+    {
+      "seeds": [
+        71,
+        73
+      ],
+      "shared_documents": [
+        8738
+      ]
+    },
+    {
+      "seeds": [
+        72,
+        73
+      ],
+      "shared_documents": []
+    }
+  ],
+  "broader_replay_jobs": [
+    {
+      "id": "stability-broader-71-2048",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit2048/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed71/fit2048/report.json",
+        "--output",
+        "/root/p32-stability/seed71/fit2048/broader.json"
+      ],
+      "result": "/root/p32-stability/seed71/fit2048/broader.json",
+      "log": "/root/p32-stability/seed71/fit2048/broader.json.log"
+    },
+    {
+      "id": "stability-broader-71-4096",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit4096/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed71/fit4096/report.json",
+        "--output",
+        "/root/p32-stability/seed71/fit4096/broader.json"
+      ],
+      "result": "/root/p32-stability/seed71/fit4096/broader.json",
+      "log": "/root/p32-stability/seed71/fit4096/broader.json.log"
+    },
+    {
+      "id": "stability-broader-71-8192",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit8192/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed71/fit8192/report.json",
+        "--output",
+        "/root/p32-stability/seed71/fit8192/broader.json"
+      ],
+      "result": "/root/p32-stability/seed71/fit8192/broader.json",
+      "log": "/root/p32-stability/seed71/fit8192/broader.json.log"
+    },
+    {
+      "id": "stability-broader-71-16384",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit16384/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed71/fit16384/report.json",
+        "--output",
+        "/root/p32-stability/seed71/fit16384/broader.json"
+      ],
+      "result": "/root/p32-stability/seed71/fit16384/broader.json",
+      "log": "/root/p32-stability/seed71/fit16384/broader.json.log"
+    },
+    {
+      "id": "stability-broader-71-32768",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit32768/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed71/fit32768/report.json",
+        "--output",
+        "/root/p32-stability/seed71/fit32768/broader.json"
+      ],
+      "result": "/root/p32-stability/seed71/fit32768/broader.json",
+      "log": "/root/p32-stability/seed71/fit32768/broader.json.log"
+    },
+    {
+      "id": "stability-broader-72-2048",
+      "requires_complete": [
+        "/root/p32-stability/seed72/fit2048/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed72/fit2048/report.json",
+        "--output",
+        "/root/p32-stability/seed72/fit2048/broader.json"
+      ],
+      "result": "/root/p32-stability/seed72/fit2048/broader.json",
+      "log": "/root/p32-stability/seed72/fit2048/broader.json.log"
+    },
+    {
+      "id": "stability-broader-72-4096",
+      "requires_complete": [
+        "/root/p32-stability/seed72/fit4096/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed72/fit4096/report.json",
+        "--output",
+        "/root/p32-stability/seed72/fit4096/broader.json"
+      ],
+      "result": "/root/p32-stability/seed72/fit4096/broader.json",
+      "log": "/root/p32-stability/seed72/fit4096/broader.json.log"
+    },
+    {
+      "id": "stability-broader-72-8192",
+      "requires_complete": [
+        "/root/p32-stability/seed72/fit8192/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed72/fit8192/report.json",
+        "--output",
+        "/root/p32-stability/seed72/fit8192/broader.json"
+      ],
+      "result": "/root/p32-stability/seed72/fit8192/broader.json",
+      "log": "/root/p32-stability/seed72/fit8192/broader.json.log"
+    },
+    {
+      "id": "stability-broader-72-16384",
+      "requires_complete": [
+        "/root/p32-stability/seed72/fit16384/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed72/fit16384/report.json",
+        "--output",
+        "/root/p32-stability/seed72/fit16384/broader.json"
+      ],
+      "result": "/root/p32-stability/seed72/fit16384/broader.json",
+      "log": "/root/p32-stability/seed72/fit16384/broader.json.log"
+    },
+    {
+      "id": "stability-broader-72-32768",
+      "requires_complete": [
+        "/root/p32-stability/seed72/fit32768/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed72/fit32768/report.json",
+        "--output",
+        "/root/p32-stability/seed72/fit32768/broader.json"
+      ],
+      "result": "/root/p32-stability/seed72/fit32768/broader.json",
+      "log": "/root/p32-stability/seed72/fit32768/broader.json.log"
+    },
+    {
+      "id": "stability-broader-73-2048",
+      "requires_complete": [
+        "/root/p32-stability/seed73/fit2048/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed73/fit2048/report.json",
+        "--output",
+        "/root/p32-stability/seed73/fit2048/broader.json"
+      ],
+      "result": "/root/p32-stability/seed73/fit2048/broader.json",
+      "log": "/root/p32-stability/seed73/fit2048/broader.json.log"
+    },
+    {
+      "id": "stability-broader-73-4096",
+      "requires_complete": [
+        "/root/p32-stability/seed73/fit4096/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed73/fit4096/report.json",
+        "--output",
+        "/root/p32-stability/seed73/fit4096/broader.json"
+      ],
+      "result": "/root/p32-stability/seed73/fit4096/broader.json",
+      "log": "/root/p32-stability/seed73/fit4096/broader.json.log"
+    },
+    {
+      "id": "stability-broader-73-8192",
+      "requires_complete": [
+        "/root/p32-stability/seed73/fit8192/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed73/fit8192/report.json",
+        "--output",
+        "/root/p32-stability/seed73/fit8192/broader.json"
+      ],
+      "result": "/root/p32-stability/seed73/fit8192/broader.json",
+      "log": "/root/p32-stability/seed73/fit8192/broader.json.log"
+    },
+    {
+      "id": "stability-broader-73-16384",
+      "requires_complete": [
+        "/root/p32-stability/seed73/fit16384/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed73/fit16384/report.json",
+        "--output",
+        "/root/p32-stability/seed73/fit16384/broader.json"
+      ],
+      "result": "/root/p32-stability/seed73/fit16384/broader.json",
+      "log": "/root/p32-stability/seed73/fit16384/broader.json.log"
+    },
+    {
+      "id": "stability-broader-73-32768",
+      "requires_complete": [
+        "/root/p32-stability/seed73/fit32768/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-stability/seed73/fit32768/report.json",
+        "--output",
+        "/root/p32-stability/seed73/fit32768/broader.json"
+      ],
+      "result": "/root/p32-stability/seed73/fit32768/broader.json",
+      "log": "/root/p32-stability/seed73/fit32768/broader.json.log"
+    }
+  ]
+}
