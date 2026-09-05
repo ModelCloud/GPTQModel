@@ -28,9 +28,9 @@ model execution, FP32 factors, and CUDA accumulation.
 | Arm                        | Batch / AC  | Wall (s)  | CUDA (s)   | Throughput     | Peak VRAM GiB  |
 +----------------------------+-------------+-----------+------------+----------------+----------------+
 | merged main                | 1 / on      | 6.6012    | 6.1562     | 38.7806 tok/s | 51.73          |
-| optimized high-memory path | 4 / off     | 2.7333    | 2.5262     | 93.6613 tok/s | 63.00          |
+| optimized high-memory path | 4 / off     | 2.3199    | 2.1117     | 110.3517 tok/s | 63.00          |
 +----------------------------+-------------+-----------+------------+----------------+----------------+
-| Speedup / reduction        |             | 2.415x    | 2.437x     | 2.415x         | +11.27 GiB     |
+| Speedup / reduction        |             | 2.846x    | 2.915x     | 2.846x         | +11.27 GiB     |
 +----------------------------+-------------+-----------+------------+----------------+----------------+
 ```
 
@@ -54,11 +54,12 @@ python scripts/benchmark_qvq_yaqa_qwen38.py \
   --rows 4 --batch-size 4 --sequence-length 64 \
   --all-targets --layer-count 4 --arms streaming_256 \
   --no-activation-checkpointing \
-  --output /tmp/qvq_yaqa_speed2x_4layer_gpu_validate.json
+  --output /tmp/qvq_yaqa_speed2x_e8f163cd.json
 ```
 
 The benchmark's four-row population only permits batch 4. The lifecycle auto policy uses up to batch 16 when the
-configured calibration population is large enough.
+configured calibration population is large enough. A preceding candidate repeat measured 2.7333 seconds, so the
+observed end-to-end speedup range is 2.415x--2.846x; the slower repeat still clears the 2x target.
 
 ## Correctness
 
