@@ -112,3 +112,53 @@ scheduler readiness without giving up M128 decode reuse, preferably by
 sharing the same eight input tiles across more independent N64 consumer
 warpgroups. Any wider-CTA candidate must stay within H100 shared-memory and
 register limits and is rejected on spills or full-MLP regression.
+
+## Phase 2: coalesced reuse-8 accumulator stores
+
+The original reuse-8 implementation retained the generic RS-WGMMA scalar
+store mapping. Each consumer lane owns eight permuted FP32 accumulator values,
+so direct global stores produce nearly twice the ideal number of sectors. The
+reuse-4 kernel already had an exact shared-memory transpose, but its compile-
+time gate excluded `RowTilesPerCta == 8`.
+
+After the final WGMMA stage, the reuse-8 kernel now reclaims dead input TMA
+storage, scatters each 16x64 accumulator tile into canonical shared-memory
+order, and writes aligned `float4` vectors. The transpose changes no value or
+arithmetic order. W2.5 remains excluded because its measured decoder depth
+makes the extra barriers unprofitable.
+
+| Weight | MLP MKN (gate/up; down) | Reuse-8 | Coalesced | Speedup | vs merged main | vs Marlin W4 | vs Machete W4 | Better than last |
+|---|---|---:|---:|---:|---:|---:|---:|:---:|
+| W2 | 128x2048x8192; 128x8192x2048 | 115.046 us | 111.314 us | 1.034x | 1.099x | 0.709x | 0.657x | Yes |
+| W2 | 512x2048x8192; 512x8192x2048 | 381.370 us | 379.795 us | 1.004x | 1.082x | 0.430x | 0.311x | Yes |
+| W2 | 4096x2048x8192; 4096x8192x2048 | 2968.358 us | 2887.635 us | 1.028x | 1.093x | 0.484x | 0.316x | Yes |
+| W2.5 | 128x2048x8192; 128x8192x2048 | 112.987 us | 112.474 us | 1.005x | 1.101x | 0.702x | 0.650x | Yes |
+| W2.5 | 512x2048x8192; 512x8192x2048 | 388.721 us | 386.990 us | 1.004x | 1.092x | 0.422x | 0.305x | Yes |
+| W2.5 | 4096x2048x8192; 4096x8192x2048 | 2918.758 us | 2915.539 us | 1.001x | 1.099x | 0.480x | 0.313x | Yes |
+| W3 | 128x2048x8192; 128x8192x2048 | 116.418 us | 113.401 us | 1.027x | 1.081x | 0.696x | 0.645x | Yes |
+| W3 | 512x2048x8192; 512x8192x2048 | 385.756 us | 381.948 us | 1.010x | 1.100x | 0.428x | 0.309x | Yes |
+| W3 | 4096x2048x8192; 4096x8192x2048 | 2975.374 us | 2946.670 us | 1.010x | 1.080x | 0.475x | 0.310x | Yes |
+| W3.5 | 128x2048x8192; 128x8192x2048 | 114.809 us | 111.954 us | 1.026x | 1.103x | 0.705x | 0.653x | Yes |
+| W3.5 | 512x2048x8192; 512x8192x2048 | 396.394 us | 392.659 us | 1.010x | 1.104x | 0.416x | 0.301x | Yes |
+| W3.5 | 4096x2048x8192; 4096x8192x2048 | 3028.471 us | 2978.757 us | 1.017x | 1.102x | 0.470x | 0.307x | Yes |
+
+All twelve strict medians are lower, although W2.5 executes unchanged code
+and its sub-percent movement is cross-run telemetry. Geometric-mean speedup
+is `1.0144x` versus Phase 1 and `1.0948x` versus merged main.
+
+The exact-commit `5c6632c7` W3 M512 Nsight Compute/SASS comparison is:
+
+| Metric | Reuse-8 direct store | Reuse-8 coalesced | Change |
+|---|---:|---:|---:|
+| NCU duration | 154.24 us | 146.50 us | 1.053x |
+| Executed warp instructions | 62.01 M | 63.63 M | +2.62% |
+| L2 compression/store input sectors | 2.135 M | 1.087 M | -49.1% |
+| Registers/thread | 137 | 139 | +2 |
+| Achieved occupancy | 13.81% | 13.95% | +0.14 point |
+| Eligible warps/scheduler | 0.63 | 0.69 | +0.06 |
+| DRAM throughput | 7.39% | 7.27% | -0.12 point |
+
+The opcode audit shows the decoder math is essentially unchanged; the small
+instruction increase is the shared transpose and vector-store plumbing. The
+win comes from eliminating conflicting/scattered output transactions, not
+from reducing arithmetic. No spills are reported.
