@@ -13,12 +13,92 @@ sys.path.insert(0, str(ROOT))
 from scripts.p32_twenty.low_rank_sweep import SNAPSHOT, sha
 
 
+def walsh_screen(args, folded, xe, reference, report, torch):
+    """Largest-coefficient post-hoc screen; no activation-aware retraining."""
+    n, k = folded.T.shape
+
+    def transform(x):
+        y = x
+        width = 1
+        while width < args.tile:
+            blocks = y.reshape(*y.shape[:-1], -1, 2, width)
+            a, b = blocks[..., 0, :], blocks[..., 1, :]
+            y = torch.stack((a + b, a - b), -2).reshape(y.shape)
+            width *= 2
+        return y / args.tile**0.5
+
+    from scripts.p32_twenty.scorecard import layer_metrics
+
+    coeff = transform(folded.T.contiguous().reshape(n, k // args.tile, args.tile))
+    order = coeff.abs().argsort(dim=-1, descending=True, stable=True)
+    report["objective"] = "post-hoc largest Walsh coefficients; no activation fitting"
+    report["weighting"] = "none"
+    for keep in (1, 2, 4, 8, 16, 32, 64, 128):
+        if keep > args.tile:
+            continue
+        indices = order[..., :keep]
+        values = coeff.gather(-1, indices)
+        sparse = torch.zeros_like(coeff).scatter_(-1, indices, values)
+        decoded = transform(sparse)
+        path = args.output / f"keep{keep}.pt"
+        torch.save(
+            {
+                "module": args.module,
+                "shape": [n, k],
+                "tile": args.tile,
+                "keep": keep,
+                "normalization": "orthonormal Sylvester",
+                "indices": indices.byte().cpu(),
+                "values": values.cpu(),
+            },
+            path,
+        )
+        bundle = torch.load(path, weights_only=True)
+        restored = transform(
+            torch.zeros_like(coeff).scatter_(
+                -1, bundle["indices"].long().cuda(), bundle["values"].cuda()
+            )
+        )
+        if not torch.equal(restored, decoded):
+            raise AssertionError("Walsh export reload changed reconstructed weights")
+        w = restored.reshape(n, k).T.contiguous()
+        cases = [
+            {"M": m, "teacher_metrics": layer_metrics(xe[:m] @ w, reference[:m])}
+            for m in (1, 2, 4, 8, 16, 32, 128, 512, 2048)
+        ]
+        report["candidates"].append(
+            {
+                "keep": keep,
+                "export": str(path),
+                "sha256": sha(path),
+                "serialized_bytes": path.stat().st_size,
+                "bpw": 8 * path.stat().st_size / (n * k),
+                "reload_equal": True,
+                "retained_spectral_energy": float(
+                    sparse.square().sum() / coeff.square().sum()
+                ),
+                "cases": cases,
+            }
+        )
+        print(
+            "WALSH_KEEP",
+            keep,
+            "passes",
+            sum(x["teacher_metrics"]["local_tolerance_pass"] for x in cases),
+            flush=True,
+        )
+        (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("--representation", choices=("signed", "walsh"), default="signed")
     p.add_argument("--uuid", required=True)
     p.add_argument("--module", default="model.layers.0.mlp.down_proj")
     p.add_argument("--tile", type=int, choices=(16, 32, 64, 128), default=64)
-    p.add_argument("--weighting", choices=("activation", "uniform"), default="activation")
+    p.add_argument(
+        "--weighting", choices=("activation", "uniform"), default="activation"
+    )
     p.add_argument("--output", type=Path, required=True)
     args = p.parse_args()
     if args.output.exists() or args.output.resolve().is_relative_to(SNAPSHOT.resolve()):
@@ -99,7 +179,8 @@ def main():
         raise ValueError("Expected original 8192-token capture and whole tiles")
     args.output.mkdir(parents=True)
     report = {
-        "scope": __doc__,
+        "scope": "Real folded-weight representation screening; dense reconstruction, not packed inference",
+        "representation": args.representation,
         "module": args.module,
         "uuid": args.uuid,
         "tile": args.tile,
@@ -123,7 +204,9 @@ def main():
         scales = []
         reference = teacher(xe)
         report["folding_metrics"] = layer_metrics(xe @ folded, reference)
-        for rank in range(1, 17):
+        if args.representation == "walsh":
+            walsh_screen(args, folded, xe, reference, report, torch)
+        for rank in range(1, 17) if args.representation == "signed" else ():
             signs = torch.where(residual >= 0, 1.0, -1.0)
             scale = (residual.abs() * energy).sum(-1) / energy.sum(-1)
             decoded += signs * scale[..., None]
@@ -175,7 +258,9 @@ def main():
                     "serialized_bytes": path.stat().st_size,
                     "bpw": 8 * path.stat().st_size / (n * k),
                     "reload_equal": True,
-                    "weighted_residual_energy": float((residual.square() * energy).sum()),
+                    "weighted_residual_energy": float(
+                        (residual.square() * energy).sum()
+                    ),
                     "weight_residual_max": float(residual.abs().max()),
                     "cases": cases,
                 }

@@ -1,0 +1,73 @@
+{
+  "scope": "Experiment30 sparse Walsh representation screening; dense reconstruction only, queued",
+  "jobs": [
+    {
+      "id": "sparse-walsh-tile16",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--representation",
+        "walsh",
+        "--tile",
+        "16",
+        "--output",
+        "/root/p32-signed-basis/walsh-tile16"
+      ],
+      "result": "/root/p32-signed-basis/walsh-tile16/report.json",
+      "log": "/root/p32-signed-basis/walsh-tile16.log"
+    },
+    {
+      "id": "sparse-walsh-tile32",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--representation",
+        "walsh",
+        "--tile",
+        "32",
+        "--output",
+        "/root/p32-signed-basis/walsh-tile32"
+      ],
+      "result": "/root/p32-signed-basis/walsh-tile32/report.json",
+      "log": "/root/p32-signed-basis/walsh-tile32.log"
+    },
+    {
+      "id": "sparse-walsh-tile64",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--representation",
+        "walsh",
+        "--tile",
+        "64",
+        "--output",
+        "/root/p32-signed-basis/walsh-tile64"
+      ],
+      "result": "/root/p32-signed-basis/walsh-tile64/report.json",
+      "log": "/root/p32-signed-basis/walsh-tile64.log"
+    },
+    {
+      "id": "sparse-walsh-tile128",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--representation",
+        "walsh",
+        "--tile",
+        "128",
+        "--output",
+        "/root/p32-signed-basis/walsh-tile128"
+      ],
+      "result": "/root/p32-signed-basis/walsh-tile128/report.json",
+      "log": "/root/p32-signed-basis/walsh-tile128.log"
+    }
+  ]
+}
