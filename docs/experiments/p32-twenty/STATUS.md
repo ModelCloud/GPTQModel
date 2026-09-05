@@ -11,7 +11,7 @@ AGENTS.md. All changes and evidence share PR #137.
 |1|Decoder decomposition|Real-layer timing covers 12 projections and all nine row counts; four representative q/v/up/down Nsight counter captures now include instructions, occupancy, memory/L2, registers, and launch statistics. Tensor-Core-specific counters and decoder/GEMM overlap remain.|
 |2|Decode reuse across rows|Fused BM16/32/64 split16 q sweep and layer1-down BM32 pass 36/36; modest/no gains against existing window. More configurations/model/profile remain.|
 |3|Persistent decoded tiles|New persistent scheduling/register-pressure sweep remains.|
-|4|Warp-specialized pipeline|BM16, BM32, and BM32/BN64 direct decode/MMA baselines cover 12 projections and 12 row counts with 432/432 local passes; medians remain below 1.0x at small M and near 1.0x at large M. Producer/consumer overlap implementation remains.|
+|4|Warp-specialized pipeline|BM16, BM32, BM32/BN64, and BM64/BN64 direct decode/MMA baselines cover 12 projections and 12 row counts with 576/576 local passes; BM64/BN64 reaches 1.216x median at M=2048 but remains below 1.0x at small M and below the 2x target. Producer/consumer overlap implementation remains.|
 |5|Transition LUTs|GPU index/pair LUT decoders exact across all 94 projections; both slower overall in materialization, fused LUT study remains.|
 |6|Vectorized codebook output|Packed half2 output exact across all 94 projections at 1/4 warps; fused MMA-fragment output and model validation remain.|
 |7|Short reduced-precision accumulation|Real five-projection arithmetic sweep recorded; layer1-down FP16/BF16 partials fail some/all cases. Integrated decoder/model and executed profiling remain.|
