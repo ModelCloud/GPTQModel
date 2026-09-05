@@ -331,9 +331,14 @@ def test_h200_grouped_a8_executes_true_fp8_children_and_matches_independent_outp
     )
     attention = _Attention(children)
     x = (torch.randn((logical_m, 256), device=device) * 0.02).to(dtype)
+    if dtype == torch.bfloat16:
+        # Finite BF16 values above FP16's range must survive the shared
+        # SU/Hadamard transform before dynamic E4M3 row scaling.
+        x[0].fill_(65536.0)
 
     with torch.inference_mode():
         expected = tuple(child(x).clone() for child in children)
+    assert all(torch.isfinite(output).all() for output in expected)
     assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
     with torch.inference_mode():
         actual = tuple(

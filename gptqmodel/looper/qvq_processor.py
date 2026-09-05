@@ -1557,7 +1557,9 @@ class QVQProcessor(LoopProcessor):
                         mps_cleanup_interval=self.qcfg.yaqa.mps_cleanup_interval,
                         chat_template_config=self.qcfg.yaqa.chat_template,
                         activation=self.qcfg.activation,
-                        activation_modules=targets,
+                        activation_modules=(
+                            targets if self.qcfg.activation is not None else None
+                        ),
                     )
                     input_hessians.update(pass_inputs)
                     output_hessians.update(pass_outputs)

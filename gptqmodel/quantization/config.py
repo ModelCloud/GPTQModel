@@ -6629,6 +6629,16 @@ class QVQConfig(BaseQuantizeConfig):
         self.rounding = self.rounding.strip().lower()
         if self.rounding not in {"block_ldlq", "yaqa"}:
             raise ValueError("QVQConfig: `rounding` must be `block_ldlq` or `yaqa`.")
+        if (
+            self.rounding == "yaqa"
+            and self.activation is not None
+            and self.activation.target == "p32_operand"
+        ):
+            raise ValueError(
+                "QVQConfig: YAQA activation-aware calibration currently requires "
+                "activation.target=`linear_input`; `p32_operand` needs a "
+                "post-SU/Hadamard Sketch-B collector."
+            )
         if isinstance(self.yaqa, dict):
             self.yaqa = YaqaConfig(**self.yaqa)
         elif isinstance(self.yaqa, YaqaConfig):

@@ -3,10 +3,16 @@
 
 import threading
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 from transformers import DynamicCache
+from transformers.masking_utils import (
+    ALL_MASK_ATTENTION_FUNCTIONS,
+    create_causal_mask,
+    create_sliding_window_causal_mask,
+)
 
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.looper.qvq_processor import QVQProcessor
@@ -14,18 +20,24 @@ from gptqmodel.models.auto import (
     _activation_quantization_mode,
     _is_supported_quantization_config,
 )
+from gptqmodel.nn_modules.qlinear.qvq import QVQLinear, qvq_dense_oracle_forward
 from gptqmodel.nn_modules.qvq_fp8_cache import (
     QVQFP8DynamicCache,
     install_qvq_fp8_kv_cache,
     qvq_fp8_attention_forward,
 )
 from gptqmodel.quantization import FORMAT, QVQActivationConfig, QVQConfig
-from gptqmodel.quantization.qvq import quantize_qvq_linear
+from gptqmodel.quantization.qvq import (
+    pack_qvq_binary_bank_ids,
+    quantize_qvq_linear,
+    reconstruct_qvq_inner_weight,
+)
 from gptqmodel.quantization.qvq_activation import (
     dequantize_qvq_fp8_activation,
     fake_quantize_qvq_fp8_activation,
     quantize_qvq_fp8_activation,
 )
+from gptqmodel.quantization.qvq_codecs import pgc16_levels_for_version
 from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
 
 
@@ -231,6 +243,43 @@ def test_qvq_a8_runtime_injects_fp8_cache_and_rejects_dense_cache():
         )
 
 
+def test_qvq_a8_registers_additive_padding_and_sliding_window_masks():
+    class TinyMaskModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.config = _TinyCacheConfig()
+
+        def forward(self, input_ids, past_key_values=None, use_cache=None):
+            del input_ids, past_key_values, use_cache
+
+    model = TinyMaskModel()
+    install_qvq_fp8_kv_cache(model, QVQActivationConfig())
+    assert ALL_MASK_ATTENTION_FUNCTIONS["qvq_fp8"] is not None
+
+    embeds = torch.zeros((2, 4, 8), dtype=torch.float32)
+    left_padding = torch.tensor([[0, 0, 1, 1], [1, 1, 1, 1]])
+    causal = create_causal_mask(
+        model.config,
+        embeds,
+        left_padding,
+        past_key_values=None,
+    )
+    assert tuple(causal.shape) == (2, 1, 4, 4)
+    assert bool((causal[0, 0, 3, :2] < -1e20).all())
+    assert bool((causal[0, 0, 3, 2:] == 0).all())
+    assert bool((causal[1, 0, 3] == 0).all())
+
+    model.config.sliding_window = 2
+    sliding = create_sliding_window_causal_mask(
+        model.config,
+        embeds[:1],
+        torch.ones((1, 4), dtype=torch.long),
+        past_key_values=None,
+    )
+    assert bool((sliding[0, 0, 3, :2] < -1e20).all())
+    assert bool((sliding[0, 0, 3, 2:] == 0).all())
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("seed", (17, 29, 41))
 def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(seed):
@@ -322,6 +371,94 @@ def test_h200_fp8_attention_consumes_cache_without_dense_prefix_materialization(
     assert telemetry["allocations"] == 1
     assert telemetry["reallocations"] == 0
     assert layer.values.stride(-2) == 1
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_h200_fp8_attention_preserves_left_padding_and_sliding_window_masks():
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
+        pytest.skip("native QVQ FP8 attention validation requires the assigned H200")
+
+    device = torch.device("cuda")
+    generator = torch.Generator(device=device).manual_seed(20260905)
+    query = torch.randn(
+        (2, 8, 4, 64), generator=generator, device=device, dtype=torch.bfloat16
+    )
+    key = torch.randn(
+        (2, 2, 4, 64), generator=generator, device=device, dtype=torch.bfloat16
+    )
+    value = torch.randn(
+        (2, 2, 4, 64), generator=generator, device=device, dtype=torch.bfloat16
+    )
+    config = _TinyCacheConfig()
+    config._attn_implementation = "qvq_fp8"
+    config.sliding_window = 2
+    ALL_MASK_ATTENTION_FUNCTIONS.register(
+        "qvq_fp8", ALL_MASK_ATTENTION_FUNCTIONS["eager"]
+    )
+    padding = torch.tensor(
+        [[0, 0, 1, 1], [1, 1, 1, 1]], device=device, dtype=torch.long
+    )
+    additive = create_causal_mask(
+        config,
+        torch.zeros((2, 4, 8), device=device, dtype=torch.bfloat16),
+        padding,
+        past_key_values=None,
+    )
+    cache = QVQFP8DynamicCache(config, QVQActivationConfig())
+    key_view, value_view = cache.update(key, value, 0)
+    module = SimpleNamespace(num_key_value_groups=4, training=False)
+    batched, _ = qvq_fp8_attention_forward(
+        module,
+        query,
+        key_view,
+        value_view,
+        additive,
+        scaling=0.125,
+    )
+
+    first_cache = QVQFP8DynamicCache(config, QVQActivationConfig())
+    first_key, first_value = first_cache.update(
+        key[:1, :, 2:], value[:1, :, 2:], 0
+    )
+    first, _ = qvq_fp8_attention_forward(
+        module,
+        query[:1, :, 2:],
+        first_key,
+        first_value,
+        None,
+        scaling=0.125,
+    )
+    second_cache = QVQFP8DynamicCache(config, QVQActivationConfig())
+    second_key, second_value = second_cache.update(key[1:], value[1:], 0)
+    second, _ = qvq_fp8_attention_forward(
+        module,
+        query[1:],
+        second_key,
+        second_value,
+        None,
+        scaling=0.125,
+    )
+    torch.testing.assert_close(batched[:1, 2:], first, rtol=0, atol=2e-2)
+    torch.testing.assert_close(batched[1:], second, rtol=0, atol=2e-2)
+
+    sliding = create_sliding_window_causal_mask(
+        config,
+        torch.zeros((2, 4, 8), device=device, dtype=torch.bfloat16),
+        torch.ones_like(padding),
+        past_key_values=None,
+    )
+    _, weights = qvq_fp8_attention_forward(
+        module,
+        query,
+        key_view,
+        value_view,
+        sliding,
+        scaling=0.125,
+        output_attentions=True,
+    )
+    assert torch.count_nonzero(weights[:, :, 3, :2]).item() == 0
+    assert bool((weights[:, :, 3, 2:].sum(dim=-1) > 0).all())
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
@@ -704,3 +841,158 @@ def test_yaqa_collects_fisher_factors_under_the_a8_forward_contract():
     assert activation_stats["relative_rmse"] > 0.0
     assert set(activation_stats["modules"]) == {"proj"}
     assert not module._forward_pre_hooks
+
+
+@pytest.mark.parametrize(
+    "activation",
+    (QVQActivationConfig(), {"bits": 8, "target": "p32_operand"}),
+)
+def test_yaqa_rejects_pretransform_hooks_for_p32_operand_target(activation):
+    model = torch.nn.Sequential(torch.nn.Linear(16, 16, bias=False)).eval()
+    batch = {
+        "input_ids": torch.tensor([[1, 2]]),
+        "attention_mask": torch.ones((1, 2), dtype=torch.long),
+    }
+    with pytest.raises(ValueError, match="post-SU/Hadamard collector"):
+        capture_yaqa_sketch_b(
+            model,
+            [batch],
+            {"proj": model[0]},
+            device=torch.device("cpu"),
+            first_decoder_layer=model[0],
+            activation=activation,
+            activation_modules={"proj": model[0]},
+        )
+
+
+def test_qvq_config_rejects_yaqa_p32_operand_but_accepts_linear_input():
+    with pytest.raises(ValueError, match="post-SU/Hadamard Sketch-B collector"):
+        QVQConfig(
+            bits=3.5,
+            format="v2b2-g32",
+            rounding="yaqa",
+            activation=True,
+            offload_to_disk=False,
+        )
+    config = QVQConfig(
+        bits=3.5,
+        format="v2b2-g32",
+        rounding="yaqa",
+        activation={"target": "linear_input"},
+        offload_to_disk=False,
+    )
+    assert config.activation.target == "linear_input"
+
+
+def _p32_a8_layer(kernel_mode: str) -> QVQLinear:
+    bits = 3.5
+    in_features = 32
+    out_features = 64
+    tile_count = (in_features // 16) * (out_features // 16)
+    tensors = {
+        "trellis": torch.zeros((tile_count, int(8 * bits)), dtype=torch.int32),
+        "SU": torch.linspace(0.75, 1.25, in_features),
+        "SV": torch.linspace(0.5, 1.0, out_features),
+        "bank_ids": pack_qvq_binary_bank_ids(
+            torch.zeros(tile_count * 8, dtype=torch.uint8)
+        ),
+        "bank_alt_id": torch.tensor([1], dtype=torch.uint8),
+    }
+    return QVQLinear.from_tensors(
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        name="proj",
+        tensors=tensors,
+        bank_count=2,
+        v2b2_p32=True,
+        activation={"kernel_mode": kernel_mode},
+    ).eval()
+
+
+def test_qvq_fp8_fallback_uses_the_deployed_e4m3_weight_levels():
+    layer = _p32_a8_layer("disable")
+    source = torch.randn((3, 32), generator=torch.Generator().manual_seed(20260905))
+    transformed = layer.transform_input(source)
+    quantized, scale = quantize_qvq_fp8_activation(
+        transformed,
+        format=layer.activation.format,
+        scale_method=layer.activation.scale_method,
+    )
+
+    actual = layer.forward_prequantized_fp8(
+        quantized,
+        scale,
+        output_dtype=source.dtype,
+    )
+    fp8_levels, level_scale = layer._prepare_hopper_fp8_levels(source.device)
+    canonical_inner = reconstruct_qvq_inner_weight(
+        layer.trellis,
+        bits=layer.bits,
+        in_features=layer.in_features,
+        out_features=layer.out_features,
+        bank_ids=layer.bank_ids,
+        v2b2_p32=True,
+        bank_alt_id=layer.bank_alt_id,
+    )
+    canonical_levels = pgc16_levels_for_version(layer.codebook_version)
+    deployed_inner = (fp8_levels.float() * level_scale)[
+        torch.searchsorted(canonical_levels, canonical_inner)
+    ]
+    dequantized = dequantize_qvq_fp8_activation(
+        quantized, scale, dtype=torch.float32
+    )
+    expected = layer.recover_output(
+        dequantized @ deployed_inner,
+        output_dtype=source.dtype,
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(
+        layer(source),
+        qvq_dense_oracle_forward(layer, source),
+        rtol=0,
+        atol=2e-5,
+    )
+
+    auto = _p32_a8_layer("auto")
+    auto.load_state_dict(layer.state_dict(), strict=True)
+    with patch.object(
+        QVQLinear,
+        "_fp8_kernel_ineligible_reason",
+        return_value="forced_test_fallback",
+    ):
+        auto_actual = auto.forward_prequantized_fp8(
+            quantized,
+            scale,
+            output_dtype=source.dtype,
+        )
+    torch.testing.assert_close(auto_actual, actual, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_h200_p32_a8_preserves_finite_bf16_range_and_matches_deployed_fallback():
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
+        pytest.skip("native QVQ P32 FP8 validation requires the assigned H200")
+
+    native = _p32_a8_layer("require").to("cuda")
+    fallback = _p32_a8_layer("disable").to("cuda")
+    fallback.load_state_dict(native.state_dict(), strict=True)
+    source = torch.empty((2, 32), device="cuda", dtype=torch.bfloat16)
+    source[0].fill_(65536.0)
+    source[1, ::2] = 65536.0
+    source[1, 1::2] = -65536.0
+
+    transformed = native._qvq_prepare_inference_input(source, torch.float32)
+    assert transformed.dtype == torch.float32
+    assert torch.isfinite(transformed).all()
+    with torch.inference_mode():
+        actual = native(source)
+        expected = fallback(source)
+
+    assert torch.isfinite(actual).all()
+    assert torch.isfinite(expected).all()
+    torch.testing.assert_close(actual.float(), expected.float(), rtol=0.02, atol=256.0)
+    telemetry = native.qvq_fp8_kernel_telemetry()
+    assert telemetry["executed"] == 1
+    assert telemetry["fallback"] == 0

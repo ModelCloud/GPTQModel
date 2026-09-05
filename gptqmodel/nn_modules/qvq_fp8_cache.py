@@ -13,6 +13,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 from transformers.cache_utils import Cache, DynamicLayer
+from transformers.masking_utils import ALL_MASK_ATTENTION_FUNCTIONS, eager_mask
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from ..quantization.config import QVQActivationConfig
@@ -68,7 +69,12 @@ def _attention_mask_slice(
     if attention_mask.ndim == 3:
         return attention_mask[batch, :query_tokens, :key_tokens]
     if attention_mask.ndim == 2:
-        return attention_mask[batch, :key_tokens].unsqueeze(0).expand(query_tokens, -1)
+        keep = attention_mask[batch, :key_tokens].to(torch.bool)
+        return torch.where(
+            keep,
+            torch.zeros((), device=keep.device, dtype=torch.float32),
+            torch.full((), float("-inf"), device=keep.device, dtype=torch.float32),
+        ).unsqueeze(0).expand(query_tokens, -1)
     raise ValueError(
         f"QVQ FP8 attention requires a 2D--4D attention mask, got {attention_mask.ndim}D."
     )
@@ -98,7 +104,13 @@ def _normalized_attention_mask(
     if attention_mask.shape[0] != batch_size:
         raise ValueError("QVQ FP8 attention mask batch dimension differs from query.")
     if attention_mask.ndim == 2:
-        return attention_mask[:, None, None, None, :key_tokens]
+        keep = attention_mask[:, :key_tokens].to(torch.bool)
+        additive = torch.where(
+            keep,
+            torch.zeros((), device=keep.device, dtype=torch.float32),
+            torch.full((), float("-inf"), device=keep.device, dtype=torch.float32),
+        )
+        return additive[:, None, None, None, :]
     if attention_mask.ndim == 3:
         return attention_mask[:, None, None, :query_tokens, :key_tokens]
     if attention_mask.ndim != 4:
@@ -261,7 +273,18 @@ def qvq_fp8_attention_forward(
             float("-inf"),
         )
         if attention_mask is not None:
-            dense_weights = dense_weights + attention_mask
+            normalized_mask = _normalized_attention_mask(
+                attention_mask,
+                batch_size=query.shape[0],
+                query_heads=query.shape[1],
+                kv_heads=key.shape[1],
+                groups=groups,
+                query_tokens=query.shape[-2],
+                key_tokens=key.shape[-2],
+            )
+            dense_weights = dense_weights + normalized_mask.reshape(
+                query.shape[0], query.shape[1], query.shape[-2], key.shape[-2]
+            )
         dense_weights = torch.softmax(dense_weights, dim=-1, dtype=torch.float32).to(
             query.dtype
         )
@@ -963,6 +986,11 @@ def install_qvq_fp8_kv_cache(model: torch.nn.Module, activation) -> None:
         )
 
     ALL_ATTENTION_FUNCTIONS.register("qvq_fp8", qvq_fp8_attention_forward)
+    # Without a registered builder Transformers discards the model's 2D mask
+    # before calling a custom attention backend. Eager construction preserves
+    # padding, packed-sequence, causal, and sliding-window semantics in one
+    # additive 4D mask.
+    ALL_MASK_ATTENTION_FUNCTIONS.register("qvq_fp8", eager_mask)
     text_config = model.config.get_text_config(decoder=True)
     text_config._attn_implementation = "qvq_fp8"
 

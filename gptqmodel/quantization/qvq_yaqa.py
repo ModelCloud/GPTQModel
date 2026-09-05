@@ -327,12 +327,20 @@ def capture_yaqa_sketch_b(
             activation_bits = activation.get("bits", 8)
             activation_format = activation.get("format")
             activation_scale_method = activation.get("scale_method")
+            activation_target = activation.get("target", "p32_operand")
         else:
             activation_bits = getattr(activation, "bits", 8)
             activation_format = getattr(activation, "format", None)
             activation_scale_method = getattr(activation, "scale_method", None)
+            activation_target = getattr(activation, "target", "p32_operand")
         if activation_bits != 8:
             raise ValueError("YAQA QVQ activation quantization requires 8 bits")
+        if activation_target != "linear_input":
+            raise ValueError(
+                "YAQA activation-aware Sketch-B currently supports only "
+                "activation.target=`linear_input`; `p32_operand` requires a "
+                "post-SU/Hadamard collector"
+            )
         activation_format = normalize_qvq_fp8_activation_format(activation_format)
         activation_scale_method = normalize_qvq_fp8_activation_scale_method(activation_scale_method)
         activation_modules = modules if activation_modules is None else activation_modules

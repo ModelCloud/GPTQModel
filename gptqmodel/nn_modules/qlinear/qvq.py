@@ -1251,6 +1251,19 @@ class QVQLinear(BaseQuantLinear):
         inner = self.get_inner_weight_tensor(dtype=x.dtype)
         return x @ inner
 
+    def _reference_fp8_inner_forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Emulate the exact E4M3-rounded level table deployed by Hopper."""
+
+        fp8_levels, level_scale = self._prepare_hopper_fp8_levels(x.device)
+        deployed_levels = fp8_levels.to(torch.float32).mul(level_scale)
+        canonical_levels = pgc16_levels_for_version(self.codebook_version).to(
+            device=x.device, dtype=torch.float32
+        )
+        inner = self.get_inner_weight_tensor(dtype=torch.float32)
+        level_indices = torch.searchsorted(canonical_levels, inner)
+        inner = deployed_levels[level_indices]
+        return x.to(torch.float32) @ inner
+
     def _inner_forward(
         self,
         x: torch.Tensor,
@@ -1818,22 +1831,9 @@ class QVQLinear(BaseQuantLinear):
         output = self._forward_compute_dtype(
             x_2d, compute_dtype, output_dtype=input_dtype
         )
-        # P32-operand A8 bounds the post-Hadamard input with an explicit FP8
-        # row scale, accumulates in FP32, and uses the range-safe FP32 output
-        # recovery.  Its result therefore does not need the legacy BF16 retry
-        # probe.  Besides being redundant, ``isfinite().all()`` synchronizes
-        # the host after every ungrouped projection (notably O and down) and
-        # serializes both prefill and decode.
-        range_safe_p32_fp8 = (
-            not self.training
-            and self.activation is not None
-            and self.activation.target == "p32_operand"
-            and self.activation.kernel_mode == "require"
-        )
         if (
             input_dtype == torch.bfloat16
             and x.device.type == "cuda"
-            and not range_safe_p32_fp8
         ):
             if torch.cuda.is_current_stream_capturing():
                 rescued = self._forward_compute_dtype(
@@ -1981,6 +1981,8 @@ class QVQLinear(BaseQuantLinear):
                 f"got {quantized.shape[-1]}"
             )
         compute_dtype = _qvq_compute_dtype(output_dtype, quantized.device.type)
+        if output_dtype == torch.bfloat16 and quantized.device.type == "cuda":
+            compute_dtype = torch.float32
         quantized_2d = quantized.reshape(-1, self.in_features)
         scale_2d = scale.reshape(-1, 1)
         reason = (
@@ -2016,10 +2018,12 @@ class QVQLinear(BaseQuantLinear):
         transformed = dequantize_qvq_fp8_activation(
             quantized_2d,
             scale_2d,
-            dtype=compute_dtype,
+            dtype=torch.float32,
         )
-        output = self._inner_forward(transformed)
-        recovered = self._recover_output_compute_dtype(output, compute_dtype)
+        output = self._reference_fp8_inner_forward(transformed)
+        recovered = self._recover_output_compute_dtype(
+            output, torch.float32, target_dtype=output_dtype
+        )
         return recovered.reshape(*quantized.shape[:-1], self.out_features).to(
             output_dtype
         )
@@ -2064,6 +2068,16 @@ class QVQLinear(BaseQuantLinear):
         *,
         output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
+        if (
+            x_2d.device.type == "cuda"
+            and x_2d.dtype == torch.bfloat16
+            and self.activation is not None
+            and self.activation.target == "p32_operand"
+        ):
+            # BF16 values can exceed FP16 before SU/Hadamard has reduced their
+            # range. Preserve them through that transform; the resulting row
+            # is bounded when it is converted to E4M3 below.
+            compute_dtype = torch.float32
         x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(
             x_2d,
             compute_dtype,
@@ -2175,7 +2189,11 @@ class QVQLinear(BaseQuantLinear):
             transformed = dequantize_qvq_fp8_activation(
                 quantized,
                 scale,
-                dtype=transformed.dtype,
+                dtype=torch.float32,
+            )
+            output = self._reference_fp8_inner_forward(transformed)
+            return self._recover_output_compute_dtype(
+                output, torch.float32, target_dtype=output_dtype
             )
         output = self._inner_forward(transformed)
         return self._recover_output_compute_dtype(output, compute_dtype)
@@ -2330,7 +2348,10 @@ def qvq_dense_oracle_forward(
                 ),
             ).to(dtype=torch.float32)
             x_2d = x.to(device=compute_device).reshape(-1, layer.in_features)
-            if layer.activation is not None:
+            if (
+                layer.activation is not None
+                and layer.activation.target == "linear_input"
+            ):
                 _, _, x_2d = fake_quantize_qvq_fp8_activation(
                     x_2d,
                     format=layer.activation.format,
@@ -2340,6 +2361,28 @@ def qvq_dense_oracle_forward(
             transformed = x_2d * layer.SU.to(device=compute_device, dtype=torch.float32)
             if layer.input_hadamard:
                 transformed = matmul_hadU(transformed)
+            if (
+                layer.activation is not None
+                and layer.activation.target == "p32_operand"
+            ):
+                _, _, transformed = fake_quantize_qvq_fp8_activation(
+                    transformed,
+                    format=layer.activation.format,
+                    scale_method=layer.activation.scale_method,
+                )
+                canonical_levels = pgc16_levels_for_version(
+                    layer.codebook_version
+                ).to(device=compute_device, dtype=torch.float32)
+                fp8_max = float(torch.finfo(torch.float8_e4m3fn).max)
+                level_scale = float(canonical_levels.abs().amax().item() / fp8_max)
+                deployed_levels = torch.clamp(
+                    canonical_levels / level_scale,
+                    min=-fp8_max,
+                    max=fp8_max,
+                ).to(torch.float8_e4m3fn).to(torch.float32).mul(level_scale)
+                inner = deployed_levels[
+                    torch.searchsorted(canonical_levels, inner)
+                ]
             output = transformed @ inner
             if layer.output_hadamard:
                 output = matmul_hadU(output)

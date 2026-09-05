@@ -790,9 +790,16 @@ class QVQHopperGroupedRuntime:
             if direct_pad:
                 self.telemetry.h100_direct_padded_input_launches += 1
         else:
+            transform_dtype = (
+                torch.float32
+                if x.dtype == torch.bfloat16
+                and children[0].activation is not None
+                and children[0].activation.target == "p32_operand"
+                else torch.float16
+            )
             transformed = children[0]._qvq_prepare_inference_input(
                 x_2d,
-                torch.float16,
+                transform_dtype,
                 pad_to_16=direct_pad,
             )
             if (
