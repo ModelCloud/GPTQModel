@@ -124,3 +124,6 @@ repeats before promotion.
 leading geometries across four GPUs each. BM64/BN32 reaches a pooled 1.423x at
 M=2048 and BM64/BN64 reaches 1.402x; both remain slower at low M and decode.
 The large-prefill gain reproduces, but no full-model 2x result exists.
+
+[Window model wave26 partial](WINDOW_MODEL_WAVE26_PARTIAL.md) has four matched
+production controls complete and four BM64/BN32 per-module-policy arms active.
