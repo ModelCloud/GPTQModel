@@ -31,8 +31,10 @@ from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_grouped_packed,
     qvq_p32_window_wgmma_grouped_reuse2_packed,
     qvq_p32_window_wgmma_grouped_reuse4_packed,
+    qvq_p32_window_wgmma_grouped_reuse8_packed,
     qvq_p32_window_wgmma_m16_tma,
     qvq_p32_window_wgmma_m16_tma_ordered_split,
+    qvq_p32_window_wgmma_single_large_m_packed,
     qvq_pack_p32_window_hopper_group,
 )
 
@@ -694,15 +696,20 @@ def test_h100_gate_up_n128_reuse_is_exact_and_graph_safe(bits):
     )
     payload = qvq_pack_p32_window_hopper_group(windows, selectors, plan)
     expected = qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
-    actual = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
+    reuse4 = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
+    actual = qvq_p32_window_wgmma_grouped_reuse8_packed(input, payload, levels)
     assert all(
         torch.equal(child, reference)
-        for child, reference in zip(actual, expected, strict=True)
+        for child, reference in zip(reuse4, expected, strict=True)
+    )
+    assert all(
+        torch.equal(child, reference)
+        for child, reference in zip(actual, reuse4, strict=True)
     )
 
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        captured = qvq_p32_window_wgmma_grouped_reuse4_packed(
+        captured = qvq_p32_window_wgmma_grouped_reuse8_packed(
             input, payload, levels
         )
     graph.replay()
@@ -711,6 +718,68 @@ def test_h100_gate_up_n128_reuse_is_exact_and_graph_safe(bits):
         torch.equal(child, reference)
         for child, reference in zip(captured, expected, strict=True)
     )
+
+
+@pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
+def test_h100_down_single_child_reuse8_is_exact_and_graph_safe(bits):
+    """Exercise the production M512 8192-to-2048 single-child dispatch."""
+
+    device = _hopper_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    logical_m = 512
+    in_features = 8192
+    width = 2048
+    alt_id = 2
+    generator = torch.Generator(device=device).manual_seed(20260950 + int(bits * 10))
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
+    input = (
+        torch.randn((logical_m, in_features), generator=generator, device=device) * 0.1
+    ).half()
+    windows, selectors = _payloads(
+        bits=bits,
+        in_features=in_features,
+        widths=(width,),
+        generator=generator,
+        device=device,
+    )
+    plan = qvq_p32_window_wgmma_group_plan(
+        input,
+        windows,
+        levels,
+        selectors,
+        bits,
+        out_features=(width,),
+        bank_alt_ids=(alt_id,),
+        split_counts=(1,),
+    )
+    payload = qvq_pack_p32_window_hopper_group(windows, selectors, plan)
+    expected = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)[0]
+    actual = qvq_p32_window_wgmma_single_large_m_packed(
+        input,
+        windows[0],
+        levels,
+        selectors[0],
+        bits,
+        out_features=width,
+        bank_alt_id=alt_id,
+    )
+    assert torch.equal(actual, expected)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_p32_window_wgmma_single_large_m_packed(
+            input,
+            windows[0],
+            levels,
+            selectors[0],
+            bits,
+            out_features=width,
+            bank_alt_id=alt_id,
+        )
+    graph.replay()
+    torch.cuda.synchronize(device)
+    assert torch.equal(captured, expected)
 
 
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
