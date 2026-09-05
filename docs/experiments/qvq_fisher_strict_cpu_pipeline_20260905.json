@@ -1,0 +1,447 @@
+{
+  "status": "Experimental; exact factor check passed, performance rejected for initial schedules",
+  "baseline_commit": "1acd13b95bcb2c4bfc3556d7e710da1385f911f5",
+  "scope": "Qwen3.5-27B, 400 targets, B16/16 rows, T64/R256, row_start96, seed20260909",
+  "parity": [
+    {
+      "arm": "streaming_256",
+      "bitwise_equal": true,
+      "factors_checked": 800
+    }
+  ],
+  "collector_sha256": "2cacae7e4f8fffe119c7fc470eda14760cf2c981ccc75b63d62044363ce73d79",
+  "reference_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+  "operator_probes": {
+    "probe": [
+      {
+        "name": "activation",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 8,
+        "median_ms": 0.5531669994525146,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "activation",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 16,
+        "median_ms": 0.5260959987936076,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "activation",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 32,
+        "median_ms": 0.5778459999419283,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "activation",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 64,
+        "median_ms": 0.5904549998376751,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "activation",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 8,
+        "median_ms": 0.7734684986644424,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "activation",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 16,
+        "median_ms": 0.3397034997760784,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "activation",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 32,
+        "median_ms": 2.1524165022128727,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "activation",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 64,
+        "median_ms": 2.031258998613339,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 8,
+        "median_ms": 2.0736099995701807,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 16,
+        "median_ms": 1.821869997002068,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 32,
+        "median_ms": 1.9019815008505248,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 64,
+        "median_ms": 1.841061999584781,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 8,
+        "median_ms": 3.6447764996410115,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 16,
+        "median_ms": 2.1305840000422904,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 32,
+        "median_ms": 10.288275001585134,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 64,
+        "median_ms": 12.244891000591451,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      }
+    ],
+    "local-probe": [
+      {
+        "name": "activation",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 16,
+        "median_ms": 0.23539399990113452,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "activation",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 16,
+        "median_ms": 0.3195509998477064,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 16,
+        "median_ms": 0.9836459994403413,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 16,
+        "median_ms": 2.1351479990698863,
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      }
+    ],
+    "phases": [
+      {
+        "name": "activation",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 16,
+        "median_ms": 0.24325400045199785,
+        "last_phases_ms": [
+          0.10505699901841581,
+          0.1298060014960356,
+          0.003631001163739711
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "activation",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 16,
+        "median_ms": 0.3251080015616026,
+        "last_phases_ms": [
+          0.15926500054774806,
+          0.15817699750186875,
+          0.003182998625561595
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 16,
+        "median_ms": 0.970421000602073,
+        "last_phases_ms": [
+          0.35446000038064085,
+          0.594328001170652,
+          0.0034770018828567117
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 16,
+        "median_ms": 2.1332015003281413,
+        "last_phases_ms": [
+          0.6659390019194689,
+          1.4856680027151015,
+          0.003384000592632219
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      }
+    ],
+    "blocked": [
+      {
+        "name": "activation",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 16,
+        "median_ms": 0.212093002119218,
+        "last_phases_ms": [
+          0.10465900049894117,
+          0.10160100282519124,
+          0.0035330012906342745
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "activation",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 16,
+        "median_ms": 0.33229199834750034,
+        "last_phases_ms": [
+          0.1645259981160052,
+          0.15845799862290733,
+          0.0035570010368246585
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 16,
+        "median_ms": 0.6697620010527316,
+        "last_phases_ms": [
+          0.30457100001513027,
+          0.35501100137480535,
+          0.0032890020520426333
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 16,
+        "median_ms": 1.550741999380989,
+        "last_phases_ms": [
+          0.718671999493381,
+          0.9175000013783574,
+          0.0031769995985087007
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      }
+    ],
+    "prepared": [
+      {
+        "name": "activation",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 16,
+        "median_ms": 0.20551300076476764,
+        "last_phases_ms": [
+          1.8000719137489796e-05,
+          0.09810000119614415,
+          0.00291600008495152
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "activation",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 5120,
+        "threads": 16,
+        "median_ms": 0.24686799952178262,
+        "last_phases_ms": [
+          1.9997969502583146e-05,
+          0.14775700037716888,
+          0.0030650007829535753
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 4,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 16,
+        "median_ms": 0.6587424995814217,
+        "last_phases_ms": [
+          0.00014099714462645352,
+          0.3526979999151081,
+          0.0033309988793917
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      },
+      {
+        "name": "gradient",
+        "batch": 16,
+        "tokens": 64,
+        "channels": 17408,
+        "threads": 16,
+        "median_ms": 1.276718499866547,
+        "last_phases_ms": [
+          4.899993655271828e-05,
+          0.9153909995802678,
+          0.0033669966796878725
+        ],
+        "bitwise_equal": true,
+        "max_abs": 0.0
+      }
+    ]
+  },
+  "warmed_collection": {
+    "gpu": {
+      "seconds": [
+        1.0575332849984989,
+        1.0579140250010823,
+        1.0583129090009606
+      ],
+      "full_report": "/tmp/qvq-sidecar-passive-gpu.json"
+    },
+    "hybrid2": {
+      "seconds": [
+        4.348630032000074,
+        4.315800240998215,
+        4.029015783999057
+      ],
+      "full_report": "/tmp/qvq-sidecar-passive-hybrid2.json"
+    },
+    "hybrid1": {
+      "seconds": [
+        4.731127932998788,
+        4.699467922000622,
+        4.681387500997516
+      ],
+      "full_report": "/tmp/qvq-sidecar-passive-hybrid1.json"
+    },
+    "hybrid_cached": {
+      "seconds": [
+        3.2808727440024086,
+        3.2950736450002296,
+        3.2965715889986313
+      ],
+      "full_report": "/tmp/qvq-sidecar-cached.json",
+      "parity": "Not rechecked after scratch-reuse change; initial prototype passed 800 factors."
+    }
+  },
+  "prototype_artifacts": {
+    "/tmp/qvq-cpu-strict-gram-prepared.cpp": "b24da234f21e3bb29d83da2c9862e44e695289a07fc75daa8408b21ce204ade1",
+    "/tmp/qvq-onednn-reorder.cpp": "19ca79214e58c88d6cce8d7f1195fc159c398e5051d66eccdaf617687c74e731",
+    "/tmp/qvq-sidecar-prototype.py": "2cacae7e4f8fffe119c7fc470eda14760cf2c981ccc75b63d62044363ce73d79",
+    "/tmp/qvq-sidecar-prototype-cached.py": "7d55fd7def0a4f2b34854ae21724a6ee0acec741b0388833fd18caf5e5ffeea9"
+  }
+}

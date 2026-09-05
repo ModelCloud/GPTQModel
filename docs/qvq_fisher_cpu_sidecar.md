@@ -353,3 +353,68 @@ bounded overlap rather than synchronous per-hook offload.
 The capture run used zero warmups and serialized tensors while collecting; its
 latency is diagnostic only. Capture metadata and data are at
 `/tmp/qvq-sidecar-capture-metadata.json` and `/tmp/qvq-sidecar-real-tensors/`.
+
+## NUMA bandwidth and strict CPU pipeline experiments
+
+Explicit memory binding confirmed a substantial transfer difference. Each run
+used a fresh process, the H200 UUID, five warmups, twenty repetitions, and a
+128 MiB pinned allocation. `/proc/self/numa_maps` confirmed that all 32,768 pages
+resided on the requested node.
+
+| Memory and CPU node | D2H GB/s | H2D GB/s |
+|---|---:|---:|
+| 0 | 39.20 | 45.80 |
+| 1 | 37.50 | 43.97 |
+| 2 | 21.24 | 40.24 |
+| 3 | 21.54 | 41.04 |
+
+These are transfer rates, not collector speedups. The reusable
+[`benchmark_qvq_cpu_gpu_transfer.py`](../scripts/benchmark_qvq_cpu_gpu_transfer.py)
+was also run under node-0 binding and reproduced 39.24 GB/s D2H and 46.21 GB/s
+H2D. It records actual page placement, CPU inventory, preflight identity, and
+all timing samples. Example, with `CUDA_VISIBLE_DEVICES` set to the physical UUID:
+
+```bash
+numactl --cpunodebind=0 --membind=0 python scripts/benchmark_qvq_cpu_gpu_transfer.py \
+  --label node0 --output /tmp/qvq-transfer-node0.json
+```
+
+[Full NUMA measurements](experiments/qvq_fisher_numa_transfer_20260905.json).
+
+A separate AVX-512 CPU prototype preserves increasing-K FP32 FMA accumulation,
+computes triangular token-Gram tiles, and mirrors the upper triangle. For the
+captured real BF16-valued inputs, it matched the GPU Grams bitwise. Cache blocking
+and oneDNN's exact BF16-to-FP32 layout conversion reduced the B16/T64/K17408
+operator from 2.13 ms to 1.28 ms on 16 local CPU threads. This is still slower
+than GPU compute alone and requires overlap to be useful.
+
+The bounded full-collector prototype retains GPU projections and diagonal
+contractions, copies BF16-valued activations/gradients to CPU workers, and returns
+strict FP32 CPU Grams. The main thread drains ready jobs and preserves per-batch
+accumulation order. It passed the existing full-model comparison for **all 800
+factors**, including source, diagonal, source diagonal, normalizer, and seed,
+on B16/16 rows, row start 96, seed 20260909. This is one tested case, not general
+acceptance or a performance win. The production collector remains unchanged.
+
+Matched warmed one-batch measurements (two warmups, three repeats, CPU/memory
+binding to socket-0 CPUs/node-0 memory, passive OpenMP waits):
+
+| Arm | Median collection seconds | GPU-control speedup |
+|---|---:|---:|
+| Current GPU control | 1.057914 | 1.000x |
+| CPU pipeline, two workers × eight threads | 4.315800 | 0.245x |
+| CPU pipeline, one worker × sixteen threads | 4.699468 | 0.225x |
+| Two workers with reusable scratch/primitives | 3.295074 | 0.321x |
+
+All transfer and final-drain costs are included. Scratch reuse improved the
+prototype, but it remains rejected for performance. Instrumentation attributes
+most remaining worker time to packing and strict computation; standalone
+concurrent probes also show large placement-dependent disparities. Isolate
+native thread-team placement and memory locality before another full-model run.
+The successful factor comparison applies to the original prototype; the cached
+variant must repeat that gate before any promotion.
+
+[Strict pipeline evidence](experiments/qvq_fisher_strict_cpu_pipeline_20260905.json)
+records the source hashes, operator probes, fixed reference, and raw report paths.
+Experimental collector/native sources remain under `/tmp/qvq-sidecar-*` and
+`/tmp/qvq-cpu-strict-gram-*`; none is enabled in the production path.

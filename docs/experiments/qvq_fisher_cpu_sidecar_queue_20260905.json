@@ -1023,8 +1023,9 @@
     },
     {
       "id": "cpu02",
-      "state": "queued",
-      "title": "Test GPU-local pinned buffer pools and bounded NUMA-aware handoff"
+      "state": "in_progress",
+      "title": "Test GPU-local pinned buffer pools and bounded NUMA-aware handoff",
+      "evidence": "Explicit NUMA-bound pinned transfer sweep completed: node0 39.2GB/s D2H versus node2/3 roughly21GB/s. Bounded CPU Gram pipeline implemented experimentally."
     },
     {
       "id": "cpu03",
@@ -1038,8 +1039,9 @@
     },
     {
       "id": "cpu05",
-      "state": "queued",
-      "title": "Measure full-transfer crossover for small strict-FP32 operations using AVX-512"
+      "state": "in_progress",
+      "title": "Measure full-transfer crossover for small strict-FP32 operations using AVX-512",
+      "evidence": "Strict AVX-512 sequential-FMA CPU Gram prototype passes 800 full-model factor checks; initial worker schedules are slower than current GPU control. Scratch reuse under measurement."
     },
     {
       "id": "cpu06",
