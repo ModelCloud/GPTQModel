@@ -17,7 +17,12 @@ def main():
     parser.add_argument("--root", type=Path, default=Path("/root/p32-model-baseline"))
     parser.add_argument("--candidate", default="production")
     parser.add_argument("--teacher", default="canonical")
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
+    output = args.output or args.root / (args.candidate + "-comparison.json")
+    if output.exists():
+        parser.error("Refusing to overwrite an existing comparison")
+    output.parent.mkdir(parents=True, exist_ok=True)
     teacher_root = args.root / args.teacher
     candidate_root = args.root / args.candidate
     files = sorted(teacher_root.glob("logits-*.pt"))
@@ -44,7 +49,7 @@ def main():
             }
         )
         print(path.name, metrics["kl_teacher_candidate"], flush=True)
-        (args.root / (args.candidate + "-comparison.json")).write_text(
+        output.write_text(
             json.dumps(report, indent=2) + "\n"
         )
     report["complete"] = True
@@ -59,7 +64,7 @@ def main():
             "top10_agreement",
         )
     }
-    (args.root / (args.candidate + "-comparison.json")).write_text(
+    output.write_text(
         json.dumps(report, indent=2) + "\n"
     )
 

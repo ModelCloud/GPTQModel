@@ -52,3 +52,10 @@ it does not prove all full-operator overhead is unchanged. No new masks, address
 operations or conversions were introduced into that epilogue. Native GEMM/input
 projection remain separate optimization opportunities. Post-profile normal
 correctness/Graph timing is queued; NCU replay durations are not speed evidence.
+
+Two saved-logit CPU comparisons are running: fused versus separate alpha1, and
+fused versus window. `compare_baselines.py` now accepts an explicit output path
+and refuses to overwrite an existing report, allowing both reference comparisons
+without clobbering evidence. Early per-document results include nonzero
+fused/separate divergence; final aggregate KL/top-k results remain pending.
+These comparisons reuse completed C4 model runs without touching the teacher.
