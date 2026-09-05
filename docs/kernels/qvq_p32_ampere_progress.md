@@ -3835,6 +3835,26 @@ transition bits 4--7 remain bit-for-bit identical to the fetched baseline.
 The broad stage-1/2 guard from the earlier probe is not used: it regressed
 small M, so the retained condition is explicitly limited to `M>=2048`.
 
+The post-commit Nsight Compute captures are `/tmp/v31_ncu_candidate_m4096.csv`
+and `/tmp/v31_ncu_baseline_m4096.csv`.  At the strongest case (`M=4096`,
+`stage=2`), the eight-row launch halves the grid from 1024 to 512 CTAs and
+lowers executed instructions from 280,303,616 to 160,534,528 (-42.7%).
+Profiled duration falls from 1,069,632 ns to 925,280 ns (13.5%); this timing
+is directional because the small kernel is profiler-instrumented.  Memory
+throughput is 77.17% versus 78.08%, L1/TEX is 93.77% versus 86.80%, and both
+variants have zero local/shared-memory spill requests.  The retained four-row
+entry uses 64 registers and 9,232 B shared memory; the new eight-row entry uses
+96 registers and 17,424 B.
+
+The source-correlated SASS extracts are `/tmp/v31_candidate_m8_stage2_sass.txt`
+and `/tmp/v31_base_m4_stage2_sass.txt`.  Static instructions rise from 1,269
+to 1,350 per CTA, but normalize to roughly 47% fewer instructions per output
+row after accounting for four versus eight live row groups.  HMMA/STG scale
+with doubled row work (16/16 to 32/32); decode/address work remains flat or
+falls (IMAD 225 to 230, SHF 126 to 121, LOP3 100 to 99, LEA 75 to 76).
+The SSA/algebraic pass found no redundant mask, shift, conversion, permutation,
+or address expression introduced by the new dispatch.
+
 ## Reproduction
 
 ```bash
