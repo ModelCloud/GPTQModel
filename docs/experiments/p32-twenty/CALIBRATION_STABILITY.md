@@ -80,3 +80,18 @@ missing. Other fast failing cases are retained in the machine-readable summary.
 and read-only hash outcomes before counting a local fit as complete. Its output
 explicitly separates partial/missing fits from completed local evidence; it does
 not certify full-model acceptance or completion of experiment 36.
+
+## Rank-6 sparse model follow-up completed
+
+The earlier rank-6 + 32-exception export now completed all 1,172 ARC examples:
+392 raw / 431 normalized correct, versus window 390 / 428. Paired raw wins/losses
+are 10/8 (exact p=0.81453), normalized 9/6 (p=0.60724). Prompts, targets, and
+sample indices matched exactly before comparison. These results are consistent
+with noise, not an established improvement. This is the original 8,192-token
+rank-6 sparse candidate, not the new subset-71 rank-6 fit.
+
+[Archived report](results/rank8-targeted/rank6-sparse32-arc.json) and
+[paired statistics](results/rank8-targeted/rank6-sparse32-arc-paired.json).
+The original generic `recovery_contract` text incorrectly calls all corrections
+FP32; the archive annotates this without rewriting the recorded run. Future
+reports now record A/B dtypes, logical rank, and sparse count explicitly.

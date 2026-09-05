@@ -1,0 +1,20 @@
+{
+  "scope": "Paired full ARC, rank6 with 32 sparse exceptions versus window",
+  "samples": 1172,
+  "metrics": {
+    "accuracy,loglikelihood": {
+      "candidate_correct": 392.0,
+      "window_correct": 390.0,
+      "wins": 10,
+      "losses": 8,
+      "paired_exact_p": 0.8145294189453125
+    },
+    "accuracy,loglikelihood_norm": {
+      "candidate_correct": 431.0,
+      "window_correct": 428.0,
+      "wins": 9,
+      "losses": 6,
+      "paired_exact_p": 0.60723876953125
+    }
+  }
+}

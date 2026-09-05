@@ -276,6 +276,10 @@ def main():
                 {
                     "module": name,
                     "path": str(path),
+                    "factor_a_dtype": str(candidate.a.dtype),
+                    "factor_b_dtype": str(candidate.b.dtype),
+                    "logical_rank": candidate.a.shape[1],
+                    "sparse_nnz": candidate.sparse_nnz,
                     "bytes": path.stat().st_size,
                     "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 }
@@ -293,7 +297,7 @@ def main():
                 for c in report["runtime_repack_caches"]
             )
         report["recovery_contract"] = (
-            "Full operator replacement: W4A16 + FP32 correction, output cast to input dtype; teacher files read only"
+            "Full operator replacement: native W4A16 plus typed low-rank correction and optional sparse correction; output cast to input dtype; teacher files read only"
         )
     if args.task:
         from transformers import AutoTokenizer
