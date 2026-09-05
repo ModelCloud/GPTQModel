@@ -1277,7 +1277,7 @@ __global__ __launch_bounds__(128) void p32_window_ampere_large_m2_kernel(
   p32_window_ampere_kernel_body<
       TransitionBits, true, 0, StaticN, 128, 4, StageKTiles,
       true, false, StaticK, RowGroups,
-      (RowGroups == 16 && StageKTiles == 3)>(
+      (RowGroups == 16 && StageKTiles >= 3)>(
       input + static_cast<int64_t>(row_offset) * size_k,
       trellis, levels, bank_ids, partial_output,
       output + static_cast<int64_t>(row_offset) * size_n, local_m, size_k,
@@ -2831,7 +2831,7 @@ int launch_p32_large_m2_grid(
       static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
       static_cast<unsigned>(size_m / (RowGroups * kRows)),
       static_cast<unsigned>(split_count));
-  constexpr bool kDynamicInputTile = RowGroups == 16 && StageKTiles == 3;
+  constexpr bool kDynamicInputTile = RowGroups == 16 && StageKTiles >= 3;
   constexpr int kDynamicInputBytes =
       kDynamicInputTile
           ? 2 * RowGroups * kRows * StageKTiles * kTileRows * sizeof(half)
@@ -3011,6 +3011,11 @@ int launch_p32_large_m(
         input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
         output, partial_output, size_m, size_k, size_n, config.split_count, \
         use_static_n, cuda_stream)
+#define QVQ_LARGE_M2_STAGE4(ROW_GROUPS) \
+    status = launch_p32_large_m2_grid_dispatch<TransitionBits, 4, ROW_GROUPS>( \
+        input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+        output, partial_output, size_m, size_k, size_n, config.split_count, \
+        use_static_n, cuda_stream)
     if (row_groups == 8) {
       const bool supported_n1024_stage =
           size_n == 1024 &&
@@ -3052,6 +3057,10 @@ int launch_p32_large_m(
                   size_n == 17408)) ||
                 (size_m >= 2048 && size_n != 1024))) {
       QVQ_LARGE_M2_STAGE3(16);
+    } else if (config.stage_k_tiles == 4 &&
+               qwen38_27b_shape &&
+               TransitionBits == 4 && size_m == 4096 && size_n != 1024) {
+      QVQ_LARGE_M2_STAGE4(16);
     } else if (((size_n == 1024 &&
                  (config.stage_k_tiles == 3 ||
                   (config.stage_k_tiles != 4 && size_m >= 2048))) ||
@@ -3067,6 +3076,7 @@ int launch_p32_large_m(
       QVQ_LARGE_M2_STAGE(2)
     }
     return status;
+#undef QVQ_LARGE_M2_STAGE4
 #undef QVQ_LARGE_M2_STAGE3
 #undef QVQ_LARGE_M2_STAGE2
 #undef QVQ_LARGE_M2_STAGE
