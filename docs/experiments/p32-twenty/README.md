@@ -1,12 +1,12 @@
 # Twenty P32 experiments
 
-Status: preparation only; **0/20 experiments completed**. No candidate is promoted.
+Status: F6 seed-7 C4 teacher quantization running; **0/20 experiments completed**. No candidate is promoted.
 
 Baseline: origin/main `a75e6f732d49041535ff0b0890d4002b3fc0d7ae`.
 All experiment commits and results belong to the single branch `experiments/p32-twenty` and its PR.
 Commit and push after each completed experiment, including rejected results and profiler evidence.
 
-## Inputs still to lock
+## Initial input audit (superseded by authorized F6 seed 7 below)
 
 The user must identify the accepted P32 teacher by checkpoint path/model revision.
 The best checkpoint documented in `docs/qvq_vaqa_best_log.md` is absent at its recorded
@@ -146,3 +146,22 @@ Output: `/root/work/p32-twenty-data/f6-seed7-c4-checkpoint`.
 The launcher pins the physical UUID, passes a strict idle gate and caps build/CPU parallelism.
 Environment: `/root/venv-py3.14t`, Python 3.14, Torch 2.15.0.dev20260817+cu130, Transformers 5.15.0.
 The earlier Python 3.13 probe environment lacks model dependencies and is not used for quantization.
+
+
+### Shared scorecard validation
+
+`scripts/p32_twenty/scorecard.py` defines float64 per-case MAE/max/relative-L2/cosine,
+teacher-to-candidate KL averaged per valid token, and top-k set overlap divided by k.
+Stable ordering resolves ties by vocabulary index. Zero reference norms produce null relative metrics;
+non-finite values fail explicitly. `equal_values` is a value-equality check, not a packed-bit proof.
+Callers must remove padding before measurement and supply a complete, deduplicated storage inventory.
+
+Validation: Ruff passed; `pytest -q tests/test_p32_twenty_scorecard.py` passed (1 CPU algebra test),
+covering constant-logit shifts, opposite rankings, outlier local-gate failure, non-finite rejection,
+zero-norm handling and metadata-inclusive BPW. No GPU implementation or model quality is validated by this test.
+
+Teacher job launched from quantizer revision `f75b2ff8`, process 369335, with log
+`/root/work/p32-twenty-data/quantize.log`. Runtime inspection confirmed active Fisher capture over
+112 targets and 10178 sequences. The log reports every 636 batches; timestamps/process/GPU activity
+must be checked rather than treating a quiet log as job completion or failure. Checkpoint save and
+reload/evaluation remain pending.
