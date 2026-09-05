@@ -81,6 +81,9 @@ def main():
         parser.error("--aiter-direct requires --aiter-skinny and a prebuilt AITER module_custom")
     if sum((args.inplace_correction, args.fused_correction, args.graph_execute, args.aiter_skinny != "none")) > 1:
         parser.error("Choose one correction, graph staging, or skinny dispatch experiment")
+    if args.fused_prefetch and (not args.fused_correction or args.fused_block_k != 64
+                               or args.fused_block_m not in (64, 128) or args.fused_block_n not in (64, 128)):
+        parser.error("Prefetch requires fused correction, BK64, and BM/BN64 or128")
     hardware, valid = _idle_preflight(args)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["HIP_VISIBLE_DEVICES"] = str(args.physical_gpu)

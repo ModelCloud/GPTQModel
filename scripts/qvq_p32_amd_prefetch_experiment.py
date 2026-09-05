@@ -51,10 +51,23 @@ def folded_residual_prefetch_kernel(
     interleave: gl.constexpr = False, prune_masks: gl.constexpr = True,
 ):
     gl.static_assert(size_k >= block_k and size_k % block_k == 0)
-    a_layout: gl.constexpr = gl.BlockedLayout([1, 8], [8, 8], [4, 1], [1, 0])
-    b_layout: gl.constexpr = gl.BlockedLayout([8, 1], [8, 8], [1, 4], [0, 1])
-    a_shared_layout: gl.constexpr = gl.SwizzledSharedLayout(8, 1, 8, [1, 0])
-    b_shared_layout: gl.constexpr = gl.SwizzledSharedLayout(8, 1, 8, [0, 1])
+    gl.static_assert(block_k == 64 and (block_m == 64 or block_m == 128)
+                     and (block_n == 64 or block_n == 128))
+    # Match the physical vector/lane/wave order of global-to-LDS transfers.
+    ar: gl.constexpr = [[0, 1], [0, 2], [0, 4], [4, 0]] + ([[8, 0]] if block_m == 128 else [])
+    al: gl.constexpr = [[0, 8], [0, 16], [0, 32]] + (
+        [[16, 0], [32, 0], [64, 0]] if block_m == 128 else [[8, 0], [16, 0], [32, 0]])
+    aw: gl.constexpr = [[1, 0], [2, 0]]
+    br: gl.constexpr = [[1, 0], [2, 0], [4, 0], [0, 4]] + ([[0, 8]] if block_n == 128 else [])
+    bl: gl.constexpr = [[8, 0], [16, 0], [32, 0]] + (
+        [[0, 16], [0, 32], [0, 64]] if block_n == 128 else [[0, 8], [0, 16], [0, 32]])
+    bw: gl.constexpr = [[0, 1], [0, 2]]
+    a_layout: gl.constexpr = gl.DistributedLinearLayout(ar, al, aw, [], [block_m, block_k])
+    b_layout: gl.constexpr = gl.DistributedLinearLayout(br, bl, bw, [], [block_k, block_n])
+    a_shared_layout: gl.constexpr = gl.PaddedSharedLayout(
+        [[512, 16]], ar[:3] + al + aw + ar[3:], [], [block_m, block_k])
+    b_shared_layout: gl.constexpr = gl.PaddedSharedLayout(
+        [[512, 16]], br[:3] + bl + bw + br[3:], [], [block_k, block_n])
     mma: gl.constexpr = gl.amd.AMDMFMALayout(4, [16, 16, 32], False, [2, 2])
     xs = gl.allocate_shared_memory(gl.float16, [2, block_m, block_k], a_shared_layout)
     hs = gl.allocate_shared_memory(gl.float16, [2, block_k, block_n], b_shared_layout)
