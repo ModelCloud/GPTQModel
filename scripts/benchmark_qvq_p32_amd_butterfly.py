@@ -55,6 +55,7 @@ def main():
     parser.add_argument("--graph-execute", action="store_true", help="Stage fresh inputs and clone graph outputs")
     parser.add_argument("--aiter-skinny", choices=("none", "wv", "llmm1"), default="none")
     parser.add_argument("--aiter-direct", action="store_true", help="Measure private native binding with cached weight metadata")
+    parser.add_argument("--flydsl-hgemm", action="store_true", help="Experimental same-type FP16 FlyDSL GEMM dispatch")
     parser.add_argument("--gemv-block-n", type=int, choices=(2, 4, 8), default=2)
     parser.add_argument("--shapes", nargs="+", choices=[shape[0] for shape in QWEN38_27B_SHAPES])
     parser.add_argument("--m-values", nargs="+", type=int, choices=REQUESTED_M)
@@ -81,8 +82,11 @@ def main():
         parser.error("Graph staging and skinny dispatch are separate experiments")
     if args.aiter_direct and args.aiter_skinny == "none":
         parser.error("--aiter-direct requires --aiter-skinny and a prebuilt AITER module_custom")
-    if sum((args.inplace_correction, args.fused_correction, args.graph_execute, args.aiter_skinny != "none")) > 1:
+    if sum((args.inplace_correction, args.fused_correction, args.graph_execute,
+            args.aiter_skinny != "none", args.flydsl_hgemm)) > 1:
         parser.error("Choose one correction, graph staging, or skinny dispatch experiment")
+    if args.flydsl_hgemm and (args.folded_direct_ceiling or args.folded_residual_ceiling):
+        parser.error("FlyDSL trial must preserve public layer guards; do not combine with raw ceilings")
     if args.fused_prefetch and (not args.fused_correction or args.fused_block_k not in (32, 64)
                                or args.fused_block_m not in (64, 128) or args.fused_block_n not in (64, 128)):
         parser.error("Prefetch requires fused correction, BK32 or64, and BM/BN64 or128")
@@ -124,6 +128,28 @@ def main():
     original_recovery = candidate_amd._qvq_p32_composite_recovery_gfx950_kernel
     original_gemv = candidate_amd._qvq_p32_folded_gemv_gfx950_kernel
     original_execute = candidate_amd._qvq_p32_folded_execute
+    flydsl_metadata = None
+    if args.flydsl_hgemm:
+        from importlib.metadata import version as package_version
+
+        from aiter.ops.flydsl import gemm_kernels as flydsl_module
+
+        flydsl_metadata = {
+            "version": package_version("flydsl"),
+            "wrapper_source": flydsl_module.__file__,
+            "wrapper_sha256": hashlib.sha256(Path(flydsl_module.__file__).read_bytes()).hexdigest(),
+            "kernel_sha256": hashlib.sha256(
+                (Path(flydsl_module.__file__).parent / "kernels/splitk_hgemm.py").read_bytes()
+            ).hexdigest(),
+            "runtime_cache_dir": os.environ.get("FLYDSL_RUNTIME_CACHE_DIR"),
+            "config": {"tile_m": 128, "tile_n": 128, "tile_k": 64, "split_k": 1,
+                       "block_m_warps": 2, "block_n_warps": 2, "block_k_warps": 1,
+                       "stages": 2, "async_copy": True, "b_to_lds": True},
+        }
+        # Match the installed wrapper's mandatory large-M/N/K selection filter.
+        flydsl_metadata["large_config"] = flydsl_metadata["config"] | {
+            "tile_m": 256, "tile_n": 256, "block_n_warps": 4,
+        }
     aiter_skinny = None
     if args.aiter_skinny != "none":
         import aiter
@@ -247,6 +273,23 @@ def main():
 
     graph_entries = {}
     skinny_weights = {}
+    flydsl_cases = set()
+
+    def flydsl_execute(x, operand, residual_operand=None, composite_recovery=None, **kwargs):
+        m, k = x.shape
+        n = kwargs["out_features"]
+        if (k, n) == (6144, 5120) and m <= 32:
+            residual_operand = None
+        if (m < 8 or composite_recovery is not None or residual_operand is not None
+                or kwargs["output_fp32"] or x.dtype != torch.float16 or operand.dtype != torch.float16
+                or not x.is_contiguous() or not operand.T.is_contiguous()):
+            return original_execute(x, operand, residual_operand, composite_recovery, **kwargs)
+        # Physical N-by-K immutable weights are already cached by the layer.
+        # Keep all public mutation guards and do not create per-forward weight copies.
+        config = flydsl_metadata["large_config" if min(m, n, k) >= 4096 else "config"]
+        output = flydsl_module.flydsl_hgemm(x, operand.T, **config)
+        flydsl_cases.add((m, k, n))
+        return output
 
     def skinny_execute(x, operand, residual_operand=None, composite_recovery=None, **kwargs):
         m, k = x.shape
@@ -326,6 +369,7 @@ def main():
 
     def select(name):
         candidate_amd._qvq_p32_folded_execute = (
+            flydsl_execute if name == "candidate" and args.flydsl_hgemm else
             fused_correction_execute if name == "candidate" and args.fused_correction else
             inplace_correction_execute if name == "candidate" and args.inplace_correction else
             graph_execute if name == "candidate" and args.graph_execute else
@@ -369,6 +413,7 @@ def main():
             "gpu": props.name,
             "arch": props.gcnArchName,
             "cu_count": props.multi_processor_count,
+            "flydsl": flydsl_metadata,
             "aiter_source": aiter.__file__ if aiter_skinny is not None else None,
             "aiter_jit_dir": os.environ.get("AITER_JIT_DIR") if aiter_skinny is not None else None,
         },
@@ -563,7 +608,9 @@ def main():
                     else torch.equal(outputs["candidate"], outputs["baseline"])
                 )
                 row["exact_baseline_equal"] = torch.equal(outputs["candidate"], outputs["baseline"])
+                row["flydsl_dispatched"] = (m, k, n) in flydsl_cases
                 if (args.graph_execute or args.inplace_correction
+                        or row["flydsl_dispatched"]
                         or (args.fused_correction and args.folded_residual_ceiling)
                         or ((k, n) == (6144, 5120) and m >= 64)):
                     select("candidate")
@@ -581,6 +628,7 @@ def main():
                 if aiter_skinny is not None and not qvq_p32_amd_folded_case_supported(m, k, n):
                     row["graph_check_status"] = "unchanged fallback: host validation is not graph-capture-safe"
                 if (args.graph_execute or (aiter_skinny is not None and m <= 4) or args.gemv_dot2
+                        or row["flydsl_dispatched"]
                         or (args.fused_correction and args.folded_residual_ceiling)
                         or ((args.gemv_dot2_loop or args.gemv_gluon) and m == 1)
                         or ((k, n) == (17408, 5120) and m >= 1024)
