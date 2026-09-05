@@ -275,6 +275,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_fp8_prefill_bytes: int = 0
     h100_fp8_mlp_down_launches: int = 0
     h100_fp8_mlp_down_bytes: int = 0
+    h100_fp8_mlp_fused_silu_launches: int = 0
     h100_fp8_ondemand_launches: int = 0
     h100_fp8_ondemand_retained_bytes: int = 0
     h100_fp8_ondemand_scratch_bytes: int = 0
@@ -358,6 +359,9 @@ class QVQGroupedRuntimeTelemetry:
             "h100_fp8_prefill_bytes": self.h100_fp8_prefill_bytes,
             "h100_fp8_mlp_down_launches": self.h100_fp8_mlp_down_launches,
             "h100_fp8_mlp_down_bytes": self.h100_fp8_mlp_down_bytes,
+            "h100_fp8_mlp_fused_silu_launches": (
+                self.h100_fp8_mlp_fused_silu_launches
+            ),
             "h100_fp8_ondemand_launches": self.h100_fp8_ondemand_launches,
             "h100_fp8_ondemand_retained_bytes": (
                 self.h100_fp8_ondemand_retained_bytes
@@ -1794,7 +1798,6 @@ class QVQHopperGroupedRuntime:
             gate, up = self._execute_h100_fp8_prefill(x, fp8_prefill)
             # Keep the two split views strided.  SiLU and multiplication can
             # consume them directly, avoiding two full Mx8192 materializations.
-            activated_gate = self._mlp_act_fn(gate)
             use_fp8_down = (
                 (down.in_features, down.out_features) == (8192, 2048)
                 and down.bias is None
@@ -1808,11 +1811,19 @@ class QVQHopperGroupedRuntime:
                 else None
             )
             if fp8_down is not None:
+                if self._mlp_activation_is_exact_silu:
+                    from .triton_utils.kernels import fused_silu_mul
+
+                    intermediate = fused_silu_mul(gate, up)
+                    self.telemetry.h100_fp8_mlp_fused_silu_launches += 1
+                else:
+                    intermediate = self._mlp_act_fn(gate) * up
                 self.telemetry.h100_fp8_mlp_down_launches += 1
                 recovered = self._execute_h100_fp8_mlp_down(
-                    activated_gate * up, fp8_down
+                    intermediate, fp8_down
                 )
                 return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
+            activated_gate = self._mlp_act_fn(gate)
             transformed = qvq_cuda_swiglu_precondition_multiblock(
                 activated_gate.reshape(rows, down.in_features),
                 up.reshape(rows, down.in_features),

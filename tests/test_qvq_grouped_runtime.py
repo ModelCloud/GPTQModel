@@ -1453,6 +1453,7 @@ def test_h100_m512_mlp_uses_versioned_fp8_prefill_and_replays_cuda_graph(
     telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
     assert telemetry["h100_fp8_prefill_launches"] == 2
     assert telemetry["h100_fp8_mlp_down_launches"] == 2
+    assert telemetry["h100_fp8_mlp_fused_silu_launches"] == 2
     assert telemetry["h100_fp8_prefill_bytes"] == 2048 * 16384 + 16384 * 4 + 4
     assert telemetry["h100_fp8_mlp_down_bytes"] == 8192 * 2048 + 2048 * 4 + 4
     assert telemetry["plain_fallbacks"] == 0
