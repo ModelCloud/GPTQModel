@@ -3774,6 +3774,28 @@ The candidate library used for this screen was built directly from
 `gptqmodel_ext/qvq/p32/qvq_p32_cuda.cu` with CUDA 13.3, `-O3`,
 `--split-compile=64`, and `-gencode arch=compute_80,code=sm_80`.
 
+The post-commit Nsight Compute capture is `/tmp/v30_ncu_candidate.csv`, with
+the matched control in `/tmp/v30_ncu_baseline.csv`.  For `M=512,N=1024`, the
+eight-row launch halves the grid from 128 to 64 CTAs and lowers executed
+instructions from 32,834,944 to 19,729,856 (-39.9%).  NCU reports zero local
+or shared-memory spill requests in both kernels.  The candidate uses 96
+registers/thread and 26,136 B static shared memory in the launch report
+(the resource dump rounds this to 27,288 B); the four-row control uses 64
+registers and 13,848 B in NCU (15,000 B in the resource dump).  The profiled
+candidate duration is 293,152 ns versus 310,880 ns for the control; this
+profiled timing is directional because Nsight instrumentation dominates this
+small grid.
+
+The source-correlated SASS extracts are `/tmp/v30_candidate_m8_sass.txt` and
+`/tmp/v30_base_m4_sass.txt`.  Static instruction count rises from 1,426 to
+1,522 per CTA, but after normalizing for four versus eight live row groups,
+the body is about 47% smaller per output row.  HMMA/LDSM/STG scale exactly
+with the doubled row work (24/12/16 to 48/24/32), while shared decode/address
+families do not: IMAD 275 to 278, SHF 126 to 129, LOP3 127 to 132, and LEA
+78 to 79.  The algebraic/data-movement pass found no new mask, shift,
+conversion, permutation, or address expression to fold; the surviving
+integer instructions are shared trellis-address and circular-state indexing.
+
 ## Reproduction
 
 ```bash
