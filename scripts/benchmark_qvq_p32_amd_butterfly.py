@@ -29,6 +29,10 @@ def main():
     parser.add_argument("--idle-memory-tolerance-mib", type=int, default=1024)
     parser.add_argument("--allow-busy", action="store_true")
     parser.add_argument("--full-sweep", action="store_true")
+    parser.add_argument("--shapes", nargs="+", choices=[shape[0] for shape in QWEN38_27B_SHAPES])
+    parser.add_argument("--m-values", nargs="+", type=int, choices=REQUESTED_M)
+    parser.add_argument("--folded-residual-ceiling", action="store_true",
+                        help="Benchmark a raw cached high+residual operator, not production dispatch")
     parser.add_argument("--baseline-forward-commit", help="Compare the folded-forward method from this git revision")
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--warmup", type=int, default=20)
@@ -132,6 +136,10 @@ def main():
 
     shapes = QWEN38_27B_SHAPES if args.full_sweep else [("mlp_down", 17408, 5120)]
     m_values = REQUESTED_M if args.full_sweep else [1024]
+    if args.shapes:
+        shapes = [shape for shape in QWEN38_27B_SHAPES if shape[0] in args.shapes]
+    if args.m_values:
+        m_values = args.m_values
     permitted = set(hardware["process_ids"]) | set(
         _rocm_snapshot(args.physical_gpu)["process_ids"]
     )
@@ -204,6 +212,16 @@ def main():
                 },
             ).eval()
             inner = layer.get_inner_weight_tensor()
+            high = low = None
+            if args.folded_residual_ceiling:
+                folded = inner.T.contiguous()
+                if ih:
+                    folded = matmul_hadU(folded, transpose=True)
+                if oh:
+                    folded = matmul_hadU(folded.T.contiguous()).T.contiguous()
+                high = folded.to(torch.float16).contiguous()
+                low = (folded - high.float()).to(torch.float16).contiguous()
+                del folded
             for m in m_values:
                 torch.mm = original_mm
                 x = (
@@ -214,15 +232,20 @@ def main():
                 ref = ref @ inner
                 if oh:
                     ref = matmul_hadU(ref)
+                def run(name, input_tensor=x, high=high, low=low, layer=layer):
+                    if name == "candidate" and args.folded_residual_ceiling:
+                        primary = original_mm(input_tensor, high.T, out_dtype=torch.float32)
+                        return torch.addmm(primary, input_tensor, low.T, out_dtype=torch.float32).to(torch.float16)
+                    return layer(input_tensor)
                 outputs = {}
                 for name, fn in [
                     ("baseline", original_mm),
                     ("candidate", candidate_mm),
                 ]:
                     select(name)
-                    outputs[name] = layer(x)
+                    outputs[name] = run(name)
                     for _ in range(args.warmup):
-                        layer(x)
+                        run(name)
                 torch.cuda.synchronize()
                 _, okay = _timing_recheck(args, permitted)
                 report["valid"] &= okay
@@ -244,7 +267,7 @@ def main():
                 for name, start, end in records:
                     select(name)
                     start.record()
-                    layer(x)
+                    run(name)
                     end.record()
                 torch.cuda.synchronize()
                 row = {
@@ -255,6 +278,9 @@ def main():
                     "n": n,
                     "dtype": "float16",
                 }
+                row["fp16_reference_rounding_floor"] = (ref.to(torch.float16).float() - ref).abs().max().item()
+                row["raw_candidate"] = args.folded_residual_ceiling
+                row["candidate_weight_cache_bytes"] = 4 * k * n if args.folded_residual_ceiling else None
                 for name, value in outputs.items():
                     times = sorted(
                         s.elapsed_time(e) for label, s, e in records if label == name
@@ -277,7 +303,7 @@ def main():
                 )
                 row["accuracy_basis"] = (
                     "canonical_fp32"
-                    if qvq_p32_amd_folded_case_supported(m, k, n)
+                    if args.folded_residual_ceiling or qvq_p32_amd_folded_case_supported(m, k, n)
                     else "exact_baseline"
                 )
                 row["accuracy_pass"] = (
@@ -291,12 +317,12 @@ def main():
                     stream.wait_stream(torch.cuda.current_stream())
                     with torch.cuda.stream(stream):
                         xs = x.clone()
-                        ys = layer(xs)
+                        ys = run("candidate", xs)
                     torch.cuda.current_stream().wait_stream(stream)
                     row["stream_equal"] = torch.equal(ys, outputs["candidate"])
                     graph = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(graph):
-                        yg = layer(x)
+                        yg = run("candidate")
                     graph.replay()
                     torch.cuda.synchronize()
                     row["graph_equal"] = torch.equal(yg, outputs["candidate"])
@@ -310,8 +336,8 @@ def main():
                     f"speedup={row['speedup']:.3f}x pass={row['accuracy_pass']}",
                     flush=True,
                 )
-                del x, ref, outputs
-            del layer, packed, banks, inner
+                del x, ref, outputs, run
+            del layer, packed, banks, inner, high, low
             torch.cuda.empty_cache()
         report["completed"] = True
         args.output.write_text(json.dumps(report, indent=2))
