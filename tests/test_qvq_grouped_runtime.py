@@ -948,6 +948,108 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_safe(bits):
     assert telemetry["fused_mlp_fallbacks"] == 0
 
 
+@pytest.mark.parametrize("bits, expected_fused_tiles", [(2.0, 0), (3.0, 2)])
+def test_qwen38_m32_rate_specific_path_is_cuda_graph_safe(
+    bits, expected_fused_tiles
+):
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+
+    class QwenMLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            shared = torch.ones(5120, device=device)
+            self.gate_proj = _child(
+                "gate_proj", in_features=5120, out_features=17408, bits=bits,
+                su=shared, seed=20261020, device=device, output_hadamard=False,
+            )
+            self.up_proj = _child(
+                "up_proj", in_features=5120, out_features=17408, bits=bits,
+                su=shared, seed=20261021, device=device, output_hadamard=False,
+            )
+            self.down_proj = _child(
+                "down_proj", in_features=17408, out_features=5120, bits=bits,
+                seed=20261022, device=device, input_hadamard=False,
+            )
+            self.act_fn = nn.SiLU()
+
+        def forward(self, x):
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+    mlp = QwenMLP().eval()
+    with torch.no_grad():
+        for child in (mlp.gate_proj, mlp.up_proj, mlp.down_proj):
+            child.SV.fill_(0.002)
+            child.bias.zero_()
+    x = torch.randn((32, 5120), device=device, dtype=torch.float16) * 0.02
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+    with torch.inference_mode():
+        eager = mlp(x)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = mlp(x)
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    torch.testing.assert_close(eager, captured, rtol=0, atol=0)
+    telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
+    assert telemetry["h100_qwen_m32_fused_tiles"] == expected_fused_tiles
+    assert telemetry["h100_qwen_large_m_direct_down_launches"] == (
+        0 if expected_fused_tiles else 2
+    )
+    assert telemetry["fused_mlp_fallbacks"] == 0
+
+
+def test_qwen38_m128_gate_up_uses_unsplit_graph_safe_payload():
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+
+    class QwenMLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            shared = torch.ones(5120, device=device)
+            self.gate_proj = _child(
+                "gate_proj", in_features=5120, out_features=17408, bits=3,
+                su=shared, seed=20261023, device=device, output_hadamard=False,
+            )
+            self.up_proj = _child(
+                "up_proj", in_features=5120, out_features=17408, bits=3,
+                su=shared, seed=20261024, device=device, output_hadamard=False,
+            )
+            self.down_proj = _child(
+                "down_proj", in_features=17408, out_features=5120, bits=3,
+                seed=20261025, device=device, input_hadamard=False,
+            )
+            self.act_fn = nn.SiLU()
+
+        def forward(self, x):
+            return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
+
+    mlp = QwenMLP().eval()
+    with torch.no_grad():
+        for child in (mlp.gate_proj, mlp.up_proj, mlp.down_proj):
+            child.SV.fill_(0.002)
+            child.bias.zero_()
+    x = torch.randn((128, 5120), device=device, dtype=torch.float16) * 0.02
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+    with torch.inference_mode():
+        eager = mlp(x)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = mlp(x)
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    torch.testing.assert_close(eager, captured, rtol=0, atol=0)
+    telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
+    assert telemetry["active_split_counts"] == (5, 5)
+    assert telemetry["h100_qwen_large_m_unsplit_gate_up_launches"] == 2
+    assert telemetry["h100_qwen_large_m_direct_down_launches"] == 2
+    assert telemetry["fused_mlp_fallbacks"] == 0
+
+
 def test_unwarmed_group_fails_closed_to_graph_safe_children(monkeypatch):
     """Capture must never run R0 tensor comparisons or payload repacking."""
 

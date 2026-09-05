@@ -15,6 +15,31 @@ Treat every QvQ feature branch as concurrently writable. Never push a stale loca
 - Never resolve a conflict by blindly choosing all of `ours` or `theirs`. Read the base, local change, and incoming
   change; integrate both intents when compatible.
 
+## Start every new branch from the live remote main tip
+
+Multiple agents may merge pull requests while another task is running. Before creating any new feature or benchmark
+branch, fetch `origin` again and branch directly from the newly resolved `origin/main`. Do not branch from a local
+`main`, the current feature-branch `HEAD`, a merge commit on an old feature branch, or an `origin/main` value fetched
+earlier in the session.
+
+1. Preserve or commit the current task's intended changes and leave unrelated collaborator files untouched.
+2. Confirm `origin` still points at ModelCloud/QvQ, then run `git fetch origin --prune` immediately before branching.
+3. Record `git rev-parse origin/main` as the new branch's base.
+4. Create the branch or worktree with `origin/main` as the explicit start point, for example:
+
+   ```bash
+   git switch -c <new-branch> --no-track origin/main
+   # Or, when preserving the current worktree:
+   git worktree add -b <new-branch> <new-worktree> origin/main
+   ```
+
+5. Before making changes, require both `git rev-parse HEAD` and `git merge-base HEAD origin/main` to equal the
+   recorded remote-main SHA, and require `git log --oneline origin/main..HEAD` to be empty.
+
+If selected commits from an earlier branch must carry forward, first create the clean branch from the latest
+`origin/main`, then cherry-pick only those reviewed commits. Never use the earlier branch or its post-merge tip as the
+new branch point. Re-fetch again before the first push because `origin/main` may have advanced during setup.
+
 ## Synchronize before every push
 
 1. Inspect `git status --short`, the active branch, its upstream, and `git remote -v`.
