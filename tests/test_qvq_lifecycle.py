@@ -15,6 +15,7 @@ from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization import FORMAT, OutputAlignConfig, QVQConfig, YaqaConfig
 from gptqmodel.quantization.qvq import quantize_qvq_linear
+from gptqmodel.quantization.qvq_yaqa import YaqaGramSketch
 
 
 def _prepared_calibration(**kwargs):
@@ -815,6 +816,51 @@ class _YaqaQModel:
         return True
 
 
+def _fake_yaqa_result(module, bits):
+    result = SimpleNamespace(
+        trellis=torch.zeros((1, int(8 * bits)), dtype=torch.int32),
+        SU=torch.ones(16),
+        SV=torch.ones(16),
+        bias=None,
+        weight=module.weight.detach().clone(),
+        proxy_loss=torch.tensor(1.0),
+        output_scale_optimized_channels=0,
+        hessian_viterbi_selected=False,
+        rounding="yaqa",
+        kronecker_proxy_loss=torch.tensor(0.75),
+        module_scale_search_selected=False,
+        module_scale_multiplier=1.0,
+        module_scale_reencoded=False,
+        telemetry=None,
+        bank_ids=None,
+        bank_alt_id=None,
+        yaqa_bank_fallback_to_v2=None,
+        yaqa_selector_churn=None,
+        yaqa_family_changed=None,
+        yaqa_block_family_id=None,
+        yaqa_spectral_selected=None,
+        yaqa_spectral_method=None,
+        yaqa_spectral_rank=None,
+        yaqa_spectral_lambda=None,
+        yaqa_spectral_alpha=None,
+        yaqa_spectral_svd_device=None,
+        yaqa_spectral_concentration=None,
+        yaqa_spectral_oracle_losses=None,
+        yaqa_spectral_candidates=None,
+        yaqa_spectral_absorption_efficiency=None,
+        yaqa_spectral_selector_churn=None,
+        yaqa_spectral_family_changed=None,
+        input_hadamard=True,
+        output_hadamard=True,
+    )
+    result.serialized_tensors = lambda: {
+        "trellis": result.trellis,
+        "SU": result.SU,
+        "SV": result.SV,
+    }
+    return result
+
+
 @pytest.mark.parametrize("bits", (1, 1.5))
 def test_qvq_yaqa_lifecycle_collects_full_model_factors_and_wires_them_to_quantizer(bits):
     # Source of truth: YAQA_DEFAULT_RATE_REGULARIZATION in
@@ -872,47 +918,7 @@ def test_qvq_yaqa_lifecycle_collects_full_model_factors_and_wires_them_to_quanti
     processor._set_current_batch_index(0)
     processor.pre_process_fwd_hook("proj")(module, (source,), module(source))
 
-    fake_result = SimpleNamespace(
-        trellis=torch.zeros((1, int(8 * bits)), dtype=torch.int32),
-        SU=torch.ones(16),
-        SV=torch.ones(16),
-        bias=None,
-        weight=module.weight.detach().clone(),
-        proxy_loss=torch.tensor(1.0),
-        output_scale_optimized_channels=0,
-        hessian_viterbi_selected=False,
-        rounding="yaqa",
-        kronecker_proxy_loss=torch.tensor(0.75),
-        module_scale_search_selected=False,
-        module_scale_multiplier=1.0,
-        module_scale_reencoded=False,
-        telemetry=None,
-        bank_ids=None,
-        bank_alt_id=None,
-        yaqa_bank_fallback_to_v2=None,
-        yaqa_selector_churn=None,
-        yaqa_family_changed=None,
-        yaqa_block_family_id=None,
-        yaqa_spectral_selected=None,
-        yaqa_spectral_method=None,
-        yaqa_spectral_rank=None,
-        yaqa_spectral_lambda=None,
-        yaqa_spectral_alpha=None,
-        yaqa_spectral_svd_device=None,
-        yaqa_spectral_concentration=None,
-        yaqa_spectral_oracle_losses=None,
-        yaqa_spectral_candidates=None,
-        yaqa_spectral_absorption_efficiency=None,
-        yaqa_spectral_selector_churn=None,
-        yaqa_spectral_family_changed=None,
-        input_hadamard=True,
-        output_hadamard=True,
-        serialized_tensors=lambda: {
-            "trellis": fake_result.trellis,
-            "SU": fake_result.SU,
-            "SV": fake_result.SV,
-        },
-    )
+    fake_result = _fake_yaqa_result(module, bits)
     with patch("gptqmodel.looper.qvq_processor.quantize_qvq_linear", return_value=fake_result) as quantize:
         processor.process(named, device=torch.device("cpu"))
 
@@ -1005,6 +1011,70 @@ def test_qvq_yaqa_chunked_factor_passes_match_single_pass_exactly():
         torch.testing.assert_close(
             single._yaqa_output_hessians[name], chunked._yaqa_output_hessians[name], rtol=0, atol=0
         )
+
+
+def test_qvq_yaqa_streaming_projected_lifecycle_retains_compact_factors():
+    rows = [
+        {
+            "input_ids": torch.tensor([[1, 2], [3, 4], [5, 6]]),
+            "attention_mask": torch.ones((3, 2), dtype=torch.long),
+        }
+    ]
+    qcfg = QVQConfig(
+        bits=2,
+        rounding="yaqa",
+        yaqa={
+            "seed": 787,
+            "minimum_sequences": 3,
+            "gram_strategy": "streaming_projected",
+            "gram_projection_rank": 32,
+        },
+        device="cpu",
+        offload_to_disk=False,
+    )
+    qmodel = _YaqaQModel(qcfg)
+    processor = QVQProcessor(
+        tokenizer=None,
+        qcfg=qcfg,
+        calibration=rows,
+        prepare_dataset_func=_prepared_calibration,
+        calibration_concat_size=None,
+        calibration_sort=None,
+        batch_size=1,
+        yaqa_calibration=rows,
+    )
+
+    processor.prepare_yaqa(qmodel)
+
+    assert processor._yaqa_stats["factor_passes"] == 1
+    assert processor._yaqa_stats["selected_gram_strategy"] == "streaming_projected"
+    assert processor._yaqa_stats["gram_projection_rank"] == 32
+    assert processor._yaqa_stats["factor_compression_ratio"] == pytest.approx(16 / 33)
+    assert all(isinstance(factor, YaqaGramSketch) for factor in processor._yaqa_input_hessians.values())
+    assert all(isinstance(factor, YaqaGramSketch) for factor in processor._yaqa_output_hessians.values())
+
+    full_name = "model.layers.0.proj"
+    input_sketch = processor._yaqa_input_hessians[full_name]
+    output_sketch = processor._yaqa_output_hessians[full_name]
+    expected_input = input_sketch.materialize(device=torch.device("cpu"))
+    expected_output = output_sketch.materialize(device=torch.device("cpu"))
+    module = qmodel.model.model.layers[0].proj
+    named = NamedModule(module, name="proj", full_name=full_name, layer_index=0)
+    processor.preprocess(named)
+    source = qmodel.model.embed(rows[0]["input_ids"]).detach()
+    processor._mask_tls = threading.local()
+    processor._mask_tls.value = rows[0]["attention_mask"].bool()
+    processor._set_current_batch_index(0)
+    processor.pre_process_fwd_hook("proj")(module, (source,), module(source))
+
+    fake_result = _fake_yaqa_result(module, bits=2)
+    with patch("gptqmodel.looper.qvq_processor.quantize_qvq_linear", return_value=fake_result) as quantize:
+        processor.process(named, device=torch.device("cpu"))
+
+    torch.testing.assert_close(quantize.call_args.args[1], expected_input)
+    torch.testing.assert_close(quantize.call_args.kwargs["output_hessian"], expected_output)
+    assert full_name not in processor._yaqa_input_hessians
+    assert full_name not in processor._yaqa_output_hessians
 
 
 @pytest.mark.cuda

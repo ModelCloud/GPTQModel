@@ -910,6 +910,8 @@ def test_yaqa_config_defaults_to_validated_rate_damping_and_sample_floor():
     assert config.yaqa.source_weight_column is None
     assert config.yaqa.source_weights == ()
     assert config.yaqa.max_factor_bytes_per_pass is None
+    assert config.yaqa.gram_strategy == "auto"
+    assert config.yaqa.gram_projection_rank == 256
     for rate in (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0):
         assert config.yaqa.regularization_for_rate(rate) == pytest.approx(0.1)
     for rate in (4.5, 5.0, 6.0, 7.0, 8.0):
@@ -928,6 +930,10 @@ def test_yaqa_config_defaults_to_validated_rate_damping_and_sample_floor():
         ({"sequence_sort": "shuffle"}, ValueError, "sequence_sort"),
         ({"max_factor_bytes_per_pass": 0}, ValueError, "max_factor_bytes_per_pass"),
         ({"max_factor_bytes_per_pass": True}, ValueError, "max_factor_bytes_per_pass"),
+        ({"gram_strategy": 1}, TypeError, "gram_strategy"),
+        ({"gram_strategy": "dense"}, ValueError, "gram_strategy"),
+        ({"gram_projection_rank": 0}, ValueError, "gram_projection_rank"),
+        ({"gram_projection_rank": True}, ValueError, "gram_projection_rank"),
     ),
 )
 def test_yaqa_config_rejects_invalid_collection_controls(kwargs, exception, message):
