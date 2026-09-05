@@ -24,3 +24,17 @@ quantization error. Neither variant establishes exact full forward arithmetic.
 
 [FP32 summary](results/lookup/fp32-summary.json), with raw per-projection samples.
 The full fused/model scorecard remains outstanding for experiments5/6.
+
+## Packed half2 result
+
+The packed-output run completed across all 94 projections at 1/4 warps. Every
+uint32 output word equals the canonical pair's two FP16 bit patterns. This tests
+exact pair packing, not approximate weights or a new accumulation strategy.
+Median direct/LUT ratios are 0.9714x for index lookup and 0.8600x for packed-pair
+lookup. Neither LUT improves the full decode/materialization path overall.
+Packed output is 4 bytes per pair instead of the 8-byte FP32 output array; these
+are different output layouts and no full-model speed ratio is inferred between
+them. The index/pair tables retain their counted 128/256-KiB payloads plus headers.
+
+The materialization implementation is not an MMA-fragment-ready fused kernel.
+Tests of vectorized output within the actual GEMM remain outstanding.

@@ -12,8 +12,8 @@ AGENTS.md. All changes and evidence share PR #137.
 |2|Decode reuse across rows|Five row-group limits, 45 passing cases on one projection; launch/concat confounding remains, controlled fused sweep needed.|
 |3|Persistent decoded tiles|New persistent scheduling/register-pressure sweep remains.|
 |4|Warp-specialized pipeline|Producer/consumer decode-MMA implementation and overlap measurement remain.|
-|5|Transition LUTs|Compact transition analysis available; actual GPU LUT implementation/sweep remains.|
-|6|Vectorized codebook output|Existing window kernel is comparator; dedicated packed-output ablation remains.|
+|5|Transition LUTs|GPU index/pair LUT decoders exact across all 94 projections; both slower overall in materialization, fused LUT study remains.|
+|6|Vectorized codebook output|Packed half2 output exact across all 94 projections at 1/4 warps; fused MMA-fragment output and model validation remain.|
 |7|Short reduced-precision accumulation|Promotion intervals 16–256 and real-model validation remain.|
 |8|Blockwise FP32 promotion|Reduction-order/promotion variants remain.|
 |9|Output supertiles|Neighboring projections/channels implementation and matched evaluation remain.|
