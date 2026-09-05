@@ -17,16 +17,69 @@ from gptqmodel.quantization.qvq_codecs import (
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.utils import qvq_wgmma_cuda
+from gptqmodel.utils.qvq_cuda import qvq_cuda_hadamard
 from gptqmodel.utils.qvq_wgmma_cuda import (
+    qvq_h100_large_m_ordered_split_count,
+    qvq_p32_window_decode_grouped_fp16_packed,
+    qvq_p32_window_grouped_prefill_fp16_packed,
+    qvq_p32_window_prepare_grouped_fp8_packed,
+    qvq_p32_window_prepare_grouped_fp16_packed,
     qvq_p32_window_wgmma_group_plan,
     qvq_p32_window_wgmma_grouped,
     qvq_p32_window_wgmma_grouped_ordered_packed,
     qvq_p32_window_wgmma_grouped_ordered_partials_packed,
     qvq_p32_window_wgmma_grouped_packed,
+    qvq_p32_window_wgmma_grouped_reuse2_packed,
+    qvq_p32_window_wgmma_grouped_reuse4_packed,
     qvq_p32_window_wgmma_m16_tma,
     qvq_p32_window_wgmma_m16_tma_ordered_split,
     qvq_pack_p32_window_hopper_group,
 )
+
+
+@pytest.mark.parametrize(
+    ("logical_rows", "expected"),
+    (
+        (17, 8),
+        (32, 8),
+        (64, 8),
+        (65, 4),
+        (128, 4),
+        (129, 2),
+        (256, 2),
+        (257, 1),
+        (4096, 1),
+    ),
+)
+def test_h100_large_m_down_split_policy(logical_rows, expected):
+    assert (
+        qvq_h100_large_m_ordered_split_count(
+            device_name="NVIDIA H100",
+            compute_capability=(9, 0),
+            logical_rows=logical_rows,
+            in_features=8192,
+            out_features=2048,
+        )
+        == expected
+    )
+
+
+def test_h100_large_m_down_split_policy_fails_closed_for_other_devices_and_shapes():
+    common = {
+        "compute_capability": (9, 0),
+        "logical_rows": 64,
+        "in_features": 8192,
+        "out_features": 2048,
+    }
+    assert (
+        qvq_h100_large_m_ordered_split_count(device_name="NVIDIA H200", **common) == 1
+    )
+    assert (
+        qvq_h100_large_m_ordered_split_count(
+            device_name="NVIDIA H100", **(common | {"out_features": 4096})
+        )
+        == 1
+    )
 
 
 def test_hopper_group_plan_retains_child_boundaries_and_policy():
@@ -214,6 +267,223 @@ def _payloads(
 
 
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
+def test_grouped_p32_fp16_prefill_decodes_once_and_is_graph_safe(bits):
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    in_features = 256
+    widths = (256, 256, 256)
+    alt_ids = (3, 1, 2)
+    generator = torch.Generator(device=device).manual_seed(20260940 + int(bits * 10))
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
+    input = (
+        torch.randn((128, in_features), generator=generator, device=device) * 0.1
+    ).half()
+    windows, selectors = _payloads(
+        bits=bits,
+        in_features=in_features,
+        widths=widths,
+        generator=generator,
+        device=device,
+    )
+    plan = qvq_p32_window_wgmma_group_plan(
+        input,
+        windows,
+        levels,
+        selectors,
+        bits,
+        out_features=widths,
+        bank_alt_ids=alt_ids,
+        split_counts=(1, 1, 1),
+    )
+    payload = qvq_pack_p32_window_hopper_group(windows, selectors, plan)
+    dense_children = tuple(
+        reconstruct_p32_window_inner_weight(
+            window,
+            bits=bits,
+            in_features=in_features,
+            out_features=width,
+            bank_ids=child_selectors,
+            bank_alt_id=torch.tensor(alt_id, dtype=torch.uint8, device=device),
+        )
+        for window, child_selectors, width, alt_id in zip(
+            windows, selectors, widths, alt_ids, strict=True
+        )
+    )
+
+    decoded = qvq_p32_window_decode_grouped_fp16_packed(payload, levels)
+    assert decoded.shape == (in_features, sum(widths))
+    assert decoded.dtype == torch.float16
+    assert torch.equal(decoded, torch.cat(dense_children, dim=1).half())
+
+    input_scale = torch.rand(
+        in_features, generator=generator, device=device, dtype=torch.float32
+    )
+    output_scales = tuple(
+        torch.rand(width, generator=generator, device=device, dtype=torch.float32)
+        for width in widths
+    )
+    output_hadamards = (True, True, False)
+    phase1_transposed = qvq_cuda_hadamard(
+        decoded.float().t().contiguous(),
+        post_scale=input_scale,
+        scale_mode=1,
+    )
+    phase1 = phase1_transposed.t().contiguous()
+    phase1_children = []
+    offset = 0
+    for width, scale, output_hadamard in zip(
+        widths, output_scales, output_hadamards, strict=True
+    ):
+        child = phase1[:, offset : offset + width].contiguous()
+        phase1_children.append(
+            qvq_cuda_hadamard(child, post_scale=scale, scale_mode=1)
+            if output_hadamard
+            else child * scale
+        )
+        offset += width
+    phase1_folded = torch.cat(phase1_children, dim=1).half()
+    phase2_folded = qvq_p32_window_prepare_grouped_fp16_packed(
+        payload,
+        levels,
+        input_scale,
+        output_scales,
+        output_hadamards,
+    )
+    assert torch.equal(phase2_folded, phase1_folded)
+
+    folded_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(folded_graph):
+        captured_folded = qvq_p32_window_prepare_grouped_fp16_packed(
+            payload,
+            levels,
+            input_scale,
+            output_scales,
+            output_hadamards,
+        )
+    folded_graph.replay()
+    torch.cuda.synchronize(device)
+    assert torch.equal(captured_folded, phase2_folded)
+
+    weight_scale = (phase2_folded.abs().amax() / 448.0).float()
+    weight_scale = torch.where(
+        weight_scale > 0, weight_scale, torch.ones_like(weight_scale)
+    )
+    expected_fp8 = (
+        phase2_folded.t().contiguous() / weight_scale
+    ).to(torch.float8_e4m3fn).t()
+    phase3_fp8 = qvq_p32_window_prepare_grouped_fp8_packed(
+        payload,
+        levels,
+        input_scale,
+        output_scales,
+        output_hadamards,
+        weight_scale,
+    )
+    assert phase3_fp8.dtype == torch.float8_e4m3fn
+    assert phase3_fp8.shape == phase2_folded.shape
+    assert phase3_fp8.stride() == (1, in_features)
+    assert torch.equal(phase3_fp8.float(), expected_fp8.float())
+
+    fp8_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(fp8_graph):
+        captured_fp8 = qvq_p32_window_prepare_grouped_fp8_packed(
+            payload,
+            levels,
+            input_scale,
+            output_scales,
+            output_hadamards,
+            weight_scale,
+        )
+    fp8_graph.replay()
+    torch.cuda.synchronize(device)
+    assert torch.equal(captured_fp8.float(), phase3_fp8.float())
+
+    half_folded_fp8 = qvq_p32_window_prepare_grouped_fp8_packed(
+        payload,
+        levels,
+        input_scale,
+        output_scales,
+        output_hadamards,
+        weight_scale,
+        half_fold=True,
+    )
+    # The packed-half implementation owns adjacent columns as one half2.  Its
+    # bit-1 butterfly is lane-local and all later butterflies operate on two
+    # independent lanes, so it must retain the scalar FP16 stage ordering and
+    # rounding boundaries exactly.  Build that scalar reference from the
+    # established Hadamard primitive instead of only checking finite output.
+    half_k = qvq_cuda_hadamard(
+        decoded.t().contiguous(), scale_mode=5
+    )
+    half_k = (
+        half_k.float()
+        * (1.0 / float(in_features) ** 0.5)
+        * input_scale
+    ).half()
+    half_transformed = half_k.t().contiguous()
+    half_children = []
+    offset = 0
+    for width, scale, output_hadamard in zip(
+        widths, output_scales, output_hadamards, strict=True
+    ):
+        child = half_transformed[:, offset : offset + width].contiguous()
+        if output_hadamard:
+            child = qvq_cuda_hadamard(child, scale_mode=5)
+            child = child.float() * (1.0 / float(width) ** 0.5)
+        else:
+            child = child.float()
+        half_children.append((child * scale).half())
+        offset += width
+    half_reference = torch.cat(half_children, dim=1)
+    expected_half_fp8 = (
+        (half_reference.t().contiguous().float() / weight_scale).half()
+    ).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).t()
+    assert half_folded_fp8.dtype == torch.float8_e4m3fn
+    assert half_folded_fp8.shape == phase2_folded.shape
+    assert half_folded_fp8.stride() == (1, in_features)
+    assert torch.isfinite(half_folded_fp8.float()).all()
+    assert torch.equal(half_folded_fp8.float(), expected_half_fp8.float())
+
+    half_fold_graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(half_fold_graph):
+        captured_half_fold = qvq_p32_window_prepare_grouped_fp8_packed(
+            payload,
+            levels,
+            input_scale,
+            output_scales,
+            output_hadamards,
+            weight_scale,
+            half_fold=True,
+        )
+    half_fold_graph.replay()
+    torch.cuda.synchronize(device)
+    assert torch.equal(
+        captured_half_fold.float(), half_folded_fp8.float()
+    )
+
+    expected = tuple(input.float() @ dense for dense in dense_children)
+    actual = qvq_p32_window_grouped_prefill_fp16_packed(input, payload, levels)
+    repeated = qvq_p32_window_grouped_prefill_fp16_packed(input, payload, levels)
+    for child, repeat, reference in zip(actual, repeated, expected, strict=True):
+        assert child.dtype == torch.float32
+        assert torch.equal(child, repeat)
+        torch.testing.assert_close(child, reference, rtol=0, atol=2e-3)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_p32_window_grouped_prefill_fp16_packed(
+            input, payload, levels
+        )
+    graph.replay()
+    torch.cuda.synchronize(device)
+    assert all(
+        torch.equal(child, reference)
+        for child, reference in zip(captured, actual, strict=True)
+    )
+
+
+@pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
 @pytest.mark.parametrize("logical_m", (1, 2, 4, 8, 16))
 def test_grouped_hopper_is_bit_exact_to_plain_children_and_bounded_by_dense(
     bits, logical_m
@@ -289,6 +559,156 @@ def test_grouped_hopper_is_bit_exact_to_plain_children_and_bounded_by_dense(
         torch.testing.assert_close(
             child[:logical_m], input[:logical_m].float() @ dense, rtol=0, atol=2e-3
         )
+
+
+@pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
+@pytest.mark.parametrize("logical_m", (32, 64, 128, 256))
+def test_grouped_hopper_large_m_is_exact_to_m16_tiles_and_graph_safe(bits, logical_m):
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    in_features = 256
+    widths = (256, 512, 256)
+    alt_ids = (3, 1, 2)
+    generator = torch.Generator(device=device).manual_seed(20260904 + int(bits * 10))
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
+    input = (
+        torch.randn((logical_m, in_features), generator=generator, device=device) * 0.1
+    ).half()
+    windows, selectors = _payloads(
+        bits=bits,
+        in_features=in_features,
+        widths=widths,
+        generator=generator,
+        device=device,
+    )
+    plan = qvq_p32_window_wgmma_group_plan(
+        input,
+        windows,
+        levels,
+        selectors,
+        bits,
+        out_features=widths,
+        bank_alt_ids=alt_ids,
+        split_counts=(1, 1, 1),
+    )
+    payload = qvq_pack_p32_window_hopper_group(windows, selectors, plan)
+    actual = qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
+    reused = qvq_p32_window_wgmma_grouped_reuse2_packed(input, payload, levels)
+    reused4 = (
+        qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
+        if logical_m >= 64
+        else None
+    )
+    tiled = tuple(
+        torch.cat(
+            tuple(
+                qvq_p32_window_wgmma_grouped_packed(
+                    input[row_start : row_start + 16], payload, levels
+                )[child_index]
+                for row_start in range(0, logical_m, 16)
+            ),
+            dim=0,
+        )
+        for child_index in range(len(widths))
+    )
+
+    for child, expected, window, child_selectors, width, alt_id in zip(
+        reused,
+        tiled,
+        windows,
+        selectors,
+        widths,
+        alt_ids,
+        strict=True,
+    ):
+        assert torch.equal(child, expected)
+        dense = reconstruct_p32_window_inner_weight(
+            window,
+            bits=bits,
+            in_features=in_features,
+            out_features=width,
+            bank_ids=child_selectors,
+            bank_alt_id=torch.tensor(alt_id, dtype=torch.uint8, device=device),
+        )
+        torch.testing.assert_close(child, input.float() @ dense, rtol=0, atol=2e-3)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = (
+            qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
+            if reused4 is not None
+            else qvq_p32_window_wgmma_grouped_reuse2_packed(input, payload, levels)
+        )
+    graph.replay()
+    torch.cuda.synchronize(device)
+    assert all(
+        torch.equal(child, expected)
+        for child, expected in zip(captured, reused4 or reused, strict=True)
+    )
+    assert all(
+        torch.equal(child, expected)
+        for child, expected in zip(reused, actual, strict=True)
+    )
+    if reused4 is not None:
+        assert all(
+            torch.equal(child, expected)
+            for child, expected in zip(reused4, actual, strict=True)
+        )
+
+
+@pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
+def test_h100_gate_up_n128_reuse_is_exact_and_graph_safe(bits):
+    """Exercise the measured N128 x M64 CTA, not a reduced test geometry."""
+
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    logical_m = 128
+    in_features = 2048
+    widths = (8192, 8192)
+    alt_ids = (1, 3)
+    generator = torch.Generator(device=device).manual_seed(20260940 + int(bits * 10))
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
+    input = (
+        torch.randn((logical_m, in_features), generator=generator, device=device) * 0.1
+    ).half()
+    windows, selectors = _payloads(
+        bits=bits,
+        in_features=in_features,
+        widths=widths,
+        generator=generator,
+        device=device,
+    )
+    plan = qvq_p32_window_wgmma_group_plan(
+        input,
+        windows,
+        levels,
+        selectors,
+        bits,
+        out_features=widths,
+        bank_alt_ids=alt_ids,
+        split_counts=(1, 1),
+    )
+    payload = qvq_pack_p32_window_hopper_group(windows, selectors, plan)
+    expected = qvq_p32_window_wgmma_grouped_packed(input, payload, levels)
+    actual = qvq_p32_window_wgmma_grouped_reuse4_packed(input, payload, levels)
+    assert all(
+        torch.equal(child, reference)
+        for child, reference in zip(actual, expected, strict=True)
+    )
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_p32_window_wgmma_grouped_reuse4_packed(
+            input, payload, levels
+        )
+    graph.replay()
+    torch.cuda.synchronize(device)
+    assert all(
+        torch.equal(child, reference)
+        for child, reference in zip(captured, expected, strict=True)
+    )
 
 
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
