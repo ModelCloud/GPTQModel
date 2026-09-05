@@ -24,7 +24,7 @@ AGENTS.md. All changes and evidence share PR #137.
 |14|GPU-aligned banks|Constrained learned-bank implementation/calibration remains.|
 |15|Additive codebooks|CPU fitting reference/tests; calibrated GPU/model integration remains.|
 |16|Signed-basis P32|CPU fitting reference/tests; calibrated GPU/model integration remains.|
-|17|INT4 + exceptions|Sparse residual reference; deployed base/exception export and calibration remain.|
+|17|INT4 + exceptions|Deployed fixed-base sparse-only sweeps: 1/2/4/8 target channels, 0–512 exceptions, all tested local cases fail. Broader budget/channel selection, model and profile coverage remain.|
 |18|Hybrid native/trellis|Sensitivity selection, tile dispatch, and full BPW/latency tradeoff remain.|
 |19|Native base + low rank|Four W4A16 projections refit at FP16 boundary on 8192 tokens; down rank16 passes 9/9 and bounded model run has mixed PPL/ARC effects. Full coverage/export remains.|
 |20|Joint optimization|Two deployed rank16 rounds on four projections measured; calibration selects step0 for q/k, step2 for gate/down. Full rank allocation/model study remains.|
@@ -36,7 +36,7 @@ AGENTS.md. All changes and evidence share PR #137.
 |26|GF(2) jump-ahead|CPU matrix reference exact; GPU compact affine scan #21 is related evidence, matrix-form implementation remains.|
 |27|Tensor-product codebook|CPU reference/tests; calibrated learned representation, GPU execution and quality/BPW sweep remain.|
 |28|Signed/ternary basis|CPU reference/tests; trained GPU representation and model study remain.|
-|29|Native + low-rank + sparse/P32|CPU residual components; deployed joint budget optimization remains.|
+|29|Native + low-rank + sparse/P32|Deployed rank6/8 plus sparse exports and bounded/full-ARC evidence recorded; joint budget optimization, retained P32 blocks and fused sparse execution remain.|
 |30|Sparse Walsh spectrum|CPU local-Walsh reference/tests; calibrated GPU/model representation remains.|
 
 Authoritative evidence links: [window model](WINDOW_MODEL.md), [row reuse](ROW_REUSE.md),
@@ -68,3 +68,25 @@ are complete. Native-GEMM fusion and fused-model validation remain outstanding.
 none passes every canonical case, so all retain window. 105 exports and 945
 reload metric comparisons are recorded. This does not complete broader/model
 validation for possible future alternatives.
+
+## Updated low-rank coverage
+
+- 31/32/33/35: fixed-base rank/fit/FP32-FP16 studies executed on layer0; broader
+  factor-precision options, maximum-aware objectives and all-layer coverage remain.
+- 34: rank-plus-sparse sweeps executed; targeted channel selection uses development
+  errors, so final untouched confirmation remains necessary.
+- 36: all 15 calibration fits and 15 broader replays completed (360 exports,
+  3,240 local reload cases, 9,000 broader cases). Cross-subset model checks are
+  running; full stability/sensitivity interpretation remains.
+- 37: layers1–15 initial ranks0–16 fail strict local coverage; remain window.
+- 38: layer0-only model replacement evaluated; successful deeper replacements
+  and nontrivial progressive replacement remain.
+- 39: opt-in fused expansion/add integrated, 9/9 local and Graph checks, full ARC,
+  C4/logits, fresh profiles and post-profile checks recorded. This is not fusion
+  of the native base with correction, nor proven 2x full-model speedup.
+- 40: bounded joint rank8/16 fitting executed; joint per-layer budget/rank selection
+  and broader optimization remain.
+
+See [calibration stability](CALIBRATION_STABILITY.md) and
+[fused model evidence](FUSED_RECOVERY_MODEL.md). These updates do not close any
+experiment's missing full scorecard items or replace experiments 1–30.

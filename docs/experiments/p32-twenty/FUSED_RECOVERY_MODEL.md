@@ -75,3 +75,9 @@ C4 fused-versus-separate logits KL is 1.13269545e-5, with top1/5/10 agreement
 Post-profile runtime checks again pass both local gates at all nine row counts.
 [Post-profile report](results/rank8-targeted/fused-post-profile-runtime.json).
 Full-model 2x speedup remains unproven; only one down projection is replaced.
+
+Fused-versus-window C4 logits comparison completed: KL 0.001789895,
+top1/5/10 agreement 0.9777832031 / 0.9744140625 / 0.9754638672.
+[Full comparison](results/rank8-targeted/fused-logits-vs-window.json).
+This measures the combined native conversion/recovery and fusion difference;
+the separate-reference comparison isolates the smaller fusion contribution.

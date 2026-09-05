@@ -148,3 +148,8 @@ Rank6 tail at seed72/4096 passes the original nine cases but only 23/25 replay
 cases. In contrast, rank6 L2 and tail at 16K/32K pass both original and replay
 cases across all three subsets. These are still development activation tests,
 not untouched full-model confirmation or proof of P32's advantage over BF16.
+
+The final seed72/8192 retry completed. All 15 broader replays now cover 360
+exports and 9,000 cases; [completed replay summary](results/low-rank/stability-broader-completed.json)
+retains every failed case. Completion here means evaluation ran, not every
+candidate passed or experiment36 met its full model/stability scorecard.
