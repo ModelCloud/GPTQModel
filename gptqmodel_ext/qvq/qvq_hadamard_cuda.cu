@@ -1586,6 +1586,47 @@ __device__ __forceinline__ void qvq_recovery_high_pair_selected(
   output1 = round_fp16_unless_overflow(values[0] - values[1]);
 }
 
+// Produce four outputs whose tile indices differ only in the final two
+// 32-point Hadamard bits.  The first three exact rounded reduction stages are
+// shared.  Stages three and four then form outputs t, t+8, t+16, and t+24 in
+// the same ascending butterfly order as four independent selected trees.
+__device__ __forceinline__ void qvq_recovery_high_quad_selected(
+    const float* __restrict__ workspace_row,
+    int local,
+    int output_tile,
+    float (&output)[4]) {
+  float values[kHadamardPairMultiblockTiles];
+#pragma unroll
+  for (int tile = 0; tile < kHadamardPairMultiblockTiles; ++tile) {
+    values[tile] = workspace_row[tile * kHadamardPairMultiblockTile + local];
+  }
+  int active = kHadamardPairMultiblockTiles;
+#pragma unroll
+  for (int stage = 0; stage < 3; ++stage) {
+    active >>= 1;
+    const bool subtract = (output_tile & (1 << stage)) != 0;
+#pragma unroll
+    for (int index = 0; index < kHadamardPairMultiblockTiles / 2; ++index) {
+      if (index < active) {
+        const float a = values[index * 2];
+        const float b = values[index * 2 + 1];
+        values[index] = round_fp16_unless_overflow(
+            subtract ? a - b : a + b);
+      }
+    }
+  }
+  const float low_sum = round_fp16_unless_overflow(values[0] + values[1]);
+  const float low_difference =
+      round_fp16_unless_overflow(values[0] - values[1]);
+  const float high_sum = round_fp16_unless_overflow(values[2] + values[3]);
+  const float high_difference =
+      round_fp16_unless_overflow(values[2] - values[3]);
+  output[0] = round_fp16_unless_overflow(low_sum + high_sum);
+  output[1] = round_fp16_unless_overflow(low_difference + high_difference);
+  output[2] = round_fp16_unless_overflow(low_sum - high_sum);
+  output[3] = round_fp16_unless_overflow(low_difference - high_difference);
+}
+
 __device__ __forceinline__ float qvq_round_fp16_known_finite(float value) {
   return __half2float(__float2half_rn(value));
 }
@@ -2058,6 +2099,145 @@ __global__ void qvq_recovery_high_pair_swiglu_precondition_half2_low_kernel(
         buf[0][local];
     *reinterpret_cast<half2*>(precondition_workspace + pair_offset1) =
         buf[1][local];
+  }
+}
+
+// Large-M candidate: one CTA owns four output tiles separated by the final
+// two high-transform bits.  It shares the first three recovery stages and all
+// synchronization/control in the four independent low transforms.  The
+// nonlinear recovery boundary and every FP16 butterfly rounding remain
+// identical to the accepted two-tile implementation.
+__global__ void qvq_recovery_high_quad_swiglu_precondition_half2_low_kernel(
+    const float* __restrict__ recovery_workspace,
+    const float* __restrict__ post_scale0,
+    const float* __restrict__ post_scale1,
+    const float* __restrict__ bias0,
+    const float* __restrict__ bias1,
+    const half* __restrict__ pre_scale,
+    half* __restrict__ precondition_workspace,
+    int rows,
+    int scale_mode) {
+  __shared__ half2 buf[4][kHadamardPairMultiblockHalf2LowValues];
+  const int row = static_cast<int>(blockIdx.y);
+  const int output_tile = static_cast<int>(blockIdx.x);
+  const int local = static_cast<int>(threadIdx.x);
+  const int64_t row_offset =
+      static_cast<int64_t>(row) * kHadamardPairMultiblockN;
+  const float* gate_workspace = recovery_workspace + row_offset;
+  const float* up_workspace = recovery_workspace +
+      static_cast<int64_t>(rows + row) * kHadamardPairMultiblockN;
+
+  float gate_values[4];
+  float up_values[4];
+  qvq_recovery_high_quad_selected(
+      gate_workspace, local, output_tile, gate_values);
+  qvq_recovery_high_quad_selected(
+      up_workspace, local, output_tile, up_values);
+
+  const float reciprocal = 1.0f /
+      sqrtf(static_cast<float>(kHadamardPairMultiblockN));
+  const float divisor = __half2float(
+      __float2half_rn(sqrtf(static_cast<float>(kHadamardPairMultiblockN))));
+  half initial[4];
+#pragma unroll
+  for (int index = 0; index < 4; ++index) {
+    const int tile = output_tile + index * (kHadamardPairMultiblockTiles / 4);
+    const int column = tile * kHadamardPairMultiblockTile + local;
+    float gate_value = gate_values[index];
+    float up_value = up_values[index];
+    if (scale_mode == 4) {
+      gate_value = round_fp16_unless_overflow(gate_value * reciprocal);
+      up_value = round_fp16_unless_overflow(up_value * reciprocal);
+    }
+    gate_value = round_fp16_unless_overflow(
+        gate_value * post_scale0[column]);
+    up_value = round_fp16_unless_overflow(up_value * post_scale1[column]);
+    if (bias0 != nullptr) {
+      gate_value = round_fp16_unless_overflow(gate_value + bias0[column]);
+    }
+    if (bias1 != nullptr) {
+      up_value = round_fp16_unless_overflow(up_value + bias1[column]);
+    }
+    const half activated_gate = qvq_silu_fp16(__float2half_rn(gate_value));
+    const half product = __float2half_rn(
+        __half2float(activated_gate) *
+        __half2float(__float2half_rn(up_value)));
+    float seed = __half2float(product) * __half2float(pre_scale[column]);
+    seed = round_fp16_unless_overflow(seed);
+    initial[index] = __float2half_rn(seed / divisor);
+  }
+
+  unsigned int peer_bits[4];
+#pragma unroll
+  for (int index = 0; index < 4; ++index) {
+    peer_bits[index] = __shfl_xor_sync(
+        0xffffffffu,
+        static_cast<unsigned int>(__half_as_ushort(initial[index])),
+        1);
+  }
+  if ((local & 1) == 0) {
+    constexpr unsigned int kEvenLaneMask = 0x55555555u;
+    const int local_pair = local >> 1;
+    half2 packed[4];
+#pragma unroll
+    for (int index = 0; index < 4; ++index) {
+      const half peer =
+          __ushort_as_half(static_cast<unsigned short>(peer_bits[index]));
+      const half2 pair = __halves2half2(initial[index], peer);
+      const half2 swapped = __lowhigh2highlow(pair);
+      const half2 sum = __hadd2(pair, swapped);
+      const half2 difference = __hsub2(pair, swapped);
+      packed[index] = __lows2half2(sum, difference);
+    }
+#pragma unroll
+    for (int bit = 1; bit < 16; bit <<= 1) {
+#pragma unroll
+      for (int index = 0; index < 4; ++index) {
+        union Half2Bits {
+          half2 value;
+          unsigned int bits;
+        } packed_bits, packed_peer;
+        packed_bits.value = packed[index];
+        packed_peer.bits = __shfl_xor_sync(
+            kEvenLaneMask, packed_bits.bits, bit * 2);
+        packed[index] = (local_pair & bit) == 0
+            ? __hadd2(packed[index], packed_peer.value)
+            : __hsub2(packed_peer.value, packed[index]);
+      }
+    }
+#pragma unroll
+    for (int index = 0; index < 4; ++index) {
+      buf[index][local_pair] = packed[index];
+    }
+  }
+  __syncthreads();
+
+#pragma unroll
+  for (int bit = 16; bit < kHadamardPairMultiblockHalf2LowValues; bit <<= 1) {
+    if (local < kHadamardPairMultiblockHalf2LowValues) {
+      const int peer = local ^ bit;
+      if (local < peer) {
+#pragma unroll
+        for (int index = 0; index < 4; ++index) {
+          const half2 a = buf[index][local];
+          const half2 b = buf[index][peer];
+          buf[index][local] = __hadd2(a, b);
+          buf[index][peer] = __hsub2(a, b);
+        }
+      }
+    }
+    __syncthreads();
+  }
+  if (local < kHadamardPairMultiblockHalf2LowValues) {
+#pragma unroll
+    for (int index = 0; index < 4; ++index) {
+      const int tile =
+          output_tile + index * (kHadamardPairMultiblockTiles / 4);
+      const int64_t pair_offset = row_offset +
+          tile * kHadamardPairMultiblockTile + local * 2;
+      *reinterpret_cast<half2*>(precondition_workspace + pair_offset) =
+          buf[index][local];
+    }
   }
 }
 
@@ -2973,7 +3153,22 @@ at::Tensor qvq_hadamard_pair_swiglu_precondition_multiblock_cuda(
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
   if (pair_tiles) {
-    if (bounded_rounding) {
+    if (rows > 16) {
+      qvq_recovery_high_quad_swiglu_precondition_half2_low_kernel<<<
+          dim3(kHadamardPairMultiblockTiles / 4, rows),
+          kHadamardPairMultiblockTile,
+          0,
+          stream>>>(
+          recovery_workspace.const_data_ptr<float>(),
+          post_scale0.const_data_ptr<float>(),
+          post_scale1.const_data_ptr<float>(),
+          bias0.has_value() ? bias0->const_data_ptr<float>() : nullptr,
+          bias1.has_value() ? bias1->const_data_ptr<float>() : nullptr,
+          reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+          reinterpret_cast<half*>(precondition_workspace.mutable_data_ptr()),
+          rows,
+          static_cast<int>(scale_mode));
+    } else if (bounded_rounding) {
       if (packed_gate_up) {
         qvq_recovery_high_pair_swiglu_precondition_half2_low_kernel<true, true><<<
             dim3(kHadamardPairMultiblockTiles / 2, rows),
