@@ -629,7 +629,9 @@ def test_qvq_p32_amd_folded_residual_cache_reuses_and_matches_fp32_oracle(m):
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not _gfx950_available(), reason="requires a ROCm gfx950 GPU")
-def test_qvq_linear_amd_folded_cache_reuses_and_invalidates_auxiliary_mutation():
+@pytest.mark.parametrize("buffer_name", ["trellis", "bank_ids", "bank_alt_id", "SU", "SV", "bias"])
+@pytest.mark.parametrize("replacement", [False, True])
+def test_qvq_linear_amd_folded_cache_reuses_and_invalidates_auxiliary_mutation(buffer_name, replacement):
     bits = 3.0
     k, n = 5120, 1024
     x, planar, _, _, bank_ids, bank_alt_id = _case(bits, 7, k=k, n=n, seed=9950)
@@ -657,17 +659,43 @@ def test_qvq_linear_amd_folded_cache_reuses_and_invalidates_auxiliary_mutation()
     first_folded = window._qvq_p32_amd_folded_cache[1]
     first_hot = layer._qvq_amd_folded_hot_cache
     assert first_hot is not None
-    repeated = layer(x)
+    with patch(
+        "gptqmodel.nn_modules.qlinear.qvq.qvq_transition_bits",
+        side_effect=AssertionError("hot hit should not normalize an unchanged rate"),
+    ):
+        repeated = layer(x)
     assert window._qvq_p32_amd_folded_cache[1] is first_folded
     assert layer._qvq_amd_folded_hot_cache is first_hot
     assert torch.equal(first, repeated)
 
-    layer.SU.mul_(0.875)
+    source = getattr(layer, buffer_name)
+    if replacement:
+        replacement_tensor = source.clone()
+        if buffer_name == "SU":
+            # Parameter replacement must still use normal module resolution.
+            replacement_tensor = torch.nn.Parameter(replacement_tensor, requires_grad=False)
+        setattr(layer, buffer_name, replacement_tensor)
+    elif buffer_name == "bank_alt_id":
+        source.fill_(1)
+    elif buffer_name in ("trellis", "bank_ids"):
+        source.bitwise_xor_(1)
+    elif buffer_name == "bias":
+        source.add_(0.001)
+    else:
+        source.mul_(0.875)
     changed = layer(x)
+    window = layer._qvq_cuda_window_cache[3]
     second_folded = window._qvq_p32_amd_folded_cache[1]
-    assert second_folded is not first_folded
+    if buffer_name != "bias":
+        assert second_folded is not first_folded
     assert layer._qvq_amd_folded_hot_cache is not first_hot
     inner = layer.get_inner_weight_tensor()
     reference = matmul_hadU(x.float() * layer.SU) @ inner
     reference = matmul_hadU(reference) * layer.SV + layer.bias.float()
     torch.testing.assert_close(changed.float(), reference, rtol=0.0, atol=2e-3)
+    layer.bits = 2.5
+    with patch(
+        "gptqmodel.nn_modules.qlinear.qvq.qvq_transition_bits",
+        side_effect=RuntimeError("changed rate must be validated"),
+    ), pytest.raises(RuntimeError, match="changed rate must be validated"):
+        layer._qvq_amd_folded_forward(x, torch.float16)

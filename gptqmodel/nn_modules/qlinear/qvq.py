@@ -672,7 +672,6 @@ class QVQLinear(BaseQuantLinear):
             or self.dual_v2
             or not self.v2b2_p32
             or self.vector_size != 2
-            or qvq_transition_bits(self.bits, vector_size=2) not in (4, 5, 6, 7)
         ):
             return None
         from ...utils.qvq_amd import (
@@ -682,28 +681,36 @@ class QVQLinear(BaseQuantLinear):
             qvq_p32_amd_folded_prefers_fp32_output,
             qvq_p32_amd_supported,
         )
-        from ...utils.qvq_cuda import _pgc16_levels
-
         if not qvq_p32_amd_folded_case_supported(
             x_2d.shape[0], self.in_features, self.out_features
         ):
             return None
         cached = self._qvq_amd_folded_hot_cache
+        # Resolve registered tensors once. nn.Module buffer lookup is not a plain
+        # attribute read, and repeated resolution was material in decode forwards.
+        buffers = self._buffers if type(self) is QVQLinear else {}
+        # dict.get(default) would eagerly perform the attribute lookup we avoid.
+        trellis = buffers["trellis"] if "trellis" in buffers else self.trellis  # noqa: SIM401
+        bank_ids_source = buffers["bank_ids"] if "bank_ids" in buffers else self.bank_ids  # noqa: SIM401
+        bank_alt_source = buffers["bank_alt_id"] if "bank_alt_id" in buffers else self.bank_alt_id  # noqa: SIM401
+        su_source = buffers["SU"] if "SU" in buffers else self.SU  # noqa: SIM401
+        sv_source = buffers["SV"] if "SV" in buffers else self.SV  # noqa: SIM401
+        bias_source = self.bias
         if (
             cached is not None
             and len(cached) == 27
-            and cached[0] is self.trellis
-            and cached[1] == self.trellis._version
-            and cached[2] is self.bank_ids
-            and cached[3] == self.bank_ids._version
-            and cached[4] is self.bank_alt_id
-            and cached[5] == self.bank_alt_id._version
-            and cached[6] is self.SU
-            and cached[7] == self.SU._version
-            and cached[8] is self.SV
-            and cached[9] == self.SV._version
-            and cached[10] is self.bias
-            and cached[11] == (-1 if self.bias is None else self.bias._version)
+            and cached[0] is trellis
+            and cached[1] == trellis._version
+            and cached[2] is bank_ids_source
+            and cached[3] == bank_ids_source._version
+            and cached[4] is bank_alt_source
+            and cached[5] == bank_alt_source._version
+            and cached[6] is su_source
+            and cached[7] == su_source._version
+            and cached[8] is sv_source
+            and cached[9] == sv_source._version
+            and cached[10] is bias_source
+            and cached[11] == (-1 if bias_source is None else bias_source._version)
             and cached[12] == x_2d.device
             and cached[13] == self.bits
             and cached[14] == self.input_hadamard
@@ -723,6 +730,12 @@ class QVQLinear(BaseQuantLinear):
                 ),
             )
             return output if bias is None else output + bias
+        # A cache hit already proved this exact rate eligible when built. Keep
+        # normalization on the cold path, including after any rate mutation.
+        if qvq_transition_bits(self.bits, vector_size=2) not in (4, 5, 6, 7):
+            return None
+        from ...utils.qvq_cuda import _pgc16_levels
+
         if not qvq_p32_amd_supported(x_2d.device):
             return None
         if not self._bank_ids_loaded or self.bank_ids is None or self.bank_ids.device.type == "meta":

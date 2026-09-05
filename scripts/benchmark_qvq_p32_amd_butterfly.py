@@ -6,6 +6,7 @@ solution indices are build-specific research knobs, not portable defaults.
 """
 
 import argparse
+import ast
 import hashlib
 import itertools
 import json
@@ -28,6 +29,7 @@ def main():
     parser.add_argument("--idle-memory-tolerance-mib", type=int, default=1024)
     parser.add_argument("--allow-busy", action="store_true")
     parser.add_argument("--full-sweep", action="store_true")
+    parser.add_argument("--baseline-forward-commit", help="Compare the folded-forward method from this git revision")
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument(
@@ -50,6 +52,7 @@ def main():
     import triton
     from qvq_p32_amd_butterfly_experiment import fht128_kernel, fht128_split_kernel
 
+    import gptqmodel.nn_modules.qlinear.qvq as qvq_module
     from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
     from gptqmodel.quantization.qvq import pack_qvq_binary_bank_ids
     from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
@@ -60,6 +63,22 @@ def main():
     if not torch.version.hip or props.gcnArchName.split(":")[0] != "gfx950":
         raise RuntimeError("This experiment requires gfx950")
     original_mm = torch.mm
+    candidate_forward = QVQLinear._qvq_amd_folded_forward
+    baseline_forward = candidate_forward
+    if args.baseline_forward_commit:
+        revision = subprocess.check_output(
+            ["git", "rev-parse", "--verify", args.baseline_forward_commit + "^{commit}"], cwd=root, text=True,
+        ).strip()
+        source = subprocess.check_output(
+            ["git", "show", revision + ":gptqmodel/nn_modules/qlinear/qvq.py"], cwd=root, text=True,
+        )
+        cls = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef) and node.name == "QVQLinear")
+        method = next(node for node in cls.body if isinstance(node, ast.FunctionDef)
+                      and node.name == "_qvq_amd_folded_forward")
+        namespace = dict(vars(qvq_module))
+        # Explicit opt-in to trusted local repository code, never network input.
+        exec(compile(ast.Module(body=[method], type_ignores=[]), "<baseline-folded-forward>", "exec"), namespace)  # noqa: S102
+        baseline_forward = namespace["_qvq_amd_folded_forward"]
     hipb_mm = None
     if args.hipblaslt_solution >= 0:
         import aiter
@@ -106,6 +125,11 @@ def main():
             return y
         return original_mm(x, w, *mm_args, **kwargs)
 
+    def select(name):
+        QVQLinear._qvq_amd_folded_forward = baseline_forward if name == "baseline" else candidate_forward
+        torch.mm = (candidate_mm if name == "candidate"
+                    and (args.butterfly != "none" or hipb_mm is not None) else original_mm)
+
     shapes = QWEN38_27B_SHAPES if args.full_sweep else [("mlp_down", 17408, 5120)]
     m_values = REQUESTED_M if args.full_sweep else [1024]
     permitted = set(hardware["process_ids"]) | set(
@@ -130,6 +154,9 @@ def main():
         "rows": [],
         "kernel_source_sha256": hashlib.sha256(
             (root / "scripts/qvq_p32_amd_butterfly_experiment.py").read_bytes()
+        ).hexdigest(),
+        "qvq_source_sha256": hashlib.sha256(
+            (root / "gptqmodel/nn_modules/qlinear/qvq.py").read_bytes()
         ).hexdigest(),
         "status": "exploratory; not production promotion or model-quality evidence",
     }
@@ -192,7 +219,7 @@ def main():
                     ("baseline", original_mm),
                     ("candidate", candidate_mm),
                 ]:
-                    torch.mm = fn
+                    select(name)
                     outputs[name] = layer(x)
                     for _ in range(args.warmup):
                         layer(x)
@@ -215,7 +242,7 @@ def main():
                             )
                         )
                 for name, start, end in records:
-                    torch.mm = original_mm if name == "baseline" else candidate_mm
+                    select(name)
                     start.record()
                     layer(x)
                     end.record()
@@ -259,7 +286,7 @@ def main():
                     else torch.equal(outputs["candidate"], outputs["baseline"])
                 )
                 if (m, k, n) == (1024, 17408, 5120):
-                    torch.mm = candidate_mm
+                    select("candidate")
                     stream = torch.cuda.Stream()
                     stream.wait_stream(torch.cuda.current_stream())
                     with torch.cuda.stream(stream):
@@ -296,6 +323,7 @@ def main():
         raise
     finally:
         torch.mm = original_mm
+        QVQLinear._qvq_amd_folded_forward = candidate_forward
 
 
 if __name__ == "__main__":
