@@ -1,0 +1,95 @@
+{
+  "scope": "layer baseline and window candidate; experiment 1/10 partial evidence; profiler and model gates pending",
+  "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+  "worker": 0,
+  "torch": "2.13.0+cu130",
+  "device": "_CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=cb9e7784-cf50-203d-4f0d-5c622a89b1f2, pci_bus_id=37, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "revision": "5dcc5d5b6694a9ad763f2a4d486e0330fb1e7cb7",
+  "rows": [
+    {
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 1,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 2048,
+        "mean_abs": 3.383833415426807e-05,
+        "max_abs": 0.00031188130378723145,
+        "relative_l2": 0.00017053125476460646,
+        "cosine": 0.9999999854839637,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 2048,
+        "mean_abs": 3.383908077836395e-05,
+        "max_abs": 0.00031191110610961914,
+        "relative_l2": 0.00017053609865579832,
+        "cosine": 0.9999999854830913,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 16,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 32768,
+        "mean_abs": 5.609219032975954e-05,
+        "max_abs": 0.00054168701171875,
+        "relative_l2": 4.4302551111724965e-05,
+        "cosine": 0.9999999990326515,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 32768,
+        "mean_abs": 5.6234778468500224e-05,
+        "max_abs": 0.000553131103515625,
+        "relative_l2": 4.44387230302873e-05,
+        "cosine": 0.9999999990323298,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 2048,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 4194304,
+        "mean_abs": 5.6764365369271426e-05,
+        "max_abs": 0.0009241104125976562,
+        "relative_l2": 4.274818730067548e-05,
+        "cosine": 0.999999999087681,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 4194304,
+        "mean_abs": 5.7203423427800005e-05,
+        "max_abs": 0.000885009765625,
+        "relative_l2": 4.3193194542104334e-05,
+        "cosine": 0.9999999990866772,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    }
+  ],
+  "complete": true
+}
