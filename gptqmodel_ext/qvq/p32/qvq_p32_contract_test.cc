@@ -6,7 +6,7 @@
 #include <type_traits>
 
 static_assert(QVQ_P32_OPERATION_VERSION == 1);
-static_assert(QVQ_P32_ABI_VERSION == 1);
+static_assert(QVQ_P32_ABI_VERSION == 2);
 static_assert(QVQ_P32_KERNEL_VERSION == 10);
 static_assert(QVQ_P32_COMPILED_SM == 80);
 static_assert(QVQ_P32_TILE_SIZE == 16);
@@ -23,6 +23,8 @@ static_assert(QVQ_P32_GROUP_COUNT_MAX == 3);
 static_assert(QVQ_P32_ROW_GROUPS_AUTO == 0);
 static_assert(QVQ_P32_ROW_GROUPS_MIN == 1);
 static_assert(QVQ_P32_ROW_GROUPS_MAX == 16);
+static_assert(QVQ_P32_LAUNCH_PLAN_MAX_LAUNCHES == 5);
+static_assert(QVQ_P32_LAUNCH_PLAN_MAX_ARGS == 16);
 
 static_assert(QVQ_P32_VARIANT_SCALAR == 1);
 static_assert(QVQ_P32_VARIANT_BLOCK == 2);
@@ -30,6 +32,11 @@ static_assert(QVQ_P32_REDUCTION_NATIVE == 1);
 static_assert(QVQ_P32_REDUCTION_PARTIALS == 2);
 static_assert(std::is_standard_layout_v<qvq_p32_config>);
 static_assert(sizeof(qvq_p32_config) == 6 * sizeof(int));
+static_assert(std::is_standard_layout_v<qvq_p32_launch_arg>);
+static_assert(std::is_standard_layout_v<qvq_p32_launch_descriptor>);
+static_assert(std::is_standard_layout_v<qvq_p32_launch_plan>);
+static_assert(QVQ_P32_LAUNCH_ARG_DEVICE_POINTER == 1);
+static_assert(QVQ_P32_LAUNCH_ARG_HOST_VALUE == 2);
 
 int main() {
   const qvq_p32_config config = {
@@ -40,5 +47,6 @@ int main() {
       0,
       QVQ_P32_REDUCTION_NATIVE,
   };
-  return config.split_count == 1 ? 0 : 1;
+  qvq_p32_launch_plan plan{};
+  return config.split_count == 1 && plan.launch_count == 0 ? 0 : 1;
 }
