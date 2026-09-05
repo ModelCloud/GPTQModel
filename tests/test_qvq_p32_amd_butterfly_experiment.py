@@ -6,6 +6,33 @@ import torch
 triton = pytest.importorskip("triton")
 
 
+@pytest.mark.parametrize("size_k", [256, 5120, 6144])
+@pytest.mark.parametrize("tile", [64, 128])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
+@pytest.mark.parametrize("interleave", [False, True])
+def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, interleave):
+    if not torch.cuda.is_available() or not torch.version.hip:
+        pytest.skip("requires AMD GPU")
+    if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
+        pytest.skip("requires gfx950")
+    from scripts.qvq_p32_amd_butterfly_experiment import (
+        folded_residual_gemm_gluon_kernel,
+    )
+
+    m, n = 65, 67
+    generator = torch.Generator(device="cuda").manual_seed(950 + size_k)
+    x = torch.randn((m, size_k), generator=generator, device="cuda", dtype=torch.float16) * 0.01
+    high = torch.randn((n, size_k), generator=generator, device="cuda", dtype=torch.float16)
+    low = torch.randn(high.shape, generator=generator, device="cuda", dtype=torch.float16) * 0.001
+    reference = x.float() @ (high.float() + low.float()).T
+    output = torch.full((m * n + 128,), 999.0, device="cuda", dtype=dtype)
+    folded_residual_gemm_gluon_kernel[(triton.cdiv(m, tile), triton.cdiv(n, tile))](
+        x, high, low, output, m, n, size_k, tile, tile, tile, interleave, num_warps=4, num_stages=2,
+    )
+    torch.testing.assert_close(output[:m*n].view(m, n).float(), reference, atol=2e-3, rtol=0)
+    assert (output[m*n:] == 999.0).all()
+
+
 @pytest.mark.parametrize("size_k", [5120, 6144])
 @pytest.mark.parametrize("block_n", [2, 4, 8])
 @pytest.mark.parametrize("residual", [False, True])

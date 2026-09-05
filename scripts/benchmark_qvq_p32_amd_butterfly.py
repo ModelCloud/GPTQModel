@@ -40,6 +40,11 @@ def main():
     parser.add_argument("--gemv-gluon", action="store_true", help="Use explicit layouts for the packed-dot K loop")
     parser.add_argument("--inplace-correction", action="store_true",
                         help="Reuse the private FP32 primary output for residual addmm")
+    parser.add_argument("--fused-correction", action="store_true", help="Experimental shared-X Gluon residual GEMM")
+    parser.add_argument("--fused-interleave", action="store_true", help="Interleave high/low into one FP32 accumulator")
+    parser.add_argument("--fused-block-m", type=int, choices=(32, 64, 128), default=64)
+    parser.add_argument("--fused-block-n", type=int, choices=(32, 64, 128), default=64)
+    parser.add_argument("--fused-block-k", type=int, choices=(32, 64, 128), default=64)
     parser.add_argument("--torch-profile-dir", type=Path, help="Capture warmed paired operator mapping traces")
     parser.add_argument("--gemv-loop-k", type=int, choices=(256, 512, 1024), default=512)
     parser.add_argument("--gemv-split-k", action="store_true", help="Remove padded arithmetic from full-K GEMV")
@@ -72,8 +77,8 @@ def main():
         parser.error("Graph staging and skinny dispatch are separate experiments")
     if args.aiter_direct and args.aiter_skinny == "none":
         parser.error("--aiter-direct requires --aiter-skinny and a prebuilt AITER module_custom")
-    if args.inplace_correction and (args.graph_execute or args.aiter_skinny != "none"):
-        parser.error("In-place correction, graph staging, and skinny dispatch are separate experiments")
+    if sum((args.inplace_correction, args.fused_correction, args.graph_execute, args.aiter_skinny != "none")) > 1:
+        parser.error("Choose one correction, graph staging, or skinny dispatch experiment")
     hardware, valid = _idle_preflight(args)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["HIP_VISIBLE_DEVICES"] = str(args.physical_gpu)
@@ -92,6 +97,7 @@ def main():
         folded_gemv_dot2_loop_kernel,
         folded_gemv_full_k_kernel,
         folded_gemv_split_k_kernel,
+        folded_residual_gemm_gluon_kernel,
     )
 
     import gptqmodel.nn_modules.qlinear.qvq as qvq_module
@@ -288,8 +294,24 @@ def main():
         torch.addmm(primary, x, residual_operand, out_dtype=torch.float32, out=primary)
         return primary if kwargs["output_fp32"] else primary.to(x.dtype)
 
+    def fused_correction_execute(x, operand, residual_operand=None, composite_recovery=None, **kwargs):
+        if (composite_recovery is not None or residual_operand is None or x.shape[0] < 64
+                or not x.is_contiguous() or not operand.T.is_contiguous() or not residual_operand.T.is_contiguous()
+                or (torch.is_grad_enabled() and any(t.requires_grad for t in (x, operand, residual_operand)))):
+            return original_execute(x, operand, residual_operand, composite_recovery, **kwargs)
+        m, k = x.shape
+        n = operand.shape[1]
+        output = torch.empty((m, n), device=x.device, dtype=torch.float32 if kwargs["output_fp32"] else x.dtype)
+        folded_residual_gemm_gluon_kernel[(triton.cdiv(m, args.fused_block_m), triton.cdiv(n, args.fused_block_n))](
+            x, operand, residual_operand, output, m, n, k,
+            args.fused_block_m, args.fused_block_n, args.fused_block_k, args.fused_interleave,
+            num_warps=4, num_stages=2,
+        )
+        return output
+
     def select(name):
         candidate_amd._qvq_p32_folded_execute = (
+            fused_correction_execute if name == "candidate" and args.fused_correction else
             inplace_correction_execute if name == "candidate" and args.inplace_correction else
             graph_execute if name == "candidate" and args.graph_execute else
             skinny_execute if name == "candidate" and aiter_skinny is not None else original_execute
@@ -432,6 +454,9 @@ def main():
                             output_fp32=candidate_amd.qvq_p32_amd_folded_prefers_fp32_output(m, k, n),
                         ).to(input_tensor.dtype)
                     if name == "candidate" and args.folded_residual_ceiling:
+                        if args.fused_correction:
+                            return fused_correction_execute(input_tensor, high.T, low.T,
+                                                            out_features=n, output_fp32=False)
                         primary = original_mm(input_tensor, high.T, out_dtype=torch.float32)
                         return torch.addmm(primary, input_tensor, low.T, out_dtype=torch.float32).to(torch.float16)
                     return (baseline_layer if name == "baseline" else layer)(input_tensor)
@@ -520,7 +545,9 @@ def main():
                     else torch.equal(outputs["candidate"], outputs["baseline"])
                 )
                 row["exact_baseline_equal"] = torch.equal(outputs["candidate"], outputs["baseline"])
-                if args.graph_execute or args.inplace_correction or ((k, n) == (6144, 5120) and m >= 64):
+                if (args.graph_execute or args.inplace_correction
+                        or (args.fused_correction and args.folded_residual_ceiling)
+                        or ((k, n) == (6144, 5120) and m >= 64)):
                     select("candidate")
                     saved = outputs["candidate"].clone()
                     changed = run("candidate", -x)
@@ -536,6 +563,7 @@ def main():
                 if aiter_skinny is not None and not qvq_p32_amd_folded_case_supported(m, k, n):
                     row["graph_check_status"] = "unchanged fallback: host validation is not graph-capture-safe"
                 if (args.graph_execute or (aiter_skinny is not None and m <= 4) or args.gemv_dot2
+                        or (args.fused_correction and args.folded_residual_ceiling)
                         or ((args.gemv_dot2_loop or args.gemv_gluon) and m == 1)
                         or ((k, n) == (17408, 5120) and m >= 1024)
                         or ((k, n) == (6144, 5120) and m >= 64)):

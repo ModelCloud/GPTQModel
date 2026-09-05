@@ -4,7 +4,56 @@ import triton
 import triton.language as tl
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
-from triton.experimental.gluon.language import BlockedLayout, SliceLayout
+from triton.experimental.gluon.language import (
+    BlockedLayout,
+    DotOperandLayout,
+    SliceLayout,
+)
+from triton.experimental.gluon.language.amd import AMDMFMALayout
+from triton.experimental.gluon.language.amd.cdna4 import mfma
+
+
+@gluon.jit
+def folded_residual_gemm_gluon_kernel(
+    x_ptr, high_ptr, low_ptr, output_ptr,
+    size_m: gl.constexpr, size_n: gl.constexpr, size_k: gl.constexpr,
+    block_m: gl.constexpr, block_n: gl.constexpr, block_k: gl.constexpr,
+    interleave: gl.constexpr = False,
+):
+    """Share X loads between two FP32-accumulating GEMMs; reassociation experiment."""
+    gl.static_assert(size_k % block_k == 0)
+    a_layout: gl.constexpr = BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    b_layout: gl.constexpr = BlockedLayout([4, 1], [16, 4], [1, 4], [0, 1])
+    mma_layout: gl.constexpr = AMDMFMALayout(4, [16, 16, 32], False, [2, 2])
+    rm = gl.program_id(0) * block_m + gl.arange(0, block_m, layout=SliceLayout(1, a_layout))
+    ak = gl.arange(0, block_k, layout=SliceLayout(0, a_layout))
+    bk = gl.arange(0, block_k, layout=SliceLayout(1, b_layout))
+    rn = gl.program_id(1) * block_n + gl.arange(0, block_n, layout=SliceLayout(0, b_layout))
+    primary = gl.full((block_m, block_n), 0, gl.float32, mma_layout)
+    correction = gl.full((block_m, block_n), 0, gl.float32, mma_layout)
+    for offset in range(size_k // block_k):
+        x = gl.load(x_ptr + rm[:, None] * size_k + (offset * block_k + ak[None, :]),
+                    rm[:, None] < size_m, 0)
+        indices = offset * block_k + bk[:, None] + rn[None, :] * size_k
+        high = gl.load(high_ptr + indices, rn[None, :] < size_n, 0)
+        low = gl.load(low_ptr + indices, rn[None, :] < size_n, 0)
+        a = gl.convert_layout(x, DotOperandLayout(0, mma_layout, 8))
+        b = gl.convert_layout(high, DotOperandLayout(1, mma_layout, 8))
+        c = gl.convert_layout(low, DotOperandLayout(1, mma_layout, 8))
+        primary = mfma(a, b, primary)
+        if interleave:
+            primary = mfma(a, c, primary)
+        else:
+            correction = mfma(a, c, correction)
+    out_layout: gl.constexpr = BlockedLayout([1, 4], [4, 16], [4, 1], [1, 0])
+    if interleave:
+        result = gl.convert_layout(primary, out_layout)
+    else:
+        result = gl.convert_layout(primary + correction, out_layout)
+    om = gl.program_id(0) * block_m + gl.arange(0, block_m, layout=SliceLayout(1, out_layout))
+    on = gl.program_id(1) * block_n + gl.arange(0, block_n, layout=SliceLayout(0, out_layout))
+    gl.store(output_ptr + om[:, None] * size_n + on[None, :], result,
+             (om[:, None] < size_m) & (on[None, :] < size_n))
 
 
 @gluon.jit
