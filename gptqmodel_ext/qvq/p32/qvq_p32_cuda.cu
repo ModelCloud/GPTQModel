@@ -2966,6 +2966,11 @@ int launch_p32_large_m(
         set_last_error("QVQ P32 large-M2 stage_k_tiles must be in [1, 4]"); \
         return -1; \
     }
+#define QVQ_LARGE_M2_STAGE2(ROW_GROUPS) \
+    status = launch_p32_large_m2_grid_dispatch<TransitionBits, 2, ROW_GROUPS>( \
+        input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+        output, partial_output, size_m, size_k, size_n, config.split_count, \
+        use_static_n, cuda_stream)
     if (row_groups == 8) {
       const bool supported_n1024_stage =
           size_n == 1024 &&
@@ -2991,6 +2996,13 @@ int launch_p32_large_m(
     } else if (row_groups != QVQ_P32_ROW_GROUPS_AUTO) {
       set_last_error("QVQ P32 multi-row groups require 128 threads and aligned M");
       return -1;
+    } else if (config.stage_k_tiles == 2 &&
+               size_m % (16 * kRows) == 0 &&
+               ((size_m == 1024 &&
+                 (size_n == 5120 || size_n == 10240 || size_n == 17408)) ||
+                (size_m == 2048 && size_n == 5120 && TransitionBits >= 5) ||
+                (size_m >= 4096 && size_n != 1024))) {
+      QVQ_LARGE_M2_STAGE2(16);
     } else if (((size_n == 1024 &&
                  (config.stage_k_tiles == 3 ||
                   (config.stage_k_tiles != 4 && size_m >= 2048))) ||
@@ -3006,6 +3018,7 @@ int launch_p32_large_m(
       QVQ_LARGE_M2_STAGE(2)
     }
     return status;
+#undef QVQ_LARGE_M2_STAGE2
 #undef QVQ_LARGE_M2_STAGE
   }
   if (row_groups != QVQ_P32_ROW_GROUPS_AUTO && row_groups != 1) {
