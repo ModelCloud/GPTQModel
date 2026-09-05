@@ -1,6 +1,9 @@
 # Twenty P32 experiments
 
-Status: C4 run cancelled; locating verified historical F6 seed-7 artifacts; **0/20 experiments completed**. No candidate is promoted.
+Status: existing F6 seed-7 snapshot located and selected; **0/20 experiments completed**. No candidate is promoted.
+
+**Authoritative teacher:** [F6 seed-7 snapshot and complete saved config](F6_SEED7_SNAPSHOT.md). This supersedes the missing-artifact reports and reproduction plan below; reuse the existing snapshot directly.
+
 
 Baseline: origin/main `a75e6f732d49041535ff0b0890d4002b3fc0d7ae`.
 All experiment commits and results belong to the single branch `experiments/p32-twenty` and its PR.
@@ -169,3 +172,8 @@ covering constant-logit shifts, opposite rankings, outlier local-gate failure, n
 zero-norm handling and metadata-inclusive BPW. No GPU implementation or model quality is validated by this test.
 
 The cancelled C4 job log remains at `/root/work/p32-twenty-data/quantize.log` for audit only.
+
+## Additional algebraic queue
+
+[Experiments 21–30 and prioritized combinations](ALGEBRAIC_QUEUE.md) are queued.
+Initial added order: 21 → 24 → 22 → 25 → 23. All share the fixed F6 seed-7 snapshot and common scorecard.
