@@ -18,6 +18,7 @@ def main():
     p.add_argument("--uuid", required=True)
     p.add_argument("--module", default="model.layers.0.mlp.down_proj")
     p.add_argument("--tile", type=int, choices=(16, 32, 64, 128), default=64)
+    p.add_argument("--weighting", choices=("activation", "uniform"), default="activation")
     p.add_argument("--output", type=Path, required=True)
     args = p.parse_args()
     if args.output.exists() or args.output.resolve().is_relative_to(SNAPSHOT.resolve()):
@@ -106,7 +107,8 @@ def main():
         "calibration_sha256": sha(calpath),
         "evaluation": str(evalpath),
         "evaluation_sha256": sha(evalpath),
-        "objective": "diagonal activation-energy weighted greedy weight residual; not full output-aware optimum",
+        "objective": "greedy weight residual; not full output-aware optimum",
+        "weighting": args.weighting,
         "candidates": [],
     }
     with torch.no_grad():
@@ -114,6 +116,8 @@ def main():
         energy = (
             xc.square().mean(0).reshape(1, k // args.tile, args.tile).clamp_min(1e-30)
         )
+        if args.weighting == "uniform":
+            energy = torch.ones_like(energy)
         decoded = torch.zeros_like(residual)
         planes = []
         scales = []
@@ -171,6 +175,8 @@ def main():
                     "serialized_bytes": path.stat().st_size,
                     "bpw": 8 * path.stat().st_size / (n * k),
                     "reload_equal": True,
+                    "weighted_residual_energy": float((residual.square() * energy).sum()),
+                    "weight_residual_max": float(residual.abs().max()),
                     "cases": cases,
                 }
             )
