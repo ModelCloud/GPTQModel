@@ -1,0 +1,758 @@
+{
+  "mode": "ampere",
+  "uuid": "GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855",
+  "torch": "2.13.0+cu130",
+  "device": "_CudaDeviceProperties(name='NVIDIA PG506-232', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=20f7fde4-d88c-d6ca-e324-bd4e5e9e0855, pci_bus_id=43, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "snapshot": "/root/qvq-results/calibration-fisher-frontier-wave14-v1/llama32-1b-f6_yaqa125x_seed7",
+  "source_revision": "5414c40f590f4f291d3ac26e1141f0550331211a",
+  "scope": "bounded model baseline, not complete experiment scorecard",
+  "quality": [
+    {
+      "row": 0,
+      "nll_sum": 836.9258422851562,
+      "tokens": 255
+    },
+    {
+      "row": 1,
+      "nll_sum": 687.671630859375,
+      "tokens": 255
+    },
+    {
+      "row": 2,
+      "nll_sum": 872.8809814453125,
+      "tokens": 255
+    },
+    {
+      "row": 3,
+      "nll_sum": 793.4885864257812,
+      "tokens": 255
+    },
+    {
+      "row": 4,
+      "nll_sum": 761.5778198242188,
+      "tokens": 255
+    },
+    {
+      "row": 5,
+      "nll_sum": 858.02880859375,
+      "tokens": 255
+    },
+    {
+      "row": 6,
+      "nll_sum": 843.5159912109375,
+      "tokens": 255
+    },
+    {
+      "row": 7,
+      "nll_sum": 569.896728515625,
+      "tokens": 255
+    },
+    {
+      "row": 8,
+      "nll_sum": 676.558349609375,
+      "tokens": 255
+    },
+    {
+      "row": 9,
+      "nll_sum": 830.5064697265625,
+      "tokens": 255
+    },
+    {
+      "row": 10,
+      "nll_sum": 744.4805908203125,
+      "tokens": 255
+    },
+    {
+      "row": 11,
+      "nll_sum": 681.7532958984375,
+      "tokens": 255
+    },
+    {
+      "row": 12,
+      "nll_sum": 1125.950439453125,
+      "tokens": 255
+    },
+    {
+      "row": 13,
+      "nll_sum": 1230.5123291015625,
+      "tokens": 255
+    },
+    {
+      "row": 14,
+      "nll_sum": 820.491943359375,
+      "tokens": 255
+    },
+    {
+      "row": 15,
+      "nll_sum": 1111.6224365234375,
+      "tokens": 255
+    }
+  ],
+  "performance": [
+    {
+      "regime": "prefill",
+      "tokens": 1,
+      "samples_ms": [
+        43.0827522277832,
+        40.163326263427734,
+        40.9251823425293,
+        39.72915267944336,
+        39.7393913269043,
+        45.38572692871094,
+        39.27859115600586,
+        39.28268814086914,
+        38.99699020385742,
+        39.45062255859375
+      ]
+    },
+    {
+      "regime": "prefill",
+      "tokens": 2,
+      "samples_ms": [
+        43.49951934814453,
+        52.596736907958984,
+        46.4005126953125,
+        41.250816345214844,
+        39.09120178222656,
+        38.956031799316406,
+        41.07571029663086,
+        42.4345588684082,
+        44.35660934448242,
+        40.4213752746582
+      ]
+    },
+    {
+      "regime": "prefill",
+      "tokens": 4,
+      "samples_ms": [
+        41.71468734741211,
+        39.42502212524414,
+        38.946815490722656,
+        38.86489486694336,
+        38.91302490234375,
+        41.8969612121582,
+        38.96422576904297,
+        38.63961410522461,
+        38.87513732910156,
+        39.219200134277344
+      ]
+    },
+    {
+      "regime": "prefill",
+      "tokens": 8,
+      "samples_ms": [
+        46.99852752685547,
+        39.768062591552734,
+        39.94828796386719,
+        40.46847915649414,
+        38.79014587402344,
+        38.81267166137695,
+        40.26777648925781,
+        40.11110305786133,
+        40.409088134765625,
+        39.618560791015625
+      ]
+    },
+    {
+      "regime": "prefill",
+      "tokens": 16,
+      "samples_ms": [
+        42.69363021850586,
+        40.132606506347656,
+        43.591678619384766,
+        41.08902359008789,
+        39.54790496826172,
+        39.32672119140625,
+        39.89094543457031,
+        40.1715202331543,
+        39.26015853881836,
+        39.3175048828125
+      ]
+    },
+    {
+      "regime": "prefill",
+      "tokens": 32,
+      "samples_ms": [
+        43.19744110107422,
+        42.024959564208984,
+        39.629825592041016,
+        39.44243240356445,
+        39.06047821044922,
+        39.15468978881836,
+        39.12908935546875,
+        39.54790496826172,
+        39.20383834838867,
+        39.766014099121094
+      ]
+    },
+    {
+      "regime": "prefill",
+      "tokens": 128,
+      "samples_ms": [
+        42.09356689453125,
+        40.52377700805664,
+        40.05990219116211,
+        39.63391876220703,
+        39.91654586791992,
+        39.83769607543945,
+        39.64825439453125,
+        39.74758529663086,
+        39.83564758300781,
+        39.89503860473633
+      ]
+    },
+    {
+      "regime": "prefill",
+      "tokens": 512,
+      "samples_ms": [
+        89.5313949584961,
+        87.59295654296875,
+        87.36460876464844,
+        87.66873931884766,
+        89.5467529296875,
+        88.5739517211914,
+        87.5673599243164,
+        87.37689971923828,
+        87.72300720214844,
+        87.44652557373047
+      ]
+    },
+    {
+      "regime": "prefill",
+      "tokens": 2048,
+      "samples_ms": [
+        333.1993713378906,
+        332.126220703125,
+        332.9546203613281,
+        332.28082275390625,
+        332.199951171875,
+        331.9552001953125,
+        332.2470397949219,
+        333.0201721191406,
+        332.2644348144531,
+        332.0821838378906
+      ]
+    },
+    {
+      "regime": "decode",
+      "prompt_tokens": 128,
+      "new_tokens": 32,
+      "samples_ms": [
+        39.718910217285156,
+        38.72972869873047,
+        38.66624069213867,
+        39.012351989746094,
+        38.514686584472656,
+        38.98777770996094,
+        38.779903411865234,
+        38.61299133300781,
+        39.06662368774414,
+        39.02975845336914,
+        38.69184112548828,
+        38.968318939208984,
+        38.593536376953125,
+        38.74816131591797,
+        41.79865646362305,
+        39.0645751953125,
+        38.628353118896484,
+        38.98060989379883,
+        39.172096252441406,
+        38.7061767578125,
+        38.67443084716797,
+        39.09017562866211,
+        38.77580642700195,
+        38.957054138183594,
+        38.90073776245117,
+        38.71539306640625,
+        38.77171325683594,
+        38.64064025878906,
+        38.49420928955078,
+        39.219200134277344,
+        38.565887451171875,
+        38.653953552246094
+      ],
+      "note": "growing KV cache, cold first decode included; no CUDA graphs"
+    }
+  ],
+  "ampere_min_rows": 1,
+  "runtime_repack_caches": [
+    {
+      "module": "model.layers.0.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.0.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.0.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.0.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.6.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.6.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.6.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.6.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.6.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.8.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.8.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.8.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.8.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.8.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    }
+  ],
+  "runtime_extra_bytes": 327203328,
+  "candidate_contract": "Only P32 inner kernel replaced; production transform/output boundaries retained; planar tensors retained read-only in memory",
+  "recovered_exports": [
+    {
+      "module": "model.layers.0.mlp.down_proj",
+      "path": "/root/p32-low-rank/worker1/rank4-l2-float16.pt",
+      "bytes": 8998263,
+      "sha256": "f73b9e40dbaa499449328d5ec16cb748be15b7b7919b06692549161e632a10cb"
+    }
+  ],
+  "recovery_contract": "Full operator replacement: W4A16 + FP32 correction, output cast to input dtype; teacher files read only",
+  "perplexity": 26.992376424414044,
+  "complete": true
+}

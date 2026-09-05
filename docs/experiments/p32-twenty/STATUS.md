@@ -54,3 +54,7 @@ completed BF16/window/joint-recovery arms; FP32 teacher evaluation is running.
 Experiments **31–40** are authorized in [the small-rank queue](LOW_RANK_QUEUE.md).
 The focused 31/32/33/35 layer-0 down sweep is executed; model jobs are automatically
 dispatched when their exports are ready. Full completion is still unproven.
+
+[Small-rank model results](LOW_RANK_MODEL.md): all 28 focused model runs complete;
+full ARC and broader activation replays dispatched. All-16-down calibration and
+held-out captures are complete; per-layer native fits/selection remain.

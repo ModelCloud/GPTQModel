@@ -27,6 +27,8 @@ def main():
     parser.add_argument("--capture-only", action="store_true")
     parser.add_argument("--capture-sequences", type=int, default=1)
     parser.add_argument("--capture-tokens", type=int, default=2048)
+    parser.add_argument("--capture-layers", nargs="+", type=int, default=[0, 1])
+    parser.add_argument("--capture-suffix")
     parser.add_argument("--recovered-export", type=Path, action="append", default=[])
     parser.add_argument("--task", choices=("arc_challenge", "gsm8k_cot"))
     parser.add_argument("--task-max-rows", type=int, default=128)
@@ -336,7 +338,11 @@ def main():
             return save
 
         for name, module in model.named_modules():
-            if isinstance(module, CanonicalLinear) and name.split(".")[2] in ("0", "1"):
+            if (
+                isinstance(module, CanonicalLinear)
+                and int(name.split(".")[2]) in args.capture_layers
+                and (args.capture_suffix is None or name.endswith(args.capture_suffix))
+            ):
                 hooks.append(module.register_forward_hook(hook(name)))
         if args.capture_sequences == 1:
             sequences = [
@@ -372,6 +378,9 @@ def main():
                     ),
                     "input_manifest": str(args.inputs),
                     "sequence_token_counts": [len(ids) for ids in sequences],
+                    "capture_layers": args.capture_layers,
+                    "capture_suffix": args.capture_suffix,
+                    "complete": True,
                     "modules": captured,
                 },
                 indent=2,

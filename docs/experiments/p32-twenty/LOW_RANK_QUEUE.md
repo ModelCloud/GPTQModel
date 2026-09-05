@@ -77,3 +77,8 @@ comparisons (seven ranks, two factor dtypes). Failing local candidates are
 research controls, not promotion candidates. Follow-up full tasks and experiments
 34/36–40 require their implementations/data and are tracked here rather than
 misrepresented as executable jobs already running.
+
+The initial model queue completed its 28 candidate jobs. Its replacement now
+supports append-only additions and runs the [next validation stage](LOW_RANK_MODEL.md).
+The active manifest is `extended-queue.json` (43 jobs including previous completed
+work), not the initial `model-queue.json`.

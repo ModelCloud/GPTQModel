@@ -106,6 +106,18 @@ def main():
             tmp.replace(args.state)
 
         while True:
+            # Permit append-only queue expansion without interrupting GPU workers.
+            latest = read_json(args.manifest)
+            if latest:
+                known = {j["id"]: j for j in jobs}
+                for job in latest["jobs"]:
+                    if job["id"] in known:
+                        if job != known[job["id"]]:
+                            raise ValueError("Existing queue commands are immutable; append a new job ID")
+                    else:
+                        jobs.append(job)
+                        known[job["id"]] = job
+                        records[job["id"]] = {"id": job["id"], "status": "pending"}
             for job_id, (process, gpu, log) in list(live.items()):
                 code = process.poll()
                 if code is None:

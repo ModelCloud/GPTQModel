@@ -1,0 +1,965 @@
+{
+  "cwd": "/root/f6-snapshot-pr",
+  "gpus": [
+    {
+      "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+      "jit_cache": "/root/p32-layer-jit/gpu0"
+    },
+    {
+      "uuid": "GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855",
+      "jit_cache": "/root/p32-layer-jit/gpu1"
+    },
+    {
+      "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8",
+      "jit_cache": "/root/p32-layer-jit/gpu2"
+    },
+    {
+      "uuid": "GPU-471ecdd7-a171-4d5c-d61f-a1802dc76e4c",
+      "jit_cache": "/root/p32-layer-jit/gpu3"
+    }
+  ],
+  "env": {
+    "PYTHON_GIL": "1",
+    "OMP_NUM_THREADS": "8",
+    "MKL_NUM_THREADS": "8",
+    "MAX_JOBS": "8",
+    "NVCC_THREADS": "2",
+    "PATH": "/root/venv-py3.14t-gil0/bin:/root/venv-py3.14t-gil0/bin:/root/.local/bin:/usr/local/bin:/opt/nodejs/v26.7.0/bin:/root/.local/bin:/root/.codex/packages/standalone/releases/0.153.4-x86_64-unknown-linux-musl/codex-path:/root/.omnigent/codex-native/695e27ec663c1a515befc05c230f60f3/codex-home/tmp/arg0/codex-arg0OoYBNx:/root/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/bin:/sbin:/bin"
+  },
+  "jobs": [
+    {
+      "id": "window-gpu0",
+      "gpu_uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--output",
+        "/root/p32-low-rank/models/window-gpu0"
+      ],
+      "result": "/root/p32-low-rank/models/window-gpu0/report.json",
+      "log": "/root/p32-low-rank/models/window-gpu0.log"
+    },
+    {
+      "id": "window-gpu1",
+      "gpu_uuid": "GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--output",
+        "/root/p32-low-rank/models/window-gpu1"
+      ],
+      "result": "/root/p32-low-rank/models/window-gpu1/report.json",
+      "log": "/root/p32-low-rank/models/window-gpu1.log"
+    },
+    {
+      "id": "window-gpu2",
+      "gpu_uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--output",
+        "/root/p32-low-rank/models/window-gpu2"
+      ],
+      "result": "/root/p32-low-rank/models/window-gpu2/report.json",
+      "log": "/root/p32-low-rank/models/window-gpu2.log"
+    },
+    {
+      "id": "window-gpu3",
+      "gpu_uuid": "GPU-471ecdd7-a171-4d5c-d61f-a1802dc76e4c",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--output",
+        "/root/p32-low-rank/models/window-gpu3"
+      ],
+      "result": "/root/p32-low-rank/models/window-gpu3/report.json",
+      "log": "/root/p32-low-rank/models/window-gpu3.log"
+    },
+    {
+      "id": "rank8-l2-float32",
+      "export": "/root/p32-low-rank/worker2/rank8-l2-float32.pt",
+      "export_report": "/root/p32-low-rank/worker2/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker2/rank8-l2-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank8-l2-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank8-l2-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank8-l2-float32.log"
+    },
+    {
+      "id": "rank8-l2-float16",
+      "export": "/root/p32-low-rank/worker2/rank8-l2-float16.pt",
+      "export_report": "/root/p32-low-rank/worker2/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker2/rank8-l2-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank8-l2-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank8-l2-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank8-l2-float16.log"
+    },
+    {
+      "id": "rank8-tail-float32",
+      "export": "/root/p32-low-rank/worker2/rank8-tail-float32.pt",
+      "export_report": "/root/p32-low-rank/worker2/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker2/rank8-tail-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank8-tail-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank8-tail-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank8-tail-float32.log"
+    },
+    {
+      "id": "rank8-tail-float16",
+      "export": "/root/p32-low-rank/worker2/rank8-tail-float16.pt",
+      "export_report": "/root/p32-low-rank/worker2/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker2/rank8-tail-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank8-tail-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank8-tail-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank8-tail-float16.log"
+    },
+    {
+      "id": "rank4-l2-float32",
+      "export": "/root/p32-low-rank/worker1/rank4-l2-float32.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank4-l2-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank4-l2-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank4-l2-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank4-l2-float32.log"
+    },
+    {
+      "id": "rank4-l2-float16",
+      "export": "/root/p32-low-rank/worker1/rank4-l2-float16.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank4-l2-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank4-l2-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank4-l2-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank4-l2-float16.log"
+    },
+    {
+      "id": "rank4-tail-float32",
+      "export": "/root/p32-low-rank/worker1/rank4-tail-float32.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank4-tail-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank4-tail-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank4-tail-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank4-tail-float32.log"
+    },
+    {
+      "id": "rank4-tail-float16",
+      "export": "/root/p32-low-rank/worker1/rank4-tail-float16.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank4-tail-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank4-tail-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank4-tail-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank4-tail-float16.log"
+    },
+    {
+      "id": "rank2-l2-float32",
+      "export": "/root/p32-low-rank/worker1/rank2-l2-float32.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank2-l2-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank2-l2-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank2-l2-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank2-l2-float32.log"
+    },
+    {
+      "id": "rank2-l2-float16",
+      "export": "/root/p32-low-rank/worker1/rank2-l2-float16.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank2-l2-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank2-l2-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank2-l2-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank2-l2-float16.log"
+    },
+    {
+      "id": "rank2-tail-float32",
+      "export": "/root/p32-low-rank/worker1/rank2-tail-float32.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank2-tail-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank2-tail-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank2-tail-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank2-tail-float32.log"
+    },
+    {
+      "id": "rank2-tail-float16",
+      "export": "/root/p32-low-rank/worker1/rank2-tail-float16.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank2-tail-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank2-tail-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank2-tail-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank2-tail-float16.log"
+    },
+    {
+      "id": "rank6-l2-float32",
+      "export": "/root/p32-low-rank/worker2/rank6-l2-float32.pt",
+      "export_report": "/root/p32-low-rank/worker2/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker2/rank6-l2-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank6-l2-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank6-l2-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank6-l2-float32.log"
+    },
+    {
+      "id": "rank6-l2-float16",
+      "export": "/root/p32-low-rank/worker2/rank6-l2-float16.pt",
+      "export_report": "/root/p32-low-rank/worker2/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker2/rank6-l2-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank6-l2-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank6-l2-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank6-l2-float16.log"
+    },
+    {
+      "id": "rank6-tail-float32",
+      "export": "/root/p32-low-rank/worker2/rank6-tail-float32.pt",
+      "export_report": "/root/p32-low-rank/worker2/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker2/rank6-tail-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank6-tail-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank6-tail-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank6-tail-float32.log"
+    },
+    {
+      "id": "rank6-tail-float16",
+      "export": "/root/p32-low-rank/worker2/rank6-tail-float16.pt",
+      "export_report": "/root/p32-low-rank/worker2/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker2/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank6-tail-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank6-tail-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank6-tail-float16.log"
+    },
+    {
+      "id": "rank12-l2-float32",
+      "export": "/root/p32-low-rank/worker3/rank12-l2-float32.pt",
+      "export_report": "/root/p32-low-rank/worker3/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker3/rank12-l2-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank12-l2-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank12-l2-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank12-l2-float32.log"
+    },
+    {
+      "id": "rank12-l2-float16",
+      "export": "/root/p32-low-rank/worker3/rank12-l2-float16.pt",
+      "export_report": "/root/p32-low-rank/worker3/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker3/rank12-l2-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank12-l2-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank12-l2-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank12-l2-float16.log"
+    },
+    {
+      "id": "rank12-tail-float32",
+      "export": "/root/p32-low-rank/worker3/rank12-tail-float32.pt",
+      "export_report": "/root/p32-low-rank/worker3/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker3/rank12-tail-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank12-tail-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank12-tail-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank12-tail-float32.log"
+    },
+    {
+      "id": "rank12-tail-float16",
+      "export": "/root/p32-low-rank/worker3/rank12-tail-float16.pt",
+      "export_report": "/root/p32-low-rank/worker3/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker3/rank12-tail-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank12-tail-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank12-tail-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank12-tail-float16.log"
+    },
+    {
+      "id": "rank0-l2-float32",
+      "export": "/root/p32-low-rank/worker1/rank0-l2-float32.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank0-l2-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank0-l2-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank0-l2-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank0-l2-float32.log"
+    },
+    {
+      "id": "rank0-l2-float16",
+      "export": "/root/p32-low-rank/worker1/rank0-l2-float16.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank0-l2-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank0-l2-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank0-l2-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank0-l2-float16.log"
+    },
+    {
+      "id": "rank0-tail-float32",
+      "export": "/root/p32-low-rank/worker1/rank0-tail-float32.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank0-tail-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank0-tail-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank0-tail-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank0-tail-float32.log"
+    },
+    {
+      "id": "rank0-tail-float16",
+      "export": "/root/p32-low-rank/worker1/rank0-tail-float16.pt",
+      "export_report": "/root/p32-low-rank/worker1/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker1/rank0-tail-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank0-tail-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank0-tail-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank0-tail-float16.log"
+    },
+    {
+      "id": "rank16-l2-float32",
+      "export": "/root/p32-low-rank/worker3/rank16-l2-float32.pt",
+      "export_report": "/root/p32-low-rank/worker3/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker3/rank16-l2-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank16-l2-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank16-l2-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank16-l2-float32.log"
+    },
+    {
+      "id": "rank16-l2-float16",
+      "export": "/root/p32-low-rank/worker3/rank16-l2-float16.pt",
+      "export_report": "/root/p32-low-rank/worker3/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker3/rank16-l2-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank16-l2-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank16-l2-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank16-l2-float16.log"
+    },
+    {
+      "id": "rank16-tail-float32",
+      "export": "/root/p32-low-rank/worker3/rank16-tail-float32.pt",
+      "export_report": "/root/p32-low-rank/worker3/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker3/rank16-tail-float32.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank16-tail-float32"
+      ],
+      "result": "/root/p32-low-rank/models/rank16-tail-float32/report.json",
+      "log": "/root/p32-low-rank/models/rank16-tail-float32.log"
+    },
+    {
+      "id": "rank16-tail-float16",
+      "export": "/root/p32-low-rank/worker3/rank16-tail-float16.pt",
+      "export_report": "/root/p32-low-rank/worker3/report.json",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-low-rank/worker3/rank16-tail-float16.pt",
+        "--output",
+        "/root/p32-low-rank/models/rank16-tail-float16"
+      ],
+      "result": "/root/p32-low-rank/models/rank16-tail-float16/report.json",
+      "log": "/root/p32-low-rank/models/rank16-tail-float16.log"
+    },
+    {
+      "id": "capture-all-down-heldout",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "canonical",
+        "--capture-only",
+        "--capture-sequences",
+        "16",
+        "--capture-tokens",
+        "256",
+        "--capture-layers",
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "--capture-suffix",
+        "down_proj",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--output",
+        "/root/p32-low-rank/all-down-heldout"
+      ],
+      "result": "/root/p32-low-rank/all-down-heldout/capture.json",
+      "log": "/root/p32-low-rank/all-down-heldout.log"
+    },
+    {
+      "id": "capture-all-down-calibration",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "canonical",
+        "--capture-only",
+        "--capture-sequences",
+        "16",
+        "--capture-tokens",
+        "512",
+        "--capture-layers",
+        "0",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+        "13",
+        "14",
+        "15",
+        "--capture-suffix",
+        "down_proj",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-recovery-calibration/inputs.json",
+        "--output",
+        "/root/p32-low-rank/all-down-calibration"
+      ],
+      "result": "/root/p32-low-rank/all-down-calibration/capture.json",
+      "log": "/root/p32-low-rank/all-down-calibration.log"
+    },
+    {
+      "id": "arc-full-window",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--output",
+        "/root/p32-low-rank/arc-full/window"
+      ],
+      "result": "/root/p32-low-rank/arc-full/window/report.json",
+      "log": "/root/p32-low-rank/arc-full/window.log"
+    },
+    {
+      "id": "arc-full-bf16",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "bf16",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--output",
+        "/root/p32-low-rank/arc-full/bf16"
+      ],
+      "result": "/root/p32-low-rank/arc-full/bf16/report.json",
+      "log": "/root/p32-low-rank/arc-full/bf16.log"
+    },
+    {
+      "id": "arc-full-rank12-l2-float16",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--output",
+        "/root/p32-low-rank/arc-full/rank12-l2-float16",
+        "--recovered-export",
+        "/root/p32-low-rank/worker3/rank12-l2-float16.pt"
+      ],
+      "result": "/root/p32-low-rank/arc-full/rank12-l2-float16/report.json",
+      "log": "/root/p32-low-rank/arc-full/rank12-l2-float16.log",
+      "export": "/root/p32-low-rank/worker3/rank12-l2-float16.pt",
+      "export_report": "/root/p32-low-rank/worker3/report.json"
+    },
+    {
+      "id": "arc-full-rank8-tail-float16",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--output",
+        "/root/p32-low-rank/arc-full/rank8-tail-float16",
+        "--recovered-export",
+        "/root/p32-low-rank/worker2/rank8-tail-float16.pt"
+      ],
+      "result": "/root/p32-low-rank/arc-full/rank8-tail-float16/report.json",
+      "log": "/root/p32-low-rank/arc-full/rank8-tail-float16.log",
+      "export": "/root/p32-low-rank/worker2/rank8-tail-float16.pt",
+      "export_report": "/root/p32-low-rank/worker2/report.json"
+    },
+    {
+      "id": "arc-full-rank16-l2-float32",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--output",
+        "/root/p32-low-rank/arc-full/rank16-l2-float32",
+        "--recovered-export",
+        "/root/p32-low-rank/worker3/rank16-l2-float32.pt"
+      ],
+      "result": "/root/p32-low-rank/arc-full/rank16-l2-float32/report.json",
+      "log": "/root/p32-low-rank/arc-full/rank16-l2-float32.log",
+      "export": "/root/p32-low-rank/worker3/rank16-l2-float32.pt",
+      "export_report": "/root/p32-low-rank/worker3/report.json"
+    },
+    {
+      "id": "arc-full-canonical",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "canonical",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--output",
+        "/root/p32-low-rank/arc-full/canonical"
+      ],
+      "result": "/root/p32-low-rank/arc-full/canonical/report.json",
+      "log": "/root/p32-low-rank/arc-full/canonical.log"
+    },
+    {
+      "id": "broader-worker1",
+      "requires_complete": [
+        "/root/p32-low-rank/all-down-heldout/capture.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-low-rank/worker1/report.json",
+        "--output",
+        "/root/p32-low-rank/broader/worker1.json"
+      ],
+      "result": "/root/p32-low-rank/broader/worker1.json",
+      "log": "/root/p32-low-rank/broader/worker1.json.log"
+    },
+    {
+      "id": "broader-worker2",
+      "requires_complete": [
+        "/root/p32-low-rank/all-down-heldout/capture.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-low-rank/worker2/report.json",
+        "--output",
+        "/root/p32-low-rank/broader/worker2.json"
+      ],
+      "result": "/root/p32-low-rank/broader/worker2.json",
+      "log": "/root/p32-low-rank/broader/worker2.json.log"
+    },
+    {
+      "id": "broader-worker3",
+      "requires_complete": [
+        "/root/p32-low-rank/all-down-heldout/capture.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-low-rank/worker3/report.json",
+        "--output",
+        "/root/p32-low-rank/broader/worker3.json"
+      ],
+      "result": "/root/p32-low-rank/broader/worker3.json",
+      "log": "/root/p32-low-rank/broader/worker3.json.log"
+    }
+  ]
+}
