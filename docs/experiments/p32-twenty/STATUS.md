@@ -107,4 +107,5 @@ Downstream quality and complete profiling remain open.
 [Window quality wave23 partial](WINDOW_QUALITY_WAVE23_PARTIAL.md) has two
 identical production-window ARC repeats at 390/1172 raw and 428/1172
 length-normalized, plus two identical production-window GSM8K repeats at
-59/128. Policy ARC and policy GSM8K are still running.
+59/128. Two policy ARC repeats now agree at 390/1172 raw and 429/1172
+length-normalized. Policy GSM8K remains running.

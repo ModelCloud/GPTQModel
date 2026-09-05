@@ -17,8 +17,14 @@ The first two production-window GSM8K repeats also agree:
 | production window | 5 | 0.4609375 (59/128) |
 
 The completed repeats are identical within each task. The two policy ARC
-repeats and two policy GSM8K repeats are still running and will be added after
-their reports complete.
+repeats also agree exactly on raw accuracy; their normalized scores are
+identical to each other. The two policy GSM8K repeats are still running and
+will be added after their reports complete.
+
+| Arm | Host GPU | ARC raw | ARC length-normalized |
+|---|---:|---:|---:|
+| fused policy | 2 | 0.3327645 (390/1172) | 0.3660410 (429/1172) |
+| fused policy | 3 | 0.3327645 (390/1172) | 0.3660410 (429/1172) |
 
 Raw reports:
 
@@ -30,3 +36,7 @@ Raw reports:
 - [window GSM8K GPU 4 task results](results/window-quality-wave23/window-gsm-gpu4-task-results.json)
 - [window GSM8K GPU 5 report](results/window-quality-wave23/window-gsm-gpu5.json)
 - [window GSM8K GPU 5 task results](results/window-quality-wave23/window-gsm-gpu5-task-results.json)
+- [policy ARC GPU 2 report](results/window-quality-wave23/policy-arc-gpu2.json)
+- [policy ARC GPU 2 task results](results/window-quality-wave23/policy-arc-gpu2-task-results.json)
+- [policy ARC GPU 3 report](results/window-quality-wave23/policy-arc-gpu3.json)
+- [policy ARC GPU 3 task results](results/window-quality-wave23/policy-arc-gpu3-task-results.json)
