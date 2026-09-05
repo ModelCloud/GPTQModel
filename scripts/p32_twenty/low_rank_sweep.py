@@ -43,6 +43,8 @@ def main():
         type=Path,
         default=Path("/root/p32-recovery-calibration/activations16x512"),
     )
+    p.add_argument("--calibration-tokens", type=int, default=8192)
+    p.add_argument("--calibration-prefix", action="store_true")
     p.add_argument("--ranks", nargs="+", type=int, default=[0, 2, 4, 6, 8, 12, 16])
     p.add_argument(
         "--fits",
@@ -175,10 +177,12 @@ def main():
 
     xc, calmeta = capture(args.calibration_root)
     xe, evalmeta = capture(Path("/root/p32-timing-activations"))
-    if len(xc) != 8192:
-        raise ValueError(
-            "Fixed-base focused run requires the original 8192-token capture"
-        )
+    if args.calibration_prefix:
+        calmeta["available_rows"] = len(xc)
+        xc = xc[: args.calibration_tokens]
+        calmeta["selected_prefix_rows"] = len(xc)
+    if args.calibration_tokens < 1 or len(xc) != args.calibration_tokens:
+        raise ValueError("Calibration capture does not match the declared token count")
 
     def native_fingerprint(weight):
         h = hashlib.sha256()
