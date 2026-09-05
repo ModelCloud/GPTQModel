@@ -15,7 +15,7 @@ AGENTS.md. All changes and evidence share PR #137.
 |5|Transition LUTs|GPU index/pair LUT decoders exact across all 94 projections; both slower overall in materialization, fused LUT study remains.|
 |6|Vectorized codebook output|Packed half2 output exact across all 94 projections at 1/4 warps; fused MMA-fragment output and model validation remain.|
 |7|Short reduced-precision accumulation|Real five-projection arithmetic sweep recorded; layer1-down FP16/BF16 partials fail some/all cases. Integrated decoder/model and executed profiling remain.|
-|8|Blockwise FP32 promotion|Blockwise FP32 promotion16–256 passes all 225 arithmetic-isolation cases across five projections; integrated kernel/model/profile remain.|
+|8|Blockwise FP32 promotion|Integrated BM64/BN64 fused-window K16 arm passes 143/144 and fails layer-1 down at M=1; K32/K64/K128/K256 arms are queued. Per-module selection, model, and profile validation remain.|
 |9|Output supertiles|Neighboring projections/channels implementation and matched evaluation remain.|
 |10|Lossless repack|All 94 projections bit/value exact; 108 layers, bounded model PPL/logits/ARC and large prefill speedups measured; full quality/profiling coverage remains.|
 |11|Independent trellis tiles|Requantized 64/128/256-tile exports and total BPW sweep remain.|
