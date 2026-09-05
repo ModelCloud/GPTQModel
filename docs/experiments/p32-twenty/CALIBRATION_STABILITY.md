@@ -56,3 +56,27 @@ Rank-16 tail lowers worst MAE to 0.00196325 but raises maximum error to
 and objective; it does not yet establish the cause of the large outlier or
 prove rank 6 stable. Broader replay and C4/full-ARC model checks are queued.
 No accuracy gate or production default changed.
+
+## Human exception review: rank-2 tail, subset 71 / 2,048 tokens
+
+At M=512, FP16 rank-2 tail reports 1.33298x full-linear speedup over production
+window on GPU UUID `GPU-8be4c651-4058-83df-154b-291f1b86add8` (sm80).
+Median latency is 0.977920 ms versus 1.303552 ms; the 20-sample ranges are
+0.972800–0.988160 ms and 1.262592–1.343488 ms respectively. These are one-run
+sample ranges, not confidence intervals or independent timing replications.
+Window-relative MAE 0.002065994 passes 0.003; maximum 0.049743652 fails 0.046875.
+Teacher-relative MAE/max are 0.002065236/0.049565036. Window itself passes with
+teacher-relative MAE/max 0.000024957/0.018733978.
+
+The >25% gain triggers human review under AGENTS.md. A possible exception would
+be restricted to this layer/operator and shape, with window fallback elsewhere,
+after broader replay, model checks, and repeat timing. It is not approved or
+enabled. This candidate is only 1.0094x faster than the passing rank-16 recovery
+at the same shape, so the evidence does not establish a compelling tradeoff
+against that alternative. Broader/model evidence for this specific fit remains
+missing. Other fast failing cases are retained in the machine-readable summary.
+
+`scripts/p32_twenty/summarize_stability.py` checks the complete candidate/row grid
+and read-only hash outcomes before counting a local fit as complete. Its output
+explicitly separates partial/missing fits from completed local evidence; it does
+not certify full-model acceptance or completion of experiment 36.
