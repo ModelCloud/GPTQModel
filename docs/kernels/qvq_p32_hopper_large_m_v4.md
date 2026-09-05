@@ -381,3 +381,76 @@ Profiles:
 
 - `artifacts/qvq_hopper_large_m/profiles/v4_fp8_fused_silu_mlp_w3_m4096_98acb0cf_nsys.nsys-rep`
 - `artifacts/qvq_hopper_large_m/profiles/v4_fp8_fused_silu_w3_m4096_98acb0cf_ncu.ncu-rep`
+
+## Fused SiLU, product, and down-input row quantization
+
+The staged cached path wrote an M-by-8192 FP16 gate/up product and then read
+that tensor in a second kernel to compute the per-row E4M3 scale and payload.
+The promoted kernel keeps the product in registers through the row reduction:
+
+```text
+gate FP16, up FP16
+    -> SiLU in FP32
+    -> round SiLU to FP16
+    -> multiply in FP32
+    -> round product to FP16
+    -> row maximum / 448
+    -> E4M3 output and FP32 row scale
+```
+
+The two FP16 narrowing points are unchanged, so the emitted E4M3 bytes and
+row scales are bit-exact to the staged implementation.  This removes one
+kernel launch, one 64 MiB FP16 global write, and one 64 MiB FP16 global read
+at M4096.  The remaining E4M3 matrix is explicitly allocated contiguous even
+when gate/up are strided views.  A unit test locks both that layout contract
+and bit-exact eager/CUDA Graph replay behavior.
+
+| Weight | Gate/up M×K×N | Down M×K×N | Fused-quant QVQ | vs Marlin W4 | vs Machete W4 | Better than last |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| W2 | 512×2048×8192 | 512×8192×2048 | 71.390 µs | 2.306× | 1.636× | Yes |
+| W2 | 1024×2048×8192 | 1024×8192×2048 | 104.012 µs | 3.216× | 2.132× | Yes |
+| W2 | 2048×2048×8192 | 2048×8192×2048 | 211.412 µs | 3.293× | 2.132× | Yes |
+| W2 | 4096×2048×8192 | 4096×8192×2048 | 413.443 µs | 3.399× | 2.224× | Yes |
+| W2.5 | 512×2048×8192 | 512×8192×2048 | 71.170 µs | 2.314× | 1.641× | Yes |
+| W2.5 | 1024×2048×8192 | 1024×8192×2048 | 98.785 µs | 3.387× | 2.245× | Yes |
+| W2.5 | 2048×2048×8192 | 2048×8192×2048 | 207.198 µs | 3.360× | 2.175× | Yes |
+| W2.5 | 4096×2048×8192 | 4096×8192×2048 | 416.075 µs | 3.377× | 2.210× | Yes |
+| W3 | 512×2048×8192 | 512×8192×2048 | 71.882 µs | 2.291× | 1.624× | Yes |
+| W3 | 1024×2048×8192 | 1024×8192×2048 | 108.778 µs | 3.076× | 2.039× | Yes |
+| W3 | 2048×2048×8192 | 2048×8192×2048 | 210.234 µs | 3.311× | 2.144× | Yes |
+| W3 | 4096×2048×8192 | 4096×8192×2048 | 413.638 µs | 3.397× | 2.223× | Yes |
+| W3.5 | 512×2048×8192 | 512×8192×2048 | 71.763 µs | 2.294× | 1.627× | Yes |
+| W3.5 | 1024×2048×8192 | 1024×8192×2048 | 98.873 µs | 3.384× | 2.243× | Yes |
+| W3.5 | 2048×2048×8192 | 2048×8192×2048 | 209.423 µs | 3.324× | 2.152× | Yes |
+| W3.5 | 4096×2048×8192 | 4096×8192×2048 | 414.646 µs | 3.389× | 2.217× | Yes |
+
+All sixteen cells improve.  Geometric speedups are **1.231x versus the prior
+fused-SiLU result**, **9.336x versus ordinary P32 QVQ**, **3.033x versus
+Marlin W4**, and **2.026x versus Machete W4**.  Maximum absolute error against
+the dense-P32 Torch oracle is `2.753e-4`, maximum mean absolute error is
+`3.826e-5`, and relative L2 is `0.06476--0.06489`.  Artifact:
+`artifacts/qvq_hopper_large_m/v4_fp8_cached_fused_silu_quant_mlp_candidate.json`.
+
+The exact-revision Nsight Systems trace at `e2aee900` contains five GPU nodes
+per replay: two FP8 matrix multiplications, one gate-input row quantizer, and
+one fused SiLU/product/down-input quantizer.  The separate down-input
+quantizer is absent.  The projected per-replay kernel totals are 266.520
+microseconds for the two matrix multiplications, 77.503 microseconds for the
+fused kernel, and 27.129 microseconds for gate-input quantization.
+
+Nsight Compute 2026.2 reports 71.58 microseconds, 25.117 million executed warp
+instructions, 48 registers/thread, zero local/shared spills, 59.53% achieved
+occupancy, 2.21 TB/s memory throughput, and 90.50% DRAM utilization for the
+fused kernel.  Source-correlated assembly is dominated by the required SiLU,
+absolute-maximum reduction, clamp, and conversion sequence: 9.535 million
+`FMUL`, 3.375 million `FMNMX`, 2.130 million `MUFU`, 2.097 million `HADD2`,
+and 1.049 million each of `FADD` and `F2FP`.  Address-generation instructions
+are a small fraction of the stream.  With DRAM already at 90.5%, this pass
+finds no safe algebraic deletion comparable to removing the intermediate;
+the next useful optimization must remove another global materialization or
+matrix-multiply boundary rather than merely rewriting the clamp arithmetic.
+
+Profiles:
+
+- `artifacts/qvq_hopper_large_m/profiles/v4_fp8_fused_silu_quant_mlp_w3_m4096_e2aee900_nsys.nsys-rep`
+- `artifacts/qvq_hopper_large_m/profiles/v4_fp8_fused_silu_quant_w3_m4096_e2aee900_ncu.ncu-rep`
