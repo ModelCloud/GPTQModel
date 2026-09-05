@@ -11,7 +11,7 @@ triton = pytest.importorskip("triton")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 @pytest.mark.parametrize("interleave", [False, True])
 @pytest.mark.parametrize("m,n", [(128, 128), (65, 67), (65, 128), (128, 67)])
-@pytest.mark.parametrize("prefetch", [False, True, "register"])
+@pytest.mark.parametrize("prefetch", [False, True, "register", "bk32", "bk32register"])
 def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, interleave, m, n, prefetch):
     if not torch.cuda.is_available() or not torch.version.hip:
         pytest.skip("requires AMD GPU")
@@ -26,7 +26,9 @@ def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, inter
 
     kernel = folded_residual_prefetch_kernel if prefetch else folded_residual_gemm_gluon_kernel
     block_k = 64 if prefetch else tile
-    prefetch_options = {"register_prefetch": prefetch == "register"} if prefetch else {}
+    if prefetch in ("bk32", "bk32register"):
+        block_k = 32
+    prefetch_options = {"register_prefetch": prefetch in ("register", "bk32register")} if prefetch else {}
 
     generator = torch.Generator(device="cuda").manual_seed(950 + size_k)
     x = torch.randn((m, size_k), generator=generator, device="cuda", dtype=torch.float16) * 0.01
@@ -54,10 +56,11 @@ def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, inter
         assert torch.equal(output[:m*n], control[:m*n])
 
 
-@pytest.mark.parametrize("size_k", [64, 128, 192, 320])
+@pytest.mark.parametrize("tile_count", [1, 2, 3, 5])
+@pytest.mark.parametrize("block_k", [32, 64])
 @pytest.mark.parametrize("interleave", [False, True])
 @pytest.mark.parametrize("register_prefetch", [False, True])
-def test_prefetch_ring_single_and_odd_tile_counts(size_k, interleave, register_prefetch):
+def test_prefetch_ring_single_and_odd_tile_counts(tile_count, block_k, interleave, register_prefetch):
     if not torch.cuda.is_available() or not torch.version.hip:
         pytest.skip("requires AMD GPU")
     if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
@@ -66,13 +69,14 @@ def test_prefetch_ring_single_and_odd_tile_counts(size_k, interleave, register_p
         folded_residual_prefetch_kernel,
     )
 
+    size_k = tile_count * block_k
     x = torch.ones((65, size_k), device="cuda", dtype=torch.float16)
     high = torch.ones((67, size_k), device="cuda", dtype=torch.float16)
     low = torch.full_like(high, 0.5)
     output = torch.full((65 * 67 + 16,), 999.0, device="cuda", dtype=torch.float32)
     for _ in range(10):
         folded_residual_prefetch_kernel[(2, 1)](
-            x, high, low, output, 65, 67, size_k, 64, 128, 64, interleave,
+            x, high, low, output, 65, 67, size_k, 64, 128, block_k, interleave,
             num_warps=4, num_stages=2, register_prefetch=register_prefetch,
         )
         assert (output[:65*67] == size_k * 1.5).all()
