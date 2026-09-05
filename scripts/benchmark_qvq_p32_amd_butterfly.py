@@ -43,6 +43,7 @@ def main():
     parser.add_argument("--fused-correction", action="store_true", help="Experimental shared-X Gluon residual GEMM")
     parser.add_argument("--fused-interleave", action="store_true", help="Interleave high/low into one FP32 accumulator")
     parser.add_argument("--fused-keep-masks", action="store_true", help="Control: retain masks on divisible fused tiles")
+    parser.add_argument("--fused-prefetch", action="store_true", help="Use explicit double-buffered global-to-LDS copies")
     parser.add_argument("--fused-block-m", type=int, choices=(32, 64, 128), default=64)
     parser.add_argument("--fused-block-n", type=int, choices=(32, 64, 128), default=64)
     parser.add_argument("--fused-block-k", type=int, choices=(32, 64, 128), default=64)
@@ -100,6 +101,7 @@ def main():
         folded_gemv_split_k_kernel,
         folded_residual_gemm_gluon_kernel,
     )
+    from qvq_p32_amd_prefetch_experiment import folded_residual_prefetch_kernel
 
     import gptqmodel.nn_modules.qlinear.qvq as qvq_module
     import gptqmodel.utils.qvq_amd as candidate_amd
@@ -303,7 +305,8 @@ def main():
         m, k = x.shape
         n = operand.shape[1]
         output = torch.empty((m, n), device=x.device, dtype=torch.float32 if kwargs["output_fp32"] else x.dtype)
-        folded_residual_gemm_gluon_kernel[(triton.cdiv(m, args.fused_block_m), triton.cdiv(n, args.fused_block_n))](
+        kernel = folded_residual_prefetch_kernel if args.fused_prefetch else folded_residual_gemm_gluon_kernel
+        kernel[(triton.cdiv(m, args.fused_block_m), triton.cdiv(n, args.fused_block_n))](
             x, operand, residual_operand, output, m, n, k,
             args.fused_block_m, args.fused_block_n, args.fused_block_k, args.fused_interleave, not args.fused_keep_masks,
             num_warps=4, num_stages=2,
@@ -370,6 +373,9 @@ def main():
         ).hexdigest(),
         "amd_source_sha256": hashlib.sha256((root / "gptqmodel/utils/qvq_amd.py").read_bytes()).hexdigest(),
         "benchmark_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "prefetch_source_sha256": hashlib.sha256(
+            (root / "scripts/qvq_p32_amd_prefetch_experiment.py").read_bytes()
+        ).hexdigest(),
         "status": "exploratory; not production promotion or model-quality evidence",
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
