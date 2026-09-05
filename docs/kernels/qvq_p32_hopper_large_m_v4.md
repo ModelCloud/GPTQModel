@@ -327,3 +327,57 @@ No CUDA source changed, so SASS for every component is identical.  The win is
 purely algebraic removal of two kernels and their global-memory traffic.
 Profile:
 `artifacts/qvq_hopper_large_m/profiles/v4_fp8_strided_mlp_w3_m4096_b5d92ccd_nsys.nsys-rep`.
+
+## Fused stride-aware SiLU/product
+
+The existing Triton `fused_silu_mul` operator accepts the strided gate/up views
+and preserves eager FP16 narrowing exactly: SiLU is evaluated in FP32, rounded
+to FP16, multiplied by up in FP32, and rounded to the contiguous FP16 output.
+Using it removes a second intermediate launch and materialization.
+
+| Weight | Gate/up M×K×N | Down M×K×N | Fused QVQ | vs Marlin W4 | vs Machete W4 | Better than last |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| W2 | 512×2048×8192 | 512×8192×2048 | 86.660 µs | 1.902× | 1.355× | Yes |
+| W2 | 1024×2048×8192 | 1024×8192×2048 | 126.244 µs | 2.649× | 1.779× | Yes |
+| W2 | 2048×2048×8192 | 2048×8192×2048 | 256.670 µs | 2.712× | 1.757× | Yes |
+| W2 | 4096×2048×8192 | 4096×8192×2048 | 520.070 µs | 2.695× | 1.768× | Yes |
+| W2.5 | 512×2048×8192 | 512×8192×2048 | 86.746 µs | 1.900× | 1.354× | Yes |
+| W2.5 | 1024×2048×8192 | 1024×8192×2048 | 127.035 µs | 2.632× | 1.768× | Yes |
+| W2.5 | 2048×2048×8192 | 2048×8192×2048 | 256.570 µs | 2.713× | 1.758× | Yes |
+| W2.5 | 4096×2048×8192 | 4096×8192×2048 | 521.602 µs | 2.687× | 1.763× | Yes |
+| W3 | 512×2048×8192 | 512×8192×2048 | 86.558 µs | 1.904× | 1.357× | Yes |
+| W3 | 1024×2048×8192 | 1024×8192×2048 | 127.075 µs | 2.632× | 1.768× | Yes |
+| W3 | 2048×2048×8192 | 2048×8192×2048 | 257.352 µs | 2.705× | 1.752× | Yes |
+| W3 | 4096×2048×8192 | 4096×8192×2048 | 520.424 µs | 2.693× | 1.767× | Yes |
+| W3.5 | 512×2048×8192 | 512×8192×2048 | 85.288 µs | 1.932× | 1.377× | Yes |
+| W3.5 | 1024×2048×8192 | 1024×8192×2048 | 127.551 µs | 2.622× | 1.761× | Yes |
+| W3.5 | 2048×2048×8192 | 2048×8192×2048 | 256.189 µs | 2.717× | 1.760× | Yes |
+| W3.5 | 4096×2048×8192 | 4096×8192×2048 | 520.852 µs | 2.691× | 1.765× | Yes |
+
+The fused operator improves the preceding strided path by **1.232x**
+geometrically.  Aggregate speedups reach **7.593x versus ordinary QVQ**,
+**2.461x versus Marlin W4**, and **1.653x versus Machete W4**.  All sixteen
+cells improve and the error metrics are unchanged.  Artifact:
+`artifacts/qvq_hopper_large_m/v4_fp8_cached_fused_silu_mlp_candidate.json`.
+
+Exact-revision Nsight Systems reports 517.480 microseconds projected GPU time
+per M4096 replay: 268.868 microseconds in two FP8 matrix multiplications,
+151.045 microseconds in two per-row E4M3 quantizers, and 87.334 microseconds in
+the single fused SiLU/product.  The two previous elementwise kernels totaling
+214.372 microseconds are gone.
+
+Nsight Compute 2026.2 and source-correlated SASS for the fused operator report
+79.26 microseconds, 22.413 million executed warp instructions, 32 registers per
+thread, no spills, 86.70% achieved occupancy, 2.24 TB/s memory throughput, and
+91.47% DRAM utilization.  Long-scoreboard stalls account for 91.7% of cycles
+between issued instructions.  SASS contains the expected two 128-bit global
+loads, FP32 sigmoid/exponential sequence, FP16 narrowing boundary, product,
+and contiguous store; it also contains general row/column address division
+because N is currently a runtime value.  Since the kernel is already at 91.47%
+of DRAM peak, address specialization is a measured follow-up experiment, not
+an assumed win.
+
+Profiles:
+
+- `artifacts/qvq_hopper_large_m/profiles/v4_fp8_fused_silu_mlp_w3_m4096_98acb0cf_nsys.nsys-rep`
+- `artifacts/qvq_hopper_large_m/profiles/v4_fp8_fused_silu_w3_m4096_98acb0cf_ncu.ncu-rep`
