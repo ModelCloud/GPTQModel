@@ -45,6 +45,7 @@ def main():
     parser.add_argument("--fused-keep-masks", action="store_true", help="Control: retain masks on divisible fused tiles")
     parser.add_argument("--fused-prefetch", action="store_true", help="Use explicit double-buffered global-to-LDS copies")
     parser.add_argument("--fused-register-prefetch", action="store_true", help="Carry next K-tile operands in registers")
+    parser.add_argument("--fused-single-buffer", action="store_true", help="Refill one LDS slot while computing in registers")
     parser.add_argument("--fused-block-m", type=int, choices=(32, 64, 128), default=64)
     parser.add_argument("--fused-block-n", type=int, choices=(32, 64, 128), default=64)
     parser.add_argument("--fused-block-k", type=int, choices=(32, 64, 128), default=64)
@@ -87,6 +88,8 @@ def main():
         parser.error("Prefetch requires fused correction, BK32 or64, and BM/BN64 or128")
     if args.fused_register_prefetch and not args.fused_prefetch:
         parser.error("Register prefetch requires --fused-prefetch")
+    if args.fused_single_buffer and not args.fused_register_prefetch:
+        parser.error("Single buffering requires --fused-register-prefetch")
     hardware, valid = _idle_preflight(args)
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["HIP_VISIBLE_DEVICES"] = str(args.physical_gpu)
@@ -312,7 +315,8 @@ def main():
         n = operand.shape[1]
         output = torch.empty((m, n), device=x.device, dtype=torch.float32 if kwargs["output_fp32"] else x.dtype)
         kernel = folded_residual_prefetch_kernel if args.fused_prefetch else folded_residual_gemm_gluon_kernel
-        prefetch_options = {"register_prefetch": args.fused_register_prefetch} if args.fused_prefetch else {}
+        prefetch_options = ({"register_prefetch": args.fused_register_prefetch,
+                             "single_buffer": args.fused_single_buffer} if args.fused_prefetch else {})
         kernel[(triton.cdiv(m, args.fused_block_m), triton.cdiv(n, args.fused_block_n))](
             x, operand, residual_operand, output, m, n, k,
             args.fused_block_m, args.fused_block_n, args.fused_block_k, args.fused_interleave, not args.fused_keep_masks,

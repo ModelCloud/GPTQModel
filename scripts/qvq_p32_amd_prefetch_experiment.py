@@ -69,7 +69,9 @@ def folded_residual_prefetch_kernel(
     block_m: gl.constexpr, block_n: gl.constexpr, block_k: gl.constexpr,
     interleave: gl.constexpr = False, prune_masks: gl.constexpr = True,
     register_prefetch: gl.constexpr = False,
+    single_buffer: gl.constexpr = False,
 ):
+    gl.static_assert(not single_buffer or register_prefetch)
     gl.static_assert(size_k >= block_k and size_k % block_k == 0)
     gl.static_assert((block_k == 32 or block_k == 64) and (block_m == 64 or block_m == 128)
                      and (block_n == 64 or block_n == 128))
@@ -98,9 +100,10 @@ def folded_residual_prefetch_kernel(
         [[512, 16]], br[:3] + bl + bw + br[3:], [], [block_k, block_n])
     # Match MFMA operand ownership to the vector/lane order of the padded LDS tiles.
     mma: gl.constexpr = gl.amd.AMDMFMALayout(4, [16, 16, 32], True, [2, 2])
-    xs = gl.allocate_shared_memory(gl.float16, [2, block_m, block_k], a_shared_layout)
-    hs = gl.allocate_shared_memory(gl.float16, [2, block_k, block_n], b_shared_layout)
-    ls = gl.allocate_shared_memory(gl.float16, [2, block_k, block_n], b_shared_layout)
+    slots: gl.constexpr = 1 if single_buffer else 2
+    xs = gl.allocate_shared_memory(gl.float16, [slots, block_m, block_k], a_shared_layout)
+    hs = gl.allocate_shared_memory(gl.float16, [slots, block_k, block_n], b_shared_layout)
+    ls = gl.allocate_shared_memory(gl.float16, [slots, block_k, block_n], b_shared_layout)
     rows = gl.program_id(0) * block_m + gl.arange(0, block_m, layout=gl.SliceLayout(1, a_layout))
     ak = gl.arange(0, block_k, layout=gl.SliceLayout(0, a_layout))
     columns = gl.program_id(1) * block_n + gl.arange(0, block_n, layout=gl.SliceLayout(0, b_layout))
@@ -119,7 +122,23 @@ def folded_residual_prefetch_kernel(
     async_copy.commit_group()
     primary = gl.full((block_m, block_n), 0, gl.float32, mma)
     correction = gl.full((block_m, block_n), 0, gl.float32, mma)
-    if register_prefetch and size_k // block_k > 1:
+    if single_buffer:
+        async_copy.wait_group(0)
+        a, b, c = _load_tile(xs, hs, ls, 0, mma)
+        # All current operands must be in registers before any wave overwrites LDS.
+        gl.barrier()
+        for tile in loop_range(size_k // block_k - 1, loop_unroll_factor=2):
+            offset = (tile + 1) * block_k
+            async_copy.buffer_load_to_shared(xs.index(0), x_ptr + offset, ao, amask, 0)
+            async_copy.buffer_load_to_shared(hs.index(0), high_ptr + offset, bo, bmask, 0)
+            async_copy.buffer_load_to_shared(ls.index(0), low_ptr + offset, bo, bmask, 0)
+            async_copy.commit_group()
+            primary, correction = _accumulate(a, b, c, primary, correction, interleave)
+            async_copy.wait_group(0)
+            a, b, c = _load_tile(xs, hs, ls, 0, mma)
+            gl.barrier()
+        primary, correction = _accumulate(a, b, c, primary, correction, interleave)
+    elif register_prefetch and size_k // block_k > 1:
         # Prime two LDS tiles and carry the first tile's operands in registers.
         async_copy.buffer_load_to_shared(xs.index(1), x_ptr + block_k, ao, amask, 0)
         async_copy.buffer_load_to_shared(hs.index(1), high_ptr + block_k, bo, bmask, 0)

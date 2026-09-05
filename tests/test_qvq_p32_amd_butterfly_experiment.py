@@ -11,7 +11,7 @@ triton = pytest.importorskip("triton")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.float32])
 @pytest.mark.parametrize("interleave", [False, True])
 @pytest.mark.parametrize("m,n", [(128, 128), (65, 67), (65, 128), (128, 67)])
-@pytest.mark.parametrize("prefetch", [False, True, "register", "bk32", "bk32register"])
+@pytest.mark.parametrize("prefetch", [False, True, "register", "bk32", "bk32register", "single", "bk32single"])
 def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, interleave, m, n, prefetch):
     if not torch.cuda.is_available() or not torch.version.hip:
         pytest.skip("requires AMD GPU")
@@ -26,9 +26,10 @@ def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, inter
 
     kernel = folded_residual_prefetch_kernel if prefetch else folded_residual_gemm_gluon_kernel
     block_k = 64 if prefetch else tile
-    if prefetch in ("bk32", "bk32register"):
+    if prefetch in ("bk32", "bk32register", "bk32single"):
         block_k = 32
-    prefetch_options = {"register_prefetch": prefetch in ("register", "bk32register")} if prefetch else {}
+    prefetch_options = ({"register_prefetch": prefetch in ("register", "bk32register", "single", "bk32single"),
+                         "single_buffer": prefetch in ("single", "bk32single")} if prefetch else {})
 
     generator = torch.Generator(device="cuda").manual_seed(950 + size_k)
     x = torch.randn((m, size_k), generator=generator, device="cuda", dtype=torch.float16) * 0.01
@@ -59,7 +60,7 @@ def test_fused_residual_gemm_algebra_tails_and_canary(size_k, tile, dtype, inter
 @pytest.mark.parametrize("tile_count", [1, 2, 3, 5])
 @pytest.mark.parametrize("block_k", [32, 64])
 @pytest.mark.parametrize("interleave", [False, True])
-@pytest.mark.parametrize("register_prefetch", [False, True])
+@pytest.mark.parametrize("register_prefetch", [False, True, "single"])
 def test_prefetch_ring_single_and_odd_tile_counts(tile_count, block_k, interleave, register_prefetch):
     if not torch.cuda.is_available() or not torch.version.hip:
         pytest.skip("requires AMD GPU")
@@ -77,7 +78,8 @@ def test_prefetch_ring_single_and_odd_tile_counts(tile_count, block_k, interleav
     for _ in range(10):
         folded_residual_prefetch_kernel[(2, 1)](
             x, high, low, output, 65, 67, size_k, 64, 128, block_k, interleave,
-            num_warps=4, num_stages=2, register_prefetch=register_prefetch,
+            num_warps=4, num_stages=2, register_prefetch=bool(register_prefetch),
+            single_buffer=register_prefetch == "single",
         )
         assert (output[:65*67] == size_k * 1.5).all()
         assert (output[65*67:] == 999.0).all()
@@ -99,15 +101,16 @@ def test_prefetch_paired_odd_random(interleave, block_k):
     high = torch.randn((67, size_k), generator=generator, device="cuda", dtype=torch.float16)
     low = torch.randn(high.shape, generator=generator, device="cuda", dtype=torch.float16) * 0.001
     reference = x.float() @ (high.float() + low.float()).T
-    outputs = [torch.full((65 * 67 + 16,), 999.0, device="cuda", dtype=torch.float32) for _ in range(2)]
-    for enabled, output in zip((False, True), outputs):
+    outputs = [torch.full((65 * 67 + 16,), 999.0, device="cuda", dtype=torch.float32) for _ in range(3)]
+    for enabled, output in zip((False, True, "single"), outputs):
         folded_residual_prefetch_kernel[(2, 1)](
             x, high, low, output, 65, 67, size_k, 64, 128, block_k, interleave,
-            register_prefetch=enabled, num_warps=4, num_stages=2,
+            register_prefetch=bool(enabled), single_buffer=enabled == "single", num_warps=4, num_stages=2,
         )
         torch.testing.assert_close(output[:65*67].view(65, 67), reference, atol=2e-3, rtol=0)
         assert (output[65*67:] == 999.0).all()
     assert torch.equal(outputs[0], outputs[1])
+    assert torch.equal(outputs[0], outputs[2])
 
 
 @pytest.mark.parametrize("size_k", [5120, 6144])
