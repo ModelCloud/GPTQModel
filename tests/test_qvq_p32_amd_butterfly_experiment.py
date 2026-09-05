@@ -84,7 +84,8 @@ def test_prefetch_ring_single_and_odd_tile_counts(tile_count, block_k, interleav
 
 
 @pytest.mark.parametrize("interleave", [False, True])
-def test_prefetch_paired_odd_random(interleave):
+@pytest.mark.parametrize("block_k", [32, 64])
+def test_prefetch_paired_odd_random(interleave, block_k):
     if not torch.cuda.is_available() or not torch.version.hip:
         pytest.skip("requires AMD GPU")
     if torch.cuda.get_device_properties(0).gcnArchName.split(":")[0] != "gfx950":
@@ -92,15 +93,16 @@ def test_prefetch_paired_odd_random(interleave):
     from scripts.qvq_p32_amd_prefetch_experiment import folded_residual_prefetch_kernel
 
     # Five K tiles exercise a paired main loop plus one unpaired iteration.
+    size_k = 5 * block_k
     generator = torch.Generator(device="cuda").manual_seed(320950)
-    x = torch.randn((65, 320), generator=generator, device="cuda", dtype=torch.float16) * 0.01
-    high = torch.randn((67, 320), generator=generator, device="cuda", dtype=torch.float16)
+    x = torch.randn((65, size_k), generator=generator, device="cuda", dtype=torch.float16) * 0.01
+    high = torch.randn((67, size_k), generator=generator, device="cuda", dtype=torch.float16)
     low = torch.randn(high.shape, generator=generator, device="cuda", dtype=torch.float16) * 0.001
     reference = x.float() @ (high.float() + low.float()).T
     outputs = [torch.full((65 * 67 + 16,), 999.0, device="cuda", dtype=torch.float32) for _ in range(2)]
     for enabled, output in zip((False, True), outputs):
         folded_residual_prefetch_kernel[(2, 1)](
-            x, high, low, output, 65, 67, 320, 64, 128, 64, interleave,
+            x, high, low, output, 65, 67, size_k, 64, 128, block_k, interleave,
             register_prefetch=enabled, num_warps=4, num_stages=2,
         )
         torch.testing.assert_close(output[:65*67].view(65, 67), reference, atol=2e-3, rtol=0)
