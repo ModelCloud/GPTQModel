@@ -69,6 +69,7 @@ def _validate_viterbi_distance_range(
             "squared-distance arithmetic"
         )
 _QVQ_CUDA_HADAMARD_OP: Callable | None = None
+_QVQ_CUDA_QUANTIZE_FP8_PER_ROW_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_PAIR_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP: Callable | None = None
@@ -123,6 +124,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "viterbi_v2_segment_midpoint_trusted",
         "viterbi_v2_segment_family_grid_trusted",
         "hadamard",
+        "quantize_fp8_per_row",
         "hadamard_pair_fp32_to_fp16",
         "hadamard_input_fp16_padded_multiblock",
         "hadamard_ordered_split16_fp32_to_fp16",
@@ -262,6 +264,19 @@ def _qvq_cuda_hadamard_op() -> Callable:
             if _QVQ_CUDA_HADAMARD_OP is None:
                 _QVQ_CUDA_HADAMARD_OP = _extension_api().op("qvq_cuda", "hadamard")
     return _QVQ_CUDA_HADAMARD_OP
+
+
+def _qvq_cuda_quantize_fp8_per_row_op() -> Callable:
+    """Resolve the fused dynamic per-row E4M3 quantizer once."""
+
+    global _QVQ_CUDA_QUANTIZE_FP8_PER_ROW_OP
+    if _QVQ_CUDA_QUANTIZE_FP8_PER_ROW_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_QUANTIZE_FP8_PER_ROW_OP is None:
+                _QVQ_CUDA_QUANTIZE_FP8_PER_ROW_OP = _extension_api().op(
+                    "qvq_cuda", "quantize_fp8_per_row"
+                )
+    return _QVQ_CUDA_QUANTIZE_FP8_PER_ROW_OP
 
 
 def _qvq_cuda_hadamard_pair_op() -> Callable:
@@ -803,15 +818,34 @@ def qvq_cuda_viterbi_v2_segment_banked(
     )
 
 
+def qvq_cuda_quantize_fp8_per_row(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize contiguous CUDA rows to E4M3 with one FP32 scale each."""
+
+    if x.device.type != "cuda":
+        raise ValueError("QVQ fused FP8 row quantization requires CUDA input")
+    if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise TypeError("QVQ fused FP8 row quantization requires FP16, BF16, or FP32 input")
+    if x.ndim < 1 or x.shape[-1] < 1 or not x.is_contiguous():
+        raise ValueError("QVQ fused FP8 row quantization requires contiguous input with a nonempty last dimension")
+    if torch.cuda.get_device_capability(x.device) < (8, 9):
+        raise RuntimeError("QVQ fused FP8 row quantization requires compute capability 8.9 or newer")
+    return _qvq_cuda_quantize_fp8_per_row_op()(x)
+
+
 def qvq_cuda_hadamard(
     x: torch.Tensor,
     *,
+    input_scale: torch.Tensor | None = None,
+    input_rounding_mode: int = 0,
     pre_scale: torch.Tensor | None = None,
     post_scale: torch.Tensor | None = None,
     bias: torch.Tensor | None = None,
     scale_mode: int = 0,
     pad_to_16: bool = False,
     output_fp16: bool = False,
+    output_bf16: bool = False,
 ) -> torch.Tensor:
     """Apply the fast Walsh-Hadamard transform on the last dim in one fused launch.
 
@@ -829,8 +863,14 @@ def qvq_cuda_hadamard(
 
     if x.device.type != "cuda":
         raise ValueError("QVQ CUDA Hadamard requires a CUDA input")
-    if x.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise TypeError(f"QVQ CUDA Hadamard requires float16, bfloat16, or float32 x, got {x.dtype}")
+    fp8_dtype = getattr(torch, "float8_e4m3fn", None)
+    scaled_fp8 = input_scale is not None
+    if isinstance(input_rounding_mode, bool) or not isinstance(input_rounding_mode, int):
+        raise TypeError("QVQ CUDA Hadamard input_rounding_mode must be an integer")
+    if x.dtype not in (torch.float16, torch.bfloat16, torch.float32) and not (
+        scaled_fp8 and fp8_dtype is not None and x.dtype == fp8_dtype
+    ):
+        raise TypeError(f"QVQ CUDA Hadamard requires float16, bfloat16, float32, or scaled E4M3 x, got {x.dtype}")
     if x.dim() < 1 or not x.is_contiguous():
         raise ValueError("QVQ CUDA Hadamard requires a contiguous tensor with rank >= 1")
     n = x.shape[-1]
@@ -838,8 +878,8 @@ def qvq_cuda_hadamard(
         raise ValueError(f"QVQ CUDA Hadamard requires a power-of-two last dim in [2, 16384], got {n}")
     if scale_mode not in (0, 1, 2, 3, 4, 5):
         raise ValueError("QVQ CUDA Hadamard scale_mode must be one of 0, 1, 2, 3, 4, or 5")
-    if scale_mode == 2 and x.dtype != torch.float16:
-        raise TypeError("QVQ CUDA Hadamard range-safe pre-scale mode 2 requires float16 x")
+    if scale_mode == 2 and x.dtype != torch.float16 and not scaled_fp8:
+        raise TypeError("QVQ CUDA Hadamard range-safe pre-scale mode 2 requires float16 or scaled E4M3 x")
     if scale_mode in (3, 4) and x.dtype != torch.float32:
         raise TypeError("QVQ CUDA Hadamard FP16-emulation modes 3/4 require float32 x")
     if not isinstance(pad_to_16, bool):
@@ -850,16 +890,49 @@ def qvq_cuda_hadamard(
         )
     if not isinstance(output_fp16, bool):
         raise TypeError("QVQ CUDA Hadamard output_fp16 must be a bool")
-    if output_fp16 and (
+    if not isinstance(output_bf16, bool):
+        raise TypeError("QVQ CUDA Hadamard output_bf16 must be a bool")
+    if output_fp16 and output_bf16:
+        raise ValueError("QVQ CUDA Hadamard cannot request both FP16 and BF16 output")
+    if (output_fp16 or output_bf16) and (
         x.dtype != torch.float32 or scale_mode not in (3, 4) or pad_to_16
     ):
         raise ValueError(
-            "FP16 QVQ CUDA Hadamard output requires float32 x, scale mode 3/4, and no padding"
+            "narrow QVQ CUDA Hadamard output requires float32 x, scale mode 3/4, and no padding"
         )
+    if scaled_fp8:
+        if fp8_dtype is None or x.dtype != fp8_dtype:
+            raise TypeError("QVQ CUDA Hadamard input_scale requires torch.float8_e4m3fn x")
+        rows = x.numel() // n
+        if (
+            input_scale.device != x.device
+            or input_scale.dtype != torch.float32
+            or tuple(input_scale.shape) != (*x.shape[:-1], 1)
+            or not input_scale.is_contiguous()
+        ):
+            raise ValueError("QVQ CUDA Hadamard input_scale must be contiguous FP32 with one value per row")
+        if input_scale.numel() != rows:
+            raise ValueError("QVQ CUDA Hadamard input_scale row count does not match x")
+        if scale_mode not in (1, 2) or pre_scale is None or post_scale is not None or bias is not None or output_fp16 or output_bf16:
+            raise ValueError(
+                "scaled E4M3 QVQ Hadamard requires input mode 1/2 with pre_scale and no post_scale, bias, or narrow output"
+            )
+        if pre_scale.dtype != torch.float16:
+            raise TypeError("scaled E4M3 QVQ Hadamard requires float16 pre_scale")
+        if input_rounding_mode not in (0, 1):
+            raise ValueError("scaled E4M3 QVQ Hadamard input_rounding_mode must be 0 (FP16) or 1 (BF16)")
+    elif input_rounding_mode != 0:
+        raise ValueError("QVQ CUDA Hadamard input_rounding_mode requires input_scale")
     if torch.cuda.get_device_capability(x.device) < (8, 0):
         raise RuntimeError("QVQ CUDA Hadamard requires a compute capability >= 8.0 device")
+    if scaled_fp8 and not (
+        torch.cuda.get_device_capability(x.device) >= (9, 0)
+        or torch.cuda.get_device_capability(x.device) == (8, 9)
+    ):
+        raise RuntimeError("scaled E4M3 QVQ Hadamard requires NVIDIA compute capability 8.9 or newer")
     return _qvq_cuda_hadamard_op()(
-        x, pre_scale, post_scale, bias, scale_mode, pad_to_16, output_fp16
+        x, pre_scale, post_scale, bias, scale_mode, pad_to_16, output_fp16,
+        output_bf16, input_scale, input_rounding_mode
     )
 
 
@@ -1785,9 +1858,10 @@ __all__ = [
     "qvq_cuda_error",
     "qvq_cuda_gemv",
     "qvq_cuda_hadamard",
-    "qvq_cuda_qwen_composite_recovery_fp32_to_fp16",
-    "qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16",
+    "qvq_cuda_quantize_fp8_per_row",
     "qvq_cuda_qwen_composite_input_fp16_padded",
+    "qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16",
+    "qvq_cuda_qwen_composite_recovery_fp32_to_fp16",
     "qvq_cuda_supported",
     "qvq_cuda_viterbi",
     "qvq_cuda_viterbi_banked",

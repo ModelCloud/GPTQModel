@@ -3813,6 +3813,48 @@ families do not: IMAD 275 to 278, SHF 126 to 129, LOP3 127 to 132, and LEA
 conversion, permutation, or address expression to fold; the surviving
 integer instructions are shared trellis-address and circular-state indexing.
 
+## v81 N=1024 large-M stage-1/2 reuse
+
+This phase starts from the merged `origin/main` tip `f74ec0cc`, which includes
+the v80 implementation and the explicit row-group ABI from PR #112.  The
+automatic policy now retains eight-row reuse for `N=1024, stage_k_tiles=3` at
+all aligned large-M sizes and additionally selects it for stages 1 and 2 only
+when `M>=2048`.  The four-row route remains in place for `M=512/1024` and for
+stage 4, where the larger accumulator footprint is not beneficial.
+
+Against an exact SM80 build of `origin/main`, `K=5120`, block variant,
+128 threads, split 1, the `N=1024` stage-1 large-M geometric-mean speedups
+(`M=2048/4096`) are 1.070x/1.031x (bits 4--7 averaged), and stage 2 reaches
+1.024x/1.175x.  Per-rate stage-2 large-M means are 1.092x, 1.089x, 1.090x,
+and 1.115x for bits 4, 5, 6, and 7.  The M=512/1024 controls stay within
+timer noise, and stage 3/4 dispatch remains unchanged.  The strongest case,
+`N=1024,M=4096,stage=2`, clears the requested 10% step across every rate.
+
+Random split-8 comparisons for `M=2048` and `M=4096`, stages 1 and 2, and
+transition bits 4--7 remain bit-for-bit identical to the fetched baseline.
+The broad stage-1/2 guard from the earlier probe is not used: it regressed
+small M, so the retained condition is explicitly limited to `M>=2048`.
+
+The post-commit Nsight Compute captures are `/tmp/v31_ncu_candidate_m4096.csv`
+and `/tmp/v31_ncu_baseline_m4096.csv`.  At the strongest case (`M=4096`,
+`stage=2`), the eight-row launch halves the grid from 1024 to 512 CTAs and
+lowers executed instructions from 280,303,616 to 160,534,528 (-42.7%).
+Profiled duration falls from 1,069,632 ns to 925,280 ns (13.5%); this timing
+is directional because the small kernel is profiler-instrumented.  Memory
+throughput is 77.17% versus 78.08%, L1/TEX is 93.77% versus 86.80%, and both
+variants have zero local/shared-memory spill requests.  The retained four-row
+entry uses 64 registers and 9,232 B shared memory; the new eight-row entry uses
+96 registers and 17,424 B.
+
+The source-correlated SASS extracts are `/tmp/v31_candidate_m8_stage2_sass.txt`
+and `/tmp/v31_base_m4_stage2_sass.txt`.  Static instructions rise from 1,269
+to 1,350 per CTA, but normalize to roughly 47% fewer instructions per output
+row after accounting for four versus eight live row groups.  HMMA/STG scale
+with doubled row work (16/16 to 32/32); decode/address work remains flat or
+falls (IMAD 225 to 230, SHF 126 to 121, LOP3 100 to 99, LEA 75 to 76).
+The SSA/algebraic pass found no redundant mask, shift, conversion, permutation,
+or address expression introduced by the new dispatch.
+
 ## v82 large-M paired-decode selector-mask hoist
 
 The next phase starts from fetched `origin/main` at `277e088f`; the separate

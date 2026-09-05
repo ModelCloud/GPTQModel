@@ -28,6 +28,12 @@ from .diagnostics import (
     normalize_quantization_diagnostics_mode,
 )
 from .fused_forward_config import FusedForwardConfig
+from .qvq_activation import (
+    QVQ_FP8_ACTIVATION_FORMAT,
+    QVQ_FP8_ACTIVATION_SCALE_METHOD,
+    normalize_qvq_fp8_activation_format,
+    normalize_qvq_fp8_activation_scale_method,
+)
 from .qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
 from .qvq_rates import QVQ_BITS, normalize_qvq_rate
 from .qvq_yaqa import (
@@ -35,7 +41,6 @@ from .qvq_yaqa import (
     YAQA_DEFAULT_REGULARIZATION,
     YAQA_PAPER_MINIMUM_SEQUENCES,
 )
-
 
 log = setup_logger()
 
@@ -2892,6 +2897,9 @@ QUANT_CONFIG_ARG_SYNONYMS = {
     "bnb_quant_type": FORMAT_FIELD_CODE,
     "bnb_block_size": "block_size",
     "bnb_compress_statistics": "compress_statistics",
+
+    # QVQ draft compatibility: `activation` is the canonical field.
+    "activation_quantization": "activation",
 }
 
 # compat (values are negated)
@@ -3324,6 +3332,8 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
 def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
     if isinstance(value, str):
         value = value.lower()
+        if value in {"qvq_v2b2_g32", "v2b2_g32", "v2b2-g32"}:
+            return METHOD.QVQ
         if value == FORMAT.MARLIN:
             return METHOD.GPTQ
         if value == FORMAT.BITBLAS:
@@ -3406,8 +3416,11 @@ def _serialize_adjacent_model(value: Optional[Any]) -> Optional[Dict[str, Any]]:
 
 def _normalize_format(value: Union[str, FORMAT]) -> FORMAT:
     if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"qvq_v2b2_g32", "v2b2_g32", "v2b2-g32"}:
+            normalized = FORMAT.QVQ_V2B2_P32.value
         try:
-            return FORMAT(value.lower())
+            return FORMAT(normalized)
         except ValueError as exc:
             raise ValueError(f"QuantizeConfig: Unknown quantization format: `{value}`.") from exc
     if not isinstance(value, FORMAT):
@@ -4672,6 +4685,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
     @classmethod
     def from_quant_config(cls, quantize_cfg, format: str = None):
+        if "activation" in quantize_cfg and "activation_quantization" in quantize_cfg:
+            raise ValueError(
+                "QuantizeConfig: cannot contain both `activation` and legacy `activation_quantization`."
+            )
         valid_formats = set(FORMAT)
         format_auto_inferred = False
         checkpoint_format_hint = quantize_cfg.get(FORMAT_FIELD_CHECKPOINT) if isinstance(quantize_cfg, dict) else None
@@ -6232,6 +6249,80 @@ class EXL3Config(BaseQuantizeConfig):
 
 
 @dataclass
+class QVQActivationConfig:
+    """Optional FP8 activation target for the V2B2-P32 weight codec.
+
+    Dynamic per-token scaling is shared by calibration and inference, so the
+    Hessian sees the same A8 values consumed by the runtime without retaining
+    a calibration-sized activation cache or introducing order-dependent
+    observer state. Enabling A8 also requires FP8 E4M3 K/V-cache storage for
+    every cache-enabled decoder forward; callers cannot substitute a dense
+    Transformers cache.
+    """
+
+    bits: int = 8
+    format: str = QVQ_FP8_ACTIVATION_FORMAT
+    scale_method: str = QVQ_FP8_ACTIVATION_SCALE_METHOD
+    target: str = "p32_operand"
+    kernel_mode: str = "auto"
+    replay_passes: int = 1
+    replay_max_rows: int = 2048
+    replay_validation_fraction: float = 0.125
+
+    def __post_init__(self) -> None:
+        if isinstance(self.bits, bool) or not isinstance(self.bits, int) or self.bits != 8:
+            raise ValueError("QVQActivationConfig: `bits` must be 8.")
+        self.format = normalize_qvq_fp8_activation_format(self.format)
+        self.scale_method = normalize_qvq_fp8_activation_scale_method(self.scale_method)
+        if not isinstance(self.target, str):
+            raise TypeError("QVQActivationConfig: `target` must be a string.")
+        self.target = self.target.strip().lower().replace("-", "_")
+        if self.target not in {"p32_operand", "linear_input"}:
+            raise ValueError("QVQActivationConfig: `target` must be `p32_operand` or `linear_input`.")
+        if not isinstance(self.kernel_mode, str):
+            raise TypeError("QVQActivationConfig: `kernel_mode` must be a string.")
+        self.kernel_mode = self.kernel_mode.strip().lower().replace("-", "_")
+        if self.kernel_mode not in {"auto", "require", "disable"}:
+            raise ValueError("QVQActivationConfig: `kernel_mode` must be `auto`, `require`, or `disable`.")
+        if isinstance(self.replay_passes, bool) or not isinstance(self.replay_passes, int):
+            raise TypeError("QVQActivationConfig: `replay_passes` must be an integer.")
+        if self.replay_passes not in {0, 1}:
+            raise ValueError("QVQActivationConfig: `replay_passes` must be 0 or 1.")
+        if (
+            isinstance(self.replay_max_rows, bool)
+            or not isinstance(self.replay_max_rows, int)
+            or self.replay_max_rows < 16
+        ):
+            raise ValueError("QVQActivationConfig: `replay_max_rows` must be an integer >= 16.")
+        if isinstance(self.replay_validation_fraction, bool) or not isinstance(
+            self.replay_validation_fraction, (int, float)
+        ):
+            raise TypeError("QVQActivationConfig: `replay_validation_fraction` must be a real scalar.")
+        self.replay_validation_fraction = float(self.replay_validation_fraction)
+        if not 0.0 < self.replay_validation_fraction < 0.5:
+            raise ValueError(
+                "QVQActivationConfig: `replay_validation_fraction` must be in (0, 0.5)."
+            )
+
+
+def _normalize_qvq_activation_config(
+    value: Optional[Union[QVQActivationConfig, Dict[str, Any], bool]],
+) -> Optional[QVQActivationConfig]:
+    if value is None or value is False:
+        return None
+    if value is True:
+        return QVQActivationConfig()
+    if isinstance(value, QVQActivationConfig):
+        value.__post_init__()
+        return value
+    if isinstance(value, dict):
+        return QVQActivationConfig(**value)
+    raise TypeError(
+        "QVQConfig: `activation` must be a QVQActivationConfig, dictionary, boolean, or None."
+    )
+
+
+@dataclass
 class OutputAlignConfig:
     """Offline decoder-layer output alignment for fixed QVQ trellises.
 
@@ -6376,6 +6467,9 @@ class QVQConfig(BaseQuantizeConfig):
     output_alignment: Optional[OutputAlignConfig] = field(default=None)
     module_granular_replay: Optional[ModuleGranularReplayConfig] = field(default=None)
     smooth_swiglu: Optional[SmoothSwiGLUConfig] = field(default=None)
+    # Opt-in W2--W3.5/A8 calibration and inference. None preserves the exact
+    # historical dense-activation QVQ contract.
+    activation: Optional[QVQActivationConfig] = field(default=None)
     tensor_storage: Optional[Dict[str, Any]] = field(default=None)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
@@ -6414,7 +6508,7 @@ class QVQConfig(BaseQuantizeConfig):
         if "format" in layer_dict:
             raw_format = layer_dict["format"]
             try:
-                layer_format = raw_format if isinstance(raw_format, FORMAT) else FORMAT(str(raw_format).strip().lower())
+                layer_format = _normalize_format(raw_format)
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     f"QVQConfig: layer `{layer_name}` has unsupported dynamic format `{raw_format}`."
@@ -6518,6 +6612,16 @@ class QVQConfig(BaseQuantizeConfig):
             self.trellis_window = 16
             self.bank_count = 2
 
+        self.activation = _normalize_qvq_activation_config(self.activation)
+        if self.activation is not None:
+            if self.format != FORMAT.QVQ_V2B2_P32:
+                raise ValueError(
+                    "QVQConfig: FP8 `activation` requires `format=qvq_v2b2_p32` "
+                    "(`qvq_v2b2_g32` is accepted as an input alias)."
+                )
+            if self.bits not in (2, 2.5, 3, 3.5):
+                raise ValueError("QVQConfig: FP8 activation quantization supports P32 rates W2 through W3.5.")
+
         self.codebook = str(self.codebook).strip().lower()
         pgc16_levels_for_version(self.codebook)
         if not isinstance(self.rounding, str):
@@ -6525,6 +6629,16 @@ class QVQConfig(BaseQuantizeConfig):
         self.rounding = self.rounding.strip().lower()
         if self.rounding not in {"block_ldlq", "yaqa"}:
             raise ValueError("QVQConfig: `rounding` must be `block_ldlq` or `yaqa`.")
+        if (
+            self.rounding == "yaqa"
+            and self.activation is not None
+            and self.activation.target == "p32_operand"
+        ):
+            raise ValueError(
+                "QVQConfig: YAQA activation-aware calibration currently requires "
+                "activation.target=`linear_input`; `p32_operand` needs a "
+                "post-SU/Hadamard Sketch-B collector."
+            )
         if isinstance(self.yaqa, dict):
             self.yaqa = YaqaConfig(**self.yaqa)
         elif isinstance(self.yaqa, YaqaConfig):
@@ -6578,6 +6692,8 @@ class QVQConfig(BaseQuantizeConfig):
         if self.viterbi_minimum_proxy_improvement > 0 and self.viterbi_objective != "hessian_diagonal":
             raise ValueError("QVQConfig: `viterbi_minimum_proxy_improvement` requires `hessian_diagonal` objective.")
         self.output_alignment = _normalize_qvq_output_alignment_config(self.output_alignment)
+        if self.activation is not None and self.output_alignment is not None:
+            raise ValueError("QVQConfig: FP8 activation quantization does not yet support output alignment.")
         if self.output_alignment is not None and self.lm_head:
             raise ValueError(
                 "QVQ output alignment currently supports decoder layers, not language-model head (`lm_head`) quantization."
@@ -6739,6 +6855,7 @@ class QVQConfig(BaseQuantizeConfig):
             None if self.module_granular_replay is None else asdict(self.module_granular_replay)
         )
         out["smooth_swiglu"] = None if self.smooth_swiglu is None else asdict(self.smooth_swiglu)
+        out["activation"] = None if self.activation is None else asdict(self.activation)
         out["tensor_storage"] = self.tensor_storage
 
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
@@ -6750,6 +6867,7 @@ class QVQConfig(BaseQuantizeConfig):
             "dual_v2": self.format == FORMAT.QVQ_DUAL_V2,
             "v2b4_p64": self.format == FORMAT.QVQ_V2B4_P64,
             "v2b2_p32": self.format == FORMAT.QVQ_V2B2_P32,
+            "activation": None if self.activation is None else asdict(self.activation),
         }
 
 
