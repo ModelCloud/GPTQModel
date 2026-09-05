@@ -1,0 +1,39 @@
+{
+  "scope": "layer baseline and window candidate; experiment 1/10 partial evidence; profiler and model gates pending",
+  "uuid": "GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855",
+  "worker": 1,
+  "torch": "2.13.0+cu130",
+  "device": "_CudaDeviceProperties(name='NVIDIA PG506-232', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=20f7fde4-d88c-d6ca-e324-bd4e5e9e0855, pci_bus_id=43, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "revision": "983c9c59b4d6b0666882312065be20a369459216",
+  "rows": [
+    {
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 16,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.0,
+      "baseline_metrics": {
+        "elements": 131072,
+        "mean_abs": 2.6020954863358817e-05,
+        "max_abs": 0.00023633241653442383,
+        "relative_l2": 0.00017072267420276786,
+        "cosine": 0.9999999854430763,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 131072,
+        "mean_abs": 2.601798402247454e-05,
+        "max_abs": 0.00023376941680908203,
+        "relative_l2": 0.00017068993795567514,
+        "cosine": 0.999999985436046,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    }
+  ],
+  "complete": true
+}
