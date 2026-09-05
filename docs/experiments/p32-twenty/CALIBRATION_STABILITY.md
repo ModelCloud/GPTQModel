@@ -166,4 +166,11 @@ improvement follows. This supports bounded consistency across these fits, not
 universal stability, post-quant advantage, or replacement of other layers.
 
 [Reports and paired summary](results/low-rank-model/stability/interim-summary.json)
-retain complete metrics; 32K model arms are separate and still running.
+retain complete metrics; 32K model arms are archived separately below.
+
+## Three-subset 32K GSM8K checks completed
+
+The three 32K rank6 tail FP16 model arms completed GSM8K-128 with 61/128
+(seed71), 63/128 (seed72), and 63/128 (seed73). These exploratory scores do
+not establish an improvement over the 59/128 window reference; paired task
+statistics and a broader task suite remain required.
