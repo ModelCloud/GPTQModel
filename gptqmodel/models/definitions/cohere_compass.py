@@ -9,7 +9,7 @@ import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.device import get_device
 from ...utils.model import MODALITY, get_module_by_name_prefix, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
@@ -372,7 +372,7 @@ class CohereCompassQModel(BaseQModel):
         del kwargs
         processor = self.load_processor()
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
             calib_data.append(self.prepare_inputs_for_conversations(processor, batch))
         del processor
         return calib_data

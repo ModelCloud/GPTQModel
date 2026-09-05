@@ -10,7 +10,7 @@ from typing import Any, Dict
 import torch
 from transformers import AutoModel, AutoProcessor
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
@@ -104,7 +104,7 @@ class LocateAnythingQModel(BaseQModel):
         del batch_size, kwargs
         processor = self.load_processor()
         calibration_data = []
-        for batch in batched(calibration_dataset, 1):
+        for batch in batched_conversations(calibration_dataset, 1):
             messages = batch[0]
             text = processor.py_apply_chat_template(
                 messages,

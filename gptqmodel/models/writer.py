@@ -1192,7 +1192,7 @@ def ModelWriter(cls):
         prepare_remote_code_compat(config)
 
         with suspend_hf_weight_init():
-            model = cls.loader.from_config(
+            model = self.loader.from_config(
                 config, dtype=torch.float16
             )
 
@@ -1222,7 +1222,7 @@ def ModelWriter(cls):
                 qcfg=qcfg,
                 quant_result=modules,
                 backend=BACKEND.AUTO,
-                lm_head_name=cls.lm_head,
+                lm_head_name=self.lm_head,
                 pack=True,
                 device=DEVICE.CPU,
             )

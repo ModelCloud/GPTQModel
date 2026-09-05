@@ -11,7 +11,6 @@ import threading
 import time
 from typing import Dict, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 import transformers
@@ -164,8 +163,8 @@ def get_number_of_rows_and_cols(layer: nn.Module):
         # transformers.Conv1D: weight shape is (n_in, n_out)
         return layer.weight.shape[1], layer.weight.shape[0]
     else:
-        # weight shape is (n_out, n_in)
-        return layer.weight.shape[0], np.prod(layer.weight.shape[1:])
+        # weight shape is (n_out, n_in); math.prod keeps `columns` a plain int
+        return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
 
 
 class GPTQ:
@@ -773,8 +772,17 @@ class GPTQ:
         return torch.zeros((self.columns, self.columns), dtype=torch.float32,
                            device=self._select_hessian_target_device(target_device))
 
-    def _fallback_quantize(self, strategy: FallbackStrategy, blocksize: int):
-        """Apply a lightweight quantization fallback using the requested strategy."""
+    def _fallback_quantize(
+        self,
+        strategy: FallbackStrategy,
+        blocksize: int,
+        target_device: Optional[torch.device] = None,
+    ):
+        """Apply a lightweight quantization fallback using the requested strategy.
+
+        ``target_device`` is the device the weight clone is quantized on; when
+        None it is taken from ``self.H`` if present, else the weight.
+        """
         maxq = 2 ** self.qcfg.bits - 1
         sigma = 3.0
         effective_group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
@@ -786,7 +794,8 @@ class GPTQ:
             mse_steps = smooth_method.steps
             mse_maxshrink = smooth_method.maxshrink
 
-        target_device = self.H.device if self.H is not None else self.module.weight.device
+        if target_device is None:
+            target_device = self.H.device if self.H is not None else self.module.weight.device
         W = self.clone_module(device=target_device)
         Q = torch.empty_like(W)
         scale_chunks = []
@@ -1180,9 +1189,19 @@ class GPTQ:
                 f"Quantization: Module `{self.name}` -> "
                 f"Using `{resolved_strategy.value}` fallback quantization (observed {self.nsamples} samples, threshold={threshold_text}{threshold_info}, max_total={self.expected_nsamples})."
             )
-            self.H = self.create_H(target_device=target_device)
+            # The fallback never reads the Hessian: release the fp32 XtX
+            # partials (columns^2 x 4 B each) instead of folding them into a
+            # throwaway zero H. Resolve the compute device first, since the
+            # clear changes what _select_hessian_target_device returns.
+            with self.lock:
+                fallback_device = self._select_hessian_target_device(target_device)
+                self._device_hessian_partials.clear()
+                self._device_sample_counts.clear()
+                self._hessian_dirty = False
 
-            return self._fallback_quantize(resolved_strategy, blocksize)
+            return self._fallback_quantize(
+                resolved_strategy, blocksize, target_device=fallback_device
+            )
         else:
             use_hessian = True
             self.finalize_hessian(target_device=target_device)
@@ -1637,6 +1656,13 @@ class GPTQ:
         self._borrow_workspace_last_chunk_rows = None
 
     def free(self):
+        # The task object outlives free() in processor.tasks until layer
+        # end, so no path may leave a Hessian partial behind here.
+        with self.lock:
+            self._device_hessian_partials.clear()
+            self._device_sample_counts.clear()
+            self._hessian_dirty = False
+
         if hasattr(self, "H"):
             del self.H
         if hasattr(self, "_H_diag"):

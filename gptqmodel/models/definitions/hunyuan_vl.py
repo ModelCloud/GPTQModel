@@ -7,7 +7,7 @@ from typing import Any, Dict
 
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.looper_helpers import normalize_device_like
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
@@ -113,7 +113,7 @@ class HunYuanVLQModel(BaseQModel):
         del kwargs
         processor = self.load_processor()
         calibration_data = []
-        for batch in batched(
+        for batch in batched_conversations(
             calibration_dataset,
             batch_size,
             process_func=self.preprocess_dataset,

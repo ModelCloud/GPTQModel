@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.utils.calibration import batched_conversations, normalize_chat_calibration_sample
 from gptqmodel.utils.data import collate_data
 
 
@@ -89,6 +90,52 @@ def _sample_dataset():
         {"input_ids": [[1, 2]], "attention_mask": [[1, 1]]},
         {"input_ids": [[3]], "attention_mask": [[1]]},
     ]
+
+
+def test_normalize_chat_calibration_sample_supports_public_text_inputs():
+    expected = [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "hello"}],
+        }
+    ]
+
+    assert normalize_chat_calibration_sample("hello") == expected
+    assert normalize_chat_calibration_sample({"text": "hello", "source": "dataset"}) == expected
+
+
+def test_normalize_chat_calibration_sample_unwraps_messages_and_preserves_conversations():
+    conversation = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": "image.jpg"},
+                {"type": "text", "text": "describe it"},
+            ],
+        }
+    ]
+
+    assert normalize_chat_calibration_sample({"messages": conversation}) is conversation
+    assert normalize_chat_calibration_sample(conversation) is conversation
+
+
+def test_batched_conversations_normalizes_before_model_preprocessing():
+    processed = []
+
+    def preprocess(sample):
+        processed.append(sample)
+        return sample
+
+    batches = list(
+        batched_conversations(
+            ["first", {"text": "second"}],
+            batch_size=2,
+            process_func=preprocess,
+        )
+    )
+
+    assert batches == [processed]
+    assert [sample[0]["content"][0]["text"] for sample in processed] == ["first", "second"]
 
 
 def test_prepare_dataset_concat_without_separator():

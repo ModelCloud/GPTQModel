@@ -51,6 +51,13 @@ DEFAULT_LOG_COLUMNS: List[str] = [
 ]
 
 
+def _format_gib(value: float) -> str:
+    """Formats a GiB value without unnecessary trailing zeros."""
+
+    text = f"{value:.2f}".rstrip("0").rstrip(".")
+    return f"{text}G"
+
+
 class _ThreadSafeDict(dict):
     """Dictionary with synchronized mutations and snapshot-based iteration."""
 
@@ -687,16 +694,6 @@ class LoopProcessor:
         if not snapshot:
             return "n/a"
 
-        def _format_gib(value: float) -> str:
-            """Formats a GiB value without unnecessary trailing zeros."""
-
-            text = f"{value:.2f}"
-            if text.endswith("00"):
-                text = text[:-2]
-            elif text.endswith("0"):
-                text = text[:-1]
-            return f"{text}G"
-
         grouped: Dict[str, List[Tuple[str, float, int]]] = {}
         for order, (device_id, value) in enumerate(snapshot.items()):
             family, _, index = device_id.partition(":")
@@ -945,12 +942,10 @@ def get_max_memory() -> str:
 
     stats_0 = torch.cuda.memory_stats(DEVICE_0)
     active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
-    peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
 
     if torch.cuda.device_count() > 1:
         stats_1 = torch.cuda.memory_stats(DEVICE_1)
         active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
-        peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
 
         max_memory = f"{active_0:.2f}MB, {active_1:.2f}MB"
     else:

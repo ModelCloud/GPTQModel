@@ -614,3 +614,36 @@ def test_select_quant_linear_single_select_keeps_model_wide_kernel(monkeypatch):
     # Marlin/Exllama/Triton do not support base bits=3, so the model-wide kernel
     # must be TorchLinear, which supports both the base 3-bit and dynamic 4-bit layers.
     assert selected is TorchLinear
+
+
+def test_sharded_select_tolerates_kernel_without_shard_attrs(monkeypatch):
+    class BareKernel:
+        # Defines neither SUPPORTS_SHARDED_LOAD nor SUPPORTS_SHARDS; the
+        # sharded-load guard must not evaluate a missing attribute eagerly
+        # and treats absent declarations as shard-capable.
+        SUPPORTS_DEVICES = [DEVICE.ALL]
+
+        @classmethod
+        def validate(cls, **_):
+            return True, None
+
+    monkeypatch.setitem(
+        AUTO_BACKEND_KERNEL_MAPPING[METHOD.QQQ],
+        FORMAT.QQQ,
+        OrderedDict([(BACKEND.QQQ_TORCH, BareKernel)]),
+    )
+
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=torch.device("cpu"),
+        backend=BACKEND.AUTO,
+        format=FORMAT.QQQ,
+        quant_method=METHOD.QQQ,
+        pack_dtype=torch.int32,
+        is_sharded=True,
+    )
+
+    assert qlinear_cls is BareKernel

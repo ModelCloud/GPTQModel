@@ -10,7 +10,7 @@ from typing import Dict
 
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
@@ -180,7 +180,7 @@ class InternS2PreviewQModel(BaseQModel):
         del kwargs
         processor = self.load_processor()
         calibration_data = []
-        for batch in batched(
+        for batch in batched_conversations(
             calibration_dataset,
             batch_size,
             process_func=self.preprocess_dataset,

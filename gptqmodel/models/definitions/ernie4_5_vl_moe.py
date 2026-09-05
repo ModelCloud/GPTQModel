@@ -12,7 +12,7 @@ from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 from transformers.masking_utils import create_causal_mask
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, get_module, get_module_by_name_prefix, move_to
 from ...utils.offload import offload_to_disk
@@ -53,13 +53,13 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
                 "text_moe": {
                     "gate": ("gate:!",),
                     "experts": {
-                        "#": ("gate_proj:0", "upe_proj:0", "down_proj:1"),
+                        "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                     },
                 },
                 "vision_moe": {
                     "gate": ("gate:!",),
                     "experts": {
-                        "#": ("gate_proj:0", "upe_proj:0", "down_proj:1"),
+                        "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                     },
                 }
             },
@@ -370,7 +370,7 @@ class Ernie4_5_VLMoeQModel(BaseQModel):
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         processor = self.load_processor()
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
             text = processor.apply_chat_template(
                 batch, tokenize=False, add_generation_prompt=True
             )

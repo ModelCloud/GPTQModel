@@ -9,7 +9,7 @@ from typing import Dict
 from PIL import Image
 from transformers import AutoModel, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.image import fetch_image
 from ...utils.model import MODALITY, move_to, nested_move_to
 from ...utils.offload import offload_to_disk
@@ -160,7 +160,7 @@ class MiniCPMVQModel(BaseQModel):
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         processor = self.load_processor()
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
             calib_data.append(
                 self.prepare_inputs_for_conversations(
                     processor,
