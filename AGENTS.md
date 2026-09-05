@@ -60,6 +60,8 @@ This file governs the whole repository. Keep changes narrowly scoped, preserve C
 - Upstream sync, ports, public release notes, or disclosure-boundary review: use `$gptqmodel-upstream`.
 - Ampere or A100 tuning: also use `$gptqmodel-ampere-kernels`.
 - Hopper or H100 tuning: also use `$gptqmodel-hopper-kernels`.
+- AMD ROCm kernel work, including MI350/MI355, gfx950, FlyDSL, Gluon, AITER, Primus-Turbo, hipBLASLt/rocBLAS,
+  rocprof, or AMD ISA analysis: also use `$gptqmodel-amd-kernels`.
 
 Read every selected `SKILL.md` completely before editing. Follow its linked references only when relevant to the task.
 

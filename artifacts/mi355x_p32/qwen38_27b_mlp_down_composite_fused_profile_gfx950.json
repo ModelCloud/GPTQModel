@@ -1,0 +1,127 @@
+{
+  "schema": "gptqmodel.qvq.p32.amd.composite_fused_profile.v1",
+  "date": "2026-09-05",
+  "commit": "4fdaca68",
+  "model": "Qwen3.8-27B",
+  "hardware": {
+    "gpu": "AMD Instinct MI355X VF",
+    "architecture": "gfx950",
+    "physical_gpu": 0,
+    "pci_bus_id": "0000:83:00.0",
+    "unique_id": "0x333ef6e01ec019b3",
+    "vram_bytes": 308902100992,
+    "driver": "7.1.3.31500000"
+  },
+  "software": {
+    "torch": "2.13.0+rocm10.0.0",
+    "hip": "7.15.26333",
+    "triton": "3.8.0+git4cff872c.rocm10.0.0",
+    "rocprofv3": "1.3.5"
+  },
+  "certification": {
+    "artifact": "artifacts/mi355x_p32/qwen38_27b_folded_full_post_4fdaca68_certified_gfx950.json",
+    "rates": [2.0, 2.5, 3.0, 3.5],
+    "m_values": [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096],
+    "mkn_cases": 364,
+    "accuracy_passes": 364,
+    "accuracy_failures": 0,
+    "max_abs": 0.001956462860107422,
+    "accuracy_gate": 0.002,
+    "geometric_mean_speedup_vs_original_path": 11.838279182697326,
+    "comparison_commit": "34ad8979",
+    "geometric_mean_speedup_vs_comparison_all_cases": 1.1190612318231143,
+    "geometric_mean_speedup_vs_comparison_mlp_down_all_m": 1.453816982458006,
+    "geometric_mean_speedup_vs_comparison_mlp_down_selected_m_le_512": 1.6238616112856656,
+    "target_1_5x_met": true,
+    "mlp_down_selected_per_m": [
+      {"m": 1, "mean_median_ms": 0.05017587402835488, "speedup_vs_34ad8979": 1.2308808689944508},
+      {"m": 2, "mean_median_ms": 0.04977587517350912, "speedup_vs_34ad8979": 1.453894285472198},
+      {"m": 4, "mean_median_ms": 0.049860999919474125, "speedup_vs_34ad8979": 1.5296427976211162},
+      {"m": 8, "mean_median_ms": 0.049805874936282635, "speedup_vs_34ad8979": 1.5341066663161975},
+      {"m": 16, "mean_median_ms": 0.049970750231295824, "speedup_vs_34ad8979": 1.675676577476452},
+      {"m": 32, "mean_median_ms": 0.05048562493175268, "speedup_vs_34ad8979": 1.4719006225546225},
+      {"m": 64, "mean_median_ms": 0.050120625644922256, "speedup_vs_34ad8979": 1.9055819315875862},
+      {"m": 128, "mean_median_ms": 0.05294599989429116, "speedup_vs_34ad8979": 1.8386271009710415},
+      {"m": 256, "mean_median_ms": 0.07636637426912785, "speedup_vs_34ad8979": 1.896031107214136},
+      {"m": 512, "mean_median_ms": 0.12501199916005135, "speedup_vs_34ad8979": 1.8529354317405373}
+    ]
+  },
+  "post_commit_kernel_trace": {
+    "method": "sudo rocprofv3 --kernel-trace --stats -f csv; 20 warmups and 50 measured forwards after strict idle gate",
+    "raw_trace_policy": "Raw profiler CSVs remain local and uncommitted.",
+    "steady_launches_per_forward": 3,
+    "prior_split_launches_per_forward": 4,
+    "m1": {
+      "large_hipblaslt_gemm_median_us": 27.961,
+      "split_k_post_median_us": 4.4,
+      "fused_hadamard_median_us": 4.44
+    },
+    "m64": {
+      "large_hipblaslt_gemm_median_us": 33.681,
+      "split_k_post_median_us": 4.8,
+      "fused_hadamard_median_us": 4.88
+    },
+    "m512": {
+      "large_hipblaslt_gemm_median_us": 100.601,
+      "split_k_post_median_us": 10.2,
+      "fused_hadamard_median_us": 25.281
+    }
+  },
+  "ssa_and_isa_audit": {
+    "compiler_ir_conclusion": "All runtime dimensions and normalization constants fold at TTIR construction. Each variant has one function, two dots, four loads, one store, one predicate, five integer multiplies, two integer adds, two FP32 multiplies, one FP16 extension, and one final truncation. No loop or runtime size-M branch remains.",
+    "block_p_32": {
+      "ttir_lines": 128,
+      "isa_instructions": 322,
+      "mfma": 48,
+      "vmem": 10,
+      "ds": 68,
+      "salu": 86,
+      "valu": 158,
+      "branches": 1,
+      "compares": 3,
+      "cndmask": 3,
+      "waitcnt": 34,
+      "static_vgpr": 58,
+      "static_sgpr": 34,
+      "static_lds_bytes": 0,
+      "static_scratch_bytes": 0,
+      "trace_vgpr": 60,
+      "trace_agpr": 4,
+      "trace_sgpr": 48
+    },
+    "block_p_64": {
+      "ttir_lines": 125,
+      "isa_instructions": 414,
+      "mfma": 96,
+      "vmem": 13,
+      "ds": 97,
+      "salu": 85,
+      "valu": 219,
+      "branches": 1,
+      "compares": 3,
+      "cndmask": 3,
+      "waitcnt": 28,
+      "static_vgpr": 116,
+      "static_sgpr": 30,
+      "static_lds_bytes": 0,
+      "static_scratch_bytes": 0,
+      "trace_vgpr": 116,
+      "trace_agpr": 4,
+      "trace_sgpr": 32
+    }
+  },
+  "counter_collection": {
+    "status": "unavailable_due_to_installed_backend_failure",
+    "rocprofv3_pmc_error": "aqlprofile API table load failed: HSA_STATUS_ERROR",
+    "invalid_data_policy": "No hardware-counter values were reported or inferred from the failed pass."
+  },
+  "rejected_experiments": {
+    "flydsl_hgemm": "Approximately 0.872 ms and failed the canonical gate at 0.0026836 max abs.",
+    "dual_term_triton_mfma": "Approximately 0.453 ms at M=512 versus approximately 0.217 ms production.",
+    "hipblaslt_solution_scan": "Best stable full path was approximately 0.197 ms, only about 10 percent faster than the then-current residual route.",
+    "scaled_mm_fp8": "M=512 improved from 0.13936 ms to 0.11384 ms, but max abs was 0.25452 and therefore invalid.",
+    "cached_normalization_fp16": "Removed one multiply but failed accuracy at 0.0026093 max abs.",
+    "cached_normalization_fp32": "Preserved accuracy but doubled scale traffic and was neutral to slightly slower."
+  },
+  "next_bottleneck": "The large hipBLASLt GEMM and its split-K post pass dominate. Further material gains require a higher-accuracy low-precision decomposition or a native compressed-weight GEMM; post-Hadamard algebra is no longer the primary target."
+}
