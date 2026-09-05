@@ -25,6 +25,8 @@ def main():
     )
     parser.add_argument("--ampere-min-rows", type=int, default=1)
     parser.add_argument("--capture-only", action="store_true")
+    parser.add_argument("--task", choices=("arc_challenge", "gsm8k_cot"))
+    parser.add_argument("--task-max-rows", type=int, default=128)
     parser.add_argument("--uuid", required=True)
     parser.add_argument("--inputs", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -244,6 +246,31 @@ def main():
                 )
                 print("RECONSTRUCTED", prefix, flush=True)
             del trellis, su, sv, bank, alt, inner
+    if args.task:
+        from transformers import AutoTokenizer
+
+        from tests.eval import evaluate
+
+        tokenizer = AutoTokenizer.from_pretrained(DENSE, local_files_only=True)
+        model.tokenizer = tokenizer
+        result = evaluate(
+            model_or_id_or_path=model,
+            tokenizer=tokenizer,
+            tasks=[args.task],
+            batch_size=1,
+            output_path=str(args.output / "task-results.json"),
+            model_args={"device": "cuda:0", "attn_implementation": "eager", "seed": 7},
+            apply_chat_template=args.task == "gsm8k_cot",
+            gen_kwargs={"max_new_tokens": 256, "do_sample": False},
+            suite_kwargs={"max_rows": args.task_max_rows},
+        )
+        report["task"] = args.task
+        report["task_max_rows"] = args.task_max_rows
+        report["task_result"] = result
+        report["scope"] = "bounded downstream evaluation only; never calibration"
+        report["complete"] = True
+        (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+        return
     if args.capture_only:
         if args.mode != "canonical":
             raise ValueError("Capture requires canonical teacher")

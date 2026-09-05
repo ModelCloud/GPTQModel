@@ -38,3 +38,16 @@ cases under the approved MAE <=0.003 and max <=0.046875 gates.
 [Raw reports and paired summary](results/window-model/paired-summary.json).
 These are partial experiment 1/10 integration results; no experiment is marked
 fully complete by these bounded checks.
+
+## Follow-up evidence
+
+Repeated same-device planar baselines completed after the candidate runs; raw
+reports are stored alongside the first baselines. Saved window-versus-FP32 teacher
+logits comparison completed on all 4096 positions: mean KL 3.2836589359317e-05,
+top-1 agreement 0.995361328125, top-5 0.995849609375, top-10 0.9955078125.
+These are propagated diagnostics, not localized kernel gates.
+
+The harness now supports live-model Evalution ARC-Challenge or GSM8K evaluation,
+with explicit bounded row counts. Results go only to the external output directory,
+avoiding the general evaluation CLI's checkpoint publication path. Four matched
+128-row ARC-Challenge runs (BF16, FP32 teacher, planar, window) are in progress.
