@@ -1,4 +1,6 @@
-# Window model policy tile wave 26 partial results
+# Window model policy tile wave 26 partial results (superseded)
+
+The complete comparison is now documented in [WINDOW_MODEL_WAVE26.md](WINDOW_MODEL_WAVE26.md).
 
 Wave26 compares four production-window controls with four per-module promotion
 policy arms using BM64/BN32. The controls completed on host GPUs 0–3; policy
