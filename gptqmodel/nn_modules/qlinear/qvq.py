@@ -581,6 +581,7 @@ class QVQLinear(BaseQuantLinear):
         ):
             return None
         from ...utils.qvq_amd import (
+            _qvq_p32_folded_execute,
             qvq_p32_amd_folded,
             qvq_p32_amd_folded_case_supported,
             qvq_p32_amd_folded_prefers_fp32_output,
@@ -595,7 +596,7 @@ class QVQLinear(BaseQuantLinear):
         cached = self._qvq_amd_folded_hot_cache
         if (
             cached is not None
-            and len(cached) == 24
+            and len(cached) == 27
             and cached[0] is self.trellis
             and cached[1] == self.trellis._version
             and cached[2] is self.bank_ids
@@ -614,25 +615,13 @@ class QVQLinear(BaseQuantLinear):
             and cached[15] == self.output_hadamard
             and cached[16] == self.codebook_version
         ):
-            window = cached[17]
-            levels = cached[18]
-            bank_ids = cached[19]
-            bank_alt_id = cached[20]
-            su = cached[21]
-            sv = cached[22]
             bias = cached[23]
-            output = qvq_p32_amd_folded(
+            output = _qvq_p32_folded_execute(
                 x_2d,
-                window,
-                levels,
-                bank_ids,
-                su,
-                sv,
-                self.bits,
+                cached[24],
+                cached[25],
+                cached[26],
                 out_features=self.out_features,
-                bank_alt_id=bank_alt_id,
-                input_hadamard=self.input_hadamard,
-                output_hadamard=self.output_hadamard,
                 output_fp32=bias is not None
                 or qvq_p32_amd_folded_prefers_fp32_output(
                     x_2d.shape[0], self.in_features, self.out_features
@@ -665,6 +654,9 @@ class QVQLinear(BaseQuantLinear):
                 x_2d.shape[0], self.in_features, self.out_features
             ),
         )
+        _, _, operand, _, residual_operand, composite_recovery = (
+            window._qvq_p32_amd_folded_cache
+        )
         self._qvq_amd_folded_hot_cache = (
             self.trellis,
             self.trellis._version,
@@ -690,6 +682,9 @@ class QVQLinear(BaseQuantLinear):
             su,
             sv,
             bias,
+            operand,
+            residual_operand,
+            composite_recovery,
         )
         return output if bias is None else output + bias
 

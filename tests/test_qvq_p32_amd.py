@@ -601,7 +601,7 @@ def test_qvq_p32_amd_folded_residual_cache_reuses_and_matches_fp32_oracle(m):
             output_hadamard=True,
         )
         cache = window._qvq_p32_amd_folded_cache
-        folded, operand, residual, residual_operand = cache[1:]
+        folded, operand, residual, residual_operand, composite_recovery = cache[1:]
         repeated = qvq_p32_amd_folded(
             x,
             window,
@@ -618,6 +618,7 @@ def test_qvq_p32_amd_folded_residual_cache_reuses_and_matches_fp32_oracle(m):
 
     assert residual is not None
     assert residual_operand is not None
+    assert composite_recovery is None
     assert operand.untyped_storage().data_ptr() == folded.untyped_storage().data_ptr()
     assert residual_operand.untyped_storage().data_ptr() == residual.untyped_storage().data_ptr()
     assert window._qvq_p32_amd_folded_cache is cache

@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import math
+import threading
 from operator import index
 
 import torch
@@ -36,6 +38,11 @@ _QWEN38_27B_FOLDED_M_LIMITS = {
     (17408, 5120): 512,
 }
 _QWEN38_27B_RESIDUAL_FOLDED_SHAPES = frozenset({(17408, 5120)})
+_QWEN38_27B_COMPOSITE_RECOVERY_SHAPE = (17408, 5120)
+_COMPOSITE_HADAMARD_CACHE: dict[
+    torch.device, tuple[torch.Tensor, torch.Tensor, int, int]
+] = {}
+_COMPOSITE_HADAMARD_CACHE_LOCK = threading.Lock()
 
 
 def qvq_p32_amd_supported(device: torch.device | str) -> bool:
@@ -275,7 +282,7 @@ def _qvq_p32_folded_weight(
     bank_alt_id: int,
     input_hadamard: bool,
     output_hadamard: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
+) -> tuple[torch.Tensor, torch.Tensor | None, tuple | None]:
     """Fold immutable QVQ axes into mutation-aware N-by-K FP16 cache operands."""
 
     key = (
@@ -297,7 +304,7 @@ def _qvq_p32_folded_weight(
     )
     cached = getattr(window, "_qvq_p32_amd_folded_cache", None)
     if cached is not None:
-        cached_key, _, operand, _, residual_operand = cached
+        cached_key, _, operand, _, residual_operand, composite_recovery = cached
         if all(
             current is recorded
             if isinstance(current, torch.Tensor)
@@ -307,7 +314,7 @@ def _qvq_p32_folded_weight(
             # A caller may have populated the ordinary predecode cache through
             # forward_pretransformed after this folded entry was built.
             window._qvq_p32_amd_dense_cache = None
-            return operand, residual_operand
+            return operand, residual_operand, composite_recovery
 
     dense = _qvq_p32_predecoded_weight(
         window,
@@ -321,22 +328,38 @@ def _qvq_p32_folded_weight(
         bank_alt_id=bank_alt_id,
     )
     folded_fp32 = dense.to(torch.float32)
-    if input_hadamard or output_hadamard:
+    composite_recovery = None
+    use_composite_recovery = (
+        (size_k, size_n) == _QWEN38_27B_COMPOSITE_RECOVERY_SHAPE
+        and not input_hadamard
+        and output_hadamard
+    )
+    if input_hadamard or (output_hadamard and not use_composite_recovery):
         from ..quantization.rotation.hadamard_utils import matmul_hadU
 
         # dense is W^T. Input folding right-multiplies it by H_K^T;
         # output folding transposes around the row-oriented H_N helper.
         if input_hadamard:
             folded_fp32 = matmul_hadU(folded_fp32, transpose=True)
-        if output_hadamard:
+        if output_hadamard and not use_composite_recovery:
             folded_fp32 = matmul_hadU(folded_fp32.T.contiguous()).T.contiguous()
-    folded_fp32.mul_(sv.to(torch.float32)[:, None])
     folded_fp32.mul_(su.to(torch.float32)[None, :])
-    folded = folded_fp32.to(torch.float16).contiguous()
-    operand = folded.T
+    if not use_composite_recovery:
+        folded_fp32.mul_(sv.to(torch.float32)[:, None])
+    if use_composite_recovery:
+        # hipBLASLt selects a much faster small-M path when its K-by-N input is
+        # physically contiguous.  Keep the public/cache N-by-K view without
+        # paying for a second persistent copy.
+        operand = folded_fp32.T.to(torch.float16).contiguous()
+        folded = operand.T
+    else:
+        folded = folded_fp32.to(torch.float16).contiguous()
+        operand = folded.T
     residual = None
     residual_operand = None
-    if (size_k, size_n) in _QWEN38_27B_RESIDUAL_FOLDED_SHAPES:
+    if use_composite_recovery:
+        composite_recovery = (*_qvq_p32_composite_hadamard_constants(window.device), sv)
+    elif (size_k, size_n) in _QWEN38_27B_RESIDUAL_FOLDED_SHAPES:
         # This shape narrowly misses the end-to-end 2e-3 error budget when the
         # FP32 folded matrix is rounded once.  A second FP16 expansion term
         # preserves that accuracy while remaining much cheaper than decoding
@@ -347,8 +370,88 @@ def _qvq_p32_folded_weight(
     # The predecoded matrix is only a construction intermediate here. Keeping
     # it would double the persistent dense-cache footprint for every layer.
     window._qvq_p32_amd_dense_cache = None
-    window._qvq_p32_amd_folded_cache = (key, folded, operand, residual, residual_operand)
-    return operand, residual_operand
+    window._qvq_p32_amd_folded_cache = (
+        key,
+        folded,
+        operand,
+        residual,
+        residual_operand,
+        composite_recovery,
+    )
+    return operand, residual_operand, composite_recovery
+
+
+def _qvq_p32_composite_hadamard_constants(
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, int, int]:
+    """Return shared FP32 matrices for the 40-by-128 Qwen down transform."""
+
+    with _COMPOSITE_HADAMARD_CACHE_LOCK:
+        cached = _COMPOSITE_HADAMARD_CACHE.get(device)
+        if cached is not None:
+            return cached
+        from ..quantization.rotation.hadamard_utils import get_hadK
+
+        base, base_size = get_hadK(5120)
+        if base is None or base_size != 40:
+            raise RuntimeError("Qwen3.8 down recovery requires the canonical K=40 Hadamard base")
+        base_pad = 64
+        padded_base = torch.zeros((base_pad, base_pad), dtype=torch.float32, device=device)
+        padded_base[:base_size, :base_size] = base.to(device=device, dtype=torch.float32)
+        power_width = 5120 // base_size
+        power = torch.tensor(
+            [
+                [
+                    1.0 if (row & column).bit_count() % 2 == 0 else -1.0
+                    for column in range(power_width)
+                ]
+                for row in range(power_width)
+            ],
+            dtype=torch.float32,
+            device=device,
+        )
+        cached = (padded_base, power, base_size, power_width)
+        _COMPOSITE_HADAMARD_CACHE[device] = cached
+        return cached
+
+
+@triton.jit
+def _qvq_p32_composite_recovery_gfx950_kernel(  # pragma: no cover - compiled and exercised on the GPU
+    staged_ptr,
+    base_ptr,
+    sv_ptr,
+    output_ptr,
+    size_m: tl.constexpr,
+    size_n: tl.constexpr,
+    base_size: tl.constexpr,
+    base_pad: tl.constexpr,
+    power_width: tl.constexpr,
+    block_p: tl.constexpr,
+    inv_sqrt_n: tl.constexpr,
+):
+    """Finish the composite output Hadamard, SV scale, and output cast."""
+
+    row = tl.program_id(0)
+    position = tl.program_id(1) * block_p + tl.arange(0, block_p)
+    output_base = tl.arange(0, base_pad)
+    reduction_base = tl.arange(0, base_pad)
+    base = tl.load(base_ptr + output_base[:, None] * base_pad + reduction_base[None, :])
+    values = tl.load(
+        staged_ptr
+        + row * size_n
+        + reduction_base[:, None] * power_width
+        + position[None, :],
+        mask=reduction_base[:, None] < base_size,
+        other=0.0,
+    )
+    transformed = tl.dot(base, values, input_precision="ieee")
+    columns = output_base[:, None] * power_width + position[None, :]
+    scale = tl.load(sv_ptr + columns, mask=output_base[:, None] < base_size, other=0.0)
+    tl.store(
+        output_ptr + row * size_n + columns,
+        transformed * inv_sqrt_n * scale,
+        mask=output_base[:, None] < base_size,
+    )
 
 
 @triton.jit
@@ -382,6 +485,7 @@ def _qvq_p32_folded_execute(
     x: torch.Tensor,
     operand: torch.Tensor,
     residual_operand: torch.Tensor | None = None,
+    composite_recovery: tuple | None = None,
     *,
     out_features: int,
     output_fp32: bool,
@@ -390,6 +494,38 @@ def _qvq_p32_folded_execute(
 
     m, k = x.shape
     n = out_features
+    if composite_recovery is not None:
+        padded_base, power, base_size, power_width, sv = composite_recovery
+        pre_hadamard = torch.mm(x, operand, out_dtype=torch.float32)
+        staged = torch.mm(
+            pre_hadamard.view(m * base_size, power_width),
+            power,
+        ).view(m, base_size, power_width)
+        output = torch.empty(
+            (m, n),
+            device=x.device,
+            dtype=torch.float32 if output_fp32 else x.dtype,
+        )
+        block_p = 16 if m <= 8 else 32 if m <= 64 else 64
+        _qvq_p32_composite_recovery_gfx950_kernel[(m, power_width // block_p)](
+            staged,
+            padded_base,
+            sv,
+            output,
+            size_m=m,
+            size_n=n,
+            base_size=base_size,
+            base_pad=padded_base.shape[0],
+            power_width=power_width,
+            block_p=block_p,
+            inv_sqrt_n=1.0 / math.sqrt(n),
+            num_warps=8,
+            num_stages=1,
+            waves_per_eu=0,
+            matrix_instr_nonkdim=16,
+            kpack=1,
+        )
+        return output
     if m == 1 and not output_fp32 and qvq_p32_amd_folded_shape_supported(k, n):
         output = torch.empty((1, n), device=x.device, dtype=x.dtype)
         if n == 1024:
@@ -812,12 +948,12 @@ def qvq_p32_amd_folded(
     cached = getattr(window, "_qvq_p32_amd_folded_cache", None)
     if (
         isinstance(cached, tuple)
-        and len(cached) == 5
+        and len(cached) == 6
         and x.ndim == 2
         and x.dtype == torch.float16
         and x.is_contiguous()
     ):
-        cached_key, _, operand, _, residual_operand = cached
+        cached_key, _, operand, _, residual_operand, composite_recovery = cached
         if (
             isinstance(cached_key, tuple)
             and len(cached_key) == 15
@@ -843,6 +979,7 @@ def qvq_p32_amd_folded(
                 x,
                 operand,
                 residual_operand,
+                composite_recovery,
                 out_features=out_features,
                 output_fp32=output_fp32,
             )
@@ -885,7 +1022,7 @@ def qvq_p32_amd_folded(
     if tuple(bank_ids.shape) != (tile_count,):
         raise ValueError(f"AMD folded P32 selectors must have shape {(tile_count,)}")
 
-    operand, residual_operand = _qvq_p32_folded_weight(
+    operand, residual_operand, composite_recovery = _qvq_p32_folded_weight(
         window,
         levels,
         bank_ids,
@@ -904,6 +1041,7 @@ def qvq_p32_amd_folded(
         x,
         operand,
         residual_operand,
+        composite_recovery,
         out_features=out_features,
         output_fp32=output_fp32,
     )
