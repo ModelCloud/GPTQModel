@@ -27,6 +27,23 @@ class RecoveredLinear(torch.nn.Module):
         )
         self.register_buffer("a", bundle["a"].to(device))
         self.register_buffer("b", bundle["b"].to(device))
+        self.register_buffer(
+            "sparse_input_indices",
+            bundle.get("sparse_input_indices", torch.empty(0, dtype=torch.int32)).to(
+                device
+            ),
+        )
+        self.register_buffer(
+            "sparse_output_indices",
+            bundle.get("sparse_output_indices", torch.empty(0, dtype=torch.int32)).to(
+                device
+            ),
+        )
+        self.register_buffer(
+            "sparse_values",
+            bundle.get("sparse_values", torch.empty(0, dtype=torch.float32)).to(device),
+        )
+        self.sparse_nnz = self.sparse_values.numel()
         self.eval()
 
     def forward(self, x):
@@ -37,4 +54,7 @@ class RecoveredLinear(torch.nn.Module):
             hidden = xf.to(self.a.dtype) @ self.a
             correction = hidden.to(self.b.dtype) @ self.b
             y = y + correction.float()
+        if self.sparse_nnz:
+            updates = xf[:, self.sparse_input_indices.long()] * self.sparse_values
+            y.index_add_(1, self.sparse_output_indices.long(), updates)
         return y.to(x.dtype).reshape(*shape, self.out_features)

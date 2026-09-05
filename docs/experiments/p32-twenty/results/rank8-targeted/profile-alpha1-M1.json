@@ -1,0 +1,13 @@
+{
+  "scope": "Rank8 fused correction expansion/add and blockwise-FP32 input projection.\n\nNative W4A16 execution is unchanged and remains a separate call. This is NOT\nfusion into the native GEMM itself. Both eager and CUDA Graph timings include\nnative base, correction, conversions and final FP16 output.\n",
+  "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+  "module": "model.layers.0.mlp.down_proj",
+  "export": "/root/p32-rank8-targeted/tail-alpha1/rank8-tail-float16.pt",
+  "export_sha256": "59cc1922cf228969019e3d675bcf7a6d50d3bde458ee6814e81bdaff54d4e7d9",
+  "logical_rank": 8,
+  "physical_correction_mma_rank": 16,
+  "source_sha256": "bd0d7da9d1b978777fb273487c2b1fc2de17443eb65c9dec3a5bcd8568c5e5db",
+  "rows": [],
+  "complete": true,
+  "profile_m": 1
+}
