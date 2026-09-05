@@ -24,6 +24,7 @@ def main():
     parser.add_argument("--bits", type=float, nargs="+", default=[2, 2.5, 3, 3.5])
     parser.add_argument("--iterations", type=int, default=3)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--native-graph", action="store_true")
     args = parser.parse_args()
     if args.iterations < 2 or any(size < 16 or size % 16 for size in args.sizes):
         parser.error("Require two or more iterations and positive multiples of 16")
@@ -62,6 +63,7 @@ def main():
                     return yaqa_inner_v2b2_p32(weight, h_in, h_out, library, bits=bits)
 
                 os.environ["GPTQMODEL_QVQ_AMD_NATIVE_QUANTIZATION"] = "0"
+                os.environ["GPTQMODEL_QVQ_AMD_NATIVE_GRAPH"] = str(int(args.native_graph))
                 expected = run()
                 os.environ["GPTQMODEL_QVQ_AMD_NATIVE_QUANTIZATION"] = "1"
                 actual = run()
