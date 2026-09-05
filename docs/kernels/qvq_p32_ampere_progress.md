@@ -4026,6 +4026,25 @@ reuse.  The high register footprint explains why the specialization is
 profitable only once the grid has enough work to amortize decode and staged
 weight traffic.
 
+The matched Nsight Compute captures are `/tmp/v88_ncu_candidate_m1024.csv`
+and `/tmp/v88_ncu_base_m1024.csv` for
+`N=5120,M=1024,stage=2,bits=5`.  Sixteen-group reuse halves the grid from
+640 to 320 CTAs and lowers executed instructions from 208,359,040 to
+130,910,400.  Profiled duration falls from 1,252,320 ns to 1,046,272 ns;
+memory throughput rises from 71.56% to 78.22% while compute throughput moves
+from 27.63% to 20.73%.  For this rate, the candidate uses 168 registers and
+34,064 B static shared memory versus 96 registers and 17,680 B for the
+eight-group control.
+
+The source-correlated SASS extracts are `/tmp/v88_candidate_stage2_rg16.sass`
+and `/tmp/v88_base_stage2_rg8.sass`.  Static instructions rise from 1,384 to
+1,528 per CTA while the doubled row work scales HMMA/LDSM/STG exactly 2x
+(32/16/32 to 64/32/64).  Decode and address families remain nearly flat:
+IMAD 389->398, IADD3 105->96, LEA 92->91, SHF 126->126, LOP3 89->94, and
+PRMT 12->12.  The SSA/algebraic pass found no duplicated decode, redundant
+mask or shift, unnecessary conversion/permutation, address-expression
+regression, or spill introduced by the larger row group.
+
 The companion stage-1 sixteen-group probe was rejected.  Although it also
 halves the decode grid, matched N=5120 timings regressed by roughly 21--27%
 at M=512/2048/4096.  Stage 1 needs the extra occupancy supplied by the
