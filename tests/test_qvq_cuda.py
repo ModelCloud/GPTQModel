@@ -504,6 +504,38 @@ def test_qvq_cuda_hadamard_multiblock_input_rescues_prescale_overflow_on_stream(
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
 
+@pytest.mark.parametrize("m", (32, 129, 512))
+def test_qvq_cuda_hadamard_multiblock_large_m_input_is_exact_padded_and_graph_safe(m):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("requires the physical H100 large-M input path")
+    generator = torch.Generator(device="cuda").manual_seed(20260907 + m)
+    x = torch.randn((m, 2048), generator=generator, device="cuda", dtype=torch.float16)
+    pre_scale = torch.randn(
+        (2048,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    expected = qvq_cuda_hadamard(x, pre_scale=pre_scale, scale_mode=2)
+    actual = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+        x, pre_scale=pre_scale
+    )
+    padded_rows = ((m + 63) // 64) * 64
+    assert actual.shape == (padded_rows, 2048)
+    assert torch.equal(actual[:m].view(torch.int16), expected.view(torch.int16))
+    assert torch.count_nonzero(actual[m:]) == 0
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_hadamard_input_fp16_padded_multiblock(
+            x, pre_scale=pre_scale
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
 def test_qvq_cuda_float32_hadamard_preserves_postscale_and_bias_precision():
     generator = torch.Generator().manual_seed(20260813)
     x = torch.randn((3, 32), generator=generator, dtype=torch.float32).cuda()

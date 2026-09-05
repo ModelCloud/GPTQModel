@@ -745,7 +745,7 @@ class QVQHopperGroupedRuntime:
                 pre_scale=input_scale,
             )
             self.telemetry.h100_qwen_composite_input_launches += 1
-        elif self._h100_multiblock_input_hadamard_enabled and rows <= 16:
+        elif self._h100_multiblock_input_hadamard_enabled and rows <= 4096:
             from ..utils.qvq_cuda import (
                 qvq_cuda_hadamard_input_fp16_padded_multiblock,
             )

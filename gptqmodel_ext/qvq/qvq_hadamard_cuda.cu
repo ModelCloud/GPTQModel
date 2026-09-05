@@ -2220,9 +2220,9 @@ at::Tensor qvq_hadamard_input_fp16_padded_multiblock_cuda(
   TORCH_CHECK(input.scalar_type() == at::kHalf &&
                   pre_scale.scalar_type() == at::kHalf,
               "multiblock input Hadamard tensors must be float16");
-  TORCH_CHECK(input.dim() == 2 && input.size(0) >= 1 && input.size(0) <= 16 &&
+  TORCH_CHECK(input.dim() == 2 && input.size(0) >= 1 && input.size(0) <= 4096 &&
                   input.size(1) == kHadamardInputMultiblockN,
-              "multiblock input Hadamard requires an Mx2048 input with M in [1, 16]");
+              "multiblock input Hadamard requires an Mx2048 input with M in [1, 4096]");
   TORCH_CHECK(input.is_contiguous() && pre_scale.is_contiguous(),
               "multiblock input Hadamard tensors must be contiguous");
   TORCH_CHECK(pre_scale.numel() == kHadamardInputMultiblockN,
@@ -2234,8 +2234,9 @@ at::Tensor qvq_hadamard_input_fp16_padded_multiblock_cuda(
   TORCH_CHECK(properties.major == 9,
               "multiblock input Hadamard is an experimental Hopper-only operator");
   const int rows = static_cast<int>(input.size(0));
+  const int padded_rows = rows <= 16 ? 16 : ((rows + 63) / 64) * 64;
   at::Tensor output = at::empty(
-      {16, kHadamardInputMultiblockN}, input.options());
+      {padded_rows, kHadamardInputMultiblockN}, input.options());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
   qvq_hadamard_input_fp16_padded_multiblock_low_kernel<<<
       dim3(kHadamardInputMultiblockTiles, rows),
@@ -2250,7 +2251,7 @@ at::Tensor qvq_hadamard_input_fp16_padded_multiblock_cuda(
       dim3(
           kHadamardInputMultiblockHalf2Values /
               kHadamardInputMultiblockHighThreads,
-          16),
+          padded_rows),
       kHadamardInputMultiblockHighThreads,
       0,
       stream>>>(

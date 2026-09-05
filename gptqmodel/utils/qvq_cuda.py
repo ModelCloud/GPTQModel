@@ -868,7 +868,7 @@ def qvq_cuda_hadamard_input_fp16_padded_multiblock(
     *,
     pre_scale: torch.Tensor,
 ) -> torch.Tensor:
-    """Run the exact two-stage Hopper Mx2048 input transform into M16 storage.
+    """Run the exact two-stage Hopper Mx2048 input transform into padded storage.
 
     This experimental operator has the same numerical contract as
     ``qvq_cuda_hadamard(..., scale_mode=2, pad_to_16=True)``. It exists as a
@@ -880,8 +880,8 @@ def qvq_cuda_hadamard_input_fp16_padded_multiblock(
         raise ValueError("multiblock QVQ input Hadamard tensors must share one CUDA device")
     if x.dtype != torch.float16 or pre_scale.dtype != torch.float16:
         raise TypeError("multiblock QVQ input Hadamard tensors must be float16")
-    if x.dim() != 2 or not 0 < x.shape[0] <= 16 or x.shape[1] != 2048:
-        raise ValueError("multiblock QVQ input Hadamard requires an Mx2048 input with M in [1, 16]")
+    if x.dim() != 2 or not 0 < x.shape[0] <= 4096 or x.shape[1] != 2048:
+        raise ValueError("multiblock QVQ input Hadamard requires an Mx2048 input with M in [1, 4096]")
     if not x.is_contiguous() or not pre_scale.is_contiguous():
         raise ValueError("multiblock QVQ input Hadamard tensors must be contiguous")
     if pre_scale.numel() != 2048:
