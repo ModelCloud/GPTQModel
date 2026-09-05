@@ -3744,6 +3744,75 @@ requires `0xc618`--`0x10820` bytes of static shared memory across the generated
 rate/N variants, exceeding Ampere's `0xc000` per-block limit.  The probe
 produced no binary and made no source change to the retained dispatch.
 
+## v79 compiler-owned large-M row-group tuning
+
+The framework-neutral runtime now exposes an additive
+`qvq_p32_window_with_row_groups` entry point for compiler integrations that
+own autotuning.  It accepts an explicit 1/2/4/8 multiplier describing how many
+adjacent M16 tiles reuse one packed weight decode.  The established
+`qvq_p32_window` ABI remains source- and behavior-compatible and continues to
+apply QvQ's automatic large-M row-group and fixed-N policy for PyTorch and
+other callers.
+
+Explicit calls also honor `static_n` literally instead of silently enabling a
+known-N specialization.  This lets a compiler represent row grouping, stage
+depth, thread count, split count, and fixed-N selection as visible graph
+attributes and benchmark the exact schedule it will emit.  The contract and
+runtime smoke tests pass against kernel contract version 10; end-to-end ZML
+autotune and model timing are tracked in the consuming integration.
+
+## v80 stage-3 N=1024 eight-row reuse
+
+This WIP branch starts from freshly fetched `origin/main` at `8c131ac5` and
+keeps the merged eight-row schedule for wide projections unchanged.  The
+remaining fixed-N gap was the small `N=1024` projection: for `M=512/1024/2048/4096`
+and `stage_k_tiles=3`, the four-row CTA was substantially slower than the
+eight-row CTA even though the latter was previously excluded for this width.
+The dispatch now selects `RowGroups=8` only for that exact stage, while
+stages 1, 2, and 4 retain the prior four-row schedule.  This avoids the
+stage-1/2 regression seen in the broad guard probe.
+
+On the A100 SM80 target (`K=5120`, block variant, 128 threads, split 1), the
+four-rate `N=1024` stage-3 screen is exact for all M values and improves the
+candidate/control geometric mean by 1.153x (bits 4), 1.210x (bits 5),
+1.147x (bits 6), and 1.097x (bits 7).  At bits 4 the per-M speedups are
+1.064x/1.054x/1.154x/1.366x for `M=512/1024/2048/4096`.  The all-N stage-3
+matrix improves 1.024x because this specialization affects one of six N
+shapes; the targeted N=1024 result clears the requested 10% step.
+
+The random split-1 and split-8 comparisons match bit-for-bit for transition
+bits 4--7 (`M=512,N=1024`).  Resource usage for the new fixed-N, stage-3,
+eight-row entry is 96 registers/thread and 27,288 B static shared memory,
+with no local-memory spill; the retained four-row entry is 72 registers and
+15,000 B.  The broad stage-1/2 guard was rejected because it slowed the
+small-N screen and is recorded as a failed probe rather than enabled.
+
+The candidate library used for this screen was built directly from
+`gptqmodel_ext/qvq/p32/qvq_p32_cuda.cu` with CUDA 13.3, `-O3`,
+`--split-compile=64`, and `-gencode arch=compute_80,code=sm_80`.
+
+The post-commit Nsight Compute capture is `/tmp/v30_ncu_candidate.csv`, with
+the matched control in `/tmp/v30_ncu_baseline.csv`.  For `M=512,N=1024`, the
+eight-row launch halves the grid from 128 to 64 CTAs and lowers executed
+instructions from 32,834,944 to 19,729,856 (-39.9%).  NCU reports zero local
+or shared-memory spill requests in both kernels.  The candidate uses 96
+registers/thread and 26,136 B static shared memory in the launch report
+(the resource dump rounds this to 27,288 B); the four-row control uses 64
+registers and 13,848 B in NCU (15,000 B in the resource dump).  The profiled
+candidate duration is 293,152 ns versus 310,880 ns for the control; this
+profiled timing is directional because Nsight instrumentation dominates this
+small grid.
+
+The source-correlated SASS extracts are `/tmp/v30_candidate_m8_sass.txt` and
+`/tmp/v30_base_m4_sass.txt`.  Static instruction count rises from 1,426 to
+1,522 per CTA, but after normalizing for four versus eight live row groups,
+the body is about 47% smaller per output row.  HMMA/LDSM/STG scale exactly
+with the doubled row work (24/12/16 to 48/24/32), while shared decode/address
+families do not: IMAD 275 to 278, SHF 126 to 129, LOP3 127 to 132, and LEA
+78 to 79.  The algebraic/data-movement pass found no new mask, shift,
+conversion, permutation, or address expression to fold; the surviving
+integer instructions are shared trellis-address and circular-state indexing.
+
 ## Reproduction
 
 ```bash

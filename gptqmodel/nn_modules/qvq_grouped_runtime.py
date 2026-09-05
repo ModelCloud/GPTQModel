@@ -1659,7 +1659,7 @@ class QVQHopperGroupedRuntime:
                 pre_scale=down._cached_cast("SU", torch.float16),
                 scale_mode=3,
                 pad_to_16=direct_pad,
-                pair_tiles=rows == 16,
+                pair_tiles=rows >= 16,
                 bounded_rounding=(
                     self._h100_bounded_recovery_rounding_enabled and rows == 16
                 ),
@@ -1673,7 +1673,7 @@ class QVQHopperGroupedRuntime:
             self.telemetry.h100_multiblock_recovery_launches += 1
             self.telemetry.h100_warp_recovery_low_launches += 1
             self.telemetry.h100_fused_recovery_precondition_launches += 1
-            if rows == 16:
+            if rows >= 16:
                 self.telemetry.h100_paired_recovery_tiles_launches += 1
             if self._h100_bounded_recovery_rounding_enabled and rows == 16:
                 self.telemetry.h100_bounded_recovery_rounding_launches += 1
