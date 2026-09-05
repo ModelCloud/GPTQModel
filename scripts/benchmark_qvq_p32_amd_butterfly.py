@@ -42,6 +42,7 @@ def main():
                         help="Reuse the private FP32 primary output for residual addmm")
     parser.add_argument("--fused-correction", action="store_true", help="Experimental shared-X Gluon residual GEMM")
     parser.add_argument("--fused-interleave", action="store_true", help="Interleave high/low into one FP32 accumulator")
+    parser.add_argument("--fused-keep-masks", action="store_true", help="Control: retain masks on divisible fused tiles")
     parser.add_argument("--fused-block-m", type=int, choices=(32, 64, 128), default=64)
     parser.add_argument("--fused-block-n", type=int, choices=(32, 64, 128), default=64)
     parser.add_argument("--fused-block-k", type=int, choices=(32, 64, 128), default=64)
@@ -304,7 +305,7 @@ def main():
         output = torch.empty((m, n), device=x.device, dtype=torch.float32 if kwargs["output_fp32"] else x.dtype)
         folded_residual_gemm_gluon_kernel[(triton.cdiv(m, args.fused_block_m), triton.cdiv(n, args.fused_block_n))](
             x, operand, residual_operand, output, m, n, k,
-            args.fused_block_m, args.fused_block_n, args.fused_block_k, args.fused_interleave,
+            args.fused_block_m, args.fused_block_n, args.fused_block_k, args.fused_interleave, not args.fused_keep_masks,
             num_warps=4, num_stages=2,
         )
         return output

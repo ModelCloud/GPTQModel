@@ -19,6 +19,7 @@ def folded_residual_gemm_gluon_kernel(
     size_m: gl.constexpr, size_n: gl.constexpr, size_k: gl.constexpr,
     block_m: gl.constexpr, block_n: gl.constexpr, block_k: gl.constexpr,
     interleave: gl.constexpr = False,
+    prune_masks: gl.constexpr = True,
 ):
     """Share X loads between two FP32-accumulating GEMMs; reassociation experiment."""
     gl.static_assert(size_k % block_k == 0)
@@ -32,11 +33,18 @@ def folded_residual_gemm_gluon_kernel(
     primary = gl.full((block_m, block_n), 0, gl.float32, mma_layout)
     correction = gl.full((block_m, block_n), 0, gl.float32, mma_layout)
     for offset in range(size_k // block_k):
-        x = gl.load(x_ptr + rm[:, None] * size_k + (offset * block_k + ak[None, :]),
-                    rm[:, None] < size_m, 0)
+        xp = x_ptr + rm[:, None] * size_k + (offset * block_k + ak[None, :])
+        if prune_masks and size_m % block_m == 0:
+            x = gl.load(xp)
+        else:
+            x = gl.load(xp, rm[:, None] < size_m, 0)
         indices = offset * block_k + bk[:, None] + rn[None, :] * size_k
-        high = gl.load(high_ptr + indices, rn[None, :] < size_n, 0)
-        low = gl.load(low_ptr + indices, rn[None, :] < size_n, 0)
+        if prune_masks and size_n % block_n == 0:
+            high = gl.load(high_ptr + indices)
+            low = gl.load(low_ptr + indices)
+        else:
+            high = gl.load(high_ptr + indices, rn[None, :] < size_n, 0)
+            low = gl.load(low_ptr + indices, rn[None, :] < size_n, 0)
         a = gl.convert_layout(x, DotOperandLayout(0, mma_layout, 8))
         b = gl.convert_layout(high, DotOperandLayout(1, mma_layout, 8))
         c = gl.convert_layout(low, DotOperandLayout(1, mma_layout, 8))
@@ -52,8 +60,11 @@ def folded_residual_gemm_gluon_kernel(
         result = gl.convert_layout(primary + correction, out_layout)
     om = gl.program_id(0) * block_m + gl.arange(0, block_m, layout=SliceLayout(1, out_layout))
     on = gl.program_id(1) * block_n + gl.arange(0, block_n, layout=SliceLayout(0, out_layout))
-    gl.store(output_ptr + om[:, None] * size_n + on[None, :], result,
-             (om[:, None] < size_m) & (on[None, :] < size_n))
+    if prune_masks and size_m % block_m == 0 and size_n % block_n == 0:
+        gl.store(output_ptr + om[:, None] * size_n + on[None, :], result)
+    else:
+        gl.store(output_ptr + om[:, None] * size_n + on[None, :], result,
+                 (om[:, None] < size_m) & (on[None, :] < size_n))
 
 
 @gluon.jit
