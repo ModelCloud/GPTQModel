@@ -407,12 +407,14 @@ Large dense models can make the two FP32 Sketch-B factors impractical to retain.
 linears in Qwen3.8-27B require about 299 GiB of dense factors. `YaqaConfig.gram_strategy="auto"` retains exact
 collection when the factors fit the safe accelerator working set and otherwise selects
 `"streaming_projected"`. The streaming collector applies seeded Gaussian projections to the concatenated
-per-sequence score matrices, retains only `[features, rank]` sources, and materializes one dense PSD Gram when its
-module is quantized. The default rank is 256 and can be changed with `gram_projection_rank`; use
+per-sequence score matrices and retains `[features, rank]` sources plus the exact FP32 Fisher diagonal. It uses a
+diagonal congruence transform when materializing one dense PSD Gram, making every channel curvature exact while only
+the cross-channel correlations remain sketched. The default rank is 256 and can be changed with
+`gram_projection_rank`; use
 `gram_strategy="exact"` for an explicit dense control. Telemetry reports the configured and selected strategy,
-projection distribution/rank, logical dense bytes, retained bytes, and compression ratio. The projected estimator
-is unbiased over its seeded projection but a single realization is approximate, so production rank changes still
-require post-quantization KL, Top-N, perplexity, and task-quality gates.
+projection distribution/rank, exact-diagonal status, logical dense bytes, retained bytes, and compression ratio. The
+off-diagonal projected estimator is unbiased over its seeded projection but a single realization is approximate, so
+production rank changes still require post-quantization KL, Top-N, perplexity, and task-quality gates.
 
 `scripts/benchmark_qvq_yaqa_qwen38.py` is the strict H200 comparison harness and
 `scripts/profile_qvq_yaqa_streaming.py` isolates the generated collection kernels for NCU/SASS inspection. The

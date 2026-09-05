@@ -62,22 +62,25 @@ def main() -> None:
         ).normal_(generator=projection_generator)
         output_projection = projection[:, : args.out_features]
         input_projection = projection[:, args.out_features :]
+        activation_transpose = activation.transpose(1, 2)
+        gradient_transpose = gradient.transpose(1, 2)
         if args.batch_size == 1:
             input_source = activation[0].T @ (gradient[0] @ output_projection[0])
             output_source = gradient[0].T @ (activation[0] @ input_projection[0])
         else:
             input_source = torch.bmm(
-                activation.transpose(1, 2),
+                activation_transpose,
                 torch.bmm(gradient, output_projection),
             ).sum(dim=0)
             output_source = torch.bmm(
-                gradient.transpose(1, 2),
+                gradient_transpose,
                 torch.bmm(activation, input_projection),
             ).sum(dim=0)
-        return (
-            input_source,
-            output_source,
-        )
+        gradient_token_gram = torch.bmm(gradient, gradient_transpose)
+        activation_token_gram = torch.bmm(activation, activation_transpose)
+        input_diagonal = (activation * torch.bmm(gradient_token_gram, activation)).sum(dim=(0, 1))
+        output_diagonal = (gradient * torch.bmm(activation_token_gram, gradient)).sum(dim=(0, 1))
+        return input_source, output_source, input_diagonal, output_diagonal
 
     for index in range(args.warmup):
         run(index)

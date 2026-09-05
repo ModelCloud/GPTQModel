@@ -1049,7 +1049,7 @@ def test_qvq_yaqa_streaming_projected_lifecycle_retains_compact_factors():
     assert processor._yaqa_stats["factor_passes"] == 1
     assert processor._yaqa_stats["selected_gram_strategy"] == "streaming_projected"
     assert processor._yaqa_stats["gram_projection_rank"] == 32
-    assert processor._yaqa_stats["factor_compression_ratio"] == 0.5
+    assert processor._yaqa_stats["factor_compression_ratio"] == pytest.approx(16 / 33)
     assert all(isinstance(factor, YaqaGramSketch) for factor in processor._yaqa_input_hessians.values())
     assert all(isinstance(factor, YaqaGramSketch) for factor in processor._yaqa_output_hessians.values())
 

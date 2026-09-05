@@ -1041,6 +1041,7 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
             "gram_strategy": "batched",
             "gram_projection_rank": None,
             "gram_projection_distribution": None,
+            "gram_exact_diagonal": False,
             "factor_approximate": False,
             "mps_cleanup_interval": 8,
         "mps_cleanup_count": 0,
@@ -1104,10 +1105,12 @@ def test_yaqa_streaming_projected_factor_is_compact_deterministic_and_materializ
     assert first_input["proj"].source.shape == (2, 4096)
     assert first_output["proj"].source.shape == (2, 4096)
     assert stats["gram_strategy"] == "streaming_projected"
-    assert stats["factor_storage_bytes"] == 2 * 2 * 4096 * 4
+    assert stats["factor_storage_bytes"] == 2 * 2 * (4096 + 1) * 4
     assert stats["dense_factor_storage_bytes"] == 2 * 2 * 2 * 4
     torch.testing.assert_close(first_input["proj"].source, captures[1][0]["proj"].source)
     torch.testing.assert_close(first_output["proj"].source, captures[1][1]["proj"].source)
+    torch.testing.assert_close(first_input["proj"].diagonal, exact_input["proj"].diagonal(), rtol=0, atol=1e-6)
+    torch.testing.assert_close(first_output["proj"].diagonal, exact_output["proj"].diagonal(), rtol=0, atol=1e-6)
     torch.testing.assert_close(
         first_input["proj"].materialize(device=torch.device("cpu")),
         exact_input["proj"],
@@ -1126,7 +1129,8 @@ def test_yaqa_streaming_projected_factor_is_compact_deterministic_and_materializ
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_yaqa_streaming_projected_materialization_forces_ieee_fp32_and_restores_backend():
     source = torch.randn((32, 64), dtype=torch.float32)
-    sketch = YaqaGramSketch(source=source, normalizer=64.0, seed=17)
+    diagonal = (source @ source.T).diagonal() / 64.0
+    sketch = YaqaGramSketch(source=source, diagonal=diagonal, normalizer=64.0, seed=17)
     expected = (source @ source.T) / sketch.normalizer
     cuda_matmul = torch.backends.cuda.matmul
     previous_precision = cuda_matmul.fp32_precision
@@ -1138,6 +1142,8 @@ def test_yaqa_streaming_projected_materialization_forces_ieee_fp32_and_restores_
         cuda_matmul.fp32_precision = previous_precision
 
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(actual.diagonal(), diagonal, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(sketch.source, source, rtol=0, atol=0)
 
 
 def test_yaqa_weighted_capture_tracks_effective_coverage_without_duplication():
