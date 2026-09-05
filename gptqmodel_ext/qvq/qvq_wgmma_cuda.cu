@@ -1564,7 +1564,7 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   static_assert(!FixedGateUp || Grouped);
   static_assert(!FixedQwenLinear || (Grouped && OrderedSplit && !FixedGateUp));
   static_assert(N64BlocksPerCta == 1 || N64BlocksPerCta == 2);
-  static_assert(N64BlocksPerCta == 1 || FixedGateUp);
+  static_assert(N64BlocksPerCta == 1 || Grouped);
   static_assert(
       RowTilesPerCta == 1 || RowTilesPerCta == 2 || RowTilesPerCta == 4 ||
           RowTilesPerCta == 8 || RowTilesPerCta == 11);
@@ -1701,6 +1701,9 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
       const int grid_segment = static_cast<int>(blockIdx.y);
       segment = grid_segment % grouped_params.segment_count;
       row_tile = grid_segment / grouped_params.segment_count;
+      if constexpr (N64BlocksPerCta == 2) {
+        n64_block = static_cast<int>(blockIdx.x) * 2 + consumer_group;
+      }
     }
     if (segment >= grouped_params.segment_count) {
       return;
@@ -1722,6 +1725,12 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   if constexpr (N64BlocksPerCta == 1) {
     trellis_block_global = n64_block_global;
     bank_n64_block_global = n64_block_global;
+  } else if constexpr (!FixedGateUp) {
+    // The measured generic N128 path is a single-child Qwen down projection.
+    // Its two consumers own adjacent N64 blocks while one TMA tile stages
+    // their eight contiguous N16 payloads and their shared input rows.
+    trellis_block_global = n64_block_global / N64BlocksPerCta;
+    bank_n64_block_global = n64_block_global - consumer_group;
   }
   const int row_tile_begin = row_tile * RowTilesPerCta;
   const int k_tiles = size_k / kP32TileRows;
@@ -3160,6 +3169,10 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
         (use_gate_up_geometry || use_qwen_unsplit_gate_up_geometry) &&
         size_m >= 128 &&
         std::strcmp(properties.name, "NVIDIA H100") == 0;
+    const bool use_h100_wide_reuse_qwen_down =
+        segment_count == 1 && size_k == 17408 && out_features[0] == 5120 &&
+        split_counts[0] == 1 && size_m >= 128 &&
+        std::strcmp(properties.name, "NVIDIA H100") == 0;
     if (use_h100_wide_reuse_gate_up) {
       const HopperFixedGateUpLaunchParams fixed_params{
           {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
@@ -3197,6 +3210,46 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
           reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
           partial_output.data_ptr<float>(),
           fixed_params,
+          size_m,
+          size_k,
+          static_cast<int>(total_n),
+          1,
+          0);
+    } else if (use_h100_wide_reuse_qwen_down) {
+      using WideReuseSharedStorage =
+          P32WgmmaTmaSharedStorageFor<TransitionBits, 2, RowTilesPerCta>;
+      auto wide_reuse_kernel = qvq_p32_window_wgmma_m16_tma_kernel<
+          TransitionBits,
+          true,
+          OrderedSplit,
+          false,
+          true,
+          2,
+          false,
+          RowTilesPerCta,
+          decltype(input_tma),
+          decltype(wide_trellis_tma),
+          decltype(bank_tma),
+          HopperGroupedP32LaunchParams>;
+      C10_CUDA_CHECK(cudaFuncSetAttribute(
+          wide_reuse_kernel,
+          cudaFuncAttributeMaxDynamicSharedMemorySize,
+          static_cast<int>(sizeof(WideReuseSharedStorage))));
+      const dim3 wide_reuse_grid(
+          static_cast<unsigned>(max_n64_blocks / 2),
+          static_cast<unsigned>(row_ctas),
+          1);
+      wide_reuse_kernel<<<
+          wide_reuse_grid,
+          kTmaThreads + kThreads,
+          sizeof(WideReuseSharedStorage),
+          stream>>>(
+          input_tma,
+          wide_trellis_tma,
+          bank_tma,
+          reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+          partial_output.data_ptr<float>(),
+          grouped_params,
           size_m,
           size_k,
           static_cast<int>(total_n),
