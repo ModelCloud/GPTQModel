@@ -2632,6 +2632,14 @@ at::Tensor qvq_hadamard_cuda(
       ? at::empty(input.sizes(), input.options().dtype(at::kBFloat16))
       : (pad_to_16 ? at::empty({16, n64}, input.options()) : at::empty_like(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  // Composite Qwen rotations expose power-of-two H128 rows to this kernel.
+  // A fixed 1024-thread block made 896 lanes participate only in seven block
+  // barriers.  Match the block to the row on the measured H100; every value,
+  // butterfly pair, and FP16 rounding boundary is unchanged.
+  const int hadamard_threads =
+      std::strcmp(properties.name, "NVIDIA H100") == 0 && n < kHadamardThreads
+      ? std::max(32, n)
+      : kHadamardThreads;
   const dim3 grid(static_cast<unsigned int>(rows));
 #define QVQ_HADAMARD_LAUNCH(SCALAR, OUTPUT_SCALAR, PAD)                                                            \
   {                                                                                                               \
@@ -2646,7 +2654,7 @@ at::Tensor qvq_hadamard_cuda(
     const SCALAR* bia = bias.has_value()                                                                           \
         ? reinterpret_cast<const SCALAR*>(bias->const_data_ptr())                                                  \
         : nullptr;                                                                                                 \
-    qvq_hadamard_kernel<SCALAR, OUTPUT_SCALAR, PAD><<<grid, kHadamardThreads, smem_bytes, stream>>>(               \
+    qvq_hadamard_kernel<SCALAR, OUTPUT_SCALAR, PAD><<<grid, hadamard_threads, smem_bytes, stream>>>(              \
         in_ptr, out_ptr, pre, post, bia, n, static_cast<int>(scale_mode), static_cast<int>(rows));                  \
   }
   if (scaled_fp8) {
