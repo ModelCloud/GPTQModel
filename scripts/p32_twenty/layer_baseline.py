@@ -133,7 +133,10 @@ def main():
         "rows": [],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    for item in modules[args.worker :: 4]:
+    selected = [item for item in modules if item["module"] == args.module] if args.module else modules[args.worker :: 4]
+    if not selected:
+        raise ValueError(f"No captured P32 modules match {args.module!r}")
+    for item in selected:
         prefix = item["module"]
         cap = torch.load(item["path"], weights_only=True)
         xall = cap["input"].reshape(-1, cap["input"].shape[-1]).cuda()

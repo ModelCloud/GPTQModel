@@ -19,8 +19,11 @@ DENSE = "/monster/data/model/Llama-3.2-1B-Instruct"
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--mode", choices=("bf16", "canonical", "window", "production"), required=True
+        "--mode",
+        choices=("bf16", "canonical", "window", "production", "ampere"),
+        required=True,
     )
+    parser.add_argument("--ampere-min-rows", type=int, default=1)
     parser.add_argument("--capture-only", action="store_true")
     parser.add_argument("--uuid", required=True)
     parser.add_argument("--inputs", type=Path, required=True)
@@ -79,7 +82,7 @@ def main():
         "quality": [],
         "performance": [],
     }
-    if args.mode == "production":
+    if args.mode in ("production", "ampere"):
         from gptqmodel import BACKEND, GPTQModel
 
         wrapper = GPTQModel.load(
@@ -90,6 +93,70 @@ def main():
             attn_implementation="eager",
         )
         model = wrapper.model.eval()
+        if args.mode == "ampere":
+            from types import MethodType
+
+            from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+            from gptqmodel.quantization.qvq import repack_p32_planar_to_window
+            from gptqmodel.quantization.qvq_codecs import pgc16_levels_for_version
+            from gptqmodel.utils.qvq_ampere_cuda import qvq_p32_window_ampere
+
+            caches = []
+            for name, module in model.named_modules():
+                if not isinstance(module, QVQLinear) or not module.v2b2_p32:
+                    continue
+                module._study_original_inner = module._inner_forward
+                module._study_window = repack_p32_planar_to_window(
+                    module.trellis, bits=module.bits
+                )
+                module._study_levels = pgc16_levels_for_version(
+                    module.codebook_version
+                ).to(module.trellis.device)
+                module._study_alt = int(module.bank_alt_id.item())
+                module._study_min_rows = args.ampere_min_rows
+
+                def study_inner(
+                    self, x, *, return_ordered_partials=False, ordered_split_count=None
+                ):
+                    if (
+                        return_ordered_partials
+                        or ordered_split_count is not None
+                        or x.dtype != torch.float16
+                        or x.shape[0] < self._study_min_rows
+                    ):
+                        return self._study_original_inner(
+                            x,
+                            return_ordered_partials=return_ordered_partials,
+                            ordered_split_count=ordered_split_count,
+                        )
+                    return qvq_p32_window_ampere(
+                        x.contiguous(),
+                        self._study_window,
+                        self._study_levels,
+                        self.bank_ids,
+                        self.bits,
+                        out_features=self.out_features,
+                        bank_alt_id=self._study_alt,
+                    )
+
+                module._inner_forward = MethodType(study_inner, module)
+                caches.append(
+                    {
+                        "module": name,
+                        "window_bytes": module._study_window.numel()
+                        * module._study_window.element_size(),
+                        "levels_bytes": module._study_levels.numel()
+                        * module._study_levels.element_size(),
+                    }
+                )
+            report["ampere_min_rows"] = args.ampere_min_rows
+            report["runtime_repack_caches"] = caches
+            report["runtime_extra_bytes"] = sum(
+                c["window_bytes"] + c["levels_bytes"] for c in caches
+            )
+            report["candidate_contract"] = (
+                "Only P32 inner kernel replaced; production transform/output boundaries retained; planar tensors retained read-only in memory"
+            )
     else:
         dtype = torch.bfloat16 if args.mode == "bf16" else torch.float32
         model = AutoModelForCausalLM.from_pretrained(
