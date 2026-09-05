@@ -9,4 +9,4 @@ from .llama import LlamaQModel
 
 
 class Qwen2QModel(LlamaQModel):
-    pass
+    shared_input_verified_model_types = frozenset({"qwen2"})

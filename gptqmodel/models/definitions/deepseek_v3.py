@@ -8,6 +8,8 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class DeepSeekV3QModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"deepseek_v3"})
+
     # deepseek_v3 requires custom model code
     require_trust_remote_code = True
 
@@ -39,14 +41,14 @@ class DeepSeekV3QModel(BaseQModel):
             # Moonlight:
             #   self_attn uses a single Q projection:
             #     - q_proj
-            "self_attn": ("q_proj:0", "q_a_proj:0", "kv_a_proj_with_mqa:0", "q_b_proj:1", "kv_b_proj:1", "o_proj:2"),
+            "self_attn": ("q_proj:0", "q_a_proj:0:in=h", "kv_a_proj_with_mqa:0:in=h", "q_b_proj:1:in=q_a", "kv_b_proj:1:in=kv_a", "o_proj:2"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "mlp:moe": {
-                "": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
                 "experts": {
-                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                    "#": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
                 },
-                "shared_experts": ("gate_proj:0", "up_proj:0", "down_proj:1"),
+                "shared_experts": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
             },
         }
     ]

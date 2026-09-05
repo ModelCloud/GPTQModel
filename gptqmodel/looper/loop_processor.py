@@ -19,14 +19,23 @@ from .. import DEVICE_THREAD_POOL
 from ..looper.input_cache import InputCache
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_DAMP, QUANT_LOG_LOSS,
-                             QUANT_LOG_NSAMPLES)
+from ..models.writer import (
+    PROCESS_LOG_FWD_TIME,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_TIME,
+    PROCESS_USED_MEMORY,
+    QUANT_LOG_DAMP,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_NSAMPLES,
+)
 from ..quantization.config import QuantizeConfig
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
 from ..utils.random_str import get_random_string
 from ..utils.torch import CPU, DEVICE_0, DEVICE_1, HAS_NPU
+
 
 log = setup_logger()
 
@@ -864,6 +873,27 @@ class LoopProcessor:
         """Override point for per-module forward hooks used during capture."""
 
         pass
+
+    def begin_shared_input_capture(
+        self,
+        model: Any,
+        subset_names: List[str],
+        is_lm_head_module: bool = False,
+    ) -> Dict[str, str]:
+        """Optionally elect one capture leader per explicit shared-input group in ``subset_names``.
+
+        Called before capture hooks are registered for a subset pass. Returns
+        ``{follower: leader}``; processors that do not dedup capture return ``{}``.
+        """
+
+        del model, subset_names, is_lm_head_module
+        return {}
+
+    def end_shared_input_capture(self, subset_names: List[str]) -> Optional[Dict[str, Any]]:
+        """Propagate leader statistics and optionally return capture lifecycle telemetry."""
+
+        del subset_names
+        return None
 
     def register_moe_root_capture_hook(
         self,

@@ -98,6 +98,7 @@ from ._const import (
     META,
 )
 from .loader import ModelLoader, _setup_rotation_online_had
+from .shared_input import SharedInputPlan, build_shared_input_plan
 from .writer import ModelWriter
 
 
@@ -227,6 +228,12 @@ class BaseQModel(nn.Module):
     module_tree: List[str] = None
     # Override module_tree according to different QUANT_METHOD
     module_tree_overrides: dict[METHOD, List[str]] = None
+
+    # `model_type`s whose `:in=<tag>` shared-input metadata was verified against a real (tiny, CPU)
+    # forward in tests/module_tree/test_shared_input_cpu_forward.py. Not inherited: every concrete
+    # definition (and every extra model_type mapped onto it) must list itself or its `:in=` tags
+    # are ignored and Hessian dedup stays off. See `shared_input_verified()`.
+    shared_input_verified_model_types: frozenset[str] = frozenset()
 
     # Strict=True -> all layer_modules must exists in model
     # Some models (deepseek2-lite) dynamically create lora modules based on config.rank
@@ -789,6 +796,45 @@ class BaseQModel(nn.Module):
 
         # print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
+
+    @classmethod
+    def shared_input_verified(cls, model_config=None) -> bool:
+        """
+        True when this definition's `:in=<tag>` metadata was verified by a real forward
+        for `model_config.model_type`.
+
+        Only the model types a class lists in its own `shared_input_verified_model_types`
+        count (`module_tree` is inherited, the verification set is not), so a subclass or
+        an extra `model_type` mapped onto a verified definition stays singleton-only until
+        it is covered by `tests/module_tree/test_shared_input_cpu_forward.py`.
+        """
+        model_type = getattr(model_config, "model_type", None)
+        if not isinstance(model_type, str):
+            return False
+        verified = cls.__dict__.get("shared_input_verified_model_types", ())
+        return model_type in verified
+
+    @classmethod
+    def shared_input_plan(
+        cls,
+        model_config=None,
+        quantize_config=None,
+        is_awq_quantize: bool = False,
+    ) -> SharedInputPlan:
+        """
+        Group the quantizable modules of one decoder layer by shared input tensor.
+
+        Modules in the same group consume identical activations, so Hessian (X^T X)
+        collection only needs to run for the group leader. Every module is a singleton
+        unless sibling leaves opt in with the same `:in=<tag>` flag *and* the model type
+        is listed in `shared_input_verified_model_types` (see `shared_input_verified`).
+        """
+        layer_modules = cls.simple_layer_modules(model_config, quantize_config, is_awq_quantize=is_awq_quantize)
+        return build_shared_input_plan(
+            cls.module_tree,
+            layer_modules,
+            explicit_tags=cls.shared_input_verified(model_config),
+        )
 
     @classmethod
     def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False, include_capture_only: bool = False):
@@ -2984,7 +3030,9 @@ class BaseQModel(nn.Module):
           - ':!' means participates in inference but is NOT quantized; keep this marker in output.
           - ':?' marks capture-only nodes; activations are recorded but the module is not quantized.
           - ':<digit>' means grouping; children with the same group id are emitted in the same block.
-          - Both can appear together, e.g. 'module_name:!:2'.
+          - ':in=<tag>' declares which sibling children consume the same input tensor (see shared_input.py);
+            it does not affect the emitted blocks.
+          - Flags can be combined, e.g. 'module_name:!:2' or 'module_name:1:in=q'.
           - Supports nested dict structures for MoE models with experts.
           - Special key "#" in nested dicts means direct children under parent (no additional nesting).
           - EXPERT_INDEX_PLACEHOLDER in keys will be handled by simple_layer_modules for MoE expansion.

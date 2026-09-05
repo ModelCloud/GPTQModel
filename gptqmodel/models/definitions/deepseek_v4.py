@@ -19,7 +19,7 @@ class DeepSeekV4QModel(DeepSeekV3QModel):
                 "q_a_norm:!",
                 "q_a_proj:0",
                 "q_b_norm:!",
-                "q_b_proj:0",
+                "q_b_proj:0:in=q_a",
                 "o_a_proj:!",
                 "o_b_proj:1",
                 "kv_norm:!",
