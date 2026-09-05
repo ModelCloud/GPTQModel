@@ -48,7 +48,7 @@ _A8_CONTRACT = {
     "format": "float8_e4m3fn",
     "kernel_mode": "require",
     "replay_max_rows": 2048,
-    "replay_passes": 1,
+    "replay_passes": 0,
     "replay_validation_fraction": 0.125,
     "scale_method": "dynamic_per_token",
     "target": "p32_operand",
@@ -60,6 +60,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dense-model", required=True)
     parser.add_argument("--w35-a16-checkpoint", type=Path, required=True)
     parser.add_argument("--w35-a8-checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--a8-replay-passes",
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help="Expected A8 checkpoint replay setting (default: safe no-replay baseline).",
+    )
     parser.add_argument("--dataset", required=True)
     parser.add_argument("--dataset-config")
     parser.add_argument("--dataset-split", default="train")
@@ -92,7 +99,12 @@ def _sha256(path: Path) -> str | None:
     return digest.hexdigest()
 
 
-def _checkpoint_contract(path: Path, *, expect_a8: bool) -> dict[str, Any]:
+def _checkpoint_contract(
+    path: Path,
+    *,
+    expect_a8: bool,
+    replay_passes: int = 0,
+) -> dict[str, Any]:
     path = path.expanduser().resolve()
     config_path = path / "config.json"
     if not config_path.is_file():
@@ -108,7 +120,8 @@ def _checkpoint_contract(path: Path, *, expect_a8: bool) -> dict[str, Any]:
     if quant.get("format") != FORMAT.QVQ_V2B2_P32.value:
         raise ValueError(f"Checkpoint is not QVQ P32: {path}")
     activation = quant.get("activation", quant.get("activation_quantization"))
-    if expect_a8 and activation != _A8_CONTRACT:
+    expected_activation = {**_A8_CONTRACT, "replay_passes": replay_passes}
+    if expect_a8 and activation != expected_activation:
         raise ValueError(f"Checkpoint does not have the required A8 contract: {path}")
     if not expect_a8 and activation is not None:
         raise ValueError(
@@ -274,7 +287,11 @@ def main(argv: list[str] | None = None) -> int:
         raise FileExistsError(f"Refusing to overwrite existing result: {output}")
 
     a16_contract = _checkpoint_contract(args.w35_a16_checkpoint, expect_a8=False)
-    a8_contract = _checkpoint_contract(args.w35_a8_checkpoint, expect_a8=True)
+    a8_contract = _checkpoint_contract(
+        args.w35_a8_checkpoint,
+        expect_a8=True,
+        replay_passes=args.a8_replay_passes,
+    )
     evaluation = DatasetSlice(
         args.dataset,
         args.dataset_config,

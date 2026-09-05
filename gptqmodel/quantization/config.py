@@ -6265,7 +6265,10 @@ class QVQActivationConfig:
     scale_method: str = QVQ_FP8_ACTIVATION_SCALE_METHOD
     target: str = "p32_operand"
     kernel_mode: str = "auto"
-    replay_passes: int = 1
+    # Module-local replay is experimental until its candidate selection has a
+    # propagated block/logit gate. Keep it available, but never alter packed
+    # weights merely because A8 execution was enabled.
+    replay_passes: int = 0
     replay_max_rows: int = 2048
     replay_validation_fraction: float = 0.125
 

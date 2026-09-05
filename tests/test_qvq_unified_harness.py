@@ -20,8 +20,8 @@ from scripts.qvq_evaluate import (
     _mmlu_question_row_progress,
     _model_logits,
     _publish_snapshot_evaluation,
-    _row_text,
     _resolve_cuda_graph_request,
+    _row_text,
     _wilson_interval,
     validate_evaluation_is_held_out,
 )
@@ -104,9 +104,35 @@ def test_qvq_quantize_parser_builds_v2b2_g32_a8_configuration():
     assert config.format == FORMAT.QVQ_V2B2_P32
     assert config.bits == 3
     assert config.bank_count == 2
+    assert config.rounding == "block_ldlq"
+    assert config.offload_to_disk is True
     assert config.activation.bits == 8
     assert config.activation.format == "float8_e4m3fn"
     assert config.activation.scale_method == "dynamic_per_token"
+    assert config.activation.replay_passes == 0
+
+
+def test_qvq_quantize_parser_rejects_explicit_yaqa_p32_operand_activation():
+    args = build_quantize_parser().parse_args(
+        [
+            "--model",
+            "dense-model",
+            "--output",
+            "quantized-model",
+            "--calibration-dataset",
+            "dataset",
+            "--format",
+            "v2b2-g32",
+            "--bits",
+            "3",
+            "--activation",
+            "--rounding",
+            "yaqa",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="YAQA activation-aware calibration"):
+        build_quantize_config(args)
 
 
 def test_qvq_quantize_parser_exposes_fail_closed_disjointness_gate():
