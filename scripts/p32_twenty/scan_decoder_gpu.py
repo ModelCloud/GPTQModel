@@ -18,8 +18,10 @@ SNAPSHOT = Path(
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--uuid", required=True)
+    parser.add_argument("--warp-counts", type=int, nargs="+", choices=(1, 2, 4, 8), default=[4, 8])
     parser.add_argument("--group-steps", type=int, choices=(1, 2, 4, 8), default=1)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--checkpoint-steps", type=int, choices=(8, 16, 32, 64))
     args = parser.parse_args()
     if args.output.resolve().is_relative_to(SNAPSHOT.resolve()):
         parser.error("Output must be outside snapshot")
@@ -93,18 +95,43 @@ def main():
                 g = tl.arange(0, 128 // GROUP)
                 initial = tl.sum(tl.where(g == 128 // GROUP - 1, suffix, 0), 0)
                 boundaries = ((initial << shifts) ^ suffix) & 65535
-                starts = tl.gather(boundaries, (i // GROUP + 128 // GROUP - 1) % (128 // GROUP), 0)
+                starts = tl.gather(
+                    boundaries, (i // GROUP + 128 // GROUP - 1) % (128 // GROUP), 0
+                )
                 local_shift = tl.minimum(16, (i % GROUP + 1) * T)
                 partial = state & ((1 << local_shift) - 1)
                 state = ((starts << local_shift) ^ partial) & 65535
         tl.store(Y + tile * 128 + i, state)
+
+    @triton.jit
+    def checkpoint_decode(W, CP, Y, T: tl.constexpr, B: tl.constexpr, NT: tl.constexpr):
+        tile = tl.program_id(0) * 32 + tl.arange(0, 32)
+        block = tl.program_id(1)
+        state = tl.load(CP + block * NT + tile, tile < NT, 0).to(tl.uint32)
+        for step in range(B):
+            i = block * B + step
+            bit = (127 - i) * T
+            word, shift = bit // 32, bit % 32
+            lo = tl.load(W + tile * (4 * T) + word, tile < NT, 0).to(tl.uint32)
+            hi = tl.load(W + tile * (4 * T) + (word + 1) % (4 * T), tile < NT, 0).to(
+                tl.uint32
+            )
+            symbol = ((lo >> shift) | tl.where(shift > 0, hi << (32 - shift), 0)) & (
+                (1 << T) - 1
+            )
+            state = ((state << T) | symbol) & 65535
+            tl.store(Y + tile * 128 + i, state, tile < NT)
 
     index = json.loads((SNAPSHOT / "model.safetensors.index.json").read_text())[
         "weight_map"
     ]
     modules = sorted(k[:-12] for k in index if k.endswith(".bank_alt_id"))
     report = {
-        "experiment": 21 if args.group_steps == 1 else 24,
+        "experiment": 23
+        if args.checkpoint_steps
+        else (21 if args.group_steps == 1 else 24),
+        "checkpoint_steps": args.checkpoint_steps,
+        "warp_counts": args.warp_counts,
         "group_steps": args.group_steps,
         "scope": "GPU state-only scan versus direct-window extraction; not linear-layer or model performance",
         "uuid": args.uuid,
@@ -122,13 +149,52 @@ def main():
         window = repack_p32_planar_to_window(words, bits=bits)
         reference = unpack_p32_window_states(window, bits=bits)
         output = torch.empty(reference.shape, device="cuda", dtype=torch.int32)
+        checkpoints = None
+        checkpoint_file_bytes = 0
+        if args.checkpoint_steps:
+            import struct
+
+            nt = window.numel() // window.shape[-1]
+            positions = (
+                torch.arange(0, 128, args.checkpoint_steps, device="cuda") + 127
+            ) % 128
+            checkpoints = (
+                reference.reshape(nt, 128)[:, positions].T.contiguous().to(torch.uint16)
+            )
+            checkpoint_dir = args.output.parent / (args.output.stem + "-states")
+            checkpoint_dir.mkdir(exist_ok=True)
+            header = b"P32CPV1\0" + struct.pack(
+                "<6I", nt, args.checkpoint_steps, int(bits * 2), 16, 128, 2
+            )
+            path = checkpoint_dir / (prefix + ".bin")
+            path.write_bytes(header + checkpoints.cpu().numpy().tobytes())
+            checkpoint_file_bytes = path.stat().st_size
         timings = {}
         for scan in [False, True]:
-            for warps in [4, 8]:
+            for warps in args.warp_counts:
 
                 def run(
-                    window=window, output=output, bits=bits, scan=scan, warps=warps
+                    window=window,
+                    output=output,
+                    bits=bits,
+                    scan=scan,
+                    warps=warps,
+                    checkpoints=checkpoints,
                 ):
+                    if scan and args.checkpoint_steps:
+                        nt = window.numel() // window.shape[-1]
+                        checkpoint_decode[
+                            (triton.cdiv(nt, 32), 128 // args.checkpoint_steps)
+                        ](
+                            window,
+                            checkpoints,
+                            output,
+                            int(bits * 2),
+                            args.checkpoint_steps,
+                            nt,
+                            num_warps=warps,
+                        )
+                        return
                     decode[(window.numel() // window.shape[-1],)](
                         window,
                         output,
@@ -176,6 +242,10 @@ def main():
                 "exact_states": True,
                 "samples_ms": timings,
                 "checkpoint_payload_bytes": words.numel() * words.element_size(),
+                "added_state_file_bytes": checkpoint_file_bytes,
+                "added_state_file_bpw": 8
+                * checkpoint_file_bytes
+                / (output.numel() * 2),
                 "output_scratch_bytes": output.numel() * output.element_size(),
             }
         )
