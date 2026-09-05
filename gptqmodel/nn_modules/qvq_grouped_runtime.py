@@ -32,6 +32,7 @@ from ..quantization.qvq import (
     repack_p32_planar_to_window,
     unpack_qvq_binary_bank_ids,
 )
+from ..quantization.qvq_activation import quantize_qvq_fp8_activation
 from ..quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
 from ..utils.qvq_wgmma_cuda import (
     QVQHopperGroupedP32Payload,
@@ -140,6 +141,20 @@ def _source_key(children: Sequence[QVQLinear]) -> tuple[Any, ...]:
                 bool(child.v2b2_p32),
                 bool(child.input_hadamard),
                 bool(child.output_hadamard),
+                (
+                    None
+                    if child.activation is None
+                    else (
+                        int(child.activation.bits),
+                        child.activation.format,
+                        child.activation.scale_method,
+                        child.activation.target,
+                        child.activation.kernel_mode,
+                        int(child.activation.replay_passes),
+                        int(child.activation.replay_max_rows),
+                        float(child.activation.replay_validation_fraction),
+                    )
+                ),
             )
         )
     return tuple(key)
@@ -205,6 +220,11 @@ def _validate_static_group(
         raise _R0Fallback("R0 requires bit-identical SU vectors")
     if any(child.input_hadamard != first.input_hadamard for child in resolved[1:]):
         raise _R0Fallback("R0 requires identical input-Hadamard state")
+    if any(
+        child.activation != first.activation
+        for child in resolved[1:]
+    ):
+        raise _R0Fallback("R0 requires identical activation-quantization state")
     return resolved
 
 
@@ -213,6 +233,9 @@ class QVQGroupedRuntimeTelemetry:
     category: str
     members: tuple[str, ...]
     grouped_launches: int = 0
+    grouped_a8_launches: int = 0
+    fp8_independent_child_launches: int = 0
+    shared_fp8_quantizations: int = 0
     sibling_cache_hits: int = 0
     plain_fallbacks: int = 0
     payload_builds: int = 0
@@ -282,6 +305,9 @@ class QVQGroupedRuntimeTelemetry:
             "category": self.category,
             "members": self.members,
             "grouped_launches": self.grouped_launches,
+            "grouped_a8_launches": self.grouped_a8_launches,
+            "fp8_independent_child_launches": self.fp8_independent_child_launches,
+            "shared_fp8_quantizations": self.shared_fp8_quantizations,
             "sibling_cache_hits": self.sibling_cache_hits,
             "plain_fallbacks": self.plain_fallbacks,
             "payload_builds": self.payload_builds,
@@ -476,8 +502,8 @@ class QVQHopperGroupedRuntime:
             return "autograd/training requires the original forward"
         if any(getattr(child, "adapter", None) is not None for child in children):
             return "an attached adapter requires the original forward"
-        if x.device.type != "cuda" or x.dtype != torch.float16:
-            return "grouped Hopper currently requires FP16 CUDA activations"
+        if x.device.type != "cuda" or x.dtype not in (torch.float16, torch.bfloat16):
+            return "grouped Hopper requires FP16 or BF16 CUDA activations"
         if x.shape[-1] != children[0].in_features or x.numel() == 0:
             return "input shape is unsupported"
         rows = x.numel() // children[0].in_features
@@ -711,6 +737,10 @@ class QVQHopperGroupedRuntime:
             self.telemetry.h100_large_m_chunked_group_launches += 1
             self.telemetry.h100_large_m_group_chunk_rows = chunk_rows
             return self._execute_group_chunked(x, chunk_rows, recover=recover)
+        # Preserve BF16 until activation fake-quantization so its explicit
+        # rounding contract matches ordinary child execution. The shared
+        # input transform narrows the resulting operand to FP16 for WGMMA.
+        x_2d = x.reshape(rows, children[0].in_features)
         padded_rows = (
             16
             if rows <= 16
@@ -718,11 +748,11 @@ class QVQHopperGroupedRuntime:
             if rows <= 32
             else ((rows + 63) // 64) * 64
         )
-        x_2d = x.reshape(rows, children[0].in_features).to(torch.float16)
-        payload = self._ensure_payload()
         direct_pad = self._h100_direct_padded_input_enabled and rows < 16
         use_qwen_composite_input = (
             self._h100_fp16_recovery_store_enabled
+            and x.dtype == torch.float16
+            and children[0].activation is None
             and children[0].input_hadamard
             and children[0].in_features == 5120
             and rows <= 16
@@ -745,7 +775,12 @@ class QVQHopperGroupedRuntime:
                 pre_scale=input_scale,
             )
             self.telemetry.h100_qwen_composite_input_launches += 1
-        elif self._h100_multiblock_input_hadamard_enabled and rows <= 4096:
+        elif (
+            self._h100_multiblock_input_hadamard_enabled
+            and rows <= 4096
+            and x.dtype == torch.float16
+            and children[0].activation is None
+        ):
             from ..utils.qvq_cuda import (
                 qvq_cuda_hadamard_input_fp16_padded_multiblock,
             )
@@ -758,11 +793,48 @@ class QVQHopperGroupedRuntime:
             if direct_pad:
                 self.telemetry.h100_direct_padded_input_launches += 1
         else:
+            transform_dtype = (
+                torch.float32
+                if x.dtype == torch.bfloat16
+                and children[0].activation is not None
+                and children[0].activation.target == "p32_operand"
+                else torch.float16
+            )
             transformed = children[0]._qvq_prepare_inference_input(
                 x_2d,
-                torch.float16,
+                transform_dtype,
                 pad_to_16=direct_pad,
             )
+            if (
+                children[0].activation is not None
+                and children[0].activation.target == "linear_input"
+            ):
+                self.telemetry.shared_fp8_quantizations += 1
+            if (
+                children[0].activation is not None
+                and children[0].activation.target == "p32_operand"
+            ):
+                if return_ordered_partials or not recover:
+                    raise _R0Fallback("P32 FP8 grouped split-partial execution is not implemented")
+                config = children[0].activation
+                quantized, scale = quantize_qvq_fp8_activation(
+                    transformed[:rows],
+                    format=config.format,
+                    scale_method=config.scale_method,
+                    validate=False,
+                )
+                outputs = tuple(
+                    child.forward_prequantized_fp8(
+                        quantized,
+                        scale,
+                        output_dtype=x.dtype,
+                    )
+                    for child in children
+                )
+                self.telemetry.grouped_a8_launches += 1
+                self.telemetry.shared_fp8_quantizations += 1
+                self.telemetry.fp8_independent_child_launches += len(children)
+                return outputs
             if direct_pad:
                 padded = transformed
                 self.telemetry.h100_direct_padded_input_launches += 1
@@ -775,6 +847,7 @@ class QVQHopperGroupedRuntime:
                     dtype=torch.float16,
                 )
                 padded[:rows].copy_(transformed)
+        payload = self._ensure_payload()
         from ..utils.qvq_cuda import _pgc16_levels
 
         if return_ordered_partials:
@@ -810,6 +883,8 @@ class QVQHopperGroupedRuntime:
             payload,
             _pgc16_levels(x.device, children[0].codebook_version),
         )
+        if children[0].activation is not None:
+            self.telemetry.grouped_a8_launches += 1
         if (
             grouped_inner in (
                 qvq_p32_window_wgmma_grouped_reuse4_packed,
@@ -896,7 +971,7 @@ class QVQHopperGroupedRuntime:
                 self.telemetry.h100_multiblock_recovery_launches += 1
                 self.telemetry.h100_warp_recovery_low_launches += 1
             return tuple(
-                recovered.reshape(*x.shape[:-1], child.out_features)
+                recovered.reshape(*x.shape[:-1], child.out_features).to(x.dtype)
                 for child, recovered in zip(children, recovered_pair, strict=True)
             )
 

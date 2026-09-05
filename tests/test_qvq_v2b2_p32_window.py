@@ -18,19 +18,116 @@ from gptqmodel.quantization.qvq import (
     unpack_p32_window_states,
     unpack_trellis_states,
 )
+from gptqmodel.quantization.qvq_activation import (
+    dequantize_qvq_fp8_activation,
+    quantize_qvq_fp8_activation,
+)
 from gptqmodel.quantization.qvq_codecs import (
     PGC16_CODEBOOK_VERSION,
     pgc16_levels_for_version,
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
+from gptqmodel.utils import qvq_wgmma_cuda
 from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_h100_grouped_ordered_split_counts,
     qvq_h100_ordered_split_count,
+    qvq_p32_window_wgmma_fp8_m16,
     qvq_p32_window_wgmma_m16_tma,
     qvq_p32_window_wgmma_m16_tma_ordered_split,
 )
 
 P32_RATES = (1, 1.5, 2, 2.5, 3, 3.5)
+
+
+def test_qvq_p32_fp8_dispatch_falls_back_in_auto_and_rejects_in_require_mode():
+    bits = 3.5
+    in_features, out_features = 32, 64
+    tile_count = (in_features // 16) * (out_features // 16)
+    planar = _random_planar_words(bits, tiles=tile_count)
+    generator = torch.Generator().manual_seed(20260953)
+    bank_ids = pack_qvq_binary_bank_ids(
+        torch.randint(0, 2, (tile_count * 8,), generator=generator, dtype=torch.uint8)
+    )
+    bank_alt_id = torch.tensor([3], dtype=torch.uint8)
+    layer = QVQLinear(
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        tensors={
+            "trellis": planar,
+            "SU": torch.ones(in_features),
+            "SV": torch.ones(out_features),
+            "bank_ids": bank_ids,
+            "bank_alt_id": bank_alt_id,
+        },
+        bank_count=2,
+        v2b2_p32=True,
+        activation={"kernel_mode": "auto", "replay_passes": 0},
+        input_hadamard=False,
+        output_hadamard=False,
+    ).eval()
+    transformed = torch.randn((3, in_features), generator=generator, dtype=torch.float16) * 0.05
+    quantized, scale = quantize_qvq_fp8_activation(transformed)
+    deployed = dequantize_qvq_fp8_activation(quantized, scale, dtype=torch.float32)
+    dense = reconstruct_qvq_inner_weight(
+        planar,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=bank_ids,
+        v2b2_p32=True,
+        bank_alt_id=bank_alt_id,
+    )
+
+    actual = layer._forward_pretransformed_compute_dtype(transformed, torch.float16)
+    torch.testing.assert_close(actual.float(), deployed @ dense, atol=2e-3, rtol=0.0)
+    auto_telemetry = layer.qvq_fp8_kernel_telemetry(reset=True)
+    assert auto_telemetry["requested"] == 1
+    assert auto_telemetry["eligible"] == 0
+    assert auto_telemetry["executed"] == 0
+    assert auto_telemetry["fallback"] == 1
+    assert auto_telemetry["fallback_reasons"] == {"non_cuda": 1}
+
+    layer.activation.kernel_mode = "require"
+    with pytest.raises(RuntimeError, match="required QVQ P32 FP8 WGMMA path is ineligible: non_cuda"):
+        layer._forward_pretransformed_compute_dtype(transformed, torch.float16)
+    require_telemetry = layer.qvq_fp8_kernel_telemetry()
+    assert require_telemetry["requested"] == 1
+    assert require_telemetry["rejected"] == 1
+    assert require_telemetry["rejection_reasons"] == {"non_cuda": 1}
+
+
+def test_p32_window_tma_wgmma_auto_tiles_logical_m(monkeypatch):
+    calls = []
+
+    def fake_op(name):
+        assert name == "p32_window_m16_tma"
+
+        def run(input, *args):
+            del args
+            calls.append(input.clone())
+            return input.float()
+
+        return run
+
+    monkeypatch.setattr(qvq_wgmma_cuda._QVQ_WGMMA_EXTENSION, "op", fake_op)
+    input = torch.randn(
+        (35, 256), generator=torch.Generator().manual_seed(20260904)
+    ).half()
+
+    actual = qvq_p32_window_wgmma_m16_tma(
+        input,
+        torch.empty(1),
+        torch.empty(1),
+        torch.empty(1),
+        3.5,
+        out_features=256,
+    )
+
+    assert torch.equal(actual, input.float())
+    assert [tuple(call.shape) for call in calls] == [(16, 256), (16, 256), (16, 256)]
+    assert torch.equal(calls[-1][:3], input[-3:])
+    assert torch.count_nonzero(calls[-1][3:]) == 0
 
 
 @pytest.mark.parametrize("transition_bits", (4, 5, 6, 7))
@@ -229,7 +326,8 @@ def test_p32_window_cuda_matches_cpu_words_and_states(bits):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
-def test_p32_window_tma_wgmma_matches_exact_matrix(bits):
+@pytest.mark.parametrize("logical_rows", (1, 16, 17, 33, 4096))
+def test_p32_window_tma_wgmma_matches_exact_matrix(bits, logical_rows):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (9, 0):
         pytest.skip("P32 TMA RS-WGMMA requires SM90")
@@ -251,7 +349,8 @@ def test_p32_window_tma_wgmma_matches_exact_matrix(bits):
     bank_alt_id = torch.tensor(3, dtype=torch.uint8, device="cuda")
     levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
     x = (
-        torch.randn((16, in_features), generator=generator, device="cuda") * 0.1
+        torch.randn((logical_rows, in_features), generator=generator, device="cuda")
+        * 0.1
     ).half()
 
     dense = reconstruct_p32_window_inner_weight(
@@ -278,7 +377,149 @@ def test_p32_window_tma_wgmma_matches_exact_matrix(bits):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
-def test_p32_window_tma_wgmma_ordered_split_is_repeatable(bits):
+@pytest.mark.parametrize("logical_rows", (1, 16, 17, 32, 64))
+def test_p32_window_fp8_wgmma_matches_exact_deployed_operand(bits, logical_rows):
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
+        pytest.skip("true QVQ P32 FP8 validation requires the assigned H200")
+
+    in_features = out_features = 256
+    tile_count = (in_features // 16) * (out_features // 16)
+    planar = _random_planar_words(bits, tiles=tile_count, device="cuda")
+    window = repack_p32_planar_to_window(planar, bits=bits)
+    generator = torch.Generator(device="cuda").manual_seed(20260940 + int(bits * 10))
+    selectors = torch.randint(
+        0,
+        2,
+        (tile_count * 8,),
+        generator=generator,
+        device="cuda",
+        dtype=torch.uint8,
+    )
+    bank_ids = pack_qvq_binary_bank_ids(selectors)
+    bank_alt_id = torch.tensor(3, dtype=torch.uint8, device="cuda")
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
+    level_scale = float(
+        levels.float().abs().amax().item()
+        / torch.finfo(torch.float8_e4m3fn).max
+    )
+    fp8_levels = torch.clamp(
+        levels.float() / level_scale,
+        min=-torch.finfo(torch.float8_e4m3fn).max,
+        max=torch.finfo(torch.float8_e4m3fn).max,
+    ).to(torch.float8_e4m3fn)
+    transformed = torch.randn(
+        (logical_rows, in_features),
+        generator=generator,
+        device="cuda",
+        dtype=torch.float16,
+    ) * 0.1
+    fp8_input, input_scale = quantize_qvq_fp8_activation(transformed, validate=False)
+
+    dense = reconstruct_p32_window_inner_weight(
+        window,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=bank_ids,
+        bank_alt_id=bank_alt_id,
+    )
+    deployed_input = fp8_input.float() * input_scale
+    deployed_weight = (
+        (dense / level_scale).to(torch.float8_e4m3fn).float() * level_scale
+    )
+    expected = deployed_input @ deployed_weight
+    actual = qvq_p32_window_wgmma_fp8_m16(
+        fp8_input,
+        input_scale,
+        window,
+        fp8_levels,
+        bank_ids,
+        bits,
+        out_features=out_features,
+        bank_alt_id=3,
+        level_scale=level_scale,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_p32_window_fp8_auto_tiles_every_target_m_through_4096_across_seeds():
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
+        pytest.skip("true QVQ P32 FP8 validation requires the assigned H200")
+
+    bits = 3.5
+    in_features = out_features = 256
+    tile_count = (in_features // 16) * (out_features // 16)
+    planar = _random_planar_words(bits, tiles=tile_count, device="cuda")
+    window = repack_p32_planar_to_window(planar, bits=bits)
+    selector_generator = torch.Generator(device="cuda").manual_seed(20260948)
+    bank_ids = pack_qvq_binary_bank_ids(
+        torch.randint(
+            0,
+            2,
+            (tile_count * 8,),
+            generator=selector_generator,
+            device="cuda",
+            dtype=torch.uint8,
+        )
+    )
+    bank_alt_id = torch.tensor(3, dtype=torch.uint8, device="cuda")
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).float().cuda()
+    level_scale = float(levels.abs().amax().item() / torch.finfo(torch.float8_e4m3fn).max)
+    fp8_levels = (levels / level_scale).to(torch.float8_e4m3fn)
+    dense = reconstruct_p32_window_inner_weight(
+        window,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=bank_ids,
+        bank_alt_id=bank_alt_id,
+    )
+    deployed_weight = (
+        (dense / level_scale).to(torch.float8_e4m3fn).float() * level_scale
+    )
+
+    target_rows = (1, 2, 4, 8, 16, 17, 32, 64, 128, 256, 512, 1024, 2048, 4096)
+    for seed in (20260949, 20260950, 20260951):
+        generator = torch.Generator(device="cuda").manual_seed(seed)
+        for logical_rows in target_rows:
+            transformed = torch.randn(
+                (logical_rows, in_features),
+                generator=generator,
+                device="cuda",
+                dtype=torch.float16,
+            ) * 0.1
+            fp8_input, input_scale = quantize_qvq_fp8_activation(transformed, validate=False)
+            expected = (fp8_input.float() * input_scale) @ deployed_weight
+            actual = qvq_p32_window_wgmma_fp8_m16(
+                fp8_input,
+                input_scale,
+                window,
+                fp8_levels,
+                bank_ids,
+                bits,
+                out_features=out_features,
+                bank_alt_id=3,
+                level_scale=level_scale,
+            )
+            torch.testing.assert_close(
+                actual,
+                expected,
+                atol=2e-3,
+                rtol=0.0,
+                msg=lambda message, seed=seed, logical_rows=logical_rows: (
+                    f"seed={seed}, logical_rows={logical_rows}: {message}"
+                ),
+            )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("bits", (2, 2.5, 3, 3.5))
+@pytest.mark.parametrize("logical_rows", (1, 16, 17, 33))
+def test_p32_window_tma_wgmma_ordered_split_is_repeatable(bits, logical_rows):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (9, 0):
         pytest.skip("P32 TMA RS-WGMMA requires SM90")
@@ -302,7 +543,8 @@ def test_p32_window_tma_wgmma_ordered_split_is_repeatable(bits):
     bank_alt_id = torch.tensor(3, dtype=torch.uint8, device="cuda")
     levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
     x = (
-        torch.randn((16, in_features), generator=generator, device="cuda") * 0.1
+        torch.randn((logical_rows, in_features), generator=generator, device="cuda")
+        * 0.1
     ).half()
 
     dense = reconstruct_p32_window_inner_weight(
@@ -336,7 +578,8 @@ def test_p32_window_tma_wgmma_ordered_split_is_repeatable(bits):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
-def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache():
+@pytest.mark.parametrize("logical_rows", (3, 17, 33))
+def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache(logical_rows):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (9, 0) or not (
         "H100" in properties.name or "H200" in properties.name
@@ -367,7 +610,10 @@ def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache():
         v2b2_p32=True,
     ).eval()
     x = torch.randn(
-        (3, in_features), generator=generator, device="cuda", dtype=torch.float16
+        (logical_rows, in_features),
+        generator=generator,
+        device="cuda",
+        dtype=torch.float16,
     )
     dense = reconstruct_qvq_inner_weight(
         planar,
@@ -387,3 +633,86 @@ def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache():
     layer._inner_forward(x)
     torch.cuda.synchronize()
     assert layer._qvq_cuda_window_cache[3] is cached_window
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("logical_rows", (1, 16, 17))
+def test_qvq_linear_h200_a8_executes_true_fp8_operand_path(logical_rows):
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
+        pytest.skip("true QVQ P32 FP8 validation requires the assigned H200")
+
+    bits = 3.5
+    in_features = out_features = 256
+    tile_count = (in_features // 16) * (out_features // 16)
+    planar = _random_planar_words(bits, tiles=tile_count, device="cuda")
+    generator = torch.Generator(device="cuda").manual_seed(20260947)
+    bank_ids = pack_qvq_binary_bank_ids(
+        torch.randint(
+            0,
+            2,
+            (tile_count * 8,),
+            generator=generator,
+            device="cuda",
+            dtype=torch.uint8,
+        )
+    )
+    bank_alt_id = torch.tensor([3], dtype=torch.uint8, device="cuda")
+    layer = QVQLinear(
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        tensors={
+            "trellis": planar,
+            "SU": torch.ones(in_features, device="cuda"),
+            "SV": torch.ones(out_features, device="cuda"),
+            "bank_ids": bank_ids,
+            "bank_alt_id": bank_alt_id,
+        },
+        bank_count=2,
+        v2b2_p32=True,
+        activation={"kernel_mode": "require"},
+        input_hadamard=False,
+        output_hadamard=False,
+    ).eval()
+    transformed = torch.randn(
+        (logical_rows, in_features),
+        generator=generator,
+        device="cuda",
+        dtype=torch.float16,
+    ) * 0.05
+    fp8_input, input_scale = quantize_qvq_fp8_activation(
+        transformed,
+        validate=False,
+    )
+    dense = reconstruct_qvq_inner_weight(
+        planar,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=bank_ids,
+        v2b2_p32=True,
+        bank_alt_id=bank_alt_id,
+    )
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).float()
+    level_scale = float(
+        levels.abs().amax().item() / torch.finfo(torch.float8_e4m3fn).max
+    )
+    deployed_weight = (
+        (dense / level_scale).to(torch.float8_e4m3fn).float() * level_scale
+    )
+    expected = (fp8_input.float() * input_scale) @ deployed_weight
+
+    actual = layer._forward_pretransformed_compute_dtype(
+        transformed,
+        torch.float16,
+    )
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=0.0)
+    telemetry = layer.qvq_fp8_kernel_telemetry()
+    assert telemetry["requested"] == 1
+    assert telemetry["eligible"] == 1
+    assert telemetry["executed"] == 1
+    assert telemetry["fallback"] == 0
+    assert telemetry["operand_dtype"] == "float8_e4m3fn"
+    assert telemetry["accumulator_dtype"] == "float32"

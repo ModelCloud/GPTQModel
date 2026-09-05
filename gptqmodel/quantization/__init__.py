@@ -50,6 +50,7 @@ from .config import (
                      QuantizeConfig,
                      QuantizeEmbed,
                      QuantizeEmbedConfig,
+                     QVQActivationConfig,
                      QVQConfig,
                      RTNConfig,
                      ScaleSearchConfig,
