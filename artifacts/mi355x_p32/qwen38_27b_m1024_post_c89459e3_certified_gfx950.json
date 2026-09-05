@@ -1,0 +1,1377 @@
+{
+  "schema": "qvq_p32_amd_folded_full_v1",
+  "command": "scripts/benchmark_qvq_p32_amd_folded_full.py --physical-gpu 0 --rates 2.0 2.5 3.0 3.5 --m-values 1024 --warmup 5 --iterations 10 --output artifacts/mi355x_p32/qwen38_27b_m1024_post_c89459e3_certified_gfx950.json",
+  "commit": "c89459e3086df6f4fc8645bbd565776b2c221b83",
+  "benchmark_valid": true,
+  "accuracy_gate": 0.002,
+  "model": "Qwen/Qwen3.8-27B",
+  "hardware": {
+    "physical_gpu": 0,
+    "pci_bus_id": "0000:83:00.0",
+    "unique_id": "0x333ef6e01ec019b3",
+    "driver": "7.1.3.31500000",
+    "utilization_percent": 0,
+    "vram_total_bytes": 308902100992,
+    "vram_used_bytes": 299532288,
+    "process_ids": []
+  },
+  "software": {
+    "torch": "2.13.0+rocm10.0.0",
+    "hip": "7.15.26333"
+  },
+  "summary": {
+    "cases": 28,
+    "speedup_min": 0.9705457993035511,
+    "speedup_geometric_mean": 4.881102079434052,
+    "speedup_max": 28.33599092958595,
+    "max_abs": 0.0019583702087402344,
+    "accuracy_passes": 28,
+    "accuracy_failures": 0
+  },
+  "rows": [
+    {
+      "shape": "full_q_gate",
+      "bits": 2.0,
+      "m": 1024,
+      "k": 5120,
+      "n": 12288,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 1.0376646041870117,
+        "median_ms": 1.0279890298843384,
+        "p95_ms": 1.096688985824585
+      },
+      "folded": {
+        "mean_ms": 0.10192479938268661,
+        "median_ms": 0.09978049993515015,
+        "p95_ms": 0.12228100001811981
+      },
+      "speedup": 10.302504302468462,
+      "accuracy": {
+        "max_abs": 0.001440286636352539,
+        "mean_abs": 0.0001621779811102897,
+        "relative_l2": 0.00029316366999410093
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.001440286636352539,
+        "mean_abs": 0.0001621779811102897,
+        "relative_l2": 0.00029316366999410093
+      },
+      "prior_regression": {
+        "max_abs": 0.00439453125,
+        "mean_abs": 0.0006187398685142398,
+        "relative_l2": 0.0011268587550148368
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 2,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 14879260672,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "full_q_gate",
+      "bits": 2.5,
+      "m": 1024,
+      "k": 5120,
+      "n": 12288,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 1.0261643171310424,
+        "median_ms": 1.0204684734344482,
+        "p95_ms": 1.0714080333709717
+      },
+      "folded": {
+        "mean_ms": 0.10231680050492287,
+        "median_ms": 0.09966100007295609,
+        "p95_ms": 0.1260010004043579
+      },
+      "speedup": 10.239396280264316,
+      "accuracy": {
+        "max_abs": 0.001895904541015625,
+        "mean_abs": 0.00016232157940976322,
+        "relative_l2": 0.0002931512426584959
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.001895904541015625,
+        "mean_abs": 0.00016232157940976322,
+        "relative_l2": 0.0002931512426584959
+      },
+      "prior_regression": {
+        "max_abs": 0.0048828125,
+        "mean_abs": 0.0006188413826748729,
+        "relative_l2": 0.0011260192841291428
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 9,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 18601742336,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "full_q_gate",
+      "bits": 3.0,
+      "m": 1024,
+      "k": 5120,
+      "n": 12288,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 1.0373685121536256,
+        "median_ms": 1.0336880087852478,
+        "p95_ms": 1.0957690477371216
+      },
+      "folded": {
+        "mean_ms": 0.10220089927315712,
+        "median_ms": 0.09988100081682205,
+        "p95_ms": 0.11880099773406982
+      },
+      "speedup": 10.349195546017727,
+      "accuracy": {
+        "max_abs": 0.0015535354614257812,
+        "mean_abs": 0.00016231235349550843,
+        "relative_l2": 0.0002933737705461681
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0015535354614257812,
+        "mean_abs": 0.00016231235349550843,
+        "relative_l2": 0.0002933737705461681
+      },
+      "prior_regression": {
+        "max_abs": 0.0040283203125,
+        "mean_abs": 0.0006186323007568717,
+        "relative_l2": 0.0011264488566666842
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 9,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 18564018176,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "full_q_gate",
+      "bits": 3.5,
+      "m": 1024,
+      "k": 5120,
+      "n": 12288,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 1.0141682982444764,
+        "median_ms": 1.0157479643821716,
+        "p95_ms": 1.024129033088684
+      },
+      "folded": {
+        "mean_ms": 0.1026808999478817,
+        "median_ms": 0.09986050054430962,
+        "p95_ms": 0.12396100163459778
+      },
+      "speedup": 10.171669066804537,
+      "accuracy": {
+        "max_abs": 0.0014524459838867188,
+        "mean_abs": 0.0001622505660634488,
+        "relative_l2": 0.000293119897833094
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0014524459838867188,
+        "mean_abs": 0.0001622505660634488,
+        "relative_l2": 0.000293119897833094
+      },
+      "prior_regression": {
+        "max_abs": 0.0048828125,
+        "mean_abs": 0.0006189630948938429,
+        "relative_l2": 0.0011266297660768032
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 8,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 18312376320,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "full_kv",
+      "bits": 2.0,
+      "m": 1024,
+      "k": 5120,
+      "n": 1024,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.7921543896198273,
+        "median_ms": 0.793205976486206,
+        "p95_ms": 0.8177670240402222
+      },
+      "folded": {
+        "mean_ms": 0.031484299898147584,
+        "median_ms": 0.030280999839305878,
+        "p95_ms": 0.045239999890327454
+      },
+      "speedup": 26.194841012369572,
+      "accuracy": {
+        "max_abs": 0.0014426708221435547,
+        "mean_abs": 0.00016234217036981136,
+        "relative_l2": 0.0002929051115643233
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0014426708221435547,
+        "mean_abs": 0.00016234217036981136,
+        "relative_l2": 0.0002929051115643233
+      },
+      "prior_regression": {
+        "max_abs": 0.00390625,
+        "mean_abs": 0.0005680799949914217,
+        "relative_l2": 0.0010417664889246225
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 9,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 14287937536,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "full_kv",
+      "bits": 2.5,
+      "m": 1024,
+      "k": 5120,
+      "n": 1024,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.8528946995735168,
+        "median_ms": 0.7747060060501099,
+        "p95_ms": 1.4038909673690796
+      },
+      "folded": {
+        "mean_ms": 0.02958429977297783,
+        "median_ms": 0.027340000495314598,
+        "p95_ms": 0.046560999006032944
+      },
+      "speedup": 28.33599092958595,
+      "accuracy": {
+        "max_abs": 0.001476287841796875,
+        "mean_abs": 0.00016241183038800955,
+        "relative_l2": 0.0002930086920969188
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.001476287841796875,
+        "mean_abs": 0.00016241183038800955,
+        "relative_l2": 0.0002930086920969188
+      },
+      "prior_regression": {
+        "max_abs": 0.00390625,
+        "mean_abs": 0.0005683933268301189,
+        "relative_l2": 0.0010413334239274263
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 8,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 11270148096,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "full_kv",
+      "bits": 3.0,
+      "m": 1024,
+      "k": 5120,
+      "n": 1024,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.7248418986797333,
+        "median_ms": 0.7220460176467896,
+        "p95_ms": 0.785726010799408
+      },
+      "folded": {
+        "mean_ms": 0.03160410039126873,
+        "median_ms": 0.02861999999731779,
+        "p95_ms": 0.04596000164747238
+      },
+      "speedup": 25.22872179295801,
+      "accuracy": {
+        "max_abs": 0.0013332366943359375,
+        "mean_abs": 0.00016213978233281523,
+        "relative_l2": 0.0002929598558694124
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0013332366943359375,
+        "mean_abs": 0.00016213978233281523,
+        "relative_l2": 0.0002929598558694124
+      },
+      "prior_regression": {
+        "max_abs": 0.00390625,
+        "mean_abs": 0.000567756942473352,
+        "relative_l2": 0.0010415950091555715
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 8,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 4225830912,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "full_kv",
+      "bits": 3.5,
+      "m": 1024,
+      "k": 5120,
+      "n": 1024,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.7273657977581024,
+        "median_ms": 0.7255454957485199,
+        "p95_ms": 0.7550860047340393
+      },
+      "folded": {
+        "mean_ms": 0.029680199921131134,
+        "median_ms": 0.027660499326884747,
+        "p95_ms": 0.047919999808073044
+      },
+      "speedup": 26.230383160267923,
+      "accuracy": {
+        "max_abs": 0.0013599395751953125,
+        "mean_abs": 0.00016212215996347368,
+        "relative_l2": 0.00029316855943761766
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0013599395751953125,
+        "mean_abs": 0.00016212215996347368,
+        "relative_l2": 0.00029316855943761766
+      },
+      "prior_regression": {
+        "max_abs": 0.00390625,
+        "mean_abs": 0.0005674057174474001,
+        "relative_l2": 0.0010408698581159115
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 8,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 3219214336,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "attn_out",
+      "bits": 2.0,
+      "m": 1024,
+      "k": 6144,
+      "n": 5120,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": false,
+      "prior": {
+        "mean_ms": 0.7446220993995667,
+        "median_ms": 0.7443059980869293,
+        "p95_ms": 0.7637670040130615
+      },
+      "folded": {
+        "mean_ms": 0.7608742892742157,
+        "median_ms": 0.7599459886550903,
+        "p95_ms": 0.7733659744262695
+      },
+      "speedup": 0.9794196024432739,
+      "accuracy": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_basis": "exact_prior_path",
+      "canonical_accuracy": {
+        "max_abs": 0.004282116889953613,
+        "mean_abs": 0.0006309030577540398,
+        "relative_l2": 0.001011823071166873
+      },
+      "prior_regression": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 9,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 8631996416,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "attn_out",
+      "bits": 2.5,
+      "m": 1024,
+      "k": 6144,
+      "n": 5120,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": false,
+      "prior": {
+        "mean_ms": 0.752998000383377,
+        "median_ms": 0.7464860081672668,
+        "p95_ms": 0.8020859956741333
+      },
+      "folded": {
+        "mean_ms": 0.7576660990715027,
+        "median_ms": 0.7566259801387787,
+        "p95_ms": 0.7722060084342957
+      },
+      "speedup": 0.9865984353727162,
+      "accuracy": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_basis": "exact_prior_path",
+      "canonical_accuracy": {
+        "max_abs": 0.004225730895996094,
+        "mean_abs": 0.0006311579491011798,
+        "relative_l2": 0.001011793501675129
+      },
+      "prior_regression": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 11,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 10773204992,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "attn_out",
+      "bits": 3.0,
+      "m": 1024,
+      "k": 6144,
+      "n": 5120,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": false,
+      "prior": {
+        "mean_ms": 0.7328979015350342,
+        "median_ms": 0.7322064936161041,
+        "p95_ms": 0.7500060200691223
+      },
+      "folded": {
+        "mean_ms": 0.750437992811203,
+        "median_ms": 0.7492459714412689,
+        "p95_ms": 0.7709259986877441
+      },
+      "speedup": 0.9772578319074746,
+      "accuracy": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_basis": "exact_prior_path",
+      "canonical_accuracy": {
+        "max_abs": 0.00440642237663269,
+        "mean_abs": 0.0006303830305114388,
+        "relative_l2": 0.0010113926837220788
+      },
+      "prior_regression": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 12,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 10901147648,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "attn_out",
+      "bits": 3.5,
+      "m": 1024,
+      "k": 6144,
+      "n": 5120,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": false,
+      "prior": {
+        "mean_ms": 0.7588819980621337,
+        "median_ms": 0.7630864977836609,
+        "p95_ms": 0.7714459896087646
+      },
+      "folded": {
+        "mean_ms": 0.7740300953388214,
+        "median_ms": 0.7740660011768341,
+        "p95_ms": 0.7959659695625305
+      },
+      "speedup": 0.9858158046258578,
+      "accuracy": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_basis": "exact_prior_path",
+      "canonical_accuracy": {
+        "max_abs": 0.004576325416564941,
+        "mean_abs": 0.0006308150477707386,
+        "relative_l2": 0.0010113861644640565
+      },
+      "prior_regression": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 12,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 10871803904,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "linear_qkv",
+      "bits": 2.0,
+      "m": 1024,
+      "k": 5120,
+      "n": 10240,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.8529987931251526,
+        "median_ms": 0.8540069758892059,
+        "p95_ms": 0.868166983127594
+      },
+      "folded": {
+        "mean_ms": 0.08820459991693497,
+        "median_ms": 0.08626050129532814,
+        "p95_ms": 0.10556100308895111
+      },
+      "speedup": 9.900324749625108,
+      "accuracy": {
+        "max_abs": 0.00154876708984375,
+        "mean_abs": 0.00016218936070799828,
+        "relative_l2": 0.0002931521739810705
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.00154876708984375,
+        "mean_abs": 0.00016218936070799828,
+        "relative_l2": 0.0002931521739810705
+      },
+      "prior_regression": {
+        "max_abs": 0.00390625,
+        "mean_abs": 0.000562546425499022,
+        "relative_l2": 0.001030498999170959
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 14,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 15147913216,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "linear_qkv",
+      "bits": 2.5,
+      "m": 1024,
+      "k": 5120,
+      "n": 10240,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.8518429040908814,
+        "median_ms": 0.8549070060253143,
+        "p95_ms": 0.8634870052337646
+      },
+      "folded": {
+        "mean_ms": 0.08882870003581048,
+        "median_ms": 0.08650049939751625,
+        "p95_ms": 0.10524100065231323
+      },
+      "speedup": 9.883260928894266,
+      "accuracy": {
+        "max_abs": 0.0014770030975341797,
+        "mean_abs": 0.00016235232760664076,
+        "relative_l2": 0.00029325915966182947
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0014770030975341797,
+        "mean_abs": 0.00016235232760664076,
+        "relative_l2": 0.00029325915966182947
+      },
+      "prior_regression": {
+        "max_abs": 0.00390625,
+        "mean_abs": 0.0005628899671137333,
+        "relative_l2": 0.0010308679193258286
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 14,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 20053168128,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "linear_qkv",
+      "bits": 3.0,
+      "m": 1024,
+      "k": 5120,
+      "n": 10240,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.8634390950202941,
+        "median_ms": 0.8591069877147675,
+        "p95_ms": 0.9164080023765564
+      },
+      "folded": {
+        "mean_ms": 0.08834079876542092,
+        "median_ms": 0.08636099845170975,
+        "p95_ms": 0.10504099726676941
+      },
+      "speedup": 9.94785844440129,
+      "accuracy": {
+        "max_abs": 0.0014569759368896484,
+        "mean_abs": 0.00016225808940362185,
+        "relative_l2": 0.0002932767092715949
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0014569759368896484,
+        "mean_abs": 0.00016225808940362185,
+        "relative_l2": 0.0002932767092715949
+      },
+      "prior_regression": {
+        "max_abs": 0.00397491455078125,
+        "mean_abs": 0.0005627828068099916,
+        "relative_l2": 0.0010310984216630459
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 7,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 13342298112,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "linear_qkv",
+      "bits": 3.5,
+      "m": 1024,
+      "k": 5120,
+      "n": 10240,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.8481988966464996,
+        "median_ms": 0.8480464816093445,
+        "p95_ms": 0.8680070042610168
+      },
+      "folded": {
+        "mean_ms": 0.08836879879236222,
+        "median_ms": 0.0864809975028038,
+        "p95_ms": 0.1053209975361824
+      },
+      "speedup": 9.806159805012078,
+      "accuracy": {
+        "max_abs": 0.0015058517456054688,
+        "mean_abs": 0.00016234767099376768,
+        "relative_l2": 0.00029326966614462435
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0015058517456054688,
+        "mean_abs": 0.00016234767099376768,
+        "relative_l2": 0.00029326966614462435
+      },
+      "prior_regression": {
+        "max_abs": 0.004150390625,
+        "mean_abs": 0.0005628752405755222,
+        "relative_l2": 0.001030692714266479
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 13,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 20099338240,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "linear_z",
+      "bits": 2.0,
+      "m": 1024,
+      "k": 5120,
+      "n": 6144,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.7400979995727539,
+        "median_ms": 0.7380260229110718,
+        "p95_ms": 0.7643259763717651
+      },
+      "folded": {
+        "mean_ms": 0.06972459927201272,
+        "median_ms": 0.06782099977135658,
+        "p95_ms": 0.08716099709272385
+      },
+      "speedup": 10.881969086258863,
+      "accuracy": {
+        "max_abs": 0.0017728805541992188,
+        "mean_abs": 0.00016220659017562866,
+        "relative_l2": 0.00029307929798960686
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0017728805541992188,
+        "mean_abs": 0.00016220659017562866,
+        "relative_l2": 0.00029307929798960686
+      },
+      "prior_regression": {
+        "max_abs": 0.00390625,
+        "mean_abs": 0.0005759483901783824,
+        "relative_l2": 0.0010529845021665096
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 11,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 18922856448,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "linear_z",
+      "bits": 2.5,
+      "m": 1024,
+      "k": 5120,
+      "n": 6144,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.7478900015354156,
+        "median_ms": 0.7449859976768494,
+        "p95_ms": 0.7689260244369507
+      },
+      "folded": {
+        "mean_ms": 0.07122869938611984,
+        "median_ms": 0.06806099787354469,
+        "p95_ms": 0.09968099743127823
+      },
+      "speedup": 10.945857700485249,
+      "accuracy": {
+        "max_abs": 0.0015439987182617188,
+        "mean_abs": 0.00016237683303188533,
+        "relative_l2": 0.00029317650478333235
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0015439987182617188,
+        "mean_abs": 0.00016237683303188533,
+        "relative_l2": 0.00029317650478333235
+      },
+      "prior_regression": {
+        "max_abs": 0.00390625,
+        "mean_abs": 0.0005759824998676777,
+        "relative_l2": 0.001052738050930202
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 10,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 21986811904,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "linear_z",
+      "bits": 3.0,
+      "m": 1024,
+      "k": 5120,
+      "n": 6144,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.739382004737854,
+        "median_ms": 0.736625999212265,
+        "p95_ms": 0.7597259879112244
+      },
+      "folded": {
+        "mean_ms": 0.06999649852514267,
+        "median_ms": 0.06808049976825714,
+        "p95_ms": 0.08732099831104279
+      },
+      "speedup": 10.819926435906106,
+      "accuracy": {
+        "max_abs": 0.0015535354614257812,
+        "mean_abs": 0.00016232284542638808,
+        "relative_l2": 0.00029330392135307193
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0015535354614257812,
+        "mean_abs": 0.00016232284542638808,
+        "relative_l2": 0.00029330392135307193
+      },
+      "prior_regression": {
+        "max_abs": 0.00439453125,
+        "mean_abs": 0.0005756241735070944,
+        "relative_l2": 0.0010528180282562971
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 10,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 19304570880,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "linear_z",
+      "bits": 3.5,
+      "m": 1024,
+      "k": 5120,
+      "n": 6144,
+      "input_hadamard": true,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.7371860027313233,
+        "median_ms": 0.7369860112667084,
+        "p95_ms": 0.7483260035514832
+      },
+      "folded": {
+        "mean_ms": 0.0703645996749401,
+        "median_ms": 0.06799999624490738,
+        "p95_ms": 0.09092099964618683
+      },
+      "speedup": 10.838030175948758,
+      "accuracy": {
+        "max_abs": 0.0014052391052246094,
+        "mean_abs": 0.00016218452947214246,
+        "relative_l2": 0.00029299411107786
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0014052391052246094,
+        "mean_abs": 0.00016218452947214246,
+        "relative_l2": 0.00029299411107786
+      },
+      "prior_regression": {
+        "max_abs": 0.004150390625,
+        "mean_abs": 0.0005755046149715781,
+        "relative_l2": 0.0010522364173084497
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 11,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 21443682304,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "mlp_gate_up",
+      "bits": 2.0,
+      "m": 1024,
+      "k": 5120,
+      "n": 17408,
+      "input_hadamard": true,
+      "output_hadamard": false,
+      "folded_selected": false,
+      "prior": {
+        "mean_ms": 0.617096996307373,
+        "median_ms": 0.6142249703407288,
+        "p95_ms": 0.6361250281333923
+      },
+      "folded": {
+        "mean_ms": 0.6359251976013184,
+        "median_ms": 0.6328655183315277,
+        "p95_ms": 0.6589249968528748
+      },
+      "speedup": 0.9705457993035511,
+      "accuracy": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_basis": "exact_prior_path",
+      "canonical_accuracy": {
+        "max_abs": 0.0029680728912353516,
+        "mean_abs": 0.00040131062269210815,
+        "relative_l2": 0.0007059982162900269
+      },
+      "prior_regression": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 7,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 20745355264,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "mlp_gate_up",
+      "bits": 2.5,
+      "m": 1024,
+      "k": 5120,
+      "n": 17408,
+      "input_hadamard": true,
+      "output_hadamard": false,
+      "folded_selected": false,
+      "prior": {
+        "mean_ms": 0.6602214872837067,
+        "median_ms": 0.6613454818725586,
+        "p95_ms": 0.6816059947013855
+      },
+      "folded": {
+        "mean_ms": 0.6644133865833283,
+        "median_ms": 0.6618050038814545,
+        "p95_ms": 0.678525984287262
+      },
+      "speedup": 0.9993056534686187,
+      "accuracy": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_basis": "exact_prior_path",
+      "canonical_accuracy": {
+        "max_abs": 0.003009796142578125,
+        "mean_abs": 0.00040107668610289693,
+        "relative_l2": 0.0007059425115585327
+      },
+      "prior_regression": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 8,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 21332574208,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "mlp_gate_up",
+      "bits": 3.0,
+      "m": 1024,
+      "k": 5120,
+      "n": 17408,
+      "input_hadamard": true,
+      "output_hadamard": false,
+      "folded_selected": false,
+      "prior": {
+        "mean_ms": 0.6556212961673736,
+        "median_ms": 0.6514855027198792,
+        "p95_ms": 0.6788849830627441
+      },
+      "folded": {
+        "mean_ms": 0.6637175023555756,
+        "median_ms": 0.6622450053691864,
+        "p95_ms": 0.6850460171699524
+      },
+      "speedup": 0.9837529878487962,
+      "accuracy": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_basis": "exact_prior_path",
+      "canonical_accuracy": {
+        "max_abs": 0.0030231475830078125,
+        "mean_abs": 0.00040124705992639065,
+        "relative_l2": 0.0007060784846544266
+      },
+      "prior_regression": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 6,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 21332590592,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "mlp_gate_up",
+      "bits": 3.5,
+      "m": 1024,
+      "k": 5120,
+      "n": 17408,
+      "input_hadamard": true,
+      "output_hadamard": false,
+      "folded_selected": false,
+      "prior": {
+        "mean_ms": 0.6546652972698211,
+        "median_ms": 0.650204986333847,
+        "p95_ms": 0.686165988445282
+      },
+      "folded": {
+        "mean_ms": 0.6692574977874756,
+        "median_ms": 0.6691854894161224,
+        "p95_ms": 0.6874459981918335
+      },
+      "speedup": 0.9716364096614882,
+      "accuracy": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_basis": "exact_prior_path",
+      "canonical_accuracy": {
+        "max_abs": 0.0030257701873779297,
+        "mean_abs": 0.0004014770674984902,
+        "relative_l2": 0.0007059730123728514
+      },
+      "prior_regression": {
+        "max_abs": 0.0,
+        "mean_abs": 0.0,
+        "relative_l2": 0.0
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 13,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 38445367296,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "mlp_down",
+      "bits": 2.0,
+      "m": 1024,
+      "k": 17408,
+      "n": 5120,
+      "input_hadamard": false,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.5803766965866088,
+        "median_ms": 0.5731250047683716,
+        "p95_ms": 0.6080049872398376
+      },
+      "folded": {
+        "mean_ms": 0.23630589991807938,
+        "median_ms": 0.23236199468374252,
+        "p95_ms": 0.2631619870662689
+      },
+      "speedup": 2.4665178380329635,
+      "accuracy": {
+        "max_abs": 0.001956462860107422,
+        "mean_abs": 0.0001851920533226803,
+        "relative_l2": 0.00020739869796670973
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.001956462860107422,
+        "mean_abs": 0.0001851920533226803,
+        "relative_l2": 0.00020739869796670973
+      },
+      "prior_regression": {
+        "max_abs": 0.005859375,
+        "mean_abs": 0.0007046305690892041,
+        "relative_l2": 0.0007320609875023365
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 2,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 21188935680,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "mlp_down",
+      "bits": 2.5,
+      "m": 1024,
+      "k": 17408,
+      "n": 5120,
+      "input_hadamard": false,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.5517403960227967,
+        "median_ms": 0.552684485912323,
+        "p95_ms": 0.5563250184059143
+      },
+      "folded": {
+        "mean_ms": 0.24205390065908433,
+        "median_ms": 0.24142199754714966,
+        "p95_ms": 0.25932198762893677
+      },
+      "speedup": 2.2892880165337206,
+      "accuracy": {
+        "max_abs": 0.0019583702087402344,
+        "mean_abs": 0.00018500868463888764,
+        "relative_l2": 0.00020719745953101665
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.0019583702087402344,
+        "mean_abs": 0.00018500868463888764,
+        "relative_l2": 0.00020719745953101665
+      },
+      "prior_regression": {
+        "max_abs": 0.0048828125,
+        "mean_abs": 0.0007045468664728105,
+        "relative_l2": 0.0007319828728213906
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 17,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 38714851328,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "mlp_down",
+      "bits": 3.0,
+      "m": 1024,
+      "k": 17408,
+      "n": 5120,
+      "input_hadamard": false,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.5489603996276855,
+        "median_ms": 0.5477244853973389,
+        "p95_ms": 0.5600839853286743
+      },
+      "folded": {
+        "mean_ms": 0.2399499997496605,
+        "median_ms": 0.2392219975590706,
+        "p95_ms": 0.26016199588775635
+      },
+      "speedup": 2.2896075234974593,
+      "accuracy": {
+        "max_abs": 0.001956462860107422,
+        "mean_abs": 0.00018493497918825597,
+        "relative_l2": 0.00020724025671370327
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.001956462860107422,
+        "mean_abs": 0.00018493497918825597,
+        "relative_l2": 0.00020724025671370327
+      },
+      "prior_regression": {
+        "max_abs": 0.005859375,
+        "mean_abs": 0.0007043215446174145,
+        "relative_l2": 0.0007319720461964607
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 10,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 21612593152,
+        "process_ids": []
+      }
+    },
+    {
+      "shape": "mlp_down",
+      "bits": 3.5,
+      "m": 1024,
+      "k": 17408,
+      "n": 5120,
+      "input_hadamard": false,
+      "output_hadamard": true,
+      "folded_selected": true,
+      "prior": {
+        "mean_ms": 0.5521524965763092,
+        "median_ms": 0.552764505147934,
+        "p95_ms": 0.5593249797821045
+      },
+      "folded": {
+        "mean_ms": 0.23867400139570236,
+        "median_ms": 0.23620200157165527,
+        "p95_ms": 0.2538830041885376
+      },
+      "speedup": 2.3402193947126433,
+      "accuracy": {
+        "max_abs": 0.001957416534423828,
+        "mean_abs": 0.00018522902973927557,
+        "relative_l2": 0.0002073045470751822
+      },
+      "accuracy_basis": "canonical_fp32",
+      "canonical_accuracy": {
+        "max_abs": 0.001957416534423828,
+        "mean_abs": 0.00018522902973927557,
+        "relative_l2": 0.0002073045470751822
+      },
+      "prior_regression": {
+        "max_abs": 0.005859375,
+        "mean_abs": 0.0007048783008940518,
+        "relative_l2": 0.0007321072043851018
+      },
+      "accuracy_pass": true,
+      "timing_snapshot": {
+        "physical_gpu": 0,
+        "pci_bus_id": "0000:83:00.0",
+        "unique_id": "0x333ef6e01ec019b3",
+        "driver": "7.1.3.31500000",
+        "utilization_percent": 19,
+        "vram_total_bytes": 308902100992,
+        "vram_used_bytes": 38805065728,
+        "process_ids": []
+      }
+    }
+  ]
+}
