@@ -102,12 +102,13 @@ is active; raw split partials cannot accept correction before reduction.
 
 ## Remaining work and promotion boundary
 
-This is the separate-kernel correctness implementation. Fully fused projection,
-expansion/add, transform epilogues, FP8 factors, rank-16 Tensor Core sweeps,
+The reference and fused output epilogue are implemented. Fully fused input projection,
+complete native pipeline fusion, FP8 factors, rank-16 Tensor Core sweeps,
 externally selectable BM/BN/stages, native ABI v3/StableHLO lowering, ZML
 latency tuning, automatic graph construction, real-model quality evaluation,
 TP1/2/4/8 and H100/H200 performance promotion remain unimplemented/unvalidated.
-Unsupported fused kernel selections fail; they do not pretend to be fused.
+`fused_epilogue` runs expansion/add/Hadamard/SV/bias in one kernel.
+`fully_fused` remains unsupported; it does not alias the partial fusion.
 No <=3–5% overhead or model speed/quality claim follows from these tests.
 
 ## Validation of this WIP
@@ -144,3 +145,63 @@ Logs: `/tmp/qvq-rank8-final.log`, `/tmp/qvq-rank8-regression.log`,
 `/tmp/qvq-rank8-quantize.log`. The initial graph-policy rejection is retained
 in `/tmp/qvq-rank8-h200.log`; explicit FP16 dispatch now preserves the existing
 BF16 overflow-rescue consumer during capture.
+
+
+## Fused output epilogue (00a71f4b)
+
+`recovery_kernel="fused_epilogue"` retains the reference FP32 projection/FP16
+hidden boundary and fuses expansion, FP32 base addition, existing rounded
+output Hadamard, SV and bias into one Triton kernel. QVQLinear and grouped
+QKV/gate-up consume it through the same operator. One CTA owns an output row;
+no persistent scratch or grid barrier is introduced. Supported output widths
+are powers of two from16 through16384 on SM90, with optional Hadamard/bias and
+strided grouped row storage. Unsupported widths fail explicitly in this
+opt-in implementation; automatic dispatch remains unchanged.
+
+The butterfly keeps each historical FP16 rounding point and rescues an
+individual overflowing conversion in FP32, matching modes3/4 in
+`qvq_hadamard_cuda.cu`. FP32 addition follows the completed eight-product rank
+reduction. `enable_fp_fusion=False` prevents contracting that addition into
+rank products. Source-correlated SASS confirms separate FMUL/FADD rank
+instructions; later FFMA instructions implement correctly rounded division.
+Triton's half2 folding preserves the tested half rounding boundaries.
+
+At matched M16/K2048/N2048/W3, Nsight counts13 baseline kernels versus9 fused,
+and 2,977,948 versus2,486,932 executed warp instructions (16.5% fewer).
+The fused output kernel executes135,616 instructions, uses47 registers/thread,
+8KiB shared memory,128 threads/CTA, and no spills. The old Hadamard alone
+uses27 registers/thread,8.25KiB shared memory and1024 threads/CTA.
+The fused kernel has substantial shared exchange work: the NCU shared-conflict
+metric is1568 versus6 for the padded old Hadamard, and measured active-warp
+occupancy is6.24% versus49.59% on this small M16 grid. These are optimization
+opportunities, not evidence that fewer instructions guarantees lower latency.
+The expanded correction and its casts/add/global-memory boundary disappear;
+the input projection and its casts/reduction remain separate.
+
+Post-profile tests: **87 passed,86 skipped**, including output widths through
+16384, per-operation overflow rescue, no-bias/strided outputs, independent
+single/grouped composition, and ten graph replays per case. Skips are mostly
+H100 and opt-in real-model tests. Performance remains synthetic operator
+scope; no real-model or H100 promotion is implied.
+
+Artifacts: `/tmp/p32-rank8-{reference,fused}-nsys.nsys-rep`,
+`/tmp/p32-rank8-{reference,fused}-ncu.ncu-rep`, corresponding `-sass.csv`,
+`-metrics.csv`, and `-opcode-summary.json`; correctness log
+`/tmp/p32-rank8-fused-postprofile-tests.log`. The full remaining requirements
+are tracked in [the phase ledger](qvq_p32_rank8_plan.md).
+
+Post-profile graph medians, matched K=N2048/W3/FP16 on the H200:
+
+| M | Window off us | Separate rank8 us | Fused output rank8 us | Rank8 implementation speedup | Remaining recovery overhead |
+|---:|---:|---:|---:|---:|---:|
+|1|33.115|47.560|41.808|1.138x|26.25%|
+|16|31.586|50.392|43.881|1.148x|38.93%|
+|128|35.019|56.571|48.428|1.168x|38.29%|
+|512|65.843|99.847|87.404|1.142x|32.75%|
+|2048|238.922|296.029|265.462|1.115x|11.11%|
+
+Mean and p95 improve as well; the machine-readable
+[summary](results/p32_rank8_h200_epilogue.json) retains those values. All
+preflight and pre-timing exclusivity checks passed, with no foreign compute
+processes. This meets the local opt-in implementation gates at the measured
+scope but does **not** meet the final <=3–5% recovery overhead target.
