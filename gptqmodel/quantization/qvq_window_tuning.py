@@ -292,7 +292,11 @@ def tune_window_kernel(
         raise ValueError(
             "unverified rank8 arithmetic cannot be selected for balanced/quality tuning"
         )
-    baseline = replace(eligible[0], algorithm="production_window")
+    # ``eligible[0]`` is the backend's safe reference candidate.  In a
+    # window-only CUDA load it is deliberately hopper_m16/ampere_window,
+    # because forcing production_window here would reintroduce the released
+    # planar fallback during BF16 execution or graph capture.
+    baseline = eligible[0]
     tensors, metadata = _base(layer)
     state_hash = _digest(tensors, metadata)
     identity = {
@@ -724,10 +728,13 @@ def tune_grouped_window_kernel(
 
     try:
         with torch.inference_mode():
+            # The first grouped candidate is the backend's graph-safe
+            # reference consumer.  In window-only CUDA mode it may be
+            # hopper_m16/ampere_window; replacing it with production_window
+            # would revive the planar fallback after storage release.
             baseline = tuple(
                 replace(
                     config,
-                    algorithm="production_window",
                     recovery_mode="off",
                     recovery_kernel="separate_reference",
                     recovery_projection="separate_reference",
@@ -740,7 +747,7 @@ def tune_grouped_window_kernel(
                     min_m=1,
                     max_m=8192,
                 )
-                for config in originals
+                for config in eligible[0]
             )
             baseline_fn = executable_choice(baseline)
             references = [tuple(baseline_fn(value)) for value in inputs]
