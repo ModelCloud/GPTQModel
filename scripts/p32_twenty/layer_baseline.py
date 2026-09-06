@@ -39,6 +39,9 @@ def main():
     parser.add_argument(
         "--fused-window-mode", choices=("standard", "resident-words"), default="standard"
     )
+    parser.add_argument(
+        "--fused-transform-mode", choices=("separate", "cuda-fused"), default="separate"
+    )
     parser.add_argument("--fused-num-warps", type=int, choices=(2, 4, 8), default=4)
     parser.add_argument("--fused-num-stages", type=int, choices=(1, 2, 3, 4), default=2)
     parser.add_argument(
@@ -94,6 +97,7 @@ def main():
     from gptqmodel.quantization.qvq_codecs import pgc16_levels_for_version
     from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
     from gptqmodel.utils.qvq_ampere_cuda import qvq_p32_window_ampere
+    from gptqmodel.utils.qvq_cuda import qvq_cuda_hadamard
     from gptqmodel.utils.qvq_cuda import qvq_cuda_gemv
     from scripts.p32_twenty.scorecard import layer_metrics
 
@@ -150,6 +154,7 @@ def main():
     modules = [m for m in captured if m["module"] + ".bank_alt_id" in idx]
     report = {
         "scope": "layer baseline and window candidate; experiment 1/10 partial evidence; profiler and model gates pending",
+        "fused_transform_mode": args.fused_transform_mode,
         "uuid": args.uuid,
         "worker": args.worker,
         "torch": torch.__version__,
@@ -209,7 +214,25 @@ def main():
         )
         for m in args.m_values:
             x = xall[:m].float()
-            transformed = matmul_hadU(x * su.float()).half().contiguous()
+            def input_transform(raw):
+                if args.fused_transform_mode == "cuda-fused":
+                    return qvq_cuda_hadamard(
+                        raw.contiguous(),
+                        pre_scale=su.float().contiguous(),
+                        scale_mode=1,
+                    ).half().contiguous()
+                return matmul_hadU(raw * su.float()).half().contiguous()
+
+            def output_transform(value):
+                if args.fused_transform_mode == "cuda-fused":
+                    return qvq_cuda_hadamard(
+                        value.float().contiguous(),
+                        post_scale=sv.float().contiguous(),
+                        scale_mode=1,
+                    )
+                return matmul_hadU(value.float()) * sv.float()
+
+            transformed = input_transform(x)
 
             def planar(z):
                 return qvq_cuda_gemv(
@@ -236,8 +259,7 @@ def main():
                 )
 
             def full(fn):
-                z = matmul_hadU(x * su.float()).half().contiguous()
-                return matmul_hadU(fn(z).float()) * sv.float()
+                return output_transform(fn(input_transform(x)))
 
             teacher = (
                 matmul_hadU(matmul_hadU(x * su.float()) @ inner.float()) * sv.float()
@@ -293,6 +315,7 @@ def main():
                             "decode_mode": args.fused_decode_mode,
                             "lut_cache": args.fused_lut_cache,
                             "window_mode": args.fused_window_mode,
+                            "transform_mode": args.fused_transform_mode,
                             "num_warps": args.fused_num_warps,
                             "num_stages": args.fused_num_stages,
                         },
@@ -355,6 +378,7 @@ def main():
                     "block_n": args.fused_block_n,
                     "split": args.fused_split,
                     "promotion_k": args.fused_promotion_k,
+                    "transform_mode": args.fused_transform_mode,
                     "metrics": layer_metrics(fused_output, teacher),
                     "vs_window": layer_metrics(fused_output, candidate),
                     "inner": timing(lambda: fused(transformed)),
