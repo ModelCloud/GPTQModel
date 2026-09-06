@@ -16,7 +16,7 @@ steps, not a redefinition of that goal. Baseline includes PR #137 at
 | 6 | Expansion + FP32 add + output H/SV + final store; defined rounding order | `00a71f4b`: fused Triton expansion/add/H/SV/bias, independent graph-safe reference | Integrate input projection, direct final FP16 store, composite output widths, full native pipeline fusion |
 | 7 | Grouped gate/up and QKV, independent flags, optional SiLU*up, preserve Q/K norm/RoPE/TP | Grouped separate and fused output epilogues tested on H200; child-local flags | Composite-width producer, fused SiLU/down composition, real-model grouped/TP validation |
 | 8 | ZML tunes eligible whole operators over geometry, transforms, quality and grouping; product-specific caches | Python static policy, shape-specific candidate enumeration, strict external controls, correctness-gated native/external executable runner and persistent revalidated caches; H200 90-candidate run | Actual ZML/StableHLO/native ABI adapter, non-Hopper backend candidate providers, grouped candidates, broader shape/device/quality matrix |
-| 9 | fast/balanced/quality graphs, mode changes only at request boundaries | Prepared module policies; separate captured on/off graphs tested | Model-wide graph manager and request-boundary ownership, atomic policy changes and cache invalidation |
+| 9 | fast/balanced/quality graphs, mode changes only at request boundaries | Request-owned single-GPU stateless model graphs, transactional three-mode capture, state invalidation, stream ordering and retained payload/output lifetime; tiny and real Llama graph/eager checks | Stateful generation/KV and TP scheduler integration, request overhead and graph residency measurements, broader model/shape validation |
 | 10 | Combined scorecard, teacher/tail/logit/PPL/ARC/GSM8K, prefill/decode, TP, VRAM/BPW/overhead | Local tests and synthetic H200 full-operator benchmark plus Nsight artifacts | Real disjoint model scorecard; H100/H200, M128–8192, batches1–64, TP1/2/4/8; statistical quality gates |
 | 11 | Promote and ship only verified complete operator/model results | No default promotion; explicit fused mode only | Off equivalence, meaningful teacher gain, <=3–5% marginal recovery cost, no small-M regression, competitive large-M, no credible model-quality regression |
 
@@ -88,3 +88,10 @@ real-Q tuning run: production/shared-input wins at M128, BM128/BN128 with
 Tensor Core projection at M2048. Local numerical acceptance does not waive
 the measured Tensor Core projection model-quality difference. No universal
 geometry or quality implementation is promoted.
+
+The request graph owner now captures fast/balanced/quality as independent CUDA
+graphs with externally supplied per-module geometry. A four-document real
+Llama checkpoint check preserves eager logits exactly in every mode. This
+advances phase 9; it does not complete KV/generation, TP or serving performance
+requirements. Full evidence and the captured-mask contract are recorded in
+`results/p32_window_llama_graphs.json` and the runtime documentation.

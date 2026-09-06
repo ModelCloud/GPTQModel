@@ -66,6 +66,7 @@ def main():
     parser.add_argument("--fused", action="store_true", help="Use padded Tensor Core projection and fused epilogue")
     parser.add_argument("--projection", choices=["separate_reference", "tensor_core"], default="tensor_core")
     parser.add_argument("--verify-off", action="store_true", help="Require fused-off logits to equal original-off logits")
+    parser.add_argument("--verify-graphs", action="store_true", help="Check separate quality graphs against eager logits")
     args = parser.parse_args()
     if args.verify_off and not args.fused:
         parser.error("--verify-off requires --fused")
@@ -116,6 +117,9 @@ def main():
         device_map={"": "cuda:0"},
         attn_implementation="eager",
     ).model.eval()
+    from gptqmodel.quantization.qvq_window_graphs import P32WindowGraphs
+
+    graph_owner = P32WindowGraphs(quantized) if args.verify_graphs else None
     children = []
     for name in fitted["modules"]:
         loaded = load_window_package(
@@ -181,12 +185,36 @@ def main():
                 "input_hash": _digest({"input_ids": x}, {}),
                 "teacher": metrics(reference, x),
             }
+            if graph_owner is not None:
+                graph_configs = {
+                    mode: {
+                        name: P32WindowConfig(
+                            recovery_kernel="fused_epilogue" if args.fused else "separate_reference",
+                            recovery_projection=args.projection if args.fused else "separate_reference",
+                        ) for name in fitted["modules"]
+                    } for mode in ("fast", "balanced", "quality")
+                }
+                # The eager Transformers mask builder creates an unpinned CPU
+                # scalar during forward. Supply its equivalent additive causal
+                # mask as an explicit graph input; leave eager comparison intact.
+                graph_inputs = {
+                    "input_ids": x,
+                    "attention_mask": torch.full(
+                        (1, 1, x.shape[1], x.shape[1]), torch.finfo(torch.float16).min,
+                        dtype=torch.float16, device=x.device,
+                    ).triu(1),
+                }
+                graph_owner.capture(
+                    index, graph_inputs, configs=graph_configs,
+                    static_kwargs={"use_cache": False, "return_dict": False},
+                )
+                entry["graph_logits_exact"] = {}
             original_off = None
             if args.verify_off:
                 for child in children:
                     prepare_rank8(child, P32WindowConfig())
                 original_off = quantized(x, use_cache=False).logits
-            for mode in ("fast", "quality"):
+            for mode in (("fast", "balanced", "quality") if graph_owner is not None else ("fast", "quality")):
                 for child in children:
                     prepare_rank8(
                         child, P32WindowConfig(
@@ -200,10 +228,20 @@ def main():
                     entry["off_logits_exact"] = bool(torch.equal(original_off, logits))
                     if not entry["off_logits_exact"]:
                         raise ValueError("fused-off model logits differ from original-off logits")
+                if graph_owner is not None:
+                    captured_logits = graph_owner.replay(index, mode, **graph_inputs)[0]
+                    exact = bool(torch.equal(captured_logits, logits))
+                    entry["graph_logits_exact"][mode] = exact
+                    if not exact:
+                        raise ValueError(f"{mode} captured logits differ from eager logits")
                 entry[mode] = metrics(logits, x, reference)
+            if graph_owner is not None:
+                graph_owner.invalidate()
             report["rows"].append(entry)
             args.output.write_text(json.dumps(report, indent=2) + "\n")
             print(index, entry, flush=True)
+    if graph_owner is not None:
+        graph_owner.close()
     report["summary"] = paired_summary(report["rows"])
     args.output.write_text(json.dumps(report, indent=2) + "\n")
     print(report["summary"], flush=True)

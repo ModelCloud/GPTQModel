@@ -580,3 +580,65 @@ BM128/BN128 with fused output and Tensor Core projection (199.165 us off,
 numerical gate, not model-quality promotion of Tensor Core projection.
 Actual ZML lowering, model graph ownership, concurrent native WGMMA/rank8
 fusion and the full model/device/TP scorecard remain open.
+
+## Request-owned quality graphs
+
+`gptqmodel.quantization.qvq_window_graphs.P32WindowGraphs` captures three
+separate model graphs per input signature. It calls the existing window
+operator; rank8 remains module state and is never a separate model correction
+wrapper. `fast` disables correction, `balanced` uses quantizer-selected
+modules, and `quality` uses all validated corrections. Per-module configs
+supply geometry/projection/epilogue choices; capture resolves their correction
+state from the requested quality mode instead of trusting a tuner's off/on
+field.
+
+```python
+from gptqmodel.quantization.qvq_window_graphs import P32WindowGraphs
+
+owner = P32WindowGraphs(model.eval())
+try:
+    owner.capture(
+        "prefill128",
+        {"input_ids": ids, "attention_mask": causal_mask},
+        configs=per_mode_module_configs,
+        static_kwargs={"use_cache": False, "return_dict": False},
+    )
+    logits = owner.replay(
+        "prefill128", "balanced", input_ids=next_ids,
+        attention_mask=causal_mask,
+    )[0]
+finally:
+    owner.close()
+```
+
+Input tensors must have the captured shape, dtype and CUDA device. Static
+keywords are immutable scalar values; outputs are tensor pytrees. This API
+captures a stateless model call. KV state must be supplied explicitly as tensor
+inputs rather than hidden Python state; integration with a generation server's
+KV cache and TP request scheduler remains open. Transformers eager attention
+may create CPU scalars in its mask builder, so the validation script supplies
+an equivalent additive causal mask before capture.
+
+The owner prevents overlapping host requests and multiple owners for the same
+model. CUDA events order successive requests across streams. Each request
+returns independent output storage. Captured graphs retain cached tensor and
+grouped payload storage even after eager policy restoration. Failed capture
+restores all eager policies and never installs a partial three-mode entry.
+Tracked weight/buffer mutations, module replacement, transform changes and
+training mode invalidate replay; untracked `.data`/external-pointer mutation
+is unsupported. `invalidate()` retires all graphs and permits recapture;
+`close()` additionally releases ownership. The caller must not execute or
+mutate the model concurrently outside the owner.
+
+Tests cover all three policies with independently selected child corrections,
+request/output lifetime, cross-stream ordering, changed input signatures,
+failed-capture rollback, poisoned correction state in fast mode, mutation
+rejection, grouped gate/up payload lifetime and a full tiny Llama forward.
+The real Llama-3.2-1B checkpoint graph check uses fixed first-layer Q/gate
+corrections on four C4 documents capped at 128 tokens. Both reference-output and fused-output runs match eager full logits bit for
+bit in all three modes on all four documents (508 predictions per run).
+See `results/p32_window_llama_graphs.json`. This is execution validation, not
+an expanded quality scorecard or a graph-manager latency claim. Replay still
+checks model state on the host and copies returned outputs; request overhead,
+large-context graph residency and model-wide generation performance require
+measurement before serving promotion.
