@@ -836,7 +836,23 @@ class QVQHopperGroupedRuntime:
             # Decode-sized M1/M2/M4 retains the lower-latency staged path.
             and rows >= 8
         )
-        if use_qwen_composite_input:
+        rank8_hiddens = {}
+        producer_children = tuple(
+            child for child in children
+            if getattr(child, "_p32_rank8_enabled", False)
+            and child._p32_window_config.recovery_projection == "input_fused"
+        )
+        if producer_children and x.dtype == torch.float16:
+            from ..utils.qvq_rank8_triton import rank8_input_producer
+
+            transformed, hiddens = rank8_input_producer(
+                x_2d.contiguous(), children[0]._cached_cast("SU", torch.float16),
+                tuple(child.rank8_A for child in producer_children),
+                hadamard=children[0].input_hadamard,
+            )
+            rank8_hiddens = {id(child): hidden for child, hidden in zip(producer_children, hiddens, strict=True)}
+            padded = torch.nn.functional.pad(transformed, (0, 0, 0, padded_rows - rows))
+        elif use_qwen_composite_input:
             from ..quantization.rotation.hadamard_utils import _get_hadK_on
             from ..utils.qvq_cuda import qvq_cuda_qwen_composite_input_fp16_padded
 
@@ -1050,9 +1066,13 @@ class QVQHopperGroupedRuntime:
             for child, inner in zip(children, inner_outputs, strict=True):
                 if (getattr(child, "_p32_rank8_enabled", False)
                         and child._p32_window_config.recovery_kernel == "fused_epilogue"):
-                    output = fused_rank8_output(child, padded[:rows], inner[:rows], torch.float16)
+                    output = fused_rank8_output(
+                        child, padded[:rows], inner[:rows], torch.float16, hidden=rank8_hiddens.get(id(child))
+                    )
                 else:
-                    corrected = add_rank8_correction(child, padded[:rows], inner[:rows])
+                    corrected = add_rank8_correction(
+                        child, padded[:rows], inner[:rows], hidden=rank8_hiddens.get(id(child))
+                    )
                     output = child._qvq_recover_inference_output(corrected, torch.float16)
                 outputs.append(output.reshape(*x.shape[:-1], child.out_features).to(x.dtype))
             return tuple(outputs)
@@ -1062,7 +1082,7 @@ class QVQHopperGroupedRuntime:
             # padded is the exact shared SU/H input consumed by grouped WGMMA.
             # Each child retains independent factors and a static on/off flag.
             inner_outputs = tuple(
-                add_rank8_correction(child, padded[:rows], inner[:rows])
+                add_rank8_correction(child, padded[:rows], inner[:rows], hidden=rank8_hiddens.get(id(child)))
                 for child, inner in zip(children, inner_outputs, strict=True)
             )
         if not recover:

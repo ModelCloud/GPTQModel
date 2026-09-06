@@ -19,6 +19,46 @@ import triton.language as tl
 
 
 @triton.jit
+def _rank8_tensor_core_projection(X, A, U, M: tl.constexpr, K: tl.constexpr):
+    rows = tl.program_id(0) * 32 + tl.arange(0, 32)
+    columns = tl.arange(0, 64)
+    rank = tl.arange(0, 16)
+    accumulator = tl.zeros((32, 16), tl.float32)
+    for tile in range(tl.cdiv(K, 64)):
+        inner = tile * 64 + columns
+        x = tl.load(X + rows[:, None] * K + inner[None, :],
+                    (rows[:, None] < M) & (inner[None, :] < K), other=0)
+        a = tl.load(A + inner[:, None] * 8 + rank[None, :],
+                    (inner[:, None] < K) & (rank[None, :] < 8), other=0)
+        accumulator = tl.dot(x, a, accumulator)
+    tl.store(U + rows[:, None] * 8 + rank[None, :], accumulator,
+             (rows[:, None] < M) & (rank[None, :] < 8))
+
+
+def rank8_tensor_core_projection(transformed, a):
+    """Project published FP16 X' with rank padded to 16 and FP32 accumulation."""
+    if transformed.ndim != 2 or a.shape != (transformed.shape[-1], 8):
+        raise ValueError("rank8 Tensor Core projection requires X[M,K] and A[K,8]")
+    if transformed.device.type != "cuda" or torch.cuda.get_device_capability(
+        transformed.device
+    ) != (9, 0):
+        raise ValueError("rank8 Tensor Core projection requires SM90")
+    if a.device != transformed.device or any(
+        t.dtype != torch.float16 or not t.is_contiguous() for t in (transformed, a)
+    ):
+        raise ValueError("rank8 Tensor Core projection requires contiguous FP16 inputs on one device")
+    m, k = transformed.shape
+    if k < 1:
+        raise ValueError("rank8 Tensor Core projection requires positive K")
+    hidden = torch.empty((m, 8), device=transformed.device, dtype=torch.float16)
+    if m:
+        _rank8_tensor_core_projection[(triton.cdiv(m, 32),)](
+            transformed, a, hidden, m, k, num_warps=4, num_stages=2
+        )
+    return hidden
+
+
+@triton.jit
 def _round_half_finite(value):
     narrowed = value.to(tl.float16).to(tl.float32)
     return tl.where(tl.abs(narrowed) < float("inf"), narrowed, value)
@@ -128,3 +168,115 @@ def rank8_output_epilogue(hidden, b, base, sv, bias=None, *, hadamard=True):
         enable_fp_fusion=False,
     )
     return output
+
+
+@triton.jit
+def _rank8_input_producer(
+    X,
+    SU,
+    Factors,
+    Transformed,
+    Hidden,
+    M: tl.constexpr,
+    K: tl.constexpr,
+    LOG_K: tl.constexpr,
+    X_STRIDE: tl.constexpr,
+    GROUPS: tl.constexpr,
+    HADAMARD: tl.constexpr,
+    DIVISOR: tl.constexpr,
+    RECIPROCAL: tl.constexpr,
+):
+    row = tl.program_id(0)
+    column = tl.arange(0, K)
+    value = tl.load(X + row * X_STRIDE + column).to(tl.float32)
+    value = value * tl.load(SU + column).to(tl.float32)
+    if HADAMARD and K >= 2048:
+        # Exact mode2 input semantics: rescue only overflowing SU multiply,
+        # normalize, then retain every historical FP16 butterfly boundary.
+        value = _round_half_finite(value)
+        value = tl.div_rn(value, DIVISOR).to(tl.float16).to(tl.float32)
+    else:
+        value = value.to(tl.float16).to(tl.float32)
+    if HADAMARD:
+        for stage in tl.static_range(LOG_K):
+            partner = tl.gather(value, column ^ (1 << stage), axis=0)
+            value = tl.where(
+                (column & (1 << stage)) == 0, value + partner, partner - value
+            )
+            value = value.to(tl.float16).to(tl.float32)
+        if K < 2048:
+            value = (value * RECIPROCAL).to(tl.float16).to(tl.float32)
+    tl.store(Transformed + row * K + column, value)
+    # The exact rounded activation stays live in the CTA. No recovery branch
+    # reloads X or repeats SU/H, including independent sibling projections.
+    for group in tl.static_range(GROUPS):
+        for rank in tl.static_range(8):
+            factor = tl.load(Factors[group] + column * 8 + rank).to(tl.float32)
+            projected = tl.sum(value * factor, axis=0)
+            tl.store(Hidden + group * M * 8 + row * 8 + rank, projected)
+
+
+def rank8_input_producer(x, su, factors, *, hadamard=True):
+    """Publish shared X-prime and one FP16 rank8 projection per enabled child.
+
+    Each CTA owns an entire row and its reductions. Factors are passed as a
+    tuple of pointers, so grouped consumers need no concatenated factor cache.
+    """
+    factors = (factors,) if isinstance(factors, torch.Tensor) else tuple(factors)
+    if x.ndim != 2 or x.device.type != "cuda" or x.dtype != torch.float16:
+        raise ValueError("rank8 input producer requires FP16 CUDA [M,K]")
+    m, k = x.shape
+    if (
+        k < 16
+        or k > 16384
+        or k & (k - 1)
+        or torch.cuda.get_device_capability(x.device) != (9, 0)
+    ):
+        raise ValueError(
+            "rank8 input producer requires SM90 and power-of-two K in [16,16384]"
+        )
+    if not 1 <= len(factors) <= 3:
+        raise ValueError("rank8 input producer requires one to three enabled children")
+    if (
+        su.shape != (k,)
+        or su.dtype != torch.float16
+        or su.device != x.device
+        or not su.is_contiguous()
+    ):
+        raise ValueError(
+            "rank8 input producer requires contiguous FP16 SU on the input device"
+        )
+    if x.stride(1) != 1 or any(
+        a.shape != (k, 8)
+        or a.dtype != torch.float16
+        or a.device != x.device
+        or not a.is_contiguous()
+        for a in factors
+    ):
+        raise ValueError(
+            "rank8 input producer requires contiguous columns and FP16 [K,8] factors"
+        )
+    transformed = torch.empty((m, k), device=x.device, dtype=torch.float16)
+    hidden = torch.empty((len(factors), m, 8), device=x.device, dtype=torch.float16)
+    if m:
+        divisor = struct.unpack("e", struct.pack("e", math.sqrt(k)))[0]
+        root = struct.unpack("f", struct.pack("f", math.sqrt(k)))[0]
+        reciprocal = struct.unpack("f", struct.pack("f", 1 / root))[0]
+        _rank8_input_producer[(m,)](
+            x,
+            su,
+            factors,
+            transformed,
+            hidden,
+            m,
+            k,
+            k.bit_length() - 1,
+            x.stride(0),
+            len(factors),
+            hadamard,
+            divisor,
+            reciprocal,
+            num_warps=4 if k <= 4096 else 8,
+            enable_fp_fusion=False,
+        )
+    return transformed, hidden.unbind(0)

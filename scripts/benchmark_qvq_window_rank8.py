@@ -33,7 +33,13 @@ def main():
     parser.add_argument("--m", type=int, nargs="+", default=[1, 16, 128, 512, 2048])
     parser.add_argument("--bits", type=float, default=3)
     parser.add_argument("--kernel", default="separate_reference")
+    parser.add_argument("--projection", default="separate_reference")
     parser.add_argument("--algorithm", default="auto")
+    parser.add_argument("--block-m", type=int, default=0)
+    parser.add_argument("--block-n", type=int, default=0)
+    parser.add_argument("--chunk-m", type=int, default=0)
+    parser.add_argument("--autotune", action="store_true")
+    parser.add_argument("--tuning-cache", type=Path)
     parser.add_argument("--package", type=Path)
     parser.add_argument("--profile", choices=["off", "on"])
     parser.add_argument("--profile-repeats", type=int, default=200)
@@ -100,10 +106,32 @@ def main():
             "cuda",
         )
     layer.post_init()
+    import triton
+
+    from gptqmodel.utils.qvq_cuda import _QVQ_CUDA_TORCH_OPS_EXTENSION
+    from gptqmodel.utils.qvq_wgmma_cuda import _QVQ_WGMMA_EXTENSION
+
+    build_identity = {
+        "qvq": _QVQ_CUDA_TORCH_OPS_EXTENSION.build_root().name,
+        "wgmma": _QVQ_WGMMA_EXTENSION.build_root().name,
+        "triton": triton.__version__,
+        "driver": subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--id=GPU-" + str(props.uuid).removeprefix("GPU-"),
+                "--query-gpu=driver_version",
+                "--format=csv,noheader",
+            ],
+            text=True,
+        ).strip(),
+    }
     paths = [
         "gptqmodel/quantization/qvq_rank8.py",
         "gptqmodel/nn_modules/qlinear/qvq.py",
+        "gptqmodel/nn_modules/qvq_grouped_runtime.py",
         "gptqmodel/utils/qvq_rank8_triton.py",
+        "gptqmodel/utils/qvq_wgmma_cuda.py",
+        "gptqmodel/quantization/qvq_window_tuning.py",
         "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu",
     ]
     report = {
@@ -111,6 +139,11 @@ def main():
         "revision": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip(),
+        "worktree_dirty": bool(
+            subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=ROOT, text=True
+            ).strip()
+        ),
         "sources": {
             p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest()
             for p in paths
@@ -124,16 +157,43 @@ def main():
             "capability": [props.major, props.minor],
         },
         "software": {"torch": str(torch.__version__), "cuda": torch.version.cuda},
+        "build_identity": build_identity,
         "preflight": None if idle is None else idle.as_dict(),
         "rows": [],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
+
+    def sample_candidate(fn, activation):
+        for _ in range(3):
+            expected = fn(activation)
+        candidate_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(candidate_graph):
+            candidate_output = fn(activation)
+        candidate_graph.replay()
+        torch.cuda.synchronize()
+        if not torch.equal(candidate_output, expected):
+            raise RuntimeError("autotune eager/graph mismatch")
+        if idle is not None:
+            recheck_gpu_exclusivity(idle)
+        measurements = []
+        for _ in range(args.samples):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(args.replays):
+                candidate_graph.replay()
+            end.record()
+            end.synchronize()
+            measurements.append(start.elapsed_time(end) * 1000 / args.replays)
+        return measurements
+
     print(
-        " M      K      N mode kernel                 mean_us median_us   p95_us  MAE       max",
+        " M      K      N mode kernel                 projection          mean_us median_us   p95_us  MAE       max",
         flush=True,
     )
     for m in args.m:
         x = torch.randn(m, layer.in_features, device="cuda", dtype=torch.float16) * 0.02
+        validation_x = torch.randn_like(x) * 0.02 if args.autotune else None
         for mode in ("off", "on"):
             prepare_rank8(
                 layer, P32WindowConfig(algorithm=args.algorithm, recovery_mode=mode)
@@ -145,8 +205,42 @@ def main():
                     algorithm=args.algorithm,
                     recovery_mode=mode,
                     recovery_kernel=args.kernel,
+                    recovery_projection=args.projection,
+                    block_m=args.block_m,
+                    block_n=args.block_n,
+                    chunk_m=args.chunk_m,
                 ),
             )
+            if args.autotune:
+                from gptqmodel.quantization.qvq_window_tuning import tune_window_kernel
+
+                tuning = tune_window_kernel(
+                    layer,
+                    (x, validation_x),
+                    benchmark=sample_candidate,
+                    build_id=hashlib.sha256(
+                        json.dumps(
+                            [report["sources"], build_identity], sort_keys=True
+                        ).encode()
+                    ).hexdigest(),
+                    cache_dir=args.tuning_cache,
+                )
+                report.setdefault("tuning", []).append(
+                    {
+                        "m": m,
+                        "mode": mode,
+                        "cache_hit": tuning.cache_hit,
+                        "report": tuning.report,
+                    }
+                )
+                for row in tuning.report["rows"]:
+                    if row.get("exception_review_required"):
+                        print(
+                            "ACCURACY/PERFORMANCE EXCEPTION REVIEW REQUIRED: "
+                            + json.dumps(row),
+                            flush=True,
+                        )
+            selected_config = layer._p32_window_config
             for _ in range(10):
                 output = layer(x)
             delta = (output.float() - reference.float()).abs()
@@ -190,8 +284,12 @@ def main():
                 "n": layer.out_features,
                 "bits": layer.bits,
                 "mode": mode,
-                "kernel": args.kernel,
-                "algorithm": args.algorithm,
+                "kernel": selected_config.recovery_kernel,
+                "projection": selected_config.recovery_projection,
+                "algorithm": selected_config.algorithm,
+                "block_m": selected_config.block_m,
+                "block_n": selected_config.block_n,
+                "chunk_m": selected_config.chunk_m,
                 "mean_us": statistics.mean(samples),
                 "median_us": statistics.median(samples),
                 "p95_us": sorted(samples)[int(0.95 * (len(samples) - 1))],
@@ -203,7 +301,8 @@ def main():
             }
             report["rows"].append(record)
             print(
-                f"{m:4} {layer.in_features:6} {layer.out_features:6} {mode:4} {args.kernel:22} "
+                f"{m:4} {layer.in_features:6} {layer.out_features:6} {mode:4} {record['kernel']:22} "
+                f"{record['projection']:19} "
                 f"{record['mean_us']:8.3f} {record['median_us']:9.3f} {record['p95_us']:8.3f} "
                 f"{mae:.3g} {maximum:.3g}",
                 flush=True,

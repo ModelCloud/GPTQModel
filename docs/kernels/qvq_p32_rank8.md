@@ -102,10 +102,10 @@ is active; raw split partials cannot accept correction before reduction.
 
 ## Remaining work and promotion boundary
 
-The reference and fused output epilogue are implemented. Fully fused input projection,
+The reference and fused output epilogue are implemented. Concurrent WGMMA input projection,
 complete native pipeline fusion, FP8 factors, rank-16 Tensor Core sweeps,
-externally selectable BM/BN/stages, native ABI v3/StableHLO lowering, ZML
-latency tuning, automatic graph construction, real-model quality evaluation,
+BN32/additional stages, native ABI v3/StableHLO lowering, actual ZML
+compiler integration, automatic graph construction, real-model quality evaluation,
 TP1/2/4/8 and H100/H200 performance promotion remain unimplemented/unvalidated.
 `fused_epilogue` runs expansion/add/Hadamard/SV/bias in one kernel.
 `fully_fused` remains unsupported; it does not alias the partial fusion.
@@ -205,3 +205,172 @@ Mean and p95 improve as well; the machine-readable
 preflight and pre-timing exclusivity checks passed, with no foreign compute
 processes. This meets the local opt-in implementation gates at the measured
 scope but does **not** meet the final <=3–5% recovery overhead target.
+
+## Shared input producer candidate
+
+`P32WindowConfig(recovery_mode="on", recovery_projection="input_fused",
+recovery_kernel="fused_epilogue")` also combines SU, input Hadamard, and
+FP32 rank projection in one Triton producer. It publishes the exact rounded
+FP16 activation for the existing window consumer and FP16 hidden factors for
+the output epilogue. This changes the projection's FP32 reduction order;
+it does not change the FP16 hidden boundary or permit TF32 accumulation.
+The producer retains the existing CUDA mode2 overflow rescue before input
+normalization. Grouped QKV/gate-up pass up to three independently enabled
+factor pointers through the same producer without concatenating checkpoint
+state. Disabled children do not supply factors. BF16 execution retains the
+reference projection path.
+
+This explicit candidate requires SM90, FP16 operands and a power-of-two K
+between 16 and 16384. The output epilogue has its own N eligibility gate.
+It is not `fully_fused`: the window consumer and epilogue are separate
+launches, and transformed activations still cross global memory.
+
+The [H200 producer measurements](results/p32_rank8_h200_producer.json) show
+116 focused tests passing after profiling and a four-launch M16 operator,
+down from nine. K=N=2048 W3 latency improves at M16/128 but regresses at
+M1/512/2048. No automatic dispatch or model-quality promotion is enabled.
+
+## Direct geometry controls and candidate enumeration
+
+The unified policy now exposes existing unsplit Hopper consumers with
+`algorithm="hopper_direct_decode_mma"`, `block_m=32|64|128`, and
+`block_n=64|128`. BM is the activation-row tile and BN the output-channel
+tile. BK is 256, the pipeline has two stages, and BN64/128 uses one/two
+consumer warp groups. Requests for unimplemented combinations fail at the
+configuration boundary. BM/BN zero preserves existing dispatch. Explicit
+geometry pads M to BM and slices the result back to the original rows.
+
+The native `gptqmodel_qvq_wgmma::p32_window_tuned` entry point selects the
+existing row-reuse specializations and can force BN128 independently of
+the previous H100 shape rules. It adds 12 host dispatch sites (four rates
+times three BM values) and zero new device kernel specializations; BN
+selects between the existing one/two-consumer kernels. Existing callers
+retain their dispatch. BN32, more pipeline stages and independent warp-group
+variants are still required work.
+
+Call `prepare_rank8(layer, quality_policy)` and then
+`window_kernel_candidates(layer, m=M)` to enumerate implementations for
+that quality policy. Every supported geometry remains available at each M,
+including geometries that lost at other shapes. The enumeration does not
+change correction eligibility or choose a winner. Non-Hopper devices retain
+the production candidate until their backend exposes additional controls.
+`config.to_backend_config()` and `P32WindowConfig.from_backend_config(...)`
+provide strict versioned dictionaries for external tuning, including ZML;
+they do not implement a StableHLO/XLA FFI lowering. The shared tuner below
+consumes these controls and persists measured choices.
+
+The benchmark accepts `--block-m` and `--block-n`, measures the full operator
+with correction off and on, and retains source hashes, geometry, local drift,
+graph agreement and latency samples. Selection must remain device-, shape-,
+rate-, M-, TP- and correction-specific, with correctness filtering before
+latency ranking. H200 measurements cannot supply H100 tuning entries.
+
+The initial [H200 geometry scorecard](results/p32_window_h200_geometry.json)
+contains all six BM/BN candidates and existing direct dispatch, each measured
+with correction off/on at M1/16/128/512/2048 for K=N=2048 W3. Post-profile
+tests pass 331 cases; 86 cases are skipped. BM128/BN128 improves M2048 but
+regresses smaller M, so no universal dispatch threshold is installed.
+At M2048 the matched committed baseline and candidate execute the same
+2,097,152 WGMMA instructions. TMA-load instructions fall from 139,264 to
+69,632, while registers increase 147 to 153 and dynamic shared memory
+160,512 to 172,800 bytes. Neither kernel spills. The producer shares staged
+activations across two consumers without changing the accumulation order
+within an output element. The generic window decode remains unchanged.
+Both extension binaries contain exactly the same 155 demangled device
+kernel specializations; the new geometry controls add host dispatch only.
+
+## Correctness-gated native and external tuning
+
+`qvq_window_tuning.tune_window_kernel` operates on a prepared quality policy.
+It enumerates that policy's eligible kernels and compares each executable
+against production window plus the same correction state on every supplied
+activation case. Failed candidates retain their errors and timing but cannot
+win. A failed candidate more than 1.25x faster than the fastest passing one
+gets an explicit human-review flag; this does not relax the accuracy gates.
+The benchmark CLI prints such flags when they occur.
+
+The caller supplies `benchmark(executable, activation)`, returning positive
+microsecond samples under its device-exclusivity/timing contract. The optional
+`compile_candidate(backend_config)` receives direct geometry and correction
+controls and returns the executable that will actually be validated and timed.
+This is the integration point for external compilers such as ZML. A native
+StableHLO/XLA FFI lowering is still required; a Python callback is not evidence
+that ZML itself has been run.
+
+An optional `cache_dir` stores atomic JSON entries binding exact activation
+cases and strides, deployment payload and transforms, enabled correction
+factors, device identity, TP, software/driver API, compiler build and candidate
+set. The CLI adds the actual JIT fingerprints, Triton version and driver
+release to its build identity. Cache hits revalidate the selected executable
+before use. Exceptions restore the original policy; `apply=False` also keeps
+the original policy after successful tuning. The default applies the selected
+static M policy, which must be prepared/captured outside request execution.
+Existing captured graphs do not change when a new policy is prepared.
+
+Run the integrated benchmark with `--autotune --m 128 2048 --tuning-cache DIR`.
+It validates on two independent synthetic activation tensors per M, measures
+all eligible off/on candidates, then separately checks and times the winner.
+These inputs test implementation preservation and do not fit rank8, select
+quality, or establish full-model accuracy. Non-Hopper backends currently
+expose their production candidate; additional backend-specific candidates
+and actual ZML compiler integration remain open.
+
+The retained [H200 autotuning result](results/p32_window_h200_autotuning.json)
+covers 90 candidate evaluations across M128/M2048 and correction off/on.
+All candidates passed both supplied cases. M128 selected production window,
+with the shared producer/fused epilogue when corrected; M2048 selected
+BM128/BN128, with separate projection/fused epilogue when corrected. A fresh
+process hit all four persistent entries and revalidated both cases for each.
+The broader regression run passed 334 tests with 86 skips; the final focused
+tuner tests also passed after cache-identity changes.
+
+## Full-size and chunked prefill
+
+Explicit FP16 Hopper policies now accept M through 8192. `chunk_m=0` uses
+one native window launch; `chunk_m=4096` splits only the window computation,
+retaining the shared full-size input transform and rank8/output stages.
+Both are exposed by candidate enumeration for M>4096. FP8 and the specialized
+H100 row-reuse-11 bounds remain unchanged.
+
+The [M8192 H200 record](results/p32_window_h200_m8192.json) contains 16 off
+and 64 on candidates, checked on two independent activation cases each.
+Post-profile BM128/BN128 full-size versus chunked medians are 847.162 versus
+888.707 us off and 944.509 versus 987.054 us on. Both have zero drift in this
+matched fixture. Full-size removes a second window launch and concatenation:
+nine versus eleven launches and 498,543,996 versus 500,764,567 source-correlated
+executed instructions. Window resources remain 153 registers, 172,800 bytes
+dynamic shared memory and no spills. These results select neither a universal
+crossover nor a production default.
+
+`recovery_projection="tensor_core"` is an additional explicit SM90 candidate:
+FP16 X'/A, rank padded to 16, FP32 accumulation and FP16 hidden output. It
+reads the already transformed activation without repeating SU/H. BF16 rescue
+retains reference projection. Whole-operator timing and correctness gates apply
+to this candidate just as they do to `input_fused` and `separate_reference`.
+
+The [padded Tensor Core scorecard](results/p32_rank8_h200_tensor_core.json)
+records matched BM128/BN128 full-operator medians on H200:
+
+| M | Correction off (us) | Reference projection on (us) | Padded TC on (us) | TC marginal cost |
+|---:|---:|---:|---:|---:|
+| 512 | 77.359 | 98.891 | 89.840 | 16.1% |
+| 2048 | 219.627 | 249.145 | 235.984 | 7.4% |
+| 8192 | 846.720 | 944.952 | 852.085 | 0.6% |
+
+All use K=N=2048, W3, A16, synthetic activation/factor fixtures and the fused
+output epilogue. Maximum drift is 0.001953125 against production window plus
+reference projection. These are local kernel results, not model quality or
+general recovery-overhead guarantees. At M2048, the recovered operator drops
+from nine to five launches and 120,822,714 to 107,700,862 source-correlated
+executed instructions. The projection executes 32,768 HMMA instructions,
+uses 40 registers and 6,144 bytes of dynamic shared memory, and has no spills.
+It still performs shared staging and barrier work and reads published X'
+separately from the window consumer.
+
+With this candidate included, the tuner passes 126 candidate evaluations at
+M128/M2048 against two independent cases each. M128 selects the shared input
+producer; M2048 selects padded Tensor Core projection with BM128/BN128. All
+supported choices remain available at other shapes and to external compilers.
+The post-profile regression suite passes 494 tests with 86 skips, including
+mixed projection implementations within grouped siblings. A fresh process
+revalidates all four selected entries from the persistent tuning cache.

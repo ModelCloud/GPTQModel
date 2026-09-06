@@ -1,0 +1,213 @@
+{
+  "scope": "synthetic kernel/performance, not model quality",
+  "revision": "0291756c422a2512b9a577d10c7f75c2e9dbbfee",
+  "sources": {
+    "gptqmodel/quantization/qvq_rank8.py": "e633bfe7fda7ed2286d43227d8bcbbf4ea3ee8acee5e0f0be39f7fb476aa096f",
+    "gptqmodel/nn_modules/qlinear/qvq.py": "31ad23e37ac5473574c135e2f9edec0a3f0cee3faeede72640a8424c7e8cdd9b",
+    "gptqmodel/nn_modules/qvq_grouped_runtime.py": "184937e93901f1eb0b2a132bfa8bb4294c181bc83799eece6f16f417d14af81c",
+    "gptqmodel/utils/qvq_rank8_triton.py": "aebae7c5185b613a8b6c7d944aaf9719bc2990edd6b095c22eb3dc52277f5d63",
+    "gptqmodel/utils/qvq_wgmma_cuda.py": "de8a98efba3a1020a392e2fd225cc9b1505d6d5095790a1eb7621d119a42a593",
+    "gptqmodel/quantization/qvq_window_tuning.py": "a43c6d4aac52fb64e8075123c28f8bcdff7df9471cf8169ba5e4d2610b18baa1",
+    "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu": "873595ce146e2b1e3bdb9ec79f77f9300dccb657fbc09df10e7a16c56ead2715"
+  },
+  "hardware": {
+    "name": "NVIDIA H200",
+    "uuid": "0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "sm_count": 132,
+    "memory": 150101688320,
+    "capability": [
+      9,
+      0
+    ]
+  },
+  "software": {
+    "torch": "2.15.0.dev20260901+cu130",
+    "cuda": "13.0"
+  },
+  "build_identity": {
+    "qvq": "93bf5ed612db632a",
+    "wgmma": "21c2607fb316a302",
+    "triton": "3.8.0",
+    "driver": "610.57.04"
+  },
+  "validation": "Two independent synthetic activation tensors per M; no rank8 fitting or model-quality selection.",
+  "results": [
+    {
+      "m": 128,
+      "mode": "off",
+      "candidate_count": 9,
+      "rejected_count": 0,
+      "selected": {
+        "abi_version": 3,
+        "algorithm": "production_window",
+        "recovery_mode": "off",
+        "recovery_kernel": "separate_reference",
+        "recovery_projection": "separate_reference",
+        "quality_mode": "fast",
+        "split_k": 1,
+        "min_m": 128,
+        "max_m": 128,
+        "block_m": 0,
+        "block_n": 0,
+        "block_k": 256,
+        "pipeline_stages": 2,
+        "warp_groups": 0
+      },
+      "median_us": 35.10800004005432,
+      "p95_us": 35.148799419403076,
+      "mae": 0.0,
+      "max": 0.0,
+      "cache_hit": true,
+      "cache_checks": [
+        {
+          "finite": true,
+          "mae": 0.0,
+          "max": 0.0,
+          "relative_l2": 0.0,
+          "accepted": true
+        },
+        {
+          "finite": true,
+          "mae": 0.0,
+          "max": 0.0,
+          "relative_l2": 0.0,
+          "accepted": true
+        }
+      ]
+    },
+    {
+      "m": 128,
+      "mode": "on",
+      "candidate_count": 36,
+      "rejected_count": 0,
+      "selected": {
+        "abi_version": 3,
+        "algorithm": "production_window",
+        "recovery_mode": "on",
+        "recovery_kernel": "fused_epilogue",
+        "recovery_projection": "input_fused",
+        "quality_mode": "fast",
+        "split_k": 1,
+        "min_m": 128,
+        "max_m": 128,
+        "block_m": 0,
+        "block_n": 0,
+        "block_k": 256,
+        "pipeline_stages": 2,
+        "warp_groups": 0
+      },
+      "median_us": 45.660799741744995,
+      "p95_us": 45.70559859275818,
+      "mae": 0.0,
+      "max": 0.0,
+      "cache_hit": true,
+      "cache_checks": [
+        {
+          "finite": true,
+          "mae": 0.0,
+          "max": 0.0,
+          "relative_l2": 0.0,
+          "accepted": true
+        },
+        {
+          "finite": true,
+          "mae": 0.0,
+          "max": 0.0,
+          "relative_l2": 0.0,
+          "accepted": true
+        }
+      ]
+    },
+    {
+      "m": 2048,
+      "mode": "off",
+      "candidate_count": 9,
+      "rejected_count": 0,
+      "selected": {
+        "abi_version": 3,
+        "algorithm": "hopper_direct_decode_mma",
+        "recovery_mode": "off",
+        "recovery_kernel": "separate_reference",
+        "recovery_projection": "separate_reference",
+        "quality_mode": "fast",
+        "split_k": 1,
+        "min_m": 2048,
+        "max_m": 2048,
+        "block_m": 128,
+        "block_n": 128,
+        "block_k": 256,
+        "pipeline_stages": 2,
+        "warp_groups": 2
+      },
+      "median_us": 219.5847988128662,
+      "p95_us": 220.10080814361572,
+      "mae": 0.0,
+      "max": 0.0,
+      "cache_hit": true,
+      "cache_checks": [
+        {
+          "finite": true,
+          "mae": 0.0,
+          "max": 0.0,
+          "relative_l2": 0.0,
+          "accepted": true
+        },
+        {
+          "finite": true,
+          "mae": 0.0,
+          "max": 0.0,
+          "relative_l2": 0.0,
+          "accepted": true
+        }
+      ]
+    },
+    {
+      "m": 2048,
+      "mode": "on",
+      "candidate_count": 36,
+      "rejected_count": 0,
+      "selected": {
+        "abi_version": 3,
+        "algorithm": "hopper_direct_decode_mma",
+        "recovery_mode": "on",
+        "recovery_kernel": "fused_epilogue",
+        "recovery_projection": "separate_reference",
+        "quality_mode": "fast",
+        "split_k": 1,
+        "min_m": 2048,
+        "max_m": 2048,
+        "block_m": 128,
+        "block_n": 128,
+        "block_k": 256,
+        "pipeline_stages": 2,
+        "warp_groups": 2
+      },
+      "median_us": 249.23360347747803,
+      "p95_us": 249.4607925415039,
+      "mae": 0.0,
+      "max": 0.0,
+      "cache_hit": true,
+      "cache_checks": [
+        {
+          "finite": true,
+          "mae": 0.0,
+          "max": 0.0,
+          "relative_l2": 0.0,
+          "accepted": true
+        },
+        {
+          "finite": true,
+          "mae": 0.0,
+          "max": 0.0,
+          "relative_l2": 0.0,
+          "accepted": true
+        }
+      ]
+    }
+  ],
+  "tests": {
+    "regression_passed": 334,
+    "regression_skipped": 86,
+    "tuner_tests": 3
+  }
+}

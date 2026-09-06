@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 
 import torch
 
@@ -31,12 +31,56 @@ class P32WindowConfig:
     algorithm: str = "auto"
     recovery_mode: str = "off"
     recovery_kernel: str = "separate_reference"
+    recovery_projection: str = "separate_reference"
     quality_mode: str = "fast"
     split_k: int = 1
     min_m: int = 1
-    max_m: int = 4096
+    max_m: int = 8192
+    block_m: int = 0
+    block_n: int = 0
+    block_k: int = 256
+    pipeline_stages: int = 2
+    warp_groups: int = 0
+    chunk_m: int = 0
+
+    def to_backend_config(self):
+        """Lossless external tuning controls, including the versioned ABI."""
+        return asdict(self)
+
+    @classmethod
+    def from_backend_config(cls, config):
+        """Reject unknown fields/values instead of silently changing dispatch."""
+        return cls(**config)
 
     def __post_init__(self):
+        if any(
+            type(v) is not int
+            for v in (
+                self.block_m,
+                self.block_n,
+                self.block_k,
+                self.pipeline_stages,
+                self.warp_groups,
+                self.chunk_m,
+            )
+        ):
+            raise ValueError("Hopper geometry must contain integers")
+        if self.chunk_m not in (0, 4096) or (
+            self.chunk_m and self.algorithm != "hopper_direct_decode_mma"
+        ):
+            raise ValueError("M chunking requires direct Hopper with chunk_m=0 or 4096")
+        if self.block_k != 256 or self.pipeline_stages != 2:
+            raise ValueError("current Hopper pipeline requires BK256 and two stages")
+        if (self.block_m or self.block_n or self.warp_groups) and (
+            self.algorithm != "hopper_direct_decode_mma"
+            or self.block_m not in (32, 64, 128)
+            or self.block_n not in (64, 128)
+            or self.warp_groups not in (0, self.block_n // 64)
+            or self.split_k != 1
+        ):
+            raise ValueError(
+                "explicit Hopper geometry requires BM32/64/128, BN64/128 and split_k=1"
+            )
         if self.abi_version != 3:
             raise ValueError("unsupported P32 window ABI version")
         if self.algorithm not in (
@@ -53,13 +97,15 @@ class P32WindowConfig:
             or self.split_k < 1
             or type(self.min_m) is not int
             or type(self.max_m) is not int
-            or not 1 <= self.min_m <= self.max_m <= 4096
+            or not 1 <= self.min_m <= self.max_m <= 8192
         ):
             raise ValueError("invalid split count or M range")
         if self.recovery_mode not in ("off", "on", "auto"):
             raise ValueError("invalid recovery mode")
         if self.quality_mode not in ("fast", "balanced", "quality"):
             raise ValueError("invalid quality mode")
+        if self.recovery_projection not in ("separate_reference", "input_fused", "tensor_core"):
+            raise ValueError("unsupported rank8 projection implementation")
         if self.recovery_kernel not in ("separate_reference", "fused_epilogue"):
             raise ValueError("fused recovery kernels are not implemented")
 
@@ -163,6 +209,9 @@ def prepare_rank8(layer, config):
             raise ValueError("unsupported explicit Hopper P32 contract")
         # Reuse the existing versioned window/selector cache; no new packing.
         layer._prepare_amd_p32_metadata(layer.trellis.device)
+        # That cache validates the canonical selectors. The BF16 rescue branch
+        # captured for narrow K must not repeat their host-side validation.
+        layer._bank_ids_loaded = True
     enabled = False
     if config.recovery_mode != "off" and not (
         config.recovery_mode == "auto" and config.quality_mode == "fast"
@@ -231,6 +280,24 @@ def prepare_rank8(layer, config):
         raise ValueError(
             "rank8 fused epilogue requires SM90 and power-of-two N <= 16384"
         )
+    if (
+        enabled
+        and config.recovery_projection == "input_fused"
+        and (
+            layer.trellis.device.type != "cuda"
+            or torch.cuda.get_device_capability(layer.trellis.device) != (9, 0)
+            or layer.in_features > 16384
+            or layer.in_features & (layer.in_features - 1)
+        )
+    ):
+        raise ValueError(
+            "rank8 input producer requires SM90 and power-of-two K <= 16384"
+        )
+    if enabled and config.recovery_projection == "tensor_core" and (
+        layer.trellis.device.type != "cuda"
+        or torch.cuda.get_device_capability(layer.trellis.device) != (9, 0)
+    ):
+        raise ValueError("rank8 Tensor Core projection requires SM90")
     grouped = getattr(layer, "_gptqmodel_qvq_grouped_runtime", None)
     if grouped is not None:
         if grouped._outputs is not None:
@@ -257,22 +324,35 @@ def validate_rank8_state(layer):
         raise RuntimeError("rank8 FP32 reference requires CUDA matmul TF32 disabled")
 
 
-def add_rank8_correction(layer, transformed, base):
+def _project_rank8(layer, transformed):
+    if (
+        layer._p32_window_config.recovery_projection == "tensor_core"
+        and transformed.dtype == torch.float16
+    ):
+        from ..utils.qvq_rank8_triton import rank8_tensor_core_projection
+
+        return rank8_tensor_core_projection(transformed, layer.rank8_A)
+    return (transformed.float() @ layer.rank8_A.float()).half()
+
+
+def add_rank8_correction(layer, transformed, base, *, hidden=None):
     """No recovery tensor access on the disabled branch. FP16 hidden is deliberate."""
     if not getattr(layer, "_p32_rank8_enabled", False):
         return base
     validate_rank8_state(layer)
-    hidden = (transformed.float() @ layer.rank8_A.float()).half()
+    if hidden is None:
+        hidden = _project_rank8(layer, transformed)
     correction = hidden.float() @ layer.rank8_B.float()
     return base.float() + correction
 
 
-def fused_rank8_output(layer, transformed, base, compute_dtype):
+def fused_rank8_output(layer, transformed, base, compute_dtype, *, hidden=None):
     """Fuse expansion/addition into the existing numerical output-transform contract."""
     validate_rank8_state(layer)
     from ..utils.qvq_rank8_triton import rank8_output_epilogue
 
-    hidden = (transformed.float() @ layer.rank8_A.float()).half()
+    if hidden is None:
+        hidden = _project_rank8(layer, transformed)
     return rank8_output_epilogue(
         hidden,
         layer.rank8_B,
@@ -634,11 +714,24 @@ def explicit_window_inner(layer, transformed, config):
     from ..utils.qvq_wgmma_cuda import (
         qvq_p32_window_wgmma_m16_tma,
         qvq_p32_window_wgmma_single_large_m_packed,
+        qvq_p32_window_wgmma_tuned,
     )
 
     rows = transformed.shape[0]
     if transformed.dtype != torch.float16 or not config.min_m <= rows <= config.max_m:
         raise ValueError("input dtype or M is outside the prepared Hopper policy")
+    if config.chunk_m and rows > config.chunk_m:
+        # Only the window launch is sliced. Input transform,
+        # rank8 projection/addition and output transform retain their existing
+        # full-operator boundaries; no term is duplicated across these slices.
+        chunk_config = replace(config, min_m=1, max_m=config.chunk_m, chunk_m=0)
+        return torch.cat(
+            [
+                explicit_window_inner(layer, chunk, chunk_config)
+                for chunk in transformed.split(config.chunk_m, dim=0)
+            ],
+            dim=0,
+        )
     window, banks, alt_id = layer._prepare_amd_p32_metadata(transformed.device)
     if config.algorithm == "hopper_m16":
         return qvq_p32_window_wgmma_m16_tma(
@@ -651,10 +744,30 @@ def explicit_window_inner(layer, transformed, config):
             bank_alt_id=alt_id,
             split_count=config.split_k,
         )
-    padded_rows = 16 if rows <= 16 else 32 if rows <= 32 else ((rows + 63) // 64) * 64
+    padded_rows = (
+        ((rows + config.block_m - 1) // config.block_m) * config.block_m
+        if config.block_m
+        else 16
+        if rows <= 16
+        else 32
+        if rows <= 32
+        else ((rows + 63) // 64) * 64
+    )
     padded = torch.nn.functional.pad(
         transformed, (0, 0, 0, padded_rows - rows)
     ).contiguous()
+    if config.block_m:
+        return qvq_p32_window_wgmma_tuned(
+            padded,
+            window,
+            _pgc16_levels(transformed.device, layer.codebook_version),
+            banks,
+            layer.bits,
+            out_features=layer.out_features,
+            bank_alt_id=alt_id,
+            block_m=config.block_m,
+            block_n=config.block_n,
+        )[:rows]
     return qvq_p32_window_wgmma_single_large_m_packed(
         padded,
         window,
@@ -665,6 +778,87 @@ def explicit_window_inner(layer, transformed, config):
         bank_alt_id=alt_id,
         split_count=config.split_k,
     )[:rows]
+
+
+def window_kernel_candidates(layer, *, m):
+    """Enumerate implementations for a prepared quality policy, without timing.
+
+    Native tuners and ZML can benchmark the same explicit candidates. This
+    list does not discard a geometry because it lost at a different shape.
+    Call prepare_rank8 for the requested quality mode before enumeration;
+    each candidate still passes prepare_rank8 before execution/capture.
+    """
+    if type(m) is not int or not 1 <= m <= 8192:
+        raise ValueError("window candidate enumeration requires M in [1,8192]")
+    if not hasattr(layer, "_p32_window_config"):
+        raise ValueError("prepare the module quality policy before enumerating kernels")
+    if getattr(layer, "_p32_rank8_enabled", False):
+        validate_rank8_state(layer)
+    policy = replace(
+        layer._p32_window_config,
+        algorithm="production_window",
+        block_m=0,
+        block_n=0,
+        warp_groups=0,
+        split_k=1,
+        chunk_m=0,
+        min_m=m,
+        max_m=m,
+        recovery_kernel="separate_reference",
+        recovery_projection="separate_reference",
+    )
+    candidates = [policy]
+    if layer.trellis.device.type != "cuda":
+        return tuple(candidates)
+    props = torch.cuda.get_device_properties(layer.trellis.device)
+    if (
+        (props.major, props.minor) != (9, 0)
+        or not any(name in props.name for name in ("H100", "H200"))
+        or layer.activation is not None
+        or layer.in_features % 256
+        or layer.out_features % 256
+        or layer.bits not in (2, 2.5, 3, 3.5)
+    ):
+        return tuple(candidates)
+    candidates.extend(
+        replace(policy, algorithm=name)
+        for name in ("hopper_m16", "hopper_direct_decode_mma")
+    )
+    candidates.extend(
+        replace(
+            policy,
+            algorithm="hopper_direct_decode_mma",
+            block_m=bm,
+            block_n=bn,
+            warp_groups=bn // 64,
+        )
+        for bm in (32, 64, 128)
+        for bn in (64, 128)
+    )
+    if m > 4096:
+        candidates.extend(
+            replace(c, chunk_m=4096)
+            for c in tuple(candidates)
+            if c.algorithm == "hopper_direct_decode_mma"
+        )
+    if getattr(layer, "_p32_rank8_enabled", False):
+        if layer.out_features <= 16384 and not layer.out_features & (
+            layer.out_features - 1
+        ):
+            candidates.extend(
+                replace(c, recovery_kernel="fused_epilogue") for c in tuple(candidates)
+            )
+        separate_candidates = tuple(candidates)
+        candidates.extend(
+            replace(c, recovery_projection="tensor_core") for c in separate_candidates
+        )
+        if layer.in_features <= 16384 and not layer.in_features & (
+            layer.in_features - 1
+        ):
+            candidates.extend(
+                replace(c, recovery_projection="input_fused") for c in separate_candidates
+            )
+    return tuple(candidates)
 
 
 def window_tuning_key(layer, *, m, quality_mode, tp_world_size=1, tp_rank=0, build_id):

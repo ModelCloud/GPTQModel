@@ -2945,8 +2945,13 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
     const at::Tensor& bank_ids,
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
-    at::IntArrayRef split_counts) {
+    at::IntArrayRef split_counts,
+    int64_t block_n = 0) {
   static_assert(!ReturnPartials || OrderedSplit);
+  TORCH_CHECK(block_n == 0 || block_n == 64 || block_n == 128,
+              "explicit Hopper BN must be 64 or 128");
+  TORCH_CHECK(block_n == 0 || (RowTilesPerCta > 1 && !OrderedSplit),
+              "explicit Hopper BN requires unsplit row reuse");
   TORCH_CHECK(input.is_cuda(), "grouped QVQ P32 TMA WGMMA input must be CUDA");
   c10::cuda::CUDAGuard device_guard(input.device());
   TORCH_CHECK(
@@ -2969,7 +2974,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
   TORCH_CHECK(
       input.dim() == 2 && input.size(0) >= kRows &&
           input.size(0) % kRows == 0 &&
-          input.size(0) <= (RowTilesPerCta == 11 ? 4224 : 4096),
+          input.size(0) <= (RowTilesPerCta == 11 ? 4224 : 8192),
       "grouped QVQ P32 TMA WGMMA row count exceeds its specialization limit");
   TORCH_CHECK(
       input.size(1) > 0 && input.size(1) % kKPerStage == 0,
@@ -3166,13 +3171,13 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
     // consumers sharing the same four staged M16 input tiles.  M64 retains
     // the narrower CTA: its shorter grid does not amortize the larger block.
     const bool use_h100_wide_reuse_gate_up =
-        (use_gate_up_geometry || use_qwen_unsplit_gate_up_geometry) &&
+        block_n == 0 && (use_gate_up_geometry || use_qwen_unsplit_gate_up_geometry) &&
         size_m >= 128 &&
         std::strcmp(properties.name, "NVIDIA H100") == 0;
     const bool use_h100_wide_reuse_qwen_down =
-        segment_count == 1 && size_k == 17408 && out_features[0] == 5120 &&
+        block_n == 128 || (block_n == 0 && segment_count == 1 && size_k == 17408 && out_features[0] == 5120 &&
         split_counts[0] == 1 && size_m >= 128 &&
-        std::strcmp(properties.name, "NVIDIA H100") == 0;
+        std::strcmp(properties.name, "NVIDIA H100") == 0);
     if (use_h100_wide_reuse_gate_up) {
       const HopperFixedGateUpLaunchParams fixed_params{
           {grouped_params.bank_alt_id[0], grouped_params.bank_alt_id[1]}};
@@ -3671,6 +3676,46 @@ at::Tensor qvq_p32_window_wgmma_fp8_m16(
           input, input_scale, trellis, levels, bank_ids, out_features, bank_alt_id, level_scale);
     default:
       TORCH_CHECK(false, "QVQ P32 FP8 WGMMA transition bits must be in [4, 7]");
+  }
+}
+
+template <int TransitionBits>
+at::Tensor qvq_p32_window_wgmma_tuned_impl(
+    const at::Tensor& input, const at::Tensor& trellis,
+    const at::Tensor& levels, const at::Tensor& bank_ids,
+    int64_t out_features, int64_t bank_alt_id, int64_t block_m, int64_t block_n) {
+  // Each branch already exists in grouped reuse2/4/8. No new device variants.
+  const std::vector<int64_t> widths{out_features}, banks{bank_alt_id}, splits{1};
+#define QVQ_TUNED_ROWS(BM, REUSE) \
+  case BM: return qvq_p32_window_wgmma_m16_tma_grouped_impl< \
+      TransitionBits, false, false, REUSE>( \
+          input, trellis, levels, bank_ids, widths, banks, splits, block_n)
+  switch (block_m) {
+    QVQ_TUNED_ROWS(32, 2);
+    QVQ_TUNED_ROWS(64, 4);
+    QVQ_TUNED_ROWS(128, 8);
+    default: TORCH_CHECK(false, "explicit Hopper BM must be 32, 64 or 128");
+  }
+#undef QVQ_TUNED_ROWS
+}
+
+at::Tensor qvq_p32_window_wgmma_tuned(
+    const at::Tensor& input, const at::Tensor& trellis,
+    const at::Tensor& levels, const at::Tensor& bank_ids,
+    int64_t transition_bits, int64_t out_features, int64_t bank_alt_id,
+    int64_t block_m, int64_t block_n) {
+  TORCH_CHECK(block_n == 64 || block_n == 128,
+              "explicit Hopper BN must be 64 or 128");
+  switch (transition_bits) {
+#define QVQ_TUNED_RATE(RATE) \
+    case RATE: return qvq_p32_window_wgmma_tuned_impl<RATE>( \
+        input, trellis, levels, bank_ids, out_features, bank_alt_id, block_m, block_n)
+    QVQ_TUNED_RATE(4);
+    QVQ_TUNED_RATE(5);
+    QVQ_TUNED_RATE(6);
+    QVQ_TUNED_RATE(7);
+#undef QVQ_TUNED_RATE
+    default: TORCH_CHECK(false, "explicit Hopper transition bits must be in [4, 7]");
   }
 }
 
@@ -4280,6 +4325,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_m16_tma_grouped_ordered_split(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m16_tma_grouped_ordered_partials(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_fp8_m16(Tensor input, Tensor input_scale, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id, float level_scale) -> Tensor");
+  m.def("p32_window_tuned(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id, int block_m, int block_n) -> Tensor");
   m.def("p32_window_m32_tma_grouped_reuse2(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m32_tma_grouped_ordered_reuse2(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_m64_tma_grouped_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
@@ -4303,6 +4349,7 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_m16_tma_grouped_ordered_split", qvq_p32_window_wgmma_m16_tma_grouped_ordered_split);
   m.impl("p32_window_m16_tma_grouped_ordered_partials", qvq_p32_window_wgmma_m16_tma_grouped_ordered_partials);
   m.impl("p32_window_fp8_m16", qvq_p32_window_wgmma_fp8_m16);
+  m.impl("p32_window_tuned", qvq_p32_window_wgmma_tuned);
   m.impl("p32_window_m32_tma_grouped_reuse2", qvq_p32_window_wgmma_m32_tma_grouped_reuse2);
   m.impl("p32_window_m32_tma_grouped_ordered_reuse2", qvq_p32_window_wgmma_m32_tma_grouped_ordered_reuse2);
   m.impl("p32_window_m64_tma_grouped_reuse4", qvq_p32_window_wgmma_m64_tma_grouped_reuse4);

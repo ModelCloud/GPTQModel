@@ -3,6 +3,7 @@
 """Synthetic algebra/serialization checks; not evidence of model quality."""
 
 import copy
+from dataclasses import replace
 
 import pytest
 import torch
@@ -17,6 +18,7 @@ from gptqmodel.quantization.qvq_rank8 import (
     load_window_package,
     prepare_rank8,
     qvq_p32_window_linear,
+    window_kernel_candidates,
     window_package_storage,
 )
 from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
@@ -59,6 +61,120 @@ def fixture(hadamard=True):
         teacher.weight.copy_((y * layer.SV).T)
     train, heldout = torch.randn(80, k), torch.randn(40, k)
     return layer, teacher, train, heldout
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"block_m": 64},
+        {"block_n": 32},
+        {"block_k": 16},
+        {"pipeline_stages": 3},
+        {"block_m": True},
+        {
+            "algorithm": "hopper_direct_decode_mma",
+            "block_m": 64,
+            "block_n": 128,
+            "warp_groups": 1,
+        },
+        {
+            "algorithm": "hopper_direct_decode_mma",
+            "block_m": 64,
+            "block_n": 64,
+            "split_k": 2,
+        },
+    ],
+)
+def test_window_geometry_rejects_unimplemented_combinations(kwargs):
+    with pytest.raises(ValueError):
+        P32WindowConfig(**kwargs)
+
+
+def test_external_window_controls_roundtrip_and_cpu_candidates():
+    config = P32WindowConfig(
+        algorithm="hopper_direct_decode_mma",
+        block_m=64,
+        block_n=128,
+        warp_groups=2,
+        recovery_mode="auto",
+        quality_mode="balanced",
+    )
+    assert P32WindowConfig.from_backend_config(config.to_backend_config()) == config
+    with pytest.raises(TypeError):
+        P32WindowConfig.from_backend_config({"unknown_tile": 64})
+    layer, _, _, _ = fixture()
+    prepare_rank8(layer, P32WindowConfig())
+    candidates = window_kernel_candidates(layer, m=33)
+    assert len(candidates) == 1
+    assert candidates[0].algorithm == "production_window"
+    assert candidates[0].min_m == candidates[0].max_m == 33
+    assert candidates[0].recovery_mode == "off"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("block_m", [32, 64, 128])
+@pytest.mark.parametrize("block_n", [64, 128])
+@pytest.mark.parametrize("bits", [2, 2.5, 3, 3.5])
+@pytest.mark.parametrize(
+    "m,chunk_m",
+    [(1, 0), (33, 0), (512, 0), (4097, 0), (4097, 4096), (8192, 0), (8192, 4096)],
+)
+def test_hopper_explicit_geometry_rank8_matrix(block_m, block_n, bits, m, chunk_m):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    torch.manual_seed(141)
+    layer = (
+        QVQLinear(
+            bits=bits,
+            in_features=256,
+            out_features=256,
+            bank_count=2,
+            v2b2_p32=True,
+        )
+        .to("cuda")
+        .eval()
+    )
+    layer.trellis.random_(-2147483648, 2147483647)
+    layer.SU.fill_(1)
+    layer.SV.fill_(0.1)
+    layer.post_init()
+    _kernel_rank8(layer)
+    x = torch.randn(m, 256, device="cuda", dtype=torch.float16) * 0.1
+    config = P32WindowConfig(
+        algorithm="hopper_direct_decode_mma",
+        block_m=block_m,
+        block_n=block_n,
+        chunk_m=chunk_m,
+        warp_groups=block_n // 64,
+        recovery_kernel="fused_epilogue",
+    )
+    prepare_rank8(layer, replace(config, recovery_mode="on"))
+    candidates = window_kernel_candidates(layer, m=m)
+    assert {(c.block_m, c.block_n) for c in candidates if c.block_m} == {
+        (bm, bn) for bm in (32, 64, 128) for bn in (64, 128)
+    }
+    assert all(c.recovery_mode == "on" for c in candidates)
+    assert {c.recovery_projection for c in candidates} == {
+        "separate_reference",
+        "input_fused",
+        "tensor_core",
+    }
+    for mode in ("off", "on"):
+        prepare_rank8(
+            layer, P32WindowConfig(algorithm="production_window", recovery_mode=mode)
+        )
+        reference = layer(x)
+        prepare_rank8(layer, replace(config, recovery_mode=mode))
+        actual = layer(x)
+        error = (actual.float() - reference.float()).abs()
+        assert torch.isfinite(actual).all()
+        assert error.mean() <= 2e-3 and error.max() <= 0.046875
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = layer(x)
+        for _ in range(3):
+            graph.replay()
+            assert torch.equal(captured, actual)
 
 
 def fit(layer, teacher, train, heldout, **kwargs):
@@ -217,7 +333,8 @@ def _kernel_rank8(layer):
 )
 @pytest.mark.parametrize("m", [1, 16, 64, 512])
 @pytest.mark.parametrize("recovery_kernel", ["separate_reference", "fused_epilogue"])
-def test_hopper_rank8_eager_graph(algorithm, m, recovery_kernel):
+@pytest.mark.parametrize("projection", ["separate_reference", "input_fused", "tensor_core"])
+def test_hopper_rank8_eager_graph(algorithm, m, recovery_kernel, projection):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 required")
     from test_qvq_grouped_runtime import _child
@@ -227,7 +344,10 @@ def test_hopper_rank8_eager_graph(algorithm, m, recovery_kernel):
     x = torch.randn(m, 256, device="cuda", dtype=torch.float16) * 0.01
     off = P32WindowConfig(algorithm=algorithm)
     on = P32WindowConfig(
-        algorithm=algorithm, recovery_mode="on", recovery_kernel=recovery_kernel
+        algorithm=algorithm,
+        recovery_mode="on",
+        recovery_kernel=recovery_kernel,
+        recovery_projection=projection,
     )
     base = qvq_p32_window_linear(layer, x, off)
     graphs = []
@@ -267,7 +387,8 @@ def test_hopper_rank8_eager_graph(algorithm, m, recovery_kernel):
 )
 @pytest.mark.parametrize("m", [1, 64])
 @pytest.mark.parametrize("recovery_kernel", ["separate_reference", "fused_epilogue"])
-def test_hopper_grouped_rank8_independent_flags(roles, m, recovery_kernel):
+@pytest.mark.parametrize("projection", ["separate_reference", "input_fused", "tensor_core", "mixed"])
+def test_hopper_grouped_rank8_independent_flags(roles, m, recovery_kernel, projection):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 required")
     from test_qvq_grouped_runtime import _child
@@ -279,10 +400,18 @@ def test_hopper_grouped_rank8_independent_flags(roles, m, recovery_kernel):
     ]
     for child in children:
         child.SU.copy_(children[0].SU)
-    for child in children[::2]:
+    for index, child in enumerate(children[::2]):
         _kernel_rank8(child)
         prepare_rank8(
-            child, P32WindowConfig(recovery_mode="on", recovery_kernel=recovery_kernel)
+            child,
+            P32WindowConfig(
+                recovery_mode="on",
+                recovery_kernel=recovery_kernel,
+                recovery_projection=(
+                    ("input_fused", "tensor_core")[index % 2]
+                    if projection == "mixed" else projection
+                ),
+            ),
         )
     x = torch.randn(m, 256, device="cuda", dtype=torch.float16) * 0.01
     references = [child(x) for child in children]

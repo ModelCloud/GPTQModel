@@ -2166,9 +2166,23 @@ class QVQLinear(BaseQuantLinear):
                 output = output + self.bias.to(compute_dtype)
         else:
             compute_dtype = self._qvq_operand_compute_dtype(x_2d, compute_dtype)
-            transformed = self._qvq_prepare_inference_input(x_2d, compute_dtype)
+            hidden = None
+            if (getattr(self, "_p32_rank8_enabled", False)
+                    and self._p32_window_config.recovery_projection == "input_fused"
+                    and compute_dtype == torch.float16):
+                from ...quantization.qvq_rank8 import validate_rank8_state
+                from ...utils.qvq_rank8_triton import rank8_input_producer
+
+                validate_rank8_state(self)
+                transformed, hiddens = rank8_input_producer(
+                    x_2d.to(compute_dtype).contiguous(), self._cached_cast("SU", compute_dtype),
+                    self.rank8_A, hadamard=self.input_hadamard,
+                )
+                hidden = hiddens[0]
+            else:
+                transformed = self._qvq_prepare_inference_input(x_2d, compute_dtype)
             return self._forward_pretransformed_compute_dtype(
-                transformed, compute_dtype, output_dtype=output_dtype
+                transformed, compute_dtype, output_dtype=output_dtype, rank8_hidden=hidden
             )
         return output
 
@@ -2178,6 +2192,7 @@ class QVQLinear(BaseQuantLinear):
         compute_dtype: torch.dtype,
         *,
         output_dtype: torch.dtype | None = None,
+        rank8_hidden: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if getattr(self, "_p32_rank8_enabled", False):
             from ...quantization.qvq_rank8 import validate_rank8_state
@@ -2228,11 +2243,11 @@ class QVQLinear(BaseQuantLinear):
                 and self._p32_window_config.recovery_kernel == "fused_epilogue"):
             from ...quantization.qvq_rank8 import fused_rank8_output
 
-            return fused_rank8_output(self, transformed, output, compute_dtype)
+            return fused_rank8_output(self, transformed, output, compute_dtype, hidden=rank8_hidden)
         if getattr(self, "_p32_rank8_enabled", False):
             from ...quantization.qvq_rank8 import add_rank8_correction
 
-            output = add_rank8_correction(self, transformed, output)
+            output = add_rank8_correction(self, transformed, output, hidden=rank8_hidden)
         return self._recover_output_compute_dtype(output, compute_dtype)
 
     def _recover_output_compute_dtype(

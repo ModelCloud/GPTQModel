@@ -9,6 +9,30 @@ from gptqmodel.nn_modules.qlinear.qvq import _qvq_hadamard_fused
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("k", [17, 256, 2048, 8192])
+@pytest.mark.parametrize("m", [1, 33, 512])
+def test_rank8_tensor_core_projection_contract(k, m):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from gptqmodel.utils.qvq_rank8_triton import rank8_tensor_core_projection
+
+    torch.manual_seed(149)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    x = torch.randn(m, k, device="cuda").half()
+    a = (torch.randn(k, 8, device="cuda") * 0.02).half()
+    reference = (x.float() @ a.float()).half()
+    actual = rank8_tensor_core_projection(x, a)
+    error = (actual.float() - reference.float()).abs()
+    assert torch.isfinite(actual).all()
+    assert error.mean() <= 2e-3 and error.max() <= 0.046875
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = rank8_tensor_core_projection(x, a)
+    graph.replay()
+    torch.testing.assert_close(captured, actual, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("n", [16, 256, 2048, 8192, 16384])
 @pytest.mark.parametrize("hadamard", [False, True])
 @pytest.mark.parametrize("m", [1, 17])
@@ -71,3 +95,71 @@ def test_rank8_fused_strided_group_output_and_no_bias():
         rank8_output_epilogue(hidden, b, base.half(), sv)
     with pytest.raises(ValueError, match="shape mismatch"):
         rank8_output_epilogue(hidden, b[:, :128], base, sv)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("k", [16, 256, 2048, 8192, 16384])
+@pytest.mark.parametrize("groups", [1, 3])
+@pytest.mark.parametrize("hadamard", [False, True])
+def test_rank8_shared_input_producer(k, groups, hadamard):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from gptqmodel.utils.qvq_rank8_triton import rank8_input_producer
+
+    torch.manual_seed(140)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    x = torch.randn(3, k, device="cuda").half() * 0.25
+    su = torch.randn(k, device="cuda").half()
+    factors = tuple(
+        torch.randn(k, 8, device="cuda").half() * 0.05 for _ in range(groups)
+    )
+    if hadamard:
+        reference = _qvq_hadamard_fused(
+            x, pre_scale=su, scale_mode=2 if k >= 2048 else 1
+        )
+    else:
+        reference = x * su
+    actual, hidden = rank8_input_producer(x, su, factors, hadamard=hadamard)
+    assert torch.equal(actual, reference)
+    for a, u in zip(factors, hidden):
+        expected = (reference.float() @ a.float()).half()
+        error = (u.float() - expected.float()).abs()
+        assert error.mean() <= 2e-3 and error.max() <= 0.046875
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_x, captured_u = rank8_input_producer(x, su, factors, hadamard=hadamard)
+    for _ in range(10):
+        graph.replay()
+        assert torch.equal(captured_x, actual)
+        assert all(torch.equal(a, b) for a, b in zip(captured_u, hidden))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rank8_input_producer_overflow_rescue_and_stream():
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from gptqmodel.utils.qvq_rank8_triton import rank8_input_producer
+
+    torch.backends.cuda.matmul.allow_tf32 = False
+    # A single overflowing SU product becomes finite after normalization.
+    # Strided rows also check the producer's source leading dimension.
+    x = torch.zeros(3, 4096, device="cuda", dtype=torch.float16)[:, :2048]
+    x[:, 0] = 200
+    x[:, 1] = -64
+    su = torch.full((2048,), 512, device="cuda", dtype=torch.float16)
+    a = torch.full((2048, 8), 1e-5, device="cuda", dtype=torch.float16)
+    a[::2, ::2] *= -1
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        # QVQLinear supplies contiguous input to the deployed CUDA transform.
+        # The helper's noncontiguous Python fallback has a different overflow
+        # boundary and is not the deployed mode2 reference.
+        reference = _qvq_hadamard_fused(x.contiguous(), pre_scale=su, scale_mode=2)
+        expected = (reference.float() @ a.float()).half()
+        actual, (hidden,) = rank8_input_producer(x, su, a)
+    stream.synchronize()
+    assert torch.isfinite(actual).all() and torch.isfinite(hidden).all()
+    assert torch.equal(actual, reference)
+    error = (hidden.float() - expected.float()).abs()
+    assert error.mean() <= 2e-3 and error.max() <= 0.046875
