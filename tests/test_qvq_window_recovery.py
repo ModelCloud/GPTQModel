@@ -3,6 +3,7 @@
 """Synthetic algebra/serialization checks; not evidence of model quality."""
 
 import copy
+import json
 from dataclasses import replace
 
 import pytest
@@ -13,6 +14,7 @@ from gptqmodel.quantization.qvq import reconstruct_qvq_inner_weight
 from gptqmodel.quantization.qvq_rank8 import (
     P32WindowConfig,
     _rank8_output_fit,
+    _window_artifact_binding_digest,
     add_rank8_correction,
     export_window_package,
     fit_rank8,
@@ -252,6 +254,16 @@ def test_recovery_teacher_error_roundtrip_and_off_identity(hadamard, tmp_path):
     assert artifact_report["serialized_bytes"] > artifact_report["tensor_bytes"]
     artifact_loaded = load_window_artifact(artifact_dir, config=on)
     torch.testing.assert_close(artifact_loaded(heldout), actual, rtol=0, atol=0)
+    manifest_path = artifact_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["payload_sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
+    with pytest.raises(ValueError, match="payload binding"):
+        load_window_artifact(artifact_dir, config=on)
+    manifest["payload_sha256"] = _window_artifact_binding_digest(
+        manifest["metadata"], manifest["tensors"]
+    )
+    manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n")
     (artifact_dir / "window_words.bin").write_bytes(b"tampered")
     with pytest.raises(ValueError, match="hash mismatch"):
         load_window_artifact(artifact_dir, config=on)
