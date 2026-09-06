@@ -198,6 +198,14 @@ def _validate_kernel_tuning_metadata(layer, tuning):
     paired = tuning.get("candidate_recovery_overhead", [])
     if not isinstance(paired, list):
         raise ValueError("invalid per-candidate recovery timing metadata")
+    target = tuning.get("max_recovery_overhead_percent")
+    if target is not None and (
+        isinstance(target, bool)
+        or not isinstance(target, (int, float))
+        or not torch.isfinite(torch.tensor(float(target)))
+        or float(target) < 0
+    ):
+        raise ValueError("invalid recovery overhead promotion target")
     for entry in paired:
         if not isinstance(entry, dict) or "config" not in entry or "recovery_overhead" not in entry:
             raise ValueError("invalid per-candidate recovery timing metadata")
@@ -214,6 +222,9 @@ def _validate_kernel_tuning_metadata(layer, tuning):
             for name in ("overhead_us", "overhead_percent")
         ):
             raise ValueError("invalid per-candidate recovery timing values")
+        eligible = entry.get("recovery_overhead_eligible")
+        if eligible is not None and type(eligible) is not bool:
+            raise ValueError("invalid per-candidate recovery timing eligibility")
     if expected_state != _digest(*_base(layer)):
         raise ValueError("window kernel-tuning state hash mismatch")
     if expected_factors is not None:

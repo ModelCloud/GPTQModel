@@ -158,12 +158,14 @@ def test_window_tuner_can_measure_recovery_pair_for_each_candidate(tmp_path):
         build_id="per-candidate-overhead",
         cache_dir=tmp_path,
         measure_recovery_candidates=True,
+        max_recovery_overhead_percent=5.0,
     )
     assert len(result.report["rows"]) == 1  # CPU fixture has one production candidate.
     pair = result.report["rows"][0]["recovery_overhead"]
     assert pair["off"]["median_us"] == pytest.approx(1.0)
     assert pair["on"]["median_us"] == pytest.approx(1.05)
     assert pair["overhead_percent"] == pytest.approx(5.0)
+    assert result.report["rows"][0]["recovery_overhead_eligible"] is True
     assert len(layer._p32_window_tuning["candidate_recovery_overhead"]) == 1
     assert layer._p32_window_tuning["candidate_recovery_overhead"][0]["recovery_overhead"]["overhead_percent"] == pytest.approx(5.0)
     package = export_window_package(layer)
@@ -171,6 +173,30 @@ def test_window_tuner_can_measure_recovery_pair_for_each_candidate(tmp_path):
     assert restored._p32_window_tuning["candidate_recovery_overhead"] == layer._p32_window_tuning["candidate_recovery_overhead"]
     cached = json.loads(next(tmp_path.glob("*.json")).read_text())
     assert cached["identity"]["measure_recovery_candidates"] is True
+
+
+def test_window_tuner_overhead_gate_rejects_slow_recovery(tmp_path):
+    layer, _, x, _ = fixture()
+    _kernel_rank8(layer)
+    original = P32WindowConfig(recovery_mode="on", quality_mode="fast")
+    prepare_rank8(layer, original)
+
+    def sample(fn, inputs):
+        fn(inputs)
+        return [1.05 if layer._p32_rank8_enabled else 1.0]
+
+    with pytest.raises(ValueError, match="no kernel candidate"):
+        tune_window_kernel(
+            layer,
+            x,
+            benchmark=sample,
+            build_id="overhead-gate",
+            cache_dir=tmp_path,
+            measure_recovery_candidates=True,
+            max_recovery_overhead_percent=4.0,
+        )
+    assert layer._p32_window_config == original
+    assert layer._p32_rank8_enabled
 
 
 def test_applied_tuning_metadata_roundtrips_with_unified_package(tmp_path):

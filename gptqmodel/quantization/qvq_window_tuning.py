@@ -195,6 +195,7 @@ def tune_window_kernel(
     apply=True,
     measure_recovery=False,
     measure_recovery_candidates=False,
+    max_recovery_overhead_percent=None,
     tp_world_size=1,
     tp_rank=0,
 ):
@@ -215,6 +216,12 @@ def tune_window_kernel(
     geometry while selection still uses only the validated arithmetic and
     output-correctness gates.
 
+    ``max_recovery_overhead_percent`` is an explicit promotion gate.  When
+    supplied for an enabled rank8 policy, per-candidate measurements are
+    required and candidates above the limit are excluded from selection.  It
+    is deliberately opt-in because the target is not met by every module or
+    shape yet.
+
     All input cases must have one shape/dtype/device. Cache entries bind exact
     validation inputs, deployment state, candidate set, hardware and compiler
     build. A hit revalidates the selected executable before applying it.
@@ -227,6 +234,13 @@ def tune_window_kernel(
         measure_recovery_candidates, bool
     ):
         raise TypeError("recovery measurement flags must be bool")
+    if max_recovery_overhead_percent is not None and (
+        not isinstance(max_recovery_overhead_percent, (int, float))
+        or isinstance(max_recovery_overhead_percent, bool)
+        or not math.isfinite(float(max_recovery_overhead_percent))
+        or float(max_recovery_overhead_percent) < 0
+    ):
+        raise ValueError("max_recovery_overhead_percent must be finite and nonnegative")
     inputs = (inputs,) if isinstance(inputs, torch.Tensor) else tuple(inputs)
     if not inputs or any(not isinstance(x, torch.Tensor) for x in inputs):
         raise ValueError("tuning requires activation tensors")
@@ -250,6 +264,10 @@ def tune_window_kernel(
     # Also rejects graph capture, training and an active grouped sibling cycle.
     prepare_rank8(layer, original)
     enabled = bool(layer._p32_rank8_enabled)
+    if enabled and max_recovery_overhead_percent is not None and not measure_recovery_candidates:
+        raise ValueError(
+            "an overhead promotion gate requires measure_recovery_candidates=True"
+        )
     m = first.numel() // layer.in_features
     eligible = window_kernel_candidates(layer, m=m)
     choices = eligible if candidates is None else tuple(candidates)
@@ -288,6 +306,11 @@ def tune_window_kernel(
         "candidates": [c.to_backend_config() for c in choices],
         "gate": {"mae": 2e-3, "max": 0.046875, "version": 1},
         "measure_recovery_candidates": measure_recovery_candidates,
+        "max_recovery_overhead_percent": (
+            None
+            if max_recovery_overhead_percent is None
+            else float(max_recovery_overhead_percent)
+        ),
     }
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     cache = Path(cache_dir) / (key + ".json") if cache_dir is not None else None
@@ -353,6 +376,15 @@ def tune_window_kernel(
                     "overhead_percent": (on_median / off_median - 1.0) * 100.0,
                 }
 
+            def overhead_is_eligible(overhead_percent):
+                if max_recovery_overhead_percent is None:
+                    return True
+                # Timing medians are floating-point values; allow one ulp-scale
+                # tolerance at an exact boundary such as a 5% promotion cap.
+                limit = float(max_recovery_overhead_percent)
+                tolerance = max(1e-9, abs(limit) * 1e-9)
+                return overhead_percent <= limit + tolerance
+
             if cache is not None and cache.exists():
                 cached = json.loads(cache.read_text())
                 if cached.get("identity") != json.loads(json.dumps(identity)):
@@ -364,9 +396,27 @@ def tune_window_kernel(
                 checks = [
                     _errors(fn(x), y) for x, y in zip(inputs, references, strict=True)
                 ]
-                if all(c["accepted"] for c in checks):
+                cached_row = next(
+                    (
+                        row
+                        for row in cached.get("rows", [])
+                        if row.get("config") == choice.to_backend_config()
+                    ),
+                    None,
+                )
+                cached_overhead_ok = (
+                    not enabled
+                    or max_recovery_overhead_percent is None
+                    or bool(cached_row and cached_row.get("recovery_overhead_eligible"))
+                )
+                if all(c["accepted"] for c in checks) and cached_overhead_ok:
                     selected, report, cache_hit = choice, cached, True
                     report["cache_revalidation"] = checks
+                elif max_recovery_overhead_percent is not None and enabled:
+                    # A cache made without a passing marginal-cost record must
+                    # not silently bypass the promotion gate. Rebuild a clean
+                    # report so newly measured rows are authoritative.
+                    report = {"identity": identity, "rows": [], "selected": None}
             if selected is None:
                 for config in choices:
                     fn = executable(config)
@@ -386,8 +436,20 @@ def tune_window_kernel(
                     row.update(samples_us=samples, median_us=statistics.median(samples))
                     if measure_recovery_candidates and enabled:
                         row["recovery_overhead"] = recovery_pair(config)
+                        row["recovery_overhead_eligible"] = overhead_is_eligible(
+                            row["recovery_overhead"]["overhead_percent"]
+                        )
                     report["rows"].append(row)
-                passing = [r for r in report["rows"] if r["accepted"]]
+                passing = [
+                    r
+                    for r in report["rows"]
+                    if r["accepted"]
+                    and (
+                        not enabled
+                        or max_recovery_overhead_percent is None
+                        or r.get("recovery_overhead_eligible", False)
+                    )
+                ]
                 if not passing:
                     raise ValueError(
                         "no kernel candidate passed all local correctness cases"
@@ -428,6 +490,11 @@ def tune_window_kernel(
             "selected": selected.to_backend_config(),
             "quality_mode": original.quality_mode,
             "rank8_enabled": enabled,
+            "max_recovery_overhead_percent": (
+                None
+                if max_recovery_overhead_percent is None
+                else float(max_recovery_overhead_percent)
+            ),
             # Keep matched correction-state timing with the selected policy so
             # an external ZML consumer can make the same shape-specific cost
             # visible without rerunning Python.  These measurements never
@@ -437,6 +504,11 @@ def tune_window_kernel(
                 {
                     "config": row["config"],
                     "recovery_overhead": row["recovery_overhead"],
+                    **(
+                        {"recovery_overhead_eligible": row["recovery_overhead_eligible"]}
+                        if "recovery_overhead_eligible" in row
+                        else {}
+                    ),
                 }
                 for row in report.get("rows", [])
                 if "recovery_overhead" in row
