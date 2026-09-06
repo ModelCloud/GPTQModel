@@ -5,6 +5,146 @@ It reuses `calibration_coverage.find_target_groups`; the existing coverage scann
 coverage, and `scripts/analyze_quantization_sensitivity.py` still provides local RTN-style proxy curves.
 Neither existing score is substituted for an observed final-logit difference.
 
+## Purpose and prerequisites
+
+This tool answers a narrow engineering question: if one or more physical linear
+operators change while the rest of the model remains unchanged, how much does the
+change reach the model output? It helps prioritize kernel work and identify shared
+input opportunities. It is a teacher-forced propagation harness, not a quantizer,
+benchmark runner, or task-accuracy evaluator.
+
+Use a dense or quantized checkpoint with the exact weights and runtime path you intend
+to study. Supply ordinary held-out text that is disjoint from calibration and task
+evaluation data. Keep the baseline and candidate in the same process, with the same
+token IDs, masks, dtype, device, and model state. The harness stores baseline logits on
+the CPU but does not save weights or activation histories.
+
+The command line loads a Transformers model and discovers decoder blocks from
+`--layers-path`. The Python API is required for custom model loaders, custom operators,
+private state reset logic, or a candidate implementation that is not expressible as a
+built-in probe.
+
+## Command-line workflow
+
+Start with the random CPU fixture. This verifies the harness and report format only:
+
+```bash
+python optimize/sweep_sensitivity.py \
+  --tiny \
+  --max-batches 2 \
+  --max-length 12 \
+  --amplitudes 0.001,0.002 \
+  --top-layers 2 \
+  --output /tmp/tiny-sensitivity
+```
+
+Then run a real checkpoint with held-out JSONL data:
+
+```bash
+python optimize/sweep_sensitivity.py \
+  --model /models/checkpoint \
+  --data /data/held-out.jsonl \
+  --layers-path model.language_model.layers \
+  --probe output \
+  --amplitudes 0.001,0.002,0.005,0.01 \
+  --top-layers 4 \
+  --max-batches 32 \
+  --max-length 512 \
+  --dtype bfloat16 \
+  --output /tmp/model-sensitivity
+```
+
+The `--model` path requires `--data`. `--tiny` without data creates random token IDs;
+`--tiny` with data accepts `input_ids` records and avoids tokenizer downloads. Text
+records are tokenized with the checkpoint tokenizer. Use `--revision` to pin a model
+and tokenizer revision, and `--trust-remote-code` only for checkpoints that require it.
+
+For a physical NVIDIA GPU, identify the device with `nvidia-smi` and pass its physical
+index before Torch is imported:
+
+```bash
+nvidia-smi --query-gpu=index,pci.bus_id,uuid,name --format=csv
+python optimize/sweep_sensitivity.py \
+  --model /models/checkpoint \
+  --data /data/held-out.jsonl \
+  --physical-gpu 0 \
+  --output /tmp/model-sensitivity-gpu
+```
+
+The preflight requires zero GPU utilization, no foreign compute process, and at most
+16 MiB of driver memory. It resolves the physical index to a UUID, sets
+`CUDA_VISIBLE_DEVICES`, and the model runs on the resulting `cuda:0`. The CLI does not
+shard a model across multiple GPUs; use one physical index for a single-device run.
+GPU execution is a runtime check and is not covered by the CPU tests below.
+
+## Data file formats
+
+Each nonempty JSONL record produces one or more teacher-forced batches. Supported
+forms are:
+
+```json
+{"text": "ordinary held-out text"}
+{"messages": [{"role": "user", "content": "ordinary held-out text"}]}
+{"input_ids": [1, 42, 17, 2], "attention_mask": [1, 1, 1, 1]}
+{"input_ids": [1, 42, 17, 0], "attention_mask": [1, 1, 1, 0], "sensitivity_mask": [0, 1, 1, 0]}
+```
+
+`input_ids` must be a one-dimensional token sequence. `attention_mask` defaults to all
+ones when omitted. An aligned `sensitivity_mask` selects the positions used for final
+logit metrics and masked local epsilon; it may not select padding. All invocation
+positions remain available in `local_all_positions`, whose maximum error is useful for
+checking a kernel boundary. Keep at least one selected position per record.
+
+The harness rejects `past_key_values`, `past_key_value`, `cache_params`, and `mems` in
+input records. This prevents cached state from making repeated baseline and candidate
+arms incomparable. Private recurrent or convolutional state must be cleared by the
+API's `reset_state` callback.
+
+## Selecting modules and subsets
+
+Automatic discovery inventories `nn.Linear` and Transformers `Conv1D` modules under
+each decoder block. `--layers-path` must resolve to a module container whose children
+are the decoder blocks, such as `model.layers` or `model.language_model.layers`.
+
+Use `--modules` for exact physical paths, including custom quantized operators:
+
+```json
+[
+  "model.layers.0.self_attn.q_proj",
+  "model.layers.0.self_attn.k_proj",
+  "model.layers.0.self_attn.v_proj",
+  "model.layers.1.self_attn.q_proj",
+  "model.layers.1.self_attn.k_proj",
+  "model.layers.1.self_attn.v_proj"
+]
+```
+
+When the CLI supplies an explicit module list, include at least one target under every
+layer discovered from `--layers-path`; the layer screen must have a defined target for
+each layer. For a focused one-layer run, use the API with `layers=["model.layers.0"]`.
+
+Use `--subsets` for named jointly enabled groups:
+
+```json
+{
+  "attention_qkv": [
+    "model.layers.0.self_attn.q_proj",
+    "model.layers.0.self_attn.k_proj",
+    "model.layers.0.self_attn.v_proj"
+  ],
+  "mlp_gate_up": [
+    "model.layers.0.mlp.gate_proj",
+    "model.layers.0.mlp.up_proj"
+  ]
+}
+```
+
+Each subset must contain at least two distinct inventoried targets from one decoder
+layer. The coverage scanner's names are only hints. During each forward the sensitivity
+harness verifies storage identity, view metadata, dtype, device, shape, strides, and
+the in-place mutation version before reporting shared input. Equal values in separate
+allocations are not shared inputs.
+
 ## Two stages and a combined control
 
 1. Run an unchanged teacher-forced baseline and repeat it to measure baseline drift.
