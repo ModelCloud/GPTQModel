@@ -105,7 +105,13 @@ def native_window_linear(layer, x, config):
             or config.recovery_kernel != "separate_reference"
             or config.recovery_projection != "separate_reference" or config.chunk_m):
         raise ValueError("native ABI requires explicit Hopper geometry and reference rank8 kernels")
-    if (x.ndim != 2 or x.dtype != torch.float16 or x.device != layer.trellis.device
+    # Window-only deployments intentionally release the planar trellis after
+    # CPU repacking.  Validate against the live payload that this ABI will
+    # actually consume, while keeping legacy planar layers supported.
+    payload = layer.window_words if getattr(layer, "window_only", False) else layer.trellis
+    if payload is None:
+        raise ValueError("native ABI layer has no P32 window or planar payload")
+    if (x.ndim != 2 or x.dtype != torch.float16 or x.device != payload.device
             or x.shape[1] != layer.in_features or not x.is_contiguous()):
         raise ValueError("native ABI input must be a contiguous FP16 module matrix")
     # This entry point allocates an output tensor and calls the raw native ABI,

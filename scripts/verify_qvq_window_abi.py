@@ -131,6 +131,10 @@ def main():
 
     manifest = {
         "artifact_payload_sha256": artifact_payload_sha256,
+        # Preserve the complete acceptance contract alongside the raw fixture
+        # buffers.  The standalone ZML verifier must not tune or replay rank8
+        # factors whose audit/signature metadata was dropped during export.
+        "recovery": artifact_package["recovery"],
         "config": {"abi_version": 3, "struct_bytes": ctypes.sizeof(WindowConfig), "m": 33,
                    "k": layer.in_features, "n": layer.out_features, "transition_bits": round(2 * layer.bits),
                    "bank_alt_id": alt, "algorithm": 2, "block_m": 64, "block_n": 64,

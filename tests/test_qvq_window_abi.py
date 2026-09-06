@@ -68,6 +68,28 @@ def test_native_abi_rejects_bad_version_before_reading_buffers():
     assert status != 0 and b"ABI version" in error.value
 
 
+def test_native_window_only_uses_window_payload_without_planar_trellis():
+    """The native ABI must accept the production window-only ownership mode."""
+    from test_qvq_grouped_runtime import _child
+    from test_qvq_window_recovery import export_window_package, load_window_package
+
+    source = _child(
+        "window_only_native", in_features=2048, out_features=2048,
+        bits=2, device="cuda", input_hadamard=False, output_hadamard=False,
+    ).eval()
+    source.trellis.random_(-2147483648, 2147483647)
+    source.post_init()
+    package = export_window_package(source)
+    layer = load_window_package(package, device="cuda")
+    assert layer.window_only and layer.trellis is None
+    x = torch.randn(1, source.in_features, device="cuda", dtype=torch.float16) * 0.01
+    config = P32WindowConfig(algorithm="hopper_m16", recovery_mode="off")
+    with torch.no_grad():
+        expected = layer(x)
+        actual = native_window_linear(layer, x, config)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
 def test_native_abi_admits_transform_free_composite_qwen_shape():
     """Composite Qwen tiles pass ABI shape validation without Hadamard."""
     library = native_window_library()
