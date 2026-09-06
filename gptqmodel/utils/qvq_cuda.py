@@ -1795,6 +1795,7 @@ def prewarm_qvq_cuda() -> bool:
     free of first-use registration during capture.
     """
 
+    _reject_qvq_cuda_capture("extension prewarm")
     loaded = _extension_api().load(name="qvq_cuda")["qvq_cuda"]
     if not loaded:
         return False

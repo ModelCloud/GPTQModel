@@ -140,6 +140,8 @@ def test_qvq_cuda_quantization_helpers_reject_graph_capture(monkeypatch):
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
     with pytest.raises(RuntimeError, match="cannot run during CUDA Graph capture"):
         qvq_cuda_utils._reject_qvq_cuda_capture("Viterbi quantization")
+    with pytest.raises(RuntimeError, match="extension prewarm.*CUDA Graph capture"):
+        qvq_cuda_utils.prewarm_qvq_cuda()
 
 pytestmark = [
     pytest.mark.cuda,
