@@ -73,9 +73,11 @@ command-buffer path has been exercised by the StableHLO verifier with two calls
 per correction mode. Explicit nested user capture remains an additional
 validation item, so the adapter evidence does not claim that case is complete.
 
-The registry binds addresses together with byte sizes and element dtypes, uses
-yielding/per-entry locks, bounds residency with LRU eviction, and destroys
-evicted handles before releasing their private pools. Runtime-owned handles
+The registry binds addresses together with byte sizes, element dtypes, the PJRT
+device ordinal and stream, uses yielding/per-entry locks, bounds residency with
+LRU eviction, and destroys evicted handles before releasing their private pools.
+Eviction probes entry locks without waiting under the global map lock; when all
+entries are busy it fails with a bounded resource error. Runtime-owned handles
 must still outlive all enclosing executables and graphs.
 
 That external verifier was rerun against the current ZML source build
