@@ -1,6 +1,6 @@
 {
-  "scope": "accepted-factor Q projection replay; experimental fused X-prime projection plus output epilogue candidate; not full-model quality",
-  "revision": "a19944a9099694f0d1eeb67757692bbbaa20e381",
+  "scope": "accepted-factor Q projection replay at M128/M2048/M8192; experimental fused X-prime projection plus output epilogue candidate; not full-model quality",
+  "revision": "73d441904d18caf3f5b08f6abc3e388a4d750acc",
   "worktree_dirty": false,
   "sources": {
     "gptqmodel/quantization/qvq_rank8.py": "588ce7a285cca5c7b85c388376674808ff2f04737897a1904022b12609824e7c",
@@ -34,6 +34,114 @@
   "preflight": null,
   "rows": [
     {
+      "m": 128,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "project_output_fused",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 31.79583966732025,
+      "median_us": 31.700798869132996,
+      "p95_us": 31.761598587036133,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        32.150399684906006,
+        31.761598587036133,
+        31.700798869132996,
+        31.68320059776306,
+        31.68320059776306
+      ],
+      "allocated_bytes": 4850688,
+      "peak_allocated_bytes": 6423552
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "project_output_fused",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 41.759679317474365,
+      "median_us": 41.66719913482666,
+      "p95_us": 41.68959856033325,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        42.14079976081848,
+        41.68959856033325,
+        41.66719913482666,
+        41.66559875011444,
+        41.63520038127899
+      ],
+      "allocated_bytes": 38405120,
+      "peak_allocated_bytes": 41026560
+    },
+    {
+      "m": 2048,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "project_output_fused",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 213.6617612838745,
+      "median_us": 213.63840103149414,
+      "p95_us": 213.6944055557251,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        214.02080059051514,
+        213.6944055557251,
+        213.46559524536133,
+        213.48960399627686,
+        213.63840103149414
+      ],
+      "allocated_bytes": 93455360,
+      "peak_allocated_bytes": 119669760
+    },
+    {
+      "m": 2048,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "project_output_fused",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 262.1657609939575,
+      "median_us": 262.1664047241211,
+      "p95_us": 262.16959953308105,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        262.5808000564575,
+        261.955189704895,
+        261.9568109512329,
+        262.1664047241211,
+        262.16959953308105
+      ],
+      "allocated_bytes": 93455360,
+      "peak_allocated_bytes": 135398400
+    },
+    {
       "m": 8192,
       "k": 2048,
       "n": 2048,
@@ -45,20 +153,20 @@
       "block_m": 0,
       "block_n": 0,
       "chunk_m": 0,
-      "mean_us": 813.0291366577148,
-      "median_us": 813.0448341369629,
-      "p95_us": 813.263988494873,
+      "mean_us": 813.189754486084,
+      "median_us": 813.3119583129883,
+      "p95_us": 813.3711814880371,
       "mae": 0.0,
       "max": 0.0,
       "samples_us": [
-        813.263988494873,
-        812.7728462219238,
-        812.7152442932129,
-        813.0448341369629,
-        813.3487701416016
+        813.7087821960449,
+        813.3711814880371,
+        813.3119583129883,
+        812.827205657959,
+        812.7296447753906
       ],
-      "allocated_bytes": 236061696,
-      "peak_allocated_bytes": 336724992
+      "allocated_bytes": 269616128,
+      "peak_allocated_bytes": 387056640
     },
     {
       "m": 8192,
@@ -72,17 +180,17 @@
       "block_m": 0,
       "block_n": 0,
       "chunk_m": 0,
-      "mean_us": 1015.8377456665039,
-      "median_us": 1015.6975746154785,
-      "p95_us": 1015.9040451049805,
+      "mean_us": 1016.2086296081543,
+      "median_us": 1016.1775588989258,
+      "p95_us": 1016.2991523742676,
       "mae": 0.0,
       "max": 0.0,
       "samples_us": [
-        1016.2991523742676,
-        1015.6064033508301,
-        1015.9040451049805,
-        1015.6975746154785,
-        1015.6815528869629
+        1016.590404510498,
+        1016.0287857055664,
+        1016.1775588989258,
+        1015.9472465515137,
+        1016.2991523742676
       ],
       "allocated_bytes": 269616128,
       "peak_allocated_bytes": 437388288
@@ -98,12 +206,29 @@
     "expansion": "cyclic row replay to requested M; not a full-model prefill"
   },
   "comparison": {
-    "baseline_projection": "reference_projection + fused_epilogue",
-    "baseline_median_us": 951.1887550354004,
-    "candidate_median_us": 1015.6975746154785,
-    "candidate_overhead_vs_window_off": 0.24925161807789986,
-    "candidate_overhead_vs_baseline_fused": 0.06781915706906916,
-    "candidate_promoted": false,
-    "rejection_reason": "slower than reference-projection/fused-epilogue candidate at this shape"
+    "128": {
+      "window_off_us": 31.700798869132996,
+      "candidate_on_us": 41.66719913482666,
+      "candidate_overhead_vs_window_off": 0.31438956181630884,
+      "reference_projection_fused_on_us": 45.902,
+      "candidate_delta_vs_reference_projection_fused": -0.09225743682570131,
+      "selected_candidate": "project_output_fused"
+    },
+    "2048": {
+      "window_off_us": 213.63840103149414,
+      "candidate_on_us": 262.1664047241211,
+      "candidate_overhead_vs_window_off": 0.22715019143713322,
+      "reference_projection_fused_on_us": 249.4,
+      "candidate_delta_vs_reference_projection_fused": 0.0511884712274302,
+      "selected_candidate": "reference_projection"
+    },
+    "8192": {
+      "window_off_us": 813.3119583129883,
+      "candidate_on_us": 1016.1775588989258,
+      "candidate_overhead_vs_window_off": 0.24943147400258492,
+      "reference_projection_fused_on_us": 951.125,
+      "candidate_delta_vs_reference_projection_fused": 0.0683953832555404,
+      "selected_candidate": "reference_projection"
+    }
   }
 }
