@@ -30,11 +30,13 @@
     "graph_handle_reuse": true,
     "raw_linear_capture": "rejected",
     "capture_before_warmup": "rejected by prepared graph creation",
-    "zml_enclosing_capture": "not exercised by this verifier; native child insertion is covered by ABI graph tests",
+    "zml_enclosing_capture": "not exercised; normal compiled executable command-buffer replay covered by two calls per mode",
     "native_library": "/root/.cache/gptqmodel/torch_extensions/gptqmodel_qvq_window_abi_ops/ffe774ebad78a48a/gptqmodel_qvq_window_abi_ops.so",
     "native_library_sha256": "83802c6559577a0eaccd41cb46b4ae11f9895d971a02446c785363c70d8b0714",
     "log_line_count": 74,
-    "both_modes_logged": true
+    "both_modes_logged": true,
+    "zml_command_buffer_capture_replay": true,
+    "zml_enclosing_capture_tested": false
   },
   "real_module": {
     "scope": "Real-factor/captured-activation native ABI equivalence; no fitting or model-quality claim",
@@ -2794,7 +2796,7 @@
     "native": "/tmp/p32-window-abi-native-ncu.ncu-rep"
   },
   "remaining": [
-    "ZML enclosing-capture replay through the public executable API",
+    "Explicit nested ZML user-capture replay through the public executable API",
     "Native grouped and fused rank8 choices",
     "Full native artifact loader with cryptographic validation",
     "ZML latency autotuning and product-specific caches",

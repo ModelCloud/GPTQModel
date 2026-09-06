@@ -10,7 +10,7 @@ steps, not a redefinition of that goal. Baseline includes PR #137 at
 | 0 | Versioned off/on numerical contract, optional per module/graph, FP32 initial accumulation | `qvq_rank8.py`, local off/on and graph tests | Full supported precision/device/TP matrix |
 | 1 | Normal P32 → lossless window → original-teacher output residual → two output-aware fits in one job, document-disjoint validation | Public `quantize(rank8_capture=...)` for materialized teachers; bounded document capture, module finalizer and tiny-Llama integration | Lazy teacher materialization, bounded scalable solver, alignment/atomic finalization integration, real-model fit evidence |
 | 2 | One deployment package, first-class A/B, metadata/hashes, byte/BPW reporting | Standard module buffers plus unified exporter/loader; public tiny-Llama save/reload preserves accepted factors, validates hashes and reproduces corrected module output | Whole-model weighted BPW and all serialized bytes; real-model checkpoint matrix |
-| 3 | Production/direct × off/on, integrated API, same transformed input, eager/graphs | H200 tests for auto/M16/row-reuse; independent factors and disabled poison checks; prepared native graph replay is now used by the ZML adapter | ZML enclosing-capture replay through the public executable API and full shape/rate/repetition matrix |
+| 3 | Production/direct × off/on, integrated API, same transformed input, eager/graphs | H200 tests for auto/M16/row-reuse; independent factors and disabled poison checks; prepared native graph replay is now used by the ZML adapter | Explicit nested ZML user-capture replay through the public executable API and full shape/rate/repetition matrix |
 | 4 | Existing Hopper WGMMA + optional rank8; H100/H200 BM/BN/warp-group/stage candidates | Existing WGMMA retained; explicit BM32/64/128, BN64/128, BK256/stages2; H200 off/on sweep | BN32 and additional stage/warp candidates, grouped explicit controls, integrate rank8 into consumer pipeline, both-device sweep |
 | 5 | Shared input producer, decode producer and consumer; project rank8 alongside WGMMA | Explicit shared SU/H + rank8 producer for power-of-two K; grouped independent factors tested | Composite input widths; SIMT/half2 vs padded-TC and FP8-factor sweep; concurrent scheduling; B staging/cache sweep |
 | 6 | Expansion + FP32 add + output H/SV + final store; defined rounding order | `00a71f4b`: fused Triton expansion/add/H/SV/bias, independent graph-safe reference | Integrate input projection, direct final FP16 store, composite output widths, full native pipeline fusion |
@@ -39,9 +39,10 @@ the existing window/rank8 operator as a child of an enclosing CUDA capture. The
 ZML adapter now retains one such handle per executable buffer set, stream and
 static configuration. Its first eager call prepares the handle and later calls
 reuse it; the adapter advertises command-buffer compatibility for this prepared
-path and rejects capture-before-warmup. The public ZML enclosing-capture path is
-still an explicit validation item, so the adapter evidence does not claim that
-case is complete.
+path and rejects capture-before-warmup. The normal ZML executable
+command-buffer path has been exercised by the StableHLO verifier with two calls
+per correction mode. Explicit nested user capture remains an additional
+validation item, so the adapter evidence does not claim that case is complete.
 
 The prepared native graph passed 350 focused H200 tests, including 168 graph
 cases across four rates, M1/33/128, M16 and all six BM/BN choices, correction
@@ -137,7 +138,7 @@ the existing Hopper window operator with optional reference rank8. The real Q
 fixture is bit-exact through ZML in both correction states, with two calls per
 mode reusing the prepared native graph handle. All six existing BM/BN choices
 are exposed as native controls. This is not the final fused or TP-aware ZML
-runtime: ZML enclosing capture, the native artifact loader and latency tuner
+runtime: explicit nested ZML user capture, the native artifact loader and latency tuner
 remain open. The M33 native-entry timing beats Python eager but loses to the
 captured Python operator. See `results/p32_window_native_zml.json` and
 `../../integrations/zml/README.md` for the supported contract and reproducible
