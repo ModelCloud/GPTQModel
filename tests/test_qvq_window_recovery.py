@@ -226,15 +226,19 @@ def test_unverified_rank8_arithmetic_rejects_balanced_and_quality_modes():
     layer, _, _, _ = fixture()
     _kernel_rank8(layer)
     for quality_mode in ("balanced", "quality"):
-        with pytest.raises(ValueError, match="unverified rank8 arithmetic"):
-            prepare_rank8(
-                layer,
-                P32WindowConfig(
-                    recovery_mode="on",
-                    quality_mode=quality_mode,
-                    arithmetic_signature="unverified_tensor_core",
-                ),
-            )
+        for signature in (
+            "unverified_tensor_core",
+            "unverified_project_output_fused",
+        ):
+            with pytest.raises(ValueError, match="unverified rank8 arithmetic"):
+                prepare_rank8(
+                    layer,
+                    P32WindowConfig(
+                        recovery_mode="on",
+                        quality_mode=quality_mode,
+                        arithmetic_signature=signature,
+                    ),
+                )
 
 
 def test_external_window_controls_roundtrip_and_cpu_candidates():
