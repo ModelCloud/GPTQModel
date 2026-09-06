@@ -615,8 +615,20 @@ def load_window_package(package, *, device="cpu", config=None):
     return layer
 
 
-def window_package_storage(packages):
-    """Weight-count-weighted BPW and tensor bytes, excluding container headers."""
+def window_package_storage(packages, *, serialized_bytes=None):
+    """Return module and whole-model storage accounting for a unified package.
+
+    Tensor BPW intentionally excludes the outer container/header bytes so it
+    remains comparable with the quantizer's weight accounting.  Callers that
+    have written a package can provide ``serialized_bytes`` to report the
+    actual on-disk cost as a separate field.  A package's ``selected`` flag is
+    read from its fitting metadata, so a model-wide quality selection can be
+    accounted for without counting every available recovery tensor.
+    """
+    if serialized_bytes is not None and (
+        type(serialized_bytes) is not int or serialized_bytes < 0
+    ):
+        raise ValueError("serialized_bytes must be a non-negative integer")
     records = []
     for package in packages:
         meta = package["metadata"]
@@ -632,22 +644,50 @@ def window_package_storage(packages):
             for name in ("rank8_A", "rank8_B")
             if name in tensors
         )
+        recovery = package.get("recovery") or {}
+        selected = bool(recovery.get("selected", False)) and recovery_bytes > 0
+        weights = k * n
         records.append(
             {
-                "weights": k * n,
-                "window_bpw": 8 * base_bytes / (k * n),
-                "recovered_bpw": 8 * (base_bytes + recovery_bytes) / (k * n),
-                "rank8_delta_bpw": 16 * 8 * (k + n) / (k * n),
+                "weights": weights,
+                "window_bpw": 8 * base_bytes / weights,
+                "recovered_bpw": 8 * (base_bytes + recovery_bytes) / weights,
+                "selected_bpw": 8 * (base_bytes + (recovery_bytes if selected else 0)) / weights,
+                "rank8_delta_bpw": 16 * 8 * (k + n) / weights,
+                "selected": selected,
+                "window_tensor_bytes": base_bytes,
+                "recovery_tensor_bytes": recovery_bytes,
                 "tensor_bytes": base_bytes + recovery_bytes,
             }
         )
     weights = sum(r["weights"] for r in records)
-    total_bytes = sum(r["tensor_bytes"] for r in records)
-    return {
+    window_bytes = sum(r["window_tensor_bytes"] for r in records)
+    recovery_bytes = sum(r["recovery_tensor_bytes"] for r in records)
+    total_bytes = window_bytes + recovery_bytes
+    selected_bytes = sum(
+        r["window_tensor_bytes"]
+        + (r["recovery_tensor_bytes"] if r["selected"] else 0)
+        for r in records
+    )
+    report = {
         "modules": records,
+        "weights": weights,
+        "window_tensor_bytes": window_bytes,
+        "recovery_tensor_bytes": recovery_bytes,
         "tensor_bytes": total_bytes,
+        "window_average_bpw": 8 * window_bytes / weights if weights else 0,
+        "recovered_average_bpw": 8 * total_bytes / weights if weights else 0,
+        "selected_average_bpw": 8 * selected_bytes / weights if weights else 0,
+        # Keep the historical name as the all-tensors (window + available
+        # rank8) value; new callers should use the explicit names above.
         "average_bpw": 8 * total_bytes / weights if weights else 0,
+        "rank8_modules": sum(r["recovery_tensor_bytes"] > 0 for r in records),
+        "selected_rank8_modules": sum(r["selected"] for r in records),
     }
+    if serialized_bytes is not None:
+        report["serialized_bytes"] = serialized_bytes
+        report["serialized_bpw"] = 8 * serialized_bytes / weights if weights else 0
+    return report
 
 
 @dataclass(frozen=True)
@@ -920,9 +960,6 @@ def save_window_package(layer, path):
 
     package = export_window_package(layer)
     torch.save(package, path)
-    report = window_package_storage([package])
-    report["serialized_bytes"] = Path(path).stat().st_size
-    report["serialized_bpw"] = (
-        8 * report["serialized_bytes"] / (layer.in_features * layer.out_features)
+    return window_package_storage(
+        [package], serialized_bytes=Path(path).stat().st_size
     )
-    return report

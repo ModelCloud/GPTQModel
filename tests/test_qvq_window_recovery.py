@@ -217,9 +217,17 @@ def test_recovery_teacher_error_roundtrip_and_off_identity(hadamard, tmp_path):
     torch.save(package, path)
     loaded = load_window_package(torch.load(path, weights_only=True), config=on)
     torch.testing.assert_close(loaded(heldout), actual, rtol=0, atol=0)
-    assert path.stat().st_size >= window_package_storage([package])["tensor_bytes"]
-    record = window_package_storage([package])["modules"][0]
+    storage = window_package_storage(
+        [package], serialized_bytes=path.stat().st_size
+    )
+    assert storage["serialized_bytes"] == path.stat().st_size
+    assert storage["serialized_bpw"] > storage["recovered_average_bpw"]
+    assert storage["window_average_bpw"] < storage["recovered_average_bpw"]
+    assert path.stat().st_size >= storage["tensor_bytes"]
+    record = storage["modules"][0]
     assert record["recovered_bpw"] - record["window_bpw"] == record["rank8_delta_bpw"]
+    assert record["selected"]
+    assert record["selected_bpw"] == record["recovered_bpw"]
     # Ordinary module state_dict also carries recovery; reload starts off.
     shell, _, _, _ = fixture(hadamard)
     shell.load_state_dict(layer.state_dict())
@@ -302,6 +310,30 @@ def test_empty_and_fast_package():
     loaded = load_window_package(package)
     assert loaded(torch.empty(0, 32)).shape == (0, 16)
     assert window_package_storage([])["average_bpw"] == 0
+
+
+def test_storage_reports_selected_recovery_weighted_model_average():
+    base_layer, _, _, _ = fixture(False)
+    base_package = export_window_package(base_layer)
+    fitted_layer, teacher, train, heldout = fixture(False)
+    fit(fitted_layer, teacher, train, heldout)
+    fitted_package = export_window_package(fitted_layer)
+
+    report = window_package_storage(
+        [base_package, fitted_package], serialized_bytes=12345
+    )
+    assert report["rank8_modules"] == 1
+    assert report["selected_rank8_modules"] == 1
+    assert report["window_tensor_bytes"] < report["tensor_bytes"]
+    assert (
+        report["window_average_bpw"]
+        < report["selected_average_bpw"]
+        == report["recovered_average_bpw"]
+    )
+    assert report["serialized_bytes"] == 12345
+    assert report["serialized_bpw"] == pytest.approx(
+        8 * 12345 / report["weights"]
+    )
 
 
 def _kernel_rank8(layer):
