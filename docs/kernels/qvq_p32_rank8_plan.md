@@ -160,6 +160,13 @@ shared-memory exchange and factor reuse, then evaluate padded Tensor Core
 projection and integration with the WGMMA producer/consumer pipeline. The
 full phase requirements above remain open.
 
+A direct H200 probe removed the single-segment BN128 guard for two 256-wide
+children. At M64 it produced mismatched grouped output in 16,132 of 16,384
+elements (maximum absolute error about 4.79). The guard therefore remains in
+place: generic multi-segment BN128 is not exposed until a segment-safe mapping
+is implemented and independently validated. Native single-projection BN128
+remains eligible.
+
 Explicit native and 4096-row-chunked FP16 policies now cover M through 8192;
 the retained `results/p32_window_h200_m8192.json` contains the 80-candidate
 H200 run and matched post-profile instruction/timing comparison. Rank-16-padded
