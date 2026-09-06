@@ -249,11 +249,14 @@ candidate that removes that separate projection launch as well. It computes
 declared FP16 boundary, and then applies `B`, the output Hadamard, SV and bias.
 The candidate is graph-safe after shape-specific Triton warming and is marked
 `unverified_project_output_fused`, so balanced and quality policies reject it
-until an arithmetic signature is certified. On the current accepted Q
-projection (H200, K=N=2048, M=8192), the candidate measured 1,015.8 us versus
-951.2 us for the reference-projection/fused-epilogue path; the tuner therefore
-must be allowed to reject it per shape. This is an exposed experiment, not a
-claim of universal fusion benefit.
+ until an arithmetic signature is certified. On the current accepted Q
+ projection (H200, K=N=2048), the candidate is shape-dependent: it measured
+ 41.7 us at M128 versus 45.9 us for reference projection/fused epilogue, but
+ 262.2 us at M2048 versus 249.4 us and 1,016.2 us at M8192 versus 951.2 us.
+ The tuner therefore selects it only for the M128 shape and rejects it for the
+ larger shapes. The complete matrix is recorded in
+ `results/p32_rank8_qproj_h200_project_output_fused.json`; this is an exposed
+ experiment, not a claim of universal fusion benefit.
 
 Post-profile tests: **87 passed,86 skipped**, including output widths through
 16384, per-operation overflow rescue, no-bias/strided outputs, independent
