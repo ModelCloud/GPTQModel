@@ -34,9 +34,15 @@ that change the current decision. Resolve these links relative to this file;
   [StableHLO](../../../research/stablehlo.md).
 - Algebraic deduplication, constant folding or emitted machine instructions:
   [SSA/SASS](../../../research/ssa-sass.md), with its SSA and egg paper notes.
+  For deployable analyzers and proof tools, start with
+  [the open-source tool assessment](../../../research/cuda-static-analysis-tools.md).
 - Performance diagnosis or profiling evidence:
   [Nsight](../../../research/nsight-profiling.md) and
   [Roofline](../../../research/roofline.md).
+  Also read [metric interpretation](../../../research/cuda-metrics-and-performance.md),
+  [LUT tradeoffs](../../../research/cuda-lut-tradeoffs.md) and
+  [pipeline throughput](../../../research/cuda-pipeline-throughput.md) when
+  evaluating lookup substitutions, occupancy/instruction changes or overlap.
 - SMs, CUDA/Tensor Cores, TMA, async copies or barrier protocols:
   [CUDA execution](../../../research/cuda-execution.md),
   [FlashAttention-3](../../../research/flashattention-3.md) and
@@ -74,6 +80,20 @@ kernel internals or automatically register tuning candidates. Preserve scale,
 cast, accumulation and reduction contracts; distinguish SSA from SASS and gate
 architecture-specific features. Official docs and related papers motivate
 experiments but do not prove QVQ integration, correctness or speedups.
+
+Select static-analysis tools by their modeled input and proof scope. Keep
+unsupported operations, timeouts and abstractions visible; a Clang analysis
+compile does not establish production NVCC/SASS behavior. Distinguish exact
+bit-vector/refinement checks from bounded floating-point approximation.
+
+Treat instruction count, occupancy, bandwidth and stall counters as explanatory
+evidence, not individual optimization objectives. Identify the limiting resource
+and measure matched complete-operator performance. LUTs can exchange arithmetic
+for dependent loads, conflicts and footprint; same-address broadcasts are not
+bank conflicts. Existing global-memory LUT timings do not prove a shared-memory
+conflict cause. Overlap independent work while preserving required waits and
+buffer lifetimes; do not demand zero waits for every warp or maximum DRAM
+bandwidth for compute-bound kernels.
 
 ## Maintain durable evidence
 
