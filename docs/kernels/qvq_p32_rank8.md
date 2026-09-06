@@ -415,6 +415,10 @@ provides the allocation-free `qvq_p32_window_ampere_kernel_candidates` and
 returned split waves before capture and pass the selected split explicitly.
 ZML has the corresponding `enumerateCandidates`, `benchmarkExecutable` and
 `selectFastest` controls. Each backend keeps its own shape/device/rate cache.
+The native adapter also exposes `benchmarkRecoveryPair` and
+`selectFastestWithRecoveryGate`; a supplied nonnegative budget requires a
+matched complete-executable correction-off/on pair for every winning
+candidate before graph compilation.
 
 Grouped gate/up and QKV callers use `tune_grouped_window_kernel` with a tuple of
 child policies. The tuner validates and times each complete tuple, including

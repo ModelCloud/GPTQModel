@@ -780,6 +780,9 @@ pub const CandidateMeasurement = struct {
     mean_absolute_error: f32,
     max_absolute_error: f32,
     accepted: bool,
+    /// Matched complete-operator correction-off/on timing. This is optional
+    /// for report-only tuning; an explicit recovery budget requires it.
+    recovery_pair: ?RecoveryPairMeasurement = null,
 };
 
 pub const TuningResult = struct {
@@ -792,6 +795,75 @@ pub const BenchmarkOptions = struct {
     warmup_calls: usize = 2,
     iterations: usize = 16,
 };
+
+/// Matched correction-off/on timing for one otherwise identical executable
+/// configuration. The two executables must have been compiled from the same
+/// shape, device, artifact and launch geometry; only the validated rank8
+/// state may differ. ZML keeps this result as tuning telemetry rather than
+/// allowing latency to override the quantizer's quality decision.
+pub const RecoveryPairMeasurement = struct {
+    off_median_ns: u64,
+    on_median_ns: u64,
+    overhead_ns: i64,
+    overhead_percent: f64,
+
+    pub fn meetsTarget(self: @This(), maximum_percent: f64) bool {
+        return self.off_median_ns > 0 and self.on_median_ns > 0 and
+            std.math.isFinite(self.overhead_percent) and
+            std.math.isFinite(maximum_percent) and maximum_percent >= 0 and
+            self.overhead_percent <= maximum_percent;
+    }
+};
+
+/// Build a correction-off/on result from already measured complete-executable
+/// medians. Keeping this pure makes cache/report code testable without a CUDA
+/// runtime and rejects the invalid zero-off baseline explicitly.
+pub fn recoveryPairFromMedians(off_median_ns: u64, on_median_ns: u64) !RecoveryPairMeasurement {
+    if (off_median_ns == 0 or on_median_ns == 0) return error.InvalidRecoveryBaseline;
+    const off = @as(f64, @floatFromInt(off_median_ns));
+    const on = @as(f64, @floatFromInt(on_median_ns));
+    return .{
+        .off_median_ns = off_median_ns,
+        .on_median_ns = on_median_ns,
+        .overhead_ns = @as(i64, @intCast(on_median_ns)) - @as(i64, @intCast(off_median_ns)),
+        .overhead_percent = (on / off - 1.0) * 100.0,
+    };
+}
+
+/// Measure the same complete ZML executable twice, once with correction off
+/// and once with validated rank8 correction on. Compilation and graph capture
+/// are intentionally outside this helper; both executables must be prepared
+/// before calling it, and this function must never run from a captured custom
+/// call handler.
+pub fn benchmarkRecoveryPair(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    off_executable: *const zml.Exe,
+    off_arguments: zml.Exe.Arguments,
+    off_results: *zml.Exe.Results,
+    on_executable: *const zml.Exe,
+    on_arguments: zml.Exe.Arguments,
+    on_results: *zml.Exe.Results,
+    options: BenchmarkOptions,
+) !RecoveryPairMeasurement {
+    const off_median = try benchmarkExecutable(
+        allocator,
+        io,
+        off_executable,
+        off_arguments,
+        off_results,
+        options,
+    );
+    const on_median = try benchmarkExecutable(
+        allocator,
+        io,
+        on_executable,
+        on_arguments,
+        on_results,
+        options,
+    );
+    return recoveryPairFromMedians(off_median, on_median);
+}
 
 /// Measure one already-compiled candidate before serving-graph capture.
 /// PJRT result readiness is included so callers compare complete executable
@@ -837,8 +909,23 @@ pub fn selectFastest(
     candidates: []const Config,
     measurements: []const CandidateMeasurement,
 ) !TuningResult {
+    return selectFastestWithRecoveryGate(candidates, measurements, null);
+}
+
+/// Select the fastest locally correct candidate, optionally requiring a
+/// measured correction-off/on pair at or below `maximum_percent`. The default
+/// selector remains report-only for compatibility, while promotion callers
+/// use this gate after benchmarking every candidate outside capture.
+pub fn selectFastestWithRecoveryGate(
+    candidates: []const Config,
+    measurements: []const CandidateMeasurement,
+    maximum_percent: ?f64,
+) !TuningResult {
     if (candidates.len == 0) return error.NoCandidates;
     if (candidates.len != measurements.len) return error.MeasurementCountMismatch;
+    if (maximum_percent) |limit| {
+        if (!std.math.isFinite(limit) or limit < 0) return error.InvalidRecoveryBudget;
+    }
     var selected: ?TuningResult = null;
     for (candidates, measurements, 0..) |candidate, measurement, index| {
         if (!measurement.accepted or measurement.median_ns == 0 or
@@ -846,6 +933,10 @@ pub fn selectFastest(
             !std.math.isFinite(measurement.max_absolute_error) or
             measurement.mean_absolute_error > 2e-3 or
             measurement.max_absolute_error > 3.0 / 64.0) continue;
+        if (maximum_percent) |limit| {
+            const pair = measurement.recovery_pair orelse continue;
+            if (!pair.meetsTarget(limit)) continue;
+        }
         if (selected == null or measurement.median_ns < selected.?.median_ns) {
             selected = .{
                 .config = candidate,
@@ -1029,19 +1120,19 @@ fn handler(frame: *zml.pjrt.ffi.CallFrame) callconv(.c) ?*zml.pjrt.ffi.Error {
             };
         }
     }
-    const run_entry = (handles.getPtr(key) orelse {
+    const run_entry = handles.getPtr(key) orelse {
         graph_mutex.unlock();
         return zml.pjrt.ffi.Error.create(frame.api, .internal, "native window graph registry lost its inserted handle");
-    }).*;
+    };
     // Acquire the per-key lock while the registry lock is held so LRU eviction
     // cannot remove this entry between lookup and replay. The registry lock is
     // released before native work begins, so unrelated keys remain concurrent.
-    run_entry.run_lock.lock();
+    run_entry.*.run_lock.lock();
     graph_mutex.unlock();
-    defer run_entry.run_lock.unlock();
+    defer run_entry.*.run_lock.unlock();
     var message: [4096]u8 = @splat(0);
     const status = native_graph_run.?(
-        handle,
+        run_entry.*.handle,
         stream,
         &message,
         message.len,
@@ -1077,10 +1168,42 @@ test "native window ABI layout" {
     for (&measurements) |*measurement| measurement.accepted = false;
     measurements[0].max_absolute_error = 1;
     try std.testing.expectError(error.NoViableCandidate, selectFastest(candidates[0..count], &measurements));
+    for (&measurements) |*measurement| {
+        measurement.accepted = true;
+        measurement.max_absolute_error = 0;
+        measurement.median_ns = 100;
+    }
+    measurements[3].median_ns = 20;
+    try std.testing.expectError(
+        error.NoViableCandidate,
+        selectFastestWithRecoveryGate(candidates[0..count], &measurements, 5),
+    );
     try std.testing.expectError(
         error.InvalidBenchmarkIterations,
         benchmarkExecutable(std.testing.allocator, std.testing.io, undefined, undefined, undefined, .{ .iterations = 0 }),
     );
+    const recovery = try recoveryPairFromMedians(100, 103);
+    try std.testing.expectEqual(@as(i64, 3), recovery.overhead_ns);
+    try std.testing.expectApproxEqAbs(@as(f64, 3), recovery.overhead_percent, 1e-12);
+    try std.testing.expect(recovery.meetsTarget(5));
+    try std.testing.expect(!recovery.meetsTarget(2));
+    try std.testing.expect(!(RecoveryPairMeasurement{
+        .off_median_ns = 0,
+        .on_median_ns = 1,
+        .overhead_ns = 1,
+        .overhead_percent = 0,
+    }).meetsTarget(5));
+    measurements[0].recovery_pair = recovery;
+    measurements[1].recovery_pair = try recoveryPairFromMedians(100, 108);
+    measurements[2].recovery_pair = try recoveryPairFromMedians(100, 104);
+    measurements[3].recovery_pair = try recoveryPairFromMedians(100, 120);
+    const gated = try selectFastestWithRecoveryGate(candidates[0..count], &measurements, 5);
+    try std.testing.expectEqual(@as(usize, 0), gated.candidate_index);
+    try std.testing.expectError(
+        error.InvalidRecoveryBudget,
+        selectFastestWithRecoveryGate(candidates[0..count], &measurements, -1),
+    );
+    try std.testing.expectError(error.InvalidRecoveryBaseline, recoveryPairFromMedians(0, 1));
     std.testing.refAllDecls(@This());
 }
 
@@ -1107,4 +1230,25 @@ test "graph identity includes buffer layout and element dtype" {
     right = left;
     right.buffer_types[0] = 2;
     try std.testing.expect(!GraphKeyContext.eql(.{}, left, right));
+}
+
+test "graph registry replay locks the retained entry" {
+    var handles = GraphMap.init(std.testing.allocator);
+    defer handles.deinit();
+    const key: GraphKey = .{
+        .buffers = @splat(19),
+        .buffer_bytes = @splat(64),
+        .buffer_types = @splat(1),
+        .stream = 3,
+        .config = std.mem.zeroes(Config),
+    };
+    const entry = try std.testing.allocator.create(GraphEntry);
+    entry.* = .{ .handle = null, .last_used = 1 };
+    try handles.put(key, entry);
+    const retained = handles.getPtr(key) orelse return error.TestUnexpectedResult;
+    // `getPtr` returns the map's retained pointer value. Replay must lock
+    // this object rather than copying GraphEntry (and therefore its mutex).
+    try std.testing.expectEqual(@intFromPtr(entry), @intFromPtr(retained.*));
+    _ = handles.fetchRemove(key);
+    std.testing.allocator.destroy(entry);
 }
