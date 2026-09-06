@@ -169,6 +169,12 @@ captured Python operator. See `results/p32_window_native_zml.json` and
 `../../integrations/zml/README.md` for the supported contract and reproducible
 build/execution commands.
 
+After widening the native ABI to admit transform-free composite dimensions,
+the fresh-library H200 rerun is recorded in
+`results/p32_window_native_zml_current.json`. It includes the real
+K5120/N17408 decoder compared with the QvQ reference, plus the updated
+StableHLO rank8-off/on replay.
+
 Atomic SwiGLU selection now defers rank8 fitting until the complete
 gate/up/down candidate triplet has been selected. The fit consumes the
 selected serialized payload and immutable dense teacher snapshot, then adds
