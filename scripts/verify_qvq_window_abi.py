@@ -24,6 +24,13 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--fixture", type=Path, required=True)
     parser.add_argument(
+        "--zml-m",
+        type=int,
+        default=33,
+        choices=(1, 33, 128, 2048, 8192),
+        help="row count used by the exported StableHLO/ZML fixture",
+    )
+    parser.add_argument(
         "--max-recovery-overhead-percent",
         type=float,
         default=None,
@@ -96,7 +103,8 @@ def main():
         files[name] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
     with torch.no_grad():
-        for m in (1, 33, 128, 2048):
+        m_values = (1, 33, 128, 2048, 8192) if args.zml_m == 8192 else (1, 33, 128, 2048)
+        for m in m_values:
             x = rows[torch.arange(m, device="cuda") % rows.shape[0]].contiguous()
             for algorithm in ("hopper_m16", "hopper_direct_decode_mma"):
                 for enabled in (False, True):
@@ -117,7 +125,7 @@ def main():
                     print(row, flush=True)
                     if not row["finite"] or row["mae"] > 2e-3 or row["max"] > 0.046875:
                         raise ValueError("native window ABI exceeds local numerical gate")
-                    if m == 33 and algorithm == "hopper_direct_decode_mma":
+                    if m == args.zml_m and algorithm == "hopper_direct_decode_mma":
                         save("expected_on" if enabled else "expected_off", expected)
                         save("x", x)
         window, banks, alt = layer._prepare_amd_p32_metadata(rows.device)
@@ -135,7 +143,7 @@ def main():
         # buffers.  The standalone ZML verifier must not tune or replay rank8
         # factors whose audit/signature metadata was dropped during export.
         "recovery": artifact_package["recovery"],
-        "config": {"abi_version": 3, "struct_bytes": ctypes.sizeof(WindowConfig), "m": 33,
+        "config": {"abi_version": 3, "struct_bytes": ctypes.sizeof(WindowConfig), "m": args.zml_m,
                    "k": layer.in_features, "n": layer.out_features, "transition_bits": round(2 * layer.bits),
                    "bank_alt_id": alt, "algorithm": 2, "block_m": 64, "block_n": 64,
                    "input_hadamard": int(layer.input_hadamard), "output_hadamard": int(layer.output_hadamard)},

@@ -216,6 +216,13 @@ candidate carrying its arithmetic signature. The complete 14-row report is
 `results/p32_window_native_zml_policy.json`; it is evidence that timing and
 recovery-budget gates remain subordinate to the declared numerical contract.
 
+A selectable-M rerun now exercises the same ZML verifier at M=8192. Without a
+budget, quality selects BM128/BN128 (2.193 ms) with an 11.095% measured rank8
+overhead; with the explicit 5% promotion gate, it selects BM32/BN128 (2.342 ms)
+at 4.855%. The paired reports are recorded in
+`results/p32_window_native_zml_m8192_policy.json`, confirming that large-M rank8
+is shape- and budget-dependent rather than universally free.
+
 After widening the native ABI to admit transform-free composite dimensions,
 the fresh-library H200 rerun is recorded in
 `results/p32_window_native_zml_current.json`. It includes the real
