@@ -33,11 +33,6 @@ def main():
         ),
     )
     args = parser.parse_args()
-    if args.max_recovery_overhead_percent is not None and (
-        args.max_recovery_overhead_percent < 0
-        or not math.isfinite(args.max_recovery_overhead_percent)
-    ):
-        parser.error("--max-recovery-overhead-percent must be finite and non-negative")
     import torch
 
     from gptqmodel.quantization.qvq_rank8 import (
@@ -54,6 +49,17 @@ def main():
 
     torch.backends.cuda.matmul.allow_tf32 = False
     layer = load_window_package(torch.load(args.package, weights_only=True), device="cuda")
+    recovery_budget = args.max_recovery_overhead_percent
+    if recovery_budget is None:
+        tuning = getattr(layer, "_p32_window_tuning", None)
+        if isinstance(tuning, dict):
+            candidate_budget = tuning.get("max_recovery_overhead_percent")
+            if candidate_budget is not None:
+                recovery_budget = float(candidate_budget)
+    if recovery_budget is not None and (
+        recovery_budget < 0 or not math.isfinite(recovery_budget)
+    ):
+        parser.error("--max-recovery-overhead-percent must be finite and non-negative")
     rows = torch.load(args.activations, weights_only=True)["audit_1"].cuda().half()
     report = {"scope": "Real-factor/captured-activation native ABI equivalence; no fitting or model-quality claim",
               "preflight": idle.as_dict(), "cases": []}
@@ -109,8 +115,8 @@ def main():
                      + [native_window_library()._name],
         "files": files,
     }
-    if args.max_recovery_overhead_percent is not None:
-        manifest["max_recovery_overhead_percent"] = args.max_recovery_overhead_percent
+    if recovery_budget is not None:
+        manifest["max_recovery_overhead_percent"] = recovery_budget
     (args.fixture / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     report["fixture"] = manifest
     args.output.write_text(json.dumps(report, indent=2) + "\n")
