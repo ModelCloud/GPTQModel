@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import MethodType
 from typing import ClassVar
 
@@ -23,6 +24,7 @@ from gptqmodel.quantization.qvq import (
     pack_qvq_binary_bank_ids,
     unpack_qvq_binary_bank_ids,
 )
+from gptqmodel.quantization.qvq_rank8 import P32WindowConfig
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_fp16_to_fp8_e5m2_clamped,
@@ -417,6 +419,36 @@ def test_sibling_lifecycle_fires_once_and_never_returns_stale_output(monkeypatch
     assert runtime.telemetry.stale_cycles == 1
     assert runtime.telemetry.plain_fallbacks == 2
 
+
+def test_grouped_hopper_policy_accepts_split_tuple_and_rejects_unimplemented_geometry():
+    shared = torch.randn(256)
+    children = tuple(
+        _child(name, su=shared, seed=71 + index)
+        for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+    )
+    attention = _Attention(children)
+    assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
+    runtime = attention.q_proj._gptqmodel_qvq_grouped_runtime
+    base = P32WindowConfig()
+    for child in children:
+        child._p32_window_config = base
+    direct = replace(
+        base,
+        algorithm="hopper_direct_decode_mma",
+        block_m=64,
+        block_n=64,
+        warp_groups=1,
+    )
+    for child in children:
+        child._p32_window_config = direct
+    reason = runtime._runtime_eligible(torch.randn(1, 256))
+    assert reason == "grouped Hopper tuning requires hopper_m16 for every child; direct BM/BN geometry is single-child only"
+
+    split_policy = replace(direct, algorithm="hopper_m16", block_m=0, block_n=0, warp_groups=0)
+    for child in children:
+        child._p32_window_config = split_policy
+    reason = runtime._runtime_eligible(torch.randn(1, 256))
+    assert reason == "grouped Hopper requires FP16 or BF16 CUDA activations"
 
 def test_base_fuse_uses_architecture_roles_and_preserves_qvq_checkpoint_buffers():
     shared = torch.ones(256)

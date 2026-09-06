@@ -12,11 +12,13 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import asdict, dataclass, replace
+from itertools import product
 
 import torch
 
 from .qvq import repack_p32_planar_to_window, repack_p32_window_to_planar
 from .qvq_codecs import pgc16_levels_for_version
+from .qvq_rates import qvq_transition_bits
 from .rotation.hadamard_utils import matmul_hadU
 
 CONTRACT = "p32-window-r8-v1:fp32-project,fp16-hidden,fp32-expand-add,existing-output-transform"
@@ -1882,8 +1884,10 @@ def grouped_window_kernel_candidates(layers, *, m):
     a function of each child's ``N``.  Return candidate tuples in child order
     so the grouped runtime and an external tuner can benchmark/select one
     complete policy without collapsing the widths into a synthetic total.
-    Other grouped backends retain the generic production consumer until their
-    architecture-specific grouped implementation is explicitly certified.
+    Hopper grouped consumers use the same policy tuple with child-local
+    ordered split counts.  The grouped runtime consumes these policies when
+    prepared; unsupported BM/BN geometry remains rejected explicitly rather
+    than silently ignored.
     Enumeration is shape arithmetic only and performs no CUDA work.
     """
 
@@ -1939,11 +1943,61 @@ def grouped_window_kernel_candidates(layers, *, m):
         )
     properties = torch.cuda.get_device_properties(device)
     if (properties.major, properties.minor) != (8, 0):
-        return (
+        if (properties.major, properties.minor) != (9, 0):
+            return (
+                tuple(
+                    policy(child, algorithm="production_window", split_k=1)
+                    for child in children
+                ),
+            )
+
+        # Hopper's grouped consumer exposes ordered split-K, while BM/BN
+        # geometry is currently a single-child control.  Enumerate a compact,
+        # shape-valid per-child split set so callers can benchmark complete
+        # tuples without deriving a synthetic total-N policy.  Include the
+        # measured H100 tuple first when one exists; on other SM90 devices the
+        # same explicit alternatives remain available for local tuning.
+        from ..utils.qvq_wgmma_cuda import qvq_h100_grouped_ordered_split_counts
+
+        transition_bits = qvq_transition_bits(
+            reference.bits, vector_size=reference.vector_size
+        )
+        measured = qvq_h100_grouped_ordered_split_counts(
+            device_name=properties.name,
+            compute_capability=(properties.major, properties.minor),
+            in_features=reference.in_features,
+            out_features=tuple(child.out_features for child in children),
+            transition_bits=transition_bits,
+        )
+        k_tiles = reference.in_features // 16
+        base_values = (1, 2, 4, 8)
+        options = []
+        for index, child in enumerate(children):
+            values = list(base_values)
+            if measured is not None:
+                values.append(int(measured[index]))
+            values = sorted(
+                {
+                    split
+                    for split in values
+                    if split >= 1
+                    and k_tiles % split == 0
+                    and (k_tiles // split) % 16 == 0
+                }
+            )
+            if not values:
+                raise ValueError("grouped Hopper shape has no valid split policy")
+            options.append(tuple(values))
+        split_tuples = list(product(*options))
+        if measured is not None:
+            measured = tuple(int(value) for value in measured)
+            split_tuples.sort(key=lambda value: (value != measured, value))
+        return tuple(
             tuple(
-                policy(child, algorithm="production_window", split_k=1)
-                for child in children
-            ),
+                policy(child, algorithm="hopper_m16", split_k=split)
+                for child, split in zip(children, split_counts, strict=True)
+            )
+            for split_counts in split_tuples
         )
 
     from ..utils.qvq_ampere_cuda import (

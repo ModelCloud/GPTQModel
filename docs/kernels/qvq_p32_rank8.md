@@ -122,7 +122,10 @@ Unsupported devices, activation contracts and shapes fail explicitly.
 `window_tuning_key` includes physical product name/UUID/memory/SM count,
 shape, rate, M, TP world/rank, transforms, quality/recovery state and caller
 build identity. It is a key builder, not a ZML autotuner or StableHLO lowering.
-Grouped dispatch retains its existing geometry policy.
+Grouped Hopper dispatch accepts a complete tuple of `hopper_m16` child
+policies and consumes each child’s selected split count when building the
+segmented payload. Single-child BM/BN controls remain rejected for grouped
+execution until a grouped kernel exposes those axes directly.
 
 When tuning is applied to a module, the unified package also carries an
 optional versioned `kernel_tuning` record. It stores the selected backend

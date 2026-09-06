@@ -518,14 +518,27 @@ class QVQHopperGroupedRuntime:
         self, x: torch.Tensor, *, maximum_rows: int | None = None
     ) -> str | None:
         children = self._children()
-        if any(
-            (
-                getattr(getattr(child, "_p32_window_config", None), "algorithm", "auto").startswith("hopper_")
-                or getattr(getattr(child, "_p32_window_config", None), "algorithm", "auto") == "ampere_window"
-            )
-            for child in children
-        ):
-            return "explicit child window policy requires independent dispatch"
+        policies = tuple(getattr(child, "_p32_window_config", None) for child in children)
+        algorithms = tuple(getattr(policy, "algorithm", "auto") for policy in policies)
+        if any(algorithm == "ampere_window" for algorithm in algorithms):
+            return "Ampere child window policy requires the SM80 grouped dispatcher"
+        explicit_hopper = any(
+            algorithm in ("hopper_m16", "hopper_direct_decode_mma")
+            or getattr(policy, "split_k", 1) != 1
+            for algorithm, policy in zip(algorithms, policies, strict=True)
+        )
+        if explicit_hopper:
+            if not all(algorithm == "hopper_m16" for algorithm in algorithms):
+                return (
+                    "grouped Hopper tuning requires hopper_m16 for every child; "
+                    "direct BM/BN geometry is single-child only"
+                )
+            if any(
+                getattr(policy, field, 0)
+                for policy in policies
+                for field in ("block_m", "block_n", "warp_groups", "chunk_m")
+            ):
+                return "grouped Hopper BM/BN/chunk controls are not implemented"
 
         if not isinstance(x, torch.Tensor):
             return "input is not a tensor"
@@ -624,6 +637,15 @@ class QVQHopperGroupedRuntime:
                 children[0].bits, vector_size=children[0].vector_size
             ),
         )
+        explicit_hopper = all(
+            getattr(getattr(child, "_p32_window_config", None), "algorithm", "auto")
+            == "hopper_m16"
+            for child in children
+        )
+        if explicit_hopper:
+            measured_splits = tuple(
+                int(child._p32_window_config.split_k) for child in children
+            )
 
         plan = qvq_p32_window_wgmma_group_plan(
             placeholder,

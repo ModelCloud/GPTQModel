@@ -324,6 +324,51 @@ def test_grouped_window_candidates_preserve_child_split_tuples(monkeypatch):
     )
 
 
+def test_grouped_hopper_candidates_keep_child_local_split_choices(monkeypatch):
+    """SM90 grouping exposes shape-valid ordered split tuples for ZML/native tuning."""
+
+    config = P32WindowConfig(quality_mode="fast")
+
+    class Child:
+        v2b2_p32 = True
+        in_features = 2048
+        bits = 3
+        vector_size = 2
+        codebook_version = "V2"
+
+        def __init__(self, out_features):
+            self.out_features = out_features
+            self._p32_window_config = config
+
+        @staticmethod
+        def runtime_device():
+            return torch.device("cuda", 0)
+
+    children = (Child(2048), Child(512), Child(512))
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: type(
+            "Properties", (), {"major": 9, "minor": 0, "name": "NVIDIA H200"}
+        )(),
+    )
+    candidates = grouped_window_kernel_candidates(children, m=128)
+
+    assert len(candidates) == 64
+    assert all(len(candidate) == 3 for candidate in candidates)
+    assert all(
+        child.algorithm == "hopper_m16"
+        and child.min_m == child.max_m == 128
+        and child.split_k in (1, 2, 4, 8)
+        for candidate in candidates
+        for child in candidate
+    )
+    assert any(
+        tuple(child.split_k for child in candidate) == (1, 2, 4)
+        for candidate in candidates
+    )
+
+
 def test_external_window_controls_roundtrip_and_cpu_candidates():
     config = P32WindowConfig(
         algorithm="hopper_direct_decode_mma",
