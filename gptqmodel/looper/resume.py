@@ -26,6 +26,7 @@ from safetensors.torch import save_file as safetensors_save_file
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization.config import resolve_quant_format
 from ..utils.logger import setup_logger
+from ..utils.module_locks import parent_module_lock
 from ..utils.model import create_quant_module
 
 log = setup_logger()
@@ -128,6 +129,12 @@ def _resume_fingerprint(looper, layer_count: int) -> dict:
         "format": str(qcfg.format),
         "dynamic": repr(qcfg.dynamic) if qcfg.dynamic else None,
         "pack_dtype": str(qcfg.pack_dtype),
+        # These affect the generated scales/zeros and therefore cannot be
+        # changed while reusing already-packed layers.
+        "damp_percent": float(getattr(qcfg, "damp_percent", 0.0) or 0.0),
+        "static_groups": bool(getattr(qcfg, "static_groups", False)),
+        "mse": float(getattr(qcfg, "mse", 0.0) or 0.0),
+        "act_group_aware": bool(getattr(qcfg, "act_group_aware", False)),
         "layer_count": int(layer_count),
         "model_name_or_path": str(getattr(model_config, "_name_or_path", "") or ""),
         "hidden_size": int(getattr(model_config, "hidden_size", 0) or 0),
@@ -270,8 +277,9 @@ def save_activation_cache(
 
     try:
         os.makedirs(cache_dir, exist_ok=True)
-        tmp_path = os.path.join(cache_dir, "activations.safetensors.tmp")
-        final_path = os.path.join(cache_dir, "activations.safetensors")
+        generation = uuid.uuid4().hex
+        tmp_path = os.path.join(cache_dir, f"activations.{generation}.safetensors.tmp")
+        final_path = os.path.join(cache_dir, f"activations.{generation}.safetensors")
         safetensors_save_file(tensors, tmp_path)
         os.replace(tmp_path, final_path)
 
@@ -280,6 +288,7 @@ def save_activation_cache(
             "num_batches": len(layer_inputs),
             "batch_lengths": [len(batch) for batch in layer_inputs],
             "has_shared_kv": has_shared_kv,
+            "data_file": os.path.basename(final_path),
             "fingerprint": _resume_fingerprint(looper, layer_count),
         }
         meta_tmp = os.path.join(cache_dir, "activations.json.tmp")
@@ -307,14 +316,19 @@ def _read_valid_activation_cache_meta(looper, layer_index: int, layer_count: int
         return None
 
     meta_path = os.path.join(cache_dir, "activations.json")
-    data_path = os.path.join(cache_dir, "activations.safetensors")
-    if not os.path.isfile(meta_path) or not os.path.isfile(data_path):
+    if not os.path.isfile(meta_path):
         return None
 
     try:
         with open(meta_path, encoding="utf-8") as fp:
             meta = json.load(fp)
     except (OSError, ValueError):
+        return None
+
+    data_name = meta.get("data_file", "activations.safetensors")
+    if not isinstance(data_name, str) or os.path.basename(data_name) != data_name:
+        return None
+    if not os.path.isfile(os.path.join(cache_dir, data_name)):
         return None
 
     if meta.get("layer_index") != layer_index:
@@ -356,7 +370,10 @@ def load_activation_cache(looper, layer_index: int, layer_count: int):
 
     qcfg = looper.gptq_model.quantize_config
     cache_dir = _activation_cache_dir(qcfg)
-    data_path = os.path.join(cache_dir, "activations.safetensors")
+    data_name = meta.get("data_file", "activations.safetensors")
+    if not isinstance(data_name, str) or os.path.basename(data_name) != data_name:
+        return None
+    data_path = os.path.join(cache_dir, data_name)
 
     try:
         tensors = safetensors_load_file(data_path)
@@ -575,7 +592,14 @@ def restore_completed_layer_class_only(looper, layer_prefix: str) -> List[str]:
     offload_root = qcfg.offload_to_disk_path
 
     restored: List[str] = []
-    for full_name, _bundle in _offloaded_layer_modules(offload_root, layer_prefix):
+    for full_name, bundle in _offloaded_layer_modules(offload_root, layer_prefix):
+        if os.path.basename(os.path.dirname(bundle)).endswith(".old"):
+            old_dir = os.path.dirname(bundle)
+            live_dir = old_dir[:-4]
+            with parent_module_lock(full_name):
+                if not os.path.exists(live_dir):
+                    os.replace(old_dir, live_dir)
+                    bundle = os.path.join(live_dir, "module.safetensors")
         try:
             submodule = model.model.get_submodule(full_name)
         except AttributeError:

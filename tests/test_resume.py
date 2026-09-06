@@ -235,6 +235,21 @@ def test_fingerprint_differs_when_calibration_content_changes_at_equal_size():
     assert fp_a["calibration_hash"] != fp_b["calibration_hash"]
 
 
+@pytest.mark.parametrize("field, first, second", [
+    ("damp_percent", 0.01, 0.02),
+    ("static_groups", False, True),
+    ("mse", 0.0, 2.4),
+    ("act_group_aware", False, True),
+])
+def test_fingerprint_rejects_output_affecting_quant_config_drift(field, first, second):
+    qcfg = _make_qcfg()
+    setattr(qcfg, field, first)
+    fp_a = _resume_fingerprint(_make_looper(qcfg, [{"input_ids": [1, 2]}]), layer_count=3)
+    setattr(qcfg, field, second)
+    fp_b = _resume_fingerprint(_make_looper(qcfg, [{"input_ids": [1, 2]}]), layer_count=3)
+    assert fp_a != fp_b
+
+
 # -- activation cache integrity -----------------------------------------------
 
 
@@ -264,11 +279,25 @@ def test_activation_cache_unavailable_when_data_file_is_corrupted(tmp_path):
     with _resume_opted_in():
         save_activation_cache(looper, layer_index=0, layer_count=3, layer_inputs=[[torch.randn(2, 3)]])
 
-        data_path = tmp_path / "resume_activation_cache" / "activations.safetensors"
+        meta = json.loads((tmp_path / "resume_activation_cache" / "activations.json").read_text())
+        data_path = tmp_path / "resume_activation_cache" / meta["data_file"]
         data_path.write_bytes(b"not a real safetensors file")
 
         assert not activation_cache_available(looper, layer_index=0, layer_count=3)
         assert load_activation_cache(looper, layer_index=0, layer_count=3) is None
+
+
+def test_activation_cache_metadata_binds_immutable_generation(tmp_path):
+    qcfg = _make_qcfg(offload_to_disk_path=str(tmp_path))
+    looper = _make_looper(qcfg, [{"input_ids": [1, 2, 3, 4]}])
+    with _resume_opted_in():
+        save_activation_cache(looper, 0, 3, [[torch.randn(2, 3)]])
+        assert activation_cache_available(looper, 0, 3)
+    cache_dir = tmp_path / "resume_activation_cache"
+    meta = json.loads((cache_dir / "activations.json").read_text())
+    assert meta["data_file"].startswith("activations.")
+    assert meta["data_file"].endswith(".safetensors")
+    assert (cache_dir / meta["data_file"]).is_file()
 
 
 # -- write_resume_marker / read_resume_target round trip ----------------------
