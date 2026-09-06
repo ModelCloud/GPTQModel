@@ -158,4 +158,8 @@ Transform wave39 added the existing CUDA Hadamard primitive with SU/SV fused
 into the scorecard boundaries. Standalone input/output checks were bitwise
 equal; all 72 BM64/BN32 cases passed, with pooled speedup 1.539x at M=512 and
 1.787x at M=2048, while low-M direct decode remains slower. This is a fairer
-layer scorecard but still does not establish a 3x result.
+layer scorecard but still does not establish a 3x result. Nsight wave40
+bracketed the same BM64 decode/MMA call on all eight GPUs and reproduced 64
+registers, 45.6% achieved occupancy, 14.72B integer SASS, and 13.8%
+long-scoreboard stalls. The transform fold changes boundary cost only; it does
+not yet overlap transform work with MMA.

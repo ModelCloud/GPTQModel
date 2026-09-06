@@ -284,6 +284,30 @@ kernel is much slower for M≤16, crosses the window near M=128, and reaches
 does not by itself reach 3×. Complete scorecards are in
 [wave 39 results](results/bm64bn32-fused-transform-wave39/).
 
+Wave 40 ran the matching Nsight profile on all eight projections at M=2048.
+The profiler is intentionally bracketed around the decode/MMA call by
+`--profile-fused`, so the transform fold does not alter the measured inner
+kernel. Its pooled metrics reproduce the BM64 resource profile:
+
+| Metric | CUDA-fused transform arm |
+|---|---:|
+| Registers/thread | 64 |
+| Dynamic shared memory/CTA | 8,192 bytes |
+| Achieved occupancy | 45.6% |
+| Integer SASS instructions | 14.72B |
+| Memory SASS instructions | 3.23B |
+| HMMA instructions | 16.78M |
+| Long-scoreboard stall | 13.8% |
+| Barrier stall | 11.7% |
+| Math-pipe throttle | 14.1% |
+| MIO throttle | 5.3% |
+
+This confirms that SU/Hadamard/SV folding improves boundary work without
+changing BM64 decode/MMA resource use. It does not hide the decoder under
+MMA; the next 3× experiment must fuse the transform work into the CTA or
+reduce the decode/MMA critical path. Raw profiles are in
+[wave 40 results](results/bm64bn32-transform-ncu-wave40/).
+
 ## Decision and next target
 
 The current exact dispatch remains production window for M < 512 and the
