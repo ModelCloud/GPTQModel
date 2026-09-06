@@ -61,9 +61,13 @@ extern "C" int qvq_p32_window_linear(
     check(config && config->abi_version == 3 && config->struct_bytes == sizeof(*config),
           "unsupported window ABI version or configuration size");
     const auto& c = *config;
-    check(c.m >= 1 && c.m <= 8192 && c.k >= 2048 && c.k <= 16384 && power2(c.k)
-          && c.n >= 256 && c.n <= 16384 && power2(c.n),
-          "native window ABI requires M1..8192, power-of-two K2048..16384/N256..16384");
+    // The WGMMA decoder consumes 256-wide K/N tiles.  Hadamard transforms
+    // additionally require a power-of-two width, but the transform-free
+    // composite path must admit production projections such as Qwen's
+    // K=5120/N=17408 (both are valid 256-wide tile shapes).
+    check(c.m >= 1 && c.m <= 8192 && c.k >= 2048 && c.k <= 16384 && c.k % 256 == 0
+          && c.n >= 256 && c.n <= 17408 && c.n % 256 == 0,
+          "native window ABI requires M1..8192 and 256-wide K2048..16384/N256..17408");
     check(c.transition_bits >= 4 && c.transition_bits <= 7 && c.bank_alt_id <= 3,
           "invalid P32 transition bits or alternative bank id");
     check(c.min_m >= 1 && c.min_m <= c.m && c.max_m >= c.m && c.max_m <= 8192,
@@ -72,6 +76,10 @@ extern "C" int qvq_p32_window_linear(
           "native reference ABI requires BK256, stages2, split1");
     check(c.input_hadamard <= 1 && c.output_hadamard <= 1 && c.rank8_enabled <= 1,
           "native window flags must be zero or one");
+    check(!c.input_hadamard || power2(c.k),
+          "native input Hadamard requires power-of-two K");
+    check(!c.output_hadamard || power2(c.n),
+          "native output Hadamard requires power-of-two N");
     check((c.algorithm == 1 && c.block_m == 0 && c.block_n == 0 && c.warp_groups == 0)
           || (c.algorithm == 2 && (c.block_m == 32 || c.block_m == 64 || c.block_m == 128)
               && (c.block_n == 64 || c.block_n == 128)

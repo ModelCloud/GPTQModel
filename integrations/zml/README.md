@@ -8,7 +8,10 @@ state of the same call. It does not introduce another checkpoint format.
 The initial native reference bridge supports:
 
 - SM90, contiguous FP16 activation/scales/levels/factors/output;
-- M=1..8192, power-of-two K=2048..16384 and N=256..16384;
+- M=1..8192, 256-wide K=2048..16384 and N=256..17408. Input/output
+  Hadamard remains available for power-of-two widths; transform-free
+  composite projections such as K=5120/N=17408 are accepted by the same
+  window ABI.
 - P32 W2/W2.5/W3/W3.5, the existing unpacked per-tile bank selectors;
 - existing M16 or direct BM32/64/128, BN64/128, BK256, stages2, split1;
 - optional input/output Hadamard and bias;

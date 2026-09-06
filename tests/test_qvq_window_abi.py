@@ -68,6 +68,57 @@ def test_native_abi_rejects_bad_version_before_reading_buffers():
     assert status != 0 and b"ABI version" in error.value
 
 
+def test_native_abi_admits_transform_free_composite_qwen_shape():
+    """Composite Qwen tiles pass ABI shape validation without Hadamard."""
+    library = native_window_library()
+    error = ctypes.create_string_buffer(256)
+    config = WindowConfig(
+        3, ctypes.sizeof(WindowConfig), 1, 5120, 17408, 6, 3, 1,
+        0, 0, 256, 0, 2, 1, 1, 8192, 0, 0, 0,
+    )
+    status = library.qvq_p32_window_linear(
+        *([WindowBuffer(None, 0)] * 10), ctypes.byref(config), None, error, len(error),
+    )
+    assert status != 0
+    assert b"input pointer is null" in error.value
+    assert b"power-of-two" not in error.value
+
+
+def test_native_abi_keeps_hadamard_power_of_two_guard():
+    library = native_window_library()
+    error = ctypes.create_string_buffer(256)
+    config = WindowConfig(
+        3, ctypes.sizeof(WindowConfig), 1, 5120, 17408, 6, 3, 1,
+        0, 0, 256, 0, 2, 1, 1, 8192, 1, 0, 0,
+    )
+    status = library.qvq_p32_window_linear(
+        *([WindowBuffer(None, 0)] * 10), ctypes.byref(config), None, error, len(error),
+    )
+    assert status != 0 and b"input Hadamard" in error.value
+
+
+def test_native_composite_qwen_shape_matches_window_reference():
+    """Exercise the real decoder for the production 5120 x 17408 shape."""
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child(
+        "qwen_composite",
+        in_features=5120,
+        out_features=17408,
+        bits=3.0,
+        device="cuda",
+        input_hadamard=False,
+        output_hadamard=False,
+    )
+    x = torch.randn(1, 5120, device="cuda", dtype=torch.float16) * 0.01
+    config = P32WindowConfig(algorithm="hopper_m16", recovery_mode="off")
+    prepare_rank8(layer, config)
+    with torch.no_grad():
+        expected = layer(x)
+        actual = native_window_linear(layer, x, config)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
 def test_native_disabled_pointers_and_external_capture_rejection(monkeypatch):
     from test_qvq_grouped_runtime import _child
 

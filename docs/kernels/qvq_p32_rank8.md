@@ -744,7 +744,9 @@ PJRT-provided CUDA stream. It executes without Python and reuses existing
 Hopper window/Hadamard operators. Geometry and correction state are individual
 compiler attributes. The initial native contract supports explicit M16 or
 BM32/64/128 with BN64/128, BK256/stages2/split1 and reference rank8, on SM90
-with power-of-two K2048..16384/N256..16384 and M1..8192.
+with 256-wide K2048..16384/N256..17408 and M1..8192. Hadamard transforms
+remain power-of-two only; transform-free composite shapes such as
+K5120/N17408 are now admitted and have a real H200 bit-exact ABI check.
 
 The [native/ZML evidence](results/p32_window_native_zml.json) retains 16
 bit-exact real-Q native/reference cases at M1/33/128/2048, plus successful ZML
