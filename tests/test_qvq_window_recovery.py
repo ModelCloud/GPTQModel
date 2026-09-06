@@ -488,6 +488,10 @@ def test_cuda_window_package_owns_window_payload_without_planar_vram_copy():
     assert legacy.trellis.device.type == "cpu"
     x = torch.randn(16, 256, device="cuda", dtype=torch.float16) * 0.01
     torch.testing.assert_close(loaded(x), source(x), rtol=0, atol=0)
+    # Production ownership must remain window-only at the largest supported
+    # prefill shape; this used to fall through to the released planar copy.
+    x_large = torch.randn(8192, 256, device="cuda", dtype=torch.float16) * 0.01
+    torch.testing.assert_close(loaded(x_large), source(x_large), rtol=0, atol=0)
 
 
 def test_binding_and_mutation_guard():

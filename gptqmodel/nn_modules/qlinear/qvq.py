@@ -1642,7 +1642,11 @@ class QVQLinear(BaseQuantLinear):
                 self.v2b2_p32
                 and self.vector_size == 2
                 and x.dtype == torch.float16
-                and 0 < x.shape[0] <= 4096
+                # The window-owned Hopper large-M path supports the full
+                # public M range through 8192.  Keeping the old 4096 guard
+                # here silently fell through to the planar CUDA fallback,
+                # which is unavailable after a production window-only load.
+                and 0 < x.shape[0] <= 8192
                 and self.in_features % 256 == 0
                 and self.out_features % 256 == 0
                 and qvq_transition_bits(self.bits, vector_size=2) in (4, 5, 6, 7)
