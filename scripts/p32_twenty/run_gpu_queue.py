@@ -15,6 +15,8 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
+TERMINAL_STATUSES = ("complete", "failed", "superseded")
+
 
 def read_json(path):
     try:
@@ -91,7 +93,7 @@ def main():
         records = {j["id"]: {"id": j["id"], "status": "pending"} for j in jobs}
         if previous:
             for r in previous["jobs"]:
-                if r["id"] in records and r["status"] in ("complete", "failed"):
+                if r["id"] in records and r["status"] in TERMINAL_STATUSES:
                     records[r["id"]] = r
         live = {}
 
@@ -187,7 +189,7 @@ def main():
                 live[job["id"]] = (proc, gpu, log)
                 print("STARTED", job["id"], proc.pid, gpu["uuid"], flush=True)
             save()
-            if args.exit_when_drained and all(r["status"] in ("complete", "failed") for r in records.values()):
+            if args.exit_when_drained and all(r["status"] in TERMINAL_STATUSES for r in records.values()):
                 return
             time.sleep(5)
 
