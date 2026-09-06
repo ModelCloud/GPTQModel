@@ -8,7 +8,7 @@ steps, not a redefinition of that goal. Baseline includes PR #137 at
 | Phase | Required deliverable | Authoritative current state | Still required |
 |---|---|---|---|
 | 0 | Versioned off/on numerical contract, optional per module/graph, FP32 initial accumulation | `qvq_rank8.py`, local off/on and graph tests | Full supported precision/device/TP matrix |
-| 1 | Normal P32 → lossless window → original-teacher output residual → two output-aware fits in one job, document-disjoint validation | Public `quantize(rank8_capture=...)` for materialized or explicitly lazy teachers; bounded document capture and deterministic memory-capped output-range fitting, module finalizer and tiny-Llama integration; atomic SwiGLU defers fitting until the selected serialized triplet and appends factors to that payload; output-aligned modules defer fitting until final SU/SV state | Real-model fit evidence |
+| 1 | Normal P32 → lossless window → original-teacher output residual → two output-aware fits in one job, document-disjoint validation | Public `quantize(rank8_capture=...)` for materialized or explicitly lazy teachers; bounded document capture and deterministic memory-capped output-range fitting, module finalizer and tiny-Llama integration; atomic SwiGLU defers fitting until the selected serialized triplet and appends factors to that payload; output-aligned modules defer fitting until final SU/SV state; real H200 Llama first-layer Q/gate fit and four-document audit are recorded | Broader real-model/module coverage and full-model fit provenance |
 | 2 | One deployment package, first-class A/B, metadata/hashes, byte/BPW reporting | Standard module buffers plus unified exporter/loader; selected-module weighted window/recovered BPW, rank8 delta and actual serialized container bytes; public tiny-Llama save/reload preserves accepted factors, validates hashes and reproduces corrected module output | Real-model checkpoint matrix |
 | 3 | Production/direct × off/on, integrated API, same transformed input, eager/graphs | H200 tests for auto/M16/row-reuse; independent factors and disabled poison checks; prepared native graph replay is now used by the ZML adapter | Explicit nested ZML user-capture replay through the public executable API and full shape/rate/repetition matrix |
 | 4 | Existing Hopper WGMMA + optional rank8; H100/H200 BM/BN/warp-group/stage candidates | Existing WGMMA retained; explicit BM32/64/128, BN64/128, BK256/stages2; H200 off/on sweep | BN32 and additional stage/warp candidates, grouped explicit controls, integrate rank8 into consumer pipeline, both-device sweep |
@@ -151,5 +151,5 @@ selected serialized payload and immutable dense teacher snapshot, then adds
 `rank8_A`, `rank8_B`, and `rank8_metadata` to that same payload before
 staging. This prevents candidate-zero factors from being paired with a
 different selected bank arm. Output-aligned modules consume the final aligned
-SU/SV payload before fitting. The remaining open Phase 1 evidence is
-real-model fit coverage.
+SU/SV payload before fitting. The remaining Phase 1 work is broader model and
+module coverage; the real first-layer H200 fit/audit evidence is complete.
