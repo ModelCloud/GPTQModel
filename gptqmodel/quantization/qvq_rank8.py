@@ -483,8 +483,22 @@ def rank8_audit_acceptance(audit_rows, *, minimum_improvement=0.0):
         }
     documents = []
     accepted = True
+    seen_document_ids = set()
     for row in rows:
         try:
+            if not isinstance(row, dict):
+                raise TypeError("audit rows must be mappings")
+            document_id = row.get("document_id")
+            document_rows = row.get("rows", 0)
+            if (
+                not isinstance(document_id, str)
+                or not document_id
+                or document_id in seen_document_ids
+                or type(document_rows) is not int
+                or document_rows < 1
+            ):
+                raise ValueError("invalid audit document identity")
+            seen_document_ids.add(document_id)
             baseline = row["baseline"]
             recovered = row["recovered"]
             values = tuple(
@@ -497,16 +511,18 @@ def rank8_audit_acceptance(audit_rows, *, minimum_improvement=0.0):
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("invalid rank8 audit metrics") from exc
         finite = all(torch.isfinite(torch.tensor(value)) for value in values)
+        nonnegative = all(value >= 0 for value in values)
         baseline_mse, _, _, baseline_tail, recovered_mse, _, _, recovered_tail = values
         mse_ok = recovered_mse <= baseline_mse * (1 - minimum_improvement)
         tail_ok = recovered_tail <= baseline_tail
-        document_ok = bool(finite and mse_ok and tail_ok)
+        document_ok = bool(finite and nonnegative and mse_ok and tail_ok)
         accepted = accepted and document_ok
         documents.append(
             {
                 "document_id": row.get("document_id"),
-                "rows": int(row.get("rows", 0)),
+                "rows": document_rows,
                 "finite": finite,
+                "nonnegative": nonnegative,
                 "mse_ok": bool(mse_ok),
                 "tail_ok": bool(tail_ok),
                 "accepted": document_ok,
@@ -1486,6 +1502,20 @@ def fit_rank8_serialized_payload(
         )
         report["audit_acceptance"] = audit_gate
         report["audit_validated"] = bool(audit_gate["accepted"])
+        report["audit_input_hash"] = _digest(
+            {"audit_inputs": calibration.audit_inputs}, {}
+        )
+        report["audit_document_ids"] = list(calibration.audit_document_ids)
+        report["audit_row_counts"] = list(calibration.audit_row_counts)
+        if audit_gate["accepted"]:
+            metadata = _metadata(layer)
+            metadata.update(
+                audit_input_hash=report["audit_input_hash"],
+                audit_document_ids=report["audit_document_ids"],
+                audit_row_counts=report["audit_row_counts"],
+            )
+            with torch.inference_mode(False):
+                layer.rank8_metadata = _encode(metadata, layer.runtime_device())
         report["validated"] = bool(report.get("validated") and audit_gate["accepted"])
         if not audit_gate["accepted"]:
             report["selected"] = False

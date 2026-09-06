@@ -750,6 +750,8 @@ def test_quantize_fit_export_is_one_module_job(tmp_path):
     )
     assert result.rank8_fit_report is not None
     assert result.rank8_fit_report["source_kind"] == "calibration"
+    assert result.rank8_fit_report["audit_validated"]
+    assert result.rank8_fit_report["audit_document_ids"] == ["audit"]
     layer = QVQLinear(
         bits=2,
         in_features=32,
