@@ -6,6 +6,7 @@
 import argparse
 import hashlib
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -22,7 +23,21 @@ def main():
     parser.add_argument("--activations", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--fixture", type=Path, required=True)
+    parser.add_argument(
+        "--max-recovery-overhead-percent",
+        type=float,
+        default=None,
+        help=(
+            "optional hard gate copied into the fixture manifest; the ZML "
+            "tuner rejects rank8 geometries above this matched off/on cost"
+        ),
+    )
     args = parser.parse_args()
+    if args.max_recovery_overhead_percent is not None and (
+        args.max_recovery_overhead_percent < 0
+        or not math.isfinite(args.max_recovery_overhead_percent)
+    ):
+        parser.error("--max-recovery-overhead-percent must be finite and non-negative")
     import torch
 
     from gptqmodel.quantization.qvq_rank8 import (
@@ -94,6 +109,8 @@ def main():
                      + [native_window_library()._name],
         "files": files,
     }
+    if args.max_recovery_overhead_percent is not None:
+        manifest["max_recovery_overhead_percent"] = args.max_recovery_overhead_percent
     (args.fixture / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     report["fixture"] = manifest
     args.output.write_text(json.dumps(report, indent=2) + "\n")
