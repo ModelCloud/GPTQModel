@@ -12,6 +12,7 @@ from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.quantization.qvq import reconstruct_qvq_inner_weight
 from gptqmodel.quantization.qvq_rank8 import (
     P32WindowConfig,
+    _rank8_output_fit,
     add_rank8_correction,
     export_window_package,
     fit_rank8,
@@ -61,6 +62,33 @@ def fixture(hadamard=True):
         teacher.weight.copy_((y * layer.SV).T)
     train, heldout = torch.randn(80, k), torch.randn(40, k)
     return layer, teacher, train, heldout
+
+
+def test_rank8_large_output_uses_bounded_randomized_solver():
+    torch.manual_seed(9)
+    x = torch.randn(24, 32, dtype=torch.float64)
+    residual = torch.randn(24, 64, dtype=torch.float64)
+    weights = torch.ones((24, 1), dtype=torch.float64)
+    a, b, mode = _rank8_output_fit(
+        x,
+        residual,
+        weights,
+        max_solver_bytes=1,
+        rcond=1e-5,
+        seed=123,
+    )
+    again_a, again_b, again_mode = _rank8_output_fit(
+        x,
+        residual,
+        weights,
+        max_solver_bytes=1,
+        rcond=1e-5,
+        seed=123,
+    )
+    assert mode == again_mode == "randomized_output_range"
+    assert a.shape == (32, 8) and b.shape == (8, 64)
+    torch.testing.assert_close(a, again_a, rtol=0, atol=0)
+    torch.testing.assert_close(b, again_b, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize(

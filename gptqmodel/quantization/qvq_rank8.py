@@ -399,6 +399,52 @@ def _check_documents(train_ids, heldout_ids):
         raise ValueError("fit and held-out document IDs must be nonempty and disjoint")
 
 
+def _rank8_output_fit(
+    x_train,
+    residual,
+    weights,
+    *,
+    max_solver_bytes,
+    rcond,
+    seed,
+):
+    """Fit a rank-8 output correction without an unbounded KxN workspace.
+
+    Small modules retain the original deterministic least-squares/SVD reference
+    path. For large K/N, a fixed-seed randomized output range produces an
+    equivalent rank-8 factorization while keeping solver work proportional to
+    ``(K + N) * rank`` instead of materializing a dense predicted ``rows x N``
+    matrix and a full ``K x N`` least-squares solution.
+    """
+    if type(max_solver_bytes) is not int or max_solver_bytes < 1:
+        raise ValueError("max_solver_bytes must be a positive integer")
+    design = x_train * weights
+    response = residual * weights
+    rows, k = design.shape
+    n = response.shape[1]
+    rank = min(8, k, n)
+    full_bytes = 8 * (k * n + rows * n)
+    if full_bytes <= max_solver_bytes:
+        solution = torch.linalg.lstsq(design, response, driver="gelsd", rcond=rcond).solution
+        _, _, vh = torch.linalg.svd(design @ solution, full_matrices=False)
+        rank = min(rank, vh.shape[0])
+        a = solution @ vh[:rank].T
+        b = vh[:rank]
+        return a, b, "full_lstsq_svd"
+
+    # Randomized range finding is deterministic for a fixed contract seed.
+    # Oversampling is deliberately omitted: the deployed factor rank is fixed
+    # at eight and the extra columns would only increase capture memory.
+    generator = torch.Generator(device="cpu").manual_seed(seed)
+    omega = torch.randn((n, rank), dtype=response.dtype, generator=generator)
+    q, _ = torch.linalg.qr(response @ omega, mode="reduced")
+    output_basis, _ = torch.linalg.qr(response.T @ q, mode="reduced")
+    a = torch.linalg.lstsq(
+        design, response @ output_basis, driver="gelsd", rcond=rcond
+    ).solution
+    return a, output_basis.T, "randomized_output_range"
+
+
 @torch.no_grad()
 def fit_rank8(
     layer,
@@ -410,19 +456,24 @@ def fit_rank8(
     heldout_document_ids,
     source_kind="calibration",
     minimum_improvement=0.01,
+    max_solver_bytes=256 * 1024 * 1024,
 ):
     """Finish a quantized module with two rank-8 fits; never consume eval benchmarks.
 
     Inputs must be original activations from disjoint calibration documents.
     The caller owns document provenance and row collection. The teacher must
     be the original FP linear module, before quantized replay overwrites it.
-    Dense CPU FP64 SVD/lstsq is an initial bounded-calibration reference fitter.
+    Dense CPU FP64 SVD/lstsq is used while its estimated workspace fits
+    ``max_solver_bytes``. Larger projections use a fixed-seed output-range
+    sketch whose working factors scale with rank rather than K*N.
     """
     if source_kind != "calibration":
         raise ValueError("only calibration activations may enter recovery fitting")
     _check_documents(train_document_ids, heldout_document_ids)
     if not 0 <= minimum_improvement < 1:
         raise ValueError("minimum_improvement must be in [0, 1)")
+    if type(max_solver_bytes) is not int or max_solver_bytes < 1:
+        raise ValueError("max_solver_bytes must be a positive integer")
     if not isinstance(teacher, torch.nn.Linear) or teacher.training or layer.training:
         raise ValueError("fitting requires eval-mode original FP Linear and P32 module")
     if (teacher.in_features, teacher.out_features) != (
@@ -470,22 +521,26 @@ def fit_rank8(
         # Reduced-rank regression: SVD of the least-squares *predicted output*,
         # not the weight residual. Rank-deficient inputs use the SVD solver.
         candidates = []
+        solver_modes = {}
         for objective in ("output_l2", "tail_weighted_output_l2"):
             weights = torch.ones((x_train.shape[0], 1), dtype=torch.float64)
             if objective == "tail_weighted_output_l2":
                 energy = residual[0].square().mean(1, keepdim=True)
                 weights = (1 + energy / energy.mean().clamp_min(1e-30)).sqrt()
-            design = x_train * weights
-            response = residual[0] * weights
-            solution = torch.linalg.lstsq(
-                design, response, driver="gelsd", rcond=1e-5
-            ).solution
-            _, _, vh = torch.linalg.svd(design @ solution, full_matrices=False)
-            rank = min(8, vh.shape[0])
+            fitted_a, fitted_b, solver_mode = _rank8_output_fit(
+                x_train,
+                residual[0],
+                weights,
+                max_solver_bytes=max_solver_bytes,
+                rcond=1e-5,
+                seed=0x51564 + (0 if objective == "output_l2" else 1),
+            )
+            solver_modes[objective] = solver_mode
+            rank = min(8, fitted_a.shape[1], fitted_b.shape[0])
             a = torch.zeros((layer.in_features, 8), dtype=torch.float64)
             b = torch.zeros((8, layer.out_features), dtype=torch.float64)
-            a[:, :rank] = solution @ vh[:rank].T
-            b[:rank] = vh[:rank]
+            a[:, :rank] = fitted_a[:, :rank]
+            b[:rank] = fitted_b[:rank]
             # final correction = H(inner correction) * SV, so inner B =
             # H^T(final B / SV). transpose=True matters for composite widths.
             b = b / layer.SV.detach().double().cpu()
@@ -542,6 +597,8 @@ def fit_rank8(
             "candidates": {c[0]: c[3] for c in candidates},
             "minimum_improvement": minimum_improvement,
             "lstsq_rcond": 1e-5,
+            "max_solver_bytes": max_solver_bytes,
+            "solver_modes": solver_modes,
             "fit_device": str(layer.trellis.device),
             "activation_dtype": str(train_inputs.dtype),
             "fit_output_boundary": "original_activation_dtype",
