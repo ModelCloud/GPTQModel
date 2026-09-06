@@ -1,6 +1,6 @@
 {
   "scope": "Prepared native graph-backed ZML StableHLO integration on one H200; no serving promotion",
-  "base_revision": "02c1fcb6",
+  "base_revision": "984295dd",
   "worktree_dirty": false,
   "native_abi_build": "ffe774ebad78a48a",
   "zml": {
