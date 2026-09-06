@@ -448,6 +448,7 @@ def test_forward_pretransformed_propagates_requested_store_dtype():
     layer, _, train, _ = fixture(hadamard=False)
     seen = {}
     original = layer._forward_pretransformed_compute_dtype
+    original_recover = layer._recover_output_compute_dtype
 
     def wrapped(transformed, compute_dtype, *, output_dtype=None, rank8_hidden=None):
         seen["output_dtype"] = output_dtype
@@ -459,9 +460,16 @@ def test_forward_pretransformed_propagates_requested_store_dtype():
         )
 
     layer._forward_pretransformed_compute_dtype = wrapped
+
+    def recover(output, compute_dtype, *, target_dtype=None):
+        seen["target_dtype"] = target_dtype
+        return original_recover(output, compute_dtype, target_dtype=target_dtype)
+
+    layer._recover_output_compute_dtype = recover
     transformed = layer.transform_input(train)
     layer.forward_pretransformed(transformed, output_dtype=torch.float16)
     assert seen["output_dtype"] == torch.float16
+    assert seen["target_dtype"] == torch.float16
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

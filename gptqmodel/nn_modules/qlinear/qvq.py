@@ -2368,7 +2368,9 @@ class QVQLinear(BaseQuantLinear):
             from ...quantization.qvq_rank8 import add_rank8_correction
 
             output = add_rank8_correction(self, transformed, output, hidden=rank8_hidden)
-        return self._recover_output_compute_dtype(output, compute_dtype)
+        return self._recover_output_compute_dtype(
+            output, compute_dtype, target_dtype=output_dtype
+        )
 
     def _recover_output_compute_dtype(
         self,
