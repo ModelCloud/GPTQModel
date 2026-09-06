@@ -160,12 +160,21 @@ def main():
                         return_ordered_partials
                         or ordered_split_count is not None
                         or x.dtype != torch.float16
-                        or x.shape[0] < self._study_min_rows
                     ):
                         return self._study_original_inner(
                             x,
                             return_ordered_partials=return_ordered_partials,
                             ordered_split_count=ordered_split_count,
+                        )
+                    if x.shape[0] < self._study_min_rows:
+                        return qvq_p32_window_ampere(
+                            x.contiguous(),
+                            self._study_window,
+                            self._study_levels,
+                            self.bank_ids,
+                            self.bits,
+                            out_features=self.out_features,
+                            bank_alt_id=self._study_alt,
                         )
                     if self._study_fused:
                         return fused_window_mm(
