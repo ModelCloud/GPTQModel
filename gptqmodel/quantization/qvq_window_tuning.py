@@ -194,6 +194,7 @@ def tune_window_kernel(
     candidates=None,
     apply=True,
     measure_recovery=False,
+    measure_recovery_candidates=False,
     tp_world_size=1,
     tp_rank=0,
 ):
@@ -208,6 +209,12 @@ def tune_window_kernel(
     marginal-latency record for the selected candidate.  This is a scorecard
     measurement only; it never changes quality eligibility.
 
+    Set ``measure_recovery_candidates=True`` to collect that same paired
+    measurement for every candidate row.  This is useful when BM/BN winners
+    differ between correction states: the report retains both medians for each
+    geometry while selection still uses only the validated arithmetic and
+    output-correctness gates.
+
     All input cases must have one shape/dtype/device. Cache entries bind exact
     validation inputs, deployment state, candidate set, hardware and compiler
     build. A hit revalidates the selected executable before applying it.
@@ -216,6 +223,10 @@ def tune_window_kernel(
     """
     if not isinstance(build_id, str) or not build_id:
         raise ValueError("a nonempty compiler/kernel build identity is required")
+    if not isinstance(measure_recovery, bool) or not isinstance(
+        measure_recovery_candidates, bool
+    ):
+        raise TypeError("recovery measurement flags must be bool")
     inputs = (inputs,) if isinstance(inputs, torch.Tensor) else tuple(inputs)
     if not inputs or any(not isinstance(x, torch.Tensor) for x in inputs):
         raise ValueError("tuning requires activation tensors")
@@ -276,6 +287,7 @@ def tune_window_kernel(
         "factors_hash": _metadata(layer)["factors_hash"] if enabled else None,
         "candidates": [c.to_backend_config() for c in choices],
         "gate": {"mae": 2e-3, "max": 0.046875, "version": 1},
+        "measure_recovery_candidates": measure_recovery_candidates,
     }
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     cache = Path(cache_dir) / (key + ".json") if cache_dir is not None else None
@@ -291,9 +303,9 @@ def tune_window_kernel(
                     "production reference is non-finite; tuning cannot proceed"
                 )
 
-            def executable(config):
+            def executable(config, *, expected_enabled=enabled):
                 prepare_rank8(layer, config)
-                if bool(layer._p32_rank8_enabled) != enabled:
+                if bool(layer._p32_rank8_enabled) != expected_enabled:
                     raise ValueError(
                         "a kernel candidate changed correction eligibility"
                     )
@@ -302,6 +314,44 @@ def tune_window_kernel(
                     if compile_candidate is None
                     else compile_candidate(config.to_backend_config())
                 )
+
+            def benchmark_samples(fn):
+                samples = [float(v) for v in benchmark(fn, first)]
+                if not samples or any(
+                    not math.isfinite(v) or v <= 0 for v in samples
+                ):
+                    raise ValueError(
+                        "benchmark must return finite positive latency samples"
+                    )
+                return samples
+
+            def recovery_pair(config):
+                if not enabled:
+                    raise RuntimeError(
+                        "recovery candidate measurement requires enabled factors"
+                    )
+                off_config = replace(config, recovery_mode="off")
+                on_config = replace(config, recovery_mode="on")
+                off_fn = executable(off_config, expected_enabled=False)
+                off_samples = benchmark_samples(off_fn)
+                on_fn = executable(on_config, expected_enabled=True)
+                on_samples = benchmark_samples(on_fn)
+                off_median = statistics.median(off_samples)
+                on_median = statistics.median(on_samples)
+                return {
+                    "off": {
+                        "config": off_config.to_backend_config(),
+                        "samples_us": off_samples,
+                        "median_us": off_median,
+                    },
+                    "on": {
+                        "config": on_config.to_backend_config(),
+                        "samples_us": on_samples,
+                        "median_us": on_median,
+                    },
+                    "overhead_us": on_median - off_median,
+                    "overhead_percent": (on_median / off_median - 1.0) * 100.0,
+                }
 
             if cache is not None and cache.exists():
                 cached = json.loads(cache.read_text())
@@ -332,14 +382,10 @@ def tune_window_kernel(
                     }
                     # Failed candidates remain visible; timing them permits
                     # scoped human review of unusually large potential gains.
-                    samples = [float(v) for v in benchmark(fn, first)]
-                    if not samples or any(
-                        not math.isfinite(v) or v <= 0 for v in samples
-                    ):
-                        raise ValueError(
-                            "benchmark must return finite positive latency samples"
-                        )
+                    samples = benchmark_samples(fn)
                     row.update(samples_us=samples, median_us=statistics.median(samples))
+                    if measure_recovery_candidates and enabled:
+                        row["recovery_overhead"] = recovery_pair(config)
                     report["rows"].append(row)
                 passing = [r for r in report["rows"] if r["accepted"]]
                 if not passing:

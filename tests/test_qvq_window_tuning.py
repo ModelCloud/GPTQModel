@@ -142,6 +142,32 @@ def test_window_tuner_can_attach_matched_rank8_overhead(tmp_path):
     assert layer._p32_window_config == result.config
 
 
+def test_window_tuner_can_measure_recovery_pair_for_each_candidate(tmp_path):
+    layer, _, x, _ = fixture()
+    _kernel_rank8(layer)
+    prepare_rank8(layer, P32WindowConfig(recovery_mode="on", quality_mode="fast"))
+
+    def sample(fn, inputs):
+        fn(inputs)
+        return [1.05 if layer._p32_rank8_enabled else 1.0]
+
+    result = tune_window_kernel(
+        layer,
+        x,
+        benchmark=sample,
+        build_id="per-candidate-overhead",
+        cache_dir=tmp_path,
+        measure_recovery_candidates=True,
+    )
+    assert len(result.report["rows"]) == 1  # CPU fixture has one production candidate.
+    pair = result.report["rows"][0]["recovery_overhead"]
+    assert pair["off"]["median_us"] == pytest.approx(1.0)
+    assert pair["on"]["median_us"] == pytest.approx(1.05)
+    assert pair["overhead_percent"] == pytest.approx(5.0)
+    cached = json.loads(next(tmp_path.glob("*.json")).read_text())
+    assert cached["identity"]["measure_recovery_candidates"] is True
+
+
 def test_applied_tuning_metadata_roundtrips_with_unified_package(tmp_path):
     layer, _, x, _ = fixture()
     prepare_rank8(layer, P32WindowConfig())
