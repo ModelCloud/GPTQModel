@@ -52,6 +52,14 @@ command-buffer path has been exercised by the StableHLO verifier with two calls
 per correction mode. Explicit nested user capture remains an additional
 validation item, so the adapter evidence does not claim that case is complete.
 
+That external verifier was rerun against the current ZML source build
+`8d67a352` with the CUDA PJRT/StableHLO bundle on the H200. Its release build
+produced the GPU PJRT plugin and runtime sandbox, and the real M33/K=N2048
+fixture remained bit-exact for both rank8-off and rank8-on executable calls.
+This strengthens the public ZML command-buffer evidence without changing the
+scope: explicit user-owned nested capture, TP/KV execution and H100 coverage
+remain open.
+
 The prepared native graph passed 350 focused H200 tests, including 168 graph
 cases across four rates, M1/33/128, M16 and all six BM/BN choices, correction
 off/on, disabled invalid factor pointers, repeated changed inputs, allocator
