@@ -27,6 +27,7 @@ def _gemm(
     PROMOTION_K: tl.constexpr,
     FOLDED_ADDRESSES: tl.constexpr = False,
     PREDICATED_BANK_XOR: tl.constexpr = False,
+    PAIR_LEVEL_LUT: tl.constexpr = False,
     DECODE_ONLY: tl.constexpr = False,
 ):
     rows = tl.program_id(0) * BM + tl.arange(0, BM)
@@ -62,11 +63,15 @@ def _gemm(
             state = state ^ tl.where(bank_bit != 0, ALT, 0)
         else:
             state = state ^ (bank_bit * ALT)
-        mixed = state ^ (state >> 8)
-        mixed = (mixed * 40503 + 17011) & 65535
-        mixed = mixed ^ (mixed >> 7)
-        index = tl.where((cols[None, :] % 2) == 0, mixed >> 8, mixed & 255)
-        b = tl.load(LEVELS + index)
+        if PAIR_LEVEL_LUT:
+            parity = cols[None, :] & 1
+            b = tl.load(LEVELS + state * 2 + parity)
+        else:
+            mixed = state ^ (state >> 8)
+            mixed = (mixed * 40503 + 17011) & 65535
+            mixed = mixed ^ (mixed >> 7)
+            index = tl.where((cols[None, :] % 2) == 0, mixed >> 8, mixed & 255)
+            b = tl.load(LEVELS + index)
         if DECODE_ONLY:
             tl.store(Y + krow[:, None] * N + cols[None, :], b, cols[None, :] < N)
         a = tl.load(X + rows[:, None] * K + krow[None, :], rows[:, None] < M, 0)
@@ -101,6 +106,9 @@ def fused_window_mm(
     promotion_k=0,
     address_mode="baseline",
     bank_mode="multiply",
+    decode_mode="scalar",
+    num_warps=4,
+    num_stages=2,
 ):
     if x.dtype != torch.float16 or levels.dtype != torch.float16:
         raise ValueError("FP16 activation and canonical level buffers required")
@@ -115,8 +123,8 @@ def fused_window_mm(
         raise ValueError("Expected contiguous tensors on one CUDA device")
     if torch.cuda.get_device_capability(x.device) != (8, 0):
         raise ValueError("This experimental kernel is validated only on sm80")
-    if levels.numel() != 256 or window.dtype != torch.int32 or bank.dtype != torch.uint8:
-        raise ValueError("Expected canonical 256-level, int32-word, uint8-bank buffers")
+    if bank.dtype != torch.uint8:
+        raise ValueError("Expected uint8-bank buffers")
     m, k = x.shape
     n = out_features
     t = int(2 * bits)
@@ -136,10 +144,20 @@ def fused_window_mm(
         raise ValueError("Unsupported address algebra mode")
     if bank_mode not in ("multiply", "predicated"):
         raise ValueError("Unsupported bank algebra mode")
-    if window.numel() != (k // 16) * (n // 16) * 4 * t or bank.numel() != (k // 16) * (
+    if decode_mode not in ("scalar", "pair-lut"):
+        raise ValueError("Unsupported decode mode")
+    expected_levels = 256 if decode_mode == "scalar" else 65536 * 2
+    if levels.numel() != expected_levels:
+        raise ValueError(f"Expected {expected_levels} decode levels for {decode_mode}")
+    expected_payload_bytes = (k // 16) * (n // 16) * 16 * t
+    if window.numel() * window.element_size() != expected_payload_bytes or bank.numel() != (k // 16) * (
         n // 16
     ):
         raise ValueError("Payload geometry mismatch")
+    if window.dtype != torch.int32:
+        raise ValueError("Standard window payload must use torch.int32")
+    if num_warps not in (2, 4, 8) or num_stages not in (1, 2, 3, 4):
+        raise ValueError("Unsupported launch configuration")
     masks = {
         4: [0, 0x5A5A, 0x3C3C, 0xC3C3],
         5: [0, 0x9696, 0x3C3C, 0xC3C3],
@@ -166,7 +184,8 @@ def fused_window_mm(
         promotion_k,
         address_mode == "factored",
         bank_mode == "predicated",
-        num_warps=4,
-        num_stages=2,
+        decode_mode == "pair-lut",
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return partial[0] if split == 1 else partial.sum(0)

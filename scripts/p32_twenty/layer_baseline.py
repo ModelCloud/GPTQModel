@@ -31,6 +31,11 @@ def main():
         "--fused-bank-mode", choices=("multiply", "predicated"), default="multiply"
     )
     parser.add_argument(
+        "--fused-decode-mode", choices=("scalar", "pair-lut"), default="scalar"
+    )
+    parser.add_argument("--fused-num-warps", type=int, choices=(2, 4, 8), default=4)
+    parser.add_argument("--fused-num-stages", type=int, choices=(1, 2, 3, 4), default=2)
+    parser.add_argument(
         "--fused-promotion-k", type=int, choices=(0, 16, 32, 64, 128, 256), default=0
     )
     parser.add_argument("--module")
@@ -165,7 +170,14 @@ def main():
         K = su.numel()
         aid = alt.item()
         levels = pgc16_levels_for_version(cfg["codebook"]).cuda().contiguous()
+        fused_levels = levels
         window = repack_p32_planar_to_window(t, bits=bits)
+        if args.fused_decode_mode == "pair-lut":
+            state_ids = torch.arange(65536, device=levels.device, dtype=torch.int64)
+            mixed = state_ids ^ (state_ids >> 8)
+            mixed = (mixed * 40503 + 17011) & 65535
+            mixed = mixed ^ (mixed >> 7)
+            fused_levels = torch.stack((levels[mixed >> 8], levels[mixed & 255]), dim=1).contiguous()
         inner = reconstruct_qvq_inner_weight(
             t,
             bits=bits,
@@ -232,12 +244,15 @@ def main():
 
                 def fused(z):
                     return fused_window_mm(
-                        z, window, levels, bank, bits, out_features=N,
+                        z, window, fused_levels, bank, bits, out_features=N,
                         bank_alt_id=aid, block_m=args.fused_block_m,
                         block_n=args.fused_block_n, split=args.fused_split,
                         promotion_k=args.fused_promotion_k,
                         address_mode=args.fused_address_mode,
                         bank_mode=args.fused_bank_mode,
+                        decode_mode=args.fused_decode_mode,
+                        num_warps=args.fused_num_warps,
+                        num_stages=args.fused_num_stages,
                     )
 
             if args.profile_fused:
@@ -267,6 +282,9 @@ def main():
                             "promotion_k": args.fused_promotion_k,
                             "address_mode": args.fused_address_mode,
                             "bank_mode": args.fused_bank_mode,
+                            "decode_mode": args.fused_decode_mode,
+                            "num_warps": args.fused_num_warps,
+                            "num_stages": args.fused_num_stages,
                         },
                     }
                 )
