@@ -39,8 +39,11 @@ table, bank selector validation and core GEMV/v4/Hadamard handles to be ready
 before a graph is created. Host-validated CUDA Viterbi/telemetry helpers reject
 capture explicitly. The ROCm YAQA trusted recurrence now applies the same
 guard; its prepared internal graph remains the supported repeated path.
-Quantization kernel integrations, TP/KV execution, and remaining
-capture-sensitive lazy paths still require an explicit audit.
+Quantization kernel integrations now fail closed at the YAQA Sketch-B
+collection and Gram-materialization boundary as well as at the underlying
+CUDA projection/Viterbi helpers; quantization is preparation work and must
+finish before capture. TP/KV execution and remaining capture-sensitive lazy
+paths still require an explicit audit.
 
 The native prepared-graph API owns its temporary allocation pool and can insert
 the existing window/rank8 operator as a child of an enclosing CUDA capture. The
