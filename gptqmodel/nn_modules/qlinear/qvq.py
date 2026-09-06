@@ -644,6 +644,34 @@ class QVQLinear(BaseQuantLinear):
         """Drop cached dtype conversions (call if SU/SV/bias are replaced)."""
         self._dtype_cache = {}
 
+    def _prepare_cuda_graph_auxiliary_caches(self) -> None:
+        """Materialize constant dtype variants used by graph-safe fallback paths.
+
+        The normal FP16 forward only needs the FP16 transform constants during
+        warmup.  A CUDA graph must also be able to take the BF16 overflow-rescue
+        path without allocating a new cast buffer while capture is active.
+        Keep this preparation explicit and outside capture; the forward path
+        remains free of host synchronization and cache mutation.
+        """
+        if self.trellis.device.type != "cuda":
+            return
+        self._require_prepared_outside_capture(
+            self.trellis.device, "auxiliary dtype caches"
+        )
+        for compute_dtype in (torch.float16, torch.bfloat16):
+            self._cached_cast("SU", compute_dtype)
+            for output_dtype in (torch.float16, torch.bfloat16, torch.float32):
+                self._cached_cast("SV", compute_dtype, output_dtype)
+                self._cached_cast("bias", compute_dtype, output_dtype)
+
+    @staticmethod
+    def _require_prepared_outside_capture(device: torch.device, what: str) -> None:
+        """Fail closed when a cold cache would allocate or synchronize in capture."""
+        if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                f"QVQ {what} must be prepared before CUDA Graph capture"
+            )
+
     def _prepare_hopper_p32_window(
         self,
         device: torch.device,
@@ -665,6 +693,7 @@ class QVQLinear(BaseQuantLinear):
             and cached[2] == device
         ):
             return cached[3]
+        self._require_prepared_outside_capture(device, "window payload")
         window = repack_p32_planar_to_window(source.contiguous(), bits=self.bits).to(
             device=device
         )
@@ -681,6 +710,7 @@ class QVQLinear(BaseQuantLinear):
         cached = self._qvq_fp8_levels_cache
         if cached is not None and cached[0] == device:
             return cached[1], cached[2]
+        self._require_prepared_outside_capture(device, "FP8 level table")
         fp8_dtype = torch.float8_e4m3fn
         fp8_max = float(torch.finfo(fp8_dtype).max)
         canonical = pgc16_levels_for_version(self.codebook_version).to(torch.float32)
@@ -752,6 +782,7 @@ class QVQLinear(BaseQuantLinear):
                 packed = cached[5]
                 bank_alt_id = cached[6]
             else:
+                self._require_prepared_outside_capture(device, "bank selector payload")
                 snapshot = None
                 snapshot_version = -1
                 for _ in range(3):
@@ -945,6 +976,7 @@ class QVQLinear(BaseQuantLinear):
         key = (name, dtypes)
         cached = self._dtype_cache.get(key)
         if cached is None or cached[0] is not tensor or cached[1] != tensor._version:
+            self._require_prepared_outside_capture(tensor.device, "auxiliary dtype cache")
             converted = tensor
             for dtype in dtypes:
                 converted = converted.to(dtype)
@@ -1455,6 +1487,9 @@ class QVQLinear(BaseQuantLinear):
                         cuda_bank_alt_id = cached[6]
                         cached = None
                     if cuda_bank_ids is None:
+                        self._require_prepared_outside_capture(
+                            x.device, "CUDA bank selector payload"
+                        )
                         # Clone between two version reads. If a free-threaded
                         # writer mutates during the clone, retry rather than
                         # publishing a snapshot under the wrong version.

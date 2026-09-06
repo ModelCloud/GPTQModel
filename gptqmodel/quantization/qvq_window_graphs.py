@@ -179,6 +179,7 @@ class P32WindowGraphs:
                             for name, child in self.layers.items():
                                 config = configs.get(mode, {}).get(name, P32WindowConfig())
                                 prepare_rank8(child, replace(config, recovery_mode="auto", quality_mode=mode))
+                                child._prepare_cuda_graph_auxiliary_caches()
                             buffers = {name: x.detach().clone() for name, x in inputs.items()}
                             for _ in range(warmup):
                                 self.model(**buffers, **static_kwargs)

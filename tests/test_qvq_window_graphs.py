@@ -227,3 +227,17 @@ def test_external_geometry_is_captured_without_overriding_quality(model):
         for name in actual:
             torch.testing.assert_close(actual[name], expected[name], atol=0, rtol=0)
     owner.close()
+
+
+@pytest.mark.filterwarnings("ignore:.*CUDA Graph is empty.*")
+def test_cold_qvq_payload_cache_fails_closed_during_capture(model):
+    """Preparation and dtype-cache allocation must happen before graph capture."""
+    child = model.q
+    child._dtype_cache_clear()
+    with child._qvq_cuda_bank_cache_lock:
+        child._qvq_cuda_bank_cache = None
+        child._qvq_cuda_window_cache = None
+    x = torch.randn(16, 256, device="cuda", dtype=torch.float16) * 0.01
+    graph = torch.cuda.CUDAGraph()
+    with pytest.raises(RuntimeError, match="must be prepared"), torch.cuda.graph(graph):
+        child(x)
