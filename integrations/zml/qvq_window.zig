@@ -585,15 +585,17 @@ pub fn loadArtifact(
     if (!std.mem.eql(u8, &actual_payload_hash, expected_payload_hash))
         return error.WindowArtifactBindingMismatch;
     if (root.get("recovery")) |recovery_value| {
-        const recovery_object = try artifactObject(recovery_value);
-        const expected_base_hash = try artifactString(try artifactField(recovery_object, "base_hash"));
-        const actual_base_hash = try artifactSemanticHash(allocator, io, &directory, metadata, tensors, false);
-        if (!std.mem.eql(u8, &actual_base_hash, expected_base_hash))
-            return error.WindowArtifactBaseHashMismatch;
-        const expected_factors_hash = try artifactString(try artifactField(recovery_object, "factors_hash"));
-        const actual_factors_hash = try artifactSemanticHash(allocator, io, &directory, metadata, tensors, true);
-        if (!std.mem.eql(u8, &actual_factors_hash, expected_factors_hash))
-            return error.WindowArtifactFactorsHashMismatch;
+        if (recovery_value != .null) {
+            const recovery_object = try artifactObject(recovery_value);
+            const expected_base_hash = try artifactString(try artifactField(recovery_object, "base_hash"));
+            const actual_base_hash = try artifactSemanticHash(allocator, io, &directory, metadata, tensors, false);
+            if (!std.mem.eql(u8, &actual_base_hash, expected_base_hash))
+                return error.WindowArtifactBaseHashMismatch;
+            const expected_factors_hash = try artifactString(try artifactField(recovery_object, "factors_hash"));
+            const actual_factors_hash = try artifactSemanticHash(allocator, io, &directory, metadata, tensors, true);
+            if (!std.mem.eql(u8, &actual_factors_hash, expected_factors_hash))
+                return error.WindowArtifactFactorsHashMismatch;
+        }
     }
     const k = try artifactU32(try artifactField(metadata, "in_features"));
     const n = try artifactU32(try artifactField(metadata, "out_features"));
