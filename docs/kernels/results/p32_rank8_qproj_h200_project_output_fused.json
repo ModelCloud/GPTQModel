@@ -1,0 +1,109 @@
+{
+  "scope": "accepted-factor Q projection replay; experimental fused X-prime projection plus output epilogue candidate; not full-model quality",
+  "revision": "a19944a9099694f0d1eeb67757692bbbaa20e381",
+  "worktree_dirty": false,
+  "sources": {
+    "gptqmodel/quantization/qvq_rank8.py": "588ce7a285cca5c7b85c388376674808ff2f04737897a1904022b12609824e7c",
+    "gptqmodel/nn_modules/qlinear/qvq.py": "fa54d471a32d1ff8ae419e883b7015d42756e2758240b12862086c5b7b7082b7",
+    "gptqmodel/nn_modules/qvq_grouped_runtime.py": "32f2cb18868c6d79afb5dcdb7f0c379c10521b9b21a585ca43ca5a8640e071fd",
+    "gptqmodel/utils/qvq_rank8_triton.py": "c54088e365a3c1e38feb87964efa01c399cd47be725b10c4e5e38dd49f84349f",
+    "gptqmodel/utils/qvq_wgmma_cuda.py": "3051316ac9ff31df0e126b3670773ccdfd9263c7b5c4fa98e74f203eba5c92be",
+    "gptqmodel/quantization/qvq_window_tuning.py": "409a4a5cdf0a085e2693e03ada41ae07e24a9ff3b46125a96bc3199f93dca51e",
+    "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu": "b6d3fecf48829a6bb1642e16bbe8fecc8c9b17136ddd131be3b904628058f156"
+  },
+  "hardware": {
+    "name": "NVIDIA H200",
+    "uuid": "0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "sm_count": 132,
+    "memory": 150101688320,
+    "capability": [
+      9,
+      0
+    ]
+  },
+  "software": {
+    "torch": "2.15.0.dev20260901+cu130",
+    "cuda": "13.0"
+  },
+  "build_identity": {
+    "qvq": "93bf5ed612db632a",
+    "wgmma": "0468d173c8fdfcdd",
+    "triton": "3.8.0",
+    "driver": "610.57.04"
+  },
+  "preflight": null,
+  "rows": [
+    {
+      "m": 8192,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "project_output_fused",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 813.0291366577148,
+      "median_us": 813.0448341369629,
+      "p95_us": 813.263988494873,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        813.263988494873,
+        812.7728462219238,
+        812.7152442932129,
+        813.0448341369629,
+        813.3487701416016
+      ],
+      "allocated_bytes": 236061696,
+      "peak_allocated_bytes": 336724992
+    },
+    {
+      "m": 8192,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "project_output_fused",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 1015.8377456665039,
+      "median_us": 1015.6975746154785,
+      "p95_us": 1015.9040451049805,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        1016.2991523742676,
+        1015.6064033508301,
+        1015.9040451049805,
+        1015.6975746154785,
+        1015.6815528869629
+      ],
+      "allocated_bytes": 269616128,
+      "peak_allocated_bytes": 437388288
+    }
+  ],
+  "activation_source": {
+    "path": "/root/qvq-results/current-qproj-fit/model.layers.0.self_attn.q_proj.activations.pt",
+    "sha256": "39fd8a245eb0bfbada06206abbdd7497967a1ca4e4c7651e35c87339b23594a3",
+    "rows": [
+      128,
+      128
+    ],
+    "expansion": "cyclic row replay to requested M; not a full-model prefill"
+  },
+  "comparison": {
+    "baseline_projection": "reference_projection + fused_epilogue",
+    "baseline_median_us": 951.1887550354004,
+    "candidate_median_us": 1015.6975746154785,
+    "candidate_overhead_vs_window_off": 0.24925161807789986,
+    "candidate_overhead_vs_baseline_fused": 0.06781915706906916,
+    "candidate_promoted": false,
+    "rejection_reason": "slower than reference-projection/fused-epilogue candidate at this shape"
+  }
+}
