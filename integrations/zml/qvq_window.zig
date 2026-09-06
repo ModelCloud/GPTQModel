@@ -783,6 +783,29 @@ pub fn loadArtifact(
 /// winning geometry is shape-, device- and correction-state dependent.
 pub const max_candidate_count: usize = 7;
 
+/// Arithmetic signatures are assigned by the producer after numerical
+/// certification.  A locally passing output gate is not sufficient to make
+/// a different reduction order eligible for a quality graph.
+pub const P32ArithmeticSignature = enum(u8) {
+    reference_fp32_v1,
+    certified_tensor_core_v1,
+    unverified,
+};
+
+pub const P32QualityMode = enum {
+    fast,
+    balanced,
+    quality,
+};
+
+fn p32ArithmeticAllowed(mode: P32QualityMode, signature: P32ArithmeticSignature) bool {
+    return switch (mode) {
+        .fast => true,
+        .balanced => signature == .reference_fp32_v1 or signature == .certified_tensor_core_v1,
+        .quality => signature == .reference_fp32_v1,
+    };
+}
+
 /// Result of one correctness-gated ZML candidate measurement. The executable
 /// and timing loop belong to the caller so it can use its own PJRT client and
 /// stream. Measurements must be collected before the final executable is
@@ -793,6 +816,9 @@ pub const CandidateMeasurement = struct {
     mean_absolute_error: f32,
     max_absolute_error: f32,
     accepted: bool,
+    /// The producer must set this from its arithmetic certification record;
+    /// reference is the safe default for the existing native ABI.
+    arithmetic_signature: P32ArithmeticSignature = .reference_fp32_v1,
     /// Matched complete-operator correction-off/on timing. This is optional
     /// for report-only tuning; an explicit recovery budget requires it.
     recovery_pair: ?RecoveryPairMeasurement = null,
@@ -922,7 +948,7 @@ pub fn selectFastest(
     candidates: []const Config,
     measurements: []const CandidateMeasurement,
 ) !TuningResult {
-    return selectFastestWithRecoveryGate(candidates, measurements, null);
+    return selectFastestWithPolicy(candidates, measurements, null, .balanced);
 }
 
 /// Select the fastest locally correct candidate, optionally requiring a
@@ -934,6 +960,18 @@ pub fn selectFastestWithRecoveryGate(
     measurements: []const CandidateMeasurement,
     maximum_percent: ?f64,
 ) !TuningResult {
+    return selectFastestWithPolicy(candidates, measurements, maximum_percent, .balanced);
+}
+
+/// Select the fastest candidate under an explicit arithmetic and recovery
+/// policy.  This is preparation-time tuning only; it must run before graph
+/// capture and cannot mutate a captured executable.
+pub fn selectFastestWithPolicy(
+    candidates: []const Config,
+    measurements: []const CandidateMeasurement,
+    maximum_percent: ?f64,
+    quality_mode: P32QualityMode,
+) !TuningResult {
     if (candidates.len == 0) return error.NoCandidates;
     if (candidates.len != measurements.len) return error.MeasurementCountMismatch;
     if (maximum_percent) |limit| {
@@ -942,6 +980,7 @@ pub fn selectFastestWithRecoveryGate(
     var selected: ?TuningResult = null;
     for (candidates, measurements, 0..) |candidate, measurement, index| {
         if (!measurement.accepted or measurement.median_ns == 0 or
+            !p32ArithmeticAllowed(quality_mode, measurement.arithmetic_signature) or
             !std.math.isFinite(measurement.mean_absolute_error) or
             !std.math.isFinite(measurement.max_absolute_error) or
             measurement.mean_absolute_error > 2e-3 or
@@ -1218,6 +1257,24 @@ test "native window ABI layout" {
     const winner = try selectFastest(candidates[0..count], &measurements);
     try std.testing.expectEqual(@as(usize, 3), winner.candidate_index);
     try std.testing.expectEqual(@as(u64, 20), winner.median_ns);
+
+    // A faster locally passing arithmetic variant is not eligible for a
+    // balanced or quality graph until its reduction has been certified.
+    measurements[1].arithmetic_signature = .unverified;
+    measurements[2].accepted = false;
+    measurements[3].accepted = false;
+    const balanced = try selectFastest(candidates[0..count], &measurements);
+    try std.testing.expectEqual(@as(usize, 0), balanced.candidate_index);
+    const fast = try selectFastestWithPolicy(
+        candidates[0..count], &measurements, null, .fast,
+    );
+    try std.testing.expectEqual(@as(usize, 1), fast.candidate_index);
+    const quality = try selectFastestWithPolicy(
+        candidates[0..count], &measurements, null, .quality,
+    );
+    try std.testing.expectEqual(@as(usize, 0), quality.candidate_index);
+    measurements[1].arithmetic_signature = .reference_fp32_v1;
+    measurements[2].accepted = true;
     measurements[3].accepted = false;
     const fallback = try selectFastest(candidates[0..count], &measurements);
     try std.testing.expectEqual(@as(usize, 0), fallback.candidate_index);
