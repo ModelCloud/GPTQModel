@@ -154,3 +154,8 @@ as a measured reuse ceiling, not a dispatcher replacement. Nsight wave38
 measured 87 registers/thread, 16 KiB shared memory, 30.3% achieved occupancy,
 and 23.2% long-scoreboard stalls; it cut integer SASS by about 50% but could
 not convert that reduction into a 3x runtime result.
+Transform wave39 added the existing CUDA Hadamard primitive with SU/SV fused
+into the scorecard boundaries. Standalone input/output checks were bitwise
+equal; all 72 BM64/BN32 cases passed, with pooled speedup 1.539x at M=512 and
+1.787x at M=2048, while low-M direct decode remains slower. This is a fairer
+layer scorecard but still does not establish a 3x result.

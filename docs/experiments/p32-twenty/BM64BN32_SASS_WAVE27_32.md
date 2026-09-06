@@ -260,6 +260,30 @@ The instruction reduction is real reuse, but it is purchased with 87 registers,
 This explains why the runtime gain is only 1.398× pooled at M=2048. Raw
 profiles are in [wave 38 results](results/bm128-ncu-wave38/).
 
+## Exact CUDA transform fold wave 39
+
+Wave 39 added an exact transform-mode control to the layer scorecard. With
+`cuda-fused`, the existing CUDA Hadamard primitive absorbs the FP32 SU
+pre-scale and SV post-scale around the BM64/BN32 operator; `separate` remains
+the historical reference path. Direct standalone checks on the Llama 3.2 1B
+shapes showed bitwise-equal input and output transform results. The P32 window
+payload and decoded values are unchanged.
+
+The fair comparison used CUDA-fused transforms for both production window and
+BM64/BN32, across eight projections and all nine row counts. All 72/72 cases
+passed both local gates. The pooled fused full-layer speedup was:
+
+| M | 1 | 2 | 4 | 8 | 16 | 32 | 128 | 512 | 2048 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| BM64/BN32 w4/s3 | 0.536× | 0.530× | 0.530× | 0.539× | 0.544× | 0.847× | 1.163× | 1.539× | 1.787× |
+
+This exposes the remaining shape boundary clearly: the direct decode/MMA
+kernel is much slower for M≤16, crosses the window near M=128, and reaches
+1.787× pooled at M=2048. The local fold removes roughly 0.7 ms from each
+2048-row transform in the layer-0 down example, but it benefits both arms and
+does not by itself reach 3×. Complete scorecards are in
+[wave 39 results](results/bm64bn32-fused-transform-wave39/).
+
 ## Decision and next target
 
 The current exact dispatch remains production window for M < 512 and the
