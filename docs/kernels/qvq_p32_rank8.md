@@ -416,6 +416,14 @@ returned split waves before capture and pass the selected split explicitly.
 ZML has the corresponding `enumerateCandidates`, `benchmarkExecutable` and
 `selectFastest` controls. Each backend keeps its own shape/device/rate cache.
 
+Grouped gate/up and QKV callers use `tune_grouped_window_kernel` with a tuple of
+child policies. The tuner validates and times each complete tuple, including
+matched correction-off/on samples when an overhead budget is requested, then
+caches the tuple identity with every child payload and shape. This preserves
+independent child split choices on SM80 and exposes the same explicit policy
+tuple to native callers and ZML; a policy is prepared before capture and is
+restored on failure.
+
 An optional `cache_dir` stores atomic JSON entries binding exact activation
 cases and strides, deployment payload and transforms, enabled correction
 factors, device identity, TP, software/driver API, compiler build and candidate

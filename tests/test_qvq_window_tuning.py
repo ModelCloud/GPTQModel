@@ -20,6 +20,7 @@ from gptqmodel.quantization.qvq_rank8 import (
 )
 from gptqmodel.quantization.qvq_window_tuning import (
     measure_rank8_overhead,
+    tune_grouped_window_kernel,
     tune_window_kernel,
 )
 
@@ -49,6 +50,68 @@ def test_cpu_cache_revalidates_and_binds_inputs(tmp_path):
     assert not changed.cache_hit and len(calls) == 2
     assert layer._p32_window_config == changed.config
     assert len(list(tmp_path.glob("*.json"))) == 2
+
+
+def test_grouped_tuner_selects_one_complete_child_tuple_and_caches_it(monkeypatch, tmp_path):
+    first, _, x, _ = fixture()
+    second, _, _, _ = fixture()
+    original = (P32WindowConfig(), P32WindowConfig())
+    from gptqmodel.quantization import qvq_window_tuning
+
+    for layer, config in zip((first, second), original, strict=True):
+        prepare_rank8(layer, config)
+    production = tuple(
+        replace(config, algorithm="production_window", min_m=1, max_m=1)
+        for config in original
+    )
+    alternate = tuple(
+        replace(config, algorithm="auto", min_m=1, max_m=1)
+        for config in original
+    )
+    monkeypatch.setattr(
+        qvq_window_tuning,
+        "grouped_window_kernel_candidates",
+        lambda layers, *, m: (production, alternate),
+    )
+
+    def compile_candidate(configs):
+        cost = 2.0 if configs[0]["algorithm"] == "production_window" else 1.0
+
+        def forward(value):
+            return tuple(
+                torch.ones((*value.shape[:-1], layer.out_features), dtype=value.dtype)
+                for layer in (first, second)
+            )
+
+        forward.cost = cost
+        return forward
+
+    result = tune_grouped_window_kernel(
+        (first, second),
+        x,
+        benchmark=lambda fn, value: [fn.cost],
+        compile_candidate=compile_candidate,
+        build_id="grouped-test",
+        cache_dir=tmp_path,
+        apply=False,
+    )
+    assert result.configs == alternate
+    assert result.report["selected"] == [config.to_backend_config() for config in alternate]
+    assert not result.cache_hit
+
+    cached = tune_grouped_window_kernel(
+        (first, second),
+        x,
+        benchmark=lambda fn, value: [fn.cost],
+        compile_candidate=compile_candidate,
+        build_id="grouped-test",
+        cache_dir=tmp_path,
+        apply=False,
+    )
+    assert cached.cache_hit
+    assert cached.configs == alternate
+    assert first._p32_window_config == original[0]
+    assert second._p32_window_config == original[1]
 
 
 def test_failure_restores_policy_and_cache_does_not_bypass_validation(tmp_path):
