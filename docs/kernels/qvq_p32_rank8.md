@@ -157,11 +157,13 @@ used instead.
 ## Remaining work and promotion boundary
 
 The reference/fused output epilogues, shared input producer, padded Tensor Core
-projection, request-owned model graphs and initial native/ZML reference bridge
-are implemented. Concurrent WGMMA input projection, complete native pipeline
-fusion, FP8 factors, BN32/additional stages, external capture workspace, native
-artifact loading, ZML latency tuning/cache integration, KV/TP graph ownership,
-the full real-model scorecard and H100/H200 promotion remain open.
+projection, request-owned model graphs, typed native artifact loading and
+initial native/ZML reference bridge are implemented. Allocation-free ZML
+candidate selection and direct executable timing hooks are also available for
+pre-capture tuning. Concurrent WGMMA input projection, complete native pipeline
+fusion, FP8 factors, BN32/additional stages, explicit external user capture,
+KV/TP graph ownership, the full real-model scorecard and H100/H200 promotion
+remain open.
 `fused_epilogue` runs expansion/add/Hadamard/SV/bias in one kernel.
 `fully_fused` remains unsupported; it does not alias the partial fusion.
 No <=3–5% overhead or model speed/quality claim follows from these tests.
