@@ -59,6 +59,29 @@ def get_temp_buffers(device, K: int):
     return temp_costs, temp_edges
 
 
+_workspace_registry_lock = threading.Lock()
+_workspace_gates = {}
+
+
+def _quantize_tiles_with_workspace(tiles, output, indices, K, mcg, mul1):
+    # The cached scratch tensors are writable. Order their use across streams,
+    # not just Python calls: releasing a mutex does not finish CUDA kernels.
+    key = (tiles.device, K)
+    with _workspace_registry_lock:
+        gate = _workspace_gates.setdefault(key, {"lock": threading.Lock(), "event": None})
+    stream = torch.cuda.current_stream(tiles.device)
+    with gate["lock"]:
+        if gate["event"] is not None:
+            stream.wait_event(gate["event"])
+        temp_costs, temp_edges = get_temp_buffers(tiles.device, K)
+        try:
+            ext.quantize_tiles(tiles, output, indices, temp_costs, temp_edges, K, mcg, mul1)
+        finally:
+            event = torch.cuda.Event()
+            event.record(stream)
+            gate["event"] = event
+
+
 def quantize_tiles(tiles, quant_args: dict):
     tiles = tiles.contiguous()
     assert tiles.shape[1] == 256
@@ -69,17 +92,7 @@ def quantize_tiles(tiles, quant_args: dict):
     mul1 = "mul1" in quant_args
     quantized_tiles = torch.zeros_like(tiles)
     quantized_idx = torch.zeros_like(tiles, dtype = torch.short)
-    temp_costs, temp_edges = get_temp_buffers(tiles.device, K)
-    ext.quantize_tiles(
-        tiles,
-        quantized_tiles,
-        quantized_idx,
-        temp_costs,
-        temp_edges,
-        K,
-        mcg,
-        mul1,
-    )
+    _quantize_tiles_with_workspace(tiles, quantized_tiles, quantized_idx, K, mcg, mul1)
     return quantized_tiles, quantized_idx
 
 
@@ -160,18 +173,7 @@ def quantize_tiles_multigpu(tiles, quant_args: dict):
                 K = quant_args["K"]
                 mcg = "mcg" in quant_args
                 mul1 = "mul1" in quant_args
-                temp_costs, temp_edges = get_temp_buffers(device, K)
-
-                ext.quantize_tiles(
-                    dev_tiles,
-                    dev_q_tiles,
-                    dev_q_idx,
-                    temp_costs,
-                    temp_edges,
-                    K,
-                    mcg,
-                    mul1
-                )
+                _quantize_tiles_with_workspace(dev_tiles, dev_q_tiles, dev_q_idx, K, mcg, mul1)
 
                 # Async copy back to pinned memory
                 pin_split_q_tiles[i].copy_(dev_q_tiles, non_blocking = True)
