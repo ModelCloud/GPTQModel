@@ -199,6 +199,44 @@ pub const TuningResult = struct {
     candidate_index: usize,
 };
 
+pub const BenchmarkOptions = struct {
+    warmup_calls: usize = 2,
+    iterations: usize = 16,
+};
+
+/// Measure one already-compiled candidate before serving-graph capture.
+/// PJRT result readiness is included so callers compare complete executable
+/// latency rather than an unrepresentative launch-only timestamp. The helper
+/// allocates its samples and waits on results only in this tuning phase; it is
+/// invalid to invoke it from a custom-call handler or captured graph.
+pub fn benchmarkExecutable(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    executable: *const zml.Exe,
+    arguments: zml.Exe.Arguments,
+    results: *zml.Exe.Results,
+    options: BenchmarkOptions,
+) !u64 {
+    if (options.iterations == 0) return error.InvalidBenchmarkIterations;
+    for (0..options.warmup_calls) |_| {
+        executable.call(arguments, results);
+        var output = results.get(zml.Buffer);
+        try output.await(io);
+        output.deinit();
+    }
+    const samples = try allocator.alloc(u64, options.iterations);
+    defer allocator.free(samples);
+    for (samples) |*sample| {
+        const start = zml.benchmark.monotonicNow(io);
+        executable.call(arguments, results);
+        var output = results.get(zml.Buffer);
+        try output.await(io);
+        sample.* = zml.benchmark.elapsedNanoseconds(io, start);
+        output.deinit();
+    }
+    return zml.benchmark.HostTimingStats.init(samples).median_ns;
+}
+
 /// Select the fastest locally correct candidate in stable enumeration order.
 /// The error gate matches the Python/native QvQ contract: a finite output,
 /// mean absolute error <= 2e-3 and max absolute error <= 3/64. Invalid or
@@ -379,5 +417,9 @@ test "native window ABI layout" {
     for (&measurements) |*measurement| measurement.accepted = false;
     measurements[0].max_absolute_error = 1;
     try std.testing.expectError(error.NoViableCandidate, selectFastest(candidates[0..count], &measurements));
+    try std.testing.expectError(
+        error.InvalidBenchmarkIterations,
+        benchmarkExecutable(std.testing.allocator, std.testing.io, undefined, undefined, undefined, .{ .iterations = 0 }),
+    );
     std.testing.refAllDecls(@This());
 }

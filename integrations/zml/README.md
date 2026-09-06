@@ -29,8 +29,10 @@ projection shape remains available to the tuner for other shapes. After each
 candidate has been warmed and measured outside capture, pass its correctness
 and median timings to `selectFastest`; the selector applies the same MAE/max
 error gate as the Python tuner and uses stable enumeration order for ties.
-Compile the serving executable only after selection, then warm its prepared
-native graph before any enclosing ZML/CUDA graph capture.
+`benchmarkExecutable` provides the common warmup/result-readiness timing loop
+for an already-compiled candidate. Compile the serving executable only after
+selection, then warm its prepared native graph before any enclosing ZML/CUDA
+graph capture.
 
 The bridge links LibTorch and the existing QVQ CUDA/WGMMA operator libraries,
 but execution does not require Python. The caller must validate the unified
