@@ -21,6 +21,12 @@ There is no hard-coded A100-derived M crossover. An external tuner must measure
 whole executable candidates under the existing numerical gates and distinguish
 device product, module shape/rate, M bucket, TP configuration and correction
 state in its cache. A latency result cannot establish model-quality eligibility.
+Packages may include a versioned `kernel_tuning` hint produced by the Python
+quantizer. That hint is bound to the exact P32 state and optional rank8 factors
+and is revalidated by the Python package/artifact loaders. It is advisory only:
+ZML must still enumerate and benchmark candidates for its own device, shape,
+rate, M bucket, TP layout and correction state rather than applying a cached
+choice from another environment.
 `enumerateCandidates` exposes the M16 and all six direct BM/BN candidates as
 ordinary Zig data, so a ZML autotune pass can compile the exact same `linear`
 call for each geometry and retain the winner in its shape/device cache. The

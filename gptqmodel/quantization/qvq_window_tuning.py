@@ -257,4 +257,26 @@ def tune_window_kernel(
         prepare_rank8(layer, original)
     if apply:
         prepare_rank8(layer, selected)
+        # Keep the selected executable policy with the unified deployment
+        # package.  This is metadata only: it is never part of the payload
+        # hash and is not applied automatically on a different device or
+        # shape.  A loader may use it as a candidate hint, then revalidate and
+        # retune under its own graph/device contract.
+        layer._p32_window_tuning = {
+            "version": 1,
+            "selected": selected.to_backend_config(),
+            "quality_mode": original.quality_mode,
+            "rank8_enabled": enabled,
+            "identity": {
+                "key": report["identity"]["key"],
+                "input_shape": report["identity"]["input_shape"],
+                "input_dtype": report["identity"]["input_dtype"],
+                "input_strides": report["identity"]["input_strides"],
+                "state_hash": report["identity"]["state_hash"],
+                "factors_hash": report["identity"]["factors_hash"],
+                "candidates": report["identity"]["candidates"],
+                "gate": report["identity"]["gate"],
+            },
+            "cache_hit": cache_hit,
+        }
     return WindowTuningResult(selected, report, cache_hit)

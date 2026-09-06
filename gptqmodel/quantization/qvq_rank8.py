@@ -152,6 +152,28 @@ def _metadata(layer):
     return json.loads(bytes(layer.rank8_metadata.detach().cpu().tolist()).decode())
 
 
+def _validate_kernel_tuning_metadata(layer, tuning):
+    """Validate a serialized tuning hint against the exact live payload."""
+    if tuning is None:
+        return
+    if not isinstance(tuning, dict) or tuning.get("version") != 1:
+        raise ValueError("invalid window kernel-tuning metadata")
+    try:
+        P32WindowConfig.from_backend_config(tuning["selected"])
+        identity = tuning["identity"]
+        expected_state = identity["state_hash"]
+        expected_factors = identity["factors_hash"]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("invalid selected window kernel policy") from exc
+    if expected_state != _digest(*_base(layer)):
+        raise ValueError("window kernel-tuning state hash mismatch")
+    if expected_factors is not None:
+        if layer.rank8_A is None or layer.rank8_B is None:
+            raise ValueError("window kernel-tuning factors are missing")
+        if expected_factors != _digest({"A": layer.rank8_A, "B": layer.rank8_B}, {}):
+            raise ValueError("window kernel-tuning factor hash mismatch")
+
+
 def _encode(metadata, device):
     return torch.tensor(
         list(json.dumps(metadata, sort_keys=True, allow_nan=False).encode()),
@@ -631,9 +653,22 @@ def export_window_package(layer):
             tensors.update(rank8_A=layer.rank8_A, rank8_B=layer.rank8_B)
         finally:
             prepare_rank8(layer, old_config)
+    tuning = getattr(layer, "_p32_window_tuning", None)
+    if tuning is not None:
+        if not isinstance(tuning, dict) or tuning.get("version") != 1:
+            raise ValueError("invalid window kernel-tuning metadata")
+        try:
+            P32WindowConfig.from_backend_config(tuning["selected"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid selected window kernel policy") from exc
+        _validate_kernel_tuning_metadata(layer, tuning)
+        # Normalize tuples from the device identity to JSON-compatible lists
+        # before placing metadata in a portable torch/native package.
+        tuning = json.loads(json.dumps(tuning, sort_keys=True))
     return {
         "metadata": metadata,
         "recovery": recovery,
+        "kernel_tuning": tuning,
         "tensors": {
             k: v.detach().cpu().contiguous().clone()
             for k, v in tensors.items()
@@ -646,6 +681,14 @@ def load_window_package(package, *, device="cpu", config=None):
     from ..nn_modules.qlinear.qvq import QVQLinear
 
     metadata = dict(package["metadata"])
+    tuning = package.get("kernel_tuning")
+    if tuning is not None:
+        if not isinstance(tuning, dict) or tuning.get("version") != 1:
+            raise ValueError("invalid window kernel-tuning metadata")
+        try:
+            P32WindowConfig.from_backend_config(tuning["selected"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid selected window kernel policy") from exc
     tensors = {k: v.to(device) for k, v in package["tensors"].items()}
     recovery = package["recovery"]
     a, b = tensors.pop("rank8_A", None), tensors.pop("rank8_B", None)
@@ -669,6 +712,8 @@ def load_window_package(package, *, device="cpu", config=None):
         layer.rank8_metadata = _encode(recovery, device)
         layer.post_init()
         prepare_rank8(layer, P32WindowConfig(recovery_mode="on"))
+    _validate_kernel_tuning_metadata(layer, tuning)
+    layer._p32_window_tuning = tuning
     prepare_rank8(layer, config or P32WindowConfig())
     return layer
 
@@ -736,6 +781,7 @@ def save_window_artifact(layer, directory):
         "version": 1,
         "metadata": package["metadata"],
         "recovery": package["recovery"],
+        "kernel_tuning": package.get("kernel_tuning"),
         "tensors": entries,
     }
     # Bind the complete descriptor set (including every serialized payload
@@ -816,6 +862,7 @@ def load_window_artifact(directory, *, device="cpu", config=None):
     package = {
         "metadata": manifest.get("metadata"),
         "recovery": recovery,
+        "kernel_tuning": manifest.get("kernel_tuning"),
         "tensors": tensors,
     }
     return load_window_package(package, device=device, config=config)

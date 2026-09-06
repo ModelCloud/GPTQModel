@@ -10,7 +10,11 @@ from test_qvq_window_recovery import _kernel_rank8, fixture
 
 from gptqmodel.quantization.qvq_rank8 import (
     P32WindowConfig,
+    export_window_package,
+    load_window_artifact,
+    load_window_package,
     prepare_rank8,
+    save_window_artifact,
     window_kernel_candidates,
 )
 from gptqmodel.quantization.qvq_window_tuning import tune_window_kernel
@@ -70,6 +74,42 @@ def test_failure_restores_policy_and_cache_does_not_bypass_validation(tmp_path):
             compile_candidate=lambda config: lambda inputs: layer(inputs) + 1,
         )
     assert layer._p32_window_config == original
+
+
+def test_applied_tuning_metadata_roundtrips_with_unified_package(tmp_path):
+    layer, _, x, _ = fixture()
+    prepare_rank8(layer, P32WindowConfig())
+    result = tune_window_kernel(
+        layer,
+        x,
+        benchmark=lambda fn, inputs: [1],
+        build_id="artifact-test",
+        cache_dir=tmp_path,
+    )
+    assert layer._p32_window_tuning["version"] == 1
+    assert layer._p32_window_tuning["selected"] == result.config.to_backend_config()
+    package = export_window_package(layer)
+    assert package["kernel_tuning"]["identity"]["state_hash"]
+    restored = load_window_package(package)
+    assert restored._p32_window_tuning == package["kernel_tuning"]
+    artifact = tmp_path / "artifact"
+    save_window_artifact(layer, artifact)
+    assert (artifact / "manifest.json").exists()
+    loaded_artifact = load_window_artifact(artifact)
+    assert loaded_artifact._p32_window_tuning == package["kernel_tuning"]
+
+
+def test_stale_tuning_metadata_cannot_be_exported_or_loaded():
+    layer, _, x, _ = fixture()
+    prepare_rank8(layer, P32WindowConfig())
+    tune_window_kernel(layer, x, benchmark=lambda fn, inputs: [1], build_id="stale")
+    package = export_window_package(layer)
+    layer.SU.add_(1)
+    with pytest.raises(ValueError, match="state hash"):
+        export_window_package(layer)
+    package["metadata"]["output_hadamard"] = False
+    with pytest.raises(ValueError, match="state hash"):
+        load_window_package(package)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

@@ -94,6 +94,17 @@ shape, rate, M, TP world/rank, transforms, quality/recovery state and caller
 build identity. It is a key builder, not a ZML autotuner or StableHLO lowering.
 Grouped dispatch retains its existing geometry policy.
 
+When tuning is applied to a module, the unified package also carries an
+optional versioned `kernel_tuning` record. It stores the selected backend
+configuration, quality/correction state, candidate identity and the P32/factor
+semantic hashes used for that selection. Export validates those hashes against
+the current module; package and artifact loaders validate them again before
+accepting the hint. This is advisory deployment metadata, not a portable
+performance claim: a loader must not apply it to a different device, shape, TP
+layout or build. ZML and other external consumers must enumerate and benchmark
+their own eligible executables, then cache the result under the full
+device/shape/rate/M/TP/correction key.
+
 Grouped QKV and gate/up apply child corrections to completed FP32 outputs using
 exactly the shared padded activation that fed WGMMA, then run existing child
 or paired output transforms. Each child may independently enable correction.
