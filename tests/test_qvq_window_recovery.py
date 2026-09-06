@@ -10,7 +10,10 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
-from gptqmodel.quantization.qvq import reconstruct_qvq_inner_weight
+from gptqmodel.quantization.qvq import (
+    reconstruct_qvq_inner_weight,
+    repack_p32_planar_to_window,
+)
 from gptqmodel.quantization.qvq_rank8 import (
     P32WindowConfig,
     _metrics,
@@ -70,6 +73,30 @@ def fixture(hadamard=True):
         teacher.weight.copy_((y * layer.SV).T)
     train, heldout = torch.randn(80, k), torch.randn(40, k)
     return layer, teacher, train, heldout
+
+
+def test_window_only_constructor_accepts_payload_without_planar_trellis():
+    source, _, _, _ = fixture(hadamard=False)
+    window = repack_p32_planar_to_window(source.trellis, bits=source.bits)
+    layer = QVQLinear(
+        bits=source.bits,
+        in_features=source.in_features,
+        out_features=source.out_features,
+        bank_count=2,
+        v2b2_p32=True,
+        input_hadamard=False,
+        output_hadamard=False,
+        window_only=True,
+        tensors={
+            "window_words": window,
+            "SU": source.SU,
+            "SV": source.SV,
+            "bank_ids": source.bank_ids,
+            "bank_alt_id": source.bank_alt_id,
+        },
+    ).eval()
+    assert layer.trellis is None
+    assert layer.window_words is not None
 
 
 def test_rank8_audit_gate_requires_every_document_and_records_confirmation():

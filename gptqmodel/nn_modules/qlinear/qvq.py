@@ -515,7 +515,10 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_rank8_factor_cache: dict[str, tuple[torch.Tensor, int, int, torch.device]] = {}
         pgc16_levels_for_version(self.codebook_version)
 
-        missing = {"trellis", "SU", "SV"} - set(tensors) if tensors else set()
+        required_tensors = {"SU", "SV"}
+        if not window_only:
+            required_tensors.add("trellis")
+        missing = required_tensors - set(tensors) if tensors else set()
         if tensors and missing:
             raise ValueError(
                 f"QVQ module `{self.name}` is missing tensors: {sorted(missing)}"
@@ -532,7 +535,7 @@ class QVQLinear(BaseQuantLinear):
 
         storage_dtype = dtype or torch.float16
         defaults = {
-            "trellis": torch.zeros(
+            "trellis": None if window_only else torch.zeros(
                 (
                     (in_features // 16) * (out_features // 16),
                     qvq_words_per_tile(bits, vector_size=vector_size),
