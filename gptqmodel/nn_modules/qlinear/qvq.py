@@ -717,7 +717,16 @@ class QVQLinear(BaseQuantLinear):
         ):
             return cached[2]
         self._require_prepared_outside_capture(source.device, "planar fallback")
-        planar = repack_p32_window_to_planar(source, bits=self.bits).contiguous()
+        # ``retain_planar=True`` is an explicit legacy/debug request.  Reuse
+        # the retained canonical planar payload instead of rebuilding an
+        # equivalent copy from the window.  The transfer is prepared before
+        # capture and cached for replay; production window-only loads have no
+        # ``trellis`` and continue to take the one-time lossless repack path.
+        retained = self.trellis
+        if retained is not None:
+            planar = retained.to(device=source.device).contiguous()
+        else:
+            planar = repack_p32_window_to_planar(source, bits=self.bits).contiguous()
         self._qvq_planar_fallback_cache = (source, source_version, planar)
         return planar
 

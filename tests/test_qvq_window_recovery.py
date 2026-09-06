@@ -715,6 +715,9 @@ def test_cuda_window_package_owns_window_payload_without_planar_vram_copy(monkey
     legacy = load_window_package(package, device="cuda", retain_planar=True)
     assert legacy.trellis.device.type == "cpu"
     assert len(repack_calls) == 1
+    retained_planar = legacy._prepare_planar_fallback()
+    assert retained_planar.device.type == "cuda"
+    assert len(repack_calls) == 1
     x = torch.randn(16, 256, device="cuda", dtype=torch.float16) * 0.01
     torch.testing.assert_close(loaded(x), source(x), rtol=0, atol=0)
     # Production ownership must remain window-only at the largest supported
