@@ -322,6 +322,28 @@ the kernel:
 The default scalar load remains the selected exact path. Raw results are in
 [wave 43 results](results/bm64bn32-scalar-ca-wave43/).
 
+## BM64 register-cap wave 44
+
+Wave 44 tested Triton `maxnreg` values 0, 48, 56, 64, 72, 80, and 96 (with a
+repeat at 56) on layer-0 `down_proj`, all nine row counts, and all eight GPUs.
+Every one of the 72 cases passed the exact local gates. The representative
+full-layer speedups versus production window were:
+
+| Cap | M=1 | M=16 | M=128 | M=512 | M=2048 |
+|---:|---:|---:|---:|---:|---:|
+| 0, uncapped | 0.925× | 0.977× | 0.964× | 1.240× | 1.290× |
+| 48 | 0.948× | 1.110× | 0.949× | 1.199× | 1.283× |
+| 56 | 0.922× | 1.097× | 0.974× | 1.221× | 1.286× |
+| 64 | 1.008× | 0.914× | 0.941× | 1.148× | 1.288× |
+| 72 | 0.975× | 0.996× | 0.966× | 1.165× | 1.281× |
+| 80 | 0.841× | 1.014× | 1.004× | 1.186× | 1.241× |
+| 96 | 1.020× | 0.869× | 1.271× | 1.067× | 1.208× |
+
+The cap does not improve the uncapped kernel. The 48-register arm raised the
+M=2048 inner latency from about 1.87 ms to 2.27 ms, consistent with spill or
+compiler scheduling cost; larger caps also regressed. Raw reports are in
+[wave 44 results](results/bm64bn32-maxnreg-wave44/).
+
 ## Decision and next target
 
 The current exact dispatch remains production window for M < 512 and the

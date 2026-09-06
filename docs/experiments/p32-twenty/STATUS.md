@@ -169,4 +169,8 @@ and 1.425x at M=2048, with window dispatch retained below M=512 and decode.
 See [model dispatcher wave42](MODEL_DISPATCH_WAVE42.md).
 Scalar level-table cache wave43 applied `.ca` to the exact 512-byte PGC16
 table and passed 72/72 local cases, but pooled speedup fell to 1.170x at M=512
-and 1.284x at M=2048. The default scalar load remains selected.
+and 1.284x at M=2048. The default scalar load remains selected. Register-cap
+wave44 tested `maxnreg` 0/48/56/64/72/80/96 on all eight GPUs; all 72 cases
+passed, but no cap improved the uncapped BM64 arm. Cap48 raised M=2048 inner
+latency to about 2.27 ms and cap96 reached only 1.208x layer speedup. Register
+capping is rejected; deeper decode/MMA fusion remains.
