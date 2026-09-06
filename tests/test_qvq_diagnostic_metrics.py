@@ -1011,6 +1011,7 @@ def test_yaqa_diagnostic_sketch_b_matches_independent_per_sequence_autograd_orac
     assert output_hessians["proj"].device == torch.device("cpu")
     assert stats.pop("accumulator_device") == "cpu"
     assert stats.pop("accumulator_bytes") == 32
+    assert stats.pop("factor_transfer_overlap") is False
     assert stats.pop("capture_wall_seconds") >= 0
     assert stats.pop("capture_cuda_ms") is None
     assert stats.pop("final_host_transfer_seconds") >= 0
@@ -2248,3 +2249,210 @@ def test_qvq_diagnostic_zero_signal_exact_match_has_zero_relative_error():
     assert metrics["sqnr_db"] == 0.0
     assert metrics["top1_agreement"] == 1.0
     assert metrics["top5_overlap"]["mean"] == 1.0
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_yaqa_factor_host_copy_waits_for_nondefault_stream_and_preserves_values():
+    from gptqmodel.quantization.qvq_yaqa import _YaqaFactorTransfer
+
+    transfer = _YaqaFactorTransfer(torch.device("cuda:0"))
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        sources = [
+            torch.arange(257 * 31, device="cuda", dtype=torch.float32).reshape(257, 31).T,
+            torch.arange(37, device="cuda", dtype=torch.bfloat16),
+            torch.empty(0, device="cuda"),
+        ]
+        copied = transfer.submit(sources)
+        transfer.finish()
+        # finish promises immediately readable CPU data, even on another stream.
+        for actual, source in zip(copied, sources):
+            assert actual.device.type == "cpu"
+            assert actual.numel() == 0 or actual.is_pinned()
+            assert actual.dtype == source.dtype
+            assert torch.equal(actual, source.cpu())
+        sources[0].zero_()
+    assert copied[0].sum().item() > 0
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("weight_scale", [1.0, 1e-8])
+def test_yaqa_streaming_pinned_collection_matches_blocking_copy_exactly(weight_scale):
+    model = _TinyCausalModel().cuda().eval()
+    modules = {"proj": model.model.layers[0].proj}
+    batches = [
+        {"input_ids": torch.tensor([[1, 2], [3, 4]]),
+         "attention_mask": torch.tensor([[1, 0], [1, 1]]),
+         "fisher_sequence_weight": torch.tensor([0.5, 2.0]) * weight_scale},
+        {"input_ids": torch.tensor([[5, 6]]), "attention_mask": torch.ones((1, 2), dtype=torch.long),
+         "fisher_sequence_weight": torch.tensor([weight_scale])},
+    ]
+    kwargs = {"device": torch.device("cuda:0"), "accumulator_device": torch.device("cuda:0"),
+              "seed": 91, "gram_strategy": "streaming_projected", "gram_projection_rank": 64}
+    with patch("gptqmodel.quantization.qvq_yaqa._YaqaFactorTransfer", return_value=None):
+        expected = capture_yaqa_sketch_b(model, batches, modules, **kwargs)
+    actual = capture_yaqa_sketch_b(model, batches, modules, **kwargs)
+    for side in (0, 1):
+        for name in modules:
+            left, right = actual[side][name], expected[side][name]
+            for field in ("source", "diagonal", "source_diagonal"):
+                assert torch.equal(getattr(left, field), getattr(right, field))
+            assert left.normalizer == right.normalizer
+            assert left._finite_nonnegative_validated is (weight_scale == 1.0)
+            assert torch.equal(left.materialize(device=torch.device("cpu")),
+                               right.materialize(device=torch.device("cpu")))
+    assert actual[2]["factor_transfer_overlap"] is True
+    assert expected[2]["factor_transfer_overlap"] is False
+    assert actual[2]["phase_wall_seconds"]["python_gc"] == 0
+    assert all(parameter.grad is None for parameter in model.parameters())
+    assert not modules["proj"]._forward_hooks
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("field", range(4))
+@pytest.mark.parametrize("invalid", [float("inf"), float("nan")])
+def test_yaqa_streaming_final_validation_rejects_invalid_early_update(field, invalid):
+    from gptqmodel.quantization import qvq_yaqa
+
+    model = _TinyCausalModel().cuda().eval()
+    modules = {"proj": model.model.layers[0].proj}
+    batch = {"input_ids": torch.tensor([[1, 2]]), "attention_mask": torch.ones((1, 2), dtype=torch.long)}
+    original = qvq_yaqa._streaming_projected_updates
+    calls = 0
+
+    def invalid_first(*args, **kwargs):
+        nonlocal calls
+        result = original(*args, **kwargs)
+        if calls == 0:
+            result[field].view(-1)[0] = invalid
+        calls += 1
+        return result
+
+    precision = torch.backends.cuda.matmul.fp32_precision
+    with (
+        patch.object(qvq_yaqa, "_streaming_projected_updates", side_effect=invalid_first),
+        pytest.raises(ValueError, match="non-finite Sketch-B Gram update"),
+    ):
+        capture_yaqa_sketch_b(
+            model, [batch, batch], modules, device=torch.device("cuda:0"),
+            accumulator_device=torch.device("cuda:0"), seed=91,
+            gram_strategy="streaming_projected", gram_projection_rank=64,
+        )
+    assert calls == 2
+    assert torch.backends.cuda.matmul.fp32_precision == precision
+    assert all(parameter.requires_grad and parameter.grad is None for parameter in model.parameters())
+    assert not modules["proj"]._forward_hooks
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("invalid", [float("inf"), float("nan")])
+@pytest.mark.parametrize("zero_activation", [False, True])
+def test_yaqa_streaming_final_validation_rejects_nonfinite_gradient(invalid, zero_activation):
+    from gptqmodel.quantization import qvq_yaqa
+
+    model = _TinyCausalModel().cuda().eval()
+    batch = {"input_ids": torch.tensor([[1, 2]]), "attention_mask": torch.ones((1, 2), dtype=torch.long)}
+    original = qvq_yaqa._streaming_projected_updates
+
+    def invalid_gradient(activation, gradient, **kwargs):
+        gradient = gradient.clone()
+        gradient[0, 0, 0] = invalid
+        if zero_activation:
+            activation = torch.zeros_like(activation)
+        return original(activation, gradient, **kwargs)
+
+    with (
+        patch.object(qvq_yaqa, "_streaming_projected_updates", side_effect=invalid_gradient),
+        pytest.raises(ValueError, match="non-finite Sketch-B Gram update"),
+    ):
+        capture_yaqa_sketch_b(
+            model, [batch], {"proj": model.model.layers[0].proj}, device=torch.device("cuda:0"),
+            accumulator_device=torch.device("cuda:0"), seed=91,
+            gram_strategy="streaming_projected", gram_projection_rank=64,
+        )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_yaqa_overlapped_transfer_waits_for_producer_stream():
+    from gptqmodel.quantization.qvq_yaqa import _YaqaFactorTransfer
+
+    producer = torch.cuda.Stream()
+    transfer = _YaqaFactorTransfer(torch.device("cuda:0"))
+    with torch.cuda.stream(producer):
+        source = torch.arange(8193, device="cuda", dtype=torch.float32).mul_(3)
+        host = transfer.submit([source])[0]
+    transfer.finish()
+    assert torch.equal(host, torch.arange(8193, dtype=torch.float32) * 3)
+    assert transfer.stream.query()
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_yaqa_overlapped_transfer_failure_restores_model_and_finishes_copies():
+    from gptqmodel.quantization import qvq_yaqa
+
+    model = _TinyCausalModel().cuda().eval()
+    batch = {"input_ids": torch.tensor([[1, 2]]), "attention_mask": torch.ones((1, 2), dtype=torch.long)}
+    transfer = qvq_yaqa._YaqaFactorTransfer(torch.device("cuda:0"))
+    original = transfer.submit
+
+    def fail_after_copy(tensors):
+        original(tensors)
+        raise RuntimeError("injected transfer failure")
+
+    precision = torch.backends.cuda.matmul.fp32_precision
+    with (
+        patch.object(qvq_yaqa, "_YaqaFactorTransfer", return_value=transfer),
+        patch.object(transfer, "submit", side_effect=fail_after_copy),
+        patch.object(transfer, "finish", wraps=transfer.finish) as finish,
+        pytest.raises(RuntimeError, match="injected transfer failure"),
+    ):
+        capture_yaqa_sketch_b(
+            model, [batch], {"proj": model.model.layers[0].proj}, device=torch.device("cuda:0"),
+            accumulator_device=torch.device("cuda:0"), seed=91,
+            gram_strategy="streaming_projected", gram_projection_rank=64,
+        )
+    finish.assert_called_once()
+    assert transfer.stream.query()
+    assert torch.backends.cuda.matmul.fp32_precision == precision
+    assert all(parameter.requires_grad and parameter.grad is None for parameter in model.parameters())
+    assert not model.model.layers[0].proj._forward_hooks
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.parametrize("defect", ["zero_projection", "normalization_overflow"])
+def test_yaqa_streaming_reused_validation_keeps_remaining_diagonal_guards(defect):
+    from gptqmodel.quantization import qvq_yaqa
+
+    model = _TinyCausalModel().cuda().eval()
+    batch = {
+        "input_ids": torch.tensor([[1, 2]]),
+        "attention_mask": torch.ones((1, 2), dtype=torch.long),
+        "fisher_sequence_weight": torch.tensor([1e-8 if defect == "normalization_overflow" else 1.0]),
+    }
+    original = qvq_yaqa._streaming_projected_updates
+
+    def corrupt_diagonal_contract(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if defect == "zero_projection":
+            result[0].zero_()
+        else:
+            result[2].fill_(torch.finfo(torch.float32).max)
+        return result
+
+    message = "cannot represent a positive diagonal" if defect == "zero_projection" else "diagonal must be finite"
+    with (
+        patch.object(qvq_yaqa, "_streaming_projected_updates", side_effect=corrupt_diagonal_contract),
+        pytest.raises(ValueError, match=message),
+    ):
+        capture_yaqa_sketch_b(
+            model, [batch], {"proj": model.model.layers[0].proj}, device=torch.device("cuda:0"),
+            accumulator_device=torch.device("cuda:0"), seed=91,
+            gram_strategy="streaming_projected", gram_projection_rank=64,
+        )

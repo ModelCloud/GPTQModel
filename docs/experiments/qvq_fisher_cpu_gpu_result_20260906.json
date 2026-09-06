@@ -1,0 +1,1671 @@
+{
+  "schema": "qvq.cpu_gpu_fisher.result.v1",
+  "date": "2026-09-06",
+  "status": "validated bounded opt-in experiment; normal collector unchanged",
+  "benchmark": {
+    "accumulator_device": "cuda",
+    "activation_checkpointing": false,
+    "all_targets": true,
+    "backends": {
+      "attention": "eager",
+      "convolution": [
+        "gptqmodel.hf_kernels.causal_conv1d.causal_conv1d_interface.causal_conv1d_fn"
+      ],
+      "delta_rule": [
+        "fla.ops.gated_delta_rule.chunk.chunk_gated_delta_rule"
+      ],
+      "gated_normalization": [
+        "fla.modules.fused_norm_gate.FusedRMSNormGated"
+      ],
+      "packages": {
+        "causal-conv1d": null,
+        "flash-linear-attention": "0.5.2",
+        "transformers": "5.5.4"
+      }
+    },
+    "batch_size": 2,
+    "benchmark_source_sha256": "8bee7ce055043af49d47fefd17c9883b9734865a2ecbf043d4ab90aefe6ad241",
+    "collector_source_sha256": "7f1aeaddb62dd55dd30be593f33143c2b5d7d15be17a8a0fc923a4392c5fc202",
+    "cpu_interop_threads": 1,
+    "cpu_inventory": {
+      "affinity": [
+        0,
+        1,
+        5,
+        7,
+        8,
+        14,
+        17,
+        19,
+        21,
+        22,
+        24,
+        25,
+        26,
+        27,
+        28,
+        31,
+        33,
+        36,
+        40,
+        41,
+        42,
+        43,
+        46,
+        47,
+        49,
+        51,
+        52,
+        53,
+        58,
+        59,
+        61,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        72,
+        74,
+        80,
+        83,
+        84,
+        86,
+        87,
+        88,
+        92,
+        93,
+        94,
+        95,
+        96,
+        99,
+        100,
+        103,
+        106,
+        107,
+        108,
+        110,
+        112,
+        113,
+        115,
+        116,
+        117,
+        124,
+        126,
+        127,
+        129,
+        131,
+        132,
+        136,
+        137,
+        138,
+        140,
+        144,
+        145,
+        146,
+        148,
+        150,
+        151,
+        152,
+        154,
+        155,
+        159,
+        160,
+        164,
+        165,
+        166,
+        169,
+        171,
+        173,
+        176,
+        178,
+        180,
+        182,
+        185,
+        188
+      ],
+      "allowed_logical_cpus": 96,
+      "cgroup": {
+        "cpu.max": "max 100000",
+        "cpuset.cpus.effective": "0-1,5,7-8,14,17,19,21-22,24-28,31,33,36,40-43,46-47,49,51-53,58-59,61,64-70,72,74,80,83-84,86-88,92-96,99-100,103,106-108,110,112-113,115-117,124,126-127,129,131-132,136-138,140,144-146,148,150-152,154-155,159-160,164-166,169,171,173,176,178,180,182,185,188",
+        "cpuset.mems.effective": "0-3",
+        "memory.max": "128000000000"
+      },
+      "numa_allowed_cpus": {
+        "node0": [
+          0,
+          1,
+          5,
+          7,
+          8,
+          14,
+          17,
+          19,
+          21,
+          22,
+          96,
+          99,
+          100,
+          103,
+          106,
+          107,
+          108,
+          110,
+          112,
+          113,
+          115,
+          116,
+          117
+        ],
+        "node1": [
+          24,
+          25,
+          26,
+          27,
+          28,
+          31,
+          33,
+          36,
+          40,
+          41,
+          42,
+          43,
+          46,
+          47,
+          124,
+          126,
+          127,
+          129,
+          131,
+          132,
+          136,
+          137,
+          138,
+          140
+        ],
+        "node2": [
+          49,
+          51,
+          52,
+          53,
+          58,
+          59,
+          61,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          144,
+          145,
+          146,
+          148,
+          150,
+          151,
+          152,
+          154,
+          155,
+          159,
+          160,
+          164,
+          165,
+          166
+        ],
+        "node3": [
+          72,
+          74,
+          80,
+          83,
+          84,
+          86,
+          87,
+          88,
+          92,
+          93,
+          94,
+          95,
+          169,
+          171,
+          173,
+          176,
+          178,
+          180,
+          182,
+          185,
+          188
+        ]
+      },
+      "physical_core_groups": [
+        {
+          "allowed_cpus": [
+            0,
+            96
+          ],
+          "core": 0,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            1
+          ],
+          "core": 1,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            99
+          ],
+          "core": 3,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            100
+          ],
+          "core": 4,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            5
+          ],
+          "core": 5,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            7,
+            103
+          ],
+          "core": 7,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            8
+          ],
+          "core": 8,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            106
+          ],
+          "core": 10,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            107
+          ],
+          "core": 11,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            108
+          ],
+          "core": 12,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            14,
+            110
+          ],
+          "core": 14,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            112
+          ],
+          "core": 16,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            17,
+            113
+          ],
+          "core": 17,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            19,
+            115
+          ],
+          "core": 19,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            116
+          ],
+          "core": 20,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            21,
+            117
+          ],
+          "core": 21,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            22
+          ],
+          "core": 22,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            24
+          ],
+          "core": 24,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            25
+          ],
+          "core": 25,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            26
+          ],
+          "core": 26,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            27
+          ],
+          "core": 27,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            28,
+            124
+          ],
+          "core": 28,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            126
+          ],
+          "core": 30,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            31,
+            127
+          ],
+          "core": 31,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            33,
+            129
+          ],
+          "core": 33,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            131
+          ],
+          "core": 35,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            36,
+            132
+          ],
+          "core": 36,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            40,
+            136
+          ],
+          "core": 40,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            41,
+            137
+          ],
+          "core": 41,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            42,
+            138
+          ],
+          "core": 42,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            43
+          ],
+          "core": 43,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            140
+          ],
+          "core": 44,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            46
+          ],
+          "core": 46,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            47
+          ],
+          "core": 47,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            144
+          ],
+          "core": 0,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            49,
+            145
+          ],
+          "core": 1,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            146
+          ],
+          "core": 2,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            51
+          ],
+          "core": 3,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            52,
+            148
+          ],
+          "core": 4,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            53
+          ],
+          "core": 5,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            150
+          ],
+          "core": 6,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            151
+          ],
+          "core": 7,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            152
+          ],
+          "core": 8,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            58,
+            154
+          ],
+          "core": 10,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            59,
+            155
+          ],
+          "core": 11,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            61
+          ],
+          "core": 13,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            159
+          ],
+          "core": 15,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            64,
+            160
+          ],
+          "core": 16,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            65
+          ],
+          "core": 17,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            66
+          ],
+          "core": 18,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            67
+          ],
+          "core": 19,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            68,
+            164
+          ],
+          "core": 20,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            69,
+            165
+          ],
+          "core": 21,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            70,
+            166
+          ],
+          "core": 22,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            72
+          ],
+          "core": 24,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            169
+          ],
+          "core": 25,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            74
+          ],
+          "core": 26,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            171
+          ],
+          "core": 27,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            173
+          ],
+          "core": 29,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            80,
+            176
+          ],
+          "core": 32,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            178
+          ],
+          "core": 34,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            83
+          ],
+          "core": 35,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            84,
+            180
+          ],
+          "core": 36,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            86,
+            182
+          ],
+          "core": 38,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            87
+          ],
+          "core": 39,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            88
+          ],
+          "core": 40,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            185
+          ],
+          "core": 41,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            92,
+            188
+          ],
+          "core": 44,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            93
+          ],
+          "core": 45,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            94
+          ],
+          "core": 46,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            95
+          ],
+          "core": 47,
+          "socket": 1
+        }
+      ],
+      "represented_physical_cores": 71,
+      "thread_environment": {
+        "MKL_NUM_THREADS": "16",
+        "OMP_NUM_THREADS": "16",
+        "OMP_PLACES": null,
+        "OMP_PROC_BIND": null,
+        "OPENBLAS_NUM_THREADS": "16"
+      }
+    },
+    "cpu_threads": 16,
+    "dataset": "/monster/data/model/dataset/nm-calibration/llm.parquet",
+    "dtype": "bfloat16",
+    "factor_parity": [
+      {
+        "arm": "streaming_256",
+        "bitwise_equal": true,
+        "factors_checked": 800
+      }
+    ],
+    "hardware": {
+      "compute_capability": [
+        9,
+        0
+      ],
+      "cuda": "13.0",
+      "name": "NVIDIA H200",
+      "pci_bus_id": "00000000:1C:00.0",
+      "physical_id": 0,
+      "sm_count": 132,
+      "torch": "2.15.0.dev20260901+cu130",
+      "total_memory_bytes": 150101688320,
+      "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea"
+    },
+    "idle_preflight": {
+      "config": {
+        "max_driver_memory_mib": 80,
+        "sample_count": 3,
+        "sample_interval_seconds": 1.0
+      },
+      "name": "NVIDIA H200",
+      "pci_bus_id": "00000000:1C:00.0",
+      "physical_id": 0,
+      "samples": [
+        {
+          "compute_processes": [],
+          "memory_used_mib": 0,
+          "name": "NVIDIA H200",
+          "pci_bus_id": "00000000:1C:00.0",
+          "physical_id": 0,
+          "utilization_pct": 0,
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea"
+        },
+        {
+          "compute_processes": [],
+          "memory_used_mib": 0,
+          "name": "NVIDIA H200",
+          "pci_bus_id": "00000000:1C:00.0",
+          "physical_id": 0,
+          "utilization_pct": 0,
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea"
+        },
+        {
+          "compute_processes": [],
+          "memory_used_mib": 0,
+          "name": "NVIDIA H200",
+          "pci_bus_id": "00000000:1C:00.0",
+          "physical_id": 0,
+          "utilization_pct": 0,
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea"
+        }
+      ],
+      "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea"
+    },
+    "layer": 0,
+    "layer_count": 0,
+    "load_seconds": 8.964015518999076,
+    "model": "Qwen/Qwen3.8-27B@1d4bf0f2 (matched local Qwen3.5-27B geometry proxy)",
+    "model_path": "/monster/data/model/Qwen3.5-27B",
+    "projection_kernel_source_sha256": "facb531fecbf67724b004ac4d67bb07c81f9251be10a20e440ad728063c0d312",
+    "reference_source_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+    "repeats": 9,
+    "results": [
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 3981.761962890625,
+          "capture_wall_seconds": 4.009469821998209,
+          "checkpointed_modules": 0,
+          "comparison_arm": "current_gpu",
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 1024.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.0001648559991735965,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "host_pinned_allocated_bytes": 23867031565,
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 3.04887401797896,
+            "forward": 0.7332453850031015,
+            "loss": 0.015000988991232589,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 1024,
+          "seed": 20260908,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 1024
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 73055375360,
+        "peak_reserved_bytes": 76095160320,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 0,
+        "seconds": 4.012426921995939,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 255.20714019400063
+      },
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 2325.880859375,
+          "capture_wall_seconds": 2.3540631100040628,
+          "checkpointed_modules": 0,
+          "comparison_arm": "grouped_gpu",
+          "cpu_sidecar": "disabled_grouped_gpu",
+          "cpu_sidecar_module_jobs": 0,
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 1024.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.00016580100054852664,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "host_pinned_allocated_bytes": 23867031565,
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 1.3936680789920501,
+            "forward": 0.7358600089937681,
+            "loss": 0.015010699986305553,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 1024,
+          "seed": 20260908,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 1024
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 66642677760,
+        "peak_reserved_bytes": 76095160320,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 1,
+        "seconds": 2.359055900000385,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 434.07195225845766
+      },
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 2371.4912109375,
+          "capture_wall_seconds": 2.376720143998682,
+          "checkpointed_modules": 0,
+          "comparison_arm": "cpu_finalize",
+          "cpu_sidecar": "factor_finalize",
+          "cpu_sidecar_module_jobs": 352,
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 1024.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.00017885399574879557,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "host_pinned_allocated_bytes": 23867031565,
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 1.4262885070056655,
+            "forward": 0.751907764999487,
+            "loss": 0.015034204021503683,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 1024,
+          "seed": 20260908,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 1024
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 66642677760,
+        "peak_reserved_bytes": 76095160320,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 2,
+        "seconds": 2.381882891000714,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 429.91198428306484
+      },
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 3958.722900390625,
+          "capture_wall_seconds": 3.9867572860021028,
+          "checkpointed_modules": 0,
+          "comparison_arm": "current_gpu",
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 1024.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.0001658609980950132,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "host_pinned_allocated_bytes": 23867031565,
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 3.0443746840028325,
+            "forward": 0.7196172749972902,
+            "loss": 0.014989189010520931,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 1024,
+          "seed": 20260908,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 1024
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 73055375360,
+        "peak_reserved_bytes": 76095160320,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 3,
+        "seconds": 3.9895015779984533,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 256.6736671185237
+      },
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 2278.52783203125,
+          "capture_wall_seconds": 2.3064214250043733,
+          "checkpointed_modules": 0,
+          "comparison_arm": "grouped_gpu",
+          "cpu_sidecar": "disabled_grouped_gpu",
+          "cpu_sidecar_module_jobs": 0,
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 1024.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.0001641509952605702,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "host_pinned_allocated_bytes": 23867031565,
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 1.3704022669990081,
+            "forward": 0.7098637150120339,
+            "loss": 0.014979017985751852,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 1024,
+          "seed": 20260908,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 1024
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 66642677760,
+        "peak_reserved_bytes": 76095160320,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 4,
+        "seconds": 2.311579298999277,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 442.98718215866853
+      },
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 2298.40234375,
+          "capture_wall_seconds": 2.3024706629948923,
+          "checkpointed_modules": 0,
+          "comparison_arm": "cpu_finalize",
+          "cpu_sidecar": "factor_finalize",
+          "cpu_sidecar_module_jobs": 352,
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 1024.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.00017032599862432107,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "host_pinned_allocated_bytes": 23867031565,
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 1.396337838988984,
+            "forward": 0.7180948569875909,
+            "loss": 0.015038226985780057,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 1024,
+          "seed": 20260908,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 1024
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 66642677760,
+        "peak_reserved_bytes": 76095160320,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 5,
+        "seconds": 2.307548295997549,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 443.7610262702331
+      },
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 3988.53271484375,
+          "capture_wall_seconds": 4.016341039998224,
+          "checkpointed_modules": 0,
+          "comparison_arm": "current_gpu",
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 1024.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.0001641790004214272,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "host_pinned_allocated_bytes": 23867031565,
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 3.052720296989719,
+            "forward": 0.7376171340001747,
+            "loss": 0.015027729008579627,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 1024,
+          "seed": 20260908,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 1024
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 73055375360,
+        "peak_reserved_bytes": 76095160320,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 6,
+        "seconds": 4.019421643999522,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 254.76302082631713
+      },
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 2359.1171875,
+          "capture_wall_seconds": 2.387355095001112,
+          "checkpointed_modules": 0,
+          "comparison_arm": "grouped_gpu",
+          "cpu_sidecar": "disabled_grouped_gpu",
+          "cpu_sidecar_module_jobs": 0,
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 1024.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.00017000400112010539,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "host_pinned_allocated_bytes": 23867031565,
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 1.4070569770119619,
+            "forward": 0.7526347050006734,
+            "loss": 0.015031520008051302,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 1024,
+          "seed": 20260908,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 1024
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 66642677760,
+        "peak_reserved_bytes": 76095160320,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 7,
+        "seconds": 2.3925835889967857,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 427.98922667080774
+      },
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 2258.109130859375,
+          "capture_wall_seconds": 2.262181796002551,
+          "checkpointed_modules": 0,
+          "comparison_arm": "cpu_finalize",
+          "cpu_sidecar": "factor_finalize",
+          "cpu_sidecar_module_jobs": 352,
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 1024.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.00016289000632241368,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "host_pinned_allocated_bytes": 23867031565,
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 1.3839622619998408,
+            "forward": 0.6926685799917323,
+            "loss": 0.014977079998061527,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 1024,
+          "seed": 20260908,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 1024
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 66642677760,
+        "peak_reserved_bytes": 76095160320,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 8,
+        "seconds": 2.2671014169973205,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 451.67807329777264
+      }
+    ],
+    "revision": "65f94523fabcdfd0d35f436a5d8564b77f7424df",
+    "roles": [
+      "gate_proj"
+    ],
+    "row_start": 64,
+    "rows": 16,
+    "schema": "qvq.yaqa.qwen38.benchmark.v1",
+    "sequence_length": 64,
+    "target_count": 400,
+    "timing_scope": "warmed collection",
+    "valid_tokens": 1024,
+    "warmup": 6
+  },
+  "samples_seconds": {
+    "current_gpu": [
+      4.012426921995939,
+      3.9895015779984533,
+      4.019421643999522
+    ],
+    "grouped_gpu": [
+      2.359055900000385,
+      2.311579298999277,
+      2.3925835889967857
+    ],
+    "cpu_finalize": [
+      2.381882891000714,
+      2.307548295997549,
+      2.2671014169973205
+    ]
+  },
+  "medians_seconds": {
+    "current_gpu": 4.012426921995939,
+    "grouped_gpu": 2.359055900000385,
+    "cpu_finalize": 2.307548295997549
+  },
+  "combined_speedup_vs_current_gpu": 1.7388268444719048,
+  "cpu_speedup_vs_grouped_gpu": 1.0223213547002141,
+  "attribution": "Most gain comes from grouped GPU statistics. CPU factor finalization uses two pinned workers for 352 modules. Its incremental gain is small and noisy (prior six-pair median 2.313712 vs 2.295275 seconds); no robust large CPU-only speedup is claimed.",
+  "scope": "Qwen3.5-27B geometry proxy, 400 targets, B2/T64/R256, 16 real calibration rows starting at 64, seed 20260908. Warmed complete collector including transfers and all worker drains. No universal or cold-start speedup claim.",
+  "validation": {
+    "real_factors_bitwise_equal": 800,
+    "focused_tests": "8 passed in 2.99 seconds; lifecycle, fallback, canonical factor serialization",
+    "post_profile_operator_checks": "Seven captured geometries, B2, two accumulation steps; sources, diagonals, final source norms exact",
+    "full_quantize_save_load_inference": "Not run for this opt-in experiment; factor serialization only."
+  },
+  "instruction_audit": {
+    "previous": {
+      "kernels": 111,
+      "executed_warp_instructions": 563136652.0,
+      "predicated_thread_instructions": 17268673940.0,
+      "max_registers_per_thread": 220.0,
+      "local_spill_bytes": 0.0,
+      "shared_spill_bytes": 0.0,
+      "shared_excessive_wavefronts": 9707520.0,
+      "opcodes": {
+        "FFMA": 246201088.0,
+        "IMAD": 47072598.0,
+        "IADD3": 34855094.0,
+        "ISETP": 32839316.0,
+        "LDS": 22733952.0,
+        "BRA": 21614336.0,
+        "ULDC": 21357544.0,
+        "MOV": 14648104.0,
+        "LOP3": 11564450.0,
+        "FMUL": 9687040.0,
+        "LDGSTS": 7761920.0,
+        "UIADD3": 7350912.0,
+        "FADD": 6276864.0,
+        "LDC": 6166294.0,
+        "VIADD": 5840244.0,
+        "SHF": 5356736.0,
+        "STG": 4874864.0,
+        "BSSY": 4622928.0,
+        "BSYNC": 4622846.0,
+        "UISETP": 3718912.0,
+        "LEA": 3314400.0,
+        "LDG": 2977536.0,
+        "R2P": 2895872.0,
+        "UMOV": 2811968.0,
+        "HFMA2": 2692896.0,
+        "I2FP": 2433024.0,
+        "MUFU": 2433024.0,
+        "SEL": 2366180.0,
+        "FMNMX": 2187264.0,
+        "S2R": 2109148.0,
+        "CS2R": 1884448.0,
+        "EXIT": 1845560.0,
+        "BAR": 1730976.0,
+        "FSETP": 1650944.0,
+        "FSEL": 1622016.0,
+        "STS": 1545664.0,
+        "PLOP3": 1105344.0,
+        "PRMT": 1014562.0,
+        "P2R": 881112.0,
+        "LDGDEPBAR": 861696.0,
+        "DEPBAR": 785408.0,
+        "S2UR": 495052.0,
+        "SHFL": 461984.0,
+        "WARPSYNC": 411220.0,
+        "ST": 372736.0,
+        "UIMAD": 370048.0,
+        "USEL": 353792.0,
+        "USHF": 132076.0,
+        "I2F": 67584.0,
+        "F2I": 67584.0,
+        "ULEA": 47168.0,
+        "VIADDMNMX": 28928.0,
+        "BRX": 11264.0,
+        "R2UR": 1536.0,
+        "SGXT": 512.0,
+        "BREAK": 84.0,
+        "NOP": 0.0,
+        "F2F": 0.0,
+        "HADD2": 0.0,
+        "FLO": 0.0,
+        "LEPC": 0.0,
+        "CALL": 0.0,
+        "F2FP": 0.0,
+        "RET": 0.0,
+        "CCTL": 0.0,
+        "B2R": 0.0,
+        "YIELD": 0.0,
+        "MEMBAR": 0.0,
+        "ERRBAR": 0.0,
+        "CGAERRBAR": 0.0,
+        "VOTEU": 0.0,
+        "POPC": 0.0,
+        "ATOMG": 0.0,
+        "ULOP3": 0.0,
+        "IABS": 0.0
+      }
+    },
+    "packaged": {
+      "kernels": 111,
+      "executed_warp_instructions": 563136652.0,
+      "predicated_thread_instructions": 17268673940.0,
+      "max_registers_per_thread": 220.0,
+      "local_spill_bytes": 0.0,
+      "shared_spill_bytes": 0.0,
+      "shared_excessive_wavefronts": 9707520.0,
+      "opcodes": {
+        "FFMA": 246201088.0,
+        "IMAD": 47072598.0,
+        "IADD3": 34855094.0,
+        "ISETP": 32839316.0,
+        "LDS": 22733952.0,
+        "BRA": 21614336.0,
+        "ULDC": 21357544.0,
+        "MOV": 14648104.0,
+        "LOP3": 11564450.0,
+        "FMUL": 9687040.0,
+        "LDGSTS": 7761920.0,
+        "UIADD3": 7350912.0,
+        "FADD": 6276864.0,
+        "LDC": 6166294.0,
+        "VIADD": 5840244.0,
+        "SHF": 5356736.0,
+        "STG": 4874864.0,
+        "BSSY": 4622928.0,
+        "BSYNC": 4622846.0,
+        "UISETP": 3718912.0,
+        "LEA": 3314400.0,
+        "LDG": 2977536.0,
+        "R2P": 2895872.0,
+        "UMOV": 2811968.0,
+        "HFMA2": 2692896.0,
+        "I2FP": 2433024.0,
+        "MUFU": 2433024.0,
+        "SEL": 2366180.0,
+        "FMNMX": 2187264.0,
+        "S2R": 2109148.0,
+        "CS2R": 1884448.0,
+        "EXIT": 1845560.0,
+        "BAR": 1730976.0,
+        "FSETP": 1650944.0,
+        "FSEL": 1622016.0,
+        "STS": 1545664.0,
+        "PLOP3": 1105344.0,
+        "PRMT": 1014562.0,
+        "P2R": 881112.0,
+        "LDGDEPBAR": 861696.0,
+        "DEPBAR": 785408.0,
+        "S2UR": 495052.0,
+        "SHFL": 461984.0,
+        "WARPSYNC": 411220.0,
+        "ST": 372736.0,
+        "UIMAD": 370048.0,
+        "USEL": 353792.0,
+        "USHF": 132076.0,
+        "I2F": 67584.0,
+        "F2I": 67584.0,
+        "ULEA": 47168.0,
+        "VIADDMNMX": 28928.0,
+        "BRX": 11264.0,
+        "R2UR": 1536.0,
+        "SGXT": 512.0,
+        "BREAK": 84.0,
+        "NOP": 0.0,
+        "F2F": 0.0,
+        "HADD2": 0.0,
+        "FLO": 0.0,
+        "LEPC": 0.0,
+        "CALL": 0.0,
+        "F2FP": 0.0,
+        "RET": 0.0,
+        "CCTL": 0.0,
+        "B2R": 0.0,
+        "YIELD": 0.0,
+        "MEMBAR": 0.0,
+        "ERRBAR": 0.0,
+        "CGAERRBAR": 0.0,
+        "VOTEU": 0.0,
+        "POPC": 0.0,
+        "ATOMG": 0.0,
+        "ULOP3": 0.0,
+        "IABS": 0.0
+      }
+    },
+    "identical_summary": true
+  },
+  "memory_accounting": {
+    "allowance_mib": 80,
+    "evidence": "Isolated pinned-memory probe: context difference 11 MiB; +2 MiB per GiB pinned; 32 GiB -> 75 MiB; empty host cache -> 11 MiB. Foreign processes rejected and three idle startup samples retained.",
+    "probe": "/root/qvq-sidecar-artifacts/20260906-final/qvq-pinned-accounting-probe.json"
+  },
+  "oneDNN": {
+    "version": "3.12.0",
+    "prefix": "/opt/qvq/onednn-3.12.0",
+    "runtime": "OpenMP",
+    "verified": "AMX BF16/INT8 and AVX-512 FP32",
+    "retained_path": "Torch CPU factor finalization, no AMX GEMM speedup claimed"
+  },
+  "negative_results": "B16 CPU Gram path 5.894998 seconds vs current GPU 3.9968 seconds; broad many-core Gram/norm offload was not beneficial.",
+  "artifact_directory": "/root/qvq-sidecar-artifacts/20260906-final",
+  "source_sha256": {
+    "scripts/experiments/qvq_cpu_sidecar/collector.py": "2544be229aaa3e640f4af249d5140cf96dd16b459c5af2bf97028faa137806ba",
+    "scripts/experiments/qvq_cpu_sidecar/statistics.py": "182c0376a928559cd6e1d07cbc2189dc4f322b747ea6781c8f19c4cee212a35d",
+    "scripts/experiments/qvq_cpu_sidecar/sidecar.py": "50a7bb54e61397a01fa84c4af7099c7e0f468cc2a05a4f3af4bfadb65ad8179f",
+    "scripts/experiments/qvq_cpu_sidecar/inventory.py": "89f9be332088bf89ded687032506ad9bc3e51587f076f44c0d517c0f2d846950",
+    "scripts/experiments/qvq_cpu_sidecar/__init__.py": "5703ea4a6ef994eb1c50e15b271a0260ca8945036ecbcc61b830acaeee156bc7",
+    "scripts/experiments/qvq_cpu_sidecar/paired.py": "7f1aeaddb62dd55dd30be593f33143c2b5d7d15be17a8a0fc923a4392c5fc202",
+    "scripts/experiments/qvq_cpu_sidecar/summarize.py": "149b047ecd9f671084e72ed5f61a2ff5201c102732fe5251b2e18fd295337dcc"
+  }
+}

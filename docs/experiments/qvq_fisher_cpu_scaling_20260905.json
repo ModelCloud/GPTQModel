@@ -1,0 +1,851 @@
+{
+  "scope": "GPU collector CPU-thread baseline; no CPU sidecar enabled",
+  "rows": 64,
+  "batch_size": 16,
+  "sequence_length": 64,
+  "rank": 256,
+  "target_count": 400,
+  "cases": [
+    {
+      "threads": 16,
+      "interop_threads": 1,
+      "state": "complete",
+      "median_seconds": 3.9967936579996604,
+      "min_seconds": 3.995769127999665,
+      "max_seconds": 4.004400826001074,
+      "repeats_seconds": [
+        3.995769127999665,
+        3.9967936579996604,
+        4.004400826001074
+      ],
+      "artifact": "/tmp/qvq-sidecar-baseline-cpu16.json",
+      "phase_medians_seconds": {
+        "backward_and_sketch": 3.279112422998878,
+        "forward": 0.3431788120033161,
+        "loss": 0.1489922039945668,
+        "mps_empty_cache": 0.0,
+        "mps_synchronize": 0.0,
+        "python_gc": 0.0
+      },
+      "collector_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+      "kernel_sha256": "facb531fecbf67724b004ac4d67bb07c81f9251be10a20e440ad728063c0d312"
+    },
+    {
+      "threads": 32,
+      "interop_threads": 1,
+      "state": "complete",
+      "median_seconds": 4.007734422000794,
+      "min_seconds": 4.0053606879992,
+      "max_seconds": 4.015998055001546,
+      "repeats_seconds": [
+        4.007734422000794,
+        4.015998055001546,
+        4.0053606879992
+      ],
+      "artifact": "/tmp/qvq-sidecar-baseline-cpu32.json",
+      "phase_medians_seconds": {
+        "backward_and_sketch": 3.2858166820005863,
+        "forward": 0.3431745179987047,
+        "loss": 0.1506427780004742,
+        "mps_empty_cache": 0.0,
+        "mps_synchronize": 0.0,
+        "python_gc": 0.0
+      },
+      "collector_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+      "kernel_sha256": "facb531fecbf67724b004ac4d67bb07c81f9251be10a20e440ad728063c0d312"
+    },
+    {
+      "threads": 64,
+      "interop_threads": 1,
+      "state": "complete",
+      "median_seconds": 3.9957004379975842,
+      "min_seconds": 3.9936202120006783,
+      "max_seconds": 3.99834096700215,
+      "repeats_seconds": [
+        3.99834096700215,
+        3.9957004379975842,
+        3.9936202120006783
+      ],
+      "artifact": "/tmp/qvq-sidecar-baseline-cpu64.json",
+      "phase_medians_seconds": {
+        "backward_and_sketch": 3.2776968680009304,
+        "forward": 0.34347260200229357,
+        "loss": 0.14910351100479602,
+        "mps_empty_cache": 0.0,
+        "mps_synchronize": 0.0,
+        "python_gc": 0.0
+      },
+      "collector_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+      "kernel_sha256": "facb531fecbf67724b004ac4d67bb07c81f9251be10a20e440ad728063c0d312"
+    },
+    {
+      "threads": 96,
+      "interop_threads": 1,
+      "state": "complete",
+      "median_seconds": 4.0073894499983,
+      "min_seconds": 4.0066325709995,
+      "max_seconds": 4.027146256001288,
+      "repeats_seconds": [
+        4.0073894499983,
+        4.027146256001288,
+        4.0066325709995
+      ],
+      "artifact": "/tmp/qvq-sidecar-baseline-cpu96.json",
+      "phase_medians_seconds": {
+        "backward_and_sketch": 3.287897215999692,
+        "forward": 0.34658980699896347,
+        "loss": 0.14738109999598237,
+        "mps_empty_cache": 0.0,
+        "mps_synchronize": 0.0,
+        "python_gc": 0.0
+      },
+      "collector_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+      "kernel_sha256": "facb531fecbf67724b004ac4d67bb07c81f9251be10a20e440ad728063c0d312"
+    }
+  ],
+  "cpu_inventory": {
+    "affinity": [
+      0,
+      1,
+      5,
+      7,
+      8,
+      14,
+      17,
+      19,
+      21,
+      22,
+      24,
+      25,
+      26,
+      27,
+      28,
+      31,
+      33,
+      36,
+      40,
+      41,
+      42,
+      43,
+      46,
+      47,
+      49,
+      51,
+      52,
+      53,
+      58,
+      59,
+      61,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      72,
+      74,
+      80,
+      83,
+      84,
+      86,
+      87,
+      88,
+      92,
+      93,
+      94,
+      95,
+      96,
+      99,
+      100,
+      103,
+      106,
+      107,
+      108,
+      110,
+      112,
+      113,
+      115,
+      116,
+      117,
+      124,
+      126,
+      127,
+      129,
+      131,
+      132,
+      136,
+      137,
+      138,
+      140,
+      144,
+      145,
+      146,
+      148,
+      150,
+      151,
+      152,
+      154,
+      155,
+      159,
+      160,
+      164,
+      165,
+      166,
+      169,
+      171,
+      173,
+      176,
+      178,
+      180,
+      182,
+      185,
+      188
+    ],
+    "allowed_logical_cpus": 96,
+    "cgroup": {
+      "cpu.max": "max 100000",
+      "cpuset.cpus.effective": "0-1,5,7-8,14,17,19,21-22,24-28,31,33,36,40-43,46-47,49,51-53,58-59,61,64-70,72,74,80,83-84,86-88,92-96,99-100,103,106-108,110,112-113,115-117,124,126-127,129,131-132,136-138,140,144-146,148,150-152,154-155,159-160,164-166,169,171,173,176,178,180,182,185,188",
+      "cpuset.mems.effective": "0-3",
+      "memory.max": "128000000000"
+    },
+    "numa_allowed_cpus": {
+      "node0": [
+        0,
+        1,
+        5,
+        7,
+        8,
+        14,
+        17,
+        19,
+        21,
+        22,
+        96,
+        99,
+        100,
+        103,
+        106,
+        107,
+        108,
+        110,
+        112,
+        113,
+        115,
+        116,
+        117
+      ],
+      "node1": [
+        24,
+        25,
+        26,
+        27,
+        28,
+        31,
+        33,
+        36,
+        40,
+        41,
+        42,
+        43,
+        46,
+        47,
+        124,
+        126,
+        127,
+        129,
+        131,
+        132,
+        136,
+        137,
+        138,
+        140
+      ],
+      "node2": [
+        49,
+        51,
+        52,
+        53,
+        58,
+        59,
+        61,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        144,
+        145,
+        146,
+        148,
+        150,
+        151,
+        152,
+        154,
+        155,
+        159,
+        160,
+        164,
+        165,
+        166
+      ],
+      "node3": [
+        72,
+        74,
+        80,
+        83,
+        84,
+        86,
+        87,
+        88,
+        92,
+        93,
+        94,
+        95,
+        169,
+        171,
+        173,
+        176,
+        178,
+        180,
+        182,
+        185,
+        188
+      ]
+    },
+    "physical_core_groups": [
+      {
+        "allowed_cpus": [
+          0,
+          96
+        ],
+        "core": 0,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          1
+        ],
+        "core": 1,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          99
+        ],
+        "core": 3,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          100
+        ],
+        "core": 4,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          5
+        ],
+        "core": 5,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          7,
+          103
+        ],
+        "core": 7,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          8
+        ],
+        "core": 8,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          106
+        ],
+        "core": 10,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          107
+        ],
+        "core": 11,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          108
+        ],
+        "core": 12,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          14,
+          110
+        ],
+        "core": 14,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          112
+        ],
+        "core": 16,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          17,
+          113
+        ],
+        "core": 17,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          19,
+          115
+        ],
+        "core": 19,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          116
+        ],
+        "core": 20,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          21,
+          117
+        ],
+        "core": 21,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          22
+        ],
+        "core": 22,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          24
+        ],
+        "core": 24,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          25
+        ],
+        "core": 25,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          26
+        ],
+        "core": 26,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          27
+        ],
+        "core": 27,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          28,
+          124
+        ],
+        "core": 28,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          126
+        ],
+        "core": 30,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          31,
+          127
+        ],
+        "core": 31,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          33,
+          129
+        ],
+        "core": 33,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          131
+        ],
+        "core": 35,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          36,
+          132
+        ],
+        "core": 36,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          40,
+          136
+        ],
+        "core": 40,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          41,
+          137
+        ],
+        "core": 41,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          42,
+          138
+        ],
+        "core": 42,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          43
+        ],
+        "core": 43,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          140
+        ],
+        "core": 44,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          46
+        ],
+        "core": 46,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          47
+        ],
+        "core": 47,
+        "socket": 0
+      },
+      {
+        "allowed_cpus": [
+          144
+        ],
+        "core": 0,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          49,
+          145
+        ],
+        "core": 1,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          146
+        ],
+        "core": 2,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          51
+        ],
+        "core": 3,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          52,
+          148
+        ],
+        "core": 4,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          53
+        ],
+        "core": 5,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          150
+        ],
+        "core": 6,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          151
+        ],
+        "core": 7,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          152
+        ],
+        "core": 8,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          58,
+          154
+        ],
+        "core": 10,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          59,
+          155
+        ],
+        "core": 11,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          61
+        ],
+        "core": 13,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          159
+        ],
+        "core": 15,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          64,
+          160
+        ],
+        "core": 16,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          65
+        ],
+        "core": 17,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          66
+        ],
+        "core": 18,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          67
+        ],
+        "core": 19,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          68,
+          164
+        ],
+        "core": 20,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          69,
+          165
+        ],
+        "core": 21,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          70,
+          166
+        ],
+        "core": 22,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          72
+        ],
+        "core": 24,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          169
+        ],
+        "core": 25,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          74
+        ],
+        "core": 26,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          171
+        ],
+        "core": 27,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          173
+        ],
+        "core": 29,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          80,
+          176
+        ],
+        "core": 32,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          178
+        ],
+        "core": 34,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          83
+        ],
+        "core": 35,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          84,
+          180
+        ],
+        "core": 36,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          86,
+          182
+        ],
+        "core": 38,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          87
+        ],
+        "core": 39,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          88
+        ],
+        "core": 40,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          185
+        ],
+        "core": 41,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          92,
+          188
+        ],
+        "core": 44,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          93
+        ],
+        "core": 45,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          94
+        ],
+        "core": 46,
+        "socket": 1
+      },
+      {
+        "allowed_cpus": [
+          95
+        ],
+        "core": 47,
+        "socket": 1
+      }
+    ],
+    "represented_physical_cores": 71,
+    "thread_environment": {
+      "MKL_NUM_THREADS": "16",
+      "OMP_NUM_THREADS": "16",
+      "OMP_PLACES": null,
+      "OMP_PROC_BIND": null,
+      "OPENBLAS_NUM_THREADS": "16"
+    }
+  }
+}

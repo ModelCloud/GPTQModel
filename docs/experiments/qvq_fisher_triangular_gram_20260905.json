@@ -1,0 +1,587 @@
+{
+  "status": "Rejected for performance after instruction audit and post-profile timing",
+  "scope": "Real captured Qwen3.5-27B B16/T64/K5120 and17408 Grams, strict FP32 on H200",
+  "source_sha256": "cacc6470719bb333c42cae55cdd5b6fa3b1bd8322d2d6b028c1eeefa2cf6a111",
+  "initial_probe": [
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        16,
+        32,
+        4
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.21644799709320067
+    },
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        16,
+        32,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.21639039516448974
+    },
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        16,
+        64,
+        4
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.2070784091949463
+    },
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        16,
+        64,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.20694561004638673
+    },
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        16,
+        128,
+        4
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.19476319551467897
+    },
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        16,
+        128,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.19499839544296266
+    },
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        16,
+        64,
+        8
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.36871840953826907
+    },
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        16,
+        64,
+        8
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.36841280460357667
+    },
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        32,
+        32,
+        4
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.24149758815765382
+    },
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        32,
+        32,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.24413759708404542
+    },
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        32,
+        64,
+        4
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.23946878910064698
+    },
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        32,
+        64,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.0933135986328125,
+      "candidate_ms": 0.2388144016265869
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        16,
+        32,
+        4
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 0.8746512413024903
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        16,
+        32,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 0.8747983932495117
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        16,
+        64,
+        4
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 0.698583984375
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        16,
+        64,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 0.6989503860473633
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        16,
+        128,
+        4
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 0.6870255947113038
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        16,
+        128,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 0.6881807804107666
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        16,
+        64,
+        8
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 1.2720576286315919
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        16,
+        64,
+        8
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 1.2725343704223633
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        32,
+        32,
+        4
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 1.038651180267334
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        32,
+        32,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 1.045032024383545
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        32,
+        64,
+        4
+      ],
+      "triangular": false,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 0.9095312118530273
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        32,
+        64,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5287327766418457,
+      "candidate_ms": 0.9093695640563965
+    }
+  ],
+  "audit": {
+    "baseline": {
+      "summary": {
+        "kernels": 1,
+        "executed_warp_instructions": 56621440.0,
+        "predicated_thread_instructions": 1799925760.0,
+        "max_registers_per_thread": 80.0,
+        "local_spill_bytes": 0.0,
+        "shared_spill_bytes": 0.0,
+        "shared_excessive_wavefronts": 6684672.0,
+        "opcodes": {
+          "FFMA": 35653632.0,
+          "IADD3": 5300736.0,
+          "LDS": 4458752.0,
+          "UIADD3": 2788096.0,
+          "LDGSTS": 2230272.0,
+          "ISETP": 1121792.0,
+          "UISETP": 1115776.0,
+          "UMOV": 1115392.0,
+          "SEL": 1115008.0,
+          "R2P": 557568.0,
+          "BRA": 281088.0,
+          "BAR": 279168.0,
+          "LDGDEPBAR": 278784.0,
+          "DEPBAR": 278784.0,
+          "IMAD": 11904.0,
+          "ULDC": 4736.0,
+          "FMNMX": 4096.0,
+          "VIADD": 3712.0,
+          "LEA": 2944.0,
+          "LDC": 2688.0,
+          "SHF": 2688.0,
+          "ST": 2048.0,
+          "LOP3": 1408.0,
+          "CS2R": 1280.0,
+          "S2UR": 1152.0,
+          "USHF": 1152.0,
+          "UIMAD": 1024.0,
+          "ULEA": 1024.0,
+          "PLOP3": 768.0,
+          "S2R": 640.0,
+          "STS": 512.0,
+          "MOV": 384.0,
+          "P2R": 384.0,
+          "LDG": 384.0,
+          "USEL": 256.0,
+          "R2UR": 256.0,
+          "BSSY": 256.0,
+          "BSYNC": 256.0,
+          "VIADDMNMX": 128.0,
+          "HFMA2": 128.0,
+          "PRMT": 128.0,
+          "FSETP": 128.0,
+          "EXIT": 128.0,
+          "ULOP3": 0.0,
+          "IABS": 0.0,
+          "I2F": 0.0,
+          "MUFU": 0.0,
+          "F2I": 0.0,
+          "CCTL": 0.0,
+          "YIELD": 0.0,
+          "WARPSYNC": 0.0,
+          "FADD": 0.0,
+          "STG": 0.0,
+          "FMUL": 0.0,
+          "MEMBAR": 0.0,
+          "ERRBAR": 0.0,
+          "CGAERRBAR": 0.0,
+          "ATOMG": 0.0,
+          "NOP": 0.0
+        }
+      },
+      "kernels": [
+        {
+          "Kernel Name": "sm80_xmma_gemm_f32f32_f32f32_f32_tn_n_tilesize32x32x8_stage3_warpsize1x2x1_ffma_aligna4_alignc4_execute_kernel__5x_cublas",
+          "gpu__time_duration.sum": "528.448000",
+          "launch__registers_per_thread": "80",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "3.124994",
+          "smsp__warps_eligible.avg.per_cycle_active": "0.427912"
+        }
+      ]
+    },
+    "triangular": {
+      "summary": {
+        "kernels": 1,
+        "executed_warp_instructions": 34178944.0,
+        "predicated_thread_instructions": 1085255680.0,
+        "max_registers_per_thread": 54.0,
+        "local_spill_bytes": 0.0,
+        "shared_spill_bytes": 0.0,
+        "shared_excessive_wavefronts": 77987840.0,
+        "opcodes": {
+          "FFMA": 22282240.0,
+          "LDS": 8620928.0,
+          "IADD3": 1600768.0,
+          "LDGSTS": 701440.0,
+          "ISETP": 350592.0,
+          "BAR": 176128.0,
+          "LDGDEPBAR": 175360.0,
+          "DEPBAR": 87680.0,
+          "BRA": 87040.0,
+          "IMAD": 25472.0,
+          "LOP3": 20096.0,
+          "SHF": 17152.0,
+          "LEA": 9088.0,
+          "S2R": 3328.0,
+          "SGXT": 2560.0,
+          "ULEA": 2560.0,
+          "EXIT": 2048.0,
+          "STS": 2048.0,
+          "S2UR": 1920.0,
+          "LDC": 1664.0,
+          "ULDC": 1280.0,
+          "HFMA2": 1280.0,
+          "MOV": 1280.0,
+          "UIMAD": 1280.0,
+          "UMOV": 1280.0,
+          "STG": 1024.0,
+          "SEL": 768.0,
+          "USHF": 640.0,
+          "NOP": 0.0
+        }
+      },
+      "kernels": [
+        {
+          "Kernel Name": "gram",
+          "gpu__time_duration.sum": "684.096000",
+          "launch__registers_per_thread": "54",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "10.028041",
+          "smsp__warps_eligible.avg.per_cycle_active": "0.077000"
+        }
+      ]
+    }
+  },
+  "post_profile": [
+    {
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "tile": [
+        16,
+        128,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.09320319890975952,
+      "candidate_ms": 0.1947376012802124
+    },
+    {
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "tile": [
+        16,
+        128,
+        4
+      ],
+      "triangular": true,
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.5282752037048339,
+      "candidate_ms": 0.6879456043243408
+    }
+  ],
+  "math_and_data_review": "Upper-triangle16x16 tiles mirror exact symmetric results and reduce FFMA count by37.5percent including full diagonal tiles. No split-K or reassociation. Smaller tiles increase active warps but shared-memory excessive wavefronts rise from6684672 to77987840; LDS count nearly doubles. Registers decrease80to54, no spills. Eligible warps fall0.427912to0.077. Removing arithmetic does not compensate for shared-memory access cost. No promotion.",
+  "artifacts": "/root/qvq-sidecar-artifacts/20260905-reuse"
+}

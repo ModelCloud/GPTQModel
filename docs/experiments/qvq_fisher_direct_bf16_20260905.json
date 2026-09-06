@@ -1,0 +1,57 @@
+{
+  "status": "Factor parity passes; performance still below current GPU baseline",
+  "scope": "B16/16 rows, T64/R256, Qwen3.5-27B 400 targets, four workers of16 native threads, noGIL, active OpenMP waits, node0 pinned input memory",
+  "runs": [
+    {
+      "name": "direct-bounded4",
+      "seconds": [
+        1.9867396210029256,
+        1.6294278290006332,
+        1.7661589560011635
+      ],
+      "median_seconds": 1.7661589560011635,
+      "factor_parity": [
+        {
+          "arm": "streaming_256",
+          "bitwise_equal": true,
+          "factors_checked": 800
+        }
+      ],
+      "collector_sha256": "066946cec36b861ced73ab7ca97d478703120e966d811d400495bbd9e2011be3",
+      "raw_report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-direct-bounded4.json"
+    },
+    {
+      "name": "direct4",
+      "seconds": [
+        1.8299686369937262,
+        1.8465703290057718,
+        1.8493874190025963
+      ],
+      "median_seconds": 1.8465703290057718,
+      "factor_parity": [
+        {
+          "arm": "streaming_256",
+          "bitwise_equal": true,
+          "factors_checked": 800
+        }
+      ],
+      "collector_sha256": "44c0e4e388ed07566535abceaf7b7e3ca24372658dbc2fe8387eea7cb44203f0",
+      "raw_report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-direct4.json"
+    }
+  ],
+  "memory_preflight_rejections": {
+    "count": 2,
+    "unattributed_mib": 69,
+    "limit_mib": 64,
+    "resolution": "Retain only activations with another consumer and release after the final use; rerun under unchanged64MiB limit. GPU returned0MiB at process exit. No timing accepted from rejected runs.",
+    "cause_status": "Excess cached pinned buffers were removed; attribution of every69MiB was not established."
+  },
+  "data_and_math_review": "GPU transposes/casts masked BF16-representable inputs. Native kernels directly read BF16 storage, widen to FP32, retain sequential FP32 FMA and the reference diagonal reduction tree. No CPU packing pass or FP32 scratch remains. Bounded sharing avoids96 duplicate transfers/activation Grams among352 jobs. This is prototype-only, with full-model equality shown for the documented case.",
+  "sources": {
+    "/tmp/qvq-sidecar-prototype-direct-shared-bounded.py": "066946cec36b861ced73ab7ca97d478703120e966d811d400495bbd9e2011be3",
+    "/tmp/qvq-sidecar-prototype-direct-bf16.py": "44c0e4e388ed07566535abceaf7b7e3ca24372658dbc2fe8387eea7cb44203f0",
+    "/tmp/qvq-cpu-strict-gram-bf16.cpp": "56795ae8fd3cf6ef5b7d73246997b6981ac0ac130d57be82e652cab2e8447537",
+    "/tmp/qvq-cpu-diagonal-bf16.cpp": "f7deb668fa071a3c07c7ff8b020fb465e9e9ea3e5d5b00bf58562aca542e0794"
+  },
+  "artifact_directory": "/root/qvq-sidecar-artifacts/20260905-reuse"
+}
