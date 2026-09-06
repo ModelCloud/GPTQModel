@@ -102,11 +102,12 @@ is active; raw split partials cannot accept correction before reduction.
 
 ## Remaining work and promotion boundary
 
-The reference and fused output epilogue are implemented. Concurrent WGMMA input projection,
-complete native pipeline fusion, FP8 factors, rank-16 Tensor Core sweeps,
-BN32/additional stages, native ABI v3/StableHLO lowering, actual ZML
-compiler integration, automatic graph construction, real-model quality evaluation,
-TP1/2/4/8 and H100/H200 performance promotion remain unimplemented/unvalidated.
+The reference/fused output epilogues, shared input producer, padded Tensor Core
+projection, request-owned model graphs and initial native/ZML reference bridge
+are implemented. Concurrent WGMMA input projection, complete native pipeline
+fusion, FP8 factors, BN32/additional stages, external capture workspace, native
+artifact loading, ZML latency tuning/cache integration, KV/TP graph ownership,
+the full real-model scorecard and H100/H200 promotion remain open.
 `fused_epilogue` runs expansion/add/Hadamard/SV/bias in one kernel.
 `fully_fused` remains unsupported; it does not alias the partial fusion.
 No <=3–5% overhead or model speed/quality claim follows from these tests.
@@ -293,9 +294,10 @@ The caller supplies `benchmark(executable, activation)`, returning positive
 microsecond samples under its device-exclusivity/timing contract. The optional
 `compile_candidate(backend_config)` receives direct geometry and correction
 controls and returns the executable that will actually be validated and timed.
-This is the integration point for external compilers such as ZML. A native
-StableHLO/XLA FFI lowering is still required; a Python callback is not evidence
-that ZML itself has been run.
+This is the integration point for external compilers such as ZML. The callback
+tests alone are not ZML evidence. The native/ZML section below separately
+records actual StableHLO lowering and execution; connecting that executable
+to the latency tuner and its cache remains open.
 
 An optional `cache_dir` stores atomic JSON entries binding exact activation
 cases and strides, deployment payload and transforms, enabled correction
@@ -313,7 +315,7 @@ all eligible off/on candidates, then separately checks and times the winner.
 These inputs test implementation preservation and do not fit rank8, select
 quality, or establish full-model accuracy. Non-Hopper backends currently
 expose their production candidate; additional backend-specific candidates
-and actual ZML compiler integration remain open.
+and ZML executable tuning/cache integration remain open.
 
 The retained [H200 autotuning result](results/p32_window_h200_autotuning.json)
 covers 90 candidate evaluations across M128/M2048 and correction off/on.
@@ -578,8 +580,8 @@ input projection (31.721 us off, 43.393 us on). At M2048 it selects direct
 BM128/BN128 with fused output and Tensor Core projection (199.165 us off,
 225.153 us on). These are per-shape latency selections under the local
 numerical gate, not model-quality promotion of Tensor Core projection.
-Actual ZML lowering, model graph ownership, concurrent native WGMMA/rank8
-fusion and the full model/device/TP scorecard remain open.
+External capture and KV/TP graph ownership, ZML executable tuning, concurrent
+native WGMMA/rank8 fusion and the full model/device/TP scorecard remain open.
 
 ## Request-owned quality graphs
 
@@ -642,3 +644,39 @@ an expanded quality scorecard or a graph-manager latency claim. Replay still
 checks model state on the host and copies returned outputs; request overhead,
 large-context graph residency and model-wide generation performance require
 measurement before serving promotion.
+
+
+## Native ABI and actual ZML execution
+
+The [ZML adapter](../../integrations/zml/README.md) now lowers
+`stablehlo.custom_call @qvq_p32_window_linear` to a native C ABI on the
+PJRT-provided CUDA stream. It executes without Python and reuses existing
+Hopper window/Hadamard operators. Geometry and correction state are individual
+compiler attributes. The initial native contract supports explicit M16 or
+BM32/64/128 with BN64/128, BK256/stages2/split1 and reference rank8, on SM90
+with power-of-two K2048..16384/N256..16384 and M1..8192.
+
+The [native/ZML evidence](results/p32_window_native_zml.json) retains 16
+bit-exact real-Q native/reference cases at M1/33/128/2048, plus successful ZML
+CUDA execution with correction off/on at M33, K=N2048, W2, BM64/BN64. The
+transient fixture is hash checked; it is not another deployment format.
+Post-profile validation passes 182 native/graph/tuning tests, plus 20 extension
+registry tests. Native tests cover all four legal rates and six BM/BN pairs,
+M8192 boundaries, poisoned disabled pointers and capture rejection.
+Artifact validation still belongs to setup: the Python helper validates the
+unified package, while a complete standalone native artifact loader remains
+open.
+
+The instruction audit shows 15 Python-reference launches versus 16 native
+launches, with 5,076,434 versus 5,080,407 source-correlated instructions. The
+bridge adds one SV FP16-to-FP32 conversion (3,312 instructions); common kernel
+resources are unchanged. No device kernels or precision boundaries changed.
+Post-profile M33 prepared-call medians are 207.90 us Python eager, 78.85 us
+native C and 61.41 us captured Python. These are one-module execution timings,
+not ZML or full-model latency. The C bridge is not promoted over graph serving.
+
+External CUDA capture is explicitly rejected because this reference bridge
+allocates temporary tensors. The ZML handler advertises
+`command_buffer_compatible=false` and retains replicated sharding semantics.
+Caller-owned workspace, native grouped/fused correction, TP-aware lowering,
+ZML autotuning/cache integration and broader validation remain required.

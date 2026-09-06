@@ -1,3 +1,5 @@
+recursive-include gptqmodel_ext/qvq *.h *.hpp *.cuh *.cu *.cpp
+recursive-include integrations/zml *.zig *.bazel *.md
 recursive-include gptqmodel_ext/awq *.h *.cuh *.cu *.cpp
 recursive-include gptqmodel_ext/exllamav3 *.h *.hpp *.cuh *.cu *.cpp *.c
 recursive-include gptqmodel_ext/exllamav2 *.h *.cuh *.cu *.cpp

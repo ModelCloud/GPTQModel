@@ -42,6 +42,13 @@ def _resolve_extension_factory(module_name: str, attr_name: str) -> TorchOpsJitE
 
 _EXTENSION_SPECS = (
     _ExtensionSpec(
+        name="qvq_window_abi",
+        aliases=(),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.qvq_window_abi", "_EXTENSION"),
+        supported=lambda: _resolve_attr("gptqmodel.utils.qvq_window_abi", "native_window_abi_supported")(),
+        unsupported_error=lambda: "P32 window native ABI requires an SM90 CUDA device.",
+    ),
+    _ExtensionSpec(
         name="adjacent_exact",
         aliases=("adjacent_exact_cuda",),
         resolve=lambda: _resolve_extension_attr(

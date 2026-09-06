@@ -30,7 +30,9 @@ import gptqmodel.utils.marlin_moe as marlin_moe_utils
 import gptqmodel.utils.pangolin as pangolin_utils
 import gptqmodel.utils.paroquant as paroquant_utils
 import gptqmodel.utils.qqq as qqq_utils
+import gptqmodel.utils.qvq_cpu as qvq_cpu_utils
 import gptqmodel.utils.qvq_cuda as qvq_cuda_utils
+import gptqmodel.utils.qvq_window_abi as qvq_window_abi_utils
 import gptqmodel.utils.swordfish as swordfish_utils
 import gptqmodel.utils.trilin as trilin_utils
 import gptqmodel_ext.planar as planar_api
@@ -82,6 +84,8 @@ def _install_fake_extensions(monkeypatch):
         "pack_block_cpu": _FakeExtension("pack_block_cpu"),
         "gptq_block": _FakeExtension("GPTQ CUDA block quantization"),
         "qvq_cuda": _FakeExtension("QVQ planar CUDA GEMV"),
+        "qvq_cpu": _FakeExtension("QVQ CPU"),
+        "qvq_window_abi": _FakeExtension("P32 window native ABI"),
         "floatx_cpu": _FakeExtension("floatx_cpu"),
         "diagnostic_metrics_cpu": _FakeExtension("diagnostic_metrics_cpu"),
         "diagnostic_metrics_cuda": _FakeExtension("diagnostic_metrics_cuda"),
@@ -124,6 +128,10 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(gptq_block_utils, "gptq_block_cuda_supported", lambda: True)
     monkeypatch.setattr(qvq_cuda_utils, "_QVQ_CUDA_TORCH_OPS_EXTENSION", fakes["qvq_cuda"])
     monkeypatch.setattr(qvq_cuda_utils, "qvq_cuda_supported", lambda: True)
+    monkeypatch.setattr(qvq_cpu_utils, "_QVQ_CPU_TORCH_OPS_EXTENSION", fakes["qvq_cpu"])
+    monkeypatch.setattr(qvq_cpu_utils, "qvq_cpu_supported", lambda: True)
+    monkeypatch.setattr(qvq_window_abi_utils, "_EXTENSION", fakes["qvq_window_abi"])
+    monkeypatch.setattr(qvq_window_abi_utils, "native_window_abi_supported", lambda: True)
     monkeypatch.setattr(cpp_utils, "_floatx_cpu_extension", lambda: fakes["floatx_cpu"])
     monkeypatch.setattr(
         diagnostic_metrics_utils,
@@ -250,6 +258,8 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "pack_block_cpu": True,
         "gptq_block": True,
         "qvq_cuda": True,
+        "qvq_cpu": True,
+        "qvq_window_abi": True,
         "floatx_cpu": True,
         "diagnostic_metrics_cpu": True,
         "diagnostic_metrics_cuda": True,
