@@ -174,3 +174,7 @@ wave44 tested `maxnreg` 0/48/56/64/72/80/96 on all eight GPUs; all 72 cases
 passed, but no cap improved the uncapped BM64 arm. Cap48 raised M=2048 inner
 latency to about 2.27 ms and cap96 reached only 1.208x layer speedup. Register
 capping is rejected; deeper decode/MMA fusion remains.
+Shift/mask fold wave45 replaced exact divide/modulo forms with equivalent
+bitwise operations and passed 72/72 cases, but regressed pooled speedup to
+1.136x at M=512 and 1.247x at M=2048. The compiler's existing strength
+reduction is better; the explicit fold is rejected.

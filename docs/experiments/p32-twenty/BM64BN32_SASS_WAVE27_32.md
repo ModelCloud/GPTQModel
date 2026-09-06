@@ -344,6 +344,23 @@ M=2048 inner latency from about 1.87 ms to 2.27 ms, consistent with spill or
 compiler scheduling cost; larger caps also regressed. Raw reports are in
 [wave 44 results](results/bm64bn32-maxnreg-wave44/).
 
+## Exact shift/mask address fold wave 45
+
+Wave 45 replaced runtime divide/modulo forms in the standard scalar decode
+path with equivalent shifts, masks, and a predicated final-word wrap. The
+change preserves the exact state extraction and PGC16 mapping. All 72/72
+projection/row-count cases passed the local gates, but the SASS rewrite was
+slower:
+
+| M | 1 | 2 | 4 | 8 | 16 | 32 | 128 | 512 | 2048 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Shift/mask fold | 0.982× | 0.949× | 0.979× | 0.958× | 0.953× | 0.958× | 0.974× | 1.136× | 1.247× |
+
+The compiler already strength-reduced the relevant constant arithmetic, while
+the explicit predication changed scheduling and address generation. The
+default scalar source remains selected. Raw results are in
+[wave 45 results](results/bm64bn32-bitfold-wave45/).
+
 ## Decision and next target
 
 The current exact dispatch remains production window for M < 512 and the
