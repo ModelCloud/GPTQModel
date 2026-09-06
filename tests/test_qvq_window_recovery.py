@@ -284,6 +284,36 @@ def test_ampere_window_candidates_are_explicit_and_shape_specific(monkeypatch):
     ) == candidates[0]
 
 
+def test_gfx950_window_candidates_use_real_launch_controls(monkeypatch):
+    """The unified tuner exposes the existing non-unified gfx950 sweep."""
+
+    layer, _, _, _ = fixture(hadamard=False)
+    prepare_rank8(layer, P32WindowConfig())
+    monkeypatch.setattr(layer, "runtime_device", lambda: torch.device("cuda"))
+    monkeypatch.setattr(torch.version, "hip", "6.3", raising=False)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: type(
+            "Props", (), {"major": 9, "minor": 4, "name": "AMD MI355X"}
+        )(),
+    )
+    monkeypatch.setattr(
+        "gptqmodel.utils.qvq_amd.qvq_p32_amd_supported", lambda device: True
+    )
+    candidates = window_kernel_candidates(layer, m=128)
+
+    assert candidates
+    assert all(candidate.algorithm == "amd_gfx950" for candidate in candidates)
+    assert all(candidate.block_n == 64 for candidate in candidates)
+    assert all(candidate.block_k in (16, 32, 64) for candidate in candidates)
+    assert all(candidate.warp_groups in (4, 8) for candidate in candidates)
+    assert all(candidate.pipeline_stages in (1, 2, 3) for candidate in candidates)
+    assert P32WindowConfig.from_backend_config(
+        candidates[0].to_backend_config()
+    ) == candidates[0]
+
+
 def test_grouped_window_candidates_preserve_child_split_tuples(monkeypatch):
     """The high-level grouped API exposes the SM80 tuple tuner directly."""
 

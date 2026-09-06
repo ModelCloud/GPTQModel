@@ -864,10 +864,13 @@ fallback, so legacy callers must request a normal planar module explicitly.
 
 On the non-unified gfx950 path, `qvq_p32_amd_kernel_candidates(M, N, K)`
 publishes the bounded `QVQAMDLaunchConfig` sweep (including the measured
-shape heuristic). A caller can warm, correctness-check and benchmark those
-configs, then pass the selected config to `qvq_p32_amd(..., cache_weight=False,
-launch_config=...)`. Cold decoder/cache preparation is rejected during CUDA
-capture, so the selected launch is fixed before graph replay.
+shape heuristic). The unified `window_kernel_candidates` API maps those exact
+launch choices to `P32WindowConfig(algorithm="amd_gfx950")`, and
+`explicit_window_inner` forwards the selected BM/BK/warp/stage values to
+`qvq_p32_amd(..., cache_weight=False, launch_config=...)`. A caller can warm,
+correctness-check and benchmark the same configs before capture. Cold
+decoder/cache preparation is rejected during CUDA capture, so the selected
+launch is fixed before graph replay.
 
 For atomic SwiGLU module replay, rank8 fitting is deferred until the complete
 gate/up/down triplet is selected. The fitter receives the selected candidate's

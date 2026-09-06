@@ -68,23 +68,38 @@ class P32WindowConfig:
                 self.chunk_m,
             )
         ):
-            raise ValueError("Hopper geometry must contain integers")
-        if self.chunk_m not in (0, 4096) or (
-            self.chunk_m and self.algorithm != "hopper_direct_decode_mma"
-        ):
-            raise ValueError("M chunking requires direct Hopper with chunk_m=0 or 4096")
-        if self.block_k != 256 or self.pipeline_stages != 2:
-            raise ValueError("current Hopper pipeline requires BK256 and two stages")
-        if (self.block_m or self.block_n or self.warp_groups) and (
-            self.algorithm != "hopper_direct_decode_mma"
-            or self.block_m not in (32, 64, 128)
-            or self.block_n not in (64, 128)
-            or self.warp_groups not in (0, self.block_n // 64)
-            or self.split_k != 1
-        ):
-            raise ValueError(
-                "explicit Hopper geometry requires BM32/64/128, BN64/128 and split_k=1"
-            )
+            raise ValueError("kernel geometry must contain integers")
+        if self.algorithm == "amd_gfx950":
+            if (
+                self.chunk_m != 0
+                or self.split_k != 1
+                or self.block_m not in (16, 32, 64, 128, 256, 512, 1024)
+                or self.block_n != 64
+                or self.block_k not in (16, 32, 64)
+                or self.warp_groups not in (4, 8)
+                or self.pipeline_stages not in (1, 2, 3)
+            ):
+                raise ValueError(
+                    "gfx950 geometry requires BM16/32/64/128/256/512/1024, "
+                    "BN64, BK16/32/64, warps4/8, stages1/2/3 and split_k=1"
+                )
+        else:
+            if self.chunk_m not in (0, 4096) or (
+                self.chunk_m and self.algorithm != "hopper_direct_decode_mma"
+            ):
+                raise ValueError("M chunking requires direct Hopper with chunk_m=0 or 4096")
+            if self.block_k != 256 or self.pipeline_stages != 2:
+                raise ValueError("current Hopper pipeline requires BK256 and two stages")
+            if (self.block_m or self.block_n or self.warp_groups) and (
+                self.algorithm != "hopper_direct_decode_mma"
+                or self.block_m not in (32, 64, 128)
+                or self.block_n not in (64, 128)
+                or self.warp_groups not in (0, self.block_n // 64)
+                or self.split_k != 1
+            ):
+                raise ValueError(
+                    "explicit Hopper geometry requires BM32/64/128, BN64/128 and split_k=1"
+                )
         if self.abi_version != 3:
             raise ValueError("unsupported P32 window ABI version")
         if self.algorithm not in (
@@ -93,6 +108,7 @@ class P32WindowConfig:
             "ampere_window",
             "hopper_direct_decode_mma",
             "hopper_m16",
+            "amd_gfx950",
         ):
             raise ValueError(
                 "explicit direct-decode geometry is not exposed by this reference API"
@@ -280,7 +296,7 @@ def prepare_rank8(layer, config):
     runtime_device = layer.runtime_device()
     if runtime_device.type == "cuda" and torch.cuda.is_current_stream_capturing():
         raise RuntimeError("prepare rank8 and kernel policy before CUDA Graph capture")
-    if runtime_device.type == "cuda":
+    if runtime_device.type == "cuda" and torch.version.hip is None:
         # A policy change can expose the generic GEMV/BF16 rescue branch during
         # a later captured replay. Resolve both native handles while eager.
         from ..utils.qvq_cuda import prewarm_qvq_cuda
@@ -303,6 +319,25 @@ def prepare_rank8(layer, config):
         from ..utils.qvq_ampere_cuda import prewarm_qvq_ampere
 
         prewarm_qvq_ampere()
+        layer._bank_ids_loaded = True
+    elif config.algorithm == "amd_gfx950":
+        if runtime_device.type != "cuda" or torch.version.hip is None:
+            raise ValueError("explicit gfx950 policy requires a ROCm device")
+        from ..utils.qvq_amd import qvq_p32_amd_supported
+
+        if (
+            not qvq_p32_amd_supported(runtime_device)
+            or not layer.v2b2_p32
+            or layer.activation is not None
+            or layer.in_features % 16
+            or layer.out_features % 16
+            or layer.bits not in (2, 2.5, 3, 3.5)
+        ):
+            raise ValueError("unsupported explicit gfx950 P32 contract")
+        # Selector/window preparation is the only host-side setup required by
+        # the fused Triton consumer.  Its launch specialization is warmed by
+        # the first eager call and must remain fixed for graph replay.
+        layer._prepare_amd_p32_metadata(runtime_device)
         layer._bank_ids_loaded = True
     elif config.algorithm.startswith("hopper_"):
         if runtime_device.type != "cuda":
@@ -1665,6 +1700,27 @@ def explicit_window_inner(layer, transformed, config):
             dim=0,
         )
     window, banks, alt_id = layer._prepare_amd_p32_metadata(transformed.device)
+    if config.algorithm == "amd_gfx950":
+        from ..utils.qvq_amd import QVQAMDLaunchConfig, qvq_p32_amd
+
+        return qvq_p32_amd(
+            transformed.contiguous(),
+            window,
+            _pgc16_levels(transformed.device, layer.codebook_version),
+            banks,
+            layer.bits,
+            out_features=layer.out_features,
+            bank_alt_id=alt_id,
+            output_fp32=True,
+            cache_weight=False,
+            launch_config=QVQAMDLaunchConfig(
+                block_m=config.block_m,
+                block_n=config.block_n,
+                block_k=config.block_k,
+                num_warps=config.warp_groups,
+                num_stages=config.pipeline_stages,
+            ),
+        )
     if config.algorithm == "ampere_window":
         from ..utils.qvq_ampere_cuda import qvq_p32_window_ampere
 
@@ -1763,6 +1819,33 @@ def window_kernel_candidates(layer, *, m):
         or not layer.v2b2_p32
     ):
         return tuple(candidates)
+    if torch.version.hip is not None:
+        from ..utils.qvq_amd import (
+            qvq_p32_amd_kernel_candidates,
+            qvq_p32_amd_supported,
+        )
+
+        if qvq_p32_amd_supported(layer.runtime_device()):
+            # gfx950 has a Triton consumer with independent M/K/stage choices;
+            # expose those exact launch controls to the same tuner contract.
+            # Recovery implementation variants remain SM90-only until their
+            # arithmetic and graph signatures are certified on ROCm.
+            amd_candidates = tuple(
+                replace(
+                    policy,
+                    algorithm="amd_gfx950",
+                    block_m=launch.block_m,
+                    block_n=launch.block_n,
+                    block_k=launch.block_k,
+                    warp_groups=launch.num_warps,
+                    pipeline_stages=launch.num_stages,
+                )
+                for launch in qvq_p32_amd_kernel_candidates(
+                    m, layer.out_features, layer.in_features
+                )
+            )
+            if amd_candidates:
+                return amd_candidates
     if (props.major, props.minor) == (8, 0):
         from ..utils.qvq_ampere_cuda import qvq_p32_window_ampere_kernel_candidates
 
