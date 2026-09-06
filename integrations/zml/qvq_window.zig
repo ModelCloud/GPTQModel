@@ -783,22 +783,24 @@ pub fn loadArtifact(
 /// winning geometry is shape-, device- and correction-state dependent.
 pub const max_candidate_count: usize = 7;
 
-/// Arithmetic signatures are assigned by the producer after numerical
-/// certification.  A locally passing output gate is not sufficient to make
-/// a different reduction order eligible for a quality graph.
-pub const P32ArithmeticSignature = enum(u8) {
-    reference_fp32_v1,
-    certified_tensor_core_v1,
-    unverified,
-};
-
-pub const P32QualityMode = enum {
+/// Quality policy is deliberately separate from launch geometry. A latency
+/// winner cannot silently change the arithmetic contract of a quality graph.
+pub const QualityMode = enum {
     fast,
     balanced,
     quality,
 };
 
-fn p32ArithmeticAllowed(mode: P32QualityMode, signature: P32ArithmeticSignature) bool {
+/// Arithmetic signatures are assigned by the producer after numerical
+/// certification. Unknown signatures remain visible and are only eligible
+/// for explicitly permissive fast mode.
+pub const ArithmeticSignature = enum(u8) {
+    reference_fp32_v1 = 1,
+    certified_tensor_core_v1 = 2,
+    unverified = 255,
+};
+
+fn arithmeticAllowed(mode: QualityMode, signature: ArithmeticSignature) bool {
     return switch (mode) {
         .fast => true,
         .balanced => signature == .reference_fp32_v1 or signature == .certified_tensor_core_v1,
@@ -818,7 +820,7 @@ pub const CandidateMeasurement = struct {
     accepted: bool,
     /// The producer must set this from its arithmetic certification record;
     /// reference is the safe default for the existing native ABI.
-    arithmetic_signature: P32ArithmeticSignature = .reference_fp32_v1,
+    arithmetic_signature: ArithmeticSignature = .reference_fp32_v1,
     /// Matched complete-operator correction-off/on timing. This is optional
     /// for report-only tuning; an explicit recovery budget requires it.
     recovery_pair: ?RecoveryPairMeasurement = null,
@@ -970,7 +972,7 @@ pub fn selectFastestWithPolicy(
     candidates: []const Config,
     measurements: []const CandidateMeasurement,
     maximum_percent: ?f64,
-    quality_mode: P32QualityMode,
+    quality_mode: QualityMode,
 ) !TuningResult {
     if (candidates.len == 0) return error.NoCandidates;
     if (candidates.len != measurements.len) return error.MeasurementCountMismatch;
@@ -980,7 +982,7 @@ pub fn selectFastestWithPolicy(
     var selected: ?TuningResult = null;
     for (candidates, measurements, 0..) |candidate, measurement, index| {
         if (!measurement.accepted or measurement.median_ns == 0 or
-            !p32ArithmeticAllowed(quality_mode, measurement.arithmetic_signature) or
+            !arithmeticAllowed(quality_mode, measurement.arithmetic_signature) or
             !std.math.isFinite(measurement.mean_absolute_error) or
             !std.math.isFinite(measurement.max_absolute_error) or
             measurement.mean_absolute_error > 2e-3 or
@@ -1266,11 +1268,17 @@ test "native window ABI layout" {
     const balanced = try selectFastest(candidates[0..count], &measurements);
     try std.testing.expectEqual(@as(usize, 0), balanced.candidate_index);
     const fast = try selectFastestWithPolicy(
-        candidates[0..count], &measurements, null, .fast,
+        candidates[0..count],
+        &measurements,
+        null,
+        .fast,
     );
     try std.testing.expectEqual(@as(usize, 1), fast.candidate_index);
     const quality = try selectFastestWithPolicy(
-        candidates[0..count], &measurements, null, .quality,
+        candidates[0..count],
+        &measurements,
+        null,
+        .quality,
     );
     try std.testing.expectEqual(@as(usize, 0), quality.candidate_index);
     measurements[1].arithmetic_signature = .reference_fp32_v1;
