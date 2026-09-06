@@ -49,6 +49,9 @@ The Python tuner now supports `measure_recovery_candidates=True`, retaining
 matched correction-off/on medians and marginal overhead for every eligible
 geometry. The ZML adapter exposes the equivalent `benchmarkRecoveryPair` API.
 Neither path lets latency override audit or arithmetic-signature eligibility.
+Promotion jobs may additionally pass `max_recovery_overhead_percent` to reject
+every measured geometry above the explicit 3--5% budget; the default remains
+report-only because current modules do not all meet that budget.
 
 The native prepared-graph API owns its temporary allocation pool and can insert
 the existing window/rank8 operator as a child of an enclosing CUDA capture. The
