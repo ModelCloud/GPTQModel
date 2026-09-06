@@ -1102,6 +1102,10 @@ class QVQLinear(BaseQuantLinear):
         }
         for name, (shape, dtype) in expected.items():
             tensor = getattr(self, name)
+            if tensor is None:
+                if name == "trellis" and self.window_only:
+                    continue
+                raise ValueError(f"QVQ `{name}` is missing from the module")
             if tuple(tensor.shape) != shape:
                 raise ValueError(
                     f"QVQ `{name}` must have shape {shape}, got {tuple(tensor.shape)}"

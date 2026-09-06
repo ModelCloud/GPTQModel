@@ -1047,7 +1047,15 @@ def export_window_package(layer):
     }
 
 
-def load_window_package(package, *, device="cpu", config=None):
+def load_window_package(package, *, device="cpu", config=None, retain_planar=False):
+    """Load a package with window-owned execution storage.
+
+    CUDA loads release the temporary CPU planar reconstruction by default. A
+    legacy/debug caller can request ``retain_planar=True`` explicitly; window
+    kernels never depend on that copy.
+    """
+    if not isinstance(retain_planar, bool):
+        raise TypeError("retain_planar must be a bool")
     from ..nn_modules.qlinear.qvq import QVQLinear
 
     metadata = dict(package["metadata"])
@@ -1109,6 +1117,14 @@ def load_window_package(package, *, device="cpu", config=None):
     _validate_kernel_tuning_metadata(layer, tuning)
     layer._p32_window_tuning = tuning
     prepare_rank8(layer, config or P32WindowConfig())
+    if window_only and not retain_planar:
+        # The constructor needs a temporary planar tensor for legacy shape and
+        # selector validation.  Release it after all setup so production CUDA
+        # ownership is solely the continuous window payload.
+        with torch.inference_mode(False):
+            layer.trellis = None
+        layer._validate_tensors()
+        prepare_rank8(layer, config or P32WindowConfig())
     return layer
 
 
@@ -1195,7 +1211,7 @@ def save_window_artifact(layer, directory):
     return report
 
 
-def load_window_artifact(directory, *, device="cpu", config=None):
+def load_window_artifact(directory, *, device="cpu", config=None, retain_planar=False):
     """Load and verify a hash-manifested native-friendly window artifact."""
     from pathlib import Path
 
@@ -1259,7 +1275,9 @@ def load_window_artifact(directory, *, device="cpu", config=None):
         "kernel_tuning": manifest.get("kernel_tuning"),
         "tensors": tensors,
     }
-    return load_window_package(package, device=device, config=config)
+    return load_window_package(
+        package, device=device, config=config, retain_planar=retain_planar
+    )
 
 
 def window_package_storage(packages, *, serialized_bytes=None):
