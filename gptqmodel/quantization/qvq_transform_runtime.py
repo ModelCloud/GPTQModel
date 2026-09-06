@@ -513,9 +513,9 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
             raise RuntimeError("grouped QVQ P32 child binding is inconsistent")
         if self._outputs is not None:
             raise RuntimeError("cannot change rank8 mode during a grouped projection cycle")
-        if config.algorithm.startswith("hopper_"):
+        if config.algorithm.startswith("hopper_") or config.algorithm == "ampere_window":
             raise ValueError(
-                "explicit Hopper geometry requires an independent window consumer"
+                "explicit architecture geometry requires an independent window consumer"
             )
         if config.recovery_projection != "separate_reference":
             raise ValueError(

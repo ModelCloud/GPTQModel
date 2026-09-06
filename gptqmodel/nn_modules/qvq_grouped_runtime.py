@@ -519,7 +519,10 @@ class QVQHopperGroupedRuntime:
     ) -> str | None:
         children = self._children()
         if any(
-            getattr(getattr(child, "_p32_window_config", None), "algorithm", "auto").startswith("hopper_")
+            (
+                getattr(getattr(child, "_p32_window_config", None), "algorithm", "auto").startswith("hopper_")
+                or getattr(getattr(child, "_p32_window_config", None), "algorithm", "auto") == "ampere_window"
+            )
             for child in children
         ):
             return "explicit child window policy requires independent dispatch"

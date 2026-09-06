@@ -205,6 +205,15 @@ def _p32_window_op() -> object:
     return op
 
 
+def prewarm_qvq_ampere() -> None:
+    """Load the SM80 window operator before CUDA Graph capture.
+
+    This performs only registration/JIT preparation; candidate timing and
+    launch-plan selection remain separate preparation-time operations.
+    """
+    _p32_window_op()
+
+
 def _require_warm_operator_for_capture(operator: object | None, name: str) -> None:
     """Reject lazy TorchOp registration from inside a CUDA graph capture."""
 
@@ -1334,6 +1343,7 @@ __all__ = [
     "QVQAmpereGroupedP32Plan",
     "QVQAmpereP32SegmentPlan",
     "clear_qvq_ampere_autotune_cache",
+    "prewarm_qvq_ampere",
     "qvq_p32_window_ampere",
     "qvq_p32_window_ampere_group_plan",
     "qvq_p32_window_ampere_grouped",

@@ -88,6 +88,7 @@ class P32WindowConfig:
         if self.algorithm not in (
             "auto",
             "production_window",
+            "ampere_window",
             "hopper_direct_decode_mma",
             "hopper_m16",
         ):
@@ -288,7 +289,20 @@ def prepare_rank8(layer, config):
         state, consumer_index, _ = grouped_delegate
         state.prepare_rank8(consumer_index, layer, config)
         return
-    if config.algorithm.startswith("hopper_"):
+    if config.algorithm == "ampere_window":
+        if runtime_device.type != "cuda":
+            raise ValueError("explicit Ampere policy requires an SM80 CUDA device")
+        properties = torch.cuda.get_device_properties(runtime_device)
+        if (properties.major, properties.minor) != (8, 0) or not layer.v2b2_p32:
+            raise ValueError("unsupported explicit Ampere P32 contract")
+        # Pack selectors and load the exact SM80 operator before capture;
+        # split-count timing is performed by the external tuner, not here.
+        layer._prepare_amd_p32_metadata(runtime_device)
+        from ..utils.qvq_ampere_cuda import prewarm_qvq_ampere
+
+        prewarm_qvq_ampere()
+        layer._bank_ids_loaded = True
+    elif config.algorithm.startswith("hopper_"):
         if runtime_device.type != "cuda":
             raise ValueError("explicit Hopper policy requires an SM90 CUDA device")
         properties = torch.cuda.get_device_properties(runtime_device)
@@ -1625,7 +1639,7 @@ def fit_rank8_serialized_payload(
 
 
 def explicit_window_inner(layer, transformed, config):
-    """Expose existing SM90 consumers; no copied A100 crossover or new decoder."""
+    """Dispatch one prepared, explicit window consumer by architecture."""
     from ..utils.qvq_cuda import _pgc16_levels
     from ..utils.qvq_wgmma_cuda import (
         qvq_p32_window_wgmma_m16_tma,
@@ -1649,6 +1663,19 @@ def explicit_window_inner(layer, transformed, config):
             dim=0,
         )
     window, banks, alt_id = layer._prepare_amd_p32_metadata(transformed.device)
+    if config.algorithm == "ampere_window":
+        from ..utils.qvq_ampere_cuda import qvq_p32_window_ampere
+
+        return qvq_p32_window_ampere(
+            transformed.contiguous(),
+            window,
+            _pgc16_levels(transformed.device, layer.codebook_version),
+            banks,
+            layer.bits,
+            out_features=layer.out_features,
+            bank_alt_id=alt_id,
+            split_count=config.split_k,
+        )
     if config.algorithm == "hopper_m16":
         return qvq_p32_window_wgmma_m16_tma(
             transformed.contiguous(),
@@ -1729,12 +1756,34 @@ def window_kernel_candidates(layer, *, m):
         return tuple(candidates)
     props = torch.cuda.get_device_properties(layer.runtime_device())
     if (
+        layer.activation is not None
+        or layer.bits not in (2, 2.5, 3, 3.5)
+        or not layer.v2b2_p32
+    ):
+        return tuple(candidates)
+    if (props.major, props.minor) == (8, 0):
+        from ..utils.qvq_ampere_cuda import qvq_p32_window_ampere_kernel_candidates
+
+        sm_count = int(props.multi_processor_count)
+        splits = qvq_p32_window_ampere_kernel_candidates(
+            (m, layer.in_features),
+            out_features=layer.out_features,
+            bits=layer.bits,
+            sm_count=sm_count,
+        )
+        return tuple(
+            replace(
+                policy,
+                algorithm="ampere_window",
+                split_k=split,
+            )
+            for split in splits
+        )
+    if (
         (props.major, props.minor) != (9, 0)
         or not any(name in props.name for name in ("H100", "H200"))
-        or layer.activation is not None
         or layer.in_features % 256
         or layer.out_features % 256
-        or layer.bits not in (2, 2.5, 3, 3.5)
     ):
         return tuple(candidates)
     candidates.extend(

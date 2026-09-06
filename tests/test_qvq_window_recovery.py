@@ -258,6 +258,31 @@ def test_unverified_rank8_arithmetic_rejects_balanced_and_quality_modes():
                 )
 
 
+def test_ampere_window_candidates_are_explicit_and_shape_specific(monkeypatch):
+    layer, _, _, _ = fixture(hadamard=False)
+    prepare_rank8(layer, P32WindowConfig())
+    monkeypatch.setattr(layer, "runtime_device", lambda: torch.device("cuda"))
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: type(
+            "Props",
+            (),
+            {"major": 8, "minor": 0, "multi_processor_count": 108, "name": "NVIDIA A100"},
+        )(),
+    )
+    candidates = window_kernel_candidates(layer, m=1)
+    assert candidates
+    assert all(candidate.algorithm == "ampere_window" for candidate in candidates)
+    assert [candidate.split_k for candidate in candidates] == list(
+        dict.fromkeys(candidate.split_k for candidate in candidates)
+    )
+    assert candidates[0].min_m == candidates[0].max_m == 1
+    assert P32WindowConfig.from_backend_config(
+        candidates[0].to_backend_config()
+    ) == candidates[0]
+
+
 def test_external_window_controls_roundtrip_and_cpu_candidates():
     config = P32WindowConfig(
         algorithm="hopper_direct_decode_mma",
