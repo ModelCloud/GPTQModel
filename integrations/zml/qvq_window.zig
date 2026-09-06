@@ -308,6 +308,110 @@ fn artifactHashMatches(bytes: []const u8, expected: []const u8) !void {
     if (!std.mem.eql(u8, &hex, expected)) return error.WindowArtifactHashMismatch;
 }
 
+const ArtifactSha256 = std.crypto.hash.sha2.Sha256;
+
+fn artifactBindingAppend(hasher: *ArtifactSha256, value: []const u8) void {
+    hasher.update(value);
+    hasher.update(&[_]u8{0});
+}
+
+fn artifactBindingAppendFmt(
+    hasher: *ArtifactSha256,
+    comptime format: []const u8,
+    args: anytype,
+) !void {
+    var buffer: [128]u8 = undefined;
+    const value = try std.fmt.bufPrint(&buffer, format, args);
+    artifactBindingAppend(hasher, value);
+}
+
+fn artifactBindingUpdateFmt(
+    hasher: *ArtifactSha256,
+    comptime format: []const u8,
+    args: anytype,
+) !void {
+    var buffer: [128]u8 = undefined;
+    const value = try std.fmt.bufPrint(&buffer, format, args);
+    hasher.update(value);
+}
+
+fn artifactBindingAppendShape(
+    hasher: *ArtifactSha256,
+    value: std.json.Value,
+) !void {
+    const array = switch (value) {
+        .array => |array| array,
+        else => return error.InvalidWindowArtifactManifest,
+    };
+    hasher.update("[");
+    for (array.items, 0..) |item, index| {
+        if (index != 0) hasher.update(",");
+        try artifactBindingUpdateFmt(hasher, "{d}", .{try artifactU32(item)});
+    }
+    hasher.update("]");
+}
+
+fn artifactBindingAppendEntry(
+    hasher: *ArtifactSha256,
+    tensors: std.json.ObjectMap,
+    name: []const u8,
+) !void {
+    const value = tensors.get(name) orelse return;
+    const entry = try artifactObject(value);
+    artifactBindingAppend(hasher, name);
+    artifactBindingAppend(hasher, "dtype");
+    artifactBindingAppend(hasher, try artifactString(try artifactField(entry, "dtype")));
+    artifactBindingAppend(hasher, "shape");
+    try artifactBindingAppendShape(hasher, try artifactField(entry, "shape"));
+    hasher.update(&[_]u8{0});
+    artifactBindingAppend(hasher, "bytes");
+    try artifactBindingAppendFmt(hasher, "{d}", .{try artifactU32(try artifactField(entry, "bytes"))});
+    artifactBindingAppend(hasher, "sha256");
+    artifactBindingAppend(hasher, try artifactString(try artifactField(entry, "sha256")));
+}
+
+fn artifactBindingHex(metadata: std.json.ObjectMap, tensors: std.json.ObjectMap) ![64]u8 {
+    var hasher = ArtifactSha256.init(.{});
+    artifactBindingAppend(&hasher, "qvq_p32_window_artifact-binding-v1");
+    artifactBindingAppend(&hasher, "bits");
+    switch (try artifactField(metadata, "bits")) {
+        .integer => |value| try artifactBindingAppendFmt(&hasher, "{d}", .{value}),
+        .float => |value| try artifactBindingAppendFmt(&hasher, "{d}", .{value}),
+        else => return error.InvalidWindowArtifactManifest,
+    }
+    artifactBindingAppend(&hasher, "codebook_version");
+    artifactBindingAppend(&hasher, try artifactString(try artifactField(metadata, "codebook_version")));
+    artifactBindingAppend(&hasher, "in_features");
+    try artifactBindingAppendFmt(&hasher, "{d}", .{try artifactU32(try artifactField(metadata, "in_features"))});
+    artifactBindingAppend(&hasher, "out_features");
+    try artifactBindingAppendFmt(&hasher, "{d}", .{try artifactU32(try artifactField(metadata, "out_features"))});
+    artifactBindingAppend(&hasher, "input_hadamard");
+    artifactBindingAppend(&hasher, if (try artifactBool(try artifactField(metadata, "input_hadamard"))) "true" else "false");
+    artifactBindingAppend(&hasher, "output_hadamard");
+    artifactBindingAppend(&hasher, if (try artifactBool(try artifactField(metadata, "output_hadamard"))) "true" else "false");
+    // Python's sorted() order is stable and these are the only tensor names
+    // accepted by the native ABI. Unknown entries are rejected below.
+    for ([_][]const u8{
+        "SU", "SV", "bank_alt_id", "bank_ids", "bias", "levels", "rank8_A", "rank8_B", "window_words",
+    }) |name| try artifactBindingAppendEntry(&hasher, tensors, name);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+fn artifactValidateTensorNames(tensors: std.json.ObjectMap) !void {
+    var iterator = tensors.iterator();
+    while (iterator.next()) |item| {
+        const name = item.key_ptr.*;
+        if (!(std.mem.eql(u8, name, "SU") or std.mem.eql(u8, name, "SV") or
+            std.mem.eql(u8, name, "bank_alt_id") or std.mem.eql(u8, name, "bank_ids") or
+            std.mem.eql(u8, name, "bias") or std.mem.eql(u8, name, "levels") or
+            std.mem.eql(u8, name, "rank8_A") or std.mem.eql(u8, name, "rank8_B") or
+            std.mem.eql(u8, name, "window_words")))
+            return error.InvalidWindowArtifactManifest;
+    }
+}
+
 fn artifactTensor(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -367,6 +471,11 @@ pub fn loadArtifact(
         return error.UnsupportedWindowArtifactVersion;
     const metadata = try artifactObject(try artifactField(root, "metadata"));
     const tensors = try artifactObject(try artifactField(root, "tensors"));
+    try artifactValidateTensorNames(tensors);
+    const expected_payload_hash = try artifactString(try artifactField(root, "payload_sha256"));
+    const actual_payload_hash = try artifactBindingHex(metadata, tensors);
+    if (!std.mem.eql(u8, &actual_payload_hash, expected_payload_hash))
+        return error.WindowArtifactBindingMismatch;
     const k = try artifactU32(try artifactField(metadata, "in_features"));
     const n = try artifactU32(try artifactField(metadata, "out_features"));
     const bits = try artifactField(metadata, "bits");

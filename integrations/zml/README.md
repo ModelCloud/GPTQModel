@@ -36,13 +36,16 @@ graph capture.
 
 The bridge links LibTorch and the existing QVQ CUDA/WGMMA operator libraries,
 but execution does not require Python. `loadArtifact` is the standalone native
-handoff: it validates the versioned manifest, exact file names, dtypes, shapes,
-byte counts and SHA-256 file hashes before uploading any payload. It accepts the
+handoff: it validates the versioned manifest, the descriptor-level
+`payload_sha256` binding, exact file names, dtypes, shapes, byte counts and
+per-file SHA-256 hashes before uploading any payload. It accepts the
 FP32 SU/SV precision used by QVQ checkpoints (and FP16 bias where present); the
 native ABI applies its declared FP16 transform boundary. Recovery metadata still
-has to be accepted by the deployment policy, and the Python fit's base/factor
-digest recomputation is not duplicated by this loader yet. Callers retain all
-input/output storage until the submitted stream work completes.
+has to be accepted by the deployment policy; the Python fit's semantic
+base/factor digest is retained in the manifest but is not recomputed by this
+loader because the descriptor-level payload binding covers the exact native
+bytes. Callers retain all input/output storage until the submitted stream work
+completes.
 
 The low-level `qvq_p32_window_linear` entry allocates ATen temporaries and
 rejects CUDA capture. The ZML adapter therefore never calls it directly. Its

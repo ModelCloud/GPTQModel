@@ -672,6 +672,33 @@ def load_window_package(package, *, device="cpu", config=None):
     return layer
 
 
+def _window_artifact_binding_digest(metadata, entries):
+    """Hash artifact descriptors and file hashes in native-reproducible order."""
+    binding = hashlib.sha256(b"qvq_p32_window_artifact-binding-v1\0")
+    for key in (
+        "bits",
+        "codebook_version",
+        "in_features",
+        "out_features",
+        "input_hadamard",
+        "output_hadamard",
+    ):
+        binding.update(key.encode())
+        binding.update(b"\0")
+        binding.update(json.dumps(metadata[key], sort_keys=True, separators=(",", ":")).encode())
+        binding.update(b"\0")
+    for name in sorted(entries):
+        entry = entries[name]
+        binding.update(name.encode())
+        binding.update(b"\0")
+        for key in ("dtype", "shape", "bytes", "sha256"):
+            binding.update(key.encode())
+            binding.update(b"\0")
+            binding.update(json.dumps(entry[key], sort_keys=True, separators=(",", ":")).encode())
+            binding.update(b"\0")
+    return binding.hexdigest()
+
+
 def save_window_artifact(layer, directory):
     """Write a native-friendly unified artifact directory with a hash manifest.
 
@@ -710,6 +737,13 @@ def save_window_artifact(layer, directory):
         "recovery": package["recovery"],
         "tensors": entries,
     }
+    # Bind the complete descriptor set (including every serialized payload
+    # hash) to the module geometry and transform contract. Native loaders can
+    # reproduce this delimiter-based digest without implementing Python's
+    # tensor serialization or trusting a separately supplied base hash.
+    manifest["payload_sha256"] = _window_artifact_binding_digest(
+        package["metadata"], entries
+    )
     manifest_path = directory / "manifest.json"
     manifest_bytes = json.dumps(manifest, sort_keys=True, indent=2).encode() + b"\n"
     manifest_path.write_bytes(manifest_bytes)
@@ -737,6 +771,12 @@ def load_window_artifact(directory, *, device="cpu", config=None):
     entries = manifest.get("tensors")
     if not isinstance(entries, dict) or not entries:
         raise ValueError("window artifact has no tensor manifest")
+    payload_sha256 = manifest.get("payload_sha256")
+    if payload_sha256 is not None and (
+        not isinstance(payload_sha256, str)
+        or payload_sha256 != _window_artifact_binding_digest(manifest["metadata"], entries)
+    ):
+        raise ValueError("window artifact payload binding mismatch")
     dtypes = {
         "float16": torch.float16,
         "float32": torch.float32,

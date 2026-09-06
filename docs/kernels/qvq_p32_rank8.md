@@ -432,13 +432,14 @@ optional buffers from safetensors headers before Accelerate loads shards,
 validating complete A/B/metadata triples and their shapes/dtypes first.
 For native/ZML deployment, `save_window_artifact(layer, directory)` writes the
 same tensors as immutable `.bin` files plus a versioned `manifest.json`.
-`integrations/zml/qvq_window.zig::loadArtifact` validates the manifest, exact
-file names, dtypes, shapes, byte counts, and SHA-256 file hashes before device
-upload, and accepts the checkpoint's FP32 SU/SV tensors while the native ABI
-performs its declared FP16 transform narrowing. The Python package loader still
-checks the recovery base/factor digests; native recomputation of those
-metadata-level digests remains a follow-up before treating an untrusted native
-manifest as fully bound.
+`integrations/zml/qvq_window.zig::loadArtifact` validates the manifest's
+descriptor-level `payload_sha256` binding, exact file names, dtypes, shapes,
+byte counts, and per-file SHA-256 hashes before device upload. It accepts the
+checkpoint's FP32 SU/SV tensors while the native ABI performs its declared FP16
+transform narrowing. The Python package loader also checks the recovery
+base/factor semantic digests; native loading retains those fields for policy
+inspection while the descriptor binding protects the exact bytes consumed by
+the native operator.
 The focused capture/checkpoint/lifecycle regression passes 75 tests. A separate
 [real Llama capture record](results/p32_rank8_llama_capture.json) contains
 first-layer Q/gate activation and teacher hashes for four distinct calibration
