@@ -323,6 +323,14 @@ def prepare_rank8(layer, config):
         raise ValueError(
             "unverified rank8 arithmetic is unavailable in balanced/quality mode"
         )
+    if enabled and config.quality_mode in ("balanced", "quality"):
+        metadata = _metadata(layer)
+        if (
+            metadata.get("audit_validated") is not True
+            or not isinstance(metadata.get("audit_acceptance"), dict)
+            or metadata["audit_acceptance"].get("accepted") is not True
+        ):
+            raise ValueError("rank8 recovery lacks independent audit confirmation")
     if (
         enabled
         and runtime_device.type == "cuda"
@@ -555,9 +563,58 @@ def apply_rank8_audit(layer, audit_rows, *, minimum_improvement=0.0):
     return gate
 
 
-def _check_documents(train_ids, heldout_ids):
+@torch.no_grad()
+def _independent_audit_rows(layer, teacher, calibration):
+    """Evaluate the optional third calibration fold after fitting.
+
+    The rows are kept document separated so the acceptance record can prove
+    that every independent document improved.  This runs outside graph capture
+    and is intentionally part of quantization finalization, before factors are
+    copied into a deployment result.
+    """
+    inputs = calibration.audit_inputs
+    if inputs is None:
+        return []
+    if len(calibration.audit_document_ids) != len(calibration.audit_row_counts):
+        raise ValueError("independent audit document metadata is incomplete")
+    old_config = getattr(layer, "_p32_window_config", P32WindowConfig())
+    rows = []
+    offset = 0
+    try:
+        for document_id, count in zip(
+            calibration.audit_document_ids, calibration.audit_row_counts
+        ):
+            x = inputs[offset : offset + count].to(layer.runtime_device())
+            offset += count
+            prepare_rank8(layer, P32WindowConfig(recovery_mode="off"))
+            baseline = layer(x).float()
+            prepare_rank8(layer, P32WindowConfig(recovery_mode="on"))
+            recovered = layer(x).float()
+            target = teacher(x).float()
+            rows.append(
+                {
+                    "document_id": document_id,
+                    "rows": int(count),
+                    "baseline": _metrics(target - baseline),
+                    "recovered": _metrics(target - recovered),
+                }
+            )
+        if offset != inputs.shape[0]:
+            raise ValueError("independent audit row counts do not cover inputs")
+        return rows
+    finally:
+        prepare_rank8(layer, old_config)
+
+
+def _check_documents(train_ids, heldout_ids, *additional):
     if not train_ids or not heldout_ids or set(train_ids) & set(heldout_ids):
         raise ValueError("fit and held-out document IDs must be nonempty and disjoint")
+    known = set(train_ids) | set(heldout_ids)
+    for ids in additional:
+        ids = set(ids)
+        if ids & known:
+            raise ValueError("calibration document IDs must be disjoint")
+        known.update(ids)
 
 
 def _rank8_output_fit(
@@ -914,6 +971,8 @@ def fit_rank8(
             "fit_output_boundary": "original_activation_dtype",
             "torch_version": str(torch.__version__),
             "objective": None if selected is None else selected[0],
+            "audit_validated": False,
+            "audit_acceptance": None,
         }
         if selected is not None:
             _, a, b, _ = selected
@@ -937,6 +996,14 @@ def export_window_package(layer):
         try:
             prepare_rank8(layer, P32WindowConfig(recovery_mode="on"))
             recovery = _metadata(layer)
+            if (
+                recovery.get("audit_validated") is not True
+                or not isinstance(recovery.get("audit_acceptance"), dict)
+                or recovery["audit_acceptance"].get("accepted") is not True
+            ):
+                raise ValueError(
+                    "rank8 export requires independent audit confirmation"
+                )
             tensors.update(rank8_A=layer.rank8_A, rank8_B=layer.rank8_B)
         finally:
             prepare_rank8(layer, old_config)
@@ -981,6 +1048,12 @@ def load_window_package(package, *, device="cpu", config=None):
     a, b = tensors.pop("rank8_A", None), tensors.pop("rank8_B", None)
     if recovery is not None and recovery.get("base_hash") != _digest(tensors, metadata):
         raise ValueError("window package base hash mismatch")
+    if recovery is not None and (
+        recovery.get("audit_validated") is not True
+        or not isinstance(recovery.get("audit_acceptance"), dict)
+        or recovery["audit_acceptance"].get("accepted") is not True
+    ):
+        raise ValueError("window package recovery lacks independent audit confirmation")
     if recovery is None and (a is not None or b is not None):
         raise ValueError("recovery factors require fitting metadata")
     levels = tensors.pop("levels")
@@ -1261,6 +1334,11 @@ class Rank8Calibration:
     teacher_hash: str | None = None
     max_solver_bytes: int = 256 * 1024 * 1024
     rank_candidates: tuple[int, ...] = (8,)
+    # Optional third fold.  It is deliberately separate from train/held-out
+    # fitting and is consumed only by the independent audit gate.
+    audit_inputs: torch.Tensor | None = None
+    audit_document_ids: tuple[str, ...] = ()
+    audit_row_counts: tuple[int, ...] = ()
 
     def __post_init__(self):
         if self.source_kind != "calibration":
@@ -1282,6 +1360,28 @@ class Rank8Calibration:
                 f"rank_candidates must include distinct members of {RANK8_SWEEP_CANDIDATES}, including 8"
             )
         object.__setattr__(self, "rank_candidates", ranks)
+        audit_ids = tuple(self.audit_document_ids)
+        counts = tuple(self.audit_row_counts)
+        if self.audit_inputs is None:
+            if audit_ids or counts:
+                raise ValueError("audit document metadata requires audit_inputs")
+        else:
+            if (
+                self.audit_inputs.ndim != 2
+                or not self.audit_inputs.shape[0]
+                or not torch.isfinite(self.audit_inputs).all()
+                or not audit_ids
+                or len(audit_ids) != len(counts)
+                or any(type(v) is not int or v < 1 for v in counts)
+                or sum(counts) != self.audit_inputs.shape[0]
+            ):
+                raise ValueError("audit_inputs and document row counts are invalid")
+            if any(not isinstance(v, str) or not v for v in audit_ids):
+                raise ValueError("audit document IDs must be nonempty strings")
+            if set(audit_ids) & (set(self.train_document_ids) | set(self.heldout_document_ids)):
+                raise ValueError("audit documents must be disjoint from fit documents")
+        object.__setattr__(self, "audit_document_ids", audit_ids)
+        object.__setattr__(self, "audit_row_counts", counts)
 
 
 def finish_rank8_quantization(
@@ -1377,6 +1477,17 @@ def fit_rank8_serialized_payload(
         max_solver_bytes=calibration.max_solver_bytes,
         rank_candidates=calibration.rank_candidates,
     )
+    if calibration.audit_inputs is not None and layer.rank8_metadata is not None:
+        audit_gate = apply_rank8_audit(
+            layer,
+            _independent_audit_rows(layer, teacher, calibration),
+            minimum_improvement=calibration.minimum_improvement,
+        )
+        report["audit_acceptance"] = audit_gate
+        report["audit_validated"] = bool(audit_gate["accepted"])
+        report["validated"] = bool(report.get("validated") and audit_gate["accepted"])
+        if not audit_gate["accepted"]:
+            report["selected"] = False
     return layer.rank8_A, layer.rank8_B, layer.rank8_metadata, report
 
 

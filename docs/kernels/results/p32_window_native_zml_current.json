@@ -10,7 +10,7 @@
   "native_library_sha256": "13604c9c99144b179532ebf4d81f149d188b342ba6360a8b6f10dd52cf01aa39",
   "source_sha256": {
     "gptqmodel_ext/qvq/qvq_window_abi.cpp": "d2ccc5e925b4ff94a06be0ba83cfeed43176b3787365567c8179e0dda5039dcb",
-    "integrations/zml/qvq_window.zig": "419e5123bf404515cc5a5f27ef442054576129da9ad9452ab8e6e6453b14945b",
+    "integrations/zml/qvq_window.zig": "abf27c410647639baee683c43cceea02e50a10a69edb349d90e5a9d36548dd54",
     "integrations/zml/verify.zig": "a6f26ec2f346ca69500b0d36cc78b37f2172bffac21b6c528d9146a4f9b87412"
   },
   "composite_case": {

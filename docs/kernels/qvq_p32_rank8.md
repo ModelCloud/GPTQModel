@@ -35,6 +35,14 @@ defers fitting until its complete triplet is selected; output-aligned modules
 defer fitting until the final aligned layer pass, using the aligned SU/SV
 payload and the immutable dense teacher snapshot.
 
+`Rank8Calibration` may carry a third `audit_inputs` fold with
+`audit_document_ids` and `audit_row_counts`. When present, the quantizer
+evaluates every audit document after fitting and promotes factors only when the
+independent gate accepts them. A calibration with no audit remains a fit result
+for research/inspection; `export_window_package` and the native ZML loader
+reject its rank-8 sidecar until `audit_validated=true` and
+`audit_acceptance.accepted=true` are recorded.
+
 The initial fitter is bounded-calibration CPU FP64 reduced-rank regression
 with `gelsd`, rcond 1e-5. It fits the output predicted by least squares, not a
 weight-space SVD. The two objectives are ordinary output L2 and output L2
@@ -450,6 +458,7 @@ capture = Rank8Capture(
     module_names=("model.layers.0.self_attn.q_proj",),
     train=(Rank8Document("calibration/train/document-id", train_token_tensors),),
     heldout=(Rank8Document("calibration/heldout/document-id", heldout_token_tensors),),
+    audit=(Rank8Document("calibration/audit/document-id", audit_token_tensors),),
     rows_per_document=128,
     max_bytes=512 * 1024 * 1024,
     max_solver_bytes=256 * 1024 * 1024,

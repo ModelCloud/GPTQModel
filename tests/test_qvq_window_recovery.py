@@ -15,6 +15,7 @@ from gptqmodel.quantization.qvq_rank8 import (
     P32WindowConfig,
     _rank8_output_fit,
     _window_artifact_binding_digest,
+    _metrics,
     apply_rank8_audit,
     add_rank8_correction,
     export_window_package,
@@ -131,6 +132,16 @@ def test_rank8_audit_rejection_rolls_back_registered_factors():
     assert not rejected["accepted"]
     assert layer.rank8_A is None and layer.rank8_B is None
     assert layer.rank8_metadata is None
+
+
+def test_rank8_export_requires_independent_audit_confirmation():
+    layer, teacher, train, heldout = fixture(hadamard=False)
+    fit_rank8(
+        layer, teacher, train, heldout,
+        train_document_ids=("train",), heldout_document_ids=("heldout",),
+    )
+    with pytest.raises(ValueError, match="independent audit"):
+        export_window_package(layer)
 
 
 def test_rank8_large_output_uses_bounded_randomized_solver():
@@ -314,7 +325,7 @@ def test_hopper_explicit_geometry_rank8_matrix(block_m, block_n, bits, m, chunk_
 
 
 def fit(layer, teacher, train, heldout, **kwargs):
-    return fit_rank8(
+    report = fit_rank8(
         layer,
         teacher,
         train,
@@ -323,6 +334,23 @@ def fit(layer, teacher, train, heldout, **kwargs):
         heldout_document_ids=["heldout"],
         **kwargs,
     )
+    # Synthetic fixtures include a third, disjoint audit fold so deployment
+    # export tests exercise the same hard promotion boundary as production.
+    audit = torch.randn(24, train.shape[1])
+    original = getattr(layer, "_p32_window_config", P32WindowConfig())
+    prepare_rank8(layer, P32WindowConfig(recovery_mode="off"))
+    baseline = teacher(audit).float() - layer(audit).float()
+    prepare_rank8(layer, P32WindowConfig(recovery_mode="on"))
+    recovered = teacher(audit).float() - layer(audit).float()
+    apply_rank8_audit(
+        layer,
+        [{"document_id": "audit", "rows": audit.shape[0],
+          "baseline": _metrics(baseline), "recovered": _metrics(recovered)}],
+        minimum_improvement=0.0,
+    )
+    prepare_rank8(layer, original)
+    report["audit_validated"] = True
+    return report
 
 
 @pytest.mark.parametrize("hadamard", [False, True])
@@ -563,6 +591,8 @@ def _kernel_rank8(layer):
             "fit_contract": CONTRACT,
             "validated": True,
             "selected": True,
+            "audit_validated": True,
+            "audit_acceptance": {"accepted": True, "documents": []},
             "factors_hash": _digest({"A": layer.rank8_A, "B": layer.rank8_B}, {}),
         },
         layer.trellis.device,
@@ -705,7 +735,11 @@ def test_quantize_fit_export_is_one_module_job(tmp_path):
     from gptqmodel.quantization.qvq_rank8 import Rank8Calibration, save_window_package
 
     _, teacher, train, heldout = fixture()
-    calibration = Rank8Calibration(train, heldout, ("train",), ("heldout",))
+    audit = torch.randn(24, train.shape[1])
+    calibration = Rank8Calibration(
+        train, heldout, ("train",), ("heldout",),
+        audit_inputs=audit, audit_document_ids=("audit",), audit_row_counts=(24,),
+    )
     result = quantize_qvq_linear(
         teacher.weight.detach(),
         train.T @ train / train.shape[0],

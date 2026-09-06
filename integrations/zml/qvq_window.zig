@@ -743,6 +743,13 @@ pub fn loadArtifact(
             !std.mem.eql(u8, try artifactString(try artifactField(recovery_object, "input_domain")), "p32_transformed") or
             !try artifactBool(try artifactField(recovery_object, "validated")))
             return error.InvalidWindowArtifactRecovery;
+        // Fitting validation covers only train/held-out selection.  Native
+        // deployment requires the independent confirmation gate as well.
+        if (!try artifactBool(try artifactField(recovery_object, "audit_validated")))
+            return error.InvalidWindowArtifactRecovery;
+        const audit_acceptance = try artifactObject(try artifactField(recovery_object, "audit_acceptance"));
+        if (!try artifactBool(try artifactField(audit_acceptance, "accepted")))
+            return error.InvalidWindowArtifactRecovery;
         payload.rank8_a = try artifactTensor(allocator, io, &directory, tensors, "rank8_A", "float16", &.{ k, 8 }, platform);
         initialized[6] = true;
         payload.rank8_b = try artifactTensor(allocator, io, &directory, tensors, "rank8_B", "float16", &.{ 8, n }, platform);

@@ -45,6 +45,23 @@ def test_capture_preserves_documents_padding_and_dense_inputs():
         torch.testing.assert_close(value, original[name], rtol=0, atol=0)
 
 
+def test_capture_can_carry_a_third_disjoint_audit_fold():
+    teacher = Teacher().eval()
+    captured = capture_rank8_calibration(
+        teacher,
+        Rank8Capture(
+            ("projection",),
+            (Rank8Document("train", {"input_ids": torch.tensor([[1, 2, 3]])}),),
+            (Rank8Document("heldout", {"input_ids": torch.tensor([[4, 5, 6]])}),),
+            audit=(Rank8Document("audit", {"input_ids": torch.tensor([[7, 8, 9]])}),),
+            rows_per_document=2,
+        ),
+    )["projection"]
+    assert captured.audit_document_ids == ("audit",)
+    assert captured.audit_row_counts == (2,)
+    assert captured.audit_inputs.shape == (2, 16)
+
+
 def test_capture_materializes_lazy_teacher_once_before_hooks():
     teacher = Teacher().eval()
     teacher.projection = torch.nn.Linear(16, 16, device="meta").eval()

@@ -26,6 +26,9 @@ class Rank8Capture:
     source_kind: str = "calibration"
     max_solver_bytes: int = 256 * 1024 * 1024
     rank_candidates: tuple[int, ...] = (8,)
+    # Optional third fold, placed after the original positional fields for
+    # compatibility with callers that supplied capture bounds positionally.
+    audit: tuple[Rank8Document, ...] = ()
 
     def __post_init__(self):
         if self.source_kind != "calibration":
@@ -50,10 +53,10 @@ class Rank8Capture:
                 "rank_candidates must include distinct members of (2, 4, 6, 8, 12), including 8"
             )
         object.__setattr__(self, "rank_candidates", ranks)
-        ids = [tuple(d.document_id for d in split) for split in (self.train, self.heldout)]
+        ids = [tuple(d.document_id for d in split) for split in (self.train, self.heldout, self.audit)]
         _check_documents(*ids)
         hashes = []
-        for split, names in zip((self.train, self.heldout), ids):
+        for split, names in zip((self.train, self.heldout, self.audit), ids):
             if len(set(names)) != len(names) or any(not isinstance(n, str) or not n for n in names):
                 raise ValueError("each calibration document needs a unique nonempty ID")
             current = set()
@@ -74,8 +77,8 @@ class Rank8Capture:
                     tokens = tokens[mask.to(tokens.device).bool()]
                 current.add(_digest({"input_ids": tokens.flatten().long()}, {}))
             hashes.append(current)
-        if hashes[0] & hashes[1]:
-            raise ValueError("train and held-out token documents overlap despite their IDs")
+        if hashes[0] & hashes[1] or hashes[0] & hashes[2] or hashes[1] & hashes[2]:
+            raise ValueError("fit and audit token documents overlap despite their IDs")
 
 
 @torch.no_grad()
@@ -118,7 +121,8 @@ def capture_rank8_calibration(model, request, *, materialize_teacher=None):
         child = modules.get(name)
         if not isinstance(child, torch.nn.Linear) or child.weight.is_meta or child.training:
             raise ValueError(f"rank8 capture requires a materialized eval Linear: {name}")
-    samples = {name: [[], []] for name in request.module_names}
+    samples = {name: [[], [], []] for name in request.module_names}
+    row_counts = {name: [[], [], []] for name in request.module_names}
     teacher_hashes = {
         name: _digest(dict(modules[name].named_parameters()), {}) for name in request.module_names
     }
@@ -159,13 +163,14 @@ def capture_rank8_calibration(model, request, *, materialize_teacher=None):
             if not torch.isfinite(sample).all():
                 raise ValueError("rank8 capture contains non-finite activations")
             samples[name][split_index].append(sample.to(device="cpu", copy=True))
+            row_counts[name][split_index].append(int(sample.shape[0]))
             used_bytes += size
         return collect
 
     try:
         for name in request.module_names:
             handles.append(modules[name].register_forward_pre_hook(hook(name)))
-        for split_index, documents in enumerate((request.train, request.heldout)):
+        for split_index, documents in enumerate((request.train, request.heldout, request.audit)):
             for current_document in documents:
                 seen.clear()
                 model(**current_document.inputs)
@@ -176,8 +181,10 @@ def capture_rank8_calibration(model, request, *, materialize_teacher=None):
             for name in request.module_names
         ):
             raise ValueError("rank8 teacher state changed during activation capture")
-        return {
-            name: Rank8Calibration(
+        result = {}
+        for name, values in samples.items():
+            audit_values = values[2]
+            result[name] = Rank8Calibration(
                 torch.cat(values[0]), torch.cat(values[1]),
                 tuple(d.document_id for d in request.train),
                 tuple(d.document_id for d in request.heldout),
@@ -185,9 +192,11 @@ def capture_rank8_calibration(model, request, *, materialize_teacher=None):
                 teacher_hash=teacher_hashes[name],
                 max_solver_bytes=request.max_solver_bytes,
                 rank_candidates=request.rank_candidates,
+                audit_inputs=None if not audit_values else torch.cat(audit_values),
+                audit_document_ids=tuple(d.document_id for d in request.audit),
+                audit_row_counts=tuple(row_counts[name][2]),
             )
-            for name, values in samples.items()
-        }
+        return result
     finally:
         for handle in handles:
             handle.remove()
