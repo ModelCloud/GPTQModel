@@ -12,7 +12,12 @@ from torch import nn
 
 from optimize.calibration_coverage import find_target_groups
 from optimize.sensitivity import SensitivitySweep, _clone, _noise, shared_input_noise
-from optimize.sensitivity_metrics import ErrorStats, logit_metrics, measured_gain, uncorrelated_prediction
+from optimize.sensitivity_metrics import (
+    ErrorStats,
+    logit_metrics,
+    measured_gain,
+    uncorrelated_prediction,
+)
 from optimize.sweep_sensitivity import main, render_report
 
 
@@ -347,6 +352,37 @@ def test_cli_runs_tiny_model_and_serializes_report(tmp_path):
     assert report["run"]["tiny_random_fixture"]
     assert len(report["run"]["token_sha256"]) == 64
     assert "| subset |" in (tmp_path / "sensitivity.md").read_text()
+
+
+def test_cli_passes_physical_gpu_spec_to_preflight_as_string(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_preflight(spec, allow_busy=False):
+        seen.update(spec=spec, allow_busy=allow_busy)
+        return []
+
+    monkeypatch.setattr("optimize.sweep_sensitivity._preflight_physical_gpus", fake_preflight)
+    assert (
+        main(
+            [
+                "--tiny",
+                "--physical-gpu",
+                "2,3",
+                "--output",
+                str(tmp_path),
+                "--max-batches",
+                "1",
+                "--max-length",
+                "2",
+                "--amplitudes",
+                "0.001",
+                "--top-layers",
+                "0",
+            ]
+        )
+        == 0
+    )
+    assert seen == {"spec": "2,3", "allow_busy": False}
 
 
 def test_noise_casts_and_clone_helpers():

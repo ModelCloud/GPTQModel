@@ -17,11 +17,14 @@ import json
 import sys
 from pathlib import Path
 
-
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from optimize.calibration_coverage import _load_tokenizer, _preflight_physical_gpus, _tokenize_sample
+from optimize.calibration_coverage import (
+    _load_tokenizer,
+    _preflight_physical_gpus,
+    _tokenize_sample,
+)
 
 
 def build_parser():
@@ -47,7 +50,8 @@ def build_parser():
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--dtype", choices=("float32", "float16", "bfloat16"), default="float32")
     parser.add_argument(
-        "--physical-gpu", type=int, help="Optional NVIDIA GPU; otherwise CPU. Preflight runs before Torch"
+        "--physical-gpu",
+        help="Optional NVIDIA GPU index or comma-separated indices; otherwise CPU. Preflight runs before Torch",
     )
     parser.add_argument("--trust-remote-code", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
@@ -85,11 +89,16 @@ def main(argv=None):
         raise ValueError("Batch, length and thread limits must be positive")
     if args.model and not args.data:
         raise ValueError("A real checkpoint requires held-out --data")
-    hardware = _preflight_physical_gpus([args.physical_gpu], allow_busy=False) if args.physical_gpu is not None else []
+    hardware = _preflight_physical_gpus(args.physical_gpu, allow_busy=False) if args.physical_gpu is not None else []
 
     import torch
     import transformers
-    from transformers import AutoModelForCausalLM, AutoTokenizer, LlamaConfig, LlamaForCausalLM
+    from transformers import (
+        AutoModelForCausalLM,
+        AutoTokenizer,
+        LlamaConfig,
+        LlamaForCausalLM,
+    )
 
     from optimize.sensitivity import SensitivitySweep, output_noise, shared_input_noise
 

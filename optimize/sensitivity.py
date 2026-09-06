@@ -22,7 +22,12 @@ import torch
 from torch import nn
 
 from .calibration_coverage import find_target_groups
-from .sensitivity_metrics import ErrorStats, logit_metrics, measured_gain, uncorrelated_prediction
+from .sensitivity_metrics import (
+    ErrorStats,
+    logit_metrics,
+    measured_gain,
+    uncorrelated_prediction,
+)
 
 
 @dataclass(frozen=True)
@@ -125,7 +130,9 @@ class SensitivitySweep:
         self.targets, self.owner, self.hints = {}, {}, {}
         for layer, block in self.blocks.items():
             if isinstance(block, nn.Linear):
-                raise ValueError("Layer scopes must be decoder blocks containing projections")
+                raise ValueError(  # noqa: TRY004 - preserve the public validation contract
+                    "Layer scopes must be decoder blocks containing projections"
+                )
             for group in find_target_groups(block, include_all_linear=True):
                 names = []
                 for relative, _role in group.members:
@@ -331,11 +338,11 @@ class SensitivitySweep:
         for batch in batches:
             if any(k in batch for k in ("past_key_values", "past_key_value", "cache_params", "mems")):
                 raise ValueError("Use fresh teacher-forced batches without input caches")
-            if "sensitivity_mask" in batch and "attention_mask" in batch:
-                if batch["sensitivity_mask"].shape != batch["attention_mask"].shape or bool(
-                    (batch["sensitivity_mask"].bool() & ~batch["attention_mask"].bool()).any()
-                ):
-                    raise ValueError("sensitivity_mask must select only valid attention_mask positions")
+            if "sensitivity_mask" in batch and "attention_mask" in batch and (
+                batch["sensitivity_mask"].shape != batch["attention_mask"].shape
+                or bool((batch["sensitivity_mask"].bool() & ~batch["attention_mask"].bool()).any())
+            ):
+                raise ValueError("sensitivity_mask must select only valid attention_mask positions")
         baseline = self._run(batches)
         repeated = self._run(batches, references=baseline["logits"])
         if not repeated["final"]["finite"]:

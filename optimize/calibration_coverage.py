@@ -44,7 +44,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.request import urlretrieve
 
-
 if TYPE_CHECKING:
     import torch
 
