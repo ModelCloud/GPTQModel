@@ -57,6 +57,8 @@ See the [accuracy skill](.agents/skills/qvq-kernel-accuracy/SKILL.md#human-revie
 
 - Quantization algorithms, calibration, formats, protocols, GPTQ, AWQ, QQQ, FP8, EXL3, ParoQuant, RTN, or
   bitsandbytes: use `$gptqmodel-quantization`.
+- Any model-affecting QvQ experiment or quantized-model publication: use `$qvq-model-artifact-snapshot` so complete
+  model outputs and the exact calibration inputs/derived artifacts are saved under `/monster/data/model/qvq`.
 - CPU-side tensor packing (`pack_block_cpu`, `pack_awq_cpu`, `pack_qqq_cpu`), AVX-512/AVX2 dispatch, dtype conversion,
   and thread-parallel packing: use `$gptqmodel-cpu-packing`.
 - Pre/during/post quantization error analysis, risky module/weight/channel/embedding/LM-head discovery, severe quality
