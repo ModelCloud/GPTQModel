@@ -287,11 +287,11 @@ def prepare_rank8(layer, config):
             layer.trellis.device.type != "cuda"
             or torch.cuda.get_device_capability(layer.trellis.device) != (9, 0)
             or layer.in_features > 16384
-            or layer.in_features & (layer.in_features - 1)
+            or (layer.input_hadamard and layer.in_features & (layer.in_features - 1))
         )
     ):
         raise ValueError(
-            "rank8 input producer requires SM90 and power-of-two K <= 16384"
+            "rank8 input producer requires SM90 and K <= 16384; input Hadamard mode requires power-of-two K"
         )
     if enabled and config.recovery_projection == "tensor_core" and (
         layer.trellis.device.type != "cuda"
@@ -1154,8 +1154,9 @@ def window_kernel_candidates(layer, *, m):
         candidates.extend(
             replace(c, recovery_projection="tensor_core") for c in separate_candidates
         )
-        if layer.in_features <= 16384 and not layer.in_features & (
-            layer.in_features - 1
+        if layer.in_features <= 16384 and (
+            not layer.input_hadamard
+            or not layer.in_features & (layer.in_features - 1)
         ):
             candidates.extend(
                 replace(c, recovery_projection="input_fused") for c in separate_candidates

@@ -224,6 +224,39 @@ def _rank8_input_producer(
             tl.store(Hidden + group * M * 8 + row * 8 + rank, projected)
 
 
+@triton.jit
+def _rank8_input_producer_masked(
+    X,
+    SU,
+    Factors,
+    Transformed,
+    Hidden,
+    M: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    X_STRIDE: tl.constexpr,
+    GROUPS: tl.constexpr,
+):
+    """Composite-width producer for projections whose input Hadamard is folded."""
+
+    row = tl.program_id(0)
+    column = tl.arange(0, BLOCK_K)
+    mask = column < K
+    value = tl.load(X + row * X_STRIDE + column, mask=mask, other=0).to(tl.float32)
+    value = value * tl.load(SU + column, mask=mask, other=0).to(tl.float32)
+    value = value.to(tl.float16).to(tl.float32)
+    tl.store(Transformed + row * K + column, value, mask=mask)
+    for group in tl.static_range(GROUPS):
+        for rank in tl.static_range(8):
+            factor = tl.load(
+                Factors[group] + column * 8 + rank,
+                mask=mask,
+                other=0,
+            ).to(tl.float32)
+            projected = tl.sum(value * factor, axis=0)
+            tl.store(Hidden + group * M * 8 + row * 8 + rank, projected)
+
+
 def rank8_input_producer(x, su, factors, *, hadamard=True):
     """Publish shared X-prime and one FP16 rank8 projection per enabled child.
 
@@ -234,14 +267,9 @@ def rank8_input_producer(x, su, factors, *, hadamard=True):
     if x.ndim != 2 or x.device.type != "cuda" or x.dtype != torch.float16:
         raise ValueError("rank8 input producer requires FP16 CUDA [M,K]")
     m, k = x.shape
-    if (
-        k < 16
-        or k > 16384
-        or k & (k - 1)
-        or torch.cuda.get_device_capability(x.device) != (9, 0)
-    ):
+    if k < 16 or k > 16384 or (hadamard and k & (k - 1)) or torch.cuda.get_device_capability(x.device) != (9, 0):
         raise ValueError(
-            "rank8 input producer requires SM90 and power-of-two K in [16,16384]"
+            "rank8 input producer requires SM90 and K in [16,16384]; Hadamard mode requires power-of-two K"
         )
     if not 1 <= len(factors) <= 3:
         raise ValueError("rank8 input producer requires one to three enabled children")
@@ -266,7 +294,23 @@ def rank8_input_producer(x, su, factors, *, hadamard=True):
         )
     transformed = torch.empty((m, k), device=x.device, dtype=torch.float16)
     hidden = torch.empty((len(factors), m, 8), device=x.device, dtype=torch.float16)
-    if m:
+    if m and not hadamard and k & (k - 1):
+        block_k = 1 << (k - 1).bit_length()
+        _rank8_input_producer_masked[(m,)](
+            x,
+            su,
+            factors,
+            transformed,
+            hidden,
+            m,
+            k,
+            block_k,
+            x.stride(0),
+            len(factors),
+            num_warps=4 if k <= 4096 else 8,
+            enable_fp_fusion=False,
+        )
+    elif m:
         divisor = struct.unpack("e", struct.pack("e", math.sqrt(k)))[0]
         root = struct.unpack("f", struct.pack("f", math.sqrt(k)))[0]
         reciprocal = struct.unpack("f", struct.pack("f", 1 / root))[0]
