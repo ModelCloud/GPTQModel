@@ -19,6 +19,24 @@ import triton.language as tl
 _GRAPH_CACHE_LOCK = threading.Lock()
 _GRAPH_CACHE = OrderedDict()
 _GRAPH_CACHE_LIMIT = 8
+_KERNEL_WARM_KEYS: set[tuple[object, ...]] = set()
+
+
+def _require_kernel_warm(key: tuple[object, ...]) -> None:
+    """Reject first Triton compilation when a caller is already capturing."""
+
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        with _GRAPH_CACHE_LOCK:
+            warm = key in _KERNEL_WARM_KEYS
+        if not warm:
+            raise RuntimeError(
+                "QVQ YAQA ROCm Triton kernel must be warmed before CUDA Graph capture"
+            )
+
+
+def _mark_kernel_warm(key: tuple[object, ...]) -> None:
+    with _GRAPH_CACHE_LOCK:
+        _KERNEL_WARM_KEYS.add(key)
 
 
 def _family_q_chunk(bits):
@@ -162,6 +180,23 @@ def _midpoint_traceback(Costs, Pointers, Overlap, SHIFT: tl.constexpr, BANKS: tl
 def _banked_viterbi_launch(sequences, codebooks, *, bits, segment_steps, overlap, step_weights,
                             q_chunk, families, sequences_per_family):
     batch = sequences.shape[0]
+    key = (
+        "banked",
+        sequences.device.type,
+        sequences.device.index,
+        tuple(sequences.shape),
+        sequences.dtype,
+        tuple(codebooks.shape),
+        codebooks.dtype,
+        bits,
+        segment_steps,
+        q_chunk,
+        families,
+        sequences_per_family,
+        overlap is not None,
+        step_weights is not None,
+    )
+    _require_kernel_warm(key)
     shift = int(2 * bits)
     banks = codebooks.shape[-3]
     suffix = 1 << (16 - shift)
@@ -186,14 +221,32 @@ def _banked_viterbi_launch(sequences, codebooks, *, bits, segment_steps, overlap
                             num_warps=4, enable_fp_fusion=False)
     from ..quantization.qvq import BankedTrellisQuantizationResult
 
-    return BankedTrellisQuantizationResult(states=states, values=values, squared_error=loss,
-                                         segment_bank_ids=bank_ids)
+    result = BankedTrellisQuantizationResult(
+        states=states,
+        values=values,
+        squared_error=loss,
+        segment_bank_ids=bank_ids,
+    )
+    _mark_kernel_warm(key)
+    return result
 
 
 def _family_midpoint_launch(sequences, codebooks, *, bits, segment_steps):
     families, count = sequences.shape[:2]
     flat_sequences = sequences.reshape(-1, 128, 2)
     batch = flat_sequences.shape[0]
+    key = (
+        "family_midpoint",
+        sequences.device.type,
+        sequences.device.index,
+        tuple(sequences.shape),
+        sequences.dtype,
+        tuple(codebooks.shape),
+        codebooks.dtype,
+        bits,
+        segment_steps,
+    )
+    _require_kernel_warm(key)
     shift = int(2 * bits)
     banks = codebooks.shape[1]
     suffix = 1 << (16 - shift)
@@ -211,7 +264,9 @@ def _family_midpoint_launch(sequences, codebooks, *, bits, segment_steps):
             )
         _midpoint_traceback[(batch,)](costs[1], pointers, overlap, shift, banks,
                                      num_warps=4, enable_fp_fusion=False)
-    return overlap.reshape(families, count)
+    result = overlap.reshape(families, count)
+    _mark_kernel_warm(key)
+    return result
 
 
 def banked_viterbi_trusted(sequences, codebooks, *, bits, segment_steps=16,
