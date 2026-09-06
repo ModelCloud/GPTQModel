@@ -69,6 +69,7 @@ from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND, normalize_backend
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
+from ..utils.device_telemetry import with_quantization_device_telemetry
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
@@ -899,6 +900,7 @@ class BaseQModel(nn.Module):
             logger=log,
         )
 
+    @with_quantization_device_telemetry
     def quantize(
         self,
         calibration: Optional[Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]] = None,

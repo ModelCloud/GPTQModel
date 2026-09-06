@@ -120,6 +120,7 @@ class GPTQCheckpointAdapter:
         # Location is not an algorithm setting. Keep every other serialized
         # setting conservatively, including device/packing execution policy.
         config.get("meta", {}).pop("offload_to_disk_path", None)
+        config.get("meta", {}).pop("telemetry", None)
         return {
             "adapter_version": self.VERSION,
             "device_topology": checkpoint_device_topology(

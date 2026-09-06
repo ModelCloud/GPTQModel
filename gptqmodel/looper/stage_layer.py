@@ -34,6 +34,7 @@ from ..nn_modules.converter import MODULE_CONVERTER_MAP
 from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from ..quantization.config import GcMode, QuantizeEmbed
 from ..utils.device import get_device, get_device_new
+from ..utils.device_telemetry import capture_device_telemetry
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
 from ..utils.looper_helpers import (
     find_last_quantized_layer_index,
@@ -1029,7 +1030,7 @@ def run_layer_stage(
                         # Asynchronous (current/default behavior): drain in background thread
                         # This allows next layer to start while current layer finalizes
                         finalizer_thread = threading.Thread(
-                            target=_drain_finalize_futures,
+                            target=capture_device_telemetry(_drain_finalize_futures),
                             args=(
                                 [future for future, *_ in finalize_futures_snapshot],
                                 finalize_pb,

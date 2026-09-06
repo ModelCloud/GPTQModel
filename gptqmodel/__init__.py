@@ -307,6 +307,7 @@ from .quantization import (
     QuantizeEmbed,
     QuantizeEmbedConfig,
     RTNConfig,
+    TelemetryConfig,
     WeightOnlyConfig,
 )
 from .utils import BACKEND, PROFILE
