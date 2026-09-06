@@ -186,6 +186,21 @@ def test_window_geometry_rejects_unimplemented_combinations(kwargs):
         P32WindowConfig(**kwargs)
 
 
+def test_unverified_rank8_arithmetic_rejects_balanced_and_quality_modes():
+    layer, _, _, _ = fixture()
+    _kernel_rank8(layer)
+    for quality_mode in ("balanced", "quality"):
+        with pytest.raises(ValueError, match="unverified rank8 arithmetic"):
+            prepare_rank8(
+                layer,
+                P32WindowConfig(
+                    recovery_mode="on",
+                    quality_mode=quality_mode,
+                    arithmetic_signature="unverified_tensor_core",
+                ),
+            )
+
+
 def test_external_window_controls_roundtrip_and_cpu_candidates():
     config = P32WindowConfig(
         algorithm="hopper_direct_decode_mma",

@@ -316,6 +316,14 @@ def prepare_rank8(layer, config):
             )
     if (
         enabled
+        and config.quality_mode in ("balanced", "quality")
+        and config.arithmetic_signature != "reference_fp32_v1"
+    ):
+        raise ValueError(
+            "unverified rank8 arithmetic is unavailable in balanced/quality mode"
+        )
+    if (
+        enabled
         and runtime_device.type == "cuda"
         and torch.backends.cuda.matmul.allow_tf32
     ):
