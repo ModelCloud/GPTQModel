@@ -150,6 +150,10 @@ def _device_sm_count(device: torch.device) -> int:
     key = (device.type, -1 if device.index is None else int(device.index))
     sm_count = _SM_COUNT_CACHE.get(key)
     if sm_count is None:
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "QVQ Ampere SM-count cache must be prepared before CUDA Graph capture"
+            )
         sm_count = int(torch.cuda.get_device_properties(device).multi_processor_count)
         _SM_COUNT_CACHE[key] = sm_count
     return sm_count
@@ -1174,6 +1178,11 @@ def qvq_pack_p32_window_ampere_group(
     The returned tensors are intended to be cached with the quantized module
     group.  Repacking on every inference call would erase the launch savings.
     """
+
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "QVQ Ampere grouped payload must be packed before CUDA Graph capture"
+        )
 
     trellises = tuple(trellises)
     bank_ids = tuple(bank_ids)

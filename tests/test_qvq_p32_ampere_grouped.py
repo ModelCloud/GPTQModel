@@ -104,6 +104,31 @@ def test_grouped_ampere_candidates_tune_children_independently_without_cuda_work
     assert len(candidates) == len(set(candidates))
 
 
+def test_ampere_graph_capture_rejects_cold_sm_cache_and_group_pack(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    qvq_ampere_cuda._SM_COUNT_CACHE.clear()
+    with pytest.raises(RuntimeError, match="SM-count cache.*before CUDA Graph capture"):
+        qvq_ampere_cuda._device_sm_count(torch.device("cuda", 0))
+
+    plan = qvq_p32_window_ampere_group_plan(
+        torch.empty((1, 256)),
+        (torch.empty(1),),
+        torch.empty(256),
+        (torch.empty(1),),
+        3,
+        out_features=(64,),
+        bank_alt_ids=(1,),
+        split_counts=(2,),
+    )
+    with pytest.raises(RuntimeError, match="grouped payload.*before CUDA Graph capture"):
+        qvq_pack_p32_window_ampere_group(
+            (torch.empty((64, 24), dtype=torch.int32),),
+            (torch.empty(64, dtype=torch.uint8),),
+            plan,
+        )
+
+
 @pytest.mark.parametrize(
     ("shape", "widths", "bits", "message"),
     (
