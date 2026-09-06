@@ -229,6 +229,8 @@ def rank8_output_epilogue(
         bias is not None,
         bool(rank8_enabled),
         str(output_dtype),
+        str(sv.dtype),
+        None if bias is None else str(bias.dtype),
         "masked" if not hadamard and n & (n - 1) else "butterfly",
     )
     _require_rank8_kernel_warm(key)

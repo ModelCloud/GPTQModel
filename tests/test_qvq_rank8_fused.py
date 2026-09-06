@@ -19,7 +19,7 @@ def test_rank8_triton_rejects_cold_compile_during_graph_capture(monkeypatch):
     )
     key = (
         "cuda", 0, "output_epilogue", 1, 256, False, True, True,
-        "torch.float32", "butterfly",
+        "torch.float32", "torch.float32", "torch.float32", "butterfly",
     )
     with pytest.raises(RuntimeError, match="warmed before CUDA Graph capture"):
         qvq_rank8_triton._require_rank8_kernel_warm(key)
