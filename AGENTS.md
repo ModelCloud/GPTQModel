@@ -49,7 +49,9 @@ See the [accuracy skill](.agents/skills/qvq-kernel-accuracy/SKILL.md#human-revie
 
 Before designing or reviewing supported quantization methods, PTQ enhancements,
 PTQ recovery, activation/KV scale calibration, EoRA,
-QTIP/YAQA rounding, P32 representation changes, or recirculation experiments, use
+QTIP/YAQA rounding, P32 representation changes, recirculation experiments,
+ZML/XLA/StableHLO integration, SSA/SASS algebraic analysis, Nsight profiling,
+or CUDA execution and asynchronous pipeline design, use
 [$qvq-ptq-recovery-research](.agents/skills/qvq-ptq-recovery-research/SKILL.md)
 and read the relevant notes in [research/README.md](research/README.md).
 Keep important scientific findings there with primary references, implementation
