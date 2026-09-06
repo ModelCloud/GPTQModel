@@ -39,6 +39,12 @@ def main():
             "tuner rejects rank8 geometries above this matched off/on cost"
         ),
     )
+    parser.add_argument(
+        "--quality-mode",
+        choices=("fast", "balanced", "quality"),
+        default="fast",
+        help="arithmetic-quality policy used for the generated off/on fixture",
+    )
     args = parser.parse_args()
     import torch
 
@@ -93,6 +99,7 @@ def main():
         parser.error("--max-recovery-overhead-percent must be finite and non-negative")
     rows = torch.load(args.activations, weights_only=True)["audit_1"].cuda().half()
     report = {"scope": "Real-factor/captured-activation native ABI equivalence; no fitting or model-quality claim",
+              "quality_mode": args.quality_mode,
               "preflight": idle.as_dict(), "cases": []}
     args.fixture.mkdir(parents=True, exist_ok=True)
     files = {}
@@ -112,6 +119,7 @@ def main():
                         algorithm=algorithm, block_m=64 if algorithm == "hopper_direct_decode_mma" else 0,
                         block_n=64 if algorithm == "hopper_direct_decode_mma" else 0,
                         recovery_mode="on" if enabled else "off",
+                        quality_mode=args.quality_mode,
                     )
                     prepare_rank8(layer, config)
                     expected = layer(x)
@@ -139,6 +147,7 @@ def main():
 
     manifest = {
         "artifact_payload_sha256": artifact_payload_sha256,
+        "quality_mode": args.quality_mode,
         # Preserve the complete acceptance contract alongside the raw fixture
         # buffers.  The standalone ZML verifier must not tune or replay rank8
         # factors whose audit/signature metadata was dropped during export.
