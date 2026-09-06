@@ -21,6 +21,11 @@ There is no hard-coded A100-derived M crossover. An external tuner must measure
 whole executable candidates under the existing numerical gates and distinguish
 device product, module shape/rate, M bucket, TP configuration and correction
 state in its cache. A latency result cannot establish model-quality eligibility.
+`enumerateCandidates` exposes the M16 and all six direct BM/BN candidates as
+ordinary Zig data, so a ZML autotune pass can compile the exact same `linear`
+call for each geometry and retain the winner in its shape/device cache. The
+list is deliberately not pruned globally: a geometry that wins one M or
+projection shape remains available to the tuner for other shapes.
 
 The bridge links LibTorch and the existing QVQ CUDA/WGMMA operator libraries,
 but execution does not require Python. The caller must validate the unified
@@ -29,12 +34,17 @@ storage until the submitted stream work completes. The Python helper performs
 that validation through `prepare_rank8`; a complete native artifact loader is
 still required for standalone deployment.
 
-The reference ABI allocates ATen temporaries. The FFI registration deliberately
-sets `command_buffer_compatible=false`; the native entry rejects CUDA capture.
-No TP-aware attribute is emitted: operands retain ordinary replicated custom
-call semantics. External capture workspace ownership, native grouped consumers,
-fused rank8 implementations, broader shapes and TP lowering remain open. This
-bridge is not promoted as a performance improvement.
+The low-level `qvq_p32_window_linear` entry allocates ATen temporaries and
+rejects CUDA capture. The ZML adapter therefore never calls it directly. Its
+first eager invocation prepares a retained native graph for the exact
+executable buffer addresses; subsequent invocations submit that graph, and a
+capture invocation inserts it as a child node. The FFI registration advertises
+`command_buffer_compatible=true` only for this prepared path. A graph capture
+before the eager warmup fails explicitly instead of allocating or timing inside
+capture. No TP-aware attribute is emitted: operands retain ordinary replicated
+custom-call semantics. Native grouped consumers, fused rank8 implementations,
+broader shapes and TP lowering remain open. This bridge is not promoted as a
+performance improvement.
 
 ### Prepared native graphs
 
@@ -55,10 +65,15 @@ the handle. Destroy waits for stream work before releasing the private pool.
 This is an explicit low-level ownership contract; arbitrary external pointer
 mutation or overlapping use is not automatically tracked by the C ABI.
 
-The Zig adapter still uses the ordinary reference entry and keeps
-`command_buffer_compatible=false`. Connecting prepared-handle ownership to the
-ZML executable lifecycle remains required before enabling external command
-buffers there. A native child-graph test is not proof of ZML capture safety.
+The Zig adapter owns one handle registry for its loaded runtime. It destroys
+every prepared handle after the owning stream is synchronized during
+`Runtime.deinit`; callers must destroy ZML executables and enclosing graphs
+before deinitializing the adapter. Each handle is keyed by all input/output
+buffer addresses, stream and static config, so a different executable or graph
+lane cannot reuse a stale native graph. A capture attempted before warmup is a
+reported precondition error; it is never silently downgraded to an allocating
+raw call. This keeps preparation and allocator activity out of capture and
+connects the native handle lifetime to the ZML runtime lifetime.
 
 ## Build and verify
 

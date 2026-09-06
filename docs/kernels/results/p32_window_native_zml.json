@@ -1,8 +1,8 @@
 {
-  "scope": "Initial native C ABI and executed ZML StableHLO window/rank8 integration on one H200; no serving promotion",
-  "base_revision": "3c4cc957",
-  "worktree_dirty": true,
-  "native_abi_build": "f562922c13c95b58",
+  "scope": "Prepared native graph-backed ZML StableHLO integration on one H200; no serving promotion",
+  "base_revision": "02c1fcb6",
+  "worktree_dirty": false,
+  "native_abi_build": "ffe774ebad78a48a",
   "zml": {
     "revision": "567434be798db31ad888c586293eecedff10b526",
     "zig": "0.16.0",
@@ -22,9 +22,19 @@
       "block_m": 64,
       "block_n": 64
     },
-    "log": "/tmp/p32-window-zml-execute.log",
-    "command_buffer_compatible": false,
-    "sharding_aware": false
+    "log": "/tmp/p32-window-zml-graph-replay.log",
+    "command_buffer_compatible": true,
+    "sharding_aware": false,
+    "repeat_calls_per_mode": 2,
+    "prepared_graph_replay": true,
+    "graph_handle_reuse": true,
+    "raw_linear_capture": "rejected",
+    "capture_before_warmup": "rejected by prepared graph creation",
+    "zml_enclosing_capture": "not exercised by this verifier; native child insertion is covered by ABI graph tests",
+    "native_library": "/root/.cache/gptqmodel/torch_extensions/gptqmodel_qvq_window_abi_ops/ffe774ebad78a48a/gptqmodel_qvq_window_abi_ops.so",
+    "native_library_sha256": "83802c6559577a0eaccd41cb46b4ae11f9895d971a02446c785363c70d8b0714",
+    "log_line_count": 74,
+    "both_modes_logged": true
   },
   "real_module": {
     "scope": "Real-factor/captured-activation native ABI equivalence; no fitting or model-quality claim",
@@ -2784,17 +2794,17 @@
     "native": "/tmp/p32-window-abi-native-ncu.ncu-rep"
   },
   "remaining": [
-    "External capture workspace ownership",
+    "ZML enclosing-capture replay through the public executable API",
     "Native grouped and fused rank8 choices",
     "Full native artifact loader with cryptographic validation",
     "ZML latency autotuning and product-specific caches",
     "TP-aware lowering and model/device/quality validation"
   ],
   "sources": {
-    "gptqmodel_ext/qvq/qvq_window_abi.cpp": "af8ea2e987dae510d49e35defa81d5432ec38949bcf85362cd55236492f87036",
-    "gptqmodel_ext/qvq/qvq_window_abi.h": "b0138d43caf9c897777c7109090d59479c1e8a69f30355914c1d94f5c907bdd2",
-    "integrations/zml/qvq_window.zig": "26de9e840f52dd613d61d383a69330eba91f575be2394d31cd19741ad23d3f17",
-    "integrations/zml/verify.zig": "7c7aad5725d5b8c9bcfc1ef14ff31fd0cd86ecae093ab02bde711be120eb135c"
+    "gptqmodel_ext/qvq/qvq_window_abi.cpp": "c7484a53819307d80e03b743e6d7884f1f7831d9af295ca9a1497df520ebdc69",
+    "gptqmodel_ext/qvq/qvq_window_abi.h": "a24aa2efb9ee0d7c0fe662ec2263804ad3ea7e0bc56dc0ed0e71d2b06aa9f543",
+    "integrations/zml/qvq_window.zig": "089dfdf77ef61ad81f506636c4d1e582534b9c4b5006a022a1beb0a8f20858d1",
+    "integrations/zml/verify.zig": "a6f26ec2f346ca69500b0d36cc78b37f2172bffac21b6c528d9146a4f9b87412"
   },
   "postprofile_tests": {
     "passed": 182,

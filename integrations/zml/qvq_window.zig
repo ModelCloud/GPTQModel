@@ -25,31 +25,85 @@ pub const Config = extern struct {
     rank8_enabled: u32 = 0,
 };
 const NativeBuffer = extern struct { data: ?*anyopaque, bytes: u64 };
-const NativeFunction = *const fn (
-    NativeBuffer,
-    NativeBuffer,
-    NativeBuffer,
-    NativeBuffer,
-    NativeBuffer,
-    NativeBuffer,
-    NativeBuffer,
-    NativeBuffer,
-    NativeBuffer,
-    NativeBuffer,
+const NativeGraphCreate = *const fn (
+    [*]const NativeBuffer,
     *const Config,
+    ?*anyopaque,
+    *?*anyopaque,
+    [*]u8,
+    u64,
+) callconv(.c) c_int;
+const NativeGraphRun = *const fn (
+    ?*anyopaque,
     ?*anyopaque,
     [*]u8,
     u64,
 ) callconv(.c) c_int;
-var native_function: ?NativeFunction = null;
+const NativeGraphDestroy = *const fn (
+    ?*anyopaque,
+    [*]u8,
+    u64,
+) callconv(.c) c_int;
+
+const GraphKey = struct {
+    buffers: [10]usize,
+    stream: usize,
+    config: Config,
+};
+
+const GraphKeyContext = struct {
+    pub fn hash(_: @This(), key: GraphKey) u64 {
+        var result: u64 = 0;
+        for (key.buffers) |pointer| {
+            result = std.hash.Wyhash.hash(result, std.mem.asBytes(&pointer));
+        }
+        result = std.hash.Wyhash.hash(result, std.mem.asBytes(&key.stream));
+        return std.hash.Wyhash.hash(result, std.mem.asBytes(&key.config));
+    }
+
+    pub fn eql(_: @This(), left: GraphKey, right: GraphKey) bool {
+        return std.mem.eql(usize, &left.buffers, &right.buffers) and left.stream == right.stream and std.mem.eql(u8, std.mem.asBytes(&left.config), std.mem.asBytes(&right.config));
+    }
+};
+
+const GraphMap = std.HashMap(
+    GraphKey,
+    ?*anyopaque,
+    GraphKeyContext,
+    std.hash_map.default_max_load_percentage,
+);
+
+const GraphLock = struct {
+    held: std.atomic.Value(bool) = .init(false),
+
+    fn lock(self: *@This()) void {
+        while (self.held.swap(true, .acquire)) {}
+    }
+
+    fn unlock(self: *@This()) void {
+        self.held.store(false, .release);
+    }
+};
+
+var native_graph_create: ?NativeGraphCreate = null;
+var native_graph_run: ?NativeGraphRun = null;
+var native_graph_destroy: ?NativeGraphDestroy = null;
+var graph_mutex: GraphLock = .{};
+var graph_handles: ?GraphMap = null;
+
+fn pointerValue(pointer: ?*anyopaque) usize {
+    return if (pointer) |value| @intFromPtr(value) else 0;
+}
 
 pub const Runtime = struct {
     libraries: [3]std.DynLib,
 
     // Load existing QVQ CUDA, Hopper WGMMA, then the native window ABI library.
-    // Keep this runtime alive until every executable using it has finished.
+    // Keep this runtime alive until every executable and captured graph using
+    // it has finished. Prepared handles own a native allocator pool and are
+    // released by deinit after the owning stream is synchronized.
     pub fn init(paths: [3][]const u8, platform: *const zml.Platform) !Runtime {
-        if (native_function != null) return error.AlreadyInitialized;
+        if (native_graph_create != null) return error.AlreadyInitialized;
         var libraries: [3]std.DynLib = undefined;
         var loaded: usize = 0;
         errdefer for (libraries[0..loaded]) |*library| library.close();
@@ -57,21 +111,50 @@ pub const Runtime = struct {
             libraries[i] = try std.DynLib.open(path);
             loaded += 1;
         }
-        native_function = libraries[2].lookup(NativeFunction, "qvq_p32_window_linear") orelse
-            return error.MissingNativeWindowSymbol;
-        errdefer native_function = null;
+        native_graph_create = libraries[2].lookup(NativeGraphCreate, "qvq_p32_window_graph_create") orelse
+            return error.MissingNativeWindowGraphSymbol;
+        native_graph_run = libraries[2].lookup(NativeGraphRun, "qvq_p32_window_graph_run") orelse
+            return error.MissingNativeWindowGraphSymbol;
+        native_graph_destroy = libraries[2].lookup(NativeGraphDestroy, "qvq_p32_window_graph_destroy") orelse
+            return error.MissingNativeWindowGraphSymbol;
+        errdefer {
+            native_graph_create = null;
+            native_graph_run = null;
+            native_graph_destroy = null;
+        }
         try platform.registerFfi(.{
             .name = "qvq_p32_window_linear",
             .handler = handler,
-            // The initial reference ABI allocates ATen temporaries. It must
-            // not advertise external command-buffer/capture compatibility.
-            .traits = .{ .command_buffer_compatible = false },
+            // The handler submits only a prepared graph. Its first eager call
+            // prepares the graph outside capture; capture then reuses the
+            // retained graph or inserts it as a child node.
+            .traits = .{ .command_buffer_compatible = true },
         });
+        graph_mutex.lock();
+        graph_handles = GraphMap.init(std.heap.c_allocator);
+        graph_mutex.unlock();
         return .{ .libraries = libraries };
     }
 
     pub fn deinit(self: *Runtime) void {
-        native_function = null;
+        graph_mutex.lock();
+        if (graph_handles) |*handles| {
+            var iterator = handles.iterator();
+            var message: [4096]u8 = @splat(0);
+            while (iterator.next()) |entry| {
+                _ = native_graph_destroy.?(
+                    entry.value_ptr.*,
+                    &message,
+                    message.len,
+                );
+            }
+            handles.deinit();
+            graph_handles = null;
+        }
+        graph_mutex.unlock();
+        native_graph_create = null;
+        native_graph_run = null;
+        native_graph_destroy = null;
         // Torch dispatcher registrations are removed by the library destructors.
         var i: usize = self.libraries.len;
         while (i > 0) {
@@ -92,6 +175,37 @@ pub const Input = struct {
     rank8_a: zml.Tensor,
     rank8_b: zml.Tensor,
 };
+
+/// Native Hopper configurations that ZML may compile and benchmark for one
+/// shape. The list intentionally retains every supported BM/BN choice: the
+/// winning geometry is shape-, device- and correction-state dependent.
+pub const max_candidate_count: usize = 7;
+
+pub fn enumerateCandidates(base: Config, output: []Config) usize {
+    if (output.len < max_candidate_count) return 0;
+    var count: usize = 0;
+    var m16 = base;
+    m16.algorithm = 1;
+    m16.block_m = 0;
+    m16.block_n = 0;
+    m16.warp_groups = 0;
+    output[count] = m16;
+    count += 1;
+    for ([_]u32{ 32, 64, 128 }) |block_m| {
+        for ([_]u32{ 64, 128 }) |block_n| {
+            var candidate = base;
+            candidate.algorithm = 2;
+            candidate.block_m = block_m;
+            candidate.block_n = block_n;
+            // Zero lets the native launcher select its normal warp-group
+            // policy; callers may override it when their tuner supports it.
+            candidate.warp_groups = 0;
+            output[count] = candidate;
+            count += 1;
+        }
+    }
+    return count;
+}
 
 // Config is explicit compiler data: ZML may enumerate supported BM/BN/M
 // candidates before lowering. rank8_enabled is resolved by quantizer metadata
@@ -122,7 +236,7 @@ pub fn linear(input: Input, config: Config) zml.Tensor {
 
 fn handler(frame: *zml.pjrt.ffi.CallFrame) callconv(.c) ?*zml.pjrt.ffi.Error {
     if (frame.registeringHook()) return null;
-    const function = native_function orelse
+    if (native_graph_create == null or native_graph_run == null or native_graph_destroy == null)
         return zml.pjrt.ffi.Error.create(frame.api, .failed_precondition, "native window runtime is not initialized");
     const inputs = frame.args.buffers();
     const outputs = frame.results.buffers();
@@ -142,20 +256,46 @@ fn handler(frame: *zml.pjrt.ffi.CallFrame) callconv(.c) ?*zml.pjrt.ffi.Error {
     }
     const output = zml.pjrtx.CustomCallBuffer.fromPjrt(outputs[0]);
     buffers[9] = .{ .data = output.ptr, .bytes = output.shape.byteSize() };
+    const stream: ?*anyopaque = @ptrCast(frame.api.stream(frame.ctx));
+    var key: GraphKey = .{
+        .buffers = undefined,
+        .stream = pointerValue(stream),
+        .config = config,
+    };
+    for (buffers, 0..) |buffer, i| key.buffers[i] = pointerValue(buffer.data);
+
+    // A first eager call prepares the retained native graph. Once the backend
+    // starts capture, a missing key is rejected by graph_create before any
+    // allocation or event creation, so callers must warm each executable and
+    // buffer set before capturing it.
+    graph_mutex.lock();
+    defer graph_mutex.unlock();
+    const handles = if (graph_handles) |*value| value else return zml.pjrt.ffi.Error.create(frame.api, .failed_precondition, "native window graph registry is not initialized");
+    var handle: ?*anyopaque = null;
+    if (handles.getPtr(key)) |entry| {
+        handle = entry.*;
+    } else {
+        var message: [4096]u8 = @splat(0);
+        const status = native_graph_create.?(
+            &buffers,
+            &config,
+            stream,
+            &handle,
+            &message,
+            message.len,
+        );
+        if (status != 0 or handle == null)
+            return zml.pjrt.ffi.Error.create(frame.api, .internal, std.mem.sliceTo(&message, 0));
+        handles.put(key, handle) catch {
+            var cleanup_message: [4096]u8 = @splat(0);
+            _ = native_graph_destroy.?(handle, &cleanup_message, cleanup_message.len);
+            return zml.pjrt.ffi.Error.create(frame.api, .resource_exhausted, "unable to retain native window graph handle");
+        };
+    }
     var message: [4096]u8 = @splat(0);
-    const status = function(
-        buffers[0],
-        buffers[1],
-        buffers[2],
-        buffers[3],
-        buffers[4],
-        buffers[5],
-        buffers[6],
-        buffers[7],
-        buffers[8],
-        buffers[9],
-        &config,
-        @ptrCast(frame.api.stream(frame.ctx)),
+    const status = native_graph_run.?(
+        handle,
+        stream,
         &message,
         message.len,
     );
@@ -167,5 +307,12 @@ fn handler(frame: *zml.pjrt.ffi.CallFrame) callconv(.c) ?*zml.pjrt.ffi.Error {
 test "native window ABI layout" {
     try std.testing.expectEqual(@as(usize, 76), @sizeOf(Config));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(NativeBuffer));
+    var candidates: [max_candidate_count]Config = undefined;
+    const count = enumerateCandidates(.{ .m = 33, .k = 2048, .n = 2048, .transition_bits = 4, .bank_alt_id = 2, .algorithm = 2 }, &candidates);
+    try std.testing.expectEqual(max_candidate_count, count);
+    try std.testing.expectEqual(@as(u32, 1), candidates[0].algorithm);
+    try std.testing.expectEqual(@as(u32, 2), candidates[1].algorithm);
+    try std.testing.expectEqual(@as(u32, 32), candidates[1].block_m);
+    try std.testing.expectEqual(@as(u32, 64), candidates[1].block_n);
     std.testing.refAllDecls(@This());
 }

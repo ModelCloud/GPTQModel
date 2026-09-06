@@ -70,7 +70,10 @@ pub fn main(init: std.process.Init) !void {
         var results = try executable.results(allocator);
         defer results.deinit(allocator);
         arguments.set(.{ buffers, config });
-        executable.call(arguments, &results);
+        // The first eager call prepares and retains the native graph. The
+        // second call exercises ordinary replay through the same handle and
+        // catches accidental per-call graph creation or pointer churn.
+        for (0..2) |_| executable.call(arguments, &results);
         var output = results.get(zml.Buffer);
         defer output.deinit();
         const actual = try output.toSliceAlloc(allocator, io);
