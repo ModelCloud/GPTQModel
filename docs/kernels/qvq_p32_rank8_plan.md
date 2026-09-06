@@ -209,6 +209,13 @@ build/execution commands.
 The current native rank8 ABI now combines FP32 base and rank8 expansion with one `addmm` epilogue after the explicit FP16 hidden boundary. A fresh H200 ZML verifier run compiled, warmed, correctness-checked, and timed every M16/BM/BN candidate against the current library; the complete off/on report is recorded in `results/p32_window_native_zml_addmm.json`. The selected M33 rank8 path measured 3.848% overhead for M16, while BM/BN choices ranged above and below that value, confirming that recovery cost must remain a shape-specific tuning and promotion gate.
 A second verifier run passed `--max-recovery-overhead-percent=5`; its selected candidate and rejected over-budget rows are recorded in `results/p32_window_native_zml_addmm_budget5.json`. The gate is applied before winner selection and leaves quantizer quality and arithmetic eligibility unchanged.
 
+The current ZML verifier now emits schema-versioned arithmetic policy in every
+tuning report. The H200 rerun at ZML `6265dd5` records `fast` selection for the
+correction-off graph and `quality` selection for correction-on, with every
+candidate carrying its arithmetic signature. The complete 14-row report is
+`results/p32_window_native_zml_policy.json`; it is evidence that timing and
+recovery-budget gates remain subordinate to the declared numerical contract.
+
 After widening the native ABI to admit transform-free composite dimensions,
 the fresh-library H200 rerun is recorded in
 `results/p32_window_native_zml_current.json`. It includes the real
