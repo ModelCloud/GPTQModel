@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from gptqmodel.quantization import qvq_yaqa
 from gptqmodel.quantization.qvq import yaqa_sketch_b
 from gptqmodel.quantization.qvq_yaqa import YaqaGramSketch, _sketch_b_gram_updates
 from gptqmodel.utils.diagnostic_metrics import (
@@ -1443,6 +1444,23 @@ def test_yaqa_diagnostic_sketch_b_requires_eval_mode_and_target_modules():
     model.eval()
     with pytest.raises(ValueError, match="at least one target"):
         capture_yaqa_sketch_b(model, [batch], {}, device=torch.device("cpu"))
+
+
+def test_yaqa_host_preparation_rejects_cuda_graph_capture(monkeypatch):
+    monkeypatch.setattr(qvq_yaqa.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(qvq_yaqa.torch.cuda, "is_current_stream_capturing", lambda: True)
+
+    with pytest.raises(RuntimeError, match="YAQA Sketch-B collection.*CUDA Graph capture"):
+        qvq_yaqa.capture_yaqa_sketch_b(None, [], {}, device=torch.device("cpu"))
+
+    sketch = YaqaGramSketch(
+        source=torch.ones((2, 2), dtype=torch.float32),
+        diagonal=torch.ones(2, dtype=torch.float32),
+        normalizer=1.0,
+        seed=0,
+    )
+    with pytest.raises(RuntimeError, match="YAQA Gram materialization.*CUDA Graph capture"):
+        sketch.materialize(device=torch.device("cpu"))
 
 
 def test_yaqa_diagnostic_sketch_b_rejects_invalid_accumulator_devices():
