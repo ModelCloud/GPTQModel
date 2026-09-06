@@ -48,7 +48,31 @@ def main():
     )
 
     torch.backends.cuda.matmul.allow_tf32 = False
-    layer = load_window_package(torch.load(args.package, weights_only=True), device="cuda")
+    source_package = torch.load(args.package, weights_only=True)
+    layer = load_window_package(source_package, device="cuda")
+    # Bind the disposable ZML fixture to the same immutable package identity
+    # used by native artifact loading.  The fixture stores raw buffers for
+    # execution, but its manifest must still prevent a tuning report from
+    # being reused with a different window/factor payload.
+    from gptqmodel.quantization.qvq_rank8 import (
+        _window_artifact_binding_digest,
+        export_window_package,
+    )
+
+    artifact_package = export_window_package(layer)
+    artifact_entries = {}
+    for name, value in artifact_package["tensors"].items():
+        tensor = value.detach().cpu().contiguous()
+        data = tensor.view(torch.uint8).numpy().tobytes()
+        artifact_entries[name] = {
+            "dtype": str(tensor.dtype).split(".")[-1],
+            "shape": list(tensor.shape),
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+    artifact_payload_sha256 = _window_artifact_binding_digest(
+        artifact_package["metadata"], artifact_entries
+    )
     recovery_budget = args.max_recovery_overhead_percent
     if recovery_budget is None:
         tuning = getattr(layer, "_p32_window_tuning", None)
@@ -106,6 +130,7 @@ def main():
     import ctypes
 
     manifest = {
+        "artifact_payload_sha256": artifact_payload_sha256,
         "config": {"abi_version": 3, "struct_bytes": ctypes.sizeof(WindowConfig), "m": 33,
                    "k": layer.in_features, "n": layer.out_features, "transition_bits": round(2 * layer.bits),
                    "bank_alt_id": alt, "algorithm": 2, "block_m": 64, "block_n": 64,
