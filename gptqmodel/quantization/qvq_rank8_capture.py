@@ -22,6 +22,7 @@ class Rank8Capture:
     heldout: tuple[Rank8Document, ...]
     rows_per_document: int = 128
     max_bytes: int = 512 * 1024 * 1024
+    max_solver_bytes: int = 256 * 1024 * 1024
     minimum_improvement: float = 0.01
     source_kind: str = "calibration"
 
@@ -30,7 +31,10 @@ class Rank8Capture:
             raise ValueError("rank8 capture accepts calibration documents only")
         if not self.module_names or len(set(self.module_names)) != len(self.module_names):
             raise ValueError("rank8 capture requires unique module names")
-        if any(type(v) is not int or v < 1 for v in (self.rows_per_document, self.max_bytes)):
+        if any(
+            type(v) is not int or v < 1
+            for v in (self.rows_per_document, self.max_bytes, self.max_solver_bytes)
+        ):
             raise ValueError("rank8 capture bounds must be positive integers")
         if not 0 <= self.minimum_improvement < 1:
             raise ValueError("minimum_improvement must be in [0,1)")
@@ -167,6 +171,7 @@ def capture_rank8_calibration(model, request, *, materialize_teacher=None):
                 tuple(d.document_id for d in request.heldout),
                 minimum_improvement=request.minimum_improvement,
                 teacher_hash=teacher_hashes[name],
+                max_solver_bytes=request.max_solver_bytes,
             )
             for name, values in samples.items()
         }

@@ -55,11 +55,14 @@ def test_capture_materializes_lazy_teacher_once_before_hooks():
             module.bias.zero_()
 
     captured = capture_rank8_calibration(
-        teacher, request(rows_per_document=2), materialize_teacher=materialize
+        teacher,
+        request(rows_per_document=2, max_solver_bytes=12345),
+        materialize_teacher=materialize,
     )["projection"]
     assert calls == [teacher]
     assert not teacher.projection.weight.is_meta
     assert captured.train_inputs.shape == (2, 16)
+    assert captured.max_solver_bytes == 12345
     assert not teacher.projection._forward_pre_hooks
 
 

@@ -758,11 +758,14 @@ class Rank8Calibration:
     source_kind: str = "calibration"
     minimum_improvement: float = 0.01
     teacher_hash: str | None = None
+    max_solver_bytes: int = 256 * 1024 * 1024
 
     def __post_init__(self):
         if self.source_kind != "calibration":
             raise ValueError("only calibration activations may enter rank8 fitting")
         _check_documents(self.train_document_ids, self.heldout_document_ids)
+        if type(self.max_solver_bytes) is not int or self.max_solver_bytes < 1:
+            raise ValueError("max_solver_bytes must be a positive integer")
 
 
 def finish_rank8_quantization(
@@ -811,6 +814,7 @@ def finish_rank8_quantization(
         heldout_document_ids=calibration.heldout_document_ids,
         source_kind=calibration.source_kind,
         minimum_improvement=calibration.minimum_improvement,
+        max_solver_bytes=calibration.max_solver_bytes,
     )
     return replace(
         result,
