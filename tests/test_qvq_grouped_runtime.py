@@ -948,7 +948,10 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_safe(bits):
     assert telemetry["fused_mlp_fallbacks"] == 0
 
 
-def test_rank8_grouped_mlp_includes_down_correction_and_graph_replay():
+@pytest.mark.parametrize("recovery_kernel", ["separate_reference", "fused_epilogue"])
+def test_rank8_grouped_mlp_includes_down_correction_and_graph_replay(
+    recovery_kernel,
+):
     """Gate/up and down rank-8 corrections share one captured MLP path."""
 
     device = _h100_device() or _h200_device()
@@ -999,7 +1002,12 @@ def test_rank8_grouped_mlp_includes_down_correction_and_graph_replay():
                     child.bias.zero_()
             for child in (self.gate_proj, self.up_proj, self.down_proj):
                 _kernel_rank8(child)
-                prepare_rank8(child, P32WindowConfig(recovery_mode="on"))
+                prepare_rank8(
+                    child,
+                    P32WindowConfig(
+                        recovery_mode="on", recovery_kernel=recovery_kernel
+                    ),
+                )
             self.act_fn = nn.SiLU()
 
         def forward(self, x):
