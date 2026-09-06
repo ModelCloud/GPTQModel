@@ -890,7 +890,15 @@ def test_hopper_grouped_rank8_independent_flags(roles, m, recovery_kernel, proje
     for output, reference in zip(outputs, references):
         delta = (output.float() - reference.float()).abs()
         assert delta.mean() <= 2e-3 and delta.max() <= 0.046875
-    assert children[0]._gptqmodel_qvq_grouped_runtime.telemetry.grouped_launches > 0
+    telemetry = children[0]._gptqmodel_qvq_grouped_runtime.telemetry
+    if projection == "tensor_core" or (projection == "mixed" and len(roles) == 3):
+        # Grouped MLP/QKV intentionally fails closed for projection modes that
+        # it cannot preserve per child.  The caller then uses the exact child
+        # path rather than silently replacing the selected arithmetic policy.
+        assert telemetry.grouped_launches == 0
+        assert telemetry.plain_fallbacks > 0
+    else:
+        assert telemetry.grouped_launches > 0
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         captured = [child(x) for child in children]

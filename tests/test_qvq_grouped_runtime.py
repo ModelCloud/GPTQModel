@@ -15,13 +15,17 @@ from gptqmodel.models.base import BaseQModel, _qvq_quantization_group_candidates
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.nn_modules.qvq_grouped_runtime import (
     QVQHopperGroupedRuntime,
+    _child_window_source,
     _is_exact_silu_activation,
+    _source_key,
+    _validate_static_group,
     install_qvq_hopper_groups,
     qvq_grouped_runtime_telemetry,
     uninstall_qvq_hopper_groups,
 )
 from gptqmodel.quantization.qvq import (
     pack_qvq_binary_bank_ids,
+    repack_p32_planar_to_window,
     unpack_qvq_binary_bank_ids,
 )
 from gptqmodel.quantization.qvq_rank8 import P32WindowConfig
@@ -121,6 +125,26 @@ def test_exact_silu_activation_recognition_is_narrow():
     assert not _is_exact_silu_activation(nn.SiLU(inplace=True))
     assert not _is_exact_silu_activation(nn.GELU())
     assert not _is_exact_silu_activation(lambda value: torch.nn.functional.silu(value))
+
+
+def test_group_validation_uses_window_only_child_storage():
+    shared = torch.ones(256)
+    children = tuple(
+        _child(name, su=shared, seed=91 + index)
+        for index, name in enumerate(("q_proj", "k_proj"))
+    )
+    for child in children:
+        planar = child.trellis
+        child.window_words = repack_p32_planar_to_window(planar, bits=child.bits)
+        child.window_only = True
+        child.trellis = None
+
+    resolved = _validate_static_group(children)
+    assert resolved == children
+    assert all(_child_window_source(child) is child.window_words for child in children)
+    key_before = _source_key(children)
+    children[0].window_words.add_(1)
+    assert _source_key(children) != key_before
 
 
 def test_quantization_uses_the_same_role_groups_as_runtime_fusion():

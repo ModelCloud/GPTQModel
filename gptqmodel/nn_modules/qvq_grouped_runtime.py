@@ -29,7 +29,6 @@ from torch import nn
 
 from ..quantization.qvq import (
     pack_qvq_binary_bank_ids,
-    repack_p32_planar_to_window,
     unpack_qvq_binary_bank_ids,
 )
 from ..quantization.qvq_activation import quantize_qvq_fp8_activation
@@ -113,6 +112,21 @@ def _tensor_version(tensor: torch.Tensor) -> int | None:
         return None
 
 
+def _child_window_source(child: QVQLinear) -> torch.Tensor:
+    """Return the canonical live P32 source owned by a grouped child.
+
+    Window-only modules deliberately release ``trellis`` after the CPU-side
+    repack.  Grouped execution must therefore consume their window words
+    directly, while legacy planar children still use the normal preparation
+    cache.
+    """
+
+    source = child.window_words if getattr(child, "window_only", False) else child.trellis
+    if source is None:
+        raise _R0Fallback("child is missing its window or planar P32 payload")
+    return source
+
+
 def _same_tensor_bits(left: torch.Tensor, right: torch.Tensor) -> bool:
     return (
         left.dtype == right.dtype
@@ -125,7 +139,7 @@ def _same_tensor_bits(left: torch.Tensor, right: torch.Tensor) -> bool:
 def _source_key(children: Sequence[QVQLinear]) -> tuple[Any, ...]:
     key: list[Any] = []
     for child in children:
-        for name in ("trellis", "bank_ids", "bank_alt_id", "SU"):
+        for name in ("trellis", "window_words", "bank_ids", "bank_alt_id", "SU"):
             tensor = getattr(child, name, None)
             key.extend(
                 (id(tensor), None if tensor is None else _tensor_version(tensor))
@@ -200,7 +214,7 @@ def _validate_static_group(
         child.in_features != first.in_features
         or float(child.bits) != float(first.bits)
         or child.codebook_version != first.codebook_version
-        or child.trellis.device != first.trellis.device
+        or _child_window_source(child).device != _child_window_source(first).device
         for child in resolved[1:]
     ):
         raise _R0Fallback("children disagree on K, rate, codebook, or device")
@@ -209,11 +223,11 @@ def _validate_static_group(
     if any(child.out_features <= 0 or child.out_features % 256 for child in resolved):
         raise _R0Fallback("grouped Hopper requires every child N divisible by 256")
     if any(
-        child.trellis.device.type == "meta"
+        _child_window_source(child).device.type == "meta"
         or child.bank_ids is None
-        or child.bank_ids.device != child.trellis.device
+        or child.bank_ids.device != _child_window_source(child).device
         or child.bank_alt_id is None
-        or child.bank_alt_id.device != child.trellis.device
+        or child.bank_alt_id.device != _child_window_source(child).device
         for child in resolved
     ):
         raise _R0Fallback("grouped Hopper requires concrete co-located P32 payloads")
@@ -565,7 +579,7 @@ class QVQHopperGroupedRuntime:
             if maximum_rows is None:
                 return "grouped Hopper execution requires at least one row"
             return f"grouped Hopper execution currently requires one through {maximum_rows} rows"
-        if any(child.trellis.device != x.device for child in children):
+        if any(_child_window_source(child).device != x.device for child in children):
             return "activation and grouped payload devices differ"
         properties = torch.cuda.get_device_properties(x.device)
         if (properties.major, properties.minor) != (9, 0):
@@ -578,7 +592,7 @@ class QVQHopperGroupedRuntime:
         tile_count = (child.in_features // 16) * (child.out_features // 16)
         return pack_qvq_binary_bank_ids(
             unpack_qvq_binary_bank_ids(child.bank_ids, tile_count * 8)
-        ).to(device=child.trellis.device)
+        ).to(device=_child_window_source(child).device)
 
     def _build_payload(
         self,
@@ -589,7 +603,7 @@ class QVQHopperGroupedRuntime:
         # equality check may synchronize and therefore never occurs in the
         # warmed CUDA-graph capture path.
         _validate_static_group(children, allow_installed=True)
-        device = children[0].trellis.device
+        device = _child_window_source(children[0]).device
         placeholder = torch.empty(
             (16, children[0].in_features), device=device, dtype=torch.float16
         )
@@ -657,9 +671,12 @@ class QVQHopperGroupedRuntime:
                 int(child._p32_window_config.split_k) for child in children
             )
 
+        child_windows = tuple(
+            child._prepare_hopper_p32_window(device) for child in children
+        )
         plan = qvq_p32_window_wgmma_group_plan(
             placeholder,
-            tuple(child.trellis for child in children),
+            child_windows,
             _pgc16_levels(device, children[0].codebook_version),
             selectors,
             children[0].bits,
@@ -678,14 +695,13 @@ class QVQHopperGroupedRuntime:
         words_per_tile = qvq_words_per_tile(
             children[0].bits, weight_count=256, vector_size=2
         )
-        planar = torch.cat(
+        grouped_window = torch.cat(
             tuple(
-                child.trellis.reshape(k_tiles, child.out_features // 16, words_per_tile)
-                for child in children
+                window.reshape(k_tiles, child.out_features // 16, words_per_tile)
+                for child, window in zip(children, child_windows, strict=True)
             ),
             dim=1,
-        ).reshape(-1, words_per_tile)
-        grouped_window = repack_p32_planar_to_window(planar, bits=children[0].bits)
+        ).reshape(-1, words_per_tile).contiguous()
         grouped_selectors = (
             torch.cat(
                 tuple(
@@ -733,7 +749,8 @@ class QVQHopperGroupedRuntime:
             if cached is not None:
                 avoided += cached[3].numel() * cached[3].element_size()
             else:
-                avoided += child.trellis.numel() * child.trellis.element_size()
+                source = _child_window_source(child)
+                avoided += source.numel() * source.element_size()
             with child._qvq_cuda_bank_cache_lock:
                 child._qvq_cuda_window_cache = None
                 child._qvq_cuda_bank_cache = None
@@ -756,7 +773,7 @@ class QVQHopperGroupedRuntime:
         if self._payload is not None and source_key == self._payload_source_key:
             return self._payload
         if (
-            children[0].trellis.device.type == "cuda"
+            _child_window_source(children[0]).device.type == "cuda"
             and torch.cuda.is_current_stream_capturing()
         ):
             # R0 validation compares canonical tensors and payload construction
@@ -1512,7 +1529,9 @@ class QVQHopperGroupedRuntime:
 
         children = self._children()
         payload = self._ensure_payload()
-        levels = _pgc16_levels(children[0].trellis.device, children[0].codebook_version)
+        levels = _pgc16_levels(
+            _child_window_source(children[0]).device, children[0].codebook_version
+        )
         folded = qvq_p32_window_prepare_grouped_fp16_packed(
             payload,
             levels,
@@ -2518,10 +2537,10 @@ def _maybe_install_qvq_mlp_fusion(
         not isinstance(down, QVQLinear)
         or act_fn is None
         or not _is_safe_mlp_parent(parent, parent_name)
-        or children[0].trellis.device.type != "cuda"
+        or _child_window_source(children[0]).device.type != "cuda"
     ):
         return False
-    properties = torch.cuda.get_device_properties(children[0].trellis.device)
+    properties = torch.cuda.get_device_properties(_child_window_source(children[0]).device)
     if (properties.major, properties.minor) != (9, 0):
         return False
 
@@ -2530,7 +2549,7 @@ def _maybe_install_qvq_mlp_fusion(
         -0.01,
         0.01,
         children[0].in_features,
-        device=children[0].trellis.device,
+        device=_child_window_source(children[0]).device,
         dtype=torch.float16,
     ).reshape(1, -1)
     try:
