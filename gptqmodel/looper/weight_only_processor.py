@@ -224,7 +224,11 @@ class WeightOnlyProcessor(LoopProcessor):
                 )
 
             reference_weight = qmodule._weight_to_matrix(original_layer).detach().cpu().to(torch.float32)
-            dequant_weight = qmodule.dequantize_weight().T.detach().cpu().to(torch.float32)
+            dequant_weight = qmodule.dequantize_weight()
+            # BNB exposes native [out, in] weights; FP8/GGUF expose [in, out].
+            if active_qcfg.method != METHOD.BITSANDBYTES:
+                dequant_weight = dequant_weight.T
+            dequant_weight = dequant_weight.detach().cpu().to(torch.float32)
             mean_abs_err = (dequant_weight - reference_weight).abs().mean().item()
             self._update_logged_loss(module, f"{active_qcfg.method.value}: {mean_abs_err:.7f}")
             module.state.pop("tp_pad_info", None)
