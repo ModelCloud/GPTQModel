@@ -923,20 +923,64 @@ def finish_rank8_quantization(
     """Called by the existing quantizer before returning its module result."""
     from dataclasses import replace
 
+    rank8_A, rank8_B, rank8_metadata, report = fit_rank8_serialized_payload(
+        result.serialized_tensors(),
+        original_weight,
+        bias,
+        calibration,
+        bits=bits,
+        codebook_version=codebook_version,
+        input_hadamard=result.input_hadamard,
+        output_hadamard=result.output_hadamard,
+    )
+    return replace(
+        result,
+        rank8_A=rank8_A,
+        rank8_B=rank8_B,
+        rank8_metadata=rank8_metadata,
+        rank8_fit_report=report,
+    )
+
+
+def fit_rank8_serialized_payload(
+    serialized_tensors,
+    original_weight,
+    bias,
+    calibration,
+    *,
+    bits,
+    codebook_version,
+    input_hadamard=True,
+    output_hadamard=True,
+):
+    """Fit rank8 against an already selected serialized P32 candidate.
+
+    Atomic grouped selection keeps candidate payloads as CPU snapshots and
+    chooses the complete gate/up/down tuple only after replay.  This helper
+    lets that finalizer fit the selected payload without manufacturing a
+    second quantization result object; callers then append the accepted
+    factors to the same payload atomically.
+    """
     from ..nn_modules.qlinear.qvq import QVQLinear
 
     n, k = original_weight.shape
+    device = original_weight.device
+    payload = {
+        name: tensor.to(device=device)
+        for name, tensor in serialized_tensors.items()
+        if name not in RANK8_BUFFERS
+    }
     layer = QVQLinear(
         bits=bits,
         in_features=k,
         out_features=n,
         bias=bias is not None,
-        tensors=result.serialized_tensors(),
+        tensors=payload,
         v2b2_p32=True,
         bank_count=2,
         codebook_version=codebook_version,
-        input_hadamard=result.input_hadamard,
-        output_hadamard=result.output_hadamard,
+        input_hadamard=input_hadamard,
+        output_hadamard=output_hadamard,
     ).eval()
     layer.post_init()
     teacher = torch.nn.Linear(
@@ -965,13 +1009,7 @@ def finish_rank8_quantization(
         minimum_improvement=calibration.minimum_improvement,
         max_solver_bytes=calibration.max_solver_bytes,
     )
-    return replace(
-        result,
-        rank8_A=layer.rank8_A,
-        rank8_B=layer.rank8_B,
-        rank8_metadata=layer.rank8_metadata,
-        rank8_fit_report=report,
-    )
+    return layer.rank8_A, layer.rank8_B, layer.rank8_metadata, report
 
 
 def explicit_window_inner(layer, transformed, config):

@@ -1197,9 +1197,8 @@ class BaseQModel(nn.Module):
                 or self.quantize_config.activation is not None
                 or self.quantize_config.output_alignment is not None
                 or self.quantize_config.uses_weight_only_lifecycle()
-                or getattr(self.quantize_config.module_granular_replay, "strategy", None) == "atomic_swiglu"
             ):
-                raise ValueError("rank8 capture requires pristine P32 A16 without atomic replay/output alignment")
+                raise ValueError("rank8 capture requires pristine P32 A16 without output alignment")
             from ..looper.qvq_processor import clone_qvq_config_for_module
             from ..quantization.qvq_rank8_capture import Rank8Capture, capture_rank8_calibration
 

@@ -212,6 +212,11 @@ class QVQProcessor(LoopProcessor):
         self._additional_calibration_sample_counts: Dict[str, set[int]] = {}
         self._propagation_gates_lock = threading.RLock()
         self._rank8_calibration = {}
+        # Atomic SwiGLU selects one complete gate/up/down payload only after
+        # all three candidate banks have been replayed. Keep rank8 capture
+        # alive until that tuple is final, then fit against the selected
+        # serialized payload rather than attaching factors to candidate zero.
+        self._rank8_atomic_calibration = {}
         self._smooth_swiglu_stats: Dict[str, Dict[str, Any]] = {}
         self._smooth_swiglu_prepared = False
         self._atomic_swiglu_inputs: Dict[str, torch.Tensor] = {}
@@ -1280,6 +1285,41 @@ class QVQProcessor(LoopProcessor):
                 restored_weight.to(device=module.module.weight.device, dtype=module.module.weight.dtype)
             )
             payload = records[role]["candidates"][selected_id]["serialized_tensors"]
+            with self._propagation_gates_lock:
+                rank8_calibration = self._rank8_atomic_calibration.pop(name, None)
+            if rank8_calibration is not None:
+                from ..quantization.qvq_rank8 import fit_rank8_serialized_payload
+
+                original = originals[role]
+                rank8_A, rank8_B, rank8_metadata, _rank8_report = (
+                    fit_rank8_serialized_payload(
+                        payload,
+                        # The live replay module currently contains the
+                        # selected reconstructed arm.  The immutable dense
+                        # snapshot is the teacher contract captured before
+                        # candidate replay and must be used for the fit.
+                        records[role]["dense_weight"].to(device=original.weight.device),
+                        original.bias,
+                        rank8_calibration,
+                        bits=records[role]["module_qcfg"].bits,
+                        codebook_version=records[role]["module_qcfg"].codebook,
+                        input_hadamard=records[role]["candidates"][selected_id][
+                            "input_hadamard"
+                        ],
+                        output_hadamard=records[role]["candidates"][selected_id][
+                            "output_hadamard"
+                        ],
+                    )
+                )
+                if rank8_A is not None:
+                    payload = dict(payload)
+                    payload.update(
+                        {
+                            "rank8_A": rank8_A.detach().to(device="cpu", copy=True).contiguous(),
+                            "rank8_B": rank8_B.detach().to(device="cpu", copy=True).contiguous(),
+                            "rank8_metadata": rank8_metadata.detach().to(device="cpu", copy=True).contiguous(),
+                        }
+                    )
             module.stream_sync()
             with parent_module_lock(name):
                 for key in (
@@ -2651,14 +2691,20 @@ class QVQProcessor(LoopProcessor):
             with self._propagation_gates_lock:
                 rank8_calibration = self._rank8_calibration.pop(module.full_name, None)
             if rank8_calibration is not None:
-                if atomic_swiglu or self._output_alignment is not None:
-                    raise ValueError("rank8 fitting must follow atomic selection/output alignment; unsupported here")
-                from ..quantization.qvq_rank8 import finish_rank8_quantization
+                if self._output_alignment is not None:
+                    raise ValueError(
+                        "rank8 fitting must follow output alignment; combined finalization is unsupported"
+                    )
+                if atomic_swiglu:
+                    with self._propagation_gates_lock:
+                        self._rank8_atomic_calibration[module.full_name] = rank8_calibration
+                else:
+                    from ..quantization.qvq_rank8 import finish_rank8_quantization
 
-                result = finish_rank8_quantization(
-                    result, canonical_weight, module.bias, rank8_calibration,
-                    bits=module_qcfg.bits, codebook_version=module_qcfg.codebook,
-                )
+                    result = finish_rank8_quantization(
+                        result, canonical_weight, module.bias, rank8_calibration,
+                        bits=module_qcfg.bits, codebook_version=module_qcfg.codebook,
+                    )
             duration = time.perf_counter() - started
 
             # Quantized replay temporarily overwrites the dense module. The
@@ -2957,12 +3003,20 @@ class QVQProcessor(LoopProcessor):
                 "rank8 calibration modules were not quantized: "
                 + ", ".join(sorted(self._rank8_calibration))
             )
+        with self._propagation_gates_lock:
+            if self._rank8_atomic_calibration:
+                raise ValueError(
+                    "rank8 atomic calibration modules were not finalized: "
+                    + ", ".join(sorted(self._rank8_atomic_calibration))
+                )
         self._module_replay_rows.clear()
         self._module_replay_teacher_logits.clear()
         self._module_replay_model = None
         with self._atomic_swiglu_lock:
             self._atomic_swiglu_inputs.clear()
             self._atomic_swiglu_candidates.clear()
+        with self._propagation_gates_lock:
+            self._rank8_atomic_calibration.clear()
         with self._yaqa_factor_lock:
             self._yaqa_input_hessians.clear()
             self._yaqa_output_hessians.clear()

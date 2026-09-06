@@ -30,9 +30,9 @@ The calibration processor also accepts explicit per-module calibration through
 `set_rank8_calibration(name, calibration)`. Collection of original activations
 and document provenance remains the caller's responsibility; there is no
 implicit reuse of propagation gates or evaluation benchmarks. Automatic
-whole-model document capture is not implemented. Atomic SwiGLU selection and
-output alignment must finish before fitting and are currently rejected by the
-processor attachment.
+whole-model document capture is not implemented. Atomic SwiGLU selection now
+defers fitting until its complete triplet is selected; output alignment plus
+rank8 remains fail-closed until its post-alignment teacher contract is defined.
 
 The initial fitter is bounded-calibration CPU FP64 reduced-rank regression
 with `gelsd`, rcond 1e-5. It fits the output predicted by least squares, not a
@@ -709,3 +709,9 @@ shape heuristic). A caller can warm, correctness-check and benchmark those
 configs, then pass the selected config to `qvq_p32_amd(..., cache_weight=False,
 launch_config=...)`. Cold decoder/cache preparation is rejected during CUDA
 capture, so the selected launch is fixed before graph replay.
+
+For atomic SwiGLU module replay, rank8 fitting is deferred until the complete
+gate/up/down triplet is selected. The fitter receives the selected candidate's
+serialized P32 tensors plus the immutable dense teacher snapshot, and accepted
+factors are appended to that same payload before host staging. This preserves
+the base-payload binding when the selector chooses a nonzero candidate arm.
