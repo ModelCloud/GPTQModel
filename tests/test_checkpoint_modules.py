@@ -10,6 +10,7 @@ from gptqmodel.looper.checkpoint_modules import (
 )
 from gptqmodel.looper.continuation import ContinuationCodec
 from gptqmodel.quantization.config import (
+    _GGUF_BITS_ALIAS_INFO,
     FP8Config,
     GGUFConfig,
     ParoConfig,
@@ -36,12 +37,13 @@ def assert_schema_roundtrip(module, config):
 
 
 @pytest.mark.parametrize("format", ["gptq", "gptq_v2", "gptq_p"])
-def test_gptq_packed_schema(format):
+@pytest.mark.parametrize("bits", [2, 3, 4, 8])
+def test_gptq_packed_schema(format, bits):
     from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 
-    config = QuantizeConfig(bits=4, group_size=32, format=format, desc_act=False)
+    config = QuantizeConfig(bits=bits, group_size=32, format=format, desc_act=False)
     module = TorchLinear(
-        bits=4,
+        bits=bits,
         group_size=32,
         desc_act=False,
         sym=True,
@@ -101,10 +103,11 @@ def test_fp8_scale_schema(scale):
     assert restored.weight_block_size == module.weight_block_size
 
 
-def test_gguf_bits_schema():
+@pytest.mark.parametrize("bits", sorted(_GGUF_BITS_ALIAS_INFO))
+def test_gguf_bits_schema(bits):
     from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 
-    config = GGUFConfig(bits="q4_k")
+    config = GGUFConfig(bits=bits)
     module = GGUFTorchLinear(
         bits=config.runtime_bits,
         group_size=-1,
