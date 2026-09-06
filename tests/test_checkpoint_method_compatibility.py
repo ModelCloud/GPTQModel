@@ -191,3 +191,29 @@ def test_gptq_bitblas_is_repack_only_not_a_quantization_export():
 
     assert not _supports_pack_api(BitblasLinear)
     assert callable(BitblasLinear.repack_from_gptq)
+
+
+@pytest.mark.parametrize(
+    "method,format",
+    [
+        ("gptq", "gptq_v2"),
+        ("gptq", "gptq_p"),
+        ("awq", "gemv"),
+        ("awq", "gemv_fast"),
+        ("awq", "llm-awq"),
+    ],
+)
+def test_eora_format_checkpoint_recovery(tmp_path, method, format):
+    from test_checkpoint_quantization import test_subprocess_recovery
+
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    test_subprocess_recovery(
+        tmp_path,
+        "llama",
+        "kill-before",
+        device="cuda:0",
+        method=method,
+        format=format,
+        eora=True,
+    )
