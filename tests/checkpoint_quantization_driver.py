@@ -20,6 +20,7 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--audit-hessians", action="store_true")
     parser.add_argument(
         "--mode",
         default="run",
@@ -31,6 +32,8 @@ def main():
             "kill-before",
             "kill-after",
             "error",
+            "kill-hessian",
+            "kill-hessian-early",
         ],
     )
     args = parser.parse_args()
@@ -57,6 +60,94 @@ def main():
         else None,
     )
     model = GPTQModel.load(args.model, quantize_config=qcfg, backend=BACKEND.TORCH)
+
+    if args.audit_hessians:
+        # Observe actual task construction, accumulated batches and the exact
+        # finalized Hessian consumed by GPTQ. Do not change the math or force
+        # materialization earlier than the normal quantization path does.
+        import hashlib
+        import json
+        import threading
+
+        from gptqmodel.quantization.gptq import GPTQ
+
+        audit_lock = threading.Lock()
+
+        def emit(event, task, **fields):
+            name = task._named_module.full_name
+            with audit_lock:
+                sys.stdout.write(
+                    "HESSIAN_AUDIT "
+                    + json.dumps({"event": event, "name": name, **fields})
+                    + "\n"
+                )
+                sys.stdout.flush()
+
+        def digest(tensor):
+            data = (
+                tensor.detach().cpu().contiguous().view(torch.uint8).numpy().tobytes()
+            )
+            return hashlib.sha256(data).hexdigest()
+
+        initialize = GPTQ.__init__
+        add_batch = GPTQ.add_batch
+        finalize_hessian = GPTQ.finalize_hessian
+
+        def fresh(task, *positional, **keywords):
+            initialize(task, *positional, **keywords)
+            assert task.nsamples == task.fwd_counter == task._hessian_total_samples == 0
+            assert (
+                task.H is None
+                and not task._device_hessian_partials
+                and not task._device_sample_counts
+            )
+            emit("fresh", task, nsamples=task.nsamples, fwd_counter=task.fwd_counter)
+
+        def accumulate(task, inp, out, batch_index=None):
+            add_batch(task, inp, out, batch_index=batch_index)
+            emit("batch", task, batch_index=batch_index, input_hash=digest(inp))
+            name = task._named_module.full_name
+            late_target = name.endswith((".mlp.down_proj", ".mlp.experts.0.down_proj"))
+            target = (
+                late_target if args.mode == "kill-hessian" else ".self_attn." in name
+            )
+            if (
+                args.mode in {"kill-hessian", "kill-hessian-early"}
+                and ".layers.1." in name
+                and target
+            ):
+                with task.lock:
+                    if task.fwd_counter == 2:
+                        assert task.nsamples > 0 and task._device_hessian_partials
+                        emit(
+                            "kill",
+                            task,
+                            nsamples=task.nsamples,
+                            fwd_counter=task.fwd_counter,
+                            partial_hashes=[
+                                digest(value)
+                                for value in task._device_hessian_partials.values()
+                            ],
+                        )
+                        os.kill(os.getpid(), signal.SIGKILL)
+
+        def finalized(task, *positional, **keywords):
+            hessian = finalize_hessian(task, *positional, **keywords)
+            emit(
+                "final",
+                task,
+                nsamples=task.nsamples,
+                fwd_counter=task.fwd_counter,
+                shape=list(hessian.shape),
+                dtype=str(hessian.dtype),
+                hessian_hash=digest(hessian),
+            )
+            return hessian
+
+        GPTQ.__init__ = fresh
+        GPTQ.add_batch = accumulate
+        GPTQ.finalize_hessian = finalized
+
     original = CheckpointExtension.on_boundary
 
     def boundary(extension, event):

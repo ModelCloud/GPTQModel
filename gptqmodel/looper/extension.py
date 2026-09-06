@@ -36,12 +36,23 @@ class LoopPlan:
         return self.steps.index(step) + 1
 
 
+class LoopExecution(Protocol):
+    """Placement identity and scheduler continuation owned by the looper."""
+
+    def execution_device_pools(self) -> dict[str, list[str]]: ...
+
+    def execution_state_dict(self) -> dict: ...
+
+    def load_execution_state_dict(self, state: dict) -> None: ...
+
+
 @dataclass(frozen=True)
 class LoopContext:
     plan: LoopPlan
     model: object
     processors: tuple
     shared_state: dict
+    execution: LoopExecution | None = None
 
 
 class LoopBoundary:

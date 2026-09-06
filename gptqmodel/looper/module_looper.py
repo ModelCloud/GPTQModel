@@ -220,6 +220,7 @@ class ModuleLooper():
         quant_devices = select_forward_devices(normalized_quant_device) if normalized_quant_device else [CPU]
         if not quant_devices:
             quant_devices = [CPU]
+        self._primary_quant_device = quant_devices[0]
 
         # Apply compute device filter if provided to determine which devices to use for quantization
         compute_device_filter = getattr(self.gptq_model.quantize_config, "compute_device_filter", None)
@@ -921,6 +922,49 @@ class ModuleLooper():
             return False
 
         return True
+
+    def execution_device_pools(self) -> Dict[str, List[str]]:
+        """Ordered placement pools, including forward-only visible devices."""
+        forward_devices = (
+            select_forward_devices(self._primary_quant_device)
+            if getattr(self.gptq_model.quantize_config, "auto_forward_data_parallel", True)
+            else [self._primary_quant_device]
+        )
+        return {
+            "primary": [str(self._primary_quant_device)],
+            "quantization": [str(device) for device in self._quant_devices],
+            "dense": [str(device) for device in self._dense_quant_devices],
+            "moe": [str(device) for device in self._moe_quant_devices],
+            "forward": [str(device) for device in forward_devices],
+        }
+
+    def execution_state_dict(self) -> dict:
+        """Capture scheduler continuation at a quiescent execution boundary."""
+        with self._quant_device_lock:
+            return {
+                "version": 1,
+                "next_device": self._quant_device_rr,
+                "module_devices": {name: str(device) for name, device in self._module_device_map.items()},
+            }
+
+    def load_execution_state_dict(self, state: dict) -> None:
+        """Restore scheduling without replaying completed device assignments."""
+        if (
+            not isinstance(state, dict) or state.get("version") != 1
+            or type(state.get("next_device")) is not int or state["next_device"] < 0
+        ):
+            raise ValueError("invalid execution scheduler continuation")
+        devices = state.get("module_devices")
+        allowed = {str(device) for device in self._quant_devices} | {str(CPU)}
+        if not isinstance(devices, dict) or any(
+            not isinstance(name, str) or not isinstance(device, str) or device not in allowed
+            for name, device in devices.items()
+        ):
+            raise ValueError("execution continuation contains an unavailable device")
+        restored = {name: torch.device(device) for name, device in devices.items()}
+        with self._quant_device_lock:
+            self._quant_device_rr = state["next_device"]
+            self._module_device_map = restored
 
     def _assign_quant_device_for_module(
         self,
@@ -1628,7 +1672,7 @@ class ModuleLooper():
         elif self.gptq_model.quantize_config.lm_head:
             steps.append(LoopStep("lm_head", layer_count, "lm_head"))
         self.start_step = self.extensions.start(LoopContext(
-            LoopPlan(tuple(steps)), self.gptq_model, tuple(self.processors), shared_kv_cache_dict,
+            LoopPlan(tuple(steps)), self.gptq_model, tuple(self.processors), shared_kv_cache_dict, self,
         ))
 
         if self.gptq_model.quantize_config.lm_head:

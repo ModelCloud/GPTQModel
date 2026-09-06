@@ -11,7 +11,7 @@ from .input_cache import InputCache
 
 
 class ContinuationCodec:
-    VERSION = 1
+    VERSION = 2
 
     @staticmethod
     def dumps(state) -> bytes:
@@ -24,11 +24,21 @@ class ContinuationCodec:
             if type(value) is float and math.isfinite(value):
                 return ["scalar", value]
             if isinstance(value, torch.Tensor):
-                if value.device.type == "meta" or value.layout != torch.strided:
+                if (
+                    value.device.type not in {"cpu", "cuda"}
+                    or value.layout != torch.strided
+                ):
                     raise TypeError("continuation requires materialized dense tensors")
                 name = str(len(tensors))
                 tensors[name] = value.detach().to(device="cpu").contiguous().clone()
-                return ["tensor", name]
+                return ["tensor", {"name": name, "device": str(value.device)}]
+            if type(value) is torch.device:
+                device = value
+                if device.type not in {"cpu", "cuda"}:
+                    raise TypeError("unsupported continuation metadata device")
+                if device.type == "cuda" and device.index is None:
+                    device = torch.device("cuda", torch.cuda.current_device())
+                return ["device", str(device)]
             if id(value) in active:
                 raise TypeError("cyclic continuation state is unsupported")
             active.add(id(value))
@@ -89,7 +99,27 @@ class ContinuationCodec:
             ):
                 return value
             if kind == "tensor":
-                return tensors[value]
+                device = torch.device(value["device"])
+                if (
+                    device.type not in {"cpu", "cuda"}
+                    or device.type == "cuda"
+                    and device.index is None
+                ):
+                    raise ValueError(
+                        "unsupported or unindexed continuation tensor device"
+                    )
+                return tensors[value["name"]].to(device=device)
+            if kind == "device":
+                device = torch.device(value)
+                if (
+                    device.type not in {"cpu", "cuda"}
+                    or device.type == "cuda"
+                    and device.index is None
+                ):
+                    raise ValueError(
+                        "unsupported or unindexed continuation metadata device"
+                    )
+                return device
             if kind == "input_cache":
                 fields = decode(value)
                 if set(fields) != set(InputCache.__dataclass_fields__):

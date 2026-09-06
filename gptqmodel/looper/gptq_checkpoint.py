@@ -19,6 +19,7 @@ from safetensors.torch import save
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization.config import METHOD, resolve_quant_format
 from ..utils.offload import set_submodule
+from .checkpoint_devices import checkpoint_device_topology
 from .checkpoint_store import CheckpointError
 from .continuation import ContinuationCodec
 from .gptq_processor import GPTQProcessor
@@ -99,9 +100,12 @@ def _source_identity(model):
 
 
 class GPTQCheckpointAdapter:
-    VERSION = 1
+    VERSION = 2
 
     def bind(self, context):
+        self.execution = context.execution
+        if self.execution is None:
+            raise CheckpointError("checkpoint requires execution placement state")
         self.model = context.model
         if (
             len(context.processors) != 1
@@ -118,6 +122,9 @@ class GPTQCheckpointAdapter:
         config.get("meta", {}).pop("offload_to_disk_path", None)
         return {
             "adapter_version": self.VERSION,
+            "device_topology": checkpoint_device_topology(
+                self.execution.execution_device_pools()
+            ),
             "source": _source_identity(self.model),
             "quantization": config,
             "calibration": hashlib.sha256(
@@ -168,6 +175,7 @@ class GPTQCheckpointAdapter:
                 "shared_state": self.shared_state,
                 "log": self.processor.log,
                 "specs": specs,
+                "execution": self.execution.execution_state_dict(),
                 "rng": torch.random.get_rng_state(),
                 "cuda_rng": torch.cuda.get_rng_state_all()
                 if torch.cuda.is_initialized()
@@ -175,9 +183,8 @@ class GPTQCheckpointAdapter:
                 "python_rng": random.getstate(),
                 "numpy_rng": (np_state[0], np_state[1].tolist(), *np_state[2:]),
             }
-            # Freeze tensors while holding the processor lock. The outer codec
-            # serialization sees a detached, CPU-owned tree.
-            state = ContinuationCodec.loads(ContinuationCodec.dumps(state))
+            # The caller serializes immediately while the boundary is quiescent;
+            # preserve source device tags until the codec makes CPU-owned copies.
         return state, artifacts
 
     def committed(self, artifacts):
@@ -189,6 +196,7 @@ class GPTQCheckpointAdapter:
         if state["version"] != self.VERSION or set(state["specs"]) != set(artifacts):
             raise CheckpointError("incompatible GPTQ continuation schema")
         config = self.model.quantize_config
+        self.execution.load_execution_state_dict(state["execution"])
         restored = {}
         # Validate every module and bundle before replacing anything in the model.
         for name, spec in state["specs"].items():

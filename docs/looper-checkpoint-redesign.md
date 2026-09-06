@@ -80,8 +80,25 @@ generation; malformed CURRENT or no complete generation fails closed.
 
 Identity covers the execution plan, exact source config/shard contents,
 complete prepared calibration cache, serialized quantization settings
-(excluding disposable offload location), and Torch/Transformers versions.
+(excluding disposable offload location), GPU topology, and Torch/Transformers versions.
 Mismatch reports differing top-level fields and never triggers replay.
+
+GPU topology is strict: the GPU count, physical GPU UUIDs at each logical CUDA
+index, visible ordering, and ordered quantization/dense/MoE/forward device pools
+must match. Multi-GPU-to-single-GPU resume, reordered/replaced GPUs, and changed
+device pools are rejected before decoding or restoring tensors. Forward-visible
+GPUs are included even when a quantization-device filter excludes them, since
+forward work and CUDA RNG state can still depend on them. No device remapping
+or topology migration is supported.
+
+The looper exposes its execution-placement state through the extension context.
+Its round-robin device-assignment cursor and module-device map are checkpointed,
+so skipping completed layers does not restart GPU assignment from device zero.
+Continuation tensors and device-valued metadata retain explicit device indices;
+CPU tensors stay on CPU and active CUDA tensors return to their recorded GPUs.
+Completed packed modules intentionally remain offloaded/meta until saving.
+Adapter and continuation schemas are now version 2; older checkpoints lacking
+topology/placement information are rejected rather than guessed or migrated.
 
 Restoration validates tensor schemas and creates quantized modules on `meta`.
 Per-attempt save indexes point directly to immutable checkpoint objects.
@@ -92,6 +109,14 @@ references; the next layer receives the saved continuation.
 SIGINT/SIGTERM handlers only set a stop request. The next boundary checkpoints
 and raises CheckpointStopped; workers drain before the lease is released.
 SIGKILL requires no handler and loses work after the last committed cursor.
+
+Partial Hessians and unfinished subsets are deliberately not committed. On a
+restart, the entire uncommitted layer is run again from its saved input cache:
+fresh GPTQ tasks start with zero sample/forward counts and empty Hessian partials.
+All calibration batches and earlier subsets within that interrupted layer are
+re-executed. Only fully committed layers are skipped.
+Cross-device Hessian partials are reduced in stable device-index order, not
+worker-arrival order, to avoid restart-dependent floating-point rounding.
 
 ## Scope and operational limits
 
@@ -121,3 +146,12 @@ after commits, injected publication failures, and restart without completed-laye
 execution. The same driver accepts /monster/data/model/Llama-3.2-1B for larger
 local validation. With PYTHON_GIL=0 it asserts the GIL remains disabled after
 model-stack imports. Tiny calibration is a recovery test, not a quality benchmark.
+
+Partial-Hessian fault injection kills both early in a layer and during a later
+MLP subset, after earlier subsets have already been quantized. Audit checks
+compare fresh-task initialization, every calibration-batch input hash, final
+sample/forward counts, pre-quantization Hessian hashes and every saved tensor
+against an uninterrupted run. Device tests cover strict topology rejection and
+scheduler continuation. Real two-GPU tensor-placement and dense/MoE recovery
+tests are included but skip explicitly when fewer than two GPUs are available;
+simulated topology tests are not substitutes for those E2E results.
