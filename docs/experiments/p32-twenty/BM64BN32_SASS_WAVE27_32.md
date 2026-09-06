@@ -239,6 +239,27 @@ at high M, but the larger accumulator and CTA footprint impose enough layout
 and scheduling cost to erase the gain. The complete per-projection JSON and
 logs are in [wave 37 results](results/bm128-wave37/).
 
+Wave 38 profiled the BM128 arm at M=2048 across the same eight projections.
+The pooled Nsight medians were:
+
+| Metric | BM64 scalar w4/s3 | BM128 w4/s2 | Change |
+|---|---:|---:|---:|
+| Registers/thread | 64 | 87 | +23 |
+| Dynamic shared memory/CTA | 8,192 | 16,384 | 2× |
+| Achieved occupancy | 45.6% | 30.3% | −15.3 points |
+| Integer SASS instructions | 14.72B | 7.37B | −49.9% |
+| Memory SASS instructions | 3.23B | 1.75B | −45.7% |
+| HMMA instructions | 16.78M | 16.78M | unchanged |
+| Long-scoreboard stall | 13.9% | 23.2% | +9.3 points |
+| Barrier stall | 11.7% | 9.6% | −2.1 points |
+| Math-pipe throttle | 14.1% | 6.5% | −7.6 points |
+| MIO throttle | 5.4% | 9.6% | +4.2 points |
+
+The instruction reduction is real reuse, but it is purchased with 87 registers,
+16 KiB shared memory, lower occupancy, and higher long-scoreboard pressure.
+This explains why the runtime gain is only 1.398× pooled at M=2048. Raw
+profiles are in [wave 38 results](results/bm128-ncu-wave38/).
+
 ## Decision and next target
 
 The current exact dispatch remains production window for M < 512 and the

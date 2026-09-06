@@ -150,4 +150,7 @@ therefore rejected as the 3x path; transform fusion and cross-row reuse are
 still required. BM128 cross-row reuse wave37 then passed 72/72 local cases but
 reached only 1.398x pooled M=2048 layer speedup and was slower below M=512.
 The current exact large-prefill candidate remains BM64/BN32; BM128 is retained
-as a measured reuse ceiling, not a dispatcher replacement.
+as a measured reuse ceiling, not a dispatcher replacement. Nsight wave38
+measured 87 registers/thread, 16 KiB shared memory, 30.3% achieved occupancy,
+and 23.2% long-scoreboard stalls; it cut integer SASS by about 50% but could
+not convert that reduction into a 3x runtime result.
