@@ -21,6 +21,7 @@ from ...quantization.qvq import (
     pack_qvq_binary_bank_ids,
     reconstruct_qvq_inner_weight,
     repack_p32_planar_to_window,
+    repack_p32_window_to_planar,
     unpack_qvq_bank_ids,
     unpack_qvq_binary_bank_ids,
 )
@@ -1405,8 +1406,22 @@ class QVQLinear(BaseQuantLinear):
     ) -> torch.Tensor:
         """Materialize the dense inner weight, in FP32 unless explicitly requested otherwise."""
 
+        trellis = self.trellis
+        if self.window_only:
+            if self.window_words is None:
+                raise RuntimeError("window-only QVQ module is missing window_words")
+            # This is an explicit legacy/reference request. Do not create a
+            # temporary planar tensor during graph capture; callers that need
+            # that path in a graph must load with retain_planar=True.
+            self._require_prepared_outside_capture(
+                self.window_words.device, "planar reconstruction"
+            )
+            trellis = repack_p32_window_to_planar(
+                self.window_words, bits=self.bits
+            )
+
         return reconstruct_qvq_inner_weight(
-            self.trellis,
+            trellis,
             bits=self.bits,
             vector_size=self.vector_size,
             trellis_window=self.trellis_window,
@@ -2652,8 +2667,18 @@ def qvq_dense_oracle_forward(
     inner = None
     try:
         with torch.inference_mode():
+            source = layer.window_words if layer.window_only else layer.trellis
+            if source is None:
+                raise RuntimeError(
+                    "QVQ oracle requires a window or planar P32 payload"
+                )
+            if layer.window_only:
+                layer._require_prepared_outside_capture(
+                    source.device, "oracle planar reconstruction"
+                )
+                source = repack_p32_window_to_planar(source, bits=layer.bits)
             inner = reconstruct_qvq_inner_weight(
-                layer.trellis.to(device=compute_device),
+                source.to(device=compute_device),
                 bits=layer.bits,
                 vector_size=layer.vector_size,
                 trellis_window=layer.trellis_window,

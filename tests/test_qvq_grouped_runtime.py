@@ -147,6 +147,17 @@ def test_group_validation_uses_window_only_child_storage():
     assert _source_key(children) != key_before
 
 
+def test_window_only_dense_reference_reconstructs_planar_temporarily():
+    child = _child("q_proj", seed=93)
+    expected = child.get_inner_weight_tensor()
+    child.window_words = repack_p32_planar_to_window(child.trellis, bits=child.bits)
+    child.window_only = True
+    child.trellis = None
+
+    actual = child.get_inner_weight_tensor()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
 def test_quantization_uses_the_same_role_groups_as_runtime_fusion():
     tree = [
         "model",
