@@ -672,6 +672,114 @@ def load_window_package(package, *, device="cpu", config=None):
     return layer
 
 
+def save_window_artifact(layer, directory):
+    """Write a native-friendly unified artifact directory with a hash manifest.
+
+    The artifact uses the exact tensors from :func:`export_window_package`;
+    planar trellis words are never duplicated.  Files are immutable after the
+    manifest is written, and the manifest records enough dtype/shape/hash data
+    for a non-Python loader to validate the payload before touching a device.
+    """
+    from pathlib import Path
+
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=False)
+    package = export_window_package(layer)
+    entries = {}
+    serialized_bytes = 0
+    for name, tensor in package["tensors"].items():
+        if not name or Path(name).name != name or Path(name).suffix:
+            raise ValueError(f"invalid artifact tensor name: {name!r}")
+        value = tensor.detach().cpu().contiguous()
+        data = value.view(torch.uint8).numpy().tobytes()
+        filename = f"{name}.bin"
+        (directory / filename).write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        entries[name] = {
+            "file": filename,
+            "dtype": str(value.dtype).split(".")[-1],
+            "shape": list(value.shape),
+            "bytes": len(data),
+            "sha256": digest,
+        }
+        serialized_bytes += len(data)
+    manifest = {
+        "format": "qvq_p32_window_artifact",
+        "version": 1,
+        "metadata": package["metadata"],
+        "recovery": package["recovery"],
+        "tensors": entries,
+    }
+    manifest_path = directory / "manifest.json"
+    manifest_bytes = json.dumps(manifest, sort_keys=True, indent=2).encode() + b"\n"
+    manifest_path.write_bytes(manifest_bytes)
+    serialized_bytes += len(manifest_bytes)
+    report = window_package_storage([package], serialized_bytes=serialized_bytes)
+    report["artifact_directory"] = str(directory)
+    report["manifest"] = str(manifest_path)
+    return report
+
+
+def load_window_artifact(directory, *, device="cpu", config=None):
+    """Load and verify a hash-manifested native-friendly window artifact."""
+    from pathlib import Path
+
+    directory = Path(directory)
+    manifest_path = directory / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("invalid window artifact manifest") from exc
+    if manifest.get("format") != "qvq_p32_window_artifact" or manifest.get("version") != 1:
+        raise ValueError("unsupported window artifact format")
+    if not isinstance(manifest.get("metadata"), dict):
+        raise TypeError("window artifact metadata is missing")
+    entries = manifest.get("tensors")
+    if not isinstance(entries, dict) or not entries:
+        raise ValueError("window artifact has no tensor manifest")
+    dtypes = {
+        "float16": torch.float16,
+        "float32": torch.float32,
+        "bfloat16": torch.bfloat16,
+        "int32": torch.int32,
+        "uint8": torch.uint8,
+    }
+    tensors = {}
+    for name, entry in entries.items():
+        if not isinstance(name, str) or not name or Path(name).name != name:
+            raise ValueError("invalid window artifact tensor name")
+        if not isinstance(entry, dict) or entry.get("file") != f"{name}.bin":
+            raise ValueError(f"invalid window artifact file entry: {name}")
+        dtype = dtypes.get(entry.get("dtype"))
+        shape = entry.get("shape")
+        if dtype is None or not isinstance(shape, list) or any(
+            type(dim) is not int or dim < 0 for dim in shape
+        ):
+            raise ValueError(f"invalid window artifact tensor metadata: {name}")
+        try:
+            raw = (directory / entry["file"]).read_bytes()
+        except OSError as exc:
+            raise ValueError(f"missing window artifact tensor: {name}") from exc
+        if len(raw) != entry.get("bytes") or hashlib.sha256(raw).hexdigest() != entry.get("sha256"):
+            raise ValueError(f"window artifact tensor hash mismatch: {name}")
+        expected = int(torch.tensor([], dtype=dtype).element_size())
+        count = 1
+        for dim in shape:
+            count *= dim
+        if len(raw) != count * expected:
+            raise ValueError(f"window artifact tensor byte count mismatch: {name}")
+        tensors[name] = torch.frombuffer(bytearray(raw), dtype=dtype).clone().reshape(shape)
+    recovery = manifest.get("recovery")
+    if recovery is not None and not {"rank8_A", "rank8_B"}.issubset(tensors):
+        raise ValueError("window artifact recovery factors are incomplete")
+    package = {
+        "metadata": manifest.get("metadata"),
+        "recovery": recovery,
+        "tensors": tensors,
+    }
+    return load_window_package(package, device=device, config=config)
+
+
 def window_package_storage(packages, *, serialized_bytes=None):
     """Return module and whole-model storage accounting for a unified package.
 

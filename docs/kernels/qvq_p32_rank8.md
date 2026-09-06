@@ -426,6 +426,11 @@ validation, and exact corrected module output. Its synthetic documents test
 pipeline plumbing, not held-out model quality. The loader now allocates
 optional buffers from safetensors headers before Accelerate loads shards,
 validating complete A/B/metadata triples and their shapes/dtypes first.
+For native/ZML deployment, `save_window_artifact(layer, directory)` writes the
+same tensors as immutable `.bin` files plus a versioned `manifest.json`;
+`load_window_artifact` verifies every dtype, shape, byte count, and SHA-256
+before using the existing package loader. The recovery base hash still binds
+the optional factors to the exact window payload.
 The focused capture/checkpoint/lifecycle regression passes 75 tests. A separate
 [real Llama capture record](results/p32_rank8_llama_capture.json) contains
 first-layer Q/gate activation and teacher hashes for four distinct calibration

@@ -16,9 +16,11 @@ from gptqmodel.quantization.qvq_rank8 import (
     add_rank8_correction,
     export_window_package,
     fit_rank8,
+    load_window_artifact,
     load_window_package,
     prepare_rank8,
     qvq_p32_window_linear,
+    save_window_artifact,
     window_kernel_candidates,
     window_package_storage,
 )
@@ -245,6 +247,14 @@ def test_recovery_teacher_error_roundtrip_and_off_identity(hadamard, tmp_path):
     torch.save(package, path)
     loaded = load_window_package(torch.load(path, weights_only=True), config=on)
     torch.testing.assert_close(loaded(heldout), actual, rtol=0, atol=0)
+    artifact_dir = tmp_path / "window-artifact"
+    artifact_report = save_window_artifact(layer, artifact_dir)
+    assert artifact_report["serialized_bytes"] > artifact_report["tensor_bytes"]
+    artifact_loaded = load_window_artifact(artifact_dir, config=on)
+    torch.testing.assert_close(artifact_loaded(heldout), actual, rtol=0, atol=0)
+    (artifact_dir / "window_words.bin").write_bytes(b"tampered")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        load_window_artifact(artifact_dir, config=on)
     storage = window_package_storage(
         [package], serialized_bytes=path.stat().st_size
     )
