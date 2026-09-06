@@ -63,6 +63,7 @@ from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
+from .resume import calibration_dataset_hash
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
 
@@ -1539,6 +1540,9 @@ class ModuleLooper():
 
         # release calibration_dataset
         for processor in self.processors:
+            # Resume markers are written well after this dataset is gone, so
+            # fingerprint its content now, before releasing it.
+            processor.calibration_dataset_hash = calibration_dataset_hash(processor.calibration_dataset)
             processor.release_calibration_dataset()
 
         if self.gptq_model.quantize_config.offload_to_disk:
