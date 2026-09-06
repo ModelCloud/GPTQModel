@@ -164,6 +164,8 @@ def test_window_tuner_can_measure_recovery_pair_for_each_candidate(tmp_path):
     assert pair["off"]["median_us"] == pytest.approx(1.0)
     assert pair["on"]["median_us"] == pytest.approx(1.05)
     assert pair["overhead_percent"] == pytest.approx(5.0)
+    assert len(layer._p32_window_tuning["candidate_recovery_overhead"]) == 1
+    assert layer._p32_window_tuning["candidate_recovery_overhead"][0]["recovery_overhead"]["overhead_percent"] == pytest.approx(5.0)
     cached = json.loads(next(tmp_path.glob("*.json")).read_text())
     assert cached["identity"]["measure_recovery_candidates"] is True
 

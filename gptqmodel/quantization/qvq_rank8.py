@@ -195,6 +195,25 @@ def _validate_kernel_tuning_metadata(layer, tuning):
         raise ValueError("window kernel-tuning quality mode mismatch")
     if type(tuning.get("rank8_enabled")) is not bool:
         raise ValueError("invalid window kernel-tuning correction state")
+    paired = tuning.get("candidate_recovery_overhead", [])
+    if not isinstance(paired, list):
+        raise ValueError("invalid per-candidate recovery timing metadata")
+    for entry in paired:
+        if not isinstance(entry, dict) or "config" not in entry or "recovery_overhead" not in entry:
+            raise ValueError("invalid per-candidate recovery timing metadata")
+        try:
+            candidate = P32WindowConfig.from_backend_config(entry["config"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid per-candidate recovery timing configuration") from exc
+        if candidate not in candidates:
+            raise ValueError("per-candidate recovery timing is not in measured candidates")
+        overhead = entry["recovery_overhead"]
+        if not isinstance(overhead, dict) or not all(
+            isinstance(overhead.get(name), (int, float))
+            and torch.isfinite(torch.tensor(float(overhead[name])))
+            for name in ("overhead_us", "overhead_percent")
+        ):
+            raise ValueError("invalid per-candidate recovery timing values")
     if expected_state != _digest(*_base(layer)):
         raise ValueError("window kernel-tuning state hash mismatch")
     if expected_factors is not None:

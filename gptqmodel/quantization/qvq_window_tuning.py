@@ -428,6 +428,19 @@ def tune_window_kernel(
             "selected": selected.to_backend_config(),
             "quality_mode": original.quality_mode,
             "rank8_enabled": enabled,
+            # Keep matched correction-state timing with the selected policy so
+            # an external ZML consumer can make the same shape-specific cost
+            # visible without rerunning Python.  These measurements never
+            # establish quality eligibility.
+            "recovery_overhead": report.get("recovery_overhead"),
+            "candidate_recovery_overhead": [
+                {
+                    "config": row["config"],
+                    "recovery_overhead": row["recovery_overhead"],
+                }
+                for row in report.get("rows", [])
+                if "recovery_overhead" in row
+            ],
             "identity": {
                 "key": report["identity"]["key"],
                 "input_shape": report["identity"]["input_shape"],
