@@ -68,3 +68,13 @@ improves 11.16%/5.23%; individual maximum-error regressions remain visible.
 Real-factor/activation M8192 timing gives 0.61% overhead for square Q and
 5.73% for wide gate. These results advance module evidence only; whole-model
 quality and the broad performance/promotion requirements remain open.
+
+The direct final FP16 store is now implemented for eligible single/grouped
+fused epilogues and passes 405 post-profile tests (86 skips). The C4 validation
+subset covers 128 documents/47,550 predictions with fixed first-layer Q/gate
+corrections. It shows a small loss benefit over correction off; the padded
+Tensor Core projection loses some of the reference correction's benefit,
+while the reference-projection/fused-epilogue ablation preserves it. Keep
+both implementations explicit. Correction-off transform/store fusion,
+broader model quality, ZML lowering, graph ownership and other phase rows
+remain open; this subset is not a full-model promotion scorecard.

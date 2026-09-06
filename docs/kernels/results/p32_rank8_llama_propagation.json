@@ -1,0 +1,426 @@
+{
+  "scope": "Whole-model propagation diagnostic with two fitted first-layer corrections; 16 additional calibration documents, not standardized PPL or task evaluation.",
+  "source": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm128.parquet",
+  "checkpoint": "/root/qvq-results/f6-reproduction-h200/checkpoint",
+  "teacher": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "modules": [
+    "model.layers.0.self_attn.q_proj",
+    "model.layers.0.mlp.gate_proj"
+  ],
+  "preflight": {
+    "physical_id": 0,
+    "pci_bus_id": "00000000:1C:00.0",
+    "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "name": "NVIDIA H200",
+    "config": {
+      "sample_count": 3,
+      "sample_interval_seconds": 1.0,
+      "max_driver_memory_mib": 16
+    },
+    "samples": [
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      },
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      },
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      }
+    ]
+  },
+  "rows": [
+    {
+      "document_id": "6bdd609088a7b5f3d05af1cd5f077d0a2de41170323f9c1e323b923654009a58",
+      "input_hash": "ef9550836c68d304dc4c2b7b0fad4869d2537b4a1d90d2515c223a1593c502b7",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1310.4351806640625
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1320.654052734375,
+        "kl_sum": 35.404090881347656,
+        "top1_matches": 453
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1320.14208984375,
+        "kl_sum": 35.40611267089844,
+        "top1_matches": 453
+      }
+    },
+    {
+      "document_id": "f2123c6fc871dd20551be5aad91fc183511cf279374f9eb92965776668f218a1",
+      "input_hash": "acedbdfe33a7e5fed935a9a125c8f00f68e6e663ac92f8158590aea67bd62a4f",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1365.1746826171875
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1377.0595703125,
+        "kl_sum": 44.09263610839844,
+        "top1_matches": 452
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1375.78564453125,
+        "kl_sum": 44.04981994628906,
+        "top1_matches": 453
+      }
+    },
+    {
+      "document_id": "fd9473ab7314560b401ac6282b82a72d4d232c5edeb334f9e94388ea2ff8a10f",
+      "input_hash": "8f0ea8ee661950e19d6af4e0e35465dd89911066897dc0505963fc6b33633344",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1338.179931640625
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1336.5958251953125,
+        "kl_sum": 40.38212966918945,
+        "top1_matches": 439
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1336.967041015625,
+        "kl_sum": 40.430213928222656,
+        "top1_matches": 440
+      }
+    },
+    {
+      "document_id": "63c6c07c8639d1d932aa44f912f0a9502a6d3982205714406aec1539bcd0d0f4",
+      "input_hash": "b2bc4d826c9822be185a05304e0bd8b8c42022898661fac429694394543547c0",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1347.4246826171875
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1362.98486328125,
+        "kl_sum": 37.68027877807617,
+        "top1_matches": 441
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1362.9744873046875,
+        "kl_sum": 37.5885009765625,
+        "top1_matches": 443
+      }
+    },
+    {
+      "document_id": "219edb2eae61e98178f6b9a890ee5f12231c32e8dd6367b119cae2e6d17f6300",
+      "input_hash": "6cfeaed95843fdae53aabd4545f60c4a3eda9bf0fb7bac3854826c1b9d685cc5",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1545.645751953125
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1531.072998046875,
+        "kl_sum": 52.3711051940918,
+        "top1_matches": 441
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1530.711181640625,
+        "kl_sum": 52.60881042480469,
+        "top1_matches": 441
+      }
+    },
+    {
+      "document_id": "7de4436260273ea4cbd6958ce124f8c16d7789910063cff512e086d20797ccec",
+      "input_hash": "1242ae18e041b51c0072680cd47a383802e22f4c69fd6a16709629a8f6139755",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1494.361083984375
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1534.95361328125,
+        "kl_sum": 67.65775299072266,
+        "top1_matches": 434
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1534.1494140625,
+        "kl_sum": 67.3835678100586,
+        "top1_matches": 434
+      }
+    },
+    {
+      "document_id": "78c20aec5dc0de28d7554db38c9c6333d799aa4ddce959297a07ec8a86912f36",
+      "input_hash": "6e58befdd03fc1f7dfa6bd3506a44bc0795b2c851498ff627f15c0850ced838a",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 875.7090454101562
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 888.899658203125,
+        "kl_sum": 31.541378021240234,
+        "top1_matches": 470
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 888.2936401367188,
+        "kl_sum": 31.5135498046875,
+        "top1_matches": 471
+      }
+    },
+    {
+      "document_id": "97af4d9fa540979d48370510f1a8a9b6d58cb83fbd4fc1bc72a7ad29b8a1e626",
+      "input_hash": "4dfa945fa9a1e02004721502b095201b3796cc796e885d038c476f4551e9ac11",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1779.842041015625
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1827.72998046875,
+        "kl_sum": 100.40631103515625,
+        "top1_matches": 401
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1826.398681640625,
+        "kl_sum": 100.38924407958984,
+        "top1_matches": 398
+      }
+    },
+    {
+      "document_id": "123113a93b5c25b19aff1fdc3359b4c4acc22b51d0bf86e02ad2978785a26ca0",
+      "input_hash": "678a8c1d094ad936c843e1ad7a21a62c5ed5ccd82507f9a3f3ab748d98462491",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1175.4595947265625
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1193.9779052734375,
+        "kl_sum": 36.80371856689453,
+        "top1_matches": 464
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1194.0445556640625,
+        "kl_sum": 36.877891540527344,
+        "top1_matches": 463
+      }
+    },
+    {
+      "document_id": "014d685971da15141bdd1509d6feaf5a768bc5f84a29eef6baf97aabe5dd75ae",
+      "input_hash": "c01eaef34daf0f820fff65b14dbfc61ca6a8aa39a38bf245cb9ea40f0aee7fc3",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1199.74072265625
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1233.24267578125,
+        "kl_sum": 44.979557037353516,
+        "top1_matches": 450
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1232.5576171875,
+        "kl_sum": 45.06958770751953,
+        "top1_matches": 448
+      }
+    },
+    {
+      "document_id": "aa1bb50c6894e2a6d0319b6caa15b3fb20f4902a9e4e6fd3249ff971d0fb4780",
+      "input_hash": "a57fd9edf55d2301158aa15553d0a10d8304cd5279655708032ada3806afa687",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 912.3675537109375
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 908.376708984375,
+        "kl_sum": 27.47549819946289,
+        "top1_matches": 461
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 908.2402954101562,
+        "kl_sum": 27.390430450439453,
+        "top1_matches": 462
+      }
+    },
+    {
+      "document_id": "380a8d20846a4c41b0d3202519202134b07ef94477a7085a21d928b3840b2177",
+      "input_hash": "1d1d97ec8fbcb6e002f54217c9d7bb5bd84d1f32e21d34296f989f22bde2bddc",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1589.73486328125
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1581.82666015625,
+        "kl_sum": 55.484073638916016,
+        "top1_matches": 422
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1582.0013427734375,
+        "kl_sum": 55.696922302246094,
+        "top1_matches": 426
+      }
+    },
+    {
+      "document_id": "6e6cefb288ceff4835edbe4b5294160147508aeaeca3239ca8ff8c605c9ca610",
+      "input_hash": "546cef1ea09914f1eed478485fd060f1cc51bf251897b88af9db3436ea7ee604",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1067.03857421875
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1072.2437744140625,
+        "kl_sum": 32.37950897216797,
+        "top1_matches": 453
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1070.753173828125,
+        "kl_sum": 32.301170349121094,
+        "top1_matches": 453
+      }
+    },
+    {
+      "document_id": "07ce3d4ec15b4034daa9ea06d6335cca711407ce4472760e78f9f83060d76fd1",
+      "input_hash": "a9e0c066d16a7dc92fd14beb5b6aa41b797e95251323fc46a030bec50d76870f",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1473.03759765625
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1478.287109375,
+        "kl_sum": 32.52232360839844,
+        "top1_matches": 454
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1478.385009765625,
+        "kl_sum": 32.55336380004883,
+        "top1_matches": 456
+      }
+    },
+    {
+      "document_id": "3ba1fe80addec31fe6a3601e345dd9f38459364613b659c1e3719667f3b23c6b",
+      "input_hash": "0d9fc947ca07ddcc1057dec457d98eb5ab1b18b67cd19dd8c45e272ca4dc6cd6",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1351.63134765625
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1357.225341796875,
+        "kl_sum": 35.58994674682617,
+        "top1_matches": 456
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1356.4478759765625,
+        "kl_sum": 35.70656204223633,
+        "top1_matches": 458
+      }
+    },
+    {
+      "document_id": "ca1db0154af0bfcfd7deff8743f027095626cdced112943067ef9d5b61727507",
+      "input_hash": "9cc589f90b4d503f6dc201f03b2655dc42e613e0d60318e5bb6806d4034c023e",
+      "teacher": {
+        "tokens": 511,
+        "nll_sum": 1363.0947265625
+      },
+      "fast": {
+        "tokens": 511,
+        "nll_sum": 1366.59765625,
+        "kl_sum": 57.103965759277344,
+        "top1_matches": 440
+      },
+      "quality": {
+        "tokens": 511,
+        "nll_sum": 1366.7099609375,
+        "kl_sum": 57.03565979003906,
+        "top1_matches": 439
+      }
+    }
+  ],
+  "summary": {
+    "documents": 16,
+    "tokens": 8176,
+    "modes": {
+      "teacher": {
+        "nll_per_token": 2.591594591532668,
+        "perplexity": 13.351044100090837
+      },
+      "fast": {
+        "nll_per_token": 2.613958952244947,
+        "perplexity": 13.65299555652719,
+        "kl_per_token": 0.08951495538252441,
+        "top1_agreement": 0.8721868884540117
+      },
+      "quality": {
+        "nll_per_token": 2.613082437832528,
+        "perplexity": 13.641033752261949,
+        "kl_per_token": 0.08953050484629294,
+        "top1_agreement": 0.8730430528375733
+      }
+    },
+    "bootstrap": {
+      "samples": 10000,
+      "seed": 137,
+      "unit": "document"
+    },
+    "quality_minus_fast": {
+      "nll_sum": {
+        "per_token": -0.0008765144124189702,
+        "ci95": [
+          -0.0014430454799107143,
+          -0.0003606568577238258
+        ],
+        "positive_documents": 5
+      },
+      "kl_sum": {
+        "per_token": 1.554946376852793e-05,
+        "ci95": [
+          -0.00010092384427960838,
+          0.00013175635888385212
+        ],
+        "positive_documents": 8
+      },
+      "top1_matches": {
+        "per_token": 0.0008561643835616438,
+        "ci95": [
+          -0.0007338551859099804,
+          0.002446183953033268
+        ],
+        "positive_documents": 8
+      }
+    }
+  },
+  "interpretation": "Two fixed first-layer corrections only. No statistically resolved KL/top1 change; small paired loss improvement. No full C4/task promotion claim."
+}

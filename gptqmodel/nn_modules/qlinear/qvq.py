@@ -2243,7 +2243,9 @@ class QVQLinear(BaseQuantLinear):
                 and self._p32_window_config.recovery_kernel == "fused_epilogue"):
             from ...quantization.qvq_rank8 import fused_rank8_output
 
-            return fused_rank8_output(self, transformed, output, compute_dtype, hidden=rank8_hidden)
+            return fused_rank8_output(
+                self, transformed, output, compute_dtype, hidden=rank8_hidden, output_dtype=output_dtype
+            )
         if getattr(self, "_p32_rank8_enabled", False):
             from ...quantization.qvq_rank8 import add_rank8_correction
 

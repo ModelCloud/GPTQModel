@@ -9,6 +9,34 @@ from gptqmodel.nn_modules.qlinear.qvq import _qvq_hadamard_fused
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("n", [2048, 8192])
+@pytest.mark.parametrize("hadamard", [False, True])
+def test_rank8_direct_half_store_matches_final_conversion(n, hadamard):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from gptqmodel.utils.qvq_rank8_triton import rank8_output_epilogue
+
+    torch.manual_seed(151)
+    hidden = torch.randn(33, 8, device="cuda").half()
+    b = torch.randn(8, n, device="cuda").half() * 0.02
+    base = torch.randn(33, n, device="cuda") * 100000
+    sv = torch.randn(n, device="cuda")
+    bias = torch.randn(n, device="cuda")
+    reference = rank8_output_epilogue(hidden, b, base, sv, bias, hadamard=hadamard).half()
+    actual = rank8_output_epilogue(
+        hidden, b, base, sv, bias, hadamard=hadamard, output_dtype=torch.float16
+    )
+    torch.testing.assert_close(actual, reference, rtol=0, atol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = rank8_output_epilogue(
+            hidden, b, base, sv, bias, hadamard=hadamard, output_dtype=torch.float16
+        )
+    graph.replay()
+    torch.testing.assert_close(captured, actual, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("k", [17, 256, 2048, 8192])
 @pytest.mark.parametrize("m", [1, 33, 512])
 def test_rank8_tensor_core_projection_contract(k, m):

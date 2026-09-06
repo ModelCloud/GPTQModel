@@ -346,7 +346,7 @@ def add_rank8_correction(layer, transformed, base, *, hidden=None):
     return base.float() + correction
 
 
-def fused_rank8_output(layer, transformed, base, compute_dtype, *, hidden=None):
+def fused_rank8_output(layer, transformed, base, compute_dtype, *, hidden=None, output_dtype=None):
     """Fuse expansion/addition into the existing numerical output-transform contract."""
     validate_rank8_state(layer)
     from ..utils.qvq_rank8_triton import rank8_output_epilogue
@@ -360,6 +360,15 @@ def fused_rank8_output(layer, transformed, base, compute_dtype, *, hidden=None):
         layer._cached_cast("SV", compute_dtype, base.dtype),
         layer._cached_cast("bias", compute_dtype, base.dtype),
         hadamard=layer.output_hadamard,
+        # Keep FP32 at the boundary when the surrounding operator may use
+        # its range for a BF16 overflow retry. Stable power-of-two FP16 paths
+        # already round only at their final store and need no extra cast.
+        output_dtype=(
+            torch.float16 if output_dtype == torch.float16
+            and 2048 <= layer.in_features <= 16384
+            and not layer.in_features & (layer.in_features - 1)
+            else torch.float32
+        ),
     )
 
 

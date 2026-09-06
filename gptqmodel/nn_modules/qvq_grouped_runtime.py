@@ -1067,7 +1067,8 @@ class QVQHopperGroupedRuntime:
                 if (getattr(child, "_p32_rank8_enabled", False)
                         and child._p32_window_config.recovery_kernel == "fused_epilogue"):
                     output = fused_rank8_output(
-                        child, padded[:rows], inner[:rows], torch.float16, hidden=rank8_hiddens.get(id(child))
+                        child, padded[:rows], inner[:rows], torch.float16,
+                        hidden=rank8_hiddens.get(id(child)), output_dtype=x.dtype,
                     )
                 else:
                     corrected = add_rank8_correction(

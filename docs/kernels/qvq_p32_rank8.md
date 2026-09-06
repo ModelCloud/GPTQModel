@@ -471,3 +471,68 @@ epilogue/producer fusion. The factor packages and activation captures are
 archived under `/root/qvq-results/window-rank8-first-layer-h200`, with hashes
 in the result record. Full-model propagation, more documents/layers, C4,
 ARC/GSM8K, H100 and TP validation remain pending.
+
+## Model propagation and C4 subset
+
+`scripts/evaluate_qvq_rank8_propagation.py` validates fixed package/base and
+teacher hashes, runs identical token IDs through the teacher and both model
+modes, and reports token-weighted NLL/PPL, teacher KL, top-1 agreement and
+paired document-bootstrap intervals. It performs no fitting. The
+[initial propagation diagnostic](results/p32_rank8_llama_propagation.json)
+uses 16 additional calibration documents excluded from fitting, selection,
+and the earlier module audit.
+
+The [C4 reference-correction subset](results/p32_rank8_llama_c4_subset.json)
+uses `allenai/c4` revision `1588ec454efa1a09f29cd18ddd04fe05fc8653a2`, English
+validation shard 0, first 128 documents, BOS/default tokenizer special tokens,
+no chat template, up to 2048 tokens per document. All modes score the same
+47,550 next-token predictions. Only the first-layer Q/gate corrections are
+enabled. This is a specified subset diagnostic, not full C4 validation.
+
+| Mode | PPL | Mean teacher KL | Top-1 teacher agreement |
+|---|---:|---:|---:|
+| Dense teacher | 18.85942 | — | — |
+| Existing quantized model, correction off | 20.03599 | 0.07837847 | 84.8833% |
+| Separate reference correction | 20.03124 | 0.07835802 | 84.8749% |
+| Reference projection + fused epilogue/store | 20.03123 | 0.07835780 | 84.8728% |
+| Padded Tensor Core projection + fused epilogue/store | 20.03359 | 0.07835008 | 84.8749% |
+
+The reference correction reduces mean NLL by 0.0002372 nats/token; its paired
+95% document-bootstrap interval is [-0.0003944, -0.0001040]. KL and top-1
+changes are not resolved by their intervals. The
+[Tensor Core result](results/p32_rank8_llama_c4_fused_subset.json) has a small
+NLL increase against the reference correction: +0.0001173, interval
+[+0.0000397, +0.0002029]. The
+[epilogue-only ablation](results/p32_rank8_llama_c4_epilogue_subset.json)
+does not show that increase. Projection remains externally selectable;
+these results do not establish full quality equivalence or promote a default.
+
+## Direct FP16 output store
+
+Eligible fused epilogues now store the final FP16 result directly, preserving
+all FP32 expansion/addition and existing output-transform rounding. Single
+and grouped paths pass the requested output dtype. Paths whose surrounding
+overflow retry needs FP32 range retain FP32 output; the independent reference
+API also defaults to FP32. Direct-store and cast-afterward tests include range
+edges and CUDA Graph replay. Post-profile regression passes 405 tests with
+86 skips, including grouped K2048 cases.
+
+The [H200 store-fusion record](results/p32_rank8_h200_half_store.json) retains
+the executed instruction audit and matched real-activation timings. At
+K=N=M2048 in the profiling fixture, launches fall from five to four and
+source-correlated executed instructions from 107,700,862 to 107,202,330.
+The epilogue uses 40 rather than 47 registers, with 8,192 bytes of shared
+memory and no spills. Post-profile recovered medians change as follows:
+
+| Module | M | FP32 output + cast (us) | Direct FP16 store (us) |
+|---|---:|---:|---:|
+| Q | 2048 | 237.038 | 224.895 |
+| Q | 8192 | 854.370 | 802.722 |
+| gate | 2048 | 679.112 | 635.615 |
+| gate | 8192 | 2546.246 | 2373.063 |
+
+At large M the corrected operator can beat the current correction-off path
+because it also replaces output-transform and cast work. This is not evidence
+of intrinsically negative rank8 cost: extending the same transform/store
+implementation to correction-off mode remains necessary for a fair final
+off/on comparison and the fastest unified operator.

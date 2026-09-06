@@ -114,8 +114,10 @@ def _rank8_output_epilogue(
     tl.store(Output + row * N + column, value)
 
 
-def rank8_output_epilogue(hidden, b, base, sv, bias=None, *, hadamard=True):
-    """Return FP32 full linear output, matching the existing output epilogue."""
+def rank8_output_epilogue(hidden, b, base, sv, bias=None, *, hadamard=True, output_dtype=torch.float32):
+    """Complete the existing output epilogue with an optional final FP16 store."""
+    if output_dtype not in (torch.float16, torch.float32):
+        raise ValueError("rank8 epilogue output must be FP16 or FP32")
     if base.ndim != 2 or hidden.ndim != 2:
         raise ValueError("rank8 epilogue requires matrix inputs")
     m, n = base.shape
@@ -143,7 +145,7 @@ def rank8_output_epilogue(hidden, b, base, sv, bias=None, *, hadamard=True):
         bias is not None and (bias.shape != (n,) or not bias.is_contiguous())
     ):
         raise ValueError("rank8 epilogue requires contiguous SV/bias vectors")
-    output = torch.empty((m, n), device=base.device, dtype=torch.float32)
+    output = torch.empty((m, n), device=base.device, dtype=output_dtype)
     if not m:
         return output
     divisor = struct.unpack("e", struct.pack("e", math.sqrt(n)))[0]

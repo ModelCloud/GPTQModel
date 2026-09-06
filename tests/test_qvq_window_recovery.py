@@ -388,7 +388,8 @@ def test_hopper_rank8_eager_graph(algorithm, m, recovery_kernel, projection):
 @pytest.mark.parametrize("m", [1, 64])
 @pytest.mark.parametrize("recovery_kernel", ["separate_reference", "fused_epilogue"])
 @pytest.mark.parametrize("projection", ["separate_reference", "input_fused", "tensor_core", "mixed"])
-def test_hopper_grouped_rank8_independent_flags(roles, m, recovery_kernel, projection):
+@pytest.mark.parametrize("k", [256, 2048])
+def test_hopper_grouped_rank8_independent_flags(roles, m, recovery_kernel, projection, k):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 required")
     from test_qvq_grouped_runtime import _child
@@ -396,7 +397,7 @@ def test_hopper_grouped_rank8_independent_flags(roles, m, recovery_kernel, proje
     from gptqmodel.nn_modules.qvq_grouped_runtime import install_qvq_hopper_groups
 
     children = [
-        _child(role, device="cuda", seed=i + 1).eval() for i, role in enumerate(roles)
+        _child(role, device="cuda", seed=i + 1, in_features=k).eval() for i, role in enumerate(roles)
     ]
     for child in children:
         child.SU.copy_(children[0].SU)
@@ -413,7 +414,7 @@ def test_hopper_grouped_rank8_independent_flags(roles, m, recovery_kernel, proje
                 ),
             ),
         )
-    x = torch.randn(m, 256, device="cuda", dtype=torch.float16) * 0.01
+    x = torch.randn(m, k, device="cuda", dtype=torch.float16) * 0.01
     references = [child(x) for child in children]
     parent = torch.nn.Module()
     for name, child in zip(roles, children):

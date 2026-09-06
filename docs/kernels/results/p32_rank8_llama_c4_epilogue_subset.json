@@ -1,0 +1,2723 @@
+{
+  "scope": "Whole-model propagation with fixed fitted corrections; C4 validation subset, first requested documents, per-document BOS and capped tokens, no chat template. Not full C4 validation.",
+  "source": "/root/.cache/huggingface/hub/datasets--allenai--c4/snapshots/1588ec454efa1a09f29cd18ddd04fe05fc8653a2/en/c4-validation.00000-of-00008.json.gz",
+  "checkpoint": "/root/qvq-results/f6-reproduction-h200/checkpoint",
+  "teacher": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "modules": [
+    "model.layers.0.self_attn.q_proj",
+    "model.layers.0.mlp.gate_proj"
+  ],
+  "preflight": {
+    "physical_id": 0,
+    "pci_bus_id": "00000000:1C:00.0",
+    "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "name": "NVIDIA H200",
+    "config": {
+      "sample_count": 3,
+      "sample_interval_seconds": 1.0,
+      "max_driver_memory_mib": 16
+    },
+    "samples": [
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      },
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      },
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      }
+    ]
+  },
+  "dataset_revision": "1588ec454efa1a09f29cd18ddd04fe05fc8653a2",
+  "documents_requested": 128,
+  "max_tokens": 2048,
+  "correction_implementation": "separate_reference/fused_epilogue",
+  "source_sha256": "1f25b6af12da84115301d4ee93ea5246c8fea5bb4a2008472794d95b917cc97f",
+  "rows": [
+    {
+      "document_id": "88a764087a4e0146907d546cea4b5e4a952a09982cc7fbf3e45f2ebd17dfcc96",
+      "input_hash": "b54d695ef62f74df09e06d3c308aba9d7ffa522a13d7803cdcfc9af30f09c89a",
+      "teacher": {
+        "tokens": 375,
+        "nll_sum": 1032.5390625
+      },
+      "fast": {
+        "tokens": 375,
+        "nll_sum": 1059.4688720703125,
+        "kl_sum": 37.53146743774414,
+        "top1_matches": 325
+      },
+      "quality": {
+        "tokens": 375,
+        "nll_sum": 1059.611572265625,
+        "kl_sum": 37.532318115234375,
+        "top1_matches": 325
+      }
+    },
+    {
+      "document_id": "061b9a4ce6aad4e41325dd2cd73e2a567cfa2018e7c0dddb29dfb07956ef5177",
+      "input_hash": "abfb986c5e09a5118810f58590c6e5ef9c11ccfd6811477eca7f7382eab94317",
+      "teacher": {
+        "tokens": 605,
+        "nll_sum": 1991.083740234375
+      },
+      "fast": {
+        "tokens": 605,
+        "nll_sum": 2029.63232421875,
+        "kl_sum": 41.92512130737305,
+        "top1_matches": 517
+      },
+      "quality": {
+        "tokens": 605,
+        "nll_sum": 2029.252685546875,
+        "kl_sum": 42.01020050048828,
+        "top1_matches": 517
+      }
+    },
+    {
+      "document_id": "286399b04c32b08774966c32ef990fdecbd7f7be70bfd89935240f81db5404ca",
+      "input_hash": "0b9e44dd31e0651a5d6003627ea57c9b1aa21fab1284519dc6d0ee5093c5f28e",
+      "teacher": {
+        "tokens": 720,
+        "nll_sum": 1749.126220703125
+      },
+      "fast": {
+        "tokens": 720,
+        "nll_sum": 1781.399658203125,
+        "kl_sum": 61.226600646972656,
+        "top1_matches": 592
+      },
+      "quality": {
+        "tokens": 720,
+        "nll_sum": 1781.478759765625,
+        "kl_sum": 61.34836959838867,
+        "top1_matches": 593
+      }
+    },
+    {
+      "document_id": "c4ba243bba085ea6a65501c00d4a698a6e420f672ee04d24bea2b216dcb57434",
+      "input_hash": "e612a56fb0446b73cf6b7de4134ab7c0229a37a99e195ffeb5eff76282c86e84",
+      "teacher": {
+        "tokens": 210,
+        "nll_sum": 767.4912109375
+      },
+      "fast": {
+        "tokens": 210,
+        "nll_sum": 777.3717041015625,
+        "kl_sum": 13.132417678833008,
+        "top1_matches": 169
+      },
+      "quality": {
+        "tokens": 210,
+        "nll_sum": 777.5111694335938,
+        "kl_sum": 13.120939254760742,
+        "top1_matches": 169
+      }
+    },
+    {
+      "document_id": "46f1a6a352f564d63105016b381ae3ced2807ec4173d0e9ec83d6a99b6e13f45",
+      "input_hash": "5393300024fb3a51982f026a42cd97c5016d79decf26be71c47a4bc28244d4e3",
+      "teacher": {
+        "tokens": 145,
+        "nll_sum": 497.107421875
+      },
+      "fast": {
+        "tokens": 145,
+        "nll_sum": 506.5785217285156,
+        "kl_sum": 10.217511177062988,
+        "top1_matches": 122
+      },
+      "quality": {
+        "tokens": 145,
+        "nll_sum": 506.56732177734375,
+        "kl_sum": 10.20119857788086,
+        "top1_matches": 122
+      }
+    },
+    {
+      "document_id": "0f45d200d2c29959da4e5b7dd4b77633ff1542a65f75ae00ae21abd915d2acb1",
+      "input_hash": "93e96033a24decee35b9da4aa4893cf81ecaadf0eb0766e46ab1d059bdadbae8",
+      "teacher": {
+        "tokens": 83,
+        "nll_sum": 331.0167541503906
+      },
+      "fast": {
+        "tokens": 83,
+        "nll_sum": 332.75811767578125,
+        "kl_sum": 11.666372299194336,
+        "top1_matches": 61
+      },
+      "quality": {
+        "tokens": 83,
+        "nll_sum": 332.6961669921875,
+        "kl_sum": 11.623653411865234,
+        "top1_matches": 61
+      }
+    },
+    {
+      "document_id": "70957400fb2c6eff89a3b55cdf8641c6d50ae251d0dd3cef9aabac8439e62f70",
+      "input_hash": "d0733dd7171df1f96681981af9dda4ca9422ba03b1589fda6f84664af05958e1",
+      "teacher": {
+        "tokens": 229,
+        "nll_sum": 619.9134521484375
+      },
+      "fast": {
+        "tokens": 229,
+        "nll_sum": 616.9694213867188,
+        "kl_sum": 12.660392761230469,
+        "top1_matches": 197
+      },
+      "quality": {
+        "tokens": 229,
+        "nll_sum": 617.1724853515625,
+        "kl_sum": 12.687785148620605,
+        "top1_matches": 197
+      }
+    },
+    {
+      "document_id": "3bbdfafefb89e3056889d024b93e20b12efb779f0836fd4c510be30dda951e26",
+      "input_hash": "34a5d5e8bc6d9ccceda26792a49a757234bd2dd96b6dcce267e3fe8f42eb63ba",
+      "teacher": {
+        "tokens": 81,
+        "nll_sum": 365.67529296875
+      },
+      "fast": {
+        "tokens": 81,
+        "nll_sum": 376.30487060546875,
+        "kl_sum": 14.910438537597656,
+        "top1_matches": 60
+      },
+      "quality": {
+        "tokens": 81,
+        "nll_sum": 376.40960693359375,
+        "kl_sum": 14.981075286865234,
+        "top1_matches": 61
+      }
+    },
+    {
+      "document_id": "35c5ed93486e059cba9466d002674d6b50fd3e8846e37ed47e2ad2855bcdfab7",
+      "input_hash": "34f858928e0cf49a9fcd9a44a6779d560745285ee9fa4eb729d16ceadcb81cd7",
+      "teacher": {
+        "tokens": 279,
+        "nll_sum": 894.2871704101562
+      },
+      "fast": {
+        "tokens": 279,
+        "nll_sum": 900.447021484375,
+        "kl_sum": 19.30086898803711,
+        "top1_matches": 233
+      },
+      "quality": {
+        "tokens": 279,
+        "nll_sum": 900.194580078125,
+        "kl_sum": 19.29707908630371,
+        "top1_matches": 232
+      }
+    },
+    {
+      "document_id": "7b635f4b253e2cc5fe90470fc79ee9eac2f31f6154a2247cf60d18d8fe0e9a76",
+      "input_hash": "8ca6823eff4d1c91fc94654a6c00f28f46a4419b626be57b0318c2759cb0a3b0",
+      "teacher": {
+        "tokens": 397,
+        "nll_sum": 1339.780029296875
+      },
+      "fast": {
+        "tokens": 397,
+        "nll_sum": 1345.3173828125,
+        "kl_sum": 21.464054107666016,
+        "top1_matches": 325
+      },
+      "quality": {
+        "tokens": 397,
+        "nll_sum": 1344.8173828125,
+        "kl_sum": 21.538806915283203,
+        "top1_matches": 328
+      }
+    },
+    {
+      "document_id": "ee3571255a1ddc1047e005064ba4e834e08030c34217a21360c217783d1ef723",
+      "input_hash": "fc289290ecae3fa34d3d8b5eb1c5dd199741d6a6834fe77b2c9a1e956aa6fbf3",
+      "teacher": {
+        "tokens": 1286,
+        "nll_sum": 3675.218505859375
+      },
+      "fast": {
+        "tokens": 1286,
+        "nll_sum": 3690.015380859375,
+        "kl_sum": 75.38223266601562,
+        "top1_matches": 1129
+      },
+      "quality": {
+        "tokens": 1286,
+        "nll_sum": 3689.4521484375,
+        "kl_sum": 75.65532684326172,
+        "top1_matches": 1129
+      }
+    },
+    {
+      "document_id": "f4d6f1f3713a97e1f20d25fb8f714fec2d74d4ec5a0c46723885178d656490d3",
+      "input_hash": "6fa9e99736d35ff689ebfe964bf6c1e109b645991f01362112f40285e428e564",
+      "teacher": {
+        "tokens": 465,
+        "nll_sum": 1254.2333984375
+      },
+      "fast": {
+        "tokens": 465,
+        "nll_sum": 1293.624267578125,
+        "kl_sum": 37.07990264892578,
+        "top1_matches": 392
+      },
+      "quality": {
+        "tokens": 465,
+        "nll_sum": 1293.56787109375,
+        "kl_sum": 37.07054138183594,
+        "top1_matches": 394
+      }
+    },
+    {
+      "document_id": "35b70e0da818846c4d691492c55a5c1a2c0baeeb473ec2126a41528512f15d32",
+      "input_hash": "63ca1bbf64ea7b110d01f069cd0ca90f5ab0f891756dc6fe6d972c06f1b1d415",
+      "teacher": {
+        "tokens": 981,
+        "nll_sum": 3473.737548828125
+      },
+      "fast": {
+        "tokens": 981,
+        "nll_sum": 3504.91064453125,
+        "kl_sum": 69.03475189208984,
+        "top1_matches": 822
+      },
+      "quality": {
+        "tokens": 981,
+        "nll_sum": 3505.37060546875,
+        "kl_sum": 69.0811767578125,
+        "top1_matches": 823
+      }
+    },
+    {
+      "document_id": "f8f39382dcc3352f44ef315f2e556aee46ac15ecec50662fbf69a870103550d0",
+      "input_hash": "6c586b9449ed92c2c6586ccce7b8ce91e4e40354c3b714e4bf4e46855e83e3bc",
+      "teacher": {
+        "tokens": 70,
+        "nll_sum": 300.5686340332031
+      },
+      "fast": {
+        "tokens": 70,
+        "nll_sum": 311.0030822753906,
+        "kl_sum": 9.271730422973633,
+        "top1_matches": 53
+      },
+      "quality": {
+        "tokens": 70,
+        "nll_sum": 310.474609375,
+        "kl_sum": 9.032241821289062,
+        "top1_matches": 54
+      }
+    },
+    {
+      "document_id": "4c715e4b210fd39881af2d215356679ba16f7c6566d89d529b59bd7adc017c5c",
+      "input_hash": "537422dcee5ae76733c3aedbc8471cd55240899a8cf2acbe4d51f3197c2cd614",
+      "teacher": {
+        "tokens": 82,
+        "nll_sum": 268.3319396972656
+      },
+      "fast": {
+        "tokens": 82,
+        "nll_sum": 274.4952697753906,
+        "kl_sum": 6.942766189575195,
+        "top1_matches": 68
+      },
+      "quality": {
+        "tokens": 82,
+        "nll_sum": 274.63623046875,
+        "kl_sum": 6.93203067779541,
+        "top1_matches": 69
+      }
+    },
+    {
+      "document_id": "a5fe4971a2b366864c0de8749eceb58be7b8589840814bbcc527a0d456646162",
+      "input_hash": "a2c19b0f05a8de19cb5bfc42f7a223fce472d29ff3266fe4f602bd526a5548ce",
+      "teacher": {
+        "tokens": 189,
+        "nll_sum": 428.86138916015625
+      },
+      "fast": {
+        "tokens": 189,
+        "nll_sum": 437.9625244140625,
+        "kl_sum": 28.462188720703125,
+        "top1_matches": 161
+      },
+      "quality": {
+        "tokens": 189,
+        "nll_sum": 437.5818786621094,
+        "kl_sum": 28.38601303100586,
+        "top1_matches": 160
+      }
+    },
+    {
+      "document_id": "f9cc06fa13f775085eaa1863752cf2ea613395c6c652e6348ff48fc4345ad19e",
+      "input_hash": "0d49cfb292e909afa2bb48847c273d1bdb8e1d4f67f88c7f97c4f7b407320847",
+      "teacher": {
+        "tokens": 315,
+        "nll_sum": 1026.518798828125
+      },
+      "fast": {
+        "tokens": 315,
+        "nll_sum": 1042.7445068359375,
+        "kl_sum": 17.765865325927734,
+        "top1_matches": 279
+      },
+      "quality": {
+        "tokens": 315,
+        "nll_sum": 1042.482177734375,
+        "kl_sum": 17.721332550048828,
+        "top1_matches": 278
+      }
+    },
+    {
+      "document_id": "c2e2e2e01f398ca41e3d00b36cd3e0eef7a9d67f15be2e8444e5b423a027847a",
+      "input_hash": "ad20f20c450fb3913a6d9e6767be163048ece96acf4e95f2ad655e7bf4224ae6",
+      "teacher": {
+        "tokens": 113,
+        "nll_sum": 273.8177795410156
+      },
+      "fast": {
+        "tokens": 113,
+        "nll_sum": 274.9499816894531,
+        "kl_sum": 5.068997383117676,
+        "top1_matches": 98
+      },
+      "quality": {
+        "tokens": 113,
+        "nll_sum": 275.0032653808594,
+        "kl_sum": 5.061413764953613,
+        "top1_matches": 98
+      }
+    },
+    {
+      "document_id": "f7b977cdf996571c3487d58547815de3a049de82baa8a2d14175d74a315ac309",
+      "input_hash": "940d362e05b65a64c2939b52f147a7bc73ce2c603fdf5fc2fe5f4362ce9ecda8",
+      "teacher": {
+        "tokens": 593,
+        "nll_sum": 1522.021728515625
+      },
+      "fast": {
+        "tokens": 593,
+        "nll_sum": 1581.515625,
+        "kl_sum": 55.57628631591797,
+        "top1_matches": 493
+      },
+      "quality": {
+        "tokens": 593,
+        "nll_sum": 1581.0157470703125,
+        "kl_sum": 55.50755310058594,
+        "top1_matches": 492
+      }
+    },
+    {
+      "document_id": "e511e8e63846b3fb55c4d085080d86213bab2f570255a86bd63784f6bdd3192b",
+      "input_hash": "70abfbc8a2c9ac9d16ea3eb8cffb069bd7f89aeccf634ab61a4e323800e1709d",
+      "teacher": {
+        "tokens": 445,
+        "nll_sum": 1490.381103515625
+      },
+      "fast": {
+        "tokens": 445,
+        "nll_sum": 1512.48388671875,
+        "kl_sum": 34.48899459838867,
+        "top1_matches": 382
+      },
+      "quality": {
+        "tokens": 445,
+        "nll_sum": 1512.14990234375,
+        "kl_sum": 34.616371154785156,
+        "top1_matches": 382
+      }
+    },
+    {
+      "document_id": "ad7dc0297656bf73cba829381d14d5452dffcf15cbd13d8cdca177ea5a271389",
+      "input_hash": "43aaa1c491658834e331a139688dbe40b29fc8153db55b3c18267ff8a0000c80",
+      "teacher": {
+        "tokens": 232,
+        "nll_sum": 669.135498046875
+      },
+      "fast": {
+        "tokens": 232,
+        "nll_sum": 666.47802734375,
+        "kl_sum": 14.526252746582031,
+        "top1_matches": 203
+      },
+      "quality": {
+        "tokens": 232,
+        "nll_sum": 666.5509033203125,
+        "kl_sum": 14.553232192993164,
+        "top1_matches": 202
+      }
+    },
+    {
+      "document_id": "cbd2bd797c7d1da8496891526a5227a7f805ebdc06feb867b5f636e549ef0c38",
+      "input_hash": "56619c8b67f7d17737a03689432483a30efabe2deb5518bed7976d834e70f293",
+      "teacher": {
+        "tokens": 1111,
+        "nll_sum": 2886.0390625
+      },
+      "fast": {
+        "tokens": 1111,
+        "nll_sum": 2905.396728515625,
+        "kl_sum": 53.084083557128906,
+        "top1_matches": 981
+      },
+      "quality": {
+        "tokens": 1111,
+        "nll_sum": 2905.141357421875,
+        "kl_sum": 53.23487091064453,
+        "top1_matches": 982
+      }
+    },
+    {
+      "document_id": "d1b1469eea8672af82a256144086ed1bcb12ebc0693acd7695164e87868fa1c7",
+      "input_hash": "d2236b3cafcaeed084029ae5e58ebbbc5eb575185c9868f91430d267745de5de",
+      "teacher": {
+        "tokens": 1169,
+        "nll_sum": 3487.513916015625
+      },
+      "fast": {
+        "tokens": 1169,
+        "nll_sum": 3564.785888671875,
+        "kl_sum": 69.21415710449219,
+        "top1_matches": 996
+      },
+      "quality": {
+        "tokens": 1169,
+        "nll_sum": 3564.10498046875,
+        "kl_sum": 69.28936767578125,
+        "top1_matches": 997
+      }
+    },
+    {
+      "document_id": "92668c86fadc5231e682054cfcb1399335da77f360337b279c12d468d03907ce",
+      "input_hash": "f59740bf3de985f2ea83e61a97217b9d3c0b75dd7fadfd994bc23f5ffc8817eb",
+      "teacher": {
+        "tokens": 88,
+        "nll_sum": 305.21490478515625
+      },
+      "fast": {
+        "tokens": 88,
+        "nll_sum": 314.55157470703125,
+        "kl_sum": 12.770971298217773,
+        "top1_matches": 67
+      },
+      "quality": {
+        "tokens": 88,
+        "nll_sum": 314.4677734375,
+        "kl_sum": 12.737408638000488,
+        "top1_matches": 68
+      }
+    },
+    {
+      "document_id": "64ca979796376f8e9500c7ef3aa474bd1d035f71c44bd422053eb58523b3df1a",
+      "input_hash": "04428372def67f2b1b52f69a9f2b258ac42277fae4b56669d8b6680ab6eacbc6",
+      "teacher": {
+        "tokens": 361,
+        "nll_sum": 751.3734130859375
+      },
+      "fast": {
+        "tokens": 361,
+        "nll_sum": 769.961181640625,
+        "kl_sum": 26.624134063720703,
+        "top1_matches": 306
+      },
+      "quality": {
+        "tokens": 361,
+        "nll_sum": 769.9458618164062,
+        "kl_sum": 26.669044494628906,
+        "top1_matches": 307
+      }
+    },
+    {
+      "document_id": "7d212fe0f0f004b33c71244c1cd248a9334ff070dfef0a7846aaa15fc390e7ee",
+      "input_hash": "cfd2d8be62989232c6893160d740a51a9f31d277b20ca83d5b3edf586e41a91f",
+      "teacher": {
+        "tokens": 48,
+        "nll_sum": 136.49539184570312
+      },
+      "fast": {
+        "tokens": 48,
+        "nll_sum": 138.97010803222656,
+        "kl_sum": 2.7035794258117676,
+        "top1_matches": 38
+      },
+      "quality": {
+        "tokens": 48,
+        "nll_sum": 138.86053466796875,
+        "kl_sum": 2.6853437423706055,
+        "top1_matches": 38
+      }
+    },
+    {
+      "document_id": "5979748a406b24bc900df516e6c940cea4ef54ed3def104220864ae6cd88d8dc",
+      "input_hash": "213a26936a9ebb14357016a4e43989dd2b171befedc009414ea9ee4f2d6f46b0",
+      "teacher": {
+        "tokens": 183,
+        "nll_sum": 374.3902282714844
+      },
+      "fast": {
+        "tokens": 183,
+        "nll_sum": 389.2071838378906,
+        "kl_sum": 13.47078800201416,
+        "top1_matches": 161
+      },
+      "quality": {
+        "tokens": 183,
+        "nll_sum": 389.517578125,
+        "kl_sum": 13.604406356811523,
+        "top1_matches": 161
+      }
+    },
+    {
+      "document_id": "174c063412aa9d142114bca04bb8d203965b114ef9b35359df57a3320e627cb5",
+      "input_hash": "355ed000e4d7203006e53c56ebd0850b15bd98b6304767cede63c7a493ffff4f",
+      "teacher": {
+        "tokens": 220,
+        "nll_sum": 802.971435546875
+      },
+      "fast": {
+        "tokens": 220,
+        "nll_sum": 799.2098388671875,
+        "kl_sum": 12.366471290588379,
+        "top1_matches": 198
+      },
+      "quality": {
+        "tokens": 220,
+        "nll_sum": 799.2589111328125,
+        "kl_sum": 12.37301254272461,
+        "top1_matches": 199
+      }
+    },
+    {
+      "document_id": "575f12b569afc063669096b83166623d48d64fd08d8bb7407c1938ad511f1979",
+      "input_hash": "ec54a0e5f873f65bf7069b960e24c38bb3467d68149472b584938aa46d22701f",
+      "teacher": {
+        "tokens": 31,
+        "nll_sum": 194.35443115234375
+      },
+      "fast": {
+        "tokens": 31,
+        "nll_sum": 191.42962646484375,
+        "kl_sum": 3.390300989151001,
+        "top1_matches": 21
+      },
+      "quality": {
+        "tokens": 31,
+        "nll_sum": 191.62661743164062,
+        "kl_sum": 3.375087022781372,
+        "top1_matches": 21
+      }
+    },
+    {
+      "document_id": "60dab5f870da1e63d0a5fa5c3ca9b18298b4574320fee11245e9850f669e8221",
+      "input_hash": "bb7b9de1d7a5fb953373ff3bafea920ff058d47fdefd5782f80fd54f8f5ab771",
+      "teacher": {
+        "tokens": 327,
+        "nll_sum": 882.5184326171875
+      },
+      "fast": {
+        "tokens": 327,
+        "nll_sum": 899.8107299804688,
+        "kl_sum": 19.498485565185547,
+        "top1_matches": 284
+      },
+      "quality": {
+        "tokens": 327,
+        "nll_sum": 899.8507690429688,
+        "kl_sum": 19.48963737487793,
+        "top1_matches": 285
+      }
+    },
+    {
+      "document_id": "eef3b523b55861a4556ecf4aec10b2871c4b78c72175157f163b0b24a3288209",
+      "input_hash": "f9dc73cbb12c21966e06d54347ec276495ba3e648175d67f2237b1176b6c752f",
+      "teacher": {
+        "tokens": 197,
+        "nll_sum": 482.7470397949219
+      },
+      "fast": {
+        "tokens": 197,
+        "nll_sum": 506.9398193359375,
+        "kl_sum": 20.272397994995117,
+        "top1_matches": 173
+      },
+      "quality": {
+        "tokens": 197,
+        "nll_sum": 507.009521484375,
+        "kl_sum": 20.278079986572266,
+        "top1_matches": 173
+      }
+    },
+    {
+      "document_id": "a1f0fbd12bb7fc8caff504ad58aee733cd649d5b6819c2392c27a70600e81ea9",
+      "input_hash": "f4764a12f94e317784278c0f4ca7061c98863e8aaa213e8849887947b2f774d4",
+      "teacher": {
+        "tokens": 118,
+        "nll_sum": 404.7727966308594
+      },
+      "fast": {
+        "tokens": 118,
+        "nll_sum": 405.7207946777344,
+        "kl_sum": 8.154180526733398,
+        "top1_matches": 102
+      },
+      "quality": {
+        "tokens": 118,
+        "nll_sum": 405.784912109375,
+        "kl_sum": 8.223669052124023,
+        "top1_matches": 102
+      }
+    },
+    {
+      "document_id": "7fc2af7e75300babb6b4238b4a522d4fd9d26b43000d3b3b045b5161b16a3638",
+      "input_hash": "1eb4069676f38ff6f002b7c5b1693178a567c405d479df580c6ab4998d9804a2",
+      "teacher": {
+        "tokens": 61,
+        "nll_sum": 222.2796630859375
+      },
+      "fast": {
+        "tokens": 61,
+        "nll_sum": 227.07867431640625,
+        "kl_sum": 3.7786264419555664,
+        "top1_matches": 54
+      },
+      "quality": {
+        "tokens": 61,
+        "nll_sum": 227.04273986816406,
+        "kl_sum": 3.7773540019989014,
+        "top1_matches": 54
+      }
+    },
+    {
+      "document_id": "4726f4805e33482aeacb3e7b5ac55017429ccbf6f8739fa6bf646096a145c406",
+      "input_hash": "cf8697d25a736fcd35ecdd6b22cb9311b25aecbd92b25e85d14cb5ffe0eec070",
+      "teacher": {
+        "tokens": 476,
+        "nll_sum": 1332.2796630859375
+      },
+      "fast": {
+        "tokens": 476,
+        "nll_sum": 1358.721435546875,
+        "kl_sum": 25.60150909423828,
+        "top1_matches": 417
+      },
+      "quality": {
+        "tokens": 476,
+        "nll_sum": 1358.78564453125,
+        "kl_sum": 25.76470947265625,
+        "top1_matches": 415
+      }
+    },
+    {
+      "document_id": "09243fdada4b180dd2d6e231b4c14c9d4050a3672504ee6a51f2e532b9f0fd22",
+      "input_hash": "488aae64c805f8cc317d9d833381c7bd78ca37303116a3023aa43bef45ad9755",
+      "teacher": {
+        "tokens": 746,
+        "nll_sum": 1923.2105712890625
+      },
+      "fast": {
+        "tokens": 746,
+        "nll_sum": 1950.1080322265625,
+        "kl_sum": 50.23744201660156,
+        "top1_matches": 652
+      },
+      "quality": {
+        "tokens": 746,
+        "nll_sum": 1949.739990234375,
+        "kl_sum": 50.206268310546875,
+        "top1_matches": 653
+      }
+    },
+    {
+      "document_id": "6e2ee02b09a93a93472dbe8763f09ff06f75a6ef1e98a7280196eb5b086485da",
+      "input_hash": "06e48a5fa5fd0608e324927ded38c02cf4833cf5b72bad7f672b011bdfc6bb11",
+      "teacher": {
+        "tokens": 285,
+        "nll_sum": 705.7484741210938
+      },
+      "fast": {
+        "tokens": 285,
+        "nll_sum": 743.96875,
+        "kl_sum": 41.27604675292969,
+        "top1_matches": 233
+      },
+      "quality": {
+        "tokens": 285,
+        "nll_sum": 743.3414916992188,
+        "kl_sum": 41.33233642578125,
+        "top1_matches": 233
+      }
+    },
+    {
+      "document_id": "729994bf84ff23ba57a3eabe6215c82107ca7fd8c105d7775938fde75b8030e0",
+      "input_hash": "33c3fa6ab1571966f04db50350e7cfd90cdc02d99043a8149468ad0177e71cb6",
+      "teacher": {
+        "tokens": 244,
+        "nll_sum": 698.7670288085938
+      },
+      "fast": {
+        "tokens": 244,
+        "nll_sum": 744.6929321289062,
+        "kl_sum": 44.29184341430664,
+        "top1_matches": 195
+      },
+      "quality": {
+        "tokens": 244,
+        "nll_sum": 744.6492919921875,
+        "kl_sum": 44.181339263916016,
+        "top1_matches": 195
+      }
+    },
+    {
+      "document_id": "c7521d683861d39b039ec1d996c44338136a53c9e4208f23d5ad2fff741b0147",
+      "input_hash": "8426c1b888384618638cf85366621e0f1a13f89cbc2f28ca988d9a1e191061e6",
+      "teacher": {
+        "tokens": 1516,
+        "nll_sum": 2853.17041015625
+      },
+      "fast": {
+        "tokens": 1516,
+        "nll_sum": 2966.1259765625,
+        "kl_sum": 116.07489013671875,
+        "top1_matches": 1350
+      },
+      "quality": {
+        "tokens": 1516,
+        "nll_sum": 2965.82080078125,
+        "kl_sum": 116.14006805419922,
+        "top1_matches": 1349
+      }
+    },
+    {
+      "document_id": "13b538ab00534c6039e05ce324e00a3163c44134ad9ac8515047e3d002209c68",
+      "input_hash": "f9fef2a85e9b432ca75859b40bf7e714ce05c67fcedd6fee92a5b963956e037e",
+      "teacher": {
+        "tokens": 919,
+        "nll_sum": 2471.23388671875
+      },
+      "fast": {
+        "tokens": 919,
+        "nll_sum": 2537.26416015625,
+        "kl_sum": 84.42507934570312,
+        "top1_matches": 795
+      },
+      "quality": {
+        "tokens": 919,
+        "nll_sum": 2537.129638671875,
+        "kl_sum": 84.25096130371094,
+        "top1_matches": 795
+      }
+    },
+    {
+      "document_id": "9c2c9cd6d8b60dff9b81af02126c93d5cfc6b59302e77cb31492ea88de0c2c88",
+      "input_hash": "b4ec0ad4700f7280a7c7ff380fab46256c7462e2e8199c167efeb0339c5e99ee",
+      "teacher": {
+        "tokens": 103,
+        "nll_sum": 450.914794921875
+      },
+      "fast": {
+        "tokens": 103,
+        "nll_sum": 448.02398681640625,
+        "kl_sum": 7.276019096374512,
+        "top1_matches": 84
+      },
+      "quality": {
+        "tokens": 103,
+        "nll_sum": 447.84228515625,
+        "kl_sum": 7.311136722564697,
+        "top1_matches": 84
+      }
+    },
+    {
+      "document_id": "d9e8fd80ca0f0b0739de4f9d9ab9060a353722a02fcf38b83e6ee502d4ba9957",
+      "input_hash": "510499f49df1b97ba00e7bae24bb7fdba8016bdae7c82eae4f4a36ff63cdc17f",
+      "teacher": {
+        "tokens": 281,
+        "nll_sum": 934.3495483398438
+      },
+      "fast": {
+        "tokens": 281,
+        "nll_sum": 945.2109375,
+        "kl_sum": 21.769718170166016,
+        "top1_matches": 238
+      },
+      "quality": {
+        "tokens": 281,
+        "nll_sum": 945.33837890625,
+        "kl_sum": 21.767669677734375,
+        "top1_matches": 237
+      }
+    },
+    {
+      "document_id": "75e9c15cb7a73489a6833f74647fb7df4a7f146d72af70c8cfab03139fc6bd7f",
+      "input_hash": "612ccdb693f6b53d16f08271e7a156807b265fbb5ef04d8c42715753ddb01039",
+      "teacher": {
+        "tokens": 126,
+        "nll_sum": 402.6004638671875
+      },
+      "fast": {
+        "tokens": 126,
+        "nll_sum": 412.21905517578125,
+        "kl_sum": 11.520858764648438,
+        "top1_matches": 103
+      },
+      "quality": {
+        "tokens": 126,
+        "nll_sum": 412.0684509277344,
+        "kl_sum": 11.536883354187012,
+        "top1_matches": 103
+      }
+    },
+    {
+      "document_id": "b59eff9006bfef7762976830ea52bbc388540c0bef6d5abc215adf7765500e2c",
+      "input_hash": "bcc685395ce2ff6d29f7e317203b5726bc44673b6854f7b34686497043cad2b6",
+      "teacher": {
+        "tokens": 43,
+        "nll_sum": 141.5635986328125
+      },
+      "fast": {
+        "tokens": 43,
+        "nll_sum": 146.32806396484375,
+        "kl_sum": 4.871807098388672,
+        "top1_matches": 36
+      },
+      "quality": {
+        "tokens": 43,
+        "nll_sum": 146.42369079589844,
+        "kl_sum": 4.932513236999512,
+        "top1_matches": 36
+      }
+    },
+    {
+      "document_id": "4ef4bef34f0164c7ba6056c5de3e1eb05a0ff200022f03528fe0cfe571244c7a",
+      "input_hash": "0f24599a1e491b9861f4d4da506512ef0516cb317a0a3e4c4c77cd95cab54e47",
+      "teacher": {
+        "tokens": 257,
+        "nll_sum": 920.054931640625
+      },
+      "fast": {
+        "tokens": 257,
+        "nll_sum": 927.2924194335938,
+        "kl_sum": 14.333738327026367,
+        "top1_matches": 220
+      },
+      "quality": {
+        "tokens": 257,
+        "nll_sum": 927.1732177734375,
+        "kl_sum": 14.313937187194824,
+        "top1_matches": 220
+      }
+    },
+    {
+      "document_id": "f074909f8038d41ce5a0f9673170f47d622358be70c237832faba4794280b8fc",
+      "input_hash": "f35a36a57871c2cc859c33724b988a038b280070737ae7c658d8d47dc77e1054",
+      "teacher": {
+        "tokens": 267,
+        "nll_sum": 754.6649169921875
+      },
+      "fast": {
+        "tokens": 267,
+        "nll_sum": 770.5194091796875,
+        "kl_sum": 25.317005157470703,
+        "top1_matches": 236
+      },
+      "quality": {
+        "tokens": 267,
+        "nll_sum": 770.0810546875,
+        "kl_sum": 24.967500686645508,
+        "top1_matches": 236
+      }
+    },
+    {
+      "document_id": "d7cb2f28923f25656ca7cfd0eef4cef59bce82c43e6aeceafe87357b66c165d7",
+      "input_hash": "a71753c98ad3f3548370e4b0857810a06f6fd169b1d980817c2b8afa17749c50",
+      "teacher": {
+        "tokens": 417,
+        "nll_sum": 1093.993896484375
+      },
+      "fast": {
+        "tokens": 417,
+        "nll_sum": 1122.55419921875,
+        "kl_sum": 27.263187408447266,
+        "top1_matches": 351
+      },
+      "quality": {
+        "tokens": 417,
+        "nll_sum": 1122.228515625,
+        "kl_sum": 27.219879150390625,
+        "top1_matches": 353
+      }
+    },
+    {
+      "document_id": "32392fa7f59fd55d09e03d065241001952593598cc5bf093c4fe2aa559adcbcc",
+      "input_hash": "4beac32b1bd0ff3667b5fa5ed2d25b1c4298d41f58153e064df312548628e9ff",
+      "teacher": {
+        "tokens": 410,
+        "nll_sum": 1384.99462890625
+      },
+      "fast": {
+        "tokens": 410,
+        "nll_sum": 1402.388427734375,
+        "kl_sum": 29.14704132080078,
+        "top1_matches": 344
+      },
+      "quality": {
+        "tokens": 410,
+        "nll_sum": 1402.867919921875,
+        "kl_sum": 29.28128433227539,
+        "top1_matches": 344
+      }
+    },
+    {
+      "document_id": "4585cceff15df6fbe30572d40a0202b346f3cf2e180f6a4919550e9d50ab7be8",
+      "input_hash": "7cbbb20f913379e71d5199c2ef187315dbe26537b7e12e3e814e67210f6335a5",
+      "teacher": {
+        "tokens": 66,
+        "nll_sum": 264.7388000488281
+      },
+      "fast": {
+        "tokens": 66,
+        "nll_sum": 269.5210876464844,
+        "kl_sum": 11.358121871948242,
+        "top1_matches": 50
+      },
+      "quality": {
+        "tokens": 66,
+        "nll_sum": 269.52838134765625,
+        "kl_sum": 11.35883903503418,
+        "top1_matches": 49
+      }
+    },
+    {
+      "document_id": "a791e767ddf6f1d899658829492134c9a73cccb44484ea4667ad9b6b78eddb4d",
+      "input_hash": "d9b505042ad13102fda8b0c3ad69f83c1c62154963d743fe3f33a3f0776cb978",
+      "teacher": {
+        "tokens": 300,
+        "nll_sum": 976.0465087890625
+      },
+      "fast": {
+        "tokens": 300,
+        "nll_sum": 999.79638671875,
+        "kl_sum": 23.19546890258789,
+        "top1_matches": 244
+      },
+      "quality": {
+        "tokens": 300,
+        "nll_sum": 999.6171875,
+        "kl_sum": 23.156570434570312,
+        "top1_matches": 244
+      }
+    },
+    {
+      "document_id": "684792bc99010da3e2841ac7059411e9d97d0c11d1b2df1b9cc1c4bff0f4da3d",
+      "input_hash": "de2a161a473c66ccdc2d4dd06821a5a5dc5169541fe83d01469708a7d03db93e",
+      "teacher": {
+        "tokens": 1326,
+        "nll_sum": 3854.48779296875
+      },
+      "fast": {
+        "tokens": 1326,
+        "nll_sum": 3915.482421875,
+        "kl_sum": 97.24048614501953,
+        "top1_matches": 1118
+      },
+      "quality": {
+        "tokens": 1326,
+        "nll_sum": 3915.56640625,
+        "kl_sum": 97.10574340820312,
+        "top1_matches": 1117
+      }
+    },
+    {
+      "document_id": "3e64272b939d804b682641fe917e3cb9fe428fdd0d389c2217d0bc38f05b6a0a",
+      "input_hash": "252739412b0a741a9a57da9a2c98f413139bc3b43cadff9a7ad53deb900e6ac8",
+      "teacher": {
+        "tokens": 54,
+        "nll_sum": 235.48629760742188
+      },
+      "fast": {
+        "tokens": 54,
+        "nll_sum": 235.11911010742188,
+        "kl_sum": 6.343209266662598,
+        "top1_matches": 40
+      },
+      "quality": {
+        "tokens": 54,
+        "nll_sum": 235.03269958496094,
+        "kl_sum": 6.321664810180664,
+        "top1_matches": 40
+      }
+    },
+    {
+      "document_id": "b006bd98051a98265efd1e85773aa11e3f4a62c1f6c5cc1f2f2da0f233b628d9",
+      "input_hash": "e059dd6ea722606069b35a3e146395838ff079fa6f14fef6204fc77b5853e5f8",
+      "teacher": {
+        "tokens": 106,
+        "nll_sum": 374.7213134765625
+      },
+      "fast": {
+        "tokens": 106,
+        "nll_sum": 383.538818359375,
+        "kl_sum": 8.721786499023438,
+        "top1_matches": 87
+      },
+      "quality": {
+        "tokens": 106,
+        "nll_sum": 383.35845947265625,
+        "kl_sum": 8.697230339050293,
+        "top1_matches": 87
+      }
+    },
+    {
+      "document_id": "929d29aeaba8b04f362b0db785566d18292238cac9243a21a825184c60e83e2b",
+      "input_hash": "524708075652673b600489bb3de941f99390be01e25f5b896f7ff5ae908dfc07",
+      "teacher": {
+        "tokens": 250,
+        "nll_sum": 751.6929321289062
+      },
+      "fast": {
+        "tokens": 250,
+        "nll_sum": 756.0908813476562,
+        "kl_sum": 14.146738052368164,
+        "top1_matches": 218
+      },
+      "quality": {
+        "tokens": 250,
+        "nll_sum": 756.4044799804688,
+        "kl_sum": 14.20667552947998,
+        "top1_matches": 218
+      }
+    },
+    {
+      "document_id": "858aa79aceaa949e4a0872109607daf9a5a54dbdd304fdee84fb95100f49192a",
+      "input_hash": "cbb5dab66158b8d8a48734de4138f98fb011fe367e243354502f07890e457a8f",
+      "teacher": {
+        "tokens": 105,
+        "nll_sum": 318.32379150390625
+      },
+      "fast": {
+        "tokens": 105,
+        "nll_sum": 322.75970458984375,
+        "kl_sum": 8.591028213500977,
+        "top1_matches": 87
+      },
+      "quality": {
+        "tokens": 105,
+        "nll_sum": 323.01995849609375,
+        "kl_sum": 8.65671157836914,
+        "top1_matches": 87
+      }
+    },
+    {
+      "document_id": "663ea217b8e808671e96dbf112f44c870a1cc5cddd0e5f700f553d3fcb585392",
+      "input_hash": "6799b282c1b883ca679361c93e02ec8e48ded656f2449a0e0863529a4ffbe4df",
+      "teacher": {
+        "tokens": 105,
+        "nll_sum": 346.5603332519531
+      },
+      "fast": {
+        "tokens": 105,
+        "nll_sum": 346.90435791015625,
+        "kl_sum": 4.843331336975098,
+        "top1_matches": 92
+      },
+      "quality": {
+        "tokens": 105,
+        "nll_sum": 346.95263671875,
+        "kl_sum": 4.784162521362305,
+        "top1_matches": 91
+      }
+    },
+    {
+      "document_id": "64a19a2fdffa9d49760812e4e12e6177a707d99e5d503f2b85c158e1fe96326b",
+      "input_hash": "d8d7a6ffd57e3a480cc9b0988b81f4d3b4be01ca0b5dcf5f4d74420677b22974",
+      "teacher": {
+        "tokens": 231,
+        "nll_sum": 615.70263671875
+      },
+      "fast": {
+        "tokens": 231,
+        "nll_sum": 625.3948974609375,
+        "kl_sum": 19.556257247924805,
+        "top1_matches": 194
+      },
+      "quality": {
+        "tokens": 231,
+        "nll_sum": 625.0325927734375,
+        "kl_sum": 19.610393524169922,
+        "top1_matches": 193
+      }
+    },
+    {
+      "document_id": "d08a926ac407087a91b1f241a20e656e8d6b36a6cc3414bc479020db3a437e13",
+      "input_hash": "a6515adcaa0015f69100239ff792f5556d23d7af587345c5620b0b9eeca1440a",
+      "teacher": {
+        "tokens": 159,
+        "nll_sum": 518.472900390625
+      },
+      "fast": {
+        "tokens": 159,
+        "nll_sum": 537.273193359375,
+        "kl_sum": 10.573648452758789,
+        "top1_matches": 135
+      },
+      "quality": {
+        "tokens": 159,
+        "nll_sum": 537.2398681640625,
+        "kl_sum": 10.61009693145752,
+        "top1_matches": 136
+      }
+    },
+    {
+      "document_id": "cdb93fd8b9bc5c60cef7945974d2ee411ce2f60f2d582eea187ba1fa7fc30896",
+      "input_hash": "cea3c1e04473cccbf60fd995d7374c3fde50e5e80bc31091761db649af74991c",
+      "teacher": {
+        "tokens": 173,
+        "nll_sum": 400.00628662109375
+      },
+      "fast": {
+        "tokens": 173,
+        "nll_sum": 407.12445068359375,
+        "kl_sum": 9.494686126708984,
+        "top1_matches": 154
+      },
+      "quality": {
+        "tokens": 173,
+        "nll_sum": 406.8974609375,
+        "kl_sum": 9.482532501220703,
+        "top1_matches": 154
+      }
+    },
+    {
+      "document_id": "c2597098c0a472d87ec074594237d34efed48fdf2e09df6127d350fab9f94b60",
+      "input_hash": "80e6adb827ccada4be43f54e9b79fe3f3606f57333c96173ee39c4bac0f56d49",
+      "teacher": {
+        "tokens": 50,
+        "nll_sum": 160.468017578125
+      },
+      "fast": {
+        "tokens": 50,
+        "nll_sum": 175.22012329101562,
+        "kl_sum": 14.232988357543945,
+        "top1_matches": 36
+      },
+      "quality": {
+        "tokens": 50,
+        "nll_sum": 175.22024536132812,
+        "kl_sum": 14.31061840057373,
+        "top1_matches": 36
+      }
+    },
+    {
+      "document_id": "d087da431cb3079677dc06e62363506af78fd59162572100d4952b1d3816e4b2",
+      "input_hash": "c03862a494d721e96b7d0bdb074a451e7347f376ff5c0964b4de005a6cafcaab",
+      "teacher": {
+        "tokens": 101,
+        "nll_sum": 290.78228759765625
+      },
+      "fast": {
+        "tokens": 101,
+        "nll_sum": 294.03472900390625,
+        "kl_sum": 9.920963287353516,
+        "top1_matches": 84
+      },
+      "quality": {
+        "tokens": 101,
+        "nll_sum": 293.8652648925781,
+        "kl_sum": 9.915386199951172,
+        "top1_matches": 84
+      }
+    },
+    {
+      "document_id": "c05299cbd9495079c7e3cc74d7b43597aed0f35b1d5f7b03204bc254ab2d7c6d",
+      "input_hash": "9493d715adfe6c6ba9fb514bd870d53db7af91bedb0dd148889d9f8542cae493",
+      "teacher": {
+        "tokens": 135,
+        "nll_sum": 352.7908935546875
+      },
+      "fast": {
+        "tokens": 135,
+        "nll_sum": 352.067626953125,
+        "kl_sum": 10.2357177734375,
+        "top1_matches": 110
+      },
+      "quality": {
+        "tokens": 135,
+        "nll_sum": 351.8668518066406,
+        "kl_sum": 10.236026763916016,
+        "top1_matches": 108
+      }
+    },
+    {
+      "document_id": "1e441d36859397a2179e96b57d1e9d8ae680fa3416500b64ddcc33eaf0a5bfe2",
+      "input_hash": "5a999e9223b7513365ee9295e4b85705166d9e3c9b99eccb831e93a337a7570f",
+      "teacher": {
+        "tokens": 690,
+        "nll_sum": 1874.90185546875
+      },
+      "fast": {
+        "tokens": 690,
+        "nll_sum": 2006.9921875,
+        "kl_sum": 131.3966522216797,
+        "top1_matches": 555
+      },
+      "quality": {
+        "tokens": 690,
+        "nll_sum": 2005.701904296875,
+        "kl_sum": 130.40065002441406,
+        "top1_matches": 554
+      }
+    },
+    {
+      "document_id": "d0d39a4399b3e87fc7c59dbad772510c63396fc88cf196a8e6ee232619b7dd18",
+      "input_hash": "8d54a99ba838c313154275989b19fb66f38a2fc1c5c851f8e7d392b9c74c607a",
+      "teacher": {
+        "tokens": 236,
+        "nll_sum": 970.1947021484375
+      },
+      "fast": {
+        "tokens": 236,
+        "nll_sum": 977.6237182617188,
+        "kl_sum": 27.45392608642578,
+        "top1_matches": 188
+      },
+      "quality": {
+        "tokens": 236,
+        "nll_sum": 977.9828491210938,
+        "kl_sum": 27.506139755249023,
+        "top1_matches": 188
+      }
+    },
+    {
+      "document_id": "495f08bb863b1fb6ce5f492574585bbe59aa7b175949cda1100e6d9cbf62a375",
+      "input_hash": "11fb73ab627574fb47b97f244c5f466d0a076e502dc49828c1a9ff5633ce0fd8",
+      "teacher": {
+        "tokens": 226,
+        "nll_sum": 618.54638671875
+      },
+      "fast": {
+        "tokens": 226,
+        "nll_sum": 629.59814453125,
+        "kl_sum": 14.812701225280762,
+        "top1_matches": 194
+      },
+      "quality": {
+        "tokens": 226,
+        "nll_sum": 629.3250732421875,
+        "kl_sum": 14.839044570922852,
+        "top1_matches": 194
+      }
+    },
+    {
+      "document_id": "fb594d9b5c1cf3cb3ef2a569512330435f9128c8087ed1db092540beeef342df",
+      "input_hash": "95edc0885c361e434ca34815a21fb02470e4b01f52a9bc156136e73ed26b8ae6",
+      "teacher": {
+        "tokens": 93,
+        "nll_sum": 377.4442138671875
+      },
+      "fast": {
+        "tokens": 93,
+        "nll_sum": 378.0750732421875,
+        "kl_sum": 6.717360496520996,
+        "top1_matches": 77
+      },
+      "quality": {
+        "tokens": 93,
+        "nll_sum": 378.07305908203125,
+        "kl_sum": 6.7350358963012695,
+        "top1_matches": 76
+      }
+    },
+    {
+      "document_id": "4fffb8abeed6d1a9a5c719a60cf5c8ec477c16a0bcdc5ee136b8df37b596278a",
+      "input_hash": "71ffff2ab7794367e301019e762a76a0fdfc42e3c4c24a774c28977fa69e34ee",
+      "teacher": {
+        "tokens": 545,
+        "nll_sum": 1530.124755859375
+      },
+      "fast": {
+        "tokens": 545,
+        "nll_sum": 1629.0,
+        "kl_sum": 91.73899841308594,
+        "top1_matches": 430
+      },
+      "quality": {
+        "tokens": 545,
+        "nll_sum": 1628.242919921875,
+        "kl_sum": 91.57494354248047,
+        "top1_matches": 429
+      }
+    },
+    {
+      "document_id": "6ca4d1ae79ce8085dada063f5d0ee55c3d2ea933a7d222aa3097572315718c4c",
+      "input_hash": "5ef357dea94ce0a088c94d0c20f7fc1d4618ec237a622bf337a20d0cd56393a1",
+      "teacher": {
+        "tokens": 460,
+        "nll_sum": 1677.7406005859375
+      },
+      "fast": {
+        "tokens": 460,
+        "nll_sum": 1713.377197265625,
+        "kl_sum": 28.56270980834961,
+        "top1_matches": 392
+      },
+      "quality": {
+        "tokens": 460,
+        "nll_sum": 1713.34521484375,
+        "kl_sum": 28.555099487304688,
+        "top1_matches": 392
+      }
+    },
+    {
+      "document_id": "102f08739d2bec20fbda706681c071800f24dc529bfe0c95a91c8614a86a7005",
+      "input_hash": "3276e1cab031fe37d9032639b1576c7121fecee9ca6f379eaa3feaff3302cbfe",
+      "teacher": {
+        "tokens": 154,
+        "nll_sum": 416.25286865234375
+      },
+      "fast": {
+        "tokens": 154,
+        "nll_sum": 442.3424987792969,
+        "kl_sum": 18.302345275878906,
+        "top1_matches": 130
+      },
+      "quality": {
+        "tokens": 154,
+        "nll_sum": 442.7078857421875,
+        "kl_sum": 18.28702735900879,
+        "top1_matches": 130
+      }
+    },
+    {
+      "document_id": "c3b28d27ddb77a0b47336e5cb20a0d22160046d6e9f01cae90faeb17a049aff9",
+      "input_hash": "95a8f902e2ba237a2b08cefe00644b8e8a4b0fad118eb509c13109a0d6970009",
+      "teacher": {
+        "tokens": 33,
+        "nll_sum": 223.6030731201172
+      },
+      "fast": {
+        "tokens": 33,
+        "nll_sum": 223.3706512451172,
+        "kl_sum": 6.368851661682129,
+        "top1_matches": 22
+      },
+      "quality": {
+        "tokens": 33,
+        "nll_sum": 223.38424682617188,
+        "kl_sum": 6.335875511169434,
+        "top1_matches": 21
+      }
+    },
+    {
+      "document_id": "8abad20967769c2a4adba93dc407695af9b702a0837d39286cf578a33d257bdb",
+      "input_hash": "a2a9b3e1b42f3658d00053936ca4511669cd09d82fe8cbdd6ba48e360c1a7aa7",
+      "teacher": {
+        "tokens": 761,
+        "nll_sum": 2283.896484375
+      },
+      "fast": {
+        "tokens": 761,
+        "nll_sum": 2347.956298828125,
+        "kl_sum": 57.489654541015625,
+        "top1_matches": 643
+      },
+      "quality": {
+        "tokens": 761,
+        "nll_sum": 2347.806884765625,
+        "kl_sum": 57.502288818359375,
+        "top1_matches": 643
+      }
+    },
+    {
+      "document_id": "ea4fd02a8c6f6d91e29dccbaafe5638a26e5c7add62bbbefcac97894fb338abc",
+      "input_hash": "501341a98048c072e011b3310177351b7967b006adc901ef67426c667a863d71",
+      "teacher": {
+        "tokens": 661,
+        "nll_sum": 1762.194580078125
+      },
+      "fast": {
+        "tokens": 661,
+        "nll_sum": 1791.988037109375,
+        "kl_sum": 36.50071716308594,
+        "top1_matches": 566
+      },
+      "quality": {
+        "tokens": 661,
+        "nll_sum": 1791.612060546875,
+        "kl_sum": 36.56290054321289,
+        "top1_matches": 567
+      }
+    },
+    {
+      "document_id": "9d39e66835d40ffba4f2ab7f358d2b423f53263d9d88dce9057d85807d00168e",
+      "input_hash": "a93028709ecb9a5278ca2ec6e0888641bd66d3c758fb8ad984731055f95bad37",
+      "teacher": {
+        "tokens": 69,
+        "nll_sum": 262.1635437011719
+      },
+      "fast": {
+        "tokens": 69,
+        "nll_sum": 261.61773681640625,
+        "kl_sum": 5.7587080001831055,
+        "top1_matches": 60
+      },
+      "quality": {
+        "tokens": 69,
+        "nll_sum": 261.5238037109375,
+        "kl_sum": 5.746039867401123,
+        "top1_matches": 60
+      }
+    },
+    {
+      "document_id": "4848a1a6a45540b48042ea749f87412e767acc32015abcf14e34b133746b2b77",
+      "input_hash": "62039f9fe335ab1b71bf3d05e6c9e500af81bb7356daae27157d0aff2b43fc84",
+      "teacher": {
+        "tokens": 141,
+        "nll_sum": 405.4380798339844
+      },
+      "fast": {
+        "tokens": 141,
+        "nll_sum": 410.61004638671875,
+        "kl_sum": 10.712213516235352,
+        "top1_matches": 119
+      },
+      "quality": {
+        "tokens": 141,
+        "nll_sum": 410.39715576171875,
+        "kl_sum": 10.68578052520752,
+        "top1_matches": 119
+      }
+    },
+    {
+      "document_id": "605bee459bbf48f0e4e399eb88519506f7ddc4b8ccc8c7e8909cf8f11f0ef23f",
+      "input_hash": "734a066f59f5e64eb130c5c7110baa9559f9b4247becd730ce1926d5094f9326",
+      "teacher": {
+        "tokens": 216,
+        "nll_sum": 716.8391723632812
+      },
+      "fast": {
+        "tokens": 216,
+        "nll_sum": 729.222900390625,
+        "kl_sum": 14.792621612548828,
+        "top1_matches": 180
+      },
+      "quality": {
+        "tokens": 216,
+        "nll_sum": 729.1053466796875,
+        "kl_sum": 14.838531494140625,
+        "top1_matches": 180
+      }
+    },
+    {
+      "document_id": "3178f2176433dcdca7c1486452bc38c3f16c15074bf1282b278eba980a5ada63",
+      "input_hash": "23175ea7149bc135c0b742aa4a67cb4242537318f6e88bf7f4bb2d4007b82e0c",
+      "teacher": {
+        "tokens": 80,
+        "nll_sum": 385.81640625
+      },
+      "fast": {
+        "tokens": 80,
+        "nll_sum": 386.03216552734375,
+        "kl_sum": 7.322996139526367,
+        "top1_matches": 68
+      },
+      "quality": {
+        "tokens": 80,
+        "nll_sum": 385.8256530761719,
+        "kl_sum": 7.31820011138916,
+        "top1_matches": 68
+      }
+    },
+    {
+      "document_id": "d90dd51b6f9c165db5a190160345ff2658ec9b1f0beea950d7e7d94ed71721e0",
+      "input_hash": "1608152202eb854530765b6afee36146bd7056bac357bdc6cd6dff688734800f",
+      "teacher": {
+        "tokens": 30,
+        "nll_sum": 112.01332092285156
+      },
+      "fast": {
+        "tokens": 30,
+        "nll_sum": 109.88337707519531,
+        "kl_sum": 1.3941396474838257,
+        "top1_matches": 28
+      },
+      "quality": {
+        "tokens": 30,
+        "nll_sum": 109.85218048095703,
+        "kl_sum": 1.4151694774627686,
+        "top1_matches": 28
+      }
+    },
+    {
+      "document_id": "db5bd2f84174b8c2ef4d82f9a3d338ca772cbfc86a4945ac2e0b648cdc759364",
+      "input_hash": "052292a628d9ee54b5765bb5d9646e38d93c055eadf0cf733f42c03d610f9447",
+      "teacher": {
+        "tokens": 44,
+        "nll_sum": 238.00955200195312
+      },
+      "fast": {
+        "tokens": 44,
+        "nll_sum": 241.31137084960938,
+        "kl_sum": 7.266817569732666,
+        "top1_matches": 28
+      },
+      "quality": {
+        "tokens": 44,
+        "nll_sum": 241.5564727783203,
+        "kl_sum": 7.200961112976074,
+        "top1_matches": 28
+      }
+    },
+    {
+      "document_id": "b9f4a7cf142a67edd8335e3796fdf8b4bda84297ecc19dd1064638e374a92de5",
+      "input_hash": "79e24a3f84d345386196d96afb199f058d0ce1842103f3abbec351300590478b",
+      "teacher": {
+        "tokens": 168,
+        "nll_sum": 635.0615844726562
+      },
+      "fast": {
+        "tokens": 168,
+        "nll_sum": 640.5157470703125,
+        "kl_sum": 20.16604995727539,
+        "top1_matches": 143
+      },
+      "quality": {
+        "tokens": 168,
+        "nll_sum": 639.99365234375,
+        "kl_sum": 20.148658752441406,
+        "top1_matches": 143
+      }
+    },
+    {
+      "document_id": "6e169cc871a980a5c06a598e71099fd2a6975e5435acf8775b9cb737c9e2aaaa",
+      "input_hash": "09841ef89b75c9d27e579d65c485bda4872a4179be06c4097504ec35750e64d7",
+      "teacher": {
+        "tokens": 256,
+        "nll_sum": 692.0198364257812
+      },
+      "fast": {
+        "tokens": 256,
+        "nll_sum": 737.750732421875,
+        "kl_sum": 41.396507263183594,
+        "top1_matches": 203
+      },
+      "quality": {
+        "tokens": 256,
+        "nll_sum": 737.0697021484375,
+        "kl_sum": 41.35139465332031,
+        "top1_matches": 202
+      }
+    },
+    {
+      "document_id": "08665d26a92a4b3360a85b098407a5223887631c1d1bbe724fee35e32f4e7834",
+      "input_hash": "b72bd39f1384802204424671e3fea3ee699fff9386331970e3feba064556540a",
+      "teacher": {
+        "tokens": 73,
+        "nll_sum": 266.54754638671875
+      },
+      "fast": {
+        "tokens": 73,
+        "nll_sum": 267.7570495605469,
+        "kl_sum": 5.296977996826172,
+        "top1_matches": 60
+      },
+      "quality": {
+        "tokens": 73,
+        "nll_sum": 267.8248291015625,
+        "kl_sum": 5.2657647132873535,
+        "top1_matches": 60
+      }
+    },
+    {
+      "document_id": "e75578007dccd788a49a1cc804f56a7f8393bc6b8aed7d395847ba57f4ed2212",
+      "input_hash": "d4ff17686f81bfa94fd2a629011650c4de8f3d61cd1d422336a69361ded21957",
+      "teacher": {
+        "tokens": 222,
+        "nll_sum": 621.791748046875
+      },
+      "fast": {
+        "tokens": 222,
+        "nll_sum": 641.2484130859375,
+        "kl_sum": 17.787097930908203,
+        "top1_matches": 186
+      },
+      "quality": {
+        "tokens": 222,
+        "nll_sum": 640.9429931640625,
+        "kl_sum": 17.76874351501465,
+        "top1_matches": 186
+      }
+    },
+    {
+      "document_id": "5d93e3d5a1acf319e3520119dd30fe8016e1570c3b0db32d15c8300192acac25",
+      "input_hash": "d5d065c258ce9102cabbdb2a8d071b7edf6bc91c566a931bc02315583b845428",
+      "teacher": {
+        "tokens": 583,
+        "nll_sum": 2055.66552734375
+      },
+      "fast": {
+        "tokens": 583,
+        "nll_sum": 2111.8046875,
+        "kl_sum": 46.2326545715332,
+        "top1_matches": 495
+      },
+      "quality": {
+        "tokens": 583,
+        "nll_sum": 2111.47509765625,
+        "kl_sum": 46.081790924072266,
+        "top1_matches": 496
+      }
+    },
+    {
+      "document_id": "df7e08cd3d7e5d61282fb6503eeccba2fb97c9f6dd08b370516e1ec1091377d4",
+      "input_hash": "aa05d1c68f5042ff47bc06e61febc533e2ccdc52137c9981b466cb1be5e464a2",
+      "teacher": {
+        "tokens": 338,
+        "nll_sum": 1144.4783935546875
+      },
+      "fast": {
+        "tokens": 338,
+        "nll_sum": 1138.8572998046875,
+        "kl_sum": 34.00666046142578,
+        "top1_matches": 271
+      },
+      "quality": {
+        "tokens": 338,
+        "nll_sum": 1139.276123046875,
+        "kl_sum": 34.078250885009766,
+        "top1_matches": 271
+      }
+    },
+    {
+      "document_id": "1c26c83bdac2fc8236297d954917146ac404ea0e14dcee1e349d2218c07feb6f",
+      "input_hash": "5a3d9418dda3e924950b77b46b145c4d8f7bf1da27fd0feb0fb64b72f5c46518",
+      "teacher": {
+        "tokens": 144,
+        "nll_sum": 484.040771484375
+      },
+      "fast": {
+        "tokens": 144,
+        "nll_sum": 488.9639587402344,
+        "kl_sum": 7.888352870941162,
+        "top1_matches": 125
+      },
+      "quality": {
+        "tokens": 144,
+        "nll_sum": 488.93927001953125,
+        "kl_sum": 7.908627510070801,
+        "top1_matches": 125
+      }
+    },
+    {
+      "document_id": "93d5a57485ff3ec6bae1d52cdf684d9304f174c1fd4239cb3c4037dd51c643d7",
+      "input_hash": "6efc85c28f016465da52f29cf2674a661b41491c99149ba4f53f7e6bce7864d6",
+      "teacher": {
+        "tokens": 55,
+        "nll_sum": 239.4630126953125
+      },
+      "fast": {
+        "tokens": 55,
+        "nll_sum": 238.31863403320312,
+        "kl_sum": 3.4368181228637695,
+        "top1_matches": 47
+      },
+      "quality": {
+        "tokens": 55,
+        "nll_sum": 238.34584045410156,
+        "kl_sum": 3.4455626010894775,
+        "top1_matches": 47
+      }
+    },
+    {
+      "document_id": "859af9598a91cced067f271633783078510327db78af4d5ad63ca22302af01a3",
+      "input_hash": "cd1de4acd45d9442700ff57e6771d47af86b026a6a70444203d04f5ec860f6bb",
+      "teacher": {
+        "tokens": 226,
+        "nll_sum": 750.6126708984375
+      },
+      "fast": {
+        "tokens": 226,
+        "nll_sum": 759.584716796875,
+        "kl_sum": 21.0550537109375,
+        "top1_matches": 185
+      },
+      "quality": {
+        "tokens": 226,
+        "nll_sum": 759.5125122070312,
+        "kl_sum": 21.12277603149414,
+        "top1_matches": 183
+      }
+    },
+    {
+      "document_id": "fb488e10aa9b4f9eda63ceb7278820a2aee6fa85249c8e6e5f21a4fab2f91349",
+      "input_hash": "d56add74e6673447275080b3969c02fe340a240a2c016ffd571f59556a1e92b5",
+      "teacher": {
+        "tokens": 1847,
+        "nll_sum": 4960.6650390625
+      },
+      "fast": {
+        "tokens": 1847,
+        "nll_sum": 5088.60400390625,
+        "kl_sum": 130.46414184570312,
+        "top1_matches": 1565
+      },
+      "quality": {
+        "tokens": 1847,
+        "nll_sum": 5088.2216796875,
+        "kl_sum": 130.45326232910156,
+        "top1_matches": 1564
+      }
+    },
+    {
+      "document_id": "81691d02c00db562cd878cec857960e482d270675f4ad658edfb7e8ce82ab844",
+      "input_hash": "4118c44db9be53fcf11c1d8368156d9ee759d3c61bb454d6a11691fa409bbc73",
+      "teacher": {
+        "tokens": 133,
+        "nll_sum": 538.17138671875
+      },
+      "fast": {
+        "tokens": 133,
+        "nll_sum": 536.4913940429688,
+        "kl_sum": 9.591912269592285,
+        "top1_matches": 107
+      },
+      "quality": {
+        "tokens": 133,
+        "nll_sum": 536.1928100585938,
+        "kl_sum": 9.59669303894043,
+        "top1_matches": 109
+      }
+    },
+    {
+      "document_id": "a36fc04e272973e7b835565a9d8e5005dda7ba2d94c49f807ab958d86eaabb3f",
+      "input_hash": "67d06067c0177024f312ce8eadbfdb2b0617146cd4ac3ad317d3a3a832fe6316",
+      "teacher": {
+        "tokens": 119,
+        "nll_sum": 404.2323913574219
+      },
+      "fast": {
+        "tokens": 119,
+        "nll_sum": 400.4019775390625,
+        "kl_sum": 12.171510696411133,
+        "top1_matches": 94
+      },
+      "quality": {
+        "tokens": 119,
+        "nll_sum": 400.3204650878906,
+        "kl_sum": 12.139942169189453,
+        "top1_matches": 93
+      }
+    },
+    {
+      "document_id": "c187443678735d217669cba78ab827e9ec8212c982d9fe7fc08805283ba96120",
+      "input_hash": "10b374bad40f03861f7af80d7bb463a0d16629a140b7247663c613ea6062cd2b",
+      "teacher": {
+        "tokens": 2047,
+        "nll_sum": 5669.3974609375
+      },
+      "fast": {
+        "tokens": 2047,
+        "nll_sum": 5801.421875,
+        "kl_sum": 133.15499877929688,
+        "top1_matches": 1758
+      },
+      "quality": {
+        "tokens": 2047,
+        "nll_sum": 5801.447265625,
+        "kl_sum": 133.3004150390625,
+        "top1_matches": 1756
+      }
+    },
+    {
+      "document_id": "79aa5dcf6cfba5e2b8d6dc1ebc461ef2bf069536c54aa1df5b9b172abddc8136",
+      "input_hash": "915a93de3e7b7a5750b4974a87e148f815426f66a741a94744098e8d599a3b28",
+      "teacher": {
+        "tokens": 317,
+        "nll_sum": 557.230712890625
+      },
+      "fast": {
+        "tokens": 317,
+        "nll_sum": 580.3494873046875,
+        "kl_sum": 26.252046585083008,
+        "top1_matches": 279
+      },
+      "quality": {
+        "tokens": 317,
+        "nll_sum": 580.1484375,
+        "kl_sum": 26.272605895996094,
+        "top1_matches": 279
+      }
+    },
+    {
+      "document_id": "56889a18f511dfc323d4c3703427ce4161038e05162cb8c512e57d2b5474a838",
+      "input_hash": "c4fbcb94643f7ff23c56595cf7ef8c601d5434ad5d510770833fba2994c665ed",
+      "teacher": {
+        "tokens": 638,
+        "nll_sum": 1558.9005126953125
+      },
+      "fast": {
+        "tokens": 638,
+        "nll_sum": 1613.6453857421875,
+        "kl_sum": 69.03765106201172,
+        "top1_matches": 534
+      },
+      "quality": {
+        "tokens": 638,
+        "nll_sum": 1613.356201171875,
+        "kl_sum": 69.0241470336914,
+        "top1_matches": 535
+      }
+    },
+    {
+      "document_id": "9312387ae903e578f3f83af4a4f4b5d09450c8cb162001dd7bb42eedd6efa43d",
+      "input_hash": "b7fb090536e4c8668519197f4aa103a18c293a45c2481975e013679cc3f3d8b0",
+      "teacher": {
+        "tokens": 727,
+        "nll_sum": 1981.4447021484375
+      },
+      "fast": {
+        "tokens": 727,
+        "nll_sum": 2001.06787109375,
+        "kl_sum": 41.958900451660156,
+        "top1_matches": 627
+      },
+      "quality": {
+        "tokens": 727,
+        "nll_sum": 2001.23828125,
+        "kl_sum": 42.074310302734375,
+        "top1_matches": 627
+      }
+    },
+    {
+      "document_id": "bb27d7bd690328c9102f0e77bb022b4cdef3bf7ebe87ffd28fc3a31eed64d990",
+      "input_hash": "91e81c5f6ad76deef0f767a3387b6b3fe38bc14c57c34c2e4b22fb7b45702a34",
+      "teacher": {
+        "tokens": 95,
+        "nll_sum": 431.1622314453125
+      },
+      "fast": {
+        "tokens": 95,
+        "nll_sum": 431.05712890625,
+        "kl_sum": 10.454816818237305,
+        "top1_matches": 75
+      },
+      "quality": {
+        "tokens": 95,
+        "nll_sum": 431.0420837402344,
+        "kl_sum": 10.52347183227539,
+        "top1_matches": 75
+      }
+    },
+    {
+      "document_id": "b1793e398693cc440506d089f3f86f8905a21c48cbf44ec1a46b272755382335",
+      "input_hash": "c858c9076dacf8d992e7349a0220f62f034f04fc8f945a4df52f7aa875387a50",
+      "teacher": {
+        "tokens": 508,
+        "nll_sum": 1200.4725341796875
+      },
+      "fast": {
+        "tokens": 508,
+        "nll_sum": 1311.8846435546875,
+        "kl_sum": 77.06138610839844,
+        "top1_matches": 403
+      },
+      "quality": {
+        "tokens": 508,
+        "nll_sum": 1310.647216796875,
+        "kl_sum": 76.43534851074219,
+        "top1_matches": 404
+      }
+    },
+    {
+      "document_id": "1043f5b04fc6aea60d07d8cc587a11f94685a6e9a687571c2594bfda6b437cd6",
+      "input_hash": "521c9c746f8e4a5c3759544e141150831bf955aa5715766188d2d30b537ed27d",
+      "teacher": {
+        "tokens": 353,
+        "nll_sum": 1002.9451904296875
+      },
+      "fast": {
+        "tokens": 353,
+        "nll_sum": 1014.6913452148438,
+        "kl_sum": 20.89464569091797,
+        "top1_matches": 316
+      },
+      "quality": {
+        "tokens": 353,
+        "nll_sum": 1014.7503662109375,
+        "kl_sum": 20.87213706970215,
+        "top1_matches": 313
+      }
+    },
+    {
+      "document_id": "e5e1ff46b6d493d72856a60afd8fc56a7b98f6bcc314052a5d5c96c5b834d3a0",
+      "input_hash": "71d17ca4251501a3571e5cb8759b3e2b70afcb19542df961d438a6fe8a789f4d",
+      "teacher": {
+        "tokens": 182,
+        "nll_sum": 588.256591796875
+      },
+      "fast": {
+        "tokens": 182,
+        "nll_sum": 594.770263671875,
+        "kl_sum": 13.453690528869629,
+        "top1_matches": 156
+      },
+      "quality": {
+        "tokens": 182,
+        "nll_sum": 594.6944580078125,
+        "kl_sum": 13.462285041809082,
+        "top1_matches": 156
+      }
+    },
+    {
+      "document_id": "bb02c828312ca8a21b3b52fbd9e9a27ac5480c123b17f952c1f05048e220d061",
+      "input_hash": "c5458cb6432566000485f6ef898ac4701a2b9973b31300a8668883742a6390f3",
+      "teacher": {
+        "tokens": 291,
+        "nll_sum": 1152.2164306640625
+      },
+      "fast": {
+        "tokens": 291,
+        "nll_sum": 1169.358154296875,
+        "kl_sum": 32.73738098144531,
+        "top1_matches": 241
+      },
+      "quality": {
+        "tokens": 291,
+        "nll_sum": 1169.315185546875,
+        "kl_sum": 32.80778503417969,
+        "top1_matches": 241
+      }
+    },
+    {
+      "document_id": "0c68584a373520e0f0bf80cbb4b86e7a58d576c8bc96b11a9e6222b3a1167b69",
+      "input_hash": "e3012754c33a46a486c52a7fc208e1a969e748faa5f668880220204fe50dc61f",
+      "teacher": {
+        "tokens": 435,
+        "nll_sum": 1318.2242431640625
+      },
+      "fast": {
+        "tokens": 435,
+        "nll_sum": 1310.58349609375,
+        "kl_sum": 23.012916564941406,
+        "top1_matches": 371
+      },
+      "quality": {
+        "tokens": 435,
+        "nll_sum": 1310.60888671875,
+        "kl_sum": 23.042627334594727,
+        "top1_matches": 371
+      }
+    },
+    {
+      "document_id": "f975ca0cc8e53fd781e0c5d8ac091eaed19236a6906979516cdd78ea2cc82937",
+      "input_hash": "4f1b95f723b37f0c11ef8c816ec8d9939885342eb7166a8ff292de194df9c89f",
+      "teacher": {
+        "tokens": 95,
+        "nll_sum": 444.37335205078125
+      },
+      "fast": {
+        "tokens": 95,
+        "nll_sum": 455.63909912109375,
+        "kl_sum": 7.580028533935547,
+        "top1_matches": 74
+      },
+      "quality": {
+        "tokens": 95,
+        "nll_sum": 455.6485595703125,
+        "kl_sum": 7.524318218231201,
+        "top1_matches": 73
+      }
+    },
+    {
+      "document_id": "5f87c8ac225ae1431f169eafe7597be6e99701ffd4e5bc8b7f93a680b764bee3",
+      "input_hash": "6026d0c8e5ff71e92ed755b44fcb24fd7800b201c8ba421305933bdcc45c2417",
+      "teacher": {
+        "tokens": 69,
+        "nll_sum": 270.3663635253906
+      },
+      "fast": {
+        "tokens": 69,
+        "nll_sum": 274.60894775390625,
+        "kl_sum": 3.8173463344573975,
+        "top1_matches": 55
+      },
+      "quality": {
+        "tokens": 69,
+        "nll_sum": 274.8403625488281,
+        "kl_sum": 3.8415818214416504,
+        "top1_matches": 55
+      }
+    },
+    {
+      "document_id": "3941b109a5cbc5822597f85b9aa1bf605f92f94d84ac0c3b2850145663a7cf89",
+      "input_hash": "f3b2510b1669ea46d29efe92ab158e691945fbaecb74c785c8850ed8d557257b",
+      "teacher": {
+        "tokens": 310,
+        "nll_sum": 1369.506103515625
+      },
+      "fast": {
+        "tokens": 310,
+        "nll_sum": 1387.177490234375,
+        "kl_sum": 27.829504013061523,
+        "top1_matches": 248
+      },
+      "quality": {
+        "tokens": 310,
+        "nll_sum": 1386.9271240234375,
+        "kl_sum": 27.931209564208984,
+        "top1_matches": 249
+      }
+    },
+    {
+      "document_id": "53a5c073b243d7a678c6a3869850d3a92f9bda59f7e35c86c08dcdfb0f37e2a4",
+      "input_hash": "061bdafb038833810443d02f3a536dbc8de77c374b1492295758493cd5f578b1",
+      "teacher": {
+        "tokens": 607,
+        "nll_sum": 1264.8253173828125
+      },
+      "fast": {
+        "tokens": 607,
+        "nll_sum": 1274.1728515625,
+        "kl_sum": 25.89089584350586,
+        "top1_matches": 540
+      },
+      "quality": {
+        "tokens": 607,
+        "nll_sum": 1273.84375,
+        "kl_sum": 25.826675415039062,
+        "top1_matches": 541
+      }
+    },
+    {
+      "document_id": "7a4252fe18e98a2bbb0ff7a9760881e7f0bddfe3ce3f70ff141d379fa6f46763",
+      "input_hash": "b7527555ad6d095af128404c46d883722c5f203975c5647ce5226083d620811d",
+      "teacher": {
+        "tokens": 252,
+        "nll_sum": 858.3605346679688
+      },
+      "fast": {
+        "tokens": 252,
+        "nll_sum": 867.4086303710938,
+        "kl_sum": 15.433340072631836,
+        "top1_matches": 218
+      },
+      "quality": {
+        "tokens": 252,
+        "nll_sum": 867.2706298828125,
+        "kl_sum": 15.406925201416016,
+        "top1_matches": 219
+      }
+    },
+    {
+      "document_id": "f4eab72392a119bbdaf903dfe479f923d2db8e238d00d397018f47181dfe0ff0",
+      "input_hash": "34342c492d132ac19a928e5f0db36931bc3a981808264d8cd5eab12ca2d3899e",
+      "teacher": {
+        "tokens": 1442,
+        "nll_sum": 4084.31591796875
+      },
+      "fast": {
+        "tokens": 1442,
+        "nll_sum": 4164.2783203125,
+        "kl_sum": 79.56510925292969,
+        "top1_matches": 1228
+      },
+      "quality": {
+        "tokens": 1442,
+        "nll_sum": 4164.775390625,
+        "kl_sum": 79.33010864257812,
+        "top1_matches": 1232
+      }
+    },
+    {
+      "document_id": "5233e64ad1dcd34cf4512f3e57884ca12778f9639cb6051088b8494b332f09dc",
+      "input_hash": "3f88884fd569a5741ef50b0b06e94ddeee2dde1c0ba3cc59d51e147d4b70e179",
+      "teacher": {
+        "tokens": 265,
+        "nll_sum": 549.64306640625
+      },
+      "fast": {
+        "tokens": 265,
+        "nll_sum": 557.1574096679688,
+        "kl_sum": 17.087610244750977,
+        "top1_matches": 236
+      },
+      "quality": {
+        "tokens": 265,
+        "nll_sum": 557.1521606445312,
+        "kl_sum": 17.076858520507812,
+        "top1_matches": 237
+      }
+    },
+    {
+      "document_id": "3838c3023b23623e1372dfb8b09300c989bdbd5402c655021cd8a1d98b7f6b9c",
+      "input_hash": "bbcbf402fe024400b5419e2fafc201adf107d2ea9c90931a775fa97e8de9a2d4",
+      "teacher": {
+        "tokens": 247,
+        "nll_sum": 705.9984741210938
+      },
+      "fast": {
+        "tokens": 247,
+        "nll_sum": 711.7453002929688,
+        "kl_sum": 16.87990951538086,
+        "top1_matches": 211
+      },
+      "quality": {
+        "tokens": 247,
+        "nll_sum": 712.01318359375,
+        "kl_sum": 16.85744857788086,
+        "top1_matches": 211
+      }
+    },
+    {
+      "document_id": "e61fa6ef188852c32b4b53ada38c943c5a82059ad584c561eec238b4a8a79dbd",
+      "input_hash": "33c8c90e6c4cdb72b57b04acc06b1103f6cb8b825716bd56a93e89f6f7f82a8a",
+      "teacher": {
+        "tokens": 77,
+        "nll_sum": 242.05844116210938
+      },
+      "fast": {
+        "tokens": 77,
+        "nll_sum": 240.89852905273438,
+        "kl_sum": 6.048330307006836,
+        "top1_matches": 62
+      },
+      "quality": {
+        "tokens": 77,
+        "nll_sum": 240.72830200195312,
+        "kl_sum": 6.056870937347412,
+        "top1_matches": 62
+      }
+    },
+    {
+      "document_id": "e5930f14733707a14ae1fe3647cc2a9ce0d182c5cc9205f3efce6ea765dcbd51",
+      "input_hash": "8808b00caaa401672410da1c3bc41826cebeab268f074123e7809dd13c09183d",
+      "teacher": {
+        "tokens": 88,
+        "nll_sum": 275.3878479003906
+      },
+      "fast": {
+        "tokens": 88,
+        "nll_sum": 279.6603698730469,
+        "kl_sum": 8.789033889770508,
+        "top1_matches": 80
+      },
+      "quality": {
+        "tokens": 88,
+        "nll_sum": 279.797607421875,
+        "kl_sum": 8.778950691223145,
+        "top1_matches": 80
+      }
+    },
+    {
+      "document_id": "b4c2a9234b8da5b92ffe5ee4989c1b8bb68d04b721a53055eedc7e364f2028f1",
+      "input_hash": "8b7251547f2c7c1eef7d109f1a4751dd471df175dbf192ddc98bd078f8433f1a",
+      "teacher": {
+        "tokens": 946,
+        "nll_sum": 2567.47412109375
+      },
+      "fast": {
+        "tokens": 946,
+        "nll_sum": 2614.117919921875,
+        "kl_sum": 54.638885498046875,
+        "top1_matches": 819
+      },
+      "quality": {
+        "tokens": 946,
+        "nll_sum": 2614.8544921875,
+        "kl_sum": 54.66242980957031,
+        "top1_matches": 816
+      }
+    },
+    {
+      "document_id": "56742caf7ce1d3062a554646e4f99f86e28e5c0dec60ce3c93450e740076a2fc",
+      "input_hash": "1ecac4be9155f403131be078289e9055999f73f0da2b6668a376a7c31c32245e",
+      "teacher": {
+        "tokens": 98,
+        "nll_sum": 424.6693115234375
+      },
+      "fast": {
+        "tokens": 98,
+        "nll_sum": 438.5597229003906,
+        "kl_sum": 9.393230438232422,
+        "top1_matches": 80
+      },
+      "quality": {
+        "tokens": 98,
+        "nll_sum": 438.62811279296875,
+        "kl_sum": 9.346357345581055,
+        "top1_matches": 79
+      }
+    },
+    {
+      "document_id": "21cd670e8d7db4efcff79ef8bcc9339558b3fcf3706f6b662956210823ff65f0",
+      "input_hash": "9423999af2307b90af7933b50e6a7280ce95e83b56ccc44f1bafeb1aae4c0a9e",
+      "teacher": {
+        "tokens": 190,
+        "nll_sum": 604.1552124023438
+      },
+      "fast": {
+        "tokens": 190,
+        "nll_sum": 608.932861328125,
+        "kl_sum": 10.102121353149414,
+        "top1_matches": 159
+      },
+      "quality": {
+        "tokens": 190,
+        "nll_sum": 608.5514526367188,
+        "kl_sum": 10.094564437866211,
+        "top1_matches": 159
+      }
+    },
+    {
+      "document_id": "058d63ea56d06c472b860e30adec6f21d129f56d29b93f78723a65ad935702b6",
+      "input_hash": "750cb4d2f5fbca0c1834922149c721656947814716bfe7ee6fe4ad451ad358f5",
+      "teacher": {
+        "tokens": 1149,
+        "nll_sum": 2920.07470703125
+      },
+      "fast": {
+        "tokens": 1149,
+        "nll_sum": 2973.97216796875,
+        "kl_sum": 64.62847137451172,
+        "top1_matches": 1007
+      },
+      "quality": {
+        "tokens": 1149,
+        "nll_sum": 2974.086669921875,
+        "kl_sum": 64.65499877929688,
+        "top1_matches": 1008
+      }
+    },
+    {
+      "document_id": "c6d9943decb3133393aaa85b495fa2ef56d81c24ba2976623f27149dd06cd82b",
+      "input_hash": "e7d90eb17926d9d0104b0daab2243eb2e2e67cb41d67fc903dedb4e5ecd26fe7",
+      "teacher": {
+        "tokens": 753,
+        "nll_sum": 2157.42724609375
+      },
+      "fast": {
+        "tokens": 753,
+        "nll_sum": 2188.666015625,
+        "kl_sum": 46.898468017578125,
+        "top1_matches": 651
+      },
+      "quality": {
+        "tokens": 753,
+        "nll_sum": 2188.743896484375,
+        "kl_sum": 46.88758850097656,
+        "top1_matches": 650
+      }
+    },
+    {
+      "document_id": "1d7a05e7ca6bd769826f1276413a78c54ccccb5dcb4a9a7bcf96db298e588f71",
+      "input_hash": "f5c409dcd996bf2ddb14b161f0eeb073f59e5cd2524b5495a883ec1723d21019",
+      "teacher": {
+        "tokens": 2047,
+        "nll_sum": 6522.10107421875
+      },
+      "fast": {
+        "tokens": 2047,
+        "nll_sum": 6731.86474609375,
+        "kl_sum": 184.61044311523438,
+        "top1_matches": 1743
+      },
+      "quality": {
+        "tokens": 2047,
+        "nll_sum": 6732.22607421875,
+        "kl_sum": 184.81430053710938,
+        "top1_matches": 1741
+      }
+    },
+    {
+      "document_id": "e489a8b0b70dd72a3fc35eefc0391faa6014c073693419e579e27027ff9078a7",
+      "input_hash": "77eef7916d331f7723614af07ed5dc00a91c9a72ba2a72512deb7e4cc673f859",
+      "teacher": {
+        "tokens": 1126,
+        "nll_sum": 3323.731689453125
+      },
+      "fast": {
+        "tokens": 1126,
+        "nll_sum": 3391.060302734375,
+        "kl_sum": 59.03815841674805,
+        "top1_matches": 968
+      },
+      "quality": {
+        "tokens": 1126,
+        "nll_sum": 3390.6259765625,
+        "kl_sum": 59.139530181884766,
+        "top1_matches": 966
+      }
+    },
+    {
+      "document_id": "29f7148c64bd36adeea17a97db9a4d85faaf05e3ab86755841cbaae1d80fa0fe",
+      "input_hash": "c1f373baf06061d18df3d6c48408573466dfca01340fbf0065338dcc9643b3a5",
+      "teacher": {
+        "tokens": 61,
+        "nll_sum": 236.6002197265625
+      },
+      "fast": {
+        "tokens": 61,
+        "nll_sum": 243.55563354492188,
+        "kl_sum": 6.336125373840332,
+        "top1_matches": 51
+      },
+      "quality": {
+        "tokens": 61,
+        "nll_sum": 243.35061645507812,
+        "kl_sum": 6.353731155395508,
+        "top1_matches": 51
+      }
+    },
+    {
+      "document_id": "1e2a9cad1767f5c9d5a5009eabea024cf5725d1caf6fc20124b997172e9edd69",
+      "input_hash": "7964ed375d6f7d58bcf8fcae677f86b0717d6029b901e3d6a8b5811d2ed718c3",
+      "teacher": {
+        "tokens": 396,
+        "nll_sum": 1305.373291015625
+      },
+      "fast": {
+        "tokens": 396,
+        "nll_sum": 1321.2236328125,
+        "kl_sum": 38.359130859375,
+        "top1_matches": 322
+      },
+      "quality": {
+        "tokens": 396,
+        "nll_sum": 1320.873779296875,
+        "kl_sum": 38.21174621582031,
+        "top1_matches": 321
+      }
+    },
+    {
+      "document_id": "11196add8efed9468ba055d9c3cde2b2971a18fd231eee1fec0610eb5ae0facf",
+      "input_hash": "381430fcdb12abec72667e99da3019d505960af0c97f011bc9907cb8c910c56d",
+      "teacher": {
+        "tokens": 763,
+        "nll_sum": 2635.9599609375
+      },
+      "fast": {
+        "tokens": 763,
+        "nll_sum": 2685.100341796875,
+        "kl_sum": 65.38545227050781,
+        "top1_matches": 631
+      },
+      "quality": {
+        "tokens": 763,
+        "nll_sum": 2685.541015625,
+        "kl_sum": 65.42446899414062,
+        "top1_matches": 630
+      }
+    },
+    {
+      "document_id": "c3f11a44293e7e290da2fea3a5556f7e1ddb9b8bff0f70e55de190c0f881324b",
+      "input_hash": "f412044ac7fb6c9a1d8061b507249fcc8ad5258fc33570a33d9e1f1be8b49d08",
+      "teacher": {
+        "tokens": 164,
+        "nll_sum": 505.862060546875
+      },
+      "fast": {
+        "tokens": 164,
+        "nll_sum": 506.158935546875,
+        "kl_sum": 9.885811805725098,
+        "top1_matches": 141
+      },
+      "quality": {
+        "tokens": 164,
+        "nll_sum": 506.20111083984375,
+        "kl_sum": 9.908699035644531,
+        "top1_matches": 141
+      }
+    },
+    {
+      "document_id": "6a7c01935733a7208ade88d7a8537b59b4bdfd016e2d88a76e2463b019741bc7",
+      "input_hash": "3de34f2c576ea722a865af1ca7dba83ed14e9f06bac6c2f967dc2e0ed0542c20",
+      "teacher": {
+        "tokens": 271,
+        "nll_sum": 815.996337890625
+      },
+      "fast": {
+        "tokens": 271,
+        "nll_sum": 830.1875,
+        "kl_sum": 14.38111686706543,
+        "top1_matches": 232
+      },
+      "quality": {
+        "tokens": 271,
+        "nll_sum": 830.0439453125,
+        "kl_sum": 14.435057640075684,
+        "top1_matches": 231
+      }
+    },
+    {
+      "document_id": "85a67e401f4d3b961bf82b70ce897f9c4300d9456d764a5cf2800fade019eba4",
+      "input_hash": "a3df931b6dce543fcfc6dc9ae725df389e565f7d9e34330a40f9b52a74c3c8b9",
+      "teacher": {
+        "tokens": 103,
+        "nll_sum": 248.9484100341797
+      },
+      "fast": {
+        "tokens": 103,
+        "nll_sum": 260.9114990234375,
+        "kl_sum": 9.651206970214844,
+        "top1_matches": 88
+      },
+      "quality": {
+        "tokens": 103,
+        "nll_sum": 260.8725280761719,
+        "kl_sum": 9.495878219604492,
+        "top1_matches": 89
+      }
+    },
+    {
+      "document_id": "c378950327872ea5e071502ca9cff6c2876428876ca9c9b55f3bac98450bf498",
+      "input_hash": "f21082559614afe84970ef04c192ffc70e44dd15ddcc1a652dd0d4295d174e22",
+      "teacher": {
+        "tokens": 106,
+        "nll_sum": 414.60333251953125
+      },
+      "fast": {
+        "tokens": 106,
+        "nll_sum": 416.71124267578125,
+        "kl_sum": 10.858348846435547,
+        "top1_matches": 83
+      },
+      "quality": {
+        "tokens": 106,
+        "nll_sum": 416.7477111816406,
+        "kl_sum": 10.8383150100708,
+        "top1_matches": 84
+      }
+    },
+    {
+      "document_id": "960eff387c70708d3041315217700a0e9542b6d3d6b444d70915728b74ddc6b8",
+      "input_hash": "4c80fed7ddcd42788ade0b53e83f0955e1fd579202d1795814fcf4b0e9f4d109",
+      "teacher": {
+        "tokens": 169,
+        "nll_sum": 546.797607421875
+      },
+      "fast": {
+        "tokens": 169,
+        "nll_sum": 554.6932373046875,
+        "kl_sum": 11.566194534301758,
+        "top1_matches": 145
+      },
+      "quality": {
+        "tokens": 169,
+        "nll_sum": 554.7892456054688,
+        "kl_sum": 11.590776443481445,
+        "top1_matches": 145
+      }
+    },
+    {
+      "document_id": "52a6b39cb57e5d4605a1e65e1b8cc4cc65ac5c57a89eab5aa9a9af80de1b3e52",
+      "input_hash": "d3c24a0840356dcd58c4460dddab17114d6cd224056519cd87f9945005a656fe",
+      "teacher": {
+        "tokens": 163,
+        "nll_sum": 459.565673828125
+      },
+      "fast": {
+        "tokens": 163,
+        "nll_sum": 467.1903991699219,
+        "kl_sum": 17.37529182434082,
+        "top1_matches": 137
+      },
+      "quality": {
+        "tokens": 163,
+        "nll_sum": 467.50262451171875,
+        "kl_sum": 17.369197845458984,
+        "top1_matches": 136
+      }
+    },
+    {
+      "document_id": "3fbac2610ce502da6cc94551bddd085131e5964b1bf81e7e2b9facef44229fdb",
+      "input_hash": "f5cc029aa0d866de219619c9d4c601afbb88da37cc9aa738d0317848a3cdd5eb",
+      "teacher": {
+        "tokens": 169,
+        "nll_sum": 757.7442626953125
+      },
+      "fast": {
+        "tokens": 169,
+        "nll_sum": 757.1837158203125,
+        "kl_sum": 14.734578132629395,
+        "top1_matches": 139
+      },
+      "quality": {
+        "tokens": 169,
+        "nll_sum": 757.0716552734375,
+        "kl_sum": 14.77068042755127,
+        "top1_matches": 140
+      }
+    },
+    {
+      "document_id": "8ec9ae81723f3a0055cbaa9224d37833ffd0254f535f307aa79a3d6b56ccbe09",
+      "input_hash": "694de2aa6ee26621e75c6fe1d9ec6d45cc5f82bc7f450b340994265ca5600049",
+      "teacher": {
+        "tokens": 47,
+        "nll_sum": 245.1568603515625
+      },
+      "fast": {
+        "tokens": 47,
+        "nll_sum": 256.5208740234375,
+        "kl_sum": 7.508945941925049,
+        "top1_matches": 31
+      },
+      "quality": {
+        "tokens": 47,
+        "nll_sum": 256.2926025390625,
+        "kl_sum": 7.482789993286133,
+        "top1_matches": 31
+      }
+    },
+    {
+      "document_id": "cd7cf043622eef6cc7763cc260ad436077045dd23a1c1a24f0c533c709492861",
+      "input_hash": "0dfa4164377679737ca9949187077eb362e1d7b380e28b32bdb431bef9c75a8d",
+      "teacher": {
+        "tokens": 121,
+        "nll_sum": 360.3450927734375
+      },
+      "fast": {
+        "tokens": 121,
+        "nll_sum": 389.8367919921875,
+        "kl_sum": 23.6954402923584,
+        "top1_matches": 97
+      },
+      "quality": {
+        "tokens": 121,
+        "nll_sum": 389.75811767578125,
+        "kl_sum": 23.766014099121094,
+        "top1_matches": 97
+      }
+    }
+  ],
+  "summary": {
+    "documents": 128,
+    "tokens": 47550,
+    "modes": {
+      "teacher": {
+        "nll_per_token": 2.9370125553359743,
+        "perplexity": 18.859420594444558
+      },
+      "fast": {
+        "nll_per_token": 2.9975302412833327,
+        "perplexity": 20.035991700849333,
+        "kl_per_token": 0.07837846734671688,
+        "top1_agreement": 0.8488328075709779
+      },
+      "quality": {
+        "nll_per_token": 2.997292665788428,
+        "perplexity": 20.0312322055972,
+        "kl_per_token": 0.07835780106633745,
+        "top1_agreement": 0.8487276550998949
+      }
+    },
+    "bootstrap": {
+      "samples": 10000,
+      "seed": 137,
+      "unit": "document"
+    },
+    "quality_minus_fast": {
+      "nll_sum": {
+        "per_token": -0.00023757549490462343,
+        "ci95": [
+          -0.0003950459518792273,
+          -0.00010434281532392345
+        ],
+        "positive_documents": 51
+      },
+      "kl_sum": {
+        "per_token": -2.0666280379430727e-05,
+        "ci95": [
+          -9.033162688368743e-05,
+          3.4116957503556264e-05
+        ],
+        "positive_documents": 64
+      },
+      "top1_matches": {
+        "per_token": -0.00010515247108307045,
+        "ci95": [
+          -0.0005614035087719298,
+          0.00036858810279512646
+        ],
+        "positive_documents": 30
+      }
+    }
+  },
+  "versus_reference_correction": {
+    "documents": 128,
+    "tokens": 47550,
+    "modes": {
+      "teacher": {
+        "nll_per_token": 2.9370125553359743,
+        "perplexity": 18.859420594444558
+      },
+      "fast": {
+        "nll_per_token": 2.997293038032283,
+        "perplexity": 20.03123966210169,
+        "kl_per_token": 0.07835802033120526,
+        "top1_agreement": 0.8487486855941114
+      },
+      "quality": {
+        "nll_per_token": 2.997292665788428,
+        "perplexity": 20.0312322055972,
+        "kl_per_token": 0.07835780106633745,
+        "top1_agreement": 0.8487276550998949
+      }
+    },
+    "bootstrap": {
+      "samples": 10000,
+      "seed": 137,
+      "unit": "document"
+    },
+    "quality_minus_fast": {
+      "nll_sum": {
+        "per_token": -3.722438551524711e-07,
+        "ci95": [
+          -1.2728154063496248e-06,
+          0.0
+        ],
+        "positive_documents": 0
+      },
+      "kl_sum": {
+        "per_token": -2.1926486780465464e-07,
+        "ci95": [
+          -7.462632928288117e-07,
+          0.0
+        ],
+        "positive_documents": 0
+      },
+      "top1_matches": {
+        "per_token": -2.1030494216614092e-05,
+        "ci95": [
+          -7.365722872042662e-05,
+          0.0
+        ],
+        "positive_documents": 0
+      }
+    }
+  }
+}
