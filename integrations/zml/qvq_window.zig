@@ -84,6 +84,10 @@ const GraphKeyContext = struct {
 const GraphLock = struct {
     held: std.atomic.Mutex = .unlocked,
 
+    fn tryLock(self: *@This()) bool {
+        return self.held.tryLock();
+    }
+
     fn lock(self: *@This()) void {
         while (!self.held.tryLock()) {
             // The registry is never held over native creation/replay. Yield
@@ -1112,23 +1116,41 @@ fn handler(frame: *zml.pjrt.ffi.CallFrame) callconv(.c) ?*zml.pjrt.ffi.Error {
             new_entry.last_used = graph_use_counter;
             if (handles.count() >= max_graph_handles) {
                 var oldest_key: ?GraphKey = null;
+                var oldest_entry: ?*GraphEntry = null;
                 var oldest_use: u64 = std.math.maxInt(u64);
                 var iterator = handles.iterator();
                 while (iterator.next()) |entry| {
-                    if (entry.value_ptr.*.last_used < oldest_use) {
+                    // Never wait for a live replay while holding the global
+                    // registry lock.  An entry is evictable only when its
+                    // per-key lock can be acquired immediately; otherwise
+                    // keep searching for an idle entry.
+                    if (entry.value_ptr.*.last_used < oldest_use and
+                        entry.value_ptr.*.run_lock.tryLock())
+                    {
+                        if (oldest_entry) |previous| previous.run_lock.unlock();
                         oldest_use = entry.value_ptr.*.last_used;
                         oldest_key = entry.key_ptr.*;
+                        oldest_entry = entry.value_ptr.*;
                     }
                 }
                 if (oldest_key) |evicted| {
                     if (handles.fetchRemove(evicted)) |removed| {
-                        // Remove the entry while holding the map lock, then
-                        // defer native destruction until after unlock. The
-                        // per-entry lock prevents a concurrent replay from
-                        // racing the eventual private-pool teardown.
-                        removed.value.*.run_lock.lock();
+                        // The selected entry is already locked, so native
+                        // destruction can be deferred until after the map
+                        // lock is released without blocking unrelated keys.
                         evicted_entry = removed.value;
+                    } else if (oldest_entry) |selected| {
+                        selected.run_lock.unlock();
                     }
+                } else {
+                    graph_mutex.unlock();
+                    std.heap.c_allocator.destroy(new_entry);
+                    destroyNativeGraph(created_handle);
+                    return zml.pjrt.ffi.Error.create(
+                        frame.api,
+                        .resource_exhausted,
+                        "all native window graph handles are busy",
+                    );
                 }
             }
             handles.put(key, new_entry) catch {
@@ -1290,4 +1312,15 @@ test "graph registry replay locks the retained entry" {
     try std.testing.expectEqual(@intFromPtr(entry), @intFromPtr(retained.*));
     _ = handles.fetchRemove(key);
     std.testing.allocator.destroy(entry);
+}
+
+test "graph eviction probes busy entries without blocking" {
+    var lock: GraphLock = .{};
+    try std.testing.expect(lock.tryLock());
+    // The eviction path must skip a live replay instead of waiting while the
+    // global registry map is held.
+    try std.testing.expect(!lock.tryLock());
+    lock.unlock();
+    try std.testing.expect(lock.tryLock());
+    lock.unlock();
 }
