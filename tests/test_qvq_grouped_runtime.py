@@ -450,6 +450,15 @@ def test_grouped_hopper_policy_accepts_split_tuple_and_rejects_unimplemented_geo
     reason = runtime._runtime_eligible(torch.randn(1, 256))
     assert reason == "grouped Hopper requires FP16 or BF16 CUDA activations"
 
+    unsupported_projection = replace(
+        split_policy, recovery_projection="concurrent_reference"
+    )
+    for child in children:
+        child._p32_rank8_enabled = True
+        child._p32_window_config = unsupported_projection
+    reason = runtime._runtime_eligible(torch.randn(1, 256))
+    assert reason == "grouped rank8 projection supports separate_reference or input_fused only"
+
 def test_base_fuse_uses_architecture_roles_and_preserves_qvq_checkpoint_buffers():
     shared = torch.ones(256)
 

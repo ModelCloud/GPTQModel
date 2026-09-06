@@ -157,6 +157,10 @@ capture; replay contains only fixed launch attributes.
 Grouped QKV and gate/up apply child corrections to completed FP32 outputs using
 exactly the shared padded activation that fed WGMMA, then run existing child
 or paired output transforms. Each child may independently enable correction.
+Grouped runtime preparation accepts `separate_reference` and `input_fused`
+rank8 projections only; `concurrent_reference`, Tensor Core and other
+single-child projection choices fail closed until grouped producers implement
+their own graph-safe shared scheduling.
 Folded alternatives without that activation boundary are bypassed. Fused MLP
 execution now carries rank-8 through gate/up, SiLU/product, and the down
 projection: the down correction is added after its completed FP32 inner output

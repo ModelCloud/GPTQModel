@@ -539,6 +539,16 @@ class QVQHopperGroupedRuntime:
                 for field in ("block_m", "block_n", "warp_groups", "chunk_m")
             ):
                 return "grouped Hopper BM/BN/chunk controls are not implemented"
+        if any(
+            getattr(child, "_p32_rank8_enabled", False)
+            and getattr(policy, "recovery_projection", "separate_reference")
+            not in ("separate_reference", "input_fused")
+            for child, policy in zip(children, policies, strict=True)
+        ):
+            return (
+                "grouped rank8 projection supports separate_reference or "
+                "input_fused only"
+            )
 
         if not isinstance(x, torch.Tensor):
             return "input is not a tensor"
