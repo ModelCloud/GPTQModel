@@ -18,6 +18,7 @@ from gptqmodel.quantization.qvq_rank8 import (
     apply_rank8_audit,
     add_rank8_correction,
     export_window_package,
+    fit_rank_candidates,
     fit_rank8,
     load_window_artifact,
     load_window_package,
@@ -157,6 +158,30 @@ def test_rank8_large_output_uses_bounded_randomized_solver():
     assert a.shape == (32, 8) and b.shape == (8, 64)
     torch.testing.assert_close(a, again_a, rtol=0, atol=0)
     torch.testing.assert_close(b, again_b, rtol=0, atol=0)
+
+
+def test_rank_candidate_sweep_uses_predictable_output_fit_and_reports_all_ranks():
+    torch.manual_seed(1412)
+    x = torch.randn((48, 32), dtype=torch.float64)
+    a_true = torch.randn((32, 12), dtype=torch.float64)
+    b_true = torch.randn((12, 16), dtype=torch.float64)
+    residual = x @ a_true @ b_true
+    result = fit_rank_candidates(
+        x,
+        residual,
+        ranks=(2, 4, 6, 8, 12),
+        max_solver_bytes=1,
+    )
+    assert tuple(result) == (2, 4, 6, 8, 12)
+    errors = []
+    for rank, candidate in result.items():
+        assert candidate["A"].shape == (32, rank)
+        assert candidate["B"].shape == (rank, 16)
+        assert candidate["solver_mode"] == "randomized_output_range"
+        errors.append(candidate["weighted_fit"]["mse"])
+    assert errors[-1] < errors[0]
+    with pytest.raises(ValueError, match="distinct members"):
+        fit_rank_candidates(x, residual, ranks=(3,))
 
 
 @pytest.mark.parametrize(
@@ -304,9 +329,21 @@ def fit(layer, teacher, train, heldout, **kwargs):
 def test_recovery_teacher_error_roundtrip_and_off_identity(hadamard, tmp_path):
     layer, teacher, train, heldout = fixture(hadamard)
     original = layer(heldout)
-    report = fit(layer, teacher, train, heldout)
+    report = fit(
+        layer,
+        teacher,
+        train,
+        heldout,
+        rank_candidates=(2, 4, 6, 8, 12),
+    )
     assert report["validated"]
     assert set(report["candidates"]) == {"output_l2", "tail_weighted_output_l2"}
+    assert report["rank_candidates"] == [2, 4, 6, 8, 12]
+    assert set(report["rank_sweep"]) == {"output_l2", "tail_weighted_output_l2"}
+    assert all(
+        set(report["rank_sweep"][objective]) == {"2", "4", "6", "8", "12"}
+        for objective in report["rank_sweep"]
+    )
     assert torch.equal(layer(heldout), original)
     on = P32WindowConfig(recovery_mode="on")
     actual = qvq_p32_window_linear(layer, heldout, on)

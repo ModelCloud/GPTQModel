@@ -21,6 +21,7 @@ from .rotation.hadamard_utils import matmul_hadU
 
 CONTRACT = "p32-window-r8-v1:fp32-project,fp16-hidden,fp32-expand-add,existing-output-transform"
 RANK8_BUFFERS = ("rank8_A", "rank8_B", "rank8_metadata")
+RANK8_SWEEP_CANDIDATES = (2, 4, 6, 8, 12)
 
 
 @dataclass(frozen=True)
@@ -564,6 +565,7 @@ def _rank8_output_fit(
     residual,
     weights,
     *,
+    rank=8,
     max_solver_bytes,
     rcond,
     seed,
@@ -576,13 +578,15 @@ def _rank8_output_fit(
     ``(K + N) * rank`` instead of materializing a dense predicted ``rows x N``
     matrix and a full ``K x N`` least-squares solution.
     """
+    if type(rank) is not int or rank < 1:
+        raise ValueError("rank must be a positive integer")
     if type(max_solver_bytes) is not int or max_solver_bytes < 1:
         raise ValueError("max_solver_bytes must be a positive integer")
     design = x_train * weights
     response = residual * weights
     rows, k = design.shape
     n = response.shape[1]
-    rank = min(8, rows, k, n)
+    rank = min(rank, rows, k, n)
     full_bytes = 8 * (k * n + rows * n)
     if full_bytes <= max_solver_bytes:
         solution = torch.linalg.lstsq(design, response, driver="gelsd", rcond=rcond).solution
@@ -617,6 +621,83 @@ def _rank8_output_fit(
 
 
 @torch.no_grad()
+def fit_rank_candidates(
+    x_train,
+    residual,
+    *,
+    ranks=RANK8_SWEEP_CANDIDATES,
+    weights=None,
+    max_solver_bytes=256 * 1024 * 1024,
+    rcond=1e-5,
+    seed=0x51564,
+):
+    """Fit preparation-time rank candidates with one output-aware contract.
+
+    This is intentionally a solver/reporting API.  It returns FP64 CPU factors
+    for each requested rank so a quantization job can compare 2/4/6/8/12 on
+    held-out documents before deciding which rank is eligible for deployment.
+    Only rank 8 is accepted by the current runtime package and kernels; the
+    other candidates are not silently serialized as rank8 tensors.
+    """
+    if (
+        not isinstance(x_train, torch.Tensor)
+        or not isinstance(residual, torch.Tensor)
+        or x_train.ndim != 2
+        or residual.ndim != 2
+        or x_train.shape[0] != residual.shape[0]
+        or not x_train.shape[0]
+        or not x_train.shape[1]
+        or not residual.shape[1]
+    ):
+        raise ValueError("rank sweep requires finite nonempty [rows,K] and [rows,N] matrices")
+    if not torch.isfinite(x_train).all() or not torch.isfinite(residual).all():
+        raise ValueError("rank sweep inputs must be finite")
+    normalized = tuple(ranks)
+    if (
+        not normalized
+        or len(set(normalized)) != len(normalized)
+        or any(type(r) is not int or r not in RANK8_SWEEP_CANDIDATES for r in normalized)
+    ):
+        raise ValueError(
+            f"ranks must be distinct members of {RANK8_SWEEP_CANDIDATES}"
+        )
+    if weights is None:
+        weights = torch.ones((x_train.shape[0], 1), dtype=torch.float64)
+    if (
+        not isinstance(weights, torch.Tensor)
+        or weights.shape != (x_train.shape[0], 1)
+        or not torch.isfinite(weights).all()
+        or (weights <= 0).any()
+    ):
+        raise ValueError("rank sweep weights must be finite positive [rows,1]")
+    x_cpu = x_train.detach().to(device="cpu", dtype=torch.float64).contiguous()
+    residual_cpu = residual.detach().to(device="cpu", dtype=torch.float64).contiguous()
+    weights_cpu = weights.detach().to(device="cpu", dtype=torch.float64).contiguous()
+    result = {}
+    for candidate_rank in normalized:
+        a, b, solver_mode = _rank8_output_fit(
+            x_cpu,
+            residual_cpu,
+            weights_cpu,
+            rank=candidate_rank,
+            max_solver_bytes=max_solver_bytes,
+            rcond=rcond,
+            seed=seed + candidate_rank,
+        )
+        predicted = (x_cpu * weights_cpu) @ a @ b
+        weighted_error = residual_cpu * weights_cpu - predicted
+        result[candidate_rank] = {
+            "rank": candidate_rank,
+            "effective_rank": int(a.shape[1]),
+            "solver_mode": solver_mode,
+            "A": a,
+            "B": b,
+            "weighted_fit": _metrics(weighted_error),
+        }
+    return result
+
+
+@torch.no_grad()
 def fit_rank8(
     layer,
     teacher,
@@ -628,6 +709,7 @@ def fit_rank8(
     source_kind="calibration",
     minimum_improvement=0.01,
     max_solver_bytes=256 * 1024 * 1024,
+    rank_candidates=(8,),
 ):
     """Finish a quantized module with two rank-8 fits; never consume eval benchmarks.
 
@@ -645,6 +727,19 @@ def fit_rank8(
         raise ValueError("minimum_improvement must be in [0, 1)")
     if type(max_solver_bytes) is not int or max_solver_bytes < 1:
         raise ValueError("max_solver_bytes must be a positive integer")
+    rank_candidates = tuple(rank_candidates)
+    if (
+        not rank_candidates
+        or 8 not in rank_candidates
+        or len(set(rank_candidates)) != len(rank_candidates)
+        or any(
+            type(rank) is not int or rank not in RANK8_SWEEP_CANDIDATES
+            for rank in rank_candidates
+        )
+    ):
+        raise ValueError(
+            f"rank_candidates must include distinct members of {RANK8_SWEEP_CANDIDATES}, including 8"
+        )
     if not isinstance(teacher, torch.nn.Linear) or teacher.training or layer.training:
         raise ValueError("fitting requires eval-mode original FP Linear and P32 module")
     if (teacher.in_features, teacher.out_features) != (
@@ -693,48 +788,74 @@ def fit_rank8(
         # not the weight residual. Rank-deficient inputs use the SVD solver.
         candidates = []
         solver_modes = {}
+        rank_sweep = {}
         for objective in ("output_l2", "tail_weighted_output_l2"):
             weights = torch.ones((x_train.shape[0], 1), dtype=torch.float64)
             if objective == "tail_weighted_output_l2":
                 energy = residual[0].square().mean(1, keepdim=True)
                 weights = (1 + energy / energy.mean().clamp_min(1e-30)).sqrt()
-            fitted_a, fitted_b, solver_mode = _rank8_output_fit(
-                x_train,
-                residual[0],
-                weights,
-                max_solver_bytes=max_solver_bytes,
-                rcond=1e-5,
-                seed=0x51564 + (0 if objective == "output_l2" else 1),
-            )
-            solver_modes[objective] = solver_mode
-            rank = min(8, fitted_a.shape[1], fitted_b.shape[0])
-            a = torch.zeros((layer.in_features, 8), dtype=torch.float64)
-            b = torch.zeros((8, layer.out_features), dtype=torch.float64)
-            a[:, :rank] = fitted_a[:, :rank]
-            b[:rank] = fitted_b[:rank]
-            # final correction = H(inner correction) * SV, so inner B =
-            # H^T(final B / SV). transpose=True matters for composite widths.
-            b = b / layer.SV.detach().double().cpu()
-            if layer.output_hadamard:
-                b = matmul_hadU(b, transpose=True)
-            a = a.to(device=layer.trellis.device, dtype=torch.float16)
-            b = b.to(device=layer.trellis.device, dtype=torch.float16)
-            if not torch.isfinite(a).all() or not torch.isfinite(b).all():
-                continue
-            scores = []
-            for x, target, original in zip(transformed, targets, (train_inputs, heldout_inputs)):
-                inner = layer._inner_forward(x)
-                hidden = (x.float() @ a.float()).half()
-                corrected = inner.float() + hidden.float() @ b.float()
-                # Invoke the deployed output transform rather than estimating
-                # its rounding from the mathematical inverse used above.
-                actual = layer._recover_output_compute_dtype(corrected, x.dtype).to(original.dtype).float()
-                scores.append(_metrics(target - actual))
-            if all(
-                all(torch.isfinite(torch.tensor(v)) for v in score.values())
-                for score in scores
-            ):
-                candidates.append((objective, a, b, scores))
+            objective_sweep = {}
+            for candidate_rank in rank_candidates:
+                fitted_a, fitted_b, solver_mode = _rank8_output_fit(
+                    x_train,
+                    residual[0],
+                    weights,
+                    rank=candidate_rank,
+                    max_solver_bytes=max_solver_bytes,
+                    rcond=1e-5,
+                    seed=0x51564
+                    + candidate_rank
+                    + (0 if objective == "output_l2" else 1),
+                )
+                objective_sweep[str(candidate_rank)] = {
+                    "rank": candidate_rank,
+                    "effective_rank": min(
+                        candidate_rank, fitted_a.shape[1], fitted_b.shape[0]
+                    ),
+                    "solver_mode": solver_mode,
+                }
+                effective_rank = min(
+                    candidate_rank, fitted_a.shape[1], fitted_b.shape[0]
+                )
+                a64 = fitted_a[:, :effective_rank].contiguous()
+                b64 = fitted_b[:effective_rank].contiguous()
+                # final correction = H(inner correction) * SV, so inner B =
+                # H^T(final B / SV). transpose=True matters for composite widths.
+                b64 = b64 / layer.SV.detach().double().cpu()
+                if layer.output_hadamard:
+                    b64 = matmul_hadU(b64, transpose=True)
+                a_eval = a64.to(device=layer.trellis.device, dtype=torch.float16)
+                b_eval = b64.to(device=layer.trellis.device, dtype=torch.float16)
+                if not torch.isfinite(a_eval).all() or not torch.isfinite(b_eval).all():
+                    continue
+                scores = []
+                for x, target, original in zip(
+                    transformed, targets, (train_inputs, heldout_inputs)
+                ):
+                    inner = layer._inner_forward(x)
+                    hidden = (x.float() @ a_eval.float()).half()
+                    corrected = inner.float() + hidden.float() @ b_eval.float()
+                    # Invoke the deployed output transform rather than estimating
+                    # its rounding from the mathematical inverse used above.
+                    actual = layer._recover_output_compute_dtype(
+                        corrected, x.dtype
+                    ).to(original.dtype).float()
+                    scores.append(_metrics(target - actual))
+                if all(
+                    all(torch.isfinite(torch.tensor(v)) for v in score.values())
+                    for score in scores
+                ):
+                    objective_sweep[str(candidate_rank)]["scores"] = scores
+                    if candidate_rank == 8:
+                        solver_modes[objective] = solver_mode
+                        a = torch.zeros((layer.in_features, 8), dtype=torch.float64)
+                        b = torch.zeros((8, layer.out_features), dtype=torch.float64)
+                        a[:, :effective_rank] = a64
+                        b[:effective_rank] = b64
+                        a = a.to(device=layer.trellis.device, dtype=torch.float16)
+                        b = b.to(device=layer.trellis.device, dtype=torch.float16)
+                        candidates.append((objective, a, b, scores))
+            rank_sweep[objective] = objective_sweep
         baseline = [_metrics(r) for r in residual]
         eligible = [
             c
@@ -770,6 +891,8 @@ def fit_rank8(
             "lstsq_rcond": 1e-5,
             "max_solver_bytes": max_solver_bytes,
             "solver_modes": solver_modes,
+            "rank_candidates": list(rank_candidates),
+            "rank_sweep": rank_sweep,
             "fit_device": str(layer.trellis.device),
             "activation_dtype": str(train_inputs.dtype),
             "fit_output_boundary": "original_activation_dtype",

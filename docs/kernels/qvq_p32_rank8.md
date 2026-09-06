@@ -63,6 +63,13 @@ outside the contract. The result establishes broad fitting provenance only;
 propagated perplexity, task accuracy, multi-device performance, and promotion
 gates remain separate validations.
 
+Quantization jobs may request `rank_candidates=(2, 4, 6, 8, 12)` on
+`fit_rank8`. The report then records the same predictable-residual solver,
+serialized-FP16 output scores, effective rank and solver mode for every
+candidate under both fitting objectives. Only the rank-8 candidate is attached
+to the current deployment buffers; lower or higher ranks are comparison data
+until the runtime kernel ABI and graph scorecard support their shapes.
+
 The ordinary checkpoint remains canonical planar P32 with optional rank-8
 buffers; old checkpoints require no additional storage. The explicit unified
 window exporter stores window words instead of planar words (never both),
