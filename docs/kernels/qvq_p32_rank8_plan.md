@@ -61,3 +61,10 @@ remains a separate projection launch, not concurrent recovery within WGMMA.
 executed HMMA/resource audit and expanded 126-candidate tuning run. Synthetic
 M8192 correction overhead is 0.6% for the measured K=N=2048 W3 fixture, while
 M2048 remains 7.4%; this does not close the full-model promotion gate.
+
+Real first-layer Q/gate fitting and a separate four-document audit are now
+recorded in `results/p32_rank8_llama_first_layer.json`. Aggregate teacher MSE
+improves 11.16%/5.23%; individual maximum-error regressions remain visible.
+Real-factor/activation M8192 timing gives 0.61% overhead for square Q and
+5.73% for wide gate. These results advance module evidence only; whole-model
+quality and the broad performance/promotion requirements remain open.

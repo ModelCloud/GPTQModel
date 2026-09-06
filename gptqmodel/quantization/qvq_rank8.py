@@ -445,8 +445,8 @@ def fit_rank8(
             for x in (train_inputs, heldout_inputs)
         ]
         base = [
-            layer.forward_pretransformed(x, output_dtype=torch.float32)
-            for x in transformed
+            layer.forward_pretransformed(x, output_dtype=original.dtype).float()
+            for x, original in zip(transformed, (train_inputs, heldout_inputs))
         ]
         targets = [teacher(x).float() for x in (train_inputs, heldout_inputs)]
         if any(
@@ -486,13 +486,13 @@ def fit_rank8(
             if not torch.isfinite(a).all() or not torch.isfinite(b).all():
                 continue
             scores = []
-            for x, target in zip(transformed, targets):
+            for x, target, original in zip(transformed, targets, (train_inputs, heldout_inputs)):
                 inner = layer._inner_forward(x)
                 hidden = (x.float() @ a.float()).half()
                 corrected = inner.float() + hidden.float() @ b.float()
                 # Invoke the deployed output transform rather than estimating
                 # its rounding from the mathematical inverse used above.
-                actual = layer._recover_output_compute_dtype(corrected, x.dtype)
+                actual = layer._recover_output_compute_dtype(corrected, x.dtype).to(original.dtype).float()
                 scores.append(_metrics(target - actual))
             if all(
                 all(torch.isfinite(torch.tensor(v)) for v in score.values())
@@ -534,6 +534,7 @@ def fit_rank8(
             "lstsq_rcond": 1e-5,
             "fit_device": str(layer.trellis.device),
             "activation_dtype": str(train_inputs.dtype),
+            "fit_output_boundary": "original_activation_dtype",
             "torch_version": str(torch.__version__),
             "objective": None if selected is None else selected[0],
         }

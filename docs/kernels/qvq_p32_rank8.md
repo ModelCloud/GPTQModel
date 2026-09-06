@@ -422,4 +422,52 @@ The focused capture/checkpoint/lifecycle regression passes 75 tests. A separate
 [real Llama capture record](results/p32_rank8_llama_capture.json) contains
 first-layer Q/gate activation and teacher hashes for four distinct calibration
 documents on H200, with 64 training and 64 held-out rows per module. It proves
-capture execution only; real-model fitting and quality evaluation remain open.
+capture execution only; the fitting audit below supplies separate evidence.
+
+## First real module fits and audit
+
+`scripts/evaluate_qvq_window_rank8.py` now fits selected modules of an existing
+P32 checkpoint against its original dense teacher. Its initial document policy
+uses eight calibration documents for fitting, four for candidate selection,
+and four additional audit documents; documents are capped at 512 tokens with
+64 evenly spaced activation rows retained each. IDs and token-content overlap
+are checked across the folds. It saves fitted unified packages, captured
+activations, hashes, candidate scores, and per-document audit errors. Fitting
+now explicitly scores the deployed final output dtype, including its final
+conversion, rather than requesting an FP32 final output for half activations.
+
+The [first-layer Llama result](results/p32_rank8_llama_first_layer.json) uses
+the F6 P32 checkpoint and original Llama-3.2-1B-Instruct teacher on H200.
+Both modules selected output-aware L2 over the tail-weighted candidate:
+
+| Module | K × N / rate | Audit MSE improvement | Window BPW | With rank8 BPW | Serialized package bytes |
+|---|---|---:|---:|---:|---:|
+| layer 0 Q | 2048 × 2048 / W2 | 11.16% | 2.0635 | 2.1885 | 1,153,629 |
+| layer 0 gate | 2048 × 8192 / W3 | 5.23% | 3.0510 | 3.1292 | 6,568,499 |
+
+MSE, MAE and p99 error improved on each audit document. Maximum teacher error
+increased on one Q document and two gate documents. These are four-document
+module results, not evidence of full-model non-regression or task gains.
+No evaluation benchmark entered fitting or candidate selection.
+
+`benchmark_qvq_window_rank8.py --package PACKAGE --activation-file CAPTURE`
+can replay the saved `audit_1`/`audit_2` activation matrices cyclically to the
+requested M. It records the source file hash and expansion policy; this is
+complete-operator timing, not a full-model prefill measurement. With BM128/BN128,
+padded Tensor Core projection and the fused output epilogue:
+
+| Module | M | Off (us) | On (us) | Marginal correction |
+|---|---:|---:|---:|---:|
+| Q | 2048 | 220.512 | 237.038 | 7.49% |
+| Q | 8192 | 849.207 | 854.370 | 0.61% |
+| gate | 2048 | 626.542 | 679.112 | 8.39% |
+| gate | 8192 | 2408.204 | 2546.246 | 5.73% |
+
+Both real-factor/activation cases pass the unchanged local kernel gates and
+eager/graph equality. Maximum implementation drift is 0.00390625 for Q and
+0.0009765625 for gate. The gate result exceeds the desired fused recovery
+overhead target and reinforces the need for shape-specific tuning and further
+epilogue/producer fusion. The factor packages and activation captures are
+archived under `/root/qvq-results/window-rank8-first-layer-h200`, with hashes
+in the result record. Full-model propagation, more documents/layers, C4,
+ARC/GSM8K, H100 and TP validation remain pending.

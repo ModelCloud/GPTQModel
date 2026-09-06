@@ -435,6 +435,22 @@ def test_hopper_grouped_rank8_independent_flags(roles, m, recovery_kernel, proje
             assert torch.equal(output, reference)
 
 
+def test_fit_scores_the_deployed_final_output_dtype():
+    from gptqmodel.quantization.qvq_rank8 import _metrics
+
+    layer, teacher, train, heldout = fixture(hadamard=False)
+    teacher = teacher.half()
+    train, heldout = train.half(), heldout.half()
+    with torch.no_grad():
+        expected = [_metrics(teacher(x).float() - layer(x).float()) for x in (train, heldout)]
+    report = fit_rank8(
+        layer, teacher, train, heldout,
+        train_document_ids=("train",), heldout_document_ids=("heldout",),
+    )
+    assert report["baseline"] == expected
+    assert report["fit_output_boundary"] == "original_activation_dtype"
+
+
 def test_quantize_fit_export_is_one_module_job(tmp_path):
     from gptqmodel.quantization.qvq import quantize_qvq_linear
     from gptqmodel.quantization.qvq_rank8 import Rank8Calibration, save_window_package

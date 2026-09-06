@@ -41,12 +41,16 @@ def main():
     parser.add_argument("--autotune", action="store_true")
     parser.add_argument("--tuning-cache", type=Path)
     parser.add_argument("--package", type=Path)
+    parser.add_argument("--activation-file", type=Path,
+                        help="Replay audit_1/audit_2 matrices saved by evaluate_qvq_window_rank8.py")
     parser.add_argument("--profile", choices=["off", "on"])
     parser.add_argument("--profile-repeats", type=int, default=200)
     parser.add_argument("--samples", type=int, default=30)
     parser.add_argument("--replays", type=int, default=20)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.activation_file and not args.package:
+        parser.error("--activation-file requires --package")
     if (
         min(args.k, args.n, *args.m, args.samples, args.replays, args.profile_repeats)
         <= 0
@@ -135,7 +139,10 @@ def main():
         "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu",
     ]
     report = {
-        "scope": "synthetic kernel/performance, not model quality",
+        "scope": (
+            "real fitted module, cyclic replay of captured activations; not full-model prefill or quality"
+            if args.activation_file else "synthetic kernel/performance, not model quality"
+        ),
         "revision": subprocess.check_output(
             ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
         ).strip(),
@@ -162,6 +169,22 @@ def main():
         "rows": [],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    activation_cases = None
+    if args.activation_file:
+        saved = torch.load(args.activation_file, weights_only=True, map_location="cpu")
+        activation_cases = [saved[key] for key in ("audit_1", "audit_2")]
+        if any(
+            x.ndim != 2 or x.shape[0] == 0 or x.shape[1] != layer.in_features
+            or x.dtype != torch.float16 or not torch.isfinite(x).all()
+            for x in activation_cases
+        ):
+            raise ValueError("benchmark audit activations must be finite FP16 [rows,K] matrices")
+        report["activation_source"] = {
+            "path": str(args.activation_file),
+            "sha256": hashlib.sha256(args.activation_file.read_bytes()).hexdigest(),
+            "rows": [x.shape[0] for x in activation_cases],
+            "expansion": "cyclic row replay to requested M; not a full-model prefill",
+        }
 
     def sample_candidate(fn, activation):
         for _ in range(3):
@@ -192,8 +215,13 @@ def main():
         flush=True,
     )
     for m in args.m:
-        x = torch.randn(m, layer.in_features, device="cuda", dtype=torch.float16) * 0.02
-        validation_x = torch.randn_like(x) * 0.02 if args.autotune else None
+        if activation_cases is None:
+            x = torch.randn(m, layer.in_features, device="cuda", dtype=torch.float16) * 0.02
+            validation_x = torch.randn_like(x) * 0.02 if args.autotune else None
+        else:
+            x, validation_x = [
+                rows[torch.arange(m) % rows.shape[0]].contiguous().cuda() for rows in activation_cases
+            ]
         for mode in ("off", "on"):
             prepare_rank8(
                 layer, P32WindowConfig(algorithm=args.algorithm, recovery_mode=mode)
