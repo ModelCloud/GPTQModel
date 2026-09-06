@@ -216,6 +216,29 @@ MIO pressure. Its measured runtime still does not approach 3×. Raw JSON,
 CSV, and profiler logs are in [wave 35 results](results/bm64bn32-resident-frontier-wave35/)
 and [wave 36 results](results/bm64bn32-resident-ncu-wave36/).
 
+## BM128 cross-row reuse wave 37
+
+Wave 37 tested `BM128/BN32`, four warps, two stages, standard exact window
+payloads, across eight projections and all nine row counts. This is a
+cross-row reuse ceiling test: the decoder and weight tile are shared by twice
+as many activation rows per CTA, while the P32 bits, state transitions,
+codebook, transforms, and FP32 accumulation remain unchanged. All 72/72 cases
+passed both local gates and no decoded output differed from the production
+window beyond the recorded FP16 boundary.
+
+The pooled fused full-layer speedup versus production window was:
+
+| M | 1 | 2 | 4 | 8 | 16 | 32 | 128 | 512 | 2048 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| BM128/BN32 | 0.974× | 0.960× | 0.949× | 0.977× | 0.949× | 0.943× | 0.911× | 1.220× | 1.398× |
+
+The best individual M=2048 result was 1.43× on layer-0 down projection, but
+the pooled result is below the existing BM64/BN32 scalar arm. BM128 therefore
+does not provide the required 3× path: larger row tiles improve amortization
+at high M, but the larger accumulator and CTA footprint impose enough layout
+and scheduling cost to erase the gain. The complete per-projection JSON and
+logs are in [wave 37 results](results/bm128-wave37/).
+
 ## Decision and next target
 
 The current exact dispatch remains production window for M < 512 and the

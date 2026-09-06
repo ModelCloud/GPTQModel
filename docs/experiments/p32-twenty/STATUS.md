@@ -147,4 +147,7 @@ strongest representative M=2048 projection. Wave36 reports 56 registers,
 51.6% achieved occupancy, 12.19B integer instructions, 19.5% barrier stalls,
 and 14.2% MIO stalls across eight profiled projections. Resident staging is
 therefore rejected as the 3x path; transform fusion and cross-row reuse are
-still required.
+still required. BM128 cross-row reuse wave37 then passed 72/72 local cases but
+reached only 1.398x pooled M=2048 layer speedup and was slower below M=512.
+The current exact large-prefill candidate remains BM64/BN32; BM128 is retained
+as a measured reuse ceiling, not a dispatcher replacement.
