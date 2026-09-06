@@ -39,6 +39,9 @@ table, bank selector validation and core GEMV/v4/Hadamard handles to be ready
 before a graph is created. Host-validated CUDA Viterbi/telemetry helpers reject
 capture explicitly. The ROCm YAQA trusted recurrence now applies the same
 guard; its prepared internal graph remains the supported repeated path.
+The native/ZML prepared-graph registry now detaches duplicate and LRU entries
+under the map lock but performs CUDA graph destruction after unlock while the
+entry lock is held, so teardown cannot serialize unrelated replay lanes.
 Quantization kernel integrations now fail closed at the YAQA Sketch-B
 collection and Gram-materialization boundary as well as at the underlying
 CUDA projection/Viterbi helpers; quantization is preparation work and must
