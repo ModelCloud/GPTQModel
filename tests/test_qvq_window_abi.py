@@ -100,3 +100,91 @@ def test_native_disabled_pointers_and_external_capture_rejection(monkeypatch):
 @pytest.mark.parametrize("bm,bn", [(0, 0), (128, 128)])
 def test_native_abi_maximum_m(bm, bn):
     test_native_abi_matches_existing_full_operator(8192, 256, 3, True, bm, bn)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("bm,bn", [(0, 0), (32, 64), (32, 128), (64, 64), (64, 128), (128, 64), (128, 128)])
+@pytest.mark.parametrize("n,bits", [(256, 2), (256, 2.5), (2048, 3), (2048, 3.5)])
+@pytest.mark.parametrize("m", [1, 33, 128])
+def test_native_prepared_graph_owns_workspace_and_composes(monkeypatch, enabled, bm, bn, n, bits, m):
+    from test_qvq_grouped_runtime import _child
+    from test_qvq_window_recovery import _kernel_rank8
+
+    layer = _child("q_proj", in_features=2048, out_features=n, bits=bits, device="cuda").eval()
+    if enabled:
+        _kernel_rank8(layer)
+    config = P32WindowConfig(
+        algorithm="hopper_direct_decode_mma" if bm else "hopper_m16",
+        block_m=bm, block_n=bn, recovery_mode="on" if enabled else "off",
+    )
+    x = torch.randn(m, 2048, device="cuda", dtype=torch.float16) * 0.01
+    library = native_window_library()
+    original = library.qvq_p32_window_linear
+    recorded = []
+
+    def record(*args):
+        recorded[:] = args
+        return original(*args)
+
+    monkeypatch.setattr(library, "qvq_p32_window_linear", record)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        output = native_window_linear(layer, x, config)
+    buffers = (WindowBuffer * 10)(*recorded[:10])
+    if not enabled:
+        buffers[7] = WindowBuffer(1, 2**63)
+        buffers[8] = WindowBuffer(2, 2**63)
+    handle = ctypes.c_void_p()
+    error = ctypes.create_string_buffer(4096)
+    status = library.qvq_p32_window_graph_create(
+        buffers, recorded[10], stream.cuda_stream, ctypes.byref(handle), error, len(error),
+    )
+    assert status == 0, error.value
+    parent = None
+    try:
+        # Buffer values change, addresses stay fixed. Warmup contents must not
+        # be baked into the graph, and unrelated allocator pressure cannot
+        # reclaim its private intermediate buffers.
+        with torch.cuda.stream(stream), torch.no_grad():
+            x.mul_(2)
+            expected = layer(x)
+            status = library.qvq_p32_window_graph_run(handle, stream.cuda_stream, error, len(error))
+            assert status == 0, error.value
+        stream.synchronize()
+        torch.testing.assert_close(output, expected, atol=0, rtol=0)
+        other = torch.cuda.Stream()
+        assert library.qvq_p32_window_graph_run(handle, other.cuda_stream, error, len(error)) != 0
+        assert b"owning stream" in error.value
+        parent = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(parent, stream=stream):
+            if bm == 0 and m == 1:
+                pending = ctypes.c_void_p(1)
+                rejected = library.qvq_p32_window_graph_create(
+                    buffers, recorded[10], stream.cuda_stream, ctypes.byref(pending), error, len(error),
+                )
+                assert rejected != 0 and pending.value is None
+                assert b"outside capture" in error.value
+                rejected = library.qvq_p32_window_graph_destroy(handle, error, len(error))
+                assert rejected != 0 and b"during capture" in error.value
+            x.mul_(0.5)
+            status = library.qvq_p32_window_graph_run(handle, stream.cuda_stream, error, len(error))
+            after = output + 1
+        assert status == 0, error.value
+        for _ in range(3):
+            with torch.cuda.stream(stream), torch.no_grad():
+                noise = torch.empty(1024 * 1024, device="cuda")
+                noise.fill_(float("nan"))
+                del noise
+                torch.cuda.empty_cache()
+                expected = layer(x * 0.5)
+                parent.replay()
+            stream.synchronize()
+            torch.testing.assert_close(output, expected, atol=0, rtol=0)
+            torch.testing.assert_close(after, expected + 1, atol=0, rtol=0)
+    finally:
+        if parent is not None:
+            stream.synchronize()
+            parent.reset()
+        status = library.qvq_p32_window_graph_destroy(handle, error, len(error))
+        assert status == 0, error.value

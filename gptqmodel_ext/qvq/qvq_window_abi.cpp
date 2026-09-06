@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "qvq_window_abi.h"
 #include <ATen/ATen.h>
+#include <ATen/cuda/CUDAGraph.h>
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAException.h>
@@ -9,8 +10,11 @@
 #include <algorithm>
 #include <cstdio>
 #include <stdexcept>
+#include <memory>
+#include <mutex>
 
 namespace {
+thread_local bool owned_capture = false;
 void check(bool condition, const char* message) {
   if (!condition) throw std::invalid_argument(message);
 }
@@ -76,7 +80,7 @@ extern "C" int qvq_p32_window_linear(
         static_cast<cudaStream_t>(cuda_stream), device));
     cudaStreamCaptureStatus capture;
     C10_CUDA_CHECK(cudaStreamIsCapturing(static_cast<cudaStream_t>(cuda_stream), &capture));
-    check(capture == cudaStreamCaptureStatusNone,
+    check(capture == cudaStreamCaptureStatusNone || owned_capture,
           "native reference ABI does not own external CUDA capture workspace");
     cudaDeviceProp properties{};
     C10_CUDA_CHECK(cudaGetDeviceProperties(&properties, device));
@@ -156,6 +160,125 @@ extern "C" int qvq_p32_window_linear(
     if (error && error_capacity) std::snprintf(error, error_capacity, "unknown native window failure");
     return 2;
   }
+}
+
+namespace {
+struct PreparedWindow {
+  at::cuda::CUDAGraph graph{true};
+  cudaStream_t stream;
+  int device;
+  std::mutex mutex;
+};
+template <typename Function>
+int graph_boundary(Function&& function, char* error, uint64_t capacity) {
+  try {
+    function();
+    if (error && capacity) error[0] = '\0';
+    return 0;
+  } catch (const std::exception& exception) {
+    if (error && capacity) std::snprintf(error, capacity, "%s", exception.what());
+    return 1;
+  } catch (...) {
+    if (error && capacity) std::snprintf(error, capacity, "unknown native window graph failure");
+    return 2;
+  }
+}
+} // namespace
+
+extern "C" int qvq_p32_window_graph_create(
+    const QvqWindowBuffer* buffers, const QvqP32WindowConfig* config,
+    void* cuda_stream, void** handle, char* error, uint64_t error_capacity) {
+  return graph_boundary([&] {
+    check(handle, "native graph handle output is null");
+    *handle = nullptr;
+    check(buffers && cuda_stream, "native graph requires buffers and a non-default stream");
+    auto stream = static_cast<cudaStream_t>(cuda_stream);
+    cudaStreamCaptureStatus capture;
+    C10_CUDA_CHECK(cudaStreamIsCapturing(stream, &capture));
+    check(capture == cudaStreamCaptureStatusNone, "prepare the native graph outside capture");
+    auto invoke_linear = [&] {
+      char message[4096]{};
+      const int status = qvq_p32_window_linear(
+          buffers[0], buffers[1], buffers[2], buffers[3], buffers[4],
+          buffers[5], buffers[6], buffers[7], buffers[8], buffers[9],
+          config, cuda_stream, message, sizeof(message));
+      if (status) throw std::runtime_error(message);
+    };
+    // Validation and lazy library initialization finish before capture begins.
+    for (int i = 0; i < 3; ++i) invoke_linear();
+    C10_CUDA_CHECK(cudaStreamSynchronize(stream));
+    cudaPointerAttributes attributes{};
+    C10_CUDA_CHECK(cudaPointerGetAttributes(&attributes, buffers[0].data));
+    c10::cuda::CUDAStreamGuard guard(c10::cuda::getStreamFromExternal(stream, attributes.device));
+    auto prepared = std::make_unique<PreparedWindow>();
+    prepared->stream = stream;
+    prepared->device = attributes.device;
+    prepared->graph.capture_begin();
+    try {
+      owned_capture = true;
+      invoke_linear();
+      owned_capture = false;
+      prepared->graph.capture_end();
+    } catch (...) {
+      owned_capture = false;
+      // End the CUDA stream capture as well as releasing allocator routing.
+      // reset() alone must not leave the caller's stream inside capture.
+      cudaStreamCaptureStatus failed_capture;
+      if (cudaStreamIsCapturing(stream, &failed_capture) == cudaSuccess
+          && failed_capture != cudaStreamCaptureStatusNone) {
+        try { prepared->graph.capture_end(); } catch (...) {}
+      }
+      prepared->graph.reset();
+      throw;
+    }
+    prepared->graph.instantiate();
+    *handle = prepared.release();
+  }, error, error_capacity);
+}
+
+extern "C" int qvq_p32_window_graph_run(
+    void* handle, void* cuda_stream, char* error, uint64_t error_capacity) {
+  return graph_boundary([&] {
+    check(handle, "native graph handle is null");
+    auto& prepared = *static_cast<PreparedWindow*>(handle);
+    std::lock_guard<std::mutex> lock(prepared.mutex);
+    auto stream = static_cast<cudaStream_t>(cuda_stream);
+    check(stream == prepared.stream, "native graph must run on its owning stream");
+    c10::cuda::CUDAStreamGuard guard(c10::cuda::getStreamFromExternal(stream, prepared.device));
+    cudaStreamCaptureStatus capture;
+    cudaGraph_t parent = nullptr;
+    const cudaGraphNode_t* dependencies = nullptr;
+    const cudaGraphEdgeData* edge_data = nullptr;
+    size_t count = 0;
+    C10_CUDA_CHECK(cudaStreamGetCaptureInfo(
+        stream, &capture, nullptr, &parent, &dependencies, &edge_data, &count));
+    check(capture != cudaStreamCaptureStatusInvalidated, "enclosing CUDA capture is invalidated");
+    if (capture == cudaStreamCaptureStatusNone) {
+      prepared.graph.replay();
+    } else {
+      cudaGraphNode_t child;
+      cudaGraphNodeParams params{};
+      params.type = cudaGraphNodeTypeGraph;
+      params.graph.graph = prepared.graph.raw_cuda_graph();
+      C10_CUDA_CHECK(cudaGraphAddNode(&child, parent, dependencies, edge_data, count, &params));
+      C10_CUDA_CHECK(cudaStreamUpdateCaptureDependencies(
+          stream, &child, nullptr, 1, cudaStreamSetCaptureDependencies));
+    }
+  }, error, error_capacity);
+}
+
+extern "C" int qvq_p32_window_graph_destroy(
+    void* handle, char* error, uint64_t error_capacity) {
+  return graph_boundary([&] {
+    if (!handle) return;
+    auto* prepared = static_cast<PreparedWindow*>(handle);
+    c10::cuda::CUDAStreamGuard guard(c10::cuda::getStreamFromExternal(prepared->stream, prepared->device));
+    cudaStreamCaptureStatus capture;
+    C10_CUDA_CHECK(cudaStreamIsCapturing(prepared->stream, &capture));
+    check(capture == cudaStreamCaptureStatusNone, "cannot destroy native graph during capture");
+    C10_CUDA_CHECK(cudaStreamSynchronize(prepared->stream));
+    delete prepared;
+  }, error, error_capacity);
 }
 TORCH_LIBRARY(gptqmodel_qvq_window_abi, m) {
   m.def("version() -> int", []() -> int64_t { return 3; });

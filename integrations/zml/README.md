@@ -36,6 +36,30 @@ call semantics. External capture workspace ownership, native grouped consumers,
 fused rank8 implementations, broader shapes and TP lowering remain open. This
 bridge is not promoted as a performance improvement.
 
+### Prepared native graphs
+
+The native library also exposes `qvq_p32_window_graph_create`,
+`qvq_p32_window_graph_run` and `qvq_p32_window_graph_destroy`. Creation takes
+the ten linear buffers in argument order and a fixed config, warms the same
+operator, then captures it into a retained ATen private pool. Preparation
+requires a non-default stream outside capture and synchronizes that stream.
+Run either replays the prepared graph or inserts a child graph into an active
+capture, preserving incoming dependencies and subsequent stream work.
+
+The caller retains all input/output/artifact buffers at their original addresses
+and keeps artifact values immutable. Keep the owning CUDA stream and loaded
+operator libraries alive until handle destruction. Input contents may change between requests.
+Use one handle per execution lane; submit on its owning stream. Enclosing
+graphs must also replay on that stream, and must be destroyed before releasing
+the handle. Destroy waits for stream work before releasing the private pool.
+This is an explicit low-level ownership contract; arbitrary external pointer
+mutation or overlapping use is not automatically tracked by the C ABI.
+
+The Zig adapter still uses the ordinary reference entry and keeps
+`command_buffer_compatible=false`. Connecting prepared-handle ownership to the
+ZML executable lifecycle remains required before enabling external command
+buffers there. A native child-graph test is not proof of ZML capture safety.
+
 ## Build and verify
 
 Tested against ZML `567434be798db31ad888c586293eecedff10b526`, Zig 0.16,

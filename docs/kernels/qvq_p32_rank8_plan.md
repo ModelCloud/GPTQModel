@@ -25,6 +25,40 @@ SKU comparison and multi-GPU TP performance cannot be claimed from it. That
 limits those validation rows; it does not block the remaining implementation,
 local tests, real-model single-GPU fitting, or H200 performance work.
 
+Graph safety is now an explicit requirement for all QvQ kernel code and all
+kernel-library integrations, not only the rank8 branch. The QvQ and zml-ultra
+agent guides route these changes through `graph-safe-kernels`. Completion must
+cover preparation, allocation/pool ownership, non-default streams, grouped child
+lifetimes, mode/shape invalidation, repeated replay, native FFI and actual ZML
+command buffers. Existing Python and native graph tests prove only their tested
+paths. Ampere/ROCm providers, quantization kernel integrations, TP/KV execution,
+and remaining capture-sensitive lazy paths still require an explicit audit.
+
+The native prepared-graph API now owns its temporary allocation pool and can
+insert the existing window/rank8 operator as a child of an enclosing CUDA
+capture. The caller retains fixed artifact/input/output addresses and owns one
+execution lane. This advances external capture support; integration of that
+handle into the ZML executable lifetime remains open, so its FFI compatibility
+flag remains false.
+
+The prepared native graph passed 350 focused H200 tests, including 168 graph
+cases across four rates, M1/33/128, M16 and all six BM/BN choices, correction
+off/on, disabled invalid factor pointers, repeated changed inputs, allocator
+pressure and enclosing stream dependencies. The real Q projection remains
+bit-exact. The matched profile retains the same 16 kernels and resources.
+See `results/p32_window_native_graphs.json` for the exact tested scope and
+remaining ownership obligations.
+
+```text
+H200 physical 0, real Q, FP16, M33 K2048 N2048, W2, BM64 BN64, rank8 on
+Native ordinary entry      81.42 us median
+Native prepared graph      66.39 us median
+Enclosing CUDA graph       66.66 us median
+```
+
+These timings include the same full native operator. They are not ZML, model,
+large-M recovery-overhead or additional-fusion measurements.
+
 The explicit `recovery_projection="input_fused"` candidate now publishes the
 exact FP16 transformed activation and up to three child projections from one
 CTA per row. The window consumer still reads that published activation in a

@@ -76,6 +76,16 @@ def native_window_library():
         + [ctypes.POINTER(WindowConfig), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64]
     )
     library.qvq_p32_window_linear.restype = ctypes.c_int
+    library.qvq_p32_window_graph_create.argtypes = [
+        ctypes.POINTER(WindowBuffer), ctypes.POINTER(WindowConfig), ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_uint64,
+    ]
+    library.qvq_p32_window_graph_run.argtypes = [
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64,
+    ]
+    library.qvq_p32_window_graph_destroy.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64]
+    for name in ("create", "run", "destroy"):
+        getattr(library, "qvq_p32_window_graph_" + name).restype = ctypes.c_int
     return library
 
 
