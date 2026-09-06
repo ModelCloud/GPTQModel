@@ -332,6 +332,8 @@ class ParoQuantProcessor(LoopProcessor):
             if entry is None:
                 entry = {"inputs": []}
                 self.tasks[module_name] = entry
+            batch_index = self.current_batch_index()
+            entry.setdefault("input_batch_indices", []).append(batch_index)
             entry.setdefault("inputs", []).append(feature)
 
     def _ensure_task_bucket(self, module_name: str, layer_index: int) -> None:
@@ -352,12 +354,16 @@ class ParoQuantProcessor(LoopProcessor):
         for name in list(state.modules):
             entry = self.tasks.get(name) or {}
             tensors: List[torch.Tensor] = entry.get("inputs", [])  # type: ignore[arg-type]
+            indices = entry.get("input_batch_indices", [])
+            if len(indices) == len(tensors) and all(index is not None for index in indices):
+                tensors = [tensor for _, tensor in sorted(zip(indices, tensors), key=lambda item: item[0])]
             if not tensors:
                 features[name] = torch.empty(0)
                 continue
             try:
                 features[name] = torch.cat(tensors, dim=0)
                 entry["inputs"] = [features[name]]
+                entry.pop("input_batch_indices", None)
             except RuntimeError:
                 features[name] = tensors[0]
         return features
@@ -2418,6 +2424,7 @@ class ParoQuantProcessor(LoopProcessor):
                 entry = self.tasks.get(module_name)
                 if entry is not None and entry.get("layer_index") == layer_index:
                     entry["inputs"] = []
+                    entry.pop("input_batch_indices", None)
         state.modules.clear()
         state.pending_modules.clear()
         state.processed_subsets.clear()
