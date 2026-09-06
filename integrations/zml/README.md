@@ -92,6 +92,9 @@ From QvQ, create the native libraries and a disposable correctness fixture from
 an already-bound real window package and its disjoint captured audit activations:
 
 ```bash
+export CUDA_HOME=/usr/local/cuda
+export CUDA_PATH=/usr/local/cuda
+export CUDACXX=/usr/local/cuda/bin/nvcc
 python scripts/verify_qvq_window_abi.py \
   --package /path/to/module.pt \
   --activations /path/to/module.activations.pt \
