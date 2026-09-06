@@ -1063,3 +1063,20 @@ test "native window ABI layout" {
     );
     std.testing.refAllDecls(@This());
 }
+
+test "graph identity includes buffer layout and element dtype" {
+    const left: GraphKey = .{
+        .buffers = @splat(11),
+        .buffer_bytes = @splat(32),
+        .buffer_types = @splat(1),
+        .stream = 7,
+        .config = std.mem.zeroes(Config),
+    };
+    var right = left;
+    try std.testing.expect(GraphKeyContext.eql(.{}, left, right));
+    right.buffer_bytes[0] = 64;
+    try std.testing.expect(!GraphKeyContext.eql(.{}, left, right));
+    right = left;
+    right.buffer_types[0] = 2;
+    try std.testing.expect(!GraphKeyContext.eql(.{}, left, right));
+}
