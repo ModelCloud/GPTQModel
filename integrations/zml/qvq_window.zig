@@ -586,6 +586,18 @@ fn emptyArtifactTensor(io: std.Io, platform: *const zml.Platform) !zml.Buffer {
     return zml.Buffer.fromBytes(io, platform, zml.Shape.init(.{0}, .f16), .replicated, &.{});
 }
 
+fn powerOfTwo(value: u32) bool {
+    return value != 0 and (value & (value - 1)) == 0;
+}
+
+fn nativeWindowShapeSupported(k: u32, n: u32, input_hadamard: bool, output_hadamard: bool) bool {
+    if (k < 2048 or k > 16384 or k % 256 != 0 or
+        n < 256 or n > 17408 or n % 256 != 0)
+        return false;
+    return (!input_hadamard or powerOfTwo(k)) and
+        (!output_hadamard or powerOfTwo(n));
+}
+
 /// Load and validate the unified Python window artifact before device upload.
 /// The loader owns the resulting device buffers; callers must keep the Artifact
 /// alive until every executable and prepared graph using its buffers is gone.
@@ -639,13 +651,14 @@ pub fn loadArtifact(
         .float => |value| if (value == 2.5) 5 else if (value == 3.5) 7 else return error.UnsupportedWindowArtifactRate,
         else => return error.InvalidWindowArtifactManifest,
     };
-    if (options.m == 0 or options.m > 8192 or k == 0 or n == 0)
+    const input_hadamard = if (try artifactBool(try artifactField(metadata, "input_hadamard"))) @as(u32, 1) else 0;
+    const output_hadamard = if (try artifactBool(try artifactField(metadata, "output_hadamard"))) @as(u32, 1) else 0;
+    if (options.m == 0 or options.m > 8192 or
+        !nativeWindowShapeSupported(k, n, input_hadamard != 0, output_hadamard != 0))
         return error.InvalidWindowArtifactShape;
     const tile_count = (k * n) / 256;
     if (k % 16 != 0 or n % 16 != 0 or tile_count == 0)
         return error.InvalidWindowArtifactShape;
-    const input_hadamard = if (try artifactBool(try artifactField(metadata, "input_hadamard"))) @as(u32, 1) else 0;
-    const output_hadamard = if (try artifactBool(try artifactField(metadata, "output_hadamard"))) @as(u32, 1) else 0;
     const bank_alt_entry = try artifactObject(tensors.get("bank_alt_id") orelse return error.InvalidWindowArtifactManifest);
     const bank_alt_file = try artifactString(try artifactField(bank_alt_entry, "file"));
     if (!std.mem.eql(u8, bank_alt_file, "bank_alt_id.bin") or
@@ -1062,6 +1075,14 @@ test "native window ABI layout" {
         benchmarkExecutable(std.testing.allocator, std.testing.io, undefined, undefined, undefined, .{ .iterations = 0 }),
     );
     std.testing.refAllDecls(@This());
+}
+
+test "native window shape policy admits composite transform-free Qwen tiles" {
+    try std.testing.expect(nativeWindowShapeSupported(5120, 17408, false, false));
+    try std.testing.expect(!nativeWindowShapeSupported(5120, 17408, true, false));
+    try std.testing.expect(!nativeWindowShapeSupported(5120, 17408, false, true));
+    try std.testing.expect(nativeWindowShapeSupported(2048, 2048, true, true));
+    try std.testing.expect(!nativeWindowShapeSupported(2048, 17920, false, false));
 }
 
 test "graph identity includes buffer layout and element dtype" {
