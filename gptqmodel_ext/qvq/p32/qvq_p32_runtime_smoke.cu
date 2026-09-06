@@ -22,8 +22,8 @@ bool check_cuda(cudaError_t status, const char* operation) {
 }
 
 bool close_enough(float actual, float expected) {
-  const float tolerance = 2.0e-4f + 2.0e-3f * std::fabs(expected);
-  return std::fabs(actual - expected) <= tolerance;
+  return std::isfinite(actual) && std::isfinite(expected) &&
+      std::fabs(actual - expected) <= 2.0e-3f;
 }
 
 struct DeviceBuffer {
@@ -88,13 +88,16 @@ bool test_grouped_launch_plans() {
   for (int i = 0; i < banks.size(); ++i) banks[i] = (i % 2) ? 0xa5 : 0x5a;
 
   DeviceBuffer x, t, l, b, a, native, recorded, scratch;
+  DeviceBuffer group_t, group_b, independent;
   const size_t bytes = kMaxM * kN * sizeof(float);
   if (!x.allocate(input.size() * sizeof(half)) ||
       !t.allocate(trellis.size() * sizeof(uint32_t)) ||
       !l.allocate(levels.size() * sizeof(half)) ||
       !b.allocate(banks.size()) || !a.allocate(sizeof(alts)) ||
       !native.allocate(bytes) || !recorded.allocate(bytes) ||
-      !scratch.allocate(4 * bytes)) return false;
+      !scratch.allocate(4 * bytes) ||
+      !group_t.allocate(trellis.size() * sizeof(uint32_t)) ||
+      !group_b.allocate(banks.size()) || !independent.allocate(bytes)) return false;
   if (!check_cuda(cudaMemcpy(x.pointer, input.data(), input.size() * sizeof(half), cudaMemcpyHostToDevice), "copy plan input") ||
       !check_cuda(cudaMemcpy(t.pointer, trellis.data(), trellis.size() * sizeof(uint32_t), cudaMemcpyHostToDevice), "copy plan trellis") ||
       !check_cuda(cudaMemcpy(l.pointer, levels.data(), levels.size() * sizeof(half), cudaMemcpyHostToDevice), "copy plan levels") ||
@@ -137,16 +140,34 @@ bool test_grouped_launch_plans() {
     }
     ++rejected;
   }
+  for (int invalid_mode : {0, 3}) {
+    qvq_p32_launch_plan plan;
+    if (qvq_p32_grouped_launch_plan(
+            x.pointer, t.pointer, l.pointer, b.pointer, a.pointer,
+            static_cast<float*>(recorded.pointer), static_cast<float*>(scratch.pointer),
+            1, kK, kN, 4, 4, 2, 1, 2, QVQ_P32_VARIANT_SCALAR, 128, 2,
+            0, invalid_mode, 3, 1, 3, &plan) == 0 ||
+        qvq_p32_grouped_window(
+            x.pointer, t.pointer, l.pointer, b.pointer, a.pointer,
+            static_cast<float*>(recorded.pointer), static_cast<float*>(scratch.pointer),
+            1, kK, kN, 4, 4, 2, 1, 2, QVQ_P32_VARIANT_SCALAR, 128, 2,
+            0, invalid_mode, 3, 1, 3, stream) == 0) {
+      std::fprintf(stderr, "invalid grouped reduction mode %d was accepted\n", invalid_mode);
+      return false;
+    }
+    ++rejected;
+  }
   int cases = 0;
   float max_absolute = 0;
+  float independent_max_absolute = 0;
   for (int bits = 4; bits <= 7; ++bits)
-  for (int m : {1, 2, 3, 4, 5, 8, 15, 16})
+  for (int m = 1; m <= kMaxM; ++m)
   for (int threads : {64, 128, 256})
   for (int stage = 1; stage <= 4; ++stage)
   for (int groups : {2, 3})
-  for (int pattern = 0; pattern < 3; ++pattern) {
-    const int split0 = pattern == 0 ? 1 : 2;
-    const int split1 = pattern == 2 ? 4 : 1;
+  for (int pattern = 0; pattern < 4; ++pattern) {
+    const int split0 = pattern == 0 ? 1 : (pattern == 3 ? 3 : 2);
+    const int split1 = pattern == 2 ? 4 : (pattern == 3 ? 2 : 1);
     const int split2 = pattern == 0 ? 1 : 2;
     const int variant = m <= 4 ? QVQ_P32_VARIANT_SCALAR : QVQ_P32_VARIANT_BLOCK;
     const int end1 = groups == 2 ? kN / 16 : 3;
@@ -182,16 +203,118 @@ bool test_grouped_launch_plans() {
         return false;
       }
     }
+    // Independently pack and execute each group through the standard ABI.
+    // Native/descriptor equality alone cannot detect a shared layout defect.
+    const int splits[] = {split0, split1, split2};
+    const int ends[] = {16, end1 * 16, kN};
+    int group_begin = 0;
+    for (int group = 0; group < groups; ++group) {
+      const int width = ends[group] - group_begin;
+      const int group_tiles = width / 16;
+      std::vector<uint32_t> group_words((kK / 16) * group_tiles * 4 * bits);
+      std::vector<uint8_t> group_banks((kK / 16) * group_tiles);
+      for (int kt = 0; kt < kK / 16; ++kt)
+      for (int nt = 0; nt < group_tiles; ++nt) {
+        const int source_tile = kt * (kN / 16) + group_begin / 16 + nt;
+        const int target_tile = kt * group_tiles + nt;
+        std::copy_n(trellis.data() + source_tile * 4 * bits, 4 * bits,
+                    group_words.data() + target_tile * 4 * bits);
+        group_banks[target_tile] = banks[source_tile];
+      }
+      if (!check_cuda(cudaMemcpyAsync(group_t.pointer, group_words.data(), group_words.size() * sizeof(uint32_t), cudaMemcpyHostToDevice, stream), "copy independent trellis") ||
+          !check_cuda(cudaMemcpyAsync(group_b.pointer, group_banks.data(), group_banks.size(), cudaMemcpyHostToDevice, stream), "copy independent banks") ||
+          qvq_p32_window(
+              x.pointer, group_t.pointer, l.pointer, group_b.pointer,
+              static_cast<const uint8_t*>(a.pointer) + group,
+              static_cast<float*>(independent.pointer), static_cast<float*>(scratch.pointer),
+              m, kK, width, bits, splits[group], variant, threads, stage, 0,
+              QVQ_P32_REDUCTION_NATIVE, stream) != 0 ||
+          !check_cuda(cudaMemcpyAsync(actual.data(), independent.pointer, m * width * sizeof(float), cudaMemcpyDeviceToHost, stream), "copy independent reference") ||
+          !check_cuda(cudaStreamSynchronize(stream), "synchronize independent reference")) return false;
+      for (int row = 0; row < m; ++row)
+      for (int col = 0; col < width; ++col) {
+        const float value = actual[row * width + col];
+        const float error = std::fabs(value - expected[row * kN + group_begin + col]);
+        independent_max_absolute = std::max(independent_max_absolute, error);
+        if (!std::isfinite(value) || error > 2.0e-3f) {
+          std::fprintf(stderr, "independent grouped mismatch M=%d bits=%d threads=%d stage=%d groups=%d pattern=%d group=%d row=%d col=%d drift=%g\n",
+                       m, bits, threads, stage, groups, pattern, group, row, col, error);
+          return false;
+        }
+      }
+      group_begin = ends[group];
+    }
+    // Poison both destinations: split groups must not write final output,
+    // and only packed split-group partials may be consumed by the caller.
+    std::vector<float> partials(4 * m * kN);
+    for (bool recorded_path : {false, true}) {
+      if (!check_cuda(cudaMemsetAsync(recorded.pointer, 0xff, m * kN * sizeof(float), stream), "poison direct output") ||
+          !check_cuda(cudaMemsetAsync(scratch.pointer, 0xff, partials.size() * sizeof(float), stream), "poison partial output")) return false;
+      const int partial_status = recorded_path
+          ? qvq_p32_grouped_launch_plan(
+                x.pointer, t.pointer, l.pointer, b.pointer, a.pointer,
+                static_cast<float*>(recorded.pointer), static_cast<float*>(scratch.pointer),
+                m, kK, kN, bits, 4, split0, split1, split2, variant, threads, stage,
+                0, QVQ_P32_REDUCTION_PARTIALS, groups, 1, end1, &plan)
+          : qvq_p32_grouped_window(
+                x.pointer, t.pointer, l.pointer, b.pointer, a.pointer,
+                static_cast<float*>(recorded.pointer), static_cast<float*>(scratch.pointer),
+                m, kK, kN, bits, 4, split0, split1, split2, variant, threads, stage,
+                0, QVQ_P32_REDUCTION_PARTIALS, groups, 1, end1, stream);
+      if (partial_status != 0 ||
+          (recorded_path && (plan.launch_count != 1 || !execute_plan(plan, stream))) ||
+          !check_cuda(cudaMemcpyAsync(actual.data(), recorded.pointer, m * kN * sizeof(float), cudaMemcpyDeviceToHost, stream), "copy direct partial output") ||
+          !check_cuda(cudaMemcpyAsync(partials.data(), scratch.pointer, partials.size() * sizeof(float), cudaMemcpyDeviceToHost, stream), "copy packed partial output") ||
+          !check_cuda(cudaStreamSynchronize(stream), "synchronize partials")) return false;
+      int offset = 0;
+      int begin = 0;
+      for (int group = 0; group < groups; ++group) {
+        const int width = ends[group] - begin;
+        for (int row = 0; row < m; ++row)
+        for (int col = 0; col < width; ++col) {
+          const int index = row * kN + begin + col;
+          float sum = actual[index];
+          if (splits[group] > 1) {
+            if (!std::isnan(sum)) {
+              std::fprintf(stderr, "partial mode wrote split-group final output\n");
+              return false;
+            }
+            sum = 0;
+            for (int split = 0; split < splits[group]; ++split)
+              sum += partials[offset + split * m * width + row * width + col];
+          }
+          const float error = std::fabs(sum - expected[index]);
+          if (!std::isfinite(sum) || error != 0) {
+            std::fprintf(stderr, "grouped partial mismatch M=%d bits=%d threads=%d stage=%d groups=%d pattern=%d recorded=%d index=%d drift=%g\n",
+                         m, bits, threads, stage, groups, pattern, recorded_path, index, error);
+            return false;
+          }
+        }
+        if (splits[group] > 1) offset += splits[group] * m * width;
+        begin = ends[group];
+      }
+      for (int i = offset; i < partials.size(); ++i) {
+        if (!std::isnan(partials[i])) {
+          std::fprintf(stderr, "partial mode wrote outside packed split storage\n");
+          return false;
+        }
+      }
+    }
     ++cases;
   }
-  std::printf("qvq_p32_launch_plans=PASS cases=%d rejected=%d max_absolute=%g K=%d N=%d dtype=f16/f32\n",
+  std::printf("qvq_p32_launch_plans=PASS cases=%d modes=native,partials_dispatch,partials_record rejected=%d max_absolute=%g K=%d N=%d dtype=f16/f32\n",
               cases, rejected, max_absolute, kK, kN);
+  std::printf("qvq_p32_grouped_independent=PASS cases=%d max_absolute=%g limit=0.002\n",
+              cases, independent_max_absolute);
   return true;
 }
 
 }  // namespace
 
-int main() {
+int test_standard_partials(int rows, int transition_bits = 4,
+                           int threads = 128, int stage = 2,
+                           int row_groups = QVQ_P32_ROW_GROUPS_AUTO,
+                           int size_k = 80, int size_n = 16) {
   if (qvq_p32_abi_version() != QVQ_P32_ABI_VERSION ||
       qvq_p32_kernel_version() != QVQ_P32_KERNEL_VERSION ||
       qvq_compiled_sm() != QVQ_P32_COMPILED_SM) {
@@ -206,13 +329,14 @@ int main() {
     return 1;
   }
 
-  constexpr int kM = 1;
-  constexpr int kK = 32;
-  constexpr int kN = 16;
-  constexpr int kTransitionBits = 4;
-  constexpr int kSplitCount = 2;
-  constexpr int kWordsPerTile = 4 * kTransitionBits;
-  constexpr int kTileCount =
+  const int kM = rows;
+  const int kK = size_k;
+  const int kN = size_n;
+  const int kTransitionBits = transition_bits;
+  constexpr int kSplitCount = 3;
+  const int variant = rows <= 4 ? QVQ_P32_VARIANT_SCALAR : QVQ_P32_VARIANT_BLOCK;
+  const int kWordsPerTile = 4 * kTransitionBits;
+  const int kTileCount =
       (kK / QVQ_P32_TILE_SIZE) * (kN / QVQ_P32_TILE_SIZE);
 
   std::vector<half> input(kM * kK);
@@ -227,7 +351,10 @@ int main() {
   for (int index = 0; index < levels.size(); ++index) {
     levels[index] = __float2half((static_cast<float>(index) - 127.5f) / 128.0f);
   }
-  const std::vector<uint8_t> bank_ids = {0xa5u, 0x5au};
+  std::vector<uint8_t> bank_ids(kTileCount);
+  for (int index = 0; index < kTileCount; ++index) {
+    bank_ids[index] = index % 2 == 0 ? 0xa5u : 0x5au;
+  }
   const std::vector<uint8_t> bank_alt_id = {3u};
 
   void* device_input = nullptr;
@@ -291,17 +418,17 @@ int main() {
                 device_input, device_trellis, device_levels, device_bank_ids,
                 device_bank_alt_id, device_native_output,
                 device_native_workspace, kM, kK, kN, kTransitionBits,
-                kSplitCount, QVQ_P32_VARIANT_SCALAR, 128, 2, 0,
+                kSplitCount, variant, threads, stage, 0,
                 QVQ_P32_REDUCTION_NATIVE, 1, stream) != 0) {
     std::fprintf(stderr, "native reduction failed: %s\n", qvq_last_error());
     ok = false;
   }
-  if (ok && qvq_p32_window(
+  if (ok && qvq_p32_window_with_row_groups(
                 device_input, device_trellis, device_levels, device_bank_ids,
                 device_bank_alt_id, device_partials_output,
                 device_partials_workspace, kM, kK, kN, kTransitionBits,
-                kSplitCount, QVQ_P32_VARIANT_SCALAR, 128, 2, 0,
-                QVQ_P32_REDUCTION_PARTIALS, stream) != 0) {
+                kSplitCount, variant, threads, stage, 0,
+                QVQ_P32_REDUCTION_PARTIALS, row_groups, stream) != 0) {
     std::fprintf(stderr, "partials reduction failed: %s\n", qvq_last_error());
     ok = false;
   }
@@ -321,11 +448,15 @@ int main() {
   }
 
   if (ok) {
-    for (int column = 0; column < kN; ++column) {
-      const float expected = partials[column] + partials[kN + column];
+    for (int column = 0; column < kM * kN; ++column) {
+      float expected = partials[column];
+      for (int split = 1; split < kSplitCount; ++split) {
+        expected += partials[split * kM * kN + column];
+      }
       if (!close_enough(native_output[column], expected)) {
         std::fprintf(stderr,
-                     "reduction mismatch at N=%d: native=%g partials=%g\n",
+                     "reduction mismatch M=%d rate=%d threads=%d stage=%d row_groups=%d at element=%d: native=%g partials=%g\n",
+                     kM, transition_bits, threads, stage, row_groups,
                      column, native_output[column], expected);
         ok = false;
         break;
@@ -345,8 +476,35 @@ int main() {
   cudaFree(device_input);
   if (stream != nullptr) cudaStreamDestroy(stream);
 
-  if (!ok || !test_grouped_launch_plans()) return 1;
-  std::printf("qvq_p32_runtime_smoke=PASS sm=%d split=%d reduction=native+partials\n",
-              qvq_device_sm(device), kSplitCount);
+  if (!ok) return 1;
+  std::printf("qvq_p32_standard_partials=PASS sm=%d M=%d K=%d N=%d rate=%d split=%d threads=%d stage=%d row_groups=%d reduction=native+partials\n",
+              qvq_device_sm(device), kM, kK, kN, transition_bits,
+              kSplitCount, threads, stage, row_groups);
   return 0;
+}
+
+int main() {
+  for (int bits : {4, 5, 6, 7}) {
+    for (int stage : {1, 2, 3, 4}) {
+      for (int rows : {1, 17, 31, 32, 64, 128, 256}) {
+        for (int threads : {64, 128, 256}) {
+          if (test_standard_partials(rows, bits, threads, stage) != 0) return 1;
+        }
+        for (int groups : {2, 4, 8}) {
+          if (rows % (16 * groups) != 0 || (groups == 8 && stage == 4)) continue;
+          if (test_standard_partials(rows, bits, 128, stage, groups) != 0) return 1;
+        }
+      }
+    }
+  }
+  // Exercise each restricted row-group-16 stage at a legal Qwen geometry.
+  // These remain synthetic kernel/layout checks, not model-quality evidence.
+  for (int bits : {4, 5, 6, 7}) {
+    for (int stage : {2, 3}) {
+      if (test_standard_partials(1024, bits, 128, stage, 16, 5120, 10240) != 0) return 1;
+    }
+  }
+  if (test_standard_partials(1024, 5, 128, 3, 16, 5120, 1024) != 0) return 1;
+  if (test_standard_partials(4096, 4, 128, 4, 16, 5120, 6144) != 0) return 1;
+  return test_grouped_launch_plans() ? 0 : 1;
 }
