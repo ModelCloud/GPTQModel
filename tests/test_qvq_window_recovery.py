@@ -307,6 +307,7 @@ def test_hopper_explicit_geometry_rank8_matrix(block_m, block_n, bits, m, chunk_
     assert all(c.recovery_mode == "on" for c in candidates)
     assert {c.recovery_projection for c in candidates} == {
         "separate_reference",
+        "concurrent_reference",
         "input_fused",
         "tensor_core",
         "project_output_fused",
@@ -624,7 +625,9 @@ def _kernel_rank8(layer):
 )
 @pytest.mark.parametrize("m", [1, 16, 64, 512])
 @pytest.mark.parametrize("recovery_kernel", ["separate_reference", "fused_epilogue"])
-@pytest.mark.parametrize("projection", ["separate_reference", "input_fused", "tensor_core"])
+@pytest.mark.parametrize(
+    "projection", ["separate_reference", "concurrent_reference", "input_fused", "tensor_core"]
+)
 def test_hopper_rank8_eager_graph(algorithm, m, recovery_kernel, projection):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 required")

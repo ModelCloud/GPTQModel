@@ -109,6 +109,7 @@ class P32WindowConfig:
         if self.recovery_projection not in (
             "separate_reference",
             "input_fused",
+            "concurrent_reference",
             "tensor_core",
             "project_output_fused",
         ):
@@ -373,6 +374,17 @@ def prepare_rank8(layer, config):
         or torch.cuda.get_device_capability(runtime_device) != (9, 0)
     ):
         raise ValueError("rank8 Tensor Core projection requires SM90")
+    if enabled and config.recovery_projection == "concurrent_reference":
+        if (
+            runtime_device.type != "cuda"
+            or torch.cuda.get_device_capability(runtime_device) != (9, 0)
+            or config.recovery_kernel not in ("separate_reference", "fused_epilogue")
+        ):
+            raise ValueError("concurrent rank8 projection requires SM90")
+        # Stream/event allocation is preparation work and must complete before
+        # a caller starts CUDA graph capture.  The actual matrix multiply is
+        # warmed per (caller stream, M, K) on its first eager invocation.
+        layer._rank8_concurrent_resources(runtime_device)
     grouped = getattr(layer, "_gptqmodel_qvq_grouped_runtime", None)
     if grouped is not None:
         if grouped._outputs is not None:
@@ -1722,6 +1734,20 @@ def window_kernel_candidates(layer, *, m):
                 arithmetic_signature="unverified_fused_epilogue",
             )
             for c in tuple(candidates)
+        )
+    if getattr(layer, "_p32_rank8_enabled", False):
+        # This uses the same reference FP32 projection as the separate path;
+        # only its stream placement changes.  It is therefore eligible for
+        # balanced/quality tuning once the caller has prepared the paired
+        # stream/event resources and warmed the exact M/K shape.
+        candidates.extend(
+            replace(
+                c,
+                recovery_projection="concurrent_reference",
+                arithmetic_signature="reference_fp32_v1",
+            )
+            for c in tuple(candidates)
+            if c.recovery_projection == "separate_reference"
         )
     if getattr(layer, "_p32_rank8_enabled", False) and allow_unverified:
         separate_candidates = tuple(candidates)

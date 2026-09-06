@@ -258,6 +258,19 @@ The candidate is graph-safe after shape-specific Triton warming and is marked
  `results/p32_rank8_qproj_h200_project_output_fused.json`; this is an exposed
  experiment, not a claim of universal fusion benefit.
 
+`recovery_projection="concurrent_reference"` is the first shared-producer
+candidate for the full pipeline. It keeps the exact reference FP32 projection
+and FP16 hidden rounding, but schedules that projection on a prepared auxiliary
+CUDA stream while the current stream runs the window decoder. The stream and
+events are created before capture; the exact `(device, M, K)` shape must be
+warmed before capture, and replay contains only captured dependencies. On the
+accepted Q H200 replay, the candidate measured 58.2/302.6/1,106.7 us at
+M128/2048/8192 versus 31.7/214.2/814.6 us with correction disabled. The
+resulting 83.7%/41.3%/35.8% marginal costs show that this naive overlap is
+resource-contended on this shape. It remains exposed to the shape tuner and is
+never a default quality choice; the measurement is recorded in
+`results/p32_rank8_qproj_h200_concurrent_reference.json`.
+
 Post-profile tests: **87 passed,86 skipped**, including output widths through
 16384, per-operation overflow rescue, no-bias/strided outputs, independent
 single/grouped composition, and ten graph replays per case. Skips are mostly
