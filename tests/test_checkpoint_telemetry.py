@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Restore success requires exact bits and placement, not tolerance checks."""
 
+import random
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -10,6 +14,7 @@ from gptqmodel.looper.checkpoint import CheckpointConfig, CheckpointExtension
 from gptqmodel.looper.checkpoint_store import CheckpointError
 from gptqmodel.looper.continuation import ContinuationCodec
 from gptqmodel.looper.extension import LoopExtensions, LoopPlan, LoopStep
+from gptqmodel.looper.gptq_checkpoint import GPTQCheckpointAdapter
 from gptqmodel.utils.device_telemetry import (
     capture_device_telemetry,
     clear_device_telemetry_records,
@@ -172,6 +177,71 @@ def test_failed_publication_never_reports_commit(tmp_path, monkeypatch):
             LoopExtensions([extension]).publish(PLAN.steps[0])
     assert records("checkpoint_capture_begin")
     assert not records("checkpoint_committed")
+
+
+def test_scheduler_mismatch_is_fatal_before_module_restore():
+    adapter = GPTQCheckpointAdapter()
+    adapter.processors = ()
+    adapter.model = SimpleNamespace(quantize_config=None)
+    adapter.execution = SimpleNamespace(
+        load_execution_state_dict=lambda state: None,
+        execution_state_dict=lambda: {
+            "next_device": 0,
+            "module_devices": {"a": "cuda:0"},
+        },
+    )
+    with pytest.raises(CheckpointError, match="execution placement restore mismatch"):
+        adapter.restore(
+            {
+                "version": adapter.VERSION,
+                "specs": {},
+                "processors": [],
+                "execution": {"next_device": 1, "module_devices": {"a": "cuda:1"}},
+            },
+            {},
+        )
+    (event,) = records("checkpoint_execution_restored")
+    assert not event["matched"] and event["expected"] != event["actual"]
+    assert not records("checkpoint_adapter_restored")
+
+
+def test_rng_mismatch_is_fatal_before_success(tmp_path, monkeypatch):
+    adapter = GPTQCheckpointAdapter()
+    adapter.processors = ()
+    adapter.model = SimpleNamespace(quantize_config=None)
+    adapter.execution = SimpleNamespace(
+        load_execution_state_dict=lambda state: None,
+        execution_state_dict=dict,
+    )
+    adapter.processor = SimpleNamespace(
+        lock=threading.Lock(), receive_input_cache=lambda cache: None
+    )
+    adapter.shared_state = {}
+    adapter.offload = tmp_path
+    numpy_state = np.random.get_state()
+    expected_rng = torch.Generator().manual_seed(19463).get_state()
+    if torch.equal(expected_rng, torch.random.get_rng_state()):
+        expected_rng = torch.Generator().manual_seed(19464).get_state()
+    state = {
+        "version": adapter.VERSION,
+        "specs": {},
+        "processors": [],
+        "dense": {},
+        "execution": {},
+        "cache": {},
+        "log": [],
+        "shared_state": {},
+        "rng": expected_rng,
+        "cuda_rng": [],
+        "python_rng": random.getstate(),
+        "numpy_rng": (numpy_state[0], numpy_state[1].tolist(), *numpy_state[2:]),
+    }
+    monkeypatch.setattr(torch.random, "set_rng_state", lambda state: None)
+    with pytest.raises(CheckpointError, match="RNG state restore mismatch"):
+        adapter.restore(state, {})
+    (event,) = records("checkpoint_rng_restored")
+    assert not event["matched"]
+    assert not records("checkpoint_adapter_restored")
 
 
 def test_concurrent_codec_telemetry_keeps_all_events():
