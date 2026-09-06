@@ -1816,9 +1816,33 @@ def window_kernel_candidates(layer, *, m):
         raise ValueError("prepare the module quality policy before enumerating kernels")
     if getattr(layer, "_p32_rank8_enabled", False):
         validate_rank8_state(layer)
+    runtime_device = layer.runtime_device()
+    if runtime_device.type != "cuda":
+        base_algorithm = "production_window"
+        props = None
+    else:
+        props = torch.cuda.get_device_properties(runtime_device)
+        # A window-only artifact has no planar device fallback.  Keep the
+        # baseline candidate on the architecture's graph-safe window consumer
+        # so tuning cannot select ``production_window`` and later hit the
+        # BF16/reference branch during CUDA Graph replay.
+        base_algorithm = "production_window"
+        if (
+            getattr(layer, "window_only", False)
+            and torch.version.hip is None
+            and (props.major, props.minor) == (9, 0)
+            and any(name in props.name for name in ("H100", "H200"))
+        ):
+            base_algorithm = "hopper_m16"
+        elif (
+            getattr(layer, "window_only", False)
+            and torch.version.hip is None
+            and (props.major, props.minor) == (8, 0)
+        ):
+            base_algorithm = "ampere_window"
     policy = replace(
         layer._p32_window_config,
-        algorithm="production_window",
+        algorithm=base_algorithm,
         block_m=0,
         block_n=0,
         warp_groups=0,
@@ -1831,9 +1855,8 @@ def window_kernel_candidates(layer, *, m):
         arithmetic_signature="reference_fp32_v1",
     )
     candidates = [policy]
-    if layer.runtime_device().type != "cuda":
+    if runtime_device.type != "cuda":
         return tuple(candidates)
-    props = torch.cuda.get_device_properties(layer.runtime_device())
     if (
         layer.activation is not None
         or layer.bits not in (2, 2.5, 3, 3.5)
@@ -1892,10 +1915,10 @@ def window_kernel_candidates(layer, *, m):
         or layer.out_features % 256
     ):
         return tuple(candidates)
-    candidates.extend(
-        replace(policy, algorithm=name)
-        for name in ("hopper_m16", "hopper_direct_decode_mma")
-    )
+    hopper_algorithms = ("hopper_m16", "hopper_direct_decode_mma")
+    if base_algorithm == "hopper_m16":
+        hopper_algorithms = ("hopper_direct_decode_mma",)
+    candidates.extend(replace(policy, algorithm=name) for name in hopper_algorithms)
     candidates.extend(
         replace(
             policy,

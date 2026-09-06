@@ -28,7 +28,11 @@ from gptqmodel.quantization.qvq import (
     repack_p32_planar_to_window,
     unpack_qvq_binary_bank_ids,
 )
-from gptqmodel.quantization.qvq_rank8 import P32WindowConfig, prepare_rank8
+from gptqmodel.quantization.qvq_rank8 import (
+    P32WindowConfig,
+    prepare_rank8,
+    window_kernel_candidates,
+)
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_fp16_to_fp8_e5m2_clamped,
@@ -223,6 +227,11 @@ def test_h200_window_only_rank8_capture_matches_planar_reference():
         child.trellis = None
         child.post_init()
         prepare_rank8(child, config)
+        candidates = window_kernel_candidates(child, m=16)
+        assert candidates[0].algorithm == "hopper_m16"
+        assert all(
+            candidate.algorithm != "production_window" for candidate in candidates
+        )
         actual = child(x)
         torch.cuda.synchronize(device)
         graph = torch.cuda.CUDAGraph()
