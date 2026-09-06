@@ -161,6 +161,36 @@ def test_rank8_fused_strided_group_output_and_no_bias():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rank8_fused_epilogue_supports_composite_folded_output_width():
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from gptqmodel.utils.qvq_rank8_triton import rank8_output_epilogue
+
+    torch.manual_seed(158)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    m, n = 17, 5120
+    hidden = torch.randn(m, 8, device="cuda", dtype=torch.float16)
+    b = torch.randn(8, n, device="cuda", dtype=torch.float16) * 0.02
+    base = torch.randn(m, n, device="cuda", dtype=torch.float32)
+    sv = torch.randn(n, device="cuda", dtype=torch.float32)
+    bias = torch.randn(n, device="cuda", dtype=torch.float32)
+    expected = (base + hidden.float() @ b.float()) * sv + bias
+    actual = rank8_output_epilogue(
+        hidden, b, base, sv, bias, hadamard=False, output_dtype=torch.float16
+    )
+    error = (actual.float() - expected).abs()
+    assert error.mean() <= 2e-3 and error.max() <= 0.046875
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = rank8_output_epilogue(
+            hidden, b, base, sv, bias, hadamard=False, output_dtype=torch.float16
+        )
+    for _ in range(3):
+        graph.replay()
+        torch.testing.assert_close(captured, actual, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("k", [16, 256, 2048, 8192, 16384])
 @pytest.mark.parametrize("groups", [1, 3])
 @pytest.mark.parametrize("hadamard", [False, True])

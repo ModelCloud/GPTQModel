@@ -274,11 +274,11 @@ def prepare_rank8(layer, config):
             layer.trellis.device.type != "cuda"
             or torch.cuda.get_device_capability(layer.trellis.device) != (9, 0)
             or layer.out_features > 16384
-            or layer.out_features & (layer.out_features - 1)
+            or (layer.output_hadamard and layer.out_features & (layer.out_features - 1))
         )
     ):
         raise ValueError(
-            "rank8 fused epilogue requires SM90 and power-of-two N <= 16384"
+            "rank8 fused epilogue requires SM90 and N <= 16384; output Hadamard mode requires power-of-two N"
         )
     if (
         enabled
@@ -1145,7 +1145,10 @@ def window_kernel_candidates(layer, *, m):
             for c in tuple(candidates)
             if c.algorithm == "hopper_direct_decode_mma"
         )
-    if layer.out_features <= 16384 and not layer.out_features & (layer.out_features - 1):
+    if layer.out_features <= 16384 and (
+        not layer.output_hadamard
+        or not layer.out_features & (layer.out_features - 1)
+    ):
         candidates.extend(
             replace(c, recovery_kernel="fused_epilogue") for c in tuple(candidates)
         )

@@ -118,6 +118,40 @@ def _rank8_output_epilogue(
     tl.store(Output + row * N + column, value)
 
 
+@triton.jit
+def _rank8_output_epilogue_masked(
+    Hidden,
+    B,
+    Base,
+    SV,
+    Bias,
+    Output,
+    N: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BASE_STRIDE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    HAS_RANK8: tl.constexpr,
+):
+    """Fused non-Hadamard epilogue for composite output widths."""
+
+    row = tl.program_id(0)
+    column = tl.arange(0, BLOCK_N)
+    mask = column < N
+    if HAS_RANK8:
+        correction = tl.zeros((BLOCK_N,), tl.float32)
+        for rank in tl.static_range(8):
+            hidden = tl.load(Hidden + row * 8 + rank).to(tl.float32)
+            weights = tl.load(B + rank * N + column, mask=mask, other=0).to(tl.float32)
+            correction = correction + hidden * weights
+    value = tl.load(Base + row * BASE_STRIDE + column, mask=mask, other=0).to(tl.float32)
+    if HAS_RANK8:
+        value = value + correction
+    value = value * tl.load(SV + column, mask=mask, other=0).to(tl.float32)
+    if HAS_BIAS:
+        value = value + tl.load(Bias + column, mask=mask, other=0).to(tl.float32)
+    tl.store(Output + row * N + column, value, mask=mask)
+
+
 def rank8_output_epilogue(
     hidden, b, base, sv, bias=None, *, hadamard=True, output_dtype=torch.float32, rank8_enabled=True
 ):
@@ -127,8 +161,10 @@ def rank8_output_epilogue(
     if base.ndim != 2 or (rank8_enabled and hidden.ndim != 2):
         raise ValueError("rank8 epilogue requires matrix inputs")
     m, n = base.shape
-    if n < 16 or n > 16384 or n & (n - 1):
-        raise ValueError("rank8 fused epilogue requires power-of-two N in [16,16384]")
+    if n < 16 or n > 16384 or (hadamard and n & (n - 1)):
+        raise ValueError(
+            "rank8 fused epilogue requires N in [16,16384]; Hadamard mode requires power-of-two N"
+        )
     if base.device.type != "cuda" or torch.cuda.get_device_capability(base.device) != (
         9,
         0,
@@ -153,28 +189,46 @@ def rank8_output_epilogue(
     output = torch.empty((m, n), device=base.device, dtype=output_dtype)
     if not m:
         return output
-    divisor = struct.unpack("e", struct.pack("e", math.sqrt(n)))[0]
-    root = struct.unpack("f", struct.pack("f", math.sqrt(n)))[0]
-    reciprocal = struct.unpack("f", struct.pack("f", 1 / root))[0]
-    _rank8_output_epilogue[(m,)](
-        hidden if rank8_enabled else None,
-        b if rank8_enabled else None,
-        base,
-        sv,
-        bias,
-        output,
-        n,
-        n.bit_length() - 1,
-        base.stride(0),
-        hadamard,
-        bias is not None,
-        n >= 2048,
-        divisor,
-        reciprocal,
-        rank8_enabled,
-        num_warps=4 if n <= 4096 else 8,
-        enable_fp_fusion=False,
-    )
+    if not hadamard and n & (n - 1):
+        block_n = 1 << (n - 1).bit_length()
+        _rank8_output_epilogue_masked[(m,)](
+            hidden if rank8_enabled else None,
+            b if rank8_enabled else None,
+            base,
+            sv,
+            bias,
+            output,
+            n,
+            block_n,
+            base.stride(0),
+            bias is not None,
+            rank8_enabled,
+            num_warps=4 if n <= 4096 else 8,
+            enable_fp_fusion=False,
+        )
+    else:
+        divisor = struct.unpack("e", struct.pack("e", math.sqrt(n)))[0]
+        root = struct.unpack("f", struct.pack("f", math.sqrt(n)))[0]
+        reciprocal = struct.unpack("f", struct.pack("f", 1 / root))[0]
+        _rank8_output_epilogue[(m,)](
+            hidden if rank8_enabled else None,
+            b if rank8_enabled else None,
+            base,
+            sv,
+            bias,
+            output,
+            n,
+            n.bit_length() - 1,
+            base.stride(0),
+            hadamard,
+            bias is not None,
+            n >= 2048,
+            divisor,
+            reciprocal,
+            rank8_enabled,
+            num_warps=4 if n <= 4096 else 8,
+            enable_fp_fusion=False,
+        )
     return output
 
 
