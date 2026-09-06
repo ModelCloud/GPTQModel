@@ -128,3 +128,12 @@ The large-prefill gain reproduces, but no full-model 2x result exists.
 [Window model wave26](WINDOW_MODEL_WAVE26.md) is complete. Four matched
 BM64/BN32 per-module-policy runs reach 1.354x at M=512 and 1.378x at M=2048
 against four same-wave controls, while remaining slower at low M and decode.
+
+[BM64/BN32 SASS and algebraic waves 27–32](BM64BN32_SASS_WAVE27_32.md) are
+complete on all eight mapped GPUs. Exact address/bank rewrites preserve gates
+but do not improve the kernel. Scalar BM64/BN32 with four warps and three
+stages is the best launch arm at about 1.29x on the layer-0 down projection.
+The exact pair-LUT fold reduces integer SASS instructions by about 32% but
+raises long-scoreboard stalls to about 50% and is slower. Cache-qualified LUT
+loads also fail to advance. The next 3x work must remove tile staging and
+transform boundaries while preserving the M>=512 dispatcher.
