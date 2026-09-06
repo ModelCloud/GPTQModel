@@ -1033,6 +1033,10 @@ def fit_rank8(
         raise ValueError("recovery requires finite nonzero SV")
     old_config = getattr(layer, "_p32_window_config", P32WindowConfig())
     prepare_rank8(layer, P32WindowConfig())
+    # ``prepare_rank8`` may transfer an evaluated CUDA module to window-only
+    # ownership.  Keep fitting device-agnostic and avoid reaching through the
+    # released planar ``trellis`` buffer below.
+    fit_device = layer.runtime_device()
     try:
         transformed = [
             layer.transform_input(x).reshape(-1, layer.in_features)
@@ -1091,8 +1095,8 @@ def fit_rank8(
                 b64 = b64 / layer.SV.detach().double().cpu()
                 if layer.output_hadamard:
                     b64 = matmul_hadU(b64, transpose=True)
-                a_eval = a64.to(device=layer.trellis.device, dtype=torch.float16)
-                b_eval = b64.to(device=layer.trellis.device, dtype=torch.float16)
+                a_eval = a64.to(device=fit_device, dtype=torch.float16)
+                b_eval = b64.to(device=fit_device, dtype=torch.float16)
                 if not torch.isfinite(a_eval).all() or not torch.isfinite(b_eval).all():
                     continue
                 scores = []
@@ -1119,8 +1123,8 @@ def fit_rank8(
                         b = torch.zeros((8, layer.out_features), dtype=torch.float64)
                         a[:, :effective_rank] = a64
                         b[:effective_rank] = b64
-                        a = a.to(device=layer.trellis.device, dtype=torch.float16)
-                        b = b.to(device=layer.trellis.device, dtype=torch.float16)
+                        a = a.to(device=fit_device, dtype=torch.float16)
+                        b = b.to(device=fit_device, dtype=torch.float16)
                         candidates.append((objective, a, b, scores))
             rank_sweep[objective] = objective_sweep
         baseline = [_metrics(r) for r in residual]
@@ -1182,7 +1186,7 @@ def fit_rank8(
             "solver_modes": solver_modes,
             "rank_candidates": list(rank_candidates),
             "rank_sweep": rank_sweep,
-            "fit_device": str(layer.trellis.device),
+            "fit_device": str(fit_device),
             "activation_dtype": str(train_inputs.dtype),
             "fit_output_boundary": "original_activation_dtype",
             "torch_version": str(torch.__version__),
