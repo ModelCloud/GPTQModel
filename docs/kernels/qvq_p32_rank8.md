@@ -82,11 +82,11 @@ The ordinary checkpoint remains canonical planar P32 with optional rank-8
 buffers; old checkpoints require no additional storage. The explicit unified
 window exporter stores window words instead of planar words (never both),
 actual codebook levels, selectors, transforms, bias, factors and fit metadata.
-Loading uses window-owned CUDA storage and retains a CPU planar reconstruction
-only for legacy/debug access; a normal planar module remains available when a
-legacy backend explicitly requests it. This is the same reversible layout,
-not another rank-8 weight format. The package and standard state_dict both
-reload with correction off until explicitly prepared.
+CUDA package loading makes the window payload the sole live weight storage and
+releases the temporary CPU planar reconstruction; a legacy/debug caller can
+request `retain_planar=True`. This is the same reversible layout, not another
+rank-8 weight format. The package and standard state_dict both reload with
+correction off until explicitly prepared.
 
 SHA256 binds factors to exact window bytes, levels, bank state, dimensions,
 rate, codebook version, transform flags, SU/SV and bias. Separate hashes bind
