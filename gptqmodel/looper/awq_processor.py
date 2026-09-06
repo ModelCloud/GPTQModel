@@ -2441,6 +2441,7 @@ class AWQProcessor(LoopProcessor):
                     pack_dtype=self.qcfg.pack_dtype,
                     format=self.format,
                     register_buffers=False,
+                    dtype=module.weight.dtype,
                 )
         if timer is not None and create_start is not None:
             timer.record(

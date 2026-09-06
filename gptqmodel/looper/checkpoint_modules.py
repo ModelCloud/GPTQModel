@@ -59,6 +59,8 @@ def packed_module_spec(module, config):
         if module.is_4bit:
             # Packed QuantState JSON length depends on values, not dimensions.
             spec["quant_state_shape"] = list(module.weight_quant_state.shape)
+    if getattr(module, "QUANT_TYPE", None) in {"gptq_bitblas", "awq_bitblas"}:
+        spec["compute_dtype"] = str(module.quant_config.torch_dtype)
     if type(module) is QQQLinear:
         spec["kind"] = "qqq"
         spec["group_scales"] = "s_group" in module.state_dict()

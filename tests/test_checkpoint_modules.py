@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -50,6 +52,31 @@ def test_gptq_packed_schema(format):
         register_buffers=True,
     )
     assert_schema_roundtrip(module, config)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_bitblas_compute_dtype_schema_without_optional_compiler(dtype):
+    config = QuantizeConfig(bits=4, group_size=32, desc_act=False)
+    source = SimpleNamespace(
+        in_features=64,
+        out_features=64,
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        bias=None,
+        QUANT_TYPE="awq_bitblas",
+        quant_config=SimpleNamespace(torch_dtype=dtype),
+    )
+    spec = packed_module_spec(source, config)
+    restored = restore_packed_module(
+        spec,
+        name="proj",
+        config=config,
+        kernel=lambda **kwargs: SimpleNamespace(**kwargs),
+        lm_head_name="lm_head",
+    )
+    assert restored.dtype == dtype
 
 
 @pytest.mark.parametrize("scale", ["row", "tensor", "block"])
