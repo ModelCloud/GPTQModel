@@ -2316,6 +2316,8 @@ def _normalize_bitsandbytes_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional[METHOD] = None) -> METHOD:
+    if format_value == FORMAT.BITBLAS and fallback_method == METHOD.AWQ:
+        return METHOD.AWQ
     if format_value == FORMAT.MARLIN:
         if fallback_method is None:
             raise ValueError("QuantizeConfig: FORMAT.MARLIN requires an explicit quantization method family.")
