@@ -511,6 +511,7 @@ class QVQLinear(BaseQuantLinear):
             int, tuple[torch.cuda.Stream, torch.cuda.Event, torch.cuda.Event]
         ] = {}
         self._qvq_rank8_concurrent_warm: set[tuple[int, int, int]] = set()
+        self._qvq_rank8_factor_cache: dict[str, tuple[torch.Tensor, int, int, torch.device]] = {}
         pgc16_levels_for_version(self.codebook_version)
 
         missing = {"trellis", "SU", "SV"} - set(tensors) if tensors else set()
@@ -592,6 +593,7 @@ class QVQLinear(BaseQuantLinear):
         state["_qvq_p32_amd_warm_key"] = None
         state["_qvq_rank8_concurrent_cache"] = {}
         state["_qvq_rank8_concurrent_warm"] = set()
+        state["_qvq_rank8_factor_cache"] = {}
         return state
 
     def __setstate__(self, state):
@@ -619,6 +621,7 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_p32_amd_warm_key = None
         self._qvq_rank8_concurrent_cache = {}
         self._qvq_rank8_concurrent_warm = set()
+        self._qvq_rank8_factor_cache = {}
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         super()._save_to_state_dict(destination, prefix, keep_vars)
@@ -667,6 +670,23 @@ class QVQLinear(BaseQuantLinear):
         """Drop cached dtype conversions (call if SU/SV/bias are replaced)."""
         self._dtype_cache = {}
         self._qvq_cuda_aux_cache_signature = None
+        self._qvq_rank8_factor_cache = {}
+
+    def _cached_rank8_factor(self, name: str) -> torch.Tensor:
+        """Return a prepared contiguous FP32 rank8 factor without replay casts."""
+        if name not in ("A", "B"):
+            raise ValueError("rank8 factor name must be A or B")
+        source = getattr(self, "rank8_" + name, None)
+        if source is None:
+            raise RuntimeError(f"rank8 factor {name} is unavailable")
+        key = (id(source), source._version, source.device)
+        cached = self._qvq_rank8_factor_cache.get(name)
+        if cached is not None and cached[1:] == key:
+            return cached[0]
+        self._require_prepared_outside_capture(source.device, "rank8 FP32 factors")
+        value = source.detach().to(dtype=torch.float32).contiguous()
+        self._qvq_rank8_factor_cache[name] = (value, *key)
+        return value
 
     def _prepare_cuda_graph_auxiliary_caches(self) -> None:
         """Materialize constant dtype variants used by graph-safe fallback paths.
@@ -2429,7 +2449,7 @@ class QVQLinear(BaseQuantLinear):
             with torch.cuda.stream(concurrent_stream):
                 concurrent_stream.wait_event(ready)
                 concurrent_hidden = (
-                    transformed.float() @ self.rank8_A.float()
+                    transformed.float() @ self._cached_rank8_factor("A")
                 ).half()
                 done.record(concurrent_stream)
             concurrent_done = done

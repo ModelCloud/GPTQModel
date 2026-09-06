@@ -171,6 +171,23 @@ def test_rank8_large_output_uses_bounded_randomized_solver():
     torch.testing.assert_close(b, again_b, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rank8_fp32_factor_cache_is_prepared_and_versioned():
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child("q_proj", in_features=256, out_features=256, device="cuda").eval()
+    layer.rank8_A = torch.randn(256, 8, device="cuda", dtype=torch.float16)
+    layer.rank8_B = torch.randn(8, 256, device="cuda", dtype=torch.float16)
+    first_a = layer._cached_rank8_factor("A")
+    second_a = layer._cached_rank8_factor("A")
+    assert first_a.dtype == torch.float32
+    assert first_a.is_contiguous()
+    assert first_a.data_ptr() == second_a.data_ptr()
+    layer.rank8_A = layer.rank8_A.clone()
+    refreshed_a = layer._cached_rank8_factor("A")
+    assert refreshed_a.data_ptr() != first_a.data_ptr()
+
+
 def test_rank_candidate_sweep_uses_predictable_output_fit_and_reports_all_ranks():
     torch.manual_seed(1412)
     x = torch.randn((48, 32), dtype=torch.float64)

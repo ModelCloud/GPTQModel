@@ -395,6 +395,11 @@ def prepare_rank8(layer, config):
     layer._p32_window_config = config
     layer._p32_rank8_enabled = enabled
     layer._p32_rank8_versions = _versions(layer) if enabled else None
+    if enabled and runtime_device.type == "cuda":
+        # Keep factor conversion and allocator activity outside any captured
+        # graph. The replay path reads these stable FP32 buffers directly.
+        layer._cached_rank8_factor("A")
+        layer._cached_rank8_factor("B")
     # A new policy or factor version must warm the exact projection shape
     # again before capture; retaining this set would permit a graph to bind a
     # stale A pointer/algorithm after preparation invalidated the old graph.
@@ -424,7 +429,8 @@ def _project_rank8(layer, transformed):
         from ..utils.qvq_rank8_triton import rank8_tensor_core_projection
 
         return rank8_tensor_core_projection(transformed, layer.rank8_A)
-    return (transformed.float() @ layer.rank8_A.float()).half()
+    project_a = layer._cached_rank8_factor("A") if transformed.device.type == "cuda" else layer.rank8_A.float()
+    return (transformed.float() @ project_a).half()
 
 
 def add_rank8_correction(layer, transformed, base, *, hidden=None):
@@ -434,7 +440,8 @@ def add_rank8_correction(layer, transformed, base, *, hidden=None):
     validate_rank8_state(layer)
     if hidden is None:
         hidden = _project_rank8(layer, transformed)
-    correction = hidden.float() @ layer.rank8_B.float()
+    expand_b = layer._cached_rank8_factor("B") if hidden.device.type == "cuda" else layer.rank8_B.float()
+    correction = hidden.float() @ expand_b
     return base.float() + correction
 
 
