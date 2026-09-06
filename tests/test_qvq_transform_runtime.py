@@ -94,6 +94,54 @@ def test_grouped_ampere_payload_is_prepared_once_from_released_window_storage(mo
     assert [segment.bank_alt_id for segment in state._ampere_payload.plan.segments] == [3, 1]
 
 
+def test_grouped_ampere_runtime_uses_prepared_payload_without_generic_decode(monkeypatch):
+    """A prepared Ampere group dispatches the segmented consumer directly."""
+
+    from gptqmodel.utils import qvq_ampere_cuda, qvq_cuda
+
+    widths = (64, 32)
+    state = object.__new__(QVQGroupedP32InputTransformState)
+
+    def recover(piece, *, output_dtype):
+        return piece.to(output_dtype)
+
+    state.linears = tuple(
+        SimpleNamespace(out_features=width, recover_output=recover)
+        for width in widths
+    )
+    state.output_widths = widths
+    state._rank8_enabled = [False, False]
+    state._ampere_payload = object()
+    state._ampere_levels = object()
+    state.grouped_gemv_invocations = 0
+    calls = []
+
+    def grouped(flat, payload, levels):
+        calls.append((flat, payload, levels))
+        return tuple(
+            torch.full((flat.shape[0], width), index, dtype=torch.float32)
+            for index, width in enumerate(widths)
+        )
+
+    monkeypatch.setattr(qvq_ampere_cuda, "qvq_p32_window_ampere_grouped_packed", grouped)
+
+    def generic_decode(*args, **kwargs):
+        raise AssertionError("generic grouped decode must not run for Ampere policy")
+
+    monkeypatch.setattr(qvq_cuda, "qvq_cuda_gemv", generic_decode)
+    outputs = state._grouped_outputs(
+        torch.zeros((3, 256), dtype=torch.float16), torch.float16
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1] is state._ampere_payload
+    assert calls[0][2] is state._ampere_levels
+    assert state.grouped_gemv_invocations == 1
+    assert [tuple(output.shape) for output in outputs] == [(3, 64), (3, 32)]
+    assert torch.equal(outputs[0], torch.zeros((3, 64), dtype=torch.float16))
+    assert torch.equal(outputs[1], torch.ones((3, 32), dtype=torch.float16))
+
+
 def _packed_layer(
     *, seed: int, su: torch.Tensor, input_hadamard=True, output_hadamard=True
 ):
