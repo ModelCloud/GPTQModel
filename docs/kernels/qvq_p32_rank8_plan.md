@@ -63,6 +63,12 @@ records the requested gate and each candidate's correction-off/on medians;
 without the explicit gate, timing remains diagnostic and cannot change quality
 or arithmetic-signature eligibility.
 
+The CLI also accepts `--quality-mode fast|balanced|quality`. This value is
+carried into every candidate preparation and the emitted tuning report, so a
+direct BM/BN sweep uses the same arithmetic policy as the serving graphs:
+`fast` permits permissive correction-off exploration, `balanced` admits only
+reference or certified arithmetic, and `quality` admits reference arithmetic.
+
 The native prepared-graph API owns its temporary allocation pool and can insert
 the existing window/rank8 operator as a child of an enclosing CUDA capture. The
 ZML adapter now retains one such handle per executable buffer set, stream and
