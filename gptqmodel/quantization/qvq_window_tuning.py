@@ -368,7 +368,7 @@ def tune_window_kernel(
             benchmark=benchmark,
             config=selected,
         )
-    if cache is not None and not cache_hit:
+    if cache is not None and (not cache_hit or measure_recovery):
         _write_tuning_cache(cache, report)
     if apply:
         prepare_rank8(layer, selected)
