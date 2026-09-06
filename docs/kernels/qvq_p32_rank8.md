@@ -121,6 +121,15 @@ probe set, without CUDA allocation or timing. A kernel tuner or ZML can time
 those explicit `split_count` values before capture and pass the winner to
 `qvq_p32_window_ampere`; a cold graph never launches the event-based tuner.
 
+Grouped SM80 consumers expose the same control per child through
+`qvq_p32_window_ampere_grouped_kernel_candidates((M, K), out_features=(N_0,
+N_1[, N_2]), bits=...)`. The first tuple is the independent child-policy
+baseline; later tuples vary child split waves without treating the concatenated
+width as one shape. ZML publishes the matching pure `p32GroupedCandidateSet`
+and accepts a selected geometry through
+`p32WindowMatmulGroupedWithConfig`. Enumeration and selection happen before
+capture; replay contains only fixed launch attributes.
+
 Grouped QKV and gate/up apply child corrections to completed FP32 outputs using
 exactly the shared padded activation that fed WGMMA, then run existing child
 or paired output transforms. Each child may independently enable correction.

@@ -493,6 +493,91 @@ def qvq_p32_window_ampere_kernel_candidates(
     )
 
 
+def qvq_p32_window_ampere_grouped_kernel_candidates(
+    input_shape: Sequence[int],
+    *,
+    out_features: Sequence[int],
+    bits: float,
+    sm_count: int = 108,
+    max_candidates: int = 12,
+) -> tuple[tuple[int, ...], ...]:
+    """Enumerate per-child split waves for one grouped SM80 projection.
+
+    Grouped QKV and gate/up launches contain children whose optimal split wave
+    can differ substantially with ``N``.  A synthetic sum of the child widths
+    is therefore not a valid tuning key.  This API publishes a bounded,
+    deterministic set of *tuples* in child order.  It performs only shape and
+    rate arithmetic, so callers may enumerate candidates while building a
+    graph plan; benchmark and select one tuple before capture, then pass it as
+    ``split_counts`` to :func:`qvq_p32_window_ampere_grouped`.
+    """
+
+    shape = tuple(int(value) for value in input_shape)
+    if len(shape) != 2 or shape[0] <= 0 or shape[1] <= 0:
+        raise ValueError("Ampere grouped candidate shape must be a positive (M,K) pair")
+    if shape[1] % 16:
+        raise ValueError("Ampere grouped P32 input width must be divisible by 16")
+    widths = tuple(int(value) for value in out_features)
+    if not widths or len(widths) > 3:
+        raise ValueError("Ampere grouped candidates support one through three children")
+    if any(width <= 0 or width % 16 for width in widths):
+        raise ValueError(
+            "Ampere grouped P32 output widths must be positive multiples of 16"
+        )
+    if type(sm_count) is not int or sm_count <= 0:
+        raise ValueError("Ampere SM count must be positive")
+    if type(max_candidates) is not int or max_candidates < 1:
+        raise ValueError("max_candidates must be positive")
+
+    # Resolve the rate once up front so invalid rates fail before any candidate
+    # is returned, matching the single-child public enumerator's contract.
+    _resolve_transition_bits(bits)
+    child_candidates = tuple(
+        qvq_p32_window_ampere_kernel_candidates(
+            shape,
+            out_features=width,
+            bits=bits,
+            sm_count=sm_count,
+            max_candidates=max_candidates,
+        )
+        for width in widths
+    )
+    baseline = tuple(candidates[0] for candidates in child_candidates)
+    candidates: list[tuple[int, ...]] = [baseline]
+    seen = {baseline}
+
+    # Walk the per-child alternatives in rounds.  This keeps the common tuning
+    # set small and makes it possible to isolate which grouped child benefits
+    # from a different wave.  The Cartesian product is added only while budget
+    # remains, in deterministic lexicographic order.
+    max_child_options = max(len(options) for options in child_candidates)
+    for option_index in range(1, max_child_options):
+        for child_index, child_options in enumerate(child_candidates):
+            if option_index >= len(child_options):
+                continue
+            candidate = list(baseline)
+            candidate[child_index] = child_options[option_index]
+            value = tuple(candidate)
+            if value not in seen:
+                seen.add(value)
+                candidates.append(value)
+            if len(candidates) >= max_candidates:
+                return tuple(candidates)
+
+    if len(candidates) < max_candidates and len(child_candidates) > 1:
+        import itertools
+
+        for value in itertools.product(*(options[1:] for options in child_candidates)):
+            candidate = tuple(value)
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
+            if len(candidates) >= max_candidates:
+                break
+    return tuple(candidates)
+
+
 def _resolve_split_count(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -1245,5 +1330,6 @@ __all__ = [
     "qvq_p32_window_ampere_grouped",
     "qvq_p32_window_ampere_grouped_packed",
     "qvq_p32_window_ampere_kernel_candidates",
+    "qvq_p32_window_ampere_grouped_kernel_candidates",
     "qvq_pack_p32_window_ampere_group",
 ]
