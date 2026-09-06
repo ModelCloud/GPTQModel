@@ -1263,6 +1263,7 @@ test "native window ABI layout" {
     // A faster locally passing arithmetic variant is not eligible for a
     // balanced or quality graph until its reduction has been certified.
     measurements[1].arithmetic_signature = .unverified;
+    measurements[1].median_ns = 50;
     measurements[2].accepted = false;
     measurements[3].accepted = false;
     const balanced = try selectFastest(candidates[0..count], &measurements);
@@ -1282,6 +1283,7 @@ test "native window ABI layout" {
     );
     try std.testing.expectEqual(@as(usize, 0), quality.candidate_index);
     measurements[1].arithmetic_signature = .reference_fp32_v1;
+    measurements[1].median_ns = 100;
     measurements[2].accepted = true;
     measurements[3].accepted = false;
     const fallback = try selectFastest(candidates[0..count], &measurements);
