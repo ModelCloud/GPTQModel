@@ -7,6 +7,15 @@ description: Implement, review, or debug GPT-QModel quantization algorithms, cal
 
 Treat the algorithm, serialized format, and inference backend as separate contracts. A model that quantizes successfully is not complete until its metadata round-trips, its packed tensors reload, and a compatible backend produces bounded error.
 
+## Scientific findings for PTQ recovery
+
+For supported quantization methods and enhancements, recovery, EoRA,
+NVFP4 activation/KV scales, QTIP/YAQA or P32 design choices,
+start with [research/README.md](../../../research/README.md) and use
+[$qvq-ptq-recovery-research](../qvq-ptq-recovery-research/SKILL.md).
+Keep scale calibration, weight rounding, lossless packing and additive recovery
+as separate contracts; cite the relevant research note in design decisions.
+
 ## Classify the change
 
 Decide which boundaries move before editing:
