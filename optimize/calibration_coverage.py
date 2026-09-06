@@ -22,6 +22,9 @@ and merging percentile sketches.
 
 GPU preflight runs with the standard library only and sets
 ``CUDA_VISIBLE_DEVICES`` before ``torch`` is imported.
+
+For propagated layer/module sensitivity, ``optimize/sweep_sensitivity.py`` reuses
+this target discovery, verifies sharing at runtime, and measures final logits.
 """
 
 from __future__ import annotations
@@ -878,20 +881,20 @@ def _merge_samples(
 # ---------------------------------------------------------------------------
 
 
-def find_target_groups(model: object) -> list[TargetGroup]:
-    """Find target linear modules and group same-input siblings (q/k/v and gate/up, plus GPT-2 c_attn/c_fc)."""
+def find_target_groups(model: object, *, include_all_linear: bool = False) -> list[TargetGroup]:
+    """Find projection groups; names suggest sharing but do not prove runtime input identity.
+
+    ``include_all_linear`` also inventories nonstandard linear names for propagation
+    sweeps. Callers must restrict the model scope to keep embeddings/heads excluded.
+    """
 
     from torch import nn
     from transformers import Conv1D as TransformersConv1D
 
     groups: dict[str, TargetGroup] = {}
     for name, module in model.named_modules():
-        matched_suffix = None
-        for suffix in TARGET_SUFFIXES:
-            if name.endswith(suffix):
-                matched_suffix = suffix
-                break
-        if matched_suffix is None:
+        matched_suffix = name.rsplit(".", 1)[-1]
+        if matched_suffix not in TARGET_SUFFIXES and not include_all_linear:
             continue
 
         if isinstance(module, nn.Linear):
@@ -901,7 +904,7 @@ def find_target_groups(model: object) -> list[TargetGroup]:
         else:
             continue
 
-        role = TARGET_SUFFIXES[matched_suffix]
+        role = TARGET_SUFFIXES.get(matched_suffix, "linear")
         parent = name.rsplit(".", 1)[0]
         if role in ("q", "k", "v", "qkv"):
             group_id = f"{parent}:attn"
@@ -914,6 +917,11 @@ def find_target_groups(model: object) -> list[TargetGroup]:
             kind = "down"
 
         if group_id not in groups:
+            groups[group_id] = TargetGroup(group_id, kind, columns, None, [])
+        elif groups[group_id].columns != columns:
+            # A representative with a different input width cannot provide the
+            # companion's activation statistics, even if both names look like QKV.
+            group_id = name
             groups[group_id] = TargetGroup(group_id, kind, columns, None, [])
         group = groups[group_id]
         group.members.append((name, role))

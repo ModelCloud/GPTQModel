@@ -295,6 +295,129 @@ Input formats: `.txt` files separated by `===========`, `.parquet` files with `t
 For an end-to-end example producing a public-dataset 128K-token mix, see
 `dataset/calibration_mix_128k_qwen3_0.6b/`.
 
+### Hierarchical Linear-Kernel Sensitivity Sweep
+
+`optimize/sweep_sensitivity.py` measures how a selected linear operator or module
+group changes the final logits of a teacher-forced model. It is useful for deciding
+which layers or projections deserve kernel fusion, shared-input reuse, or a separate
+accuracy investigation. The sweep is diagnostic: it does not quantize weights, certify
+a kernel, or replace downstream task evaluation. See the complete [sensitivity sweep
+guide](optimize/sensitivity.md).
+
+Run the CPU smoke test first:
+
+```bash
+python optimize/sweep_sensitivity.py \
+  --tiny \
+  --max-batches 2 \
+  --max-length 12 \
+  --amplitudes 0.001,0.002 \
+  --top-layers 2 \
+  --output /tmp/tiny-sensitivity
+```
+
+For a real checkpoint, provide disjoint held-out JSONL data. The model path can be a
+local Transformers checkpoint or a Hugging Face model ID:
+
+```bash
+python optimize/sweep_sensitivity.py \
+  --model /models/llama-checkpoint \
+  --data /data/held-out.jsonl \
+  --layers-path model.layers \
+  --probe output \
+  --amplitudes 0.001,0.002,0.005,0.01 \
+  --top-layers 4 \
+  --max-batches 32 \
+  --max-length 512 \
+  --dtype bfloat16 \
+  --output /tmp/llama-sensitivity
+```
+
+To run on a physical NVIDIA GPU, pass its `nvidia-smi` index. The script performs an
+idle and exclusivity preflight before importing Torch, then maps the selected device to
+`cuda:0` inside the process:
+
+```bash
+nvidia-smi --query-gpu=index,pci.bus_id,uuid,name --format=csv
+python optimize/sweep_sensitivity.py \
+  --model /models/llama-checkpoint \
+  --data /data/held-out.jsonl \
+  --physical-gpu 0 \
+  --output /tmp/llama-sensitivity-gpu
+```
+
+The JSONL input accepts one record per sample. A record may contain plain `text`, a
+`messages` list, or one-dimensional `input_ids`. `attention_mask` and an optional
+aligned `sensitivity_mask` may accompany `input_ids`; the sensitivity mask must select
+only positions enabled by the attention mask. Text is tokenized with the checkpoint's
+tokenizer. Tiny mode with `--data` requires `input_ids` so that the random fixture does
+not depend on an external tokenizer.
+
+Use `--modules modules.json` to restrict the sweep to exact physical module paths. The
+file is a JSON list, including custom quantized operators that automatic discovery
+cannot classify:
+
+```json
+[
+  "model.layers.0.self_attn.q_proj",
+  "model.layers.0.self_attn.k_proj",
+  "model.layers.0.self_attn.v_proj"
+]
+```
+
+Use `--subsets subsets.json` to name jointly enabled definitions:
+
+```json
+{
+  "attention_qkv": [
+    "model.layers.0.self_attn.q_proj",
+    "model.layers.0.self_attn.k_proj",
+    "model.layers.0.self_attn.v_proj"
+  ]
+}
+```
+
+Automatic discovery covers `nn.Linear` and Transformers `Conv1D` modules inside each
+decoder block. Every selected layer must contain at least one target. Therefore an
+explicit `--modules` list used with the CLI must include a target under every layer in
+`--layers-path`; use the Python API with a smaller layer list for a one-layer study.
+Subsets must contain at least two targets from one layer. Observed shared storage is
+reported evidence, not permission to fuse modules.
+
+The output directory contains `sensitivity.json` and `sensitivity.md`. The report
+includes runtime identity and input hashes, baseline repeat drift, per-layer ranking,
+per-module and subset errors, full-vocabulary KL, top-1 agreement, local invocation
+counts, and observed input-sharing counts. Undefined or nonfinite values are retained
+as failed diagnostics rather than being converted into safe scores.
+
+For a production kernel, use the Python API with a pure callback that runs the actual
+candidate on the same live input and preserves output shape, dtype, and device:
+
+```python
+from optimize.sensitivity import SensitivitySweep
+
+
+def candidate(context, module, args, kwargs, reference):
+    x = args[0] if args else kwargs["input"]
+    return optimized_forward[module](x)
+
+
+report = SensitivitySweep(
+    model,
+    ["model.layers.0", "model.layers.1"],
+    module_names=optimized_module_paths,
+    candidate=candidate,
+    reset_state=reset_private_model_state,
+).sweep(held_out_batches, amplitudes=[1.0], top_k=2)
+```
+
+Use fresh teacher-forced batches. Standard input caches are rejected and `use_cache=False`
+is passed when supported. Models with private mutable state must provide `reset_state`.
+The built-in `output` and `shared-input` probes use deterministic noise and are useful
+for ranking sensitivity, but they are not evidence of quantization quality. Compare an
+actual candidate against the same reconstructed weights, then validate on disjoint
+held-out text and task data.
+
 ## Features
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
