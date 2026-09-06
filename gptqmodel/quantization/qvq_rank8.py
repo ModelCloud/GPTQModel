@@ -649,6 +649,7 @@ class Rank8Calibration:
     heldout_document_ids: tuple[str, ...]
     source_kind: str = "calibration"
     minimum_improvement: float = 0.01
+    teacher_hash: str | None = None
 
     def __post_init__(self):
         if self.source_kind != "calibration":
@@ -683,17 +684,21 @@ def finish_rank8_quantization(
         n,
         bias=bias is not None,
         device=original_weight.device,
-        dtype=original_weight.dtype,
+        dtype=calibration.train_inputs.dtype,
     ).eval()
     with torch.no_grad():
         teacher.weight.copy_(original_weight)
         if bias is not None:
             teacher.bias.copy_(bias)
+    if calibration.teacher_hash is not None and calibration.teacher_hash != _digest(
+        dict(teacher.named_parameters()), {}
+    ):
+        raise ValueError("rank8 teacher state changed after activation capture")
     report = fit_rank8(
         layer,
         teacher,
-        calibration.train_inputs,
-        calibration.heldout_inputs,
+        calibration.train_inputs.to(original_weight.device),
+        calibration.heldout_inputs.to(original_weight.device),
         train_document_ids=calibration.train_document_ids,
         heldout_document_ids=calibration.heldout_document_ids,
         source_kind=calibration.source_kind,

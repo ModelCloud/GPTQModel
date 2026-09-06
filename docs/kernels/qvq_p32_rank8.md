@@ -374,3 +374,52 @@ supported choices remain available at other shapes and to external compilers.
 The post-profile regression suite passes 494 tests with 86 skips, including
 mixed projection implementations within grouped siblings. A fresh process
 revalidates all four selected entries from the persistent tuning cache.
+
+## Capture during public model quantization
+
+`model.quantize(..., rank8_capture=Rank8Capture(...))` captures selected dense
+Linear inputs before quantization and hands each module's document-separated
+activations to its existing P32 finalizer. For example:
+
+```python
+from gptqmodel.quantization.qvq_rank8_capture import Rank8Capture, Rank8Document
+
+capture = Rank8Capture(
+    module_names=("model.layers.0.self_attn.q_proj",),
+    train=(Rank8Document("calibration/train/document-id", train_token_tensors),),
+    heldout=(Rank8Document("calibration/heldout/document-id", heldout_token_tensors),),
+    rows_per_document=128,
+    max_bytes=512 * 1024 * 1024,
+)
+model.quantize(calibration, rank8_capture=capture)
+```
+
+Each tensor dictionary contains one tokenized document (`input_ids[1,T]` and
+optional binary `attention_mask[1,T]`) on the dense model's execution device.
+Use original calibration documents with distinct provenance, never evaluation
+benchmarks. Capture rejects intersecting IDs or identical unmasked token
+content across folds, skips padding, selects evenly spaced token positions,
+and bounds retained CPU activation storage including concatenation scratch.
+The bound does not cover the model or its forward-pass working memory.
+Hooks are removed on success and failure. Teacher hashes bind capture to the
+weights used by the finalizer; preprocessing that changes that teacher fails
+explicitly. Unconsumed module requests also fail rather than silently losing
+the requested fit.
+
+The initial public path requires an already materialized eval-mode dense
+teacher, calibration-based P32 A16, and explicit target module names. Lazy
+teacher materialization, atomic replay/output alignment and weight-only jobs
+remain unsupported for this capture path. The CPU FP64 fitter remains bounded
+by the selected activation rows; its scalable replacement is still pending.
+
+The complete tiny-Llama integration test exercises public quantize, accepted
+rank8 fitting, normal model save/reload, exact factor preservation, payload
+validation, and exact corrected module output. Its synthetic documents test
+pipeline plumbing, not held-out model quality. The loader now allocates
+optional buffers from safetensors headers before Accelerate loads shards,
+validating complete A/B/metadata triples and their shapes/dtypes first.
+The focused capture/checkpoint/lifecycle regression passes 75 tests. A separate
+[real Llama capture record](results/p32_rank8_llama_capture.json) contains
+first-layer Q/gate activation and teacher hashes for four distinct calibration
+documents on H200, with 64 training and 64 held-out rows per module. It proves
+capture execution only; real-model fitting and quality evaluation remain open.

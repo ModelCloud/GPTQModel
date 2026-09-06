@@ -2952,7 +2952,11 @@ class QVQProcessor(LoopProcessor):
     def finalize(self, model: BaseQModel, **kwargs):
         """Mark the model and checkpoint metadata as QVQ after replacement completes."""
 
-        self._rank8_calibration.clear()
+        if self._rank8_calibration:
+            raise ValueError(
+                "rank8 calibration modules were not quantized: "
+                + ", ".join(sorted(self._rank8_calibration))
+            )
         self._module_replay_rows.clear()
         self._module_replay_teacher_logits.clear()
         self._module_replay_model = None

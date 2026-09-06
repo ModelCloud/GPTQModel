@@ -1065,6 +1065,7 @@ class BaseQModel(nn.Module):
         ] = None,
         layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
         freeze_others: bool = True,
+        rank8_capture: object | None = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         """Quantize the model, optionally limited to a subset of layers.
 
@@ -1111,6 +1112,7 @@ class BaseQModel(nn.Module):
                 module_replay_confirmation_calibration=module_replay_confirmation_calibration,
                 layer_scope=layer_scope,
                 freeze_others=freeze_others,
+                rank8_capture=rank8_capture,
             )
             self._configure_qvq_fp8_kv_cache_runtime()
             return result
@@ -1167,6 +1169,7 @@ class BaseQModel(nn.Module):
         ] = None,
         layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
         freeze_others: bool = True,
+        rank8_capture: object | None = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         embed_quant_config = self._normalize_embed_quant_config(
             embed_quant_config=embed_quant_config,
@@ -1178,6 +1181,28 @@ class BaseQModel(nn.Module):
 
         if embed_quant_config is None and self.quantized and layer_scope is None:
             raise EnvironmentError("quantize() is called a model that is already quantized")
+
+        rank8_activations = None
+        if rank8_capture is not None:
+            if (
+                self.quantized
+                or self.quantize_config.format != FORMAT.QVQ_V2B2_P32
+                or self.quantize_config.activation is not None
+                or self.quantize_config.output_alignment is not None
+                or self.quantize_config.uses_weight_only_lifecycle()
+                or getattr(self.quantize_config.module_granular_replay, "strategy", None) == "atomic_swiglu"
+            ):
+                raise ValueError("rank8 capture requires pristine P32 A16 without atomic replay/output alignment")
+            from ..looper.qvq_processor import clone_qvq_config_for_module
+            from ..quantization.qvq_rank8_capture import Rank8Capture, capture_rank8_calibration
+
+            if not isinstance(rank8_capture, Rank8Capture):
+                raise TypeError("rank8_capture must be Rank8Capture")
+            for name in rank8_capture.module_names:
+                effective = clone_qvq_config_for_module(self.quantize_config, name)
+                if effective is None or effective.format != FORMAT.QVQ_V2B2_P32:
+                    raise ValueError(f"rank8 capture module is excluded or not P32: {name}")
+            rank8_activations = capture_rank8_calibration(self.model, rank8_capture)
 
         timer = getattr(self, "quant_region_timer", None)
         if timer is not None:
@@ -1396,6 +1421,7 @@ class BaseQModel(nn.Module):
                     "Calibration dataset is required unless a weight-only quantize config is configured."
                 )
             result = self._quantize_with_calibration(
+                rank8_activations=rank8_activations,
                 calibration=calibration,
                 validation_calibration=validation_calibration,
                 yaqa_calibration=yaqa_calibration,
@@ -1827,6 +1853,7 @@ class BaseQModel(nn.Module):
         adapter_calibration_dataset,
         calibration_concat_separator: Optional[str],
         embed_quant_config: Optional[QuantizeEmbedConfig] = None,
+        rank8_activations=None,
     ):
         from ..adapter.adapter import Lora
         from ..looper.analysis_processor import AnalysisProcessor
@@ -1928,6 +1955,10 @@ class BaseQModel(nn.Module):
                     calibration_concat_separator=None,
                 )
             qvq_processor = QVQProcessor(**qvq_args)
+            if rank8_activations is not None:
+                for module_name, activation_documents in rank8_activations.items():
+                    qvq_processor.set_rank8_calibration(module_name, activation_documents)
+                rank8_activations.clear()
             if yaqa_calibration is not None:
                 yaqa_execution_plan = qvq_processor.yaqa_execution_plan(self)
                 prepared_yaqa_calibration = self.prepare_dataset(
