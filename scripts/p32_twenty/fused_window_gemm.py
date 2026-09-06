@@ -25,6 +25,8 @@ def _gemm(
     BN: tl.constexpr,
     SPLIT: tl.constexpr,
     PROMOTION_K: tl.constexpr,
+    FOLDED_ADDRESSES: tl.constexpr = False,
+    PREDICATED_BANK_XOR: tl.constexpr = False,
     DECODE_ONLY: tl.constexpr = False,
 ):
     rows = tl.program_id(0) * BM + tl.arange(0, BM)
@@ -36,16 +38,30 @@ def _gemm(
     start = tl.program_id(2) * (K // SPLIT)
     for offset in range(0, K // SPLIT, 16):
         krow = start + offset + kk
-        tile = (krow[:, None] // 16) * (N // 16) + npair[None, :] // 8
-        pair = (kk[:, None] % 16) * 8 + npair[None, :] % 8
+        if FOLDED_ADDRESSES:
+            # For every K16 step, all 16 lanes in the K dimension address the
+            # same window tile column. Keep that address vector one-dimensional
+            # so the compiler does not regenerate it for each decoded value.
+            kblock = (start + offset) // 16
+            tile = kblock * (N // 16) + npair // 8
+            pair = kk[:, None] * 8 + npair[None, :] % 8
+            tile_for_load = tile[None, :]
+        else:
+            tile = (krow[:, None] // 16) * (N // 16) + npair[None, :] // 8
+            pair = (kk[:, None] % 16) * 8 + npair[None, :] % 8
+            tile_for_load = tile
         bit = (127 - pair) * T
         word, shift = bit // 32, bit % 32
         mask = npair[None, :] < N // 2
-        lo = tl.load(W + tile * (4 * T) + word, mask, 0).to(tl.uint32)
-        hi = tl.load(W + tile * (4 * T) + (word + 1) % (4 * T), mask, 0).to(tl.uint32)
+        lo = tl.load(W + tile_for_load * (4 * T) + word, mask, 0).to(tl.uint32)
+        hi = tl.load(W + tile_for_load * (4 * T) + (word + 1) % (4 * T), mask, 0).to(tl.uint32)
         state = ((lo >> shift) | tl.where(shift > 0, hi << (32 - shift), 0)) & 65535
-        bank = tl.load(BANK + tile, mask, 0).to(tl.uint32)
-        state = state ^ (((bank >> (pair // 16)) & 1) * ALT)
+        bank = tl.load(BANK + tile_for_load, mask, 0).to(tl.uint32)
+        bank_bit = (bank >> (pair // 16)) & 1
+        if PREDICATED_BANK_XOR:
+            state = state ^ tl.where(bank_bit != 0, ALT, 0)
+        else:
+            state = state ^ (bank_bit * ALT)
         mixed = state ^ (state >> 8)
         mixed = (mixed * 40503 + 17011) & 65535
         mixed = mixed ^ (mixed >> 7)
@@ -83,6 +99,8 @@ def fused_window_mm(
     block_n=32,
     split=1,
     promotion_k=0,
+    address_mode="baseline",
+    bank_mode="multiply",
 ):
     if x.dtype != torch.float16 or levels.dtype != torch.float16:
         raise ValueError("FP16 activation and canonical level buffers required")
@@ -114,6 +132,10 @@ def fused_window_mm(
         raise ValueError("Unsupported FP32 promotion interval")
     if promotion_k and (k // split) % promotion_k:
         raise ValueError("Promotion interval must divide each split K range")
+    if address_mode not in ("baseline", "factored"):
+        raise ValueError("Unsupported address algebra mode")
+    if bank_mode not in ("multiply", "predicated"):
+        raise ValueError("Unsupported bank algebra mode")
     if window.numel() != (k // 16) * (n // 16) * 4 * t or bank.numel() != (k // 16) * (
         n // 16
     ):
@@ -142,6 +164,8 @@ def fused_window_mm(
         block_n,
         split,
         promotion_k,
+        address_mode == "factored",
+        bank_mode == "predicated",
         num_warps=4,
         num_stages=2,
     )

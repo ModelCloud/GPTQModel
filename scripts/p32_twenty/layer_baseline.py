@@ -25,6 +25,12 @@ def main():
     parser.add_argument("--fused-block-n", type=int, choices=(32,64), default=32)
     parser.add_argument("--fused-split", type=int, default=1)
     parser.add_argument(
+        "--fused-address-mode", choices=("baseline", "factored"), default="baseline"
+    )
+    parser.add_argument(
+        "--fused-bank-mode", choices=("multiply", "predicated"), default="multiply"
+    )
+    parser.add_argument(
         "--fused-promotion-k", type=int, choices=(0, 16, 32, 64, 128, 256), default=0
     )
     parser.add_argument("--module")
@@ -230,6 +236,8 @@ def main():
                         bank_alt_id=aid, block_m=args.fused_block_m,
                         block_n=args.fused_block_n, split=args.fused_split,
                         promotion_k=args.fused_promotion_k,
+                        address_mode=args.fused_address_mode,
+                        bank_mode=args.fused_bank_mode,
                     )
 
             if args.profile_fused:
@@ -257,6 +265,8 @@ def main():
                             "block_n": args.fused_block_n,
                             "split": args.fused_split,
                             "promotion_k": args.fused_promotion_k,
+                            "address_mode": args.fused_address_mode,
+                            "bank_mode": args.fused_bank_mode,
                         },
                     }
                 )
