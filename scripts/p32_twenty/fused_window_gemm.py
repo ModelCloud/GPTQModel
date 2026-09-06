@@ -28,6 +28,8 @@ def _gemm(
     FOLDED_ADDRESSES: tl.constexpr = False,
     PREDICATED_BANK_XOR: tl.constexpr = False,
     PAIR_LEVEL_LUT: tl.constexpr = False,
+    LUT_CACHE_CA: tl.constexpr = False,
+    LUT_CACHE_CG: tl.constexpr = False,
     DECODE_ONLY: tl.constexpr = False,
 ):
     rows = tl.program_id(0) * BM + tl.arange(0, BM)
@@ -65,7 +67,12 @@ def _gemm(
             state = state ^ (bank_bit * ALT)
         if PAIR_LEVEL_LUT:
             parity = cols[None, :] & 1
-            b = tl.load(LEVELS + state * 2 + parity)
+            if LUT_CACHE_CA:
+                b = tl.load(LEVELS + state * 2 + parity, cache_modifier=".ca")
+            elif LUT_CACHE_CG:
+                b = tl.load(LEVELS + state * 2 + parity, cache_modifier=".cg")
+            else:
+                b = tl.load(LEVELS + state * 2 + parity)
         else:
             mixed = state ^ (state >> 8)
             mixed = (mixed * 40503 + 17011) & 65535
@@ -107,6 +114,7 @@ def fused_window_mm(
     address_mode="baseline",
     bank_mode="multiply",
     decode_mode="scalar",
+    lut_cache="default",
     num_warps=4,
     num_stages=2,
 ):
@@ -146,6 +154,8 @@ def fused_window_mm(
         raise ValueError("Unsupported bank algebra mode")
     if decode_mode not in ("scalar", "pair-lut"):
         raise ValueError("Unsupported decode mode")
+    if lut_cache not in ("default", "ca", "cg"):
+        raise ValueError("Unsupported LUT cache mode")
     expected_levels = 256 if decode_mode == "scalar" else 65536 * 2
     if levels.numel() != expected_levels:
         raise ValueError(f"Expected {expected_levels} decode levels for {decode_mode}")
@@ -185,6 +195,8 @@ def fused_window_mm(
         address_mode == "factored",
         bank_mode == "predicated",
         decode_mode == "pair-lut",
+        lut_cache == "ca",
+        lut_cache == "cg",
         num_warps=num_warps,
         num_stages=num_stages,
     )

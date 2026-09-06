@@ -33,6 +33,9 @@ def main():
     parser.add_argument(
         "--fused-decode-mode", choices=("scalar", "pair-lut"), default="scalar"
     )
+    parser.add_argument(
+        "--fused-lut-cache", choices=("default", "ca", "cg"), default="default"
+    )
     parser.add_argument("--fused-num-warps", type=int, choices=(2, 4, 8), default=4)
     parser.add_argument("--fused-num-stages", type=int, choices=(1, 2, 3, 4), default=2)
     parser.add_argument(
@@ -251,6 +254,7 @@ def main():
                         address_mode=args.fused_address_mode,
                         bank_mode=args.fused_bank_mode,
                         decode_mode=args.fused_decode_mode,
+                        lut_cache=args.fused_lut_cache,
                         num_warps=args.fused_num_warps,
                         num_stages=args.fused_num_stages,
                     )
@@ -283,6 +287,7 @@ def main():
                             "address_mode": args.fused_address_mode,
                             "bank_mode": args.fused_bank_mode,
                             "decode_mode": args.fused_decode_mode,
+                            "lut_cache": args.fused_lut_cache,
                             "num_warps": args.fused_num_warps,
                             "num_stages": args.fused_num_stages,
                         },
