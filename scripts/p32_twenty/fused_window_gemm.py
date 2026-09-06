@@ -35,7 +35,7 @@ def _gemm(
 ):
     rows = tl.program_id(0) * BM + tl.arange(0, BM)
     cols = tl.program_id(1) * BN + tl.arange(0, BN)
-    npair = cols // 2
+    npair = cols >> 1
     kk = tl.arange(0, 16)
     acc = tl.full((BM, BN), 0, tl.float32)
     partial = tl.full((BM, BN), 0, tl.float16)
@@ -44,7 +44,7 @@ def _gemm(
         krow = start + offset + kk
         if RESIDENT_WINDOW_WORDS:
             kblock = (start + offset) // 16
-            pair_col = npair % 8
+            pair_col = npair & 7
             pair = kk[:, None] * 8 + pair_col[None, :]
             tile_slots = tl.arange(0, BN // 16)
             tile_ids = (
@@ -62,11 +62,12 @@ def _gemm(
                 other=0,
             )
             flat_words = tl.reshape(tile_words, (BN // 16) * 32)
-            tile_slot = npair // 8 - tl.program_id(1) * (BN // 16)
+            tile_slot = (npair >> 3) - tl.program_id(1) * (BN // 16)
             bit = (127 - pair) * T
-            word, shift = bit // 32, bit % 32
+            word, shift = bit >> 5, bit & 31
             word_index = tile_slot[None, :] * 32 + word
-            next_word_index = tile_slot[None, :] * 32 + (word + 1) % (4 * T)
+            next_word = tl.where(word == (4 * T - 1), 0, word + 1)
+            next_word_index = tile_slot[None, :] * 32 + next_word
             lo = tl.reshape(
                 tl.gather(flat_words, tl.reshape(word_index, (16 * BN,)), axis=0),
                 (16, BN),
@@ -86,22 +87,23 @@ def _gemm(
             # For every K16 step, all 16 lanes in the K dimension address the
             # same window tile column. Keep that address vector one-dimensional
             # so the compiler does not regenerate it for each decoded value.
-            kblock = (start + offset) // 16
-            tile = kblock * (N // 16) + npair // 8
-            pair = kk[:, None] * 8 + npair[None, :] % 8
+            kblock = (start + offset) >> 4
+            tile = kblock * (N // 16) + (npair >> 3)
+            pair = kk[:, None] * 8 + (npair[None, :] & 7)
             tile_for_load = tile[None, :]
         else:
-            tile = (krow[:, None] // 16) * (N // 16) + npair[None, :] // 8
-            pair = (kk[:, None] % 16) * 8 + npair[None, :] % 8
+            tile = (krow[:, None] >> 4) * (N // 16) + (npair[None, :] >> 3)
+            pair = kk[:, None] * 8 + (npair[None, :] & 7)
             tile_for_load = tile
             bit = (127 - pair) * T
-            word, shift = bit // 32, bit % 32
+            word, shift = bit >> 5, bit & 31
             mask = npair[None, :] < N // 2
             lo = tl.load(W + tile_for_load * (4 * T) + word, mask, 0).to(tl.uint32)
-            hi = tl.load(W + tile_for_load * (4 * T) + (word + 1) % (4 * T), mask, 0).to(tl.uint32)
+            next_word = tl.where(word == (4 * T - 1), 0, word + 1)
+            hi = tl.load(W + tile_for_load * (4 * T) + next_word, mask, 0).to(tl.uint32)
             state = ((lo >> shift) | tl.where(shift > 0, hi << (32 - shift), 0)) & 65535
             bank = tl.load(BANK + tile_for_load, mask, 0).to(tl.uint32)
-        bank_bit = (bank >> (pair // 16)) & 1
+        bank_bit = (bank >> (pair >> 4)) & 1
         if PREDICATED_BANK_XOR:
             state = state ^ tl.where(bank_bit != 0, ALT, 0)
         else:
@@ -118,7 +120,7 @@ def _gemm(
             mixed = state ^ (state >> 8)
             mixed = (mixed * 40503 + 17011) & 65535
             mixed = mixed ^ (mixed >> 7)
-            index = tl.where((cols[None, :] % 2) == 0, mixed >> 8, mixed & 255)
+            index = tl.where((cols[None, :] & 1) == 0, mixed >> 8, mixed & 255)
             if LUT_CACHE_CA:
                 b = tl.load(LEVELS + index, cache_modifier=".ca")
             elif LUT_CACHE_CG:
