@@ -21,6 +21,7 @@ from gptqmodel.quantization.qvq_codecs import (
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
 from gptqmodel.utils.qvq_amd import (
+    QVQAMDLaunchConfig,
     _launch_config,
     _use_gemv,
     qvq_p32_amd,
@@ -28,6 +29,7 @@ from gptqmodel.utils.qvq_amd import (
     qvq_p32_amd_folded_case_supported,
     qvq_p32_amd_folded_prefers_fp32_output,
     qvq_p32_amd_folded_shape_supported,
+    qvq_p32_amd_kernel_candidates,
     qvq_p32_amd_supported,
 )
 from scripts.benchmark_qvq_p32_amd import _target_process_ids
@@ -199,6 +201,30 @@ def test_qvq_p32_amd_folded_output_dtype_gate_covers_measured_regressions():
 )
 def test_qvq_p32_amd_launch_config_covers_requested_regimes(m, n, k, expected):
     assert _launch_config(m, n, k) == expected
+
+
+def test_qvq_p32_amd_kernel_candidates_expose_shape_tuning_without_hidden_dispatch():
+    candidates = qvq_p32_amd_kernel_candidates(128, 5120, 6144)
+    assert candidates[0] == QVQAMDLaunchConfig(64, 64, 64, 8, 2)
+    assert len(candidates) == 7
+    assert {candidate.block_m for candidate in candidates} == {16, 32, 64, 128, 256, 512, 1024}
+    assert all(candidate.block_n == 64 and candidate.num_warps == 8 for candidate in candidates)
+    assert all(6144 % candidate.block_k == 0 for candidate in candidates)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    (
+        {"block_m": 8},
+        {"block_m": 32, "block_n": 128},
+        {"block_m": 32, "block_k": 24},
+        {"block_m": 32, "num_warps": 2},
+        {"block_m": 32, "num_stages": 4},
+    ),
+)
+def test_qvq_p32_amd_launch_config_rejects_invalid_values(kwargs):
+    with pytest.raises((TypeError, ValueError)):
+        QVQAMDLaunchConfig(**kwargs)
 
 
 @pytest.mark.parametrize(

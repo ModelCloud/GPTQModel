@@ -680,12 +680,11 @@ The [native/ZML evidence](results/p32_window_native_zml.json) retains 16
 bit-exact real-Q native/reference cases at M1/33/128/2048, plus successful ZML
 CUDA execution with correction off/on at M33, K=N2048, W2, BM64/BN64. The
 transient fixture is hash checked; it is not another deployment format.
-Post-profile validation passes 182 native/graph/tuning tests, plus 20 extension
-registry tests. Native tests cover all four legal rates and six BM/BN pairs,
-M8192 boundaries, poisoned disabled pointers and capture rejection.
-Artifact validation still belongs to setup: the Python helper validates the
-unified package, while a complete standalone native artifact loader remains
-open.
+Post-profile validation passes the native/graph/tuning cases and extension
+registry checks. Native tests cover all four legal rates and six BM/BN pairs,
+M8192 boundaries, poisoned disabled pointers and capture rejection. The
+standalone loader now validates descriptor and per-file hashes, tensor shapes,
+and Python-compatible base/factor semantic hashes before upload.
 
 The instruction audit shows 15 Python-reference launches versus 16 native
 launches, with 5,076,434 versus 5,080,407 source-correlated instructions. The
@@ -695,8 +694,18 @@ Post-profile M33 prepared-call medians are 207.90 us Python eager, 78.85 us
 native C and 61.41 us captured Python. These are one-module execution timings,
 not ZML or full-model latency. The C bridge is not promoted over graph serving.
 
-External CUDA capture is explicitly rejected because this reference bridge
-allocates temporary tensors. The ZML handler advertises
-`command_buffer_compatible=false` and retains replicated sharding semantics.
-Caller-owned workspace, native grouped/fused correction, TP-aware lowering,
-ZML autotuning/cache integration and broader validation remain required.
+The low-level raw C entry still rejects CUDA capture because it allocates
+temporary tensors. The ZML handler advertises
+`command_buffer_compatible=true` only for its prepared native-graph path:
+each exact executable buffer set is warmed outside capture, retained on its
+own stream, and replayed or inserted as a child graph. Capture before warmup
+fails closed. Replicated sharding semantics remain unchanged. Caller-owned
+workspace, native grouped/fused correction, TP-aware lowering and broader
+model validation remain required.
+
+On the non-unified gfx950 path, `qvq_p32_amd_kernel_candidates(M, N, K)`
+publishes the bounded `QVQAMDLaunchConfig` sweep (including the measured
+shape heuristic). A caller can warm, correctness-check and benchmark those
+configs, then pass the selected config to `qvq_p32_amd(..., cache_weight=False,
+launch_config=...)`. Cold decoder/cache preparation is rejected during CUDA
+capture, so the selected launch is fixed before graph replay.
