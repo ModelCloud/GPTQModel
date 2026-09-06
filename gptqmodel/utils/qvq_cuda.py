@@ -1926,6 +1926,10 @@ def qvq_cuda_gemv(
             raise ValueError(
                 "QVQ CUDA grouped alternative-bank IDs must have shape (2,) or (3,)"
             )
+        if not _bank_alt_ids_validated and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "QVQ CUDA grouped bank selectors must be validated before CUDA Graph capture"
+            )
         if not _bank_alt_ids_validated and torch.any(
             (bank_alt_ids < 1) | (bank_alt_ids > 3)
         ):

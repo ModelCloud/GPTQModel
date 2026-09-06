@@ -114,6 +114,26 @@ def test_qvq_cuda_level_cache_rejects_cold_allocation_during_graph_capture(monke
     with pytest.raises(RuntimeError, match="PGC16 level table.*before CUDA Graph capture"):
         qvq_cuda_utils._pgc16_levels(torch.device("cuda", 0), PGC16_CODEBOOK_VERSION)
 
+
+def test_qvq_cuda_grouped_bank_validation_rejects_capture_sync(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    x = torch.empty((1, 256), device="cuda", dtype=torch.float16)
+    trellis = torch.empty((256, 24), device="cuda", dtype=torch.int32)
+    bank_ids = torch.empty((256,), device="cuda", dtype=torch.uint8)
+    bank_alt_ids = torch.ones((2,), device="cuda", dtype=torch.uint8)
+    with pytest.raises(RuntimeError, match="grouped bank selectors.*before CUDA Graph capture"):
+        qvq_cuda_utils.qvq_cuda_gemv(
+            x,
+            trellis,
+            3.0,
+            out_features=256,
+            bank_ids=bank_ids,
+            v2b2_p32=True,
+            bank_alt_ids=bank_alt_ids,
+            bank_alt_boundaries=(8,),
+            _bank_alt_ids_validated=False,
+        )
+
 pytestmark = [
     pytest.mark.cuda,
     pytest.mark.skipif(
