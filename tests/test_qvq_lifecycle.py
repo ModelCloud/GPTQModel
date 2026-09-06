@@ -721,6 +721,74 @@ def test_qvq_output_alignment_refines_groups_and_runs_after_every_projection_sub
     align.assert_called_once_with(3, finalize=False)
 
 
+def test_qvq_output_alignment_defers_rank8_until_final_aligned_payload(monkeypatch):
+    from gptqmodel.quantization.qvq_rank8 import Rank8Calibration
+
+    qcfg = QVQConfig(
+        bits=2,
+        rounding="block_ldlq",
+        output_alignment=OutputAlignConfig(),
+        device="cpu",
+        offload_to_disk=False,
+    )
+    processor = _processor(qcfg=qcfg)
+    root = torch.nn.Module()
+    root.proj = torch.nn.Linear(16, 16, bias=False)
+    named = NamedModule(root.proj, name="proj", full_name="proj", layer_index=3)
+    named.state.update(
+        {
+            "trellis": torch.zeros(1, dtype=torch.int32),
+            "SU": torch.ones(16),
+            "SV": torch.ones(16),
+            "_qvq_runtime_config": (
+                2, "pgc16-v1", 2, 2, 16, False, False, True, True, True, None
+            ),
+            "_qvq_original_weight": root.proj.weight.detach().clone(),
+        }
+    )
+    calibration = Rank8Calibration(
+        torch.ones(2, 16), torch.ones(2, 16) * 2, ("train",), ("heldout",)
+    )
+    processor._rank8_alignment_calibration["proj"] = calibration
+    captured = {}
+
+    def fake_fit(payload, original_weight, bias, received_calibration, **kwargs):
+        captured.update(
+            payload=payload,
+            original_weight=original_weight,
+            bias=bias,
+            calibration=received_calibration,
+            kwargs=kwargs,
+        )
+        return torch.ones(16, 8), torch.ones(8, 16), torch.ones(1), {
+            "validated": True,
+            "selected": True,
+            "objective": "output_l2",
+        }
+
+    monkeypatch.setattr(
+        "gptqmodel.quantization.qvq_rank8.fit_rank8_serialized_payload", fake_fit
+    )
+    attachment = processor._output_alignment
+    monkeypatch.setattr(attachment, "modules_are_fully_staged", lambda *args: True)
+    monkeypatch.setattr(attachment, "staged_modules", lambda *args: [named])
+    monkeypatch.setattr(
+        attachment, "align_layer", lambda *args, **kwargs: {"alignment_pass": 1.0}
+    )
+
+    processor.cleanup_subset({"proj": named}, subset_index=0, subset_total=1)
+
+    assert captured["calibration"] is calibration
+    torch.testing.assert_close(captured["payload"]["SU"], named.state["SU"])
+    torch.testing.assert_close(captured["payload"]["SV"], named.state["SV"])
+    torch.testing.assert_close(captured["original_weight"], named.state["_qvq_original_weight"])
+    assert captured["kwargs"]["bits"] == 2
+    assert named.state["rank8_A"].shape == (16, 8)
+    assert named.state["rank8_B"].shape == (8, 16)
+    assert named.state["rank8_metadata"].shape == (1,)
+    assert not processor._rank8_alignment_calibration
+
+
 def test_qvq_output_alignment_rejects_moe_from_explicit_module_tree_tags_before_capture():
     qcfg = QVQConfig(
         bits=2,

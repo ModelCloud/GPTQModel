@@ -31,8 +31,9 @@ The calibration processor also accepts explicit per-module calibration through
 and document provenance remains the caller's responsibility; there is no
 implicit reuse of propagation gates or evaluation benchmarks. Automatic
 whole-model document capture is not implemented. Atomic SwiGLU selection now
-defers fitting until its complete triplet is selected; output alignment plus
-rank8 remains fail-closed until its post-alignment teacher contract is defined.
+defers fitting until its complete triplet is selected; output-aligned modules
+defer fitting until the final aligned layer pass, using the aligned SU/SV
+payload and the immutable dense teacher snapshot.
 
 The initial fitter is bounded-calibration CPU FP64 reduced-rank regression
 with `gelsd`, rcond 1e-5. It fits the output predicted by least squares, not a
@@ -715,3 +716,5 @@ gate/up/down triplet is selected. The fitter receives the selected candidate's
 serialized P32 tensors plus the immutable dense teacher snapshot, and accepted
 factors are appended to that same payload before host staging. This preserves
 the base-payload binding when the selector chooses a nonzero candidate arm.
+When output alignment is enabled, both ordinary and atomic modules defer the
+fit one step further, until alignment has finished revising SU/SV.

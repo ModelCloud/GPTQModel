@@ -217,6 +217,10 @@ class QVQProcessor(LoopProcessor):
         # alive until that tuple is final, then fit against the selected
         # serialized payload rather than attaching factors to candidate zero.
         self._rank8_atomic_calibration = {}
+        # Output alignment may update SU/SV over several layer passes. Keep
+        # rank8 calibration alive until the final pass so factors bind to the
+        # aligned payload rather than an intermediate transform state.
+        self._rank8_alignment_calibration = {}
         self._smooth_swiglu_stats: Dict[str, Dict[str, Any]] = {}
         self._smooth_swiglu_prepared = False
         self._atomic_swiglu_inputs: Dict[str, torch.Tensor] = {}
@@ -1287,7 +1291,13 @@ class QVQProcessor(LoopProcessor):
             payload = records[role]["candidates"][selected_id]["serialized_tensors"]
             with self._propagation_gates_lock:
                 rank8_calibration = self._rank8_atomic_calibration.pop(name, None)
-            if rank8_calibration is not None:
+            if rank8_calibration is not None and self._output_alignment is not None:
+                # The selected payload will be aligned below.  Preserve the
+                # calibration for the final layer pass instead of fitting
+                # against pre-alignment SU/SV.
+                with self._propagation_gates_lock:
+                    self._rank8_alignment_calibration[name] = rank8_calibration
+            elif rank8_calibration is not None:
                 from ..quantization.qvq_rank8 import fit_rank8_serialized_payload
 
                 original = originals[role]
@@ -2034,6 +2044,84 @@ class QVQProcessor(LoopProcessor):
             attention_masks=list(self.inputs_cache.attention_masks or []),
         )
 
+    def _fit_rank8_after_output_alignment(self, layer_index: int) -> dict[str, dict[str, Any]]:
+        """Fit deferred factors against each module's final aligned payload."""
+
+        if self._output_alignment is None:
+            return {}
+        modules = self._output_alignment.staged_modules(layer_index)
+        if not modules:
+            return {}
+        from ..quantization.qvq_rank8 import fit_rank8_serialized_payload
+
+        reports: dict[str, dict[str, Any]] = {}
+        for module in modules:
+            with self._propagation_gates_lock:
+                calibration = self._rank8_alignment_calibration.pop(module.full_name, None)
+            if calibration is None:
+                continue
+            if not isinstance(module.module, torch.nn.Linear):
+                raise NotImplementedError(
+                    "rank8 output-alignment fitting currently supports nn.Linear leaves only; "
+                    f"`{module.full_name}` is {module.module.__class__.__name__}."
+                )
+            with parent_module_lock(module.full_name):
+                runtime_config = module.state.get("_qvq_runtime_config")
+                original_weight = module.state.get("_qvq_original_weight")
+                payload = {
+                    name: module.state[name].detach().clone()
+                    for name in (
+                        "trellis",
+                        "SU",
+                        "SV",
+                        "bias",
+                        "bank_ids",
+                        "bank_alt_id",
+                    )
+                    if module.state.get(name) is not None
+                }
+            if runtime_config is None or original_weight is None:
+                raise RuntimeError(
+                    f"rank8 output-alignment fitting lost staged state for `{module.full_name}`."
+                )
+            bits, codebook = runtime_config[:2]
+            input_hadamard = bool(runtime_config[8]) if len(runtime_config) > 8 else True
+            output_hadamard = bool(runtime_config[9]) if len(runtime_config) > 9 else True
+            fit_device = module.module.weight.device
+            bias = None if module.module.bias is None else module.module.bias.detach()
+            rank8_A, rank8_B, rank8_metadata, report = fit_rank8_serialized_payload(
+                payload,
+                original_weight.to(device=fit_device),
+                bias,
+                calibration,
+                bits=bits,
+                codebook_version=codebook,
+                input_hadamard=input_hadamard,
+                output_hadamard=output_hadamard,
+            )
+            reports[module.full_name] = report
+            if rank8_A is None:
+                continue
+            with parent_module_lock(module.full_name):
+                module.state.update(
+                    {
+                        "rank8_A": rank8_A.detach().to(device="cpu", copy=True).contiguous(),
+                        "rank8_B": rank8_B.detach().to(device="cpu", copy=True).contiguous(),
+                        "rank8_metadata": rank8_metadata.detach().to(device="cpu", copy=True).contiguous(),
+                    }
+                )
+            with self._stats_lock:
+                for stat in self.log:
+                    if stat.get("full_name") == module.full_name:
+                        stat.update(
+                            {
+                                "rank8_validated": bool(report.get("validated", False)),
+                                "rank8_selected": bool(report.get("selected", False)),
+                                "rank8_objective": report.get("objective"),
+                            }
+                        )
+        return reports
+
     def cleanup_subset(
         self,
         subset: Optional[Dict[str, NamedModule]] = None,
@@ -2063,15 +2151,39 @@ class QVQProcessor(LoopProcessor):
             return
         final_subset = subset_index + 1 == subset_total
         alignment_device = get_device(next(iter(subset.values())).module)
-        if alignment_device.type == "cuda":
-            result = DEVICE_THREAD_POOL.do(
-                alignment_device,
-                self._output_alignment.align_layer,
-                layer_index,
-                finalize=final_subset,
+        staged_names = {
+            module.full_name
+            for module in self._output_alignment.staged_modules(layer_index)
+        }
+        with self._propagation_gates_lock:
+            pending_rank8 = bool(
+                staged_names.intersection(self._rank8_alignment_calibration)
             )
-        else:
-            result = self._output_alignment.align_layer(layer_index, finalize=final_subset)
+        keep_alignment_state = final_subset and pending_rank8
+        try:
+            if alignment_device.type == "cuda":
+                result = DEVICE_THREAD_POOL.do(
+                    alignment_device,
+                    self._output_alignment.align_layer,
+                    layer_index,
+                    # Keep the final alignment state alive only when deferred
+                    # rank8 fitting needs to consume its updated SU/SV/payload.
+                    finalize=final_subset and not keep_alignment_state,
+                )
+            else:
+                result = self._output_alignment.align_layer(
+                    layer_index,
+                    finalize=final_subset and not keep_alignment_state,
+                )
+        except BaseException:
+            # A failed final alignment must not leave staged tensors or
+            # deferred calibration attached to a layer that cannot be
+            # finalized.  The normal processor teardown will report the
+            # original exception; this cleanup is best-effort and preserves
+            # that failure as the primary signal.
+            if keep_alignment_state:
+                self._output_alignment.discard_layer(layer_index)
+            raise
         if result is not None:
             with self._stats_lock:
                 self._output_alignment_stats.setdefault(layer_index, []).append(result)
@@ -2083,6 +2195,11 @@ class QVQProcessor(LoopProcessor):
                                 for key, value in result.items()
                             }
                         )
+        if final_subset and keep_alignment_state:
+            try:
+                self._fit_rank8_after_output_alignment(layer_index)
+            finally:
+                self._output_alignment.discard_layer(layer_index)
 
     def is_skipped(self, module: NamedModule) -> bool:
         """Return whether dynamic rules omitted this module from QVQ work."""
@@ -2692,10 +2809,12 @@ class QVQProcessor(LoopProcessor):
                 rank8_calibration = self._rank8_calibration.pop(module.full_name, None)
             if rank8_calibration is not None:
                 if self._output_alignment is not None:
-                    raise ValueError(
-                        "rank8 fitting must follow output alignment; combined finalization is unsupported"
-                    )
-                if atomic_swiglu:
+                    # Alignment can revise SU/SV over multiple layer passes;
+                    # fitting now would bind factors to an intermediate
+                    # transform.  The final cleanup pass consumes this map.
+                    with self._propagation_gates_lock:
+                        self._rank8_alignment_calibration[module.full_name] = rank8_calibration
+                elif atomic_swiglu:
                     with self._propagation_gates_lock:
                         self._rank8_atomic_calibration[module.full_name] = rank8_calibration
                 else:
@@ -3009,6 +3128,11 @@ class QVQProcessor(LoopProcessor):
                     "rank8 atomic calibration modules were not finalized: "
                     + ", ".join(sorted(self._rank8_atomic_calibration))
                 )
+            if self._rank8_alignment_calibration:
+                raise ValueError(
+                    "rank8 alignment calibration modules were not finalized: "
+                    + ", ".join(sorted(self._rank8_alignment_calibration))
+                )
         self._module_replay_rows.clear()
         self._module_replay_teacher_logits.clear()
         self._module_replay_model = None
@@ -3017,6 +3141,7 @@ class QVQProcessor(LoopProcessor):
             self._atomic_swiglu_candidates.clear()
         with self._propagation_gates_lock:
             self._rank8_atomic_calibration.clear()
+            self._rank8_alignment_calibration.clear()
         with self._yaqa_factor_lock:
             self._yaqa_input_hessians.clear()
             self._yaqa_output_hessians.clear()
