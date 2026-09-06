@@ -1471,7 +1471,7 @@ class QVQLinear(BaseQuantLinear):
         if (window_config is not None and (
                 window_config.algorithm.startswith("hopper_")
                 or window_config.algorithm in ("ampere_window", "amd_gfx950")
-            ) and x.dtype == torch.float16):
+            ) and x.dtype in (torch.float16, torch.bfloat16)):
             if return_ordered_partials or ordered_split_count is not None:
                 raise ValueError("explicit window policy requires complete inner output")
             from ...quantization.qvq_rank8 import explicit_window_inner

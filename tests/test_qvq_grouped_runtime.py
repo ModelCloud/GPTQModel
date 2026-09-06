@@ -28,7 +28,7 @@ from gptqmodel.quantization.qvq import (
     repack_p32_planar_to_window,
     unpack_qvq_binary_bank_ids,
 )
-from gptqmodel.quantization.qvq_rank8 import P32WindowConfig
+from gptqmodel.quantization.qvq_rank8 import P32WindowConfig, prepare_rank8
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_fp16_to_fp8_e5m2_clamped,
@@ -200,6 +200,39 @@ def test_h200_grouped_window_only_payload_is_exact_and_graph_safe():
     assert runtime.telemetry.payload_builds == 1
     assert runtime.telemetry.grouped_launches >= 2
     assert children[0].trellis is None and children[1].trellis is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_h200_window_only_rank8_capture_matches_planar_reference():
+    device = _h200_device()
+    if device is None:
+        pytest.skip("H200 required")
+    from test_qvq_window_recovery import _kernel_rank8
+
+    child = _child("q_proj", device=device, seed=111)
+    _kernel_rank8(child)
+    config = P32WindowConfig(recovery_mode="on")
+    x = torch.randn(16, 256, device=device, dtype=torch.float16) * 0.01
+    with torch.inference_mode():
+        prepare_rank8(child, config)
+        expected = child(x).clone()
+        child.window_words = repack_p32_planar_to_window(
+            child.trellis, bits=child.bits
+        )
+        child.window_only = True
+        child.trellis = None
+        child.post_init()
+        prepare_rank8(child, config)
+        actual = child(x)
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = child(x)
+        for _ in range(3):
+            graph.replay()
+            torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert child.trellis is None
 
 
 def test_quantization_uses_the_same_role_groups_as_runtime_fusion():

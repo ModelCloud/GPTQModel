@@ -294,6 +294,22 @@ def prepare_rank8(layer, config):
     if layer.training:
         raise ValueError("window recovery is inference-only")
     runtime_device = layer.runtime_device()
+    if (
+        config.algorithm == "auto"
+        and getattr(layer, "window_only", False)
+        and runtime_device.type == "cuda"
+        and torch.version.hip is None
+    ):
+        # A window-only deployment has no planar GEMV fallback. Resolve the
+        # architecture's existing window consumer during preparation so the
+        # default package policy remains graph-safe at replay time.
+        properties = torch.cuda.get_device_properties(runtime_device)
+        if (properties.major, properties.minor) == (9, 0) and any(
+            name in properties.name for name in ("H100", "H200")
+        ):
+            config = replace(config, algorithm="hopper_m16")
+        elif (properties.major, properties.minor) == (8, 0):
+            config = replace(config, algorithm="ampere_window")
     if runtime_device.type == "cuda" and torch.cuda.is_current_stream_capturing():
         raise RuntimeError("prepare rank8 and kernel policy before CUDA Graph capture")
     if runtime_device.type == "cuda" and torch.version.hip is None:
@@ -1685,6 +1701,11 @@ def explicit_window_inner(layer, transformed, config):
     )
 
     rows = transformed.shape[0]
+    if transformed.dtype == torch.bfloat16:
+        # The existing native window consumers are FP16-input kernels.  The
+        # outer BF16 overflow-rescue branch may still reach this operator;
+        # narrow that fixed-shape operand without reintroducing planar state.
+        transformed = transformed.to(torch.float16)
     if transformed.dtype != torch.float16 or not config.min_m <= rows <= config.max_m:
         raise ValueError("input dtype or M is outside the prepared Hopper policy")
     if config.chunk_m and rows > config.chunk_m:
