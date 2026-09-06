@@ -161,6 +161,47 @@ def test_window_only_dense_reference_reconstructs_planar_temporarily():
     torch.testing.assert_close(child(x), expected_output, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_h200_grouped_window_only_payload_is_exact_and_graph_safe():
+    device = _h200_device()
+    if device is None:
+        pytest.skip("H200 required")
+    children = tuple(
+        _child(name, device=device, seed=101 + index)
+        for index, name in enumerate(("q_proj", "k_proj"))
+    )
+    for child in children[1:]:
+        child.SU.copy_(children[0].SU)
+    x = torch.randn(16, 256, device=device, dtype=torch.float16) * 0.01
+    with torch.inference_mode():
+        references = tuple(child(x).clone() for child in children)
+        for child in children:
+            child.window_words = repack_p32_planar_to_window(
+                child.trellis, bits=child.bits
+            )
+            child.window_only = True
+            child.trellis = None
+            child.post_init()
+        parent = nn.Module()
+        parent.gate_proj, parent.up_proj = children
+        assert install_qvq_hopper_groups(parent, qkv=False, gate_up=True)["gate_up"] == 1
+        outputs = (parent.gate_proj(x), parent.up_proj(x))
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = (parent.gate_proj(x), parent.up_proj(x))
+        for _ in range(3):
+            graph.replay()
+            for output, reference in zip(captured, references, strict=True):
+                torch.testing.assert_close(output, reference, rtol=0, atol=0)
+    for output, reference in zip(outputs, references, strict=True):
+        torch.testing.assert_close(output, reference, rtol=0, atol=0)
+    runtime = children[0]._gptqmodel_qvq_grouped_runtime
+    assert runtime.telemetry.payload_builds == 1
+    assert runtime.telemetry.grouped_launches >= 2
+    assert children[0].trellis is None and children[1].trellis is None
+
+
 def test_quantization_uses_the_same_role_groups_as_runtime_fusion():
     tree = [
         "model",
