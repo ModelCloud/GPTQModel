@@ -55,6 +55,17 @@ _QVQ_HADAMARD_MAX_WIDTH = 16384
 _QVQ_FP16_SAFE_MAGNITUDE = torch.finfo(torch.float16).max / 2
 
 
+def _qvq_buffer_version(tensor: torch.Tensor) -> int:
+    """Return a stable cache version for normal and inference tensors."""
+    try:
+        return tensor._version
+    except RuntimeError:
+        # Tensors created under inference_mode intentionally omit version
+        # counters. Their object identity still changes whenever ownership is
+        # replaced, which is sufficient for the window cache key.
+        return -1
+
+
 def _qvq_fp16_emulated_hadamard_fallback(
     x: torch.Tensor,
     *,
@@ -490,6 +501,9 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_cuda_window_cache: (
             tuple[torch.Tensor, int, torch.device, torch.Tensor] | None
         ) = None
+        self._qvq_planar_fallback_cache: (
+            tuple[torch.Tensor, int, torch.Tensor] | None
+        ) = None
         self._qvq_fp8_levels_cache: tuple[torch.device, torch.Tensor, float] | None = None
         self._qvq_fp8_telemetry_lock = threading.Lock()
         self._qvq_fp8_telemetry = {
@@ -606,6 +620,7 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_fp8_telemetry_lock = threading.Lock()
         self._qvq_cuda_bank_cache = None
         self._qvq_cuda_window_cache = None
+        self._qvq_planar_fallback_cache = None
         self._qvq_fp8_levels_cache = None
         if "_qvq_fp8_telemetry" not in self.__dict__:
             self._qvq_fp8_telemetry = {
@@ -675,6 +690,35 @@ class QVQLinear(BaseQuantLinear):
         self._dtype_cache = {}
         self._qvq_cuda_aux_cache_signature = None
         self._qvq_rank8_factor_cache = {}
+        self._qvq_planar_fallback_cache = None
+
+    def _prepare_planar_fallback(self) -> torch.Tensor:
+        """Prepare a legacy planar payload only for an explicit fallback.
+
+        Normal direct-window inference releases planar ownership. Unsupported
+        arithmetic or backend policies may still request the reference child
+        path; this cache is then prepared eagerly and remains stable for graph
+        replay instead of allocating during capture.
+        """
+        if not self.window_only:
+            if self.trellis is None:
+                raise RuntimeError("QVQ planar fallback payload is unavailable")
+            return self.trellis
+        source = self.window_words
+        if source is None:
+            raise RuntimeError("QVQ window-only module is missing window_words")
+        source_version = _qvq_buffer_version(source)
+        cached = self._qvq_planar_fallback_cache
+        if (
+            cached is not None
+            and cached[0] is source
+            and cached[1] == source_version
+        ):
+            return cached[2]
+        self._require_prepared_outside_capture(source.device, "planar fallback")
+        planar = repack_p32_window_to_planar(source, bits=self.bits).contiguous()
+        self._qvq_planar_fallback_cache = (source, source_version, planar)
+        return planar
 
     def _cached_rank8_factor(self, name: str) -> torch.Tensor:
         """Return a prepared contiguous FP32 rank8 factor without replay casts."""
@@ -766,7 +810,7 @@ class QVQLinear(BaseQuantLinear):
         source = self.window_words if self.window_only else self.trellis
         if source is None:
             raise RuntimeError("QVQ window-only module is missing window_words")
-        source_version = source._version
+        source_version = _qvq_buffer_version(source)
         cached = self._qvq_cuda_window_cache
         if (
             cached is not None
@@ -785,10 +829,21 @@ class QVQLinear(BaseQuantLinear):
                 device=device
             )
         current_source = self.window_words if self.window_only else self.trellis
-        if current_source is not source or source._version != source_version:
+        if current_source is not source or _qvq_buffer_version(source) != source_version:
             raise RuntimeError(
                 "QVQ P32 trellis changed while preparing the window payload"
             )
+        # Direct window inference owns the lossless window payload after the
+        # one-time repack. Release the planar source for evaluated modules so
+        # live device storage does not retain two equivalent representations.
+        # Training modules keep planar ownership for the differentiable path;
+        # explicit preparation is itself the boundary for eval modules.
+        if not self.window_only and not self.training:
+            self.window_words = window
+            self.trellis = None
+            self.window_only = True
+            source = self.window_words
+            source_version = _qvq_buffer_version(source)
         self._qvq_cuda_window_cache = (source, source_version, device, window)
         return window
 
@@ -1834,8 +1889,23 @@ class QVQLinear(BaseQuantLinear):
                     return output if return_ordered_partials else output[: x.shape[0]]
 
             if self.window_only:
-                raise RuntimeError(
-                    "window-only QVQ module has no device planar fallback; prepare a window-compatible kernel"
+                # Unsupported optional policies may deliberately fall back to
+                # the legacy child reference. The planar payload must have been
+                # prepared by the eager fallback before graph capture.
+                planar = self._prepare_planar_fallback()
+                return qvq_cuda_gemv(
+                    x.contiguous(),
+                    planar,
+                    self.bits,
+                    out_features=self.out_features,
+                    codebook_version=self.codebook_version,
+                    output_fp32=x.dtype in (torch.float16, torch.bfloat16),
+                    vector_size=self.vector_size,
+                    bank_ids=cuda_bank_ids,
+                    v2b4_p64=self.v2b4_p64,
+                    v2b2_p32=self.v2b2_p32,
+                    bank_alt_id=cuda_bank_alt_id,
+                    _bank_ids_validated=True,
                 )
             return qvq_cuda_gemv(
                 x.contiguous(),

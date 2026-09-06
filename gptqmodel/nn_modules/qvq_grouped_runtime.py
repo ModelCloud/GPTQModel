@@ -512,6 +512,13 @@ class QVQHopperGroupedRuntime:
         self.telemetry.plain_fallbacks += 1
         self.telemetry.last_fallback_reason = reason
         child = self._children()[member_index]
+        # Evaluated direct-window modules release their planar source.  A
+        # rejected grouped policy still uses the exact legacy child path, so
+        # materialize its explicit planar fallback before entering that path.
+        # The helper fails closed if this is attempted during CUDA Graph
+        # capture without an eager preparation.
+        if child.window_only:
+            child._prepare_planar_fallback()
         original = child._gptqmodel_qvq_grouped_original_forward
         return original(x)
 
@@ -728,7 +735,8 @@ class QVQHopperGroupedRuntime:
             .reshape(-1)
             .contiguous()
         )
-        if source_key != _source_key(children):
+        current_key = _source_key(children)
+        if source_key != current_key:
             raise RuntimeError("QVQ grouped canonical payload changed during repack")
         payload = QVQHopperGroupedP32Payload(
             trellis=grouped_window,

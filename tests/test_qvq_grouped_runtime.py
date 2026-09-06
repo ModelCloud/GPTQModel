@@ -166,6 +166,23 @@ def test_window_only_dense_reference_reconstructs_planar_temporarily():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_h200_window_prepare_releases_planar_source_in_inference():
+    device = _h200_device()
+    if device is None:
+        pytest.skip("H200 required")
+    child = _child("q_proj", device=device, seed=97)
+    assert not child.window_only and child.trellis is not None
+    with torch.inference_mode():
+        window = child._prepare_hopper_p32_window(device)
+    assert child.window_only
+    assert child.trellis is None
+    assert child.window_words is window
+    # A second preparation reuses the inference tensor by identity without
+    # trying to read its unavailable version counter.
+    assert child._prepare_hopper_p32_window(device) is window
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_h200_grouped_window_only_payload_is_exact_and_graph_safe():
     device = _h200_device()
     if device is None:
@@ -180,12 +197,15 @@ def test_h200_grouped_window_only_payload_is_exact_and_graph_safe():
     with torch.inference_mode():
         references = tuple(child(x).clone() for child in children)
         for child in children:
-            child.window_words = repack_p32_planar_to_window(
-                child.trellis, bits=child.bits
-            )
-            child.window_only = True
-            child.trellis = None
-            child.post_init()
+            # Direct inference now transfers planar ownership to the lossless
+            # window cache before this explicit window-only check.
+            if not child.window_only:
+                child.window_words = repack_p32_planar_to_window(
+                    child.trellis, bits=child.bits
+                )
+                child.window_only = True
+                child.trellis = None
+                child.post_init()
         parent = nn.Module()
         parent.gate_proj, parent.up_proj = children
         assert install_qvq_hopper_groups(parent, qkv=False, gate_up=True)["gate_up"] == 1
@@ -264,12 +284,13 @@ def test_h200_window_only_rank8_capture_matches_planar_reference():
     with torch.inference_mode():
         prepare_rank8(child, config)
         expected = child(x).clone()
-        child.window_words = repack_p32_planar_to_window(
-            child.trellis, bits=child.bits
-        )
-        child.window_only = True
-        child.trellis = None
-        child.post_init()
+        if not child.window_only:
+            child.window_words = repack_p32_planar_to_window(
+                child.trellis, bits=child.bits
+            )
+            child.window_only = True
+            child.trellis = None
+            child.post_init()
         prepare_rank8(child, config)
         candidates = window_kernel_candidates(child, m=16)
         assert candidates[0].algorithm == "hopper_m16"
@@ -848,7 +869,9 @@ def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
     telemetry = qvq_grouped_runtime_telemetry(model)
     assert len(telemetry) == 1
     expected_window_bytes = sum(
-        child.trellis.numel() * child.trellis.element_size() for child in children
+        (child.window_words if child.window_only else child.trellis).numel()
+        * (child.window_words if child.window_only else child.trellis).element_size()
+        for child in children
     )
     assert telemetry[0]["grouped_launches"] == 1
     assert telemetry[0]["payload_builds"] == 1

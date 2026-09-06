@@ -288,6 +288,14 @@ def _versions(layer):
         "window_words",
         *RANK8_BUFFERS,
     )
+    def version(value):
+        try:
+            return value._version
+        except RuntimeError:
+            # Buffers materialized under inference_mode omit version counters;
+            # their object identity remains part of the state tuple.
+            return -1
+
     return (
         layer.bits,
         layer.codebook_version,
@@ -295,7 +303,7 @@ def _versions(layer):
         layer.output_hadamard,
         id(layer.activation),
     ) + tuple(
-        (name, id(value), value._version)
+        (name, id(value), version(value))
         for name in names
         if (value := getattr(layer, name, None)) is not None
     )
@@ -505,6 +513,12 @@ def prepare_rank8(layer, config):
                 "cannot change rank8 mode during a sibling projection cycle"
             )
         grouped.invalidate()
+    # Establish window ownership before recording the version tuple.  Direct
+    # CUDA inference may transfer a planar module to its window-only payload;
+    # recording versions first would make the first corrected forward look
+    # stale even though the transfer is the intended one-time preparation.
+    if runtime_device.type == "cuda" and config.algorithm != "production_window":
+        layer._prepare_hopper_p32_window(runtime_device)
     layer._p32_window_config = config
     layer._p32_rank8_enabled = enabled
     layer._p32_rank8_versions = _versions(layer) if enabled else None
