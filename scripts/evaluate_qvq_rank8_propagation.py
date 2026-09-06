@@ -25,6 +25,16 @@ def paired_summary(rows, *, samples=10000, seed=137):
     result = {"documents": len(rows), "tokens": tokens, "modes": {},
               "bootstrap": {"samples": samples, "seed": seed, "unit": "document"},
               "quality_minus_fast": {}}
+    optional_mode_metrics = (
+        ("kl_low_temp_sum", "low_temperature_kl_per_token", 1),
+        ("margin_sum", "candidate_margin", 1),
+        ("teacher_margin_sum", "teacher_margin", 1),
+        ("margin_abs_error_sum", "margin_absolute_error", 1),
+        ("margin_sign_matches", "margin_sign_agreement", 1),
+        ("top5_overlap_sum", "top5_agreement", 5),
+        ("top10_overlap_sum", "top10_agreement", 10),
+        ("top32_overlap_sum", "top32_agreement", 32),
+    )
     for mode in ("teacher", "fast", "quality"):
         nll = sum(row[mode]["nll_sum"] for row in rows) / tokens
         values = {"nll_per_token": nll, "perplexity": math.exp(nll)}
@@ -33,9 +43,24 @@ def paired_summary(rows, *, samples=10000, seed=137):
                 "kl_per_token": sum(row[mode]["kl_sum"] for row in rows) / tokens,
                 "top1_agreement": sum(row[mode]["top1_matches"] for row in rows) / tokens,
             })
+            for source, name, denominator in optional_mode_metrics:
+                if all(source in row[mode] for row in rows):
+                    values[name] = sum(row[mode][source] for row in rows) / (tokens * denominator)
         result["modes"][mode] = values
     rng = random.Random(seed)
-    for metric in ("nll_sum", "kl_sum", "top1_matches"):
+    delta_metrics = ["nll_sum", "kl_sum", "top1_matches"]
+    for metric in (
+        "kl_low_temp_sum",
+        "margin_sum",
+        "margin_abs_error_sum",
+        "margin_sign_matches",
+        "top5_overlap_sum",
+        "top10_overlap_sum",
+        "top32_overlap_sum",
+    ):
+        if all(metric in row["fast"] and metric in row["quality"] for row in rows):
+            delta_metrics.append(metric)
+    for metric in delta_metrics:
         deltas = [row["quality"][metric] - row["fast"][metric] for row in rows]
         boot = []
         for _ in range(samples):
@@ -48,6 +73,62 @@ def paired_summary(rows, *, samples=10000, seed=137):
             "ci95": [boot[int(samples * 0.025) - 1], boot[int(samples * 0.975) - 1]],
             "positive_documents": sum(value > 0 for value in deltas),
         }
+    return result
+
+
+def logit_metrics(logits, target, reference=None):
+    """Return teacher CE and quality-sensitive logit agreement statistics.
+
+    The returned sums are over predicted tokens.  Keeping sums at the row
+    level lets :func:`paired_summary` perform document-level bootstrap samples
+    without giving long documents or repeated tokens an incorrect weight.
+    """
+    import torch
+    import torch.nn.functional as F
+
+    if not isinstance(logits, torch.Tensor) or logits.ndim != 3:
+        raise ValueError("logits must have shape [batch, sequence, vocabulary]")
+    z = logits[0, :-1].float()
+    labels = target[0, 1:]
+    if z.shape[0] != labels.shape[0]:
+        raise ValueError("logits and target sequence lengths do not match")
+    if not torch.isfinite(z).all():
+        raise ValueError("non-finite model logits")
+    result = {
+        "tokens": labels.numel(),
+        "nll_sum": float(F.cross_entropy(z, labels, reduction="sum")),
+    }
+    if reference is None:
+        return result
+    r = reference[0, :-1].float()
+    if r.shape != z.shape or not torch.isfinite(r).all():
+        raise ValueError("reference logits do not match candidate logits")
+    result["kl_sum"] = float((r.log_softmax(-1).exp() * (r.log_softmax(-1) - z.log_softmax(-1))).sum())
+    low_temperature = 0.5
+    reference_low = (r / low_temperature).log_softmax(-1)
+    candidate_low = (z / low_temperature).log_softmax(-1)
+    result["kl_low_temp_sum"] = float(
+        (reference_low.exp() * (reference_low - candidate_low)).sum()
+    )
+    teacher_top2 = r.topk(2, dim=-1).values
+    candidate_top2 = z.topk(2, dim=-1).values
+    teacher_margin = teacher_top2[:, 0] - teacher_top2[:, 1]
+    candidate_margin = candidate_top2[:, 0] - candidate_top2[:, 1]
+    result["teacher_margin_sum"] = float(teacher_margin.sum())
+    result["margin_sum"] = float(candidate_margin.sum())
+    result["margin_abs_error_sum"] = float((candidate_margin - teacher_margin).abs().sum())
+    result["margin_sign_matches"] = int((candidate_margin.sign() == teacher_margin.sign()).sum())
+    result["top1_matches"] = int((r.argmax(-1) == z.argmax(-1)).sum())
+    vocabulary = z.shape[-1]
+    for k in (5, 10, 32):
+        if vocabulary < k:
+            raise ValueError(f"vocabulary must contain at least {k} logits")
+        teacher_topk = r.topk(k, dim=-1).indices
+        candidate_topk = z.topk(k, dim=-1).indices
+        overlap = (
+            candidate_topk.unsqueeze(-1) == teacher_topk.unsqueeze(-2)
+        ).any(-1).sum()
+        result[f"top{k}_overlap_sum"] = int(overlap)
     return result
 
 
@@ -76,7 +157,6 @@ def main():
     import json
 
     import torch
-    import torch.nn.functional as F
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     from gptqmodel import GPTQModel
@@ -153,24 +233,6 @@ def main():
         "rows": [],
     }
 
-    @torch.no_grad()
-    def metrics(logits, target, reference=None):
-        if not torch.isfinite(logits).all():
-            raise ValueError("non-finite model logits")
-        z = logits[0, :-1].float()
-        labels = target[0, 1:]
-        result = {
-            "tokens": labels.numel(),
-            "nll_sum": float(F.cross_entropy(z, labels, reduction="sum")),
-        }
-        if reference is not None:
-            r = reference[0, :-1].float()
-            rp = r.log_softmax(-1)
-            qp = z.log_softmax(-1)
-            result["kl_sum"] = float((rp.exp() * (rp - qp)).sum())
-            result["top1_matches"] = int((r.argmax(-1) == z.argmax(-1)).sum())
-        return result
-
     with torch.no_grad():
         for index, row in enumerate(rows):
             ids = tok(row["text"], add_special_tokens=True)["input_ids"][
@@ -183,7 +245,7 @@ def main():
             entry = {
                 "document_id": row["normalized_user_sha256"],
                 "input_hash": _digest({"input_ids": x}, {}),
-                "teacher": metrics(reference, x),
+                "teacher": logit_metrics(reference, x),
             }
             if graph_owner is not None:
                 graph_configs = {
@@ -234,7 +296,7 @@ def main():
                     entry["graph_logits_exact"][mode] = exact
                     if not exact:
                         raise ValueError(f"{mode} captured logits differ from eager logits")
-                entry[mode] = metrics(logits, x, reference)
+                entry[mode] = logit_metrics(logits, x, reference)
             if graph_owner is not None:
                 graph_owner.invalidate()
             report["rows"].append(entry)

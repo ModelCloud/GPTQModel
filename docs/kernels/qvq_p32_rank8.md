@@ -584,8 +584,11 @@ ARC/GSM8K, H100 and TP validation remain pending.
 
 `scripts/evaluate_qvq_rank8_propagation.py` validates fixed package/base and
 teacher hashes, runs identical token IDs through the teacher and both model
-modes, and reports token-weighted NLL/PPL, teacher KL, top-1 agreement and
-paired document-bootstrap intervals. It performs no fitting. The
+modes, and reports token-weighted teacher cross-entropy/PPL, temperature-one
+and low-temperature KL, top-1/top-5/top-10/top-32 agreement, logit margins and
+paired document-bootstrap intervals. It performs no fitting. Older result
+files contain the original metric subset; rerunning the script writes the full
+metric record without changing the fitting or package inputs. The
 [initial propagation diagnostic](results/p32_rank8_llama_propagation.json)
 uses 16 additional calibration documents excluded from fitting, selection,
 and the earlier module audit.
