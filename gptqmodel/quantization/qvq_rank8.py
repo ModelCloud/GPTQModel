@@ -1830,6 +1830,11 @@ def window_kernel_candidates(layer, *, m):
         if (
             getattr(layer, "window_only", False)
             and torch.version.hip is None
+            and layer.activation is None
+            and layer.bits in (2, 2.5, 3, 3.5)
+            and layer.v2b2_p32
+            and layer.in_features % 256 == 0
+            and layer.out_features % 256 == 0
             and (props.major, props.minor) == (9, 0)
             and any(name in props.name for name in ("H100", "H200"))
         ):
@@ -1837,6 +1842,9 @@ def window_kernel_candidates(layer, *, m):
         elif (
             getattr(layer, "window_only", False)
             and torch.version.hip is None
+            and layer.activation is None
+            and layer.bits in (2, 2.5, 3, 3.5)
+            and layer.v2b2_p32
             and (props.major, props.minor) == (8, 0)
         ):
             base_algorithm = "ampere_window"
