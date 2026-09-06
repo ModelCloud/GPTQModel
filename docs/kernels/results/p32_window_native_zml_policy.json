@@ -1,7 +1,7 @@
 {
   "scope": "Current native ABI rank8 quality-policy selection through ZML StableHLO/PJRT on one H200",
-  "qvq_revision": "f14c793e",
-  "zml_revision": "6265dd5",
+  "qvq_revision": "3706fc42",
+  "zml_revision": "4d8ce52",
   "device": "NVIDIA H200",
   "shape": {
     "m": 33,
@@ -25,13 +25,13 @@
   },
   "verifier_report": {
     "schema_version": 2,
-    "fixture": "/tmp/p32-window-zml-fixture-a70",
+    "fixture": "/tmp/p32-window-zml-fixture-policy",
     "artifact_payload_sha256": null,
     "max_recovery_overhead_percent": null,
     "selection_policy_off": "fast",
     "selection_policy_on": "quality",
     "selected_off": 0,
-    "selected_on": 1,
+    "selected_on": 3,
     "entries": [
       {
         "rank8_enabled": 0,
@@ -57,7 +57,7 @@
           "output_hadamard": 1,
           "rank8_enabled": 0
         },
-        "median_ns": 909472,
+        "median_ns": 884666,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
@@ -88,7 +88,7 @@
           "output_hadamard": 1,
           "rank8_enabled": 0
         },
-        "median_ns": 960804,
+        "median_ns": 1040866,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
@@ -119,7 +119,7 @@
           "output_hadamard": 1,
           "rank8_enabled": 0
         },
-        "median_ns": 1083849,
+        "median_ns": 1067820,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
@@ -150,7 +150,7 @@
           "output_hadamard": 1,
           "rank8_enabled": 0
         },
-        "median_ns": 948180,
+        "median_ns": 1017335,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
@@ -181,7 +181,7 @@
           "output_hadamard": 1,
           "rank8_enabled": 0
         },
-        "median_ns": 1057151,
+        "median_ns": 983529,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
@@ -212,7 +212,7 @@
           "output_hadamard": 1,
           "rank8_enabled": 0
         },
-        "median_ns": 1140822,
+        "median_ns": 1015690,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
@@ -243,7 +243,7 @@
           "output_hadamard": 1,
           "rank8_enabled": 0
         },
-        "median_ns": 1002013,
+        "median_ns": 1030261,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
@@ -274,16 +274,16 @@
           "output_hadamard": 1,
           "rank8_enabled": 1
         },
-        "median_ns": 957217,
+        "median_ns": 1003330,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
         "arithmetic_signature": "reference_fp32_v1",
         "recovery_pair": {
-          "off_median_ns": 909472,
-          "on_median_ns": 957217,
-          "overhead_ns": 47745,
-          "overhead_percent": 5.2497493050913
+          "off_median_ns": 884666,
+          "on_median_ns": 1003330,
+          "overhead_ns": 118664,
+          "overhead_percent": 13.41342382322821
         }
       },
       {
@@ -310,16 +310,16 @@
           "output_hadamard": 1,
           "rank8_enabled": 1
         },
-        "median_ns": 931579,
+        "median_ns": 1145750,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
         "arithmetic_signature": "reference_fp32_v1",
         "recovery_pair": {
-          "off_median_ns": 960804,
-          "on_median_ns": 931579,
-          "overhead_ns": -29225,
-          "overhead_percent": -3.041723389994211
+          "off_median_ns": 1040866,
+          "on_median_ns": 1145750,
+          "overhead_ns": 104884,
+          "overhead_percent": 10.076609284960792
         }
       },
       {
@@ -346,16 +346,16 @@
           "output_hadamard": 1,
           "rank8_enabled": 1
         },
-        "median_ns": 987253,
+        "median_ns": 951672,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
         "arithmetic_signature": "reference_fp32_v1",
         "recovery_pair": {
-          "off_median_ns": 1083849,
-          "on_median_ns": 987253,
-          "overhead_ns": -96596,
-          "overhead_percent": -8.912311585838983
+          "off_median_ns": 1067820,
+          "on_median_ns": 951672,
+          "overhead_ns": -116148,
+          "overhead_percent": -10.877114120357367
         }
       },
       {
@@ -382,16 +382,16 @@
           "output_hadamard": 1,
           "rank8_enabled": 1
         },
-        "median_ns": 1077562,
+        "median_ns": 942580,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
         "arithmetic_signature": "reference_fp32_v1",
         "recovery_pair": {
-          "off_median_ns": 948180,
-          "on_median_ns": 1077562,
-          "overhead_ns": 129382,
-          "overhead_percent": 13.645299415722745
+          "off_median_ns": 1017335,
+          "on_median_ns": 942580,
+          "overhead_ns": -74755,
+          "overhead_percent": -7.348120334009933
         }
       },
       {
@@ -418,16 +418,16 @@
           "output_hadamard": 1,
           "rank8_enabled": 1
         },
-        "median_ns": 1047079,
+        "median_ns": 1112802,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
         "arithmetic_signature": "reference_fp32_v1",
         "recovery_pair": {
-          "off_median_ns": 1057151,
-          "on_median_ns": 1047079,
-          "overhead_ns": -10072,
-          "overhead_percent": -0.952749418011245
+          "off_median_ns": 983529,
+          "on_median_ns": 1112802,
+          "overhead_ns": 129273,
+          "overhead_percent": 13.143791387950943
         }
       },
       {
@@ -454,16 +454,16 @@
           "output_hadamard": 1,
           "rank8_enabled": 1
         },
-        "median_ns": 1076937,
+        "median_ns": 1032812,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
         "arithmetic_signature": "reference_fp32_v1",
         "recovery_pair": {
-          "off_median_ns": 1140822,
-          "on_median_ns": 1076937,
-          "overhead_ns": -63885,
-          "overhead_percent": -5.599909538911419
+          "off_median_ns": 1015690,
+          "on_median_ns": 1032812,
+          "overhead_ns": 17122,
+          "overhead_percent": 1.6857505735017542
         }
       },
       {
@@ -490,20 +490,21 @@
           "output_hadamard": 1,
           "rank8_enabled": 1
         },
-        "median_ns": 1124626,
+        "median_ns": 1013325,
         "mean_absolute_error": 0,
         "max_absolute_error": 0,
         "accepted": true,
         "arithmetic_signature": "reference_fp32_v1",
         "recovery_pair": {
-          "off_median_ns": 1002013,
-          "on_median_ns": 1124626,
-          "overhead_ns": 122613,
-          "overhead_percent": 12.236667588145057
+          "off_median_ns": 1030261,
+          "on_median_ns": 1013325,
+          "overhead_ns": -16936,
+          "overhead_percent": -1.6438552949204155
         }
       }
     ]
   },
   "command": "bazel run //integrations/qvq_window:verify --@zml//platforms:cuda=true -- --fixture=/tmp/p32-window-zml-fixture-a70 --tuning-output=/tmp/p32-window-zml-tuning-policy.json",
-  "result": "14 candidates (7 off/7 on) compiled, warmed, correctness-gated and replayed; selected off=0, on=1; report schema=2 records policies and arithmetic signatures."
+  "result": "14 candidates (7 off/7 on) compiled, warmed, correctness-gated and replayed; selected off=0, on=1; report schema=2 records policies and arithmetic signatures.",
+  "fixture": "/tmp/p32-window-zml-fixture-policy"
 }

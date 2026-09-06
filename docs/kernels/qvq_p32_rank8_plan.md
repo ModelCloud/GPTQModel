@@ -210,7 +210,7 @@ The current native rank8 ABI now combines FP32 base and rank8 expansion with one
 A second verifier run passed `--max-recovery-overhead-percent=5`; its selected candidate and rejected over-budget rows are recorded in `results/p32_window_native_zml_addmm_budget5.json`. The gate is applied before winner selection and leaves quantizer quality and arithmetic eligibility unchanged.
 
 The current ZML verifier now emits schema-versioned arithmetic policy in every
-tuning report. The H200 rerun at ZML `6265dd5` records `fast` selection for the
+tuning report. The H200 rerun at ZML `4d8ce52` records `fast` selection for the
 correction-off graph and `quality` selection for correction-on, with every
 candidate carrying its arithmetic signature. The complete 14-row report is
 `results/p32_window_native_zml_policy.json`; it is evidence that timing and
