@@ -199,7 +199,12 @@ def main():
                 prepare_rank8(layer, P32WindowConfig())
                 fast = layer(x).float()
                 prepare_rank8(
-                    layer, P32WindowConfig(recovery_mode="auto", quality_mode="quality")
+                    # The audit is the independent confirmation step that
+                    # decides whether the fitted factors may enter quality
+                    # mode.  Run the same reference arithmetic while the
+                    # factors are still unconfirmed; requesting quality here
+                    # would correctly fail closed before apply_rank8_audit.
+                    layer, P32WindowConfig(recovery_mode="on", quality_mode="fast")
                 )
                 recovered = layer(x).float()
             entry["audit"].append(
