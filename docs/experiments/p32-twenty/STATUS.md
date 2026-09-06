@@ -167,6 +167,10 @@ subthreshold fallback and reran four window controls plus four BM64/BN32 arms
 across eight GPUs. The corrected pooled full-model speedup is 1.411x at M=512
 and 1.425x at M=2048, with window dispatch retained below M=512 and decode.
 See [model dispatcher wave42](MODEL_DISPATCH_WAVE42.md).
+Full-model Nsight wave41 is archived in [MODEL_NSYS_WAVE41](MODEL_NSYS_WAVE41.md);
+it profiles the production-window and BM64 kernel composition on eight GPUs.
+Its low-M BM64 traces used the pre-fix dense fallback, so wave42 supersedes
+them for dispatcher timing.
 Scalar level-table cache wave43 applied `.ca` to the exact 512-byte PGC16
 table and passed 72/72 local cases, but pooled speedup fell to 1.170x at M=512
 and 1.284x at M=2048. The default scalar load remains selected. Register-cap
