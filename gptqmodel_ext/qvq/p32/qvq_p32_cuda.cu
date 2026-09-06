@@ -1519,8 +1519,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_grouped_block_kerne
       split,
       total_n_tiles,
       params.n_tile_start[segment],
-      params.output_offset[segment],
-      n_tiles * kTileColumns,
+      static_cast<int64_t>(params.n_tile_start[segment]) * kTileColumns,
+      total_n_tiles * kTileColumns,
       params.partial_offset[segment]);
   }
 }
@@ -1874,6 +1874,28 @@ void launch_split_reduction(
       partial_output, output, output_values, split_count);
 }
 
+int finish_grouped_reduction(
+    const GroupedP32LaunchParams& params, float* output, float* partial_output,
+    int size_m, int total_n_tiles, int reduction_mode, cudaStream_t stream) {
+  if (reduction_mode == QVQ_P32_REDUCTION_PARTIALS) return 0;
+  for (int segment = 0; segment < params.segment_count; ++segment) {
+    if (params.split_count[segment] > 1) {
+      launch_split_reduction_grouped(
+          partial_output + params.partial_offset[segment],
+          output,
+          size_m,
+          params.n_tiles[segment] * kTileColumns,
+          total_n_tiles * kTileColumns,
+          params.n_tile_start[segment] * kTileColumns,
+          params.split_count[segment],
+          stream);
+      const cudaError_t error = cudaGetLastError();
+      if (error != cudaSuccess) return static_cast<int>(error);
+    }
+  }
+  return 0;
+}
+
 template <int TransitionBits, int Rows, int Threads, int StageKTiles>
 int launch_p32_grouped_scalar_stage(
     const half* input,
@@ -1898,21 +1920,6 @@ int launch_p32_grouped_scalar_stage(
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) return static_cast<int>(error);
 
-  for (int segment = 0; segment < params.segment_count; ++segment) {
-    if (params.split_count[segment] > 1) {
-      launch_split_reduction_grouped(
-          partial_output + params.partial_offset[segment],
-          output,
-          Rows,
-          params.n_tiles[segment] * kTileColumns,
-          total_n_tiles * kTileColumns,
-          params.n_tile_start[segment] * kTileColumns,
-          params.split_count[segment],
-          stream);
-      error = cudaGetLastError();
-      if (error != cudaSuccess) return static_cast<int>(error);
-    }
-  }
   return 0;
 }
 
@@ -2021,21 +2028,6 @@ int launch_p32_grouped_block_stage(
   cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) return static_cast<int>(error);
 
-  for (int segment = 0; segment < params.segment_count; ++segment) {
-    if (params.split_count[segment] > 1) {
-      launch_split_reduction_grouped(
-          partial_output + params.partial_offset[segment],
-          output,
-          size_m,
-          params.n_tiles[segment] * kTileColumns,
-          total_n_tiles * kTileColumns,
-          params.n_tile_start[segment] * kTileColumns,
-          params.split_count[segment],
-          stream);
-      error = cudaGetLastError();
-      if (error != cudaSuccess) return static_cast<int>(error);
-    }
-  }
   return 0;
 }
 
@@ -2098,8 +2090,9 @@ int launch_p32_grouped_block(
     const qvq_p32_config& config,
     void* stream) {
   if (config.kernel_variant != QVQ_P32_VARIANT_BLOCK || config.static_n != 0 ||
-      config.reduction_mode != QVQ_P32_REDUCTION_NATIVE) {
-    set_last_error("QVQ P32 grouped block ABI requires block, generic, native configuration");
+      (config.reduction_mode != QVQ_P32_REDUCTION_NATIVE &&
+       config.reduction_mode != QVQ_P32_REDUCTION_PARTIALS)) {
+    set_last_error("QVQ P32 grouped block ABI requires block, generic, native or partials configuration");
     return -1;
   }
   const int total_n_tiles = size_n / kTileColumns;
@@ -2147,12 +2140,13 @@ int launch_p32_grouped_block(
     if (last_error[0] == '\0') set_last_error(cudaGetErrorString(static_cast<cudaError_t>(status)));
     return status;
   }
-  const cudaError_t error = cudaGetLastError();
-  if (error != cudaSuccess) {
-    set_last_error(cudaGetErrorString(error));
-    return static_cast<int>(error);
+  status = finish_grouped_reduction(
+      params, output, partial_output, size_m, total_n_tiles,
+      config.reduction_mode, cuda_stream);
+  if (status != 0) {
+    set_last_error(cudaGetErrorString(static_cast<cudaError_t>(status)));
   }
-  return 0;
+  return status;
 }
 
 template <int TransitionBits>
@@ -2176,8 +2170,9 @@ int launch_p32_grouped_scalar(
     const qvq_p32_config& config,
     void* stream) {
   if (config.kernel_variant != QVQ_P32_VARIANT_SCALAR || config.static_n != 0 ||
-      config.reduction_mode != QVQ_P32_REDUCTION_NATIVE) {
-    set_last_error("QVQ P32 grouped ABI requires scalar, generic, native configuration");
+      (config.reduction_mode != QVQ_P32_REDUCTION_NATIVE &&
+       config.reduction_mode != QVQ_P32_REDUCTION_PARTIALS)) {
+    set_last_error("QVQ P32 grouped ABI requires scalar, generic, native or partials configuration");
     return -1;
   }
   if (size_m < 1 || size_m > 4 || group_count < 2 || group_count > kMaxGroupedP32Segments) {
@@ -2215,12 +2210,13 @@ int launch_p32_grouped_scalar(
     if (last_error[0] == '\0') set_last_error(cudaGetErrorString(static_cast<cudaError_t>(status)));
     return status;
   }
-  const cudaError_t error = cudaGetLastError();
-  if (error != cudaSuccess) {
-    set_last_error(cudaGetErrorString(error));
-    return static_cast<int>(error);
+  status = finish_grouped_reduction(
+      params, output, partial_output, size_m, total_n_tiles,
+      config.reduction_mode, cuda_stream);
+  if (status != 0) {
+    set_last_error(cudaGetErrorString(static_cast<cudaError_t>(status)));
   }
-  return 0;
+  return status;
 }
 
 template <int TransitionBits, int Rows, int Threads>
@@ -2869,10 +2865,9 @@ int launch_p32_config(
 
 // The Ampere kernel's shared-memory tile is fixed at 16 rows. Keep that
 // hardware specialization, but batch large-M projections inside one FFI call
-// so XLA/PJRT does not pay a launch boundary for every row chunk. Native
-// reduction is safe here because each chunk owns a disjoint output and partial
-// workspace range. Graph-visible partials retain the canonical [S,M,N] layout and
-// therefore continue to use explicit framework-owned row chunking.
+// so XLA/PJRT does not pay a launch boundary for every row chunk. Both large-M
+// producers use global M*N split-plane strides, retaining canonical [S,M,N]
+// partials across row chunks. The public dispatcher owns optional reduction.
 template <int TransitionBits, int Threads, int StageKTiles, int StaticN,
           int StaticK = 0>
 int launch_p32_large_m_grid(
@@ -2899,10 +2894,6 @@ int launch_p32_large_m_grid(
       <<<grid, Threads, 0, stream>>>(
       input, trellis, levels, bank_ids, partial_output, output, size_m, size_k,
       size_n, split_count, bank_alt_id);
-  if (split_count > 1) {
-    launch_split_reduction(
-        partial_output, output, size_m, size_k, size_n, split_count, stream);
-  }
   const cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
     set_last_error(cudaGetErrorString(error));
@@ -3014,10 +3005,6 @@ int launch_p32_large_m2_grid(
       <<<grid, 128, kDynamicInputBytes, stream>>>(
       input, trellis, levels, bank_ids, partial_output, output, size_m, size_k,
       size_n, split_count, bank_alt_id);
-  if (split_count > 1) {
-    launch_split_reduction(
-        partial_output, output, size_m, size_k, size_n, split_count, stream);
-  }
   const cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
     set_last_error(cudaGetErrorString(error));
@@ -3102,11 +3089,6 @@ int launch_p32_large_m(
     const qvq_p32_config& config,
     int row_groups,
     void* stream) {
-  if (config.reduction_mode != QVQ_P32_REDUCTION_NATIVE) {
-    set_last_error("QVQ P32 large-M batching requires native reduction");
-    return -1;
-  }
-
   if (config.kernel_variant != QVQ_P32_VARIANT_BLOCK) {
     set_last_error("QVQ P32 large-M batching requires block variant");
     return -1;
@@ -3447,11 +3429,6 @@ static int qvq_p32_window_impl(
     set_last_error("QVQ P32 multi-row groups require M > 16");
     return -1;
   }
-  if (size_m > QVQ_P32_GROUPED_M_MAX &&
-      reduction_mode != QVQ_P32_REDUCTION_NATIVE) {
-    set_last_error("QVQ P32 large-M batching requires native reduction");
-    return -1;
-  }
   const bool scalar_static_n =
       kernel_variant == QVQ_P32_VARIANT_SCALAR &&
       ((size_m == 1 &&
@@ -3525,6 +3502,16 @@ static int qvq_p32_window_impl(
       set_last_error("QVQ P32 transition_bits must be in [4,7]");
       status = -1;
       break;
+  }
+  if (status == 0 && size_m > QVQ_P32_GROUPED_M_MAX &&
+      reduction_mode == QVQ_P32_REDUCTION_NATIVE && split_count > 1) {
+    launch_split_reduction(partial_output, output, size_m, size_k, size_n,
+                           split_count, reinterpret_cast<cudaStream_t>(stream));
+    const cudaError_t error = cudaGetLastError();
+    if (error != cudaSuccess) {
+      set_last_error(cudaGetErrorString(error));
+      return static_cast<int>(error);
+    }
   }
   return status;
 }
@@ -3638,7 +3625,9 @@ extern "C" int qvq_p32_grouped_window(
        size_m > QVQ_P32_SCALAR_M_MAX) ||
       (kernel_variant == QVQ_P32_VARIANT_BLOCK &&
        size_m <= QVQ_P32_SCALAR_M_MAX) ||
-      static_n != 0 || reduction_mode != QVQ_P32_REDUCTION_NATIVE) {
+      static_n != 0 ||
+      (reduction_mode != QVQ_P32_REDUCTION_NATIVE &&
+       reduction_mode != QVQ_P32_REDUCTION_PARTIALS)) {
     set_last_error("QVQ P32 grouped variant does not match M or reduction configuration");
     return -1;
   }
@@ -3777,7 +3766,9 @@ extern "C" int qvq_p32_grouped_launch_plan(
        size_m > QVQ_P32_SCALAR_M_MAX) ||
       (kernel_variant == QVQ_P32_VARIANT_BLOCK &&
        size_m <= QVQ_P32_SCALAR_M_MAX) ||
-      static_n != 0 || reduction_mode != QVQ_P32_REDUCTION_NATIVE) {
+      static_n != 0 ||
+      (reduction_mode != QVQ_P32_REDUCTION_NATIVE &&
+       reduction_mode != QVQ_P32_REDUCTION_PARTIALS)) {
     set_last_error("QVQ P32 grouped launch plan variant does not match M or reduction configuration");
     return -1;
   }
@@ -3843,6 +3834,7 @@ extern "C" int qvq_p32_grouped_launch_plan(
   set_host_arg(main, arg++, &storage->main_total_n_tiles);
   main->arg_count = arg;
   plan->launch_count = 1;
+  if (reduction_mode == QVQ_P32_REDUCTION_PARTIALS) return 0;
 
   for (int segment = 0; segment < group_count; ++segment) {
     if (storage->params.split_count[segment] == 1) continue;

@@ -12,7 +12,7 @@ extern "C" {
 // launch-autotune entries when implementation details change.
 #define QVQ_P32_OPERATION_VERSION 1
 #define QVQ_P32_ABI_VERSION 2
-#define QVQ_P32_KERNEL_VERSION 10
+#define QVQ_P32_KERNEL_VERSION 11
 #define QVQ_P32_COMPILED_SM 80
 
 #define QVQ_P32_TILE_SIZE 16
@@ -109,8 +109,8 @@ struct qvq_p32_launch_plan {
 // which is the caller-owned CUDA stream. For split_count >
 // 1, partial_output must point to split_count * M * N float elements. Native
 // reduction writes their sum to output; partials mode leaves the workspace for
-// the surrounding graph to reduce. For M > 16, only native reduction is
-// supported; the launcher batches 16-row kernel tiles behind this one ABI call.
+// the surrounding graph to reduce. Kernel v11 also supports partials for M > 16:
+// batched row tiles retain the global [split_count, M, N] workspace layout.
 int qvq_p32_abi_version(void);
 int qvq_p32_kernel_version(void);
 int qvq_compiled_sm(void);
@@ -173,6 +173,11 @@ int qvq_p32_window_with_row_groups(
 // [M, size_n], while partial buffers use group-major contiguous storage: each
 // group owns an [split, M, N_group] slice. `n_tile_end_0` and `n_tile_end_1` are
 // cumulative N16 boundaries; the final boundary is size_n / 16.
+// In PARTIALS mode no reducers are launched: only groups with split_count=1
+// write their columns of output. Split groups write partial_output, packed in
+// group order as [split_count, M, N_group], excluding unsplit groups. Other
+// output columns and unused partial storage are untouched and must not be read.
+// The caller owns both buffers until all compiler-managed consumers complete.
 int qvq_p32_grouped_window(
     const void* input,
     const void* trellis,
@@ -203,6 +208,7 @@ int qvq_p32_grouped_window(
 // issuing work. ZML uses this to create/update native nodes in an XLA command
 // buffer after autotuning has selected a fixed configuration. Other framework
 // integrations can continue calling qvq_p32_grouped_window unchanged.
+// PARTIALS mode returns exactly the main-product descriptor, with no reducers.
 int qvq_p32_grouped_launch_plan(
     const void* input,
     const void* trellis,
