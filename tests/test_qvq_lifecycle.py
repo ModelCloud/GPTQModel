@@ -789,6 +789,51 @@ def test_qvq_output_alignment_defers_rank8_until_final_aligned_payload(monkeypat
     assert not processor._rank8_alignment_calibration
 
 
+def test_qvq_output_alignment_failure_discards_deferred_rank8_state(monkeypatch):
+    from gptqmodel.quantization.qvq_rank8 import Rank8Calibration
+
+    qcfg = QVQConfig(
+        bits=2,
+        rounding="block_ldlq",
+        output_alignment=OutputAlignConfig(),
+        device="cpu",
+        offload_to_disk=False,
+    )
+    processor = _processor(qcfg=qcfg)
+    root = torch.nn.Module()
+    root.proj = torch.nn.Linear(16, 16, bias=False)
+    named = NamedModule(root.proj, name="proj", full_name="proj", layer_index=3)
+    named.state.update(
+        {
+            "trellis": torch.zeros(1, dtype=torch.int32),
+            "SU": torch.ones(16),
+            "SV": torch.ones(16),
+            "_qvq_runtime_config": (
+                2, "pgc16-v1", 2, 2, 16, False, False, True, True, True, None
+            ),
+            "_qvq_original_weight": root.proj.weight.detach().clone(),
+        }
+    )
+    processor._rank8_alignment_calibration["proj"] = Rank8Calibration(
+        torch.ones(2, 16), torch.ones(2, 16) * 2, ("train",), ("heldout",)
+    )
+    attachment = processor._output_alignment
+    monkeypatch.setattr(attachment, "modules_are_fully_staged", lambda *args: True)
+    monkeypatch.setattr(attachment, "staged_modules", lambda *args: [named])
+    discarded = []
+    monkeypatch.setattr(attachment, "discard_layer", lambda layer_index: discarded.append(layer_index))
+
+    def fail_alignment(*args, **kwargs):
+        raise RuntimeError("alignment failed")
+
+    monkeypatch.setattr(attachment, "align_layer", fail_alignment)
+    with pytest.raises(RuntimeError, match="alignment failed"):
+        processor.cleanup_subset({"proj": named}, subset_index=0, subset_total=1)
+
+    assert discarded == [3]
+    assert not processor._rank8_alignment_calibration
+
+
 def test_qvq_output_alignment_rejects_moe_from_explicit_module_tree_tags_before_capture():
     qcfg = QVQConfig(
         bits=2,

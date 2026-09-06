@@ -2183,6 +2183,9 @@ class QVQProcessor(LoopProcessor):
             # that failure as the primary signal.
             if keep_alignment_state:
                 self._output_alignment.discard_layer(layer_index)
+                with self._propagation_gates_lock:
+                    for name in staged_names:
+                        self._rank8_alignment_calibration.pop(name, None)
             raise
         if result is not None:
             with self._stats_lock:
