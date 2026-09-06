@@ -41,10 +41,10 @@ handoff: it validates the versioned manifest, the descriptor-level
 per-file SHA-256 hashes before uploading any payload. It accepts the
 FP32 SU/SV precision used by QVQ checkpoints (and FP16 bias where present); the
 native ABI applies its declared FP16 transform boundary. Recovery metadata still
-has to be accepted by the deployment policy; the Python fit's semantic
-base/factor digest is retained in the manifest but is not recomputed by this
-loader because the descriptor-level payload binding covers the exact native
-bytes. Callers retain all input/output storage until the submitted stream work
+has to be accepted by the deployment policy; the loader recomputes and checks
+the Python fit's semantic base/factor digests before uploading any payload, so
+the correction cannot be attached to a different base or factor tensor set.
+Callers retain all input/output storage until the submitted stream work
 completes.
 
 The low-level `qvq_p32_window_linear` entry allocates ATen temporaries and

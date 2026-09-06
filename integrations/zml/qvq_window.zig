@@ -325,6 +325,12 @@ fn artifactBindingAppendFmt(
     artifactBindingAppend(hasher, value);
 }
 
+fn artifactBindingAppendJsonString(hasher: *ArtifactSha256, value: []const u8) !void {
+    var buffer: [512]u8 = undefined;
+    const encoded = try std.fmt.bufPrint(&buffer, "\"{s}\"", .{value});
+    artifactBindingAppend(hasher, encoded);
+}
+
 fn artifactBindingUpdateFmt(
     hasher: *ArtifactSha256,
     comptime format: []const u8,
@@ -360,14 +366,20 @@ fn artifactBindingAppendEntry(
     const entry = try artifactObject(value);
     artifactBindingAppend(hasher, name);
     artifactBindingAppend(hasher, "dtype");
-    artifactBindingAppend(hasher, try artifactString(try artifactField(entry, "dtype")));
+    try artifactBindingAppendJsonString(
+        hasher,
+        try artifactString(try artifactField(entry, "dtype")),
+    );
     artifactBindingAppend(hasher, "shape");
     try artifactBindingAppendShape(hasher, try artifactField(entry, "shape"));
     hasher.update(&[_]u8{0});
     artifactBindingAppend(hasher, "bytes");
     try artifactBindingAppendFmt(hasher, "{d}", .{try artifactU32(try artifactField(entry, "bytes"))});
     artifactBindingAppend(hasher, "sha256");
-    artifactBindingAppend(hasher, try artifactString(try artifactField(entry, "sha256")));
+    try artifactBindingAppendJsonString(
+        hasher,
+        try artifactString(try artifactField(entry, "sha256")),
+    );
 }
 
 fn artifactBindingHex(metadata: std.json.ObjectMap, tensors: std.json.ObjectMap) ![64]u8 {
@@ -380,7 +392,10 @@ fn artifactBindingHex(metadata: std.json.ObjectMap, tensors: std.json.ObjectMap)
         else => return error.InvalidWindowArtifactManifest,
     }
     artifactBindingAppend(&hasher, "codebook_version");
-    artifactBindingAppend(&hasher, try artifactString(try artifactField(metadata, "codebook_version")));
+    try artifactBindingAppendJsonString(
+        &hasher,
+        try artifactString(try artifactField(metadata, "codebook_version")),
+    );
     artifactBindingAppend(&hasher, "in_features");
     try artifactBindingAppendFmt(&hasher, "{d}", .{try artifactU32(try artifactField(metadata, "in_features"))});
     artifactBindingAppend(&hasher, "out_features");
@@ -394,6 +409,99 @@ fn artifactBindingHex(metadata: std.json.ObjectMap, tensors: std.json.ObjectMap)
     for ([_][]const u8{
         "SU", "SV", "bank_alt_id", "bank_ids", "bias", "levels", "rank8_A", "rank8_B", "window_words",
     }) |name| try artifactBindingAppendEntry(&hasher, tensors, name);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return std.fmt.bytesToHex(digest, .lower);
+}
+
+// This mirrors qvq_rank8._digest exactly for the fixed tensor contract used by
+// the native handoff.  The descriptor is the compact JSON tuple emitted by
+// Python (name, torch dtype, shape), followed immediately by the tensor's
+// little-endian file bytes.  Keep this validation in the loader rather than
+// trusting a producer-supplied semantic hash; all work happens before device
+// upload and therefore never enters a captured execution path.
+fn artifactSemanticTensor(
+    hasher: *ArtifactSha256,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    directory: *std.Io.Dir,
+    tensors: std.json.ObjectMap,
+    manifest_name: []const u8,
+    digest_name: []const u8,
+) !void {
+    const value = tensors.get(manifest_name) orelse return;
+    const entry = try artifactObject(value);
+    const dtype = try artifactString(try artifactField(entry, "dtype"));
+    const shape = switch (try artifactField(entry, "shape")) {
+        .array => |array| array,
+        else => return error.InvalidWindowArtifactManifest,
+    };
+    var descriptor: [512]u8 = undefined;
+    const descriptor_bytes = switch (shape.items.len) {
+        1 => try std.fmt.bufPrint(
+            &descriptor,
+            "[\"{s}\", \"torch.{s}\", [{d}]]",
+            .{ digest_name, dtype, try artifactU32(shape.items[0]) },
+        ),
+        2 => try std.fmt.bufPrint(
+            &descriptor,
+            "[\"{s}\", \"torch.{s}\", [{d}, {d}]]",
+            .{ digest_name, dtype, try artifactU32(shape.items[0]), try artifactU32(shape.items[1]) },
+        ),
+        else => return error.InvalidWindowArtifactManifest,
+    };
+    hasher.update(descriptor_bytes);
+    const file = try artifactString(try artifactField(entry, "file"));
+    const bytes = try directory.readFileAlloc(io, file, allocator, .limited(1 << 30));
+    defer allocator.free(bytes);
+    hasher.update(bytes);
+}
+
+fn artifactSemanticHash(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    directory: *std.Io.Dir,
+    metadata: std.json.ObjectMap,
+    tensors: std.json.ObjectMap,
+    comptime recovery_factors: bool,
+) ![64]u8 {
+    var hasher = ArtifactSha256.init(.{});
+    if (recovery_factors) {
+        // Python hashes _digest({"A": A, "B": B}, {}), whose canonical
+        // metadata prefix is the empty JSON object.
+        hasher.update("{}");
+        try artifactSemanticTensor(&hasher, allocator, io, directory, tensors, "rank8_A", "A");
+        try artifactSemanticTensor(&hasher, allocator, io, directory, tensors, "rank8_B", "B");
+    } else {
+        var bits_buffer: [64]u8 = undefined;
+        const bits = switch (try artifactField(metadata, "bits")) {
+            .integer => |value| try std.fmt.bufPrint(&bits_buffer, "{d}", .{value}),
+            .float => |value| try std.fmt.bufPrint(&bits_buffer, "{d}", .{value}),
+            else => return error.InvalidWindowArtifactManifest,
+        };
+        const codebook_version = try artifactString(try artifactField(metadata, "codebook_version"));
+        const input_hadamard = if (try artifactBool(try artifactField(metadata, "input_hadamard"))) "true" else "false";
+        const output_hadamard = if (try artifactBool(try artifactField(metadata, "output_hadamard"))) "true" else "false";
+        var metadata_buffer: [512]u8 = undefined;
+        const metadata_bytes = try std.fmt.bufPrint(
+            &metadata_buffer,
+            "{{\"bits\":{s},\"codebook_version\":\"{s}\",\"in_features\":{d},\"input_hadamard\":{s},\"out_features\":{d},\"output_hadamard\":{s}}}",
+            .{
+                bits,
+                codebook_version,
+                try artifactU32(try artifactField(metadata, "in_features")),
+                input_hadamard,
+                try artifactU32(try artifactField(metadata, "out_features")),
+                output_hadamard,
+            },
+        );
+        hasher.update(metadata_bytes);
+        // Python's sorted() order for the accepted base tensors is stable and
+        // differs from the manifest's insertion order for uppercase names.
+        for ([_][]const u8{
+            "SU", "SV", "bank_alt_id", "bank_ids", "bias", "levels", "window_words",
+        }) |name| try artifactSemanticTensor(&hasher, allocator, io, directory, tensors, name, name);
+    }
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);
@@ -476,6 +584,17 @@ pub fn loadArtifact(
     const actual_payload_hash = try artifactBindingHex(metadata, tensors);
     if (!std.mem.eql(u8, &actual_payload_hash, expected_payload_hash))
         return error.WindowArtifactBindingMismatch;
+    if (root.get("recovery")) |recovery_value| {
+        const recovery_object = try artifactObject(recovery_value);
+        const expected_base_hash = try artifactString(try artifactField(recovery_object, "base_hash"));
+        const actual_base_hash = try artifactSemanticHash(allocator, io, &directory, metadata, tensors, false);
+        if (!std.mem.eql(u8, &actual_base_hash, expected_base_hash))
+            return error.WindowArtifactBaseHashMismatch;
+        const expected_factors_hash = try artifactString(try artifactField(recovery_object, "factors_hash"));
+        const actual_factors_hash = try artifactSemanticHash(allocator, io, &directory, metadata, tensors, true);
+        if (!std.mem.eql(u8, &actual_factors_hash, expected_factors_hash))
+            return error.WindowArtifactFactorsHashMismatch;
+    }
     const k = try artifactU32(try artifactField(metadata, "in_features"));
     const n = try artifactU32(try artifactField(metadata, "out_features"));
     const bits = try artifactField(metadata, "bits");
