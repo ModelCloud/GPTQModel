@@ -7,6 +7,7 @@ import math
 import torch
 from safetensors.torch import load, save
 
+from ..utils.device_telemetry import emit_device_telemetry
 from .input_cache import InputCache
 
 
@@ -31,6 +32,14 @@ class ContinuationCodec:
                     raise TypeError("continuation requires materialized dense tensors")
                 name = str(len(tensors))
                 tensors[name] = value.detach().to(device="cpu").contiguous().clone()
+                emit_device_telemetry(
+                    "checkpoint_tensor_captured",
+                    tensor_id=name,
+                    source_device=str(value.device),
+                    storage_device="cpu",
+                    shape=list(value.shape),
+                    dtype=str(value.dtype),
+                )
                 return ["tensor", {"name": name, "device": str(value.device)}]
             if type(value) is torch.device:
                 device = value
@@ -38,6 +47,9 @@ class ContinuationCodec:
                     raise TypeError("unsupported continuation metadata device")
                 if device.type == "cuda" and device.index is None:
                     device = torch.device("cuda", torch.cuda.current_device())
+                emit_device_telemetry(
+                    "checkpoint_device_metadata_captured", device=str(device)
+                )
                 return ["device", str(device)]
             if id(value) in active:
                 raise TypeError("cyclic continuation state is unsupported")
@@ -108,7 +120,44 @@ class ContinuationCodec:
                     raise ValueError(
                         "unsupported or unindexed continuation tensor device"
                     )
-                return tensors[value["name"]].to(device=device)
+                stored = tensors[value["name"]]
+                expected_shape, expected_dtype = stored.shape, stored.dtype
+                # Keep an independent reference: a faulty in-place transfer must
+                # not mutate both the restored tensor and its verification input.
+                expected_bits = (
+                    stored.contiguous().reshape(-1).view(torch.uint8).clone()
+                )
+                tensor = stored.to(device=device)
+                placement_matched = tensor.device == device
+                state_matched = (
+                    tensor.dtype == expected_dtype
+                    and tensor.shape == expected_shape
+                    and torch.equal(
+                        tensor.detach()
+                        .cpu()
+                        .contiguous()
+                        .reshape(-1)
+                        .view(torch.uint8),
+                        expected_bits,
+                    )
+                )
+                matched = placement_matched and state_matched
+                emit_device_telemetry(
+                    "checkpoint_tensor_restored",
+                    tensor_id=value["name"],
+                    expected_device=str(device),
+                    actual_device=str(tensor.device),
+                    matched=matched,
+                    placement_matched=placement_matched,
+                    state_matched=state_matched,
+                    shape=list(tensor.shape),
+                    dtype=str(tensor.dtype),
+                )
+                if not matched:
+                    raise ValueError(
+                        "checkpoint tensor state or device placement restore mismatch"
+                    )
+                return tensor
             if kind == "device":
                 device = torch.device(value)
                 if (
@@ -119,6 +168,14 @@ class ContinuationCodec:
                     raise ValueError(
                         "unsupported or unindexed continuation metadata device"
                     )
+                emit_device_telemetry(
+                    "checkpoint_device_metadata_restored",
+                    expected_device=value,
+                    actual_device=str(device),
+                    matched=str(device) == value,
+                )
+                if str(device) != value:
+                    raise ValueError("checkpoint device metadata restore mismatch")
                 return device
             if kind == "input_cache":
                 fields = decode(value)
