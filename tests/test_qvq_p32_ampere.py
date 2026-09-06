@@ -137,6 +137,23 @@ def test_p32_ampere_autotune_skips_cold_cuda_graph_capture(monkeypatch):
     )
 
 
+def test_p32_ampere_window_rejects_cold_operator_capture(monkeypatch):
+    monkeypatch.setattr(qvq_ampere_cuda, "_P32_WINDOW_OP", None)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    input = torch.empty((1, 256))
+    with pytest.raises(RuntimeError, match="loaded before CUDA Graph capture"):
+        qvq_p32_window_ampere(
+            input,
+            input,
+            input,
+            input,
+            3,
+            out_features=80,
+            split_count=2,
+        )
+
+
 @pytest.mark.parametrize(("size_m", "expected_split"), ((8, 48), (16, 32)))
 def test_p32_ampere_dispatches_measured_wmma_kv_plan_directly(
     monkeypatch, size_m, expected_split

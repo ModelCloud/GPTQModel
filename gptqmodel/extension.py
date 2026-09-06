@@ -363,6 +363,21 @@ def error(name: str) -> str:
 def op(name: str, op_name: str, *, use_cache: bool = True) -> object:
     """Return one torch.ops handle after ensuring the selected extension is loaded."""
 
+    # JIT compilation and shared-library registration allocate host/device
+    # state that CUDA Graph capture cannot contain.  QvQ callers must warm the
+    # extension before capture; fail closed instead of silently compiling from
+    # inside a captured command buffer.  The check is intentionally limited to
+    # the QvQ CUDA extension so unrelated CPU/third-party integrations retain
+    # their existing loader behavior.
+    if _normalize_extension_name(name) == "qvq_cuda":
+        import torch
+
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            extension = _extension_for_name(name)
+            if not _process_loaded(extension):
+                raise RuntimeError(
+                    "QVQ CUDA extension must be loaded before CUDA Graph capture"
+                )
     return _load_one(name, use_cache=use_cache).op(op_name)
 
 

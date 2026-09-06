@@ -201,6 +201,19 @@ def _p32_window_op() -> object:
     return op
 
 
+def _require_warm_operator_for_capture(operator: object | None, name: str) -> None:
+    """Reject lazy TorchOp registration from inside a CUDA graph capture."""
+
+    if (
+        operator is None
+        and torch.cuda.is_available()
+        and torch.cuda.is_current_stream_capturing()
+    ):
+        raise RuntimeError(
+            f"QVQ Ampere {name} must be loaded before CUDA Graph capture"
+        )
+
+
 def _p32_window_grouped_op() -> object:
     """Resolve the native segmented dispatcher once."""
 
@@ -608,6 +621,7 @@ def qvq_p32_window_ampere(
         transition_bits = qvq_transition_bits(bits, vector_size=2)
     if transition_bits not in (4, 5, 6, 7):
         raise ValueError("QVQ P32 Ampere WMMA supports W2 through W3.5")
+    _require_warm_operator_for_capture(_P32_WINDOW_OP, "window operator")
     if (
         split_count == 0
         and input.shape[0] == 1
@@ -1134,6 +1148,7 @@ def qvq_p32_window_ampere_grouped_packed(
         for segment in plan.segments
     )
     if len(plan.segments) > 3 or plan.in_features > 6144 or uses_warp_reducer:
+        _require_warm_operator_for_capture(_P32_WINDOW_GROUPED_OP, "grouped operator")
         k_tiles = plan.in_features // 16
         words_per_tile = 4 * plan.transition_bits
         total_n_tiles = plan.out_features // 16
@@ -1162,6 +1177,9 @@ def qvq_p32_window_ampere_grouped_packed(
                 split_counts,
             )
         )
+    _require_warm_operator_for_capture(
+        _P32_WINDOW_GROUPED_FUSED_OP, "grouped fused operator"
+    )
     grouped_output = _p32_window_grouped_fused_op()(
         input,
         payload.trellis,

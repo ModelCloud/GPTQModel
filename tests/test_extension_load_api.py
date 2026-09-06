@@ -392,6 +392,19 @@ def test_op_routes_through_extension_api(monkeypatch):
     assert op is awq_utils._AWQ_TORCH_OPS_EXTENSION._ops["test_op"]
 
 
+def test_qvq_cuda_op_rejects_cold_jit_load_during_graph_capture(monkeypatch):
+    fakes = _install_fake_extensions(monkeypatch)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+
+    with pytest.raises(RuntimeError, match="loaded before CUDA Graph capture"):
+        extension_api.op("qvq_cuda", "test_op")
+    assert fakes["qvq_cuda"].load_calls == 0
+
+    fakes["qvq_cuda"].already_loaded = True
+    assert extension_api.op("qvq_cuda", "test_op") is fakes["qvq_cuda"]._ops["test_op"]
+    assert fakes["qvq_cuda"].load_calls == 1
+
+
 def test_load_serializes_same_extension_across_threads(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
     errors: list[Exception] = []
