@@ -35,15 +35,25 @@ from ..nn_modules.hooked_linear import replace_module_with_hooked_legacy
 from ..quantization.config import GcMode, QuantizeEmbed
 from ..utils.device import get_device, get_device_new
 from ..utils.logger import live_renderables_suppressed, log_time_block, setup_logger
-from ..utils.looper_helpers import find_last_quantized_layer_index, normalize_device_like
+from ..utils.looper_helpers import (
+    find_last_quantized_layer_index,
+    normalize_device_like,
+)
 from ..utils.model import find_modules, get_layer_name, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
-from .resume import (load_activation_cache, marker_layer_finalized_count, read_resume_target,
-                     resume_state_path, restore_completed_layer, restore_completed_layer_class_only,
-                     save_activation_cache, write_resume_marker)
+from .extension import LoopStep
+from .resume import (
+    load_activation_cache,
+    marker_layer_finalized_count,
+    read_resume_target,
+    restore_completed_layer,
+    restore_completed_layer_class_only,
+    resume_state_path,
+    save_activation_cache,
+    write_resume_marker,
+)
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
-
 
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from .module_looper import ModuleLooper
@@ -684,6 +694,9 @@ def run_layer_stage(
     layer_index_offset = 1 if quant_input_embeddings else 0
 
     resume_target = read_resume_target(looper, layer_count)
+    extensions = getattr(looper, "extensions", None)
+    if extensions and resume_target is not None:
+        raise ValueError("Loop extensions cannot yet be combined with legacy resume replay")
     # If the resume_target layer itself already has a valid activation cache,
     # its cached output short-circuits the whole 0..resume_target chain: none
     # of the earlier layers' forward outputs are consumed by anything, so
@@ -709,6 +722,7 @@ def run_layer_stage(
             )
 
     for layer_index in pb:
+        boundary_futures = []
         # Iterate over every transformer layer (plus lm_head when enabled) as
         # progress-bar controlled units of work.
         if looper._check_loop_stop():
@@ -1200,6 +1214,7 @@ def run_layer_stage(
                         layer_idx,
                     )
                     finalize_futures.append((future, index, module_label, process, layer_idx))
+                    boundary_futures.append(future)
 
                 finalize_futures_snapshot = list(finalize_futures)
 
@@ -1377,6 +1392,17 @@ def run_layer_stage(
                             "StageLayer: layer=%s complete (no finalize tasks)",
                             layer_index if not is_lm_head_module else "lm_head",
                         )
+
+        if extensions:
+            step_kind = (
+                "input_embeddings" if is_input_embeddings_module else
+                "output_embeddings" if is_output_embeddings_module else
+                "lm_head" if is_lm_head_module else "layer"
+            )
+            extensions.publish(
+                LoopStep(step_kind, model_layer_index, layer_name or step_kind),
+                boundary_futures,
+            )
 
         if durable_progress_logs:
             log.info(

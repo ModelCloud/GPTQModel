@@ -34,7 +34,12 @@ from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
 from ..models.base import CAPTURE_ONLY_FLAG
 from ..nn_modules.hooked_linear import HookedLinear
-from ..quantization.config import METHOD, QuantizeEmbed, QuantizeEmbedConfig, VramStrategy
+from ..quantization.config import (
+    METHOD,
+    QuantizeEmbed,
+    QuantizeEmbedConfig,
+    VramStrategy,
+)
 from ..utils.attn_mask import apply_keep_mask_bt
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
@@ -61,12 +66,12 @@ from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
+from .extension import LoopExtensions
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
 from .resume import calibration_dataset_hash
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
-
 
 log = setup_logger()
 
@@ -172,10 +177,13 @@ class ModuleLooper():
         model: BaseQModel,
         processors: List[LoopProcessor],
         embed_quant_config: Optional[QuantizeEmbedConfig] = None,
+        *,
+        extensions=(),
     ):
         """Initialize loop state, device policy, and callback wiring."""
 
         self.processors = processors
+        self.extensions = LoopExtensions(extensions)
         self.gptq_model = model
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
         self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
