@@ -1,0 +1,280 @@
+{
+  "revision": "7beba298c625ab5ab1bde25f985bf9d014b0732d",
+  "source_sha256": "cc67e42f12a20f53171af7cf6df11d329ecf6f041441a7496afec87f64026349",
+  "benchmark_sha256": "fa5e4167ce7cacfb7bf64d119be0f473a9f418aa75500c2d4602c7bd57b3bbd7",
+  "hardware": {
+    "physical_gpu": 0,
+    "pci_bus_id": "0000:83:00.0",
+    "unique_id": "0x333ef6e01ec019b3",
+    "driver": "7.1.3.31500000",
+    "utilization_percent": 0,
+    "vram_total_bytes": 308902100992,
+    "vram_used_bytes": 299532288,
+    "process_ids": []
+  },
+  "software": {
+    "torch": "2.13.0+rocm10.0.0",
+    "hip": "7.15.26333",
+    "gpu": "AMD Instinct MI355X VF",
+    "arch": "gfx950:sramecc+:xnack-",
+    "cu_count": 256
+  },
+  "config": {
+    "physical_gpu": 0,
+    "idle_samples": 3,
+    "idle_interval": 1.0,
+    "idle_memory_tolerance_mib": 1024,
+    "batch_sizes": [
+      1,
+      4
+    ],
+    "bits": [
+      2.0,
+      2.5,
+      3.0,
+      3.5
+    ],
+    "warmup": 1,
+    "iterations": 3,
+    "profile_dir": "/tmp/qvq-yaqa-rocm-baseline-traces",
+    "output": "/tmp/qvq-yaqa-rocm-baseline.json",
+    "allow_busy": false
+  },
+  "scope": "eager banked Viterbi baseline, not full YAQA or model-quality evidence",
+  "valid": true,
+  "completed": true,
+  "rows": [
+    {
+      "batch": 1,
+      "steps": 128,
+      "vector_size": 2,
+      "banks": 2,
+      "states": 65536,
+      "bits": 2.0,
+      "seed": 20261025,
+      "repeat_exact": true,
+      "event_median_ms": 17.115083694458008,
+      "event_samples_ms": [
+        17.425607681274414,
+        17.115083694458008,
+        16.93492317199707
+      ],
+      "wall_median_ms": 17.132775974459946,
+      "wall_samples_ms": [
+        17.49371300684288,
+        17.132775974459946,
+        16.951956029515713
+      ],
+      "reference_sha256": {
+        "states": "8f1dd845c7c6784eae004207b9853a90ba06af3c07fb3b8996ca133da9b091f5",
+        "values": "173522e9e0865a7f875685d90dd51b75323b194a6f153b2502f9d6f5e9751d9f",
+        "squared_error": "0bcaf973dc0138d8818f36a235be08f8c45045a775904988a8320fd983d7e612",
+        "segment_bank_ids": "677a7cc81f2f1edb6681ebb366c32383365611390c5cb231b544743b36590f21"
+      },
+      "trace": "/tmp/qvq-yaqa-rocm-baseline-traces/b1_w2.0.json"
+    },
+    {
+      "batch": 1,
+      "steps": 128,
+      "vector_size": 2,
+      "banks": 2,
+      "states": 65536,
+      "bits": 2.5,
+      "seed": 20261030,
+      "repeat_exact": true,
+      "event_median_ms": 18.114856719970703,
+      "event_samples_ms": [
+        18.114856719970703,
+        18.87442398071289,
+        18.05405616760254
+      ],
+      "wall_median_ms": 18.15906900446862,
+      "wall_samples_ms": [
+        18.15906900446862,
+        18.892043037340045,
+        18.06940999813378
+      ],
+      "reference_sha256": {
+        "states": "fbae4002873d2fb354a93fdc01e7f2c6398216f840c8d6208f453430206aa716",
+        "values": "8a3e758534c53b41739ac9187e199fdd4b2c63c206ccd148fbd2f9c152fbb925",
+        "squared_error": "eb02d23d0d4a6b49cf80ebc029669fdd8e575c50ca6826caea7e7aa06e24febb",
+        "segment_bank_ids": "0b87c1d5bf549e979c77c657a2d5f87f054ba2c9b9863314532bd6e937601df0"
+      },
+      "trace": "/tmp/qvq-yaqa-rocm-baseline-traces/b1_w2.5.json"
+    },
+    {
+      "batch": 1,
+      "steps": 128,
+      "vector_size": 2,
+      "banks": 2,
+      "states": 65536,
+      "bits": 3.0,
+      "seed": 20261035,
+      "repeat_exact": true,
+      "event_median_ms": 17.138404846191406,
+      "event_samples_ms": [
+        17.138404846191406,
+        17.186843872070312,
+        17.046764373779297
+      ],
+      "wall_median_ms": 17.182875017169863,
+      "wall_samples_ms": [
+        17.182875017169863,
+        17.203044961206615,
+        17.062295984942466
+      ],
+      "reference_sha256": {
+        "states": "bf3f6c59f7a317f907beffb501ae4eab79dfb18910bea718c66e41860bdae055",
+        "values": "1da2a3b6d2c8a58684ab56db9f568688b053d93a45d20469e52d28cfd43e7440",
+        "squared_error": "c76ce04f7b977a3aabc105832651a9ed1ee4361914b8a2fb0c20999ff5929370",
+        "segment_bank_ids": "8f0b10095a999cb62275a892f97ee3b886db6de0872a2c43ecd22fc71aedc44e"
+      },
+      "trace": "/tmp/qvq-yaqa-rocm-baseline-traces/b1_w3.0.json"
+    },
+    {
+      "batch": 1,
+      "steps": 128,
+      "vector_size": 2,
+      "banks": 2,
+      "states": 65536,
+      "bits": 3.5,
+      "seed": 20261040,
+      "repeat_exact": true,
+      "event_median_ms": 16.99504852294922,
+      "event_samples_ms": [
+        17.12076759338379,
+        16.99060821533203,
+        16.99504852294922
+      ],
+      "wall_median_ms": 17.012125987093896,
+      "wall_samples_ms": [
+        17.168485966976732,
+        17.00641500065103,
+        17.012125987093896
+      ],
+      "reference_sha256": {
+        "states": "7b74ef28a0353991733666b30fcfff2b48a0bc8471dda86faef5dd13dcd2ef50",
+        "values": "98f2a3c9f2876dcf75a678f5c691d8ea67e20cc7a6f0bb8100bcf4a2a8e3e889",
+        "squared_error": "6c179842518638e7f432cc1531be987e1bec716be610efc703e7f36aeb6fe377",
+        "segment_bank_ids": "54882157b2b000f2236e6183caa592de873740541465964deccaada5a62c70cc"
+      },
+      "trace": "/tmp/qvq-yaqa-rocm-baseline-traces/b1_w3.5.json"
+    },
+    {
+      "batch": 4,
+      "steps": 128,
+      "vector_size": 2,
+      "banks": 2,
+      "states": 65536,
+      "bits": 2.0,
+      "seed": 20261325,
+      "repeat_exact": true,
+      "event_median_ms": 17.343048095703125,
+      "event_samples_ms": [
+        17.873291015625,
+        17.185928344726562,
+        17.343048095703125
+      ],
+      "wall_median_ms": 17.358343000523746,
+      "wall_samples_ms": [
+        17.938359989784658,
+        17.202095012180507,
+        17.358343000523746
+      ],
+      "reference_sha256": {
+        "states": "b44026ebbb5444568d4775a1dc23181650a16929b688cc750367f4f63e0595c2",
+        "values": "d0eaefbcdb0daab13233d6b7c4691cbf07ec74b539368c5823447a51ac96ab4d",
+        "squared_error": "a0b8c411d344db149503ddc238ddd214115d4eb8d83012a5825d3a68611727c4",
+        "segment_bank_ids": "df0ca28a00ea8c54ef1700d124284e633d7afd8f5e32247239c250c2280f22fb"
+      },
+      "trace": "/tmp/qvq-yaqa-rocm-baseline-traces/b4_w2.0.json"
+    },
+    {
+      "batch": 4,
+      "steps": 128,
+      "vector_size": 2,
+      "banks": 2,
+      "states": 65536,
+      "bits": 2.5,
+      "seed": 20261330,
+      "repeat_exact": true,
+      "event_median_ms": 17.18480110168457,
+      "event_samples_ms": [
+        17.18480110168457,
+        17.037921905517578,
+        17.276203155517578
+      ],
+      "wall_median_ms": 17.227854987140745,
+      "wall_samples_ms": [
+        17.227854987140745,
+        17.054134979844093,
+        17.291733995079994
+      ],
+      "reference_sha256": {
+        "states": "3d35107ccfceb56d42470f5162e5d5763cc27e0e4de72249e715b19237a9617b",
+        "values": "996cae7f2a18a94ec72404c9c24ee61a49896a8eebbc30b0f38dd08469702e03",
+        "squared_error": "d426f9a0e1806999004475787219059a60cfb42077abcd87ba56bdbc2a97a7a9",
+        "segment_bank_ids": "8720f655d7c6f28d721468bc991713875c4a2a230d59466613002ed9547af090"
+      },
+      "trace": "/tmp/qvq-yaqa-rocm-baseline-traces/b4_w2.5.json"
+    },
+    {
+      "batch": 4,
+      "steps": 128,
+      "vector_size": 2,
+      "banks": 2,
+      "states": 65536,
+      "bits": 3.0,
+      "seed": 20261335,
+      "repeat_exact": true,
+      "event_median_ms": 17.11616325378418,
+      "event_samples_ms": [
+        17.21644401550293,
+        17.11616325378418,
+        17.020723342895508
+      ],
+      "wall_median_ms": 17.132334993220866,
+      "wall_samples_ms": [
+        17.259264015592635,
+        17.132334993220866,
+        17.03658699989319
+      ],
+      "reference_sha256": {
+        "states": "f7813545a4266e5bd268385315c75213e14d99f2386e07b44fc3f4502ed140c3",
+        "values": "a264f595fa6aed9a8ff6f5b1ca77de987bb3f25e6dcc33040a7154a988f20638",
+        "squared_error": "26b6544e13825e4a22dc48a923b0cd243fc0ec19d4c7f17ee6865189e31518a6",
+        "segment_bank_ids": "cfeb52862186f93048f1adb013ed6b9cb77e1f6ec5f3a4626e17ec7b2d4f079e"
+      },
+      "trace": "/tmp/qvq-yaqa-rocm-baseline-traces/b4_w3.0.json"
+    },
+    {
+      "batch": 4,
+      "steps": 128,
+      "vector_size": 2,
+      "banks": 2,
+      "states": 65536,
+      "bits": 3.5,
+      "seed": 20261340,
+      "repeat_exact": true,
+      "event_median_ms": 17.172563552856445,
+      "event_samples_ms": [
+        17.172563552856445,
+        17.244325637817383,
+        17.154403686523438
+      ],
+      "wall_median_ms": 17.21767394337803,
+      "wall_samples_ms": [
+        17.21767394337803,
+        17.260533990338445,
+        17.174896027427167
+      ],
+      "reference_sha256": {
+        "states": "384eb6bba73860011d8ea3530492350c143caca1068e1027baf42e25cad70d40",
+        "values": "ad8159e5889cdc407f100a04585d1815ef29c4b1803c42a54b902ec15b2b2ff3",
+        "squared_error": "f076d41eaaf9d469d39ca7556ebaf0a37c21483858d5c00adb2f7e75d5d4132c",
+        "segment_bank_ids": "e6c5a210b9c002a42101190a93fd2e15a7eef22525c9274c055e71e6c98157fc"
+      },
+      "trace": "/tmp/qvq-yaqa-rocm-baseline-traces/b4_w3.5.json"
+    }
+  ]
+}

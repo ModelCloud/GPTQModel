@@ -1,0 +1,134 @@
+{
+  "revision": "cc9522caaf4d0db9adab64cbc60622b4b029b456",
+  "scope": "complete YAQA family reselect/full-sampling solve, synthetic SPD Hessians and weights; not model calibration, preprocessing, serialization or end-to-end model quantization",
+  "config": {
+    "physical_gpu": 0,
+    "idle_samples": 3,
+    "idle_interval": 1,
+    "idle_memory_tolerance_mib": 1024,
+    "sizes": [
+      32
+    ],
+    "bits": [
+      2.0,
+      2.5,
+      3.0,
+      3.5
+    ],
+    "iterations": 3,
+    "output": "/tmp/qvq-yaqa-cc9522ca-pipeline-final.json",
+    "allow_busy": false
+  },
+  "hardware": {
+    "physical_gpu": 0,
+    "pci_bus_id": "0000:83:00.0",
+    "unique_id": "0x333ef6e01ec019b3",
+    "driver": "7.1.3.31500000",
+    "utilization_percent": 0,
+    "vram_total_bytes": 308902100992,
+    "vram_used_bytes": 299532288,
+    "process_ids": []
+  },
+  "valid": true,
+  "completed": true,
+  "rows": [
+    {
+      "in_features": 32,
+      "out_features": 32,
+      "bits": 2.0,
+      "exact": true,
+      "wall_ms": {
+        "eager": [
+          651.6702840453945,
+          650.7642830256373,
+          650.1519280136563
+        ],
+        "native": [
+          96.21569700539112,
+          96.12268698401749,
+          96.25608497299254
+        ]
+      },
+      "median_ms": {
+        "eager": 650.7642830256373,
+        "native": 96.21569700539112
+      },
+      "speedup": 6.763597866875858
+    },
+    {
+      "in_features": 32,
+      "out_features": 32,
+      "bits": 2.5,
+      "exact": true,
+      "wall_ms": {
+        "eager": [
+          653.3436740282923,
+          652.5089409551583,
+          653.2585849636234
+        ],
+        "native": [
+          96.81688196724281,
+          96.3900460046716,
+          99.02859304565936
+        ]
+      },
+      "median_ms": {
+        "eager": 653.2585849636234,
+        "native": 96.81688196724281
+      },
+      "speedup": 6.747362357575697
+    },
+    {
+      "in_features": 32,
+      "out_features": 32,
+      "bits": 3.0,
+      "exact": true,
+      "wall_ms": {
+        "eager": [
+          651.621630997397,
+          651.34812600445,
+          651.7145340330899
+        ],
+        "native": [
+          96.87395201763138,
+          96.21695801615715,
+          96.40717599540949
+        ]
+      },
+      "median_ms": {
+        "eager": 651.621630997397,
+        "native": 96.40717599540949
+      },
+      "speedup": 6.75905734473982
+    },
+    {
+      "in_features": 32,
+      "out_features": 32,
+      "bits": 3.5,
+      "exact": true,
+      "wall_ms": {
+        "eager": [
+          651.7205840209499,
+          650.8879720349796,
+          651.1203909758478
+        ],
+        "native": [
+          96.515586017631,
+          96.17915895069018,
+          96.46590700140223
+        ]
+      },
+      "median_ms": {
+        "eager": 651.1203909758478,
+        "native": 96.46590700140223
+      },
+      "speedup": 6.749746218281897
+    }
+  ],
+  "torch": "2.13.0+rocm10.0.0",
+  "hip": "7.15.26333",
+  "source_sha256": {
+    "gptqmodel/quantization/qvq.py": "c97295c0e267959b2268c4eb6d04baaef4e5266ac79be5088c1d3d16c14ae636",
+    "gptqmodel/utils/qvq_yaqa_amd.py": "1b72ff4d2b61d5c44017f01f48ccc328a145fb4d9846edc4dc4ae3b5846d9cdb"
+  }
+}
