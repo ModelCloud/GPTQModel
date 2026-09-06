@@ -122,6 +122,15 @@ five launches and reduces source-correlated executed instructions from
 shared exchange/reduction work; instruction reduction does not establish a
 large-M latency improvement.
 
+The concurrent-reference producer now passes its prepared FP16 hidden result
+directly into the correction epilogue instead of recomputing it on the caller
+stream. A fresh H200 graph replay at K=N=2048/W3 measures 21.85% overhead at
+M128, 3.52% at M2048, and 1.99% at M8192
+(`results/p32_rank8_h200_concurrent_reference.json`). This is current-code
+evidence that large-M correction can fall inside the 3--5% budget for a square
+projection, while small-M remains outside the target; it is still a separate
+producer/consumer candidate rather than the final WGMMA-integrated pipeline.
+
 The Ampere continuous-window operator now participates in the same
 `P32WindowConfig` and `window_kernel_candidates` policy. On SM80, the
 shape-specific split-wave enumerator publishes explicit `ampere_window`
