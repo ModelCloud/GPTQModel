@@ -256,6 +256,15 @@ class ParoQuantProcessor(LoopProcessor):
         self._runtime_prewarmed = False
         self.fallback = qcfg.fallback
 
+    def continuation_state_dict(self):
+        state = super().continuation_state_dict()
+        state["clean_group_layer_inputs"] = self._clean_group_layer_inputs
+        return state
+
+    def load_continuation_state_dict(self, state):
+        super().load_continuation_state_dict(state)
+        self._clean_group_layer_inputs = state["clean_group_layer_inputs"]
+
     def set_calibration_dataset(self, calibration_dataset):
         """Reject runtime dataset swaps because capture state is tied to the processor."""
         raise NotImplementedError("ParoQuantProcessor's calibration_dataset cannot be modified")

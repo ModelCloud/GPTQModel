@@ -347,6 +347,23 @@ class AWQProcessor(LoopProcessor):
                 self._layer_states[layer_index] = state
         return state
 
+    def continuation_state_dict(self):
+        state = super().continuation_state_dict()
+        state["awq"] = {
+            "avg_losses": self.avg_losses,
+            "nsamples": self.nsamples,
+            "nsamples_total": self._nsamples_total,
+            "quant_batch_size": self._quant_batch_size,
+        }
+        return state
+
+    def load_continuation_state_dict(self, state):
+        super().load_continuation_state_dict(state)
+        self.avg_losses = state["awq"]["avg_losses"]
+        self.nsamples = state["awq"]["nsamples"]
+        self._nsamples_total = state["awq"]["nsamples_total"]
+        self._quant_batch_size = state["awq"]["quant_batch_size"]
+
     def _initialize_sample_counts(self) -> None:
         """Computes sample and token totals from the calibration dataset."""
 
