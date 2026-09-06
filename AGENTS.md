@@ -47,7 +47,8 @@ See the [accuracy skill](.agents/skills/qvq-kernel-accuracy/SKILL.md#human-revie
 
 ## PTQ recovery research
 
-Before designing or reviewing PTQ recovery, activation/KV scale calibration, EoRA,
+Before designing or reviewing supported quantization methods, PTQ enhancements,
+PTQ recovery, activation/KV scale calibration, EoRA,
 QTIP/YAQA rounding, P32 representation changes, or recirculation experiments, use
 [$qvq-ptq-recovery-research](.agents/skills/qvq-ptq-recovery-research/SKILL.md)
 and read the relevant notes in [research/README.md](research/README.md).

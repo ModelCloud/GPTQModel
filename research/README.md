@@ -7,8 +7,27 @@ validated on QVQ, or enabled in production.
 
 ## Reading map
 
+Start with the [supported-method and enhancement inventory](supported-methods.md)
+for enum/config coverage, dispatch boundaries, and implementation status.
+
 | Topic | Note | Role |
 |---|---|---|
+| GPTQ | [GPTQ](gptq.md) | Second-order weight rounding and compensation |
+| AWQ | [AWQ](awq.md) | Activation-aware channel scaling for weight quantization |
+| QQQ | [QQQ](qqq.md) | W4A8 smoothing and Hessian compensation |
+| ParoQuant | [ParoQuant](paroquant.md) | Learned pairwise rotations and transformed-domain quantization |
+| EXL3 | [EXL3](exl3.md) | ExLlamaV3 quantization integration and exclusions |
+| RTN | [RTN](rtn.md) | Calibration-free baseline/fallback; not a separate METHOD |
+| FP8 | [FP8](fp8.md) | Weight format versus activation/cache policy |
+| bitsandbytes | [FP4/NF4 integration](bitsandbytes.md) | Blockwise storage and runtime; distinct from QLoRA training |
+| GGUF | [GGUF](gguf.md) | Container, tensor types and supported consumers |
+| MXFP4 | [MXFP4](mxfp4.md) | Microscaling and CPU module integration |
+| GPTAQ / former GPTQv2 | [GPTAQ](gptaq.md) | Asymmetric calibration for upstream error |
+| FOEM | [FOEM](foem.md) | First-order weight-error compensation |
+| GAR | [GAR](gar.md) | Group-aware reordering |
+| SLQ | [SLQ](slq.md) | Statistical fidelity and nonuniform allocation |
+| Rotation / smoothing | [Rotation and smoothing](rotation-and-smoothing.md) | Equivalent transforms versus lossy preprocessing |
+| QVQ enhancements | [Implementation findings](qvq-enhancements.md) | SwiGLU, alignment, propagation, candidate search and exact pruning |
 | NVFP4 W4A4 and FP8 KV calibration | [NVFP4 hybrid PTQ](nvfp4-hybrid-ptq.md) | Numeric representation, fusion correctness, calibration |
 | EoRA and output-residual fitting | [EoRA recovery](eora.md) | Additive low-rank compensation |
 | QTIP | [Trellis quantization](qtip.md) | Weight quantizer and parallel-decodable representation |

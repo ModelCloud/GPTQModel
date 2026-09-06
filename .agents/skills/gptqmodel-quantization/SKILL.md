@@ -9,7 +9,8 @@ Treat the algorithm, serialized format, and inference backend as separate contra
 
 ## Scientific findings for PTQ recovery
 
-For recovery, EoRA, NVFP4 activation/KV scales, QTIP/YAQA or P32 design choices,
+For supported quantization methods and enhancements, recovery, EoRA,
+NVFP4 activation/KV scales, QTIP/YAQA or P32 design choices,
 start with [research/README.md](../../../research/README.md) and use
 [$qvq-ptq-recovery-research](../qvq-ptq-recovery-research/SKILL.md).
 Keep scale calibration, weight rounding, lossless packing and additive recovery

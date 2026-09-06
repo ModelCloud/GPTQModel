@@ -1,6 +1,6 @@
 ---
 name: qvq-ptq-recovery-research
-description: Consult and maintain QVQ scientific research notes when designing or reviewing PTQ recovery, EoRA, NVFP4 W4A4 scales, QTIP/YAQA rounding, P32 representations, or recirculation experiments.
+description: Consult and maintain QVQ scientific notes for supported quantization methods, PTQ recovery, calibration and rounding enhancements, low-precision formats, P32 representations, or recirculation experiments.
 ---
 
 # QVQ PTQ recovery research
@@ -11,6 +11,12 @@ that change the current decision. Resolve these links relative to this file;
 
 ## Route the scientific question
 
+- Supported methods, formats, dispatch and enhancement coverage:
+  [method inventory](../../../research/supported-methods.md). Follow its method
+  notes for GPTQ, AWQ, QQQ, ParoQuant, EXL3, RTN, FP8, bitsandbytes, GGUF and MXFP4.
+- GPTAQ/FOEM, GAR, SLQ, rotation, SwiGLU, alignment, spectral recovery or pruning:
+  use the inventory's enhancement map and
+  [QVQ implementation findings](../../../research/qvq-enhancements.md).
 - Activation/KV calibration, NVFP4 representation or fused scales:
   [NVFP4 hybrid PTQ](../../../research/nvfp4-hybrid-ptq.md).
 - Low-rank compensation, rank selection or deployed-output fitting:
@@ -25,6 +31,10 @@ that change the current decision. Resolve these links relative to this file;
   [Recirculation](../../../research/recirculation.md).
 
 ## Apply the finding to the actual operator
+
+Distinguish a METHOD enum, a configuration, a helper, a checkpoint format and a
+runtime backend. Check actual caller support and exclusions; do not promote a
+helper into a supported end-to-end method or infer A4 from four-bit weight storage.
 
 Distinguish paper claims, repository implementation, measured results and proposed
 extensions. Follow pinned source links for historical claims; inspect current code
