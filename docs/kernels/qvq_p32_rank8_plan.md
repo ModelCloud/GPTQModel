@@ -34,8 +34,11 @@ command buffers. Existing Python and native graph tests prove only their tested
 paths. The managed CUDA extension, standalone Hopper WGMMA, Ampere
 window/grouped operators, rank8 Triton producer/epilogue, and YAQA Triton
 projector now fail closed on cold JIT/operator registration during capture;
-callers must prewarm them. The ROCm YAQA trusted recurrence now applies the
-same guard; its prepared internal graph remains the supported repeated path.
+callers must prewarm them. The managed CUDA path also requires its PGC16 level
+table, bank selector validation and core GEMV/v4/Hadamard handles to be ready
+before a graph is created. Host-validated CUDA Viterbi/telemetry helpers reject
+capture explicitly. The ROCm YAQA trusted recurrence now applies the same
+guard; its prepared internal graph remains the supported repeated path.
 Quantization kernel integrations, TP/KV execution, and remaining
 capture-sensitive lazy paths still require an explicit audit.
 
