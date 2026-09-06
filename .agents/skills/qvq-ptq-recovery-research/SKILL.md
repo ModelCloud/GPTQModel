@@ -1,6 +1,6 @@
 ---
 name: qvq-ptq-recovery-research
-description: Consult and maintain QVQ scientific notes for supported quantization methods, PTQ recovery, calibration and rounding enhancements, low-precision formats, P32 representations, or recirculation experiments.
+description: Consult and maintain QVQ scientific notes for quantization methods, PTQ recovery, calibration, low-precision formats, P32, recirculation, ZML/XLA/StableHLO integration, SSA/SASS analysis, Nsight profiling, and CUDA asynchronous execution.
 ---
 
 # QVQ PTQ recovery research
@@ -29,6 +29,18 @@ that change the current decision. Resolve these links relative to this file;
   [P32](../../../research/p32.md).
 - Deep-to-shallow feedback, replay or recurrent cache state:
   [Recirculation](../../../research/recirculation.md).
+- Model construction, compiler lowering or operation semantics:
+  [ZML](../../../research/zml.md), [XLA](../../../research/xla.md) and
+  [StableHLO](../../../research/stablehlo.md).
+- Algebraic deduplication, constant folding or emitted machine instructions:
+  [SSA/SASS](../../../research/ssa-sass.md), with its SSA and egg paper notes.
+- Performance diagnosis or profiling evidence:
+  [Nsight](../../../research/nsight-profiling.md) and
+  [Roofline](../../../research/roofline.md).
+- SMs, CUDA/Tensor Cores, TMA, async copies or barrier protocols:
+  [CUDA execution](../../../research/cuda-execution.md),
+  [FlashAttention-3](../../../research/flashattention-3.md) and
+  [task-based tensor computations](../../../research/task-based-tensor-computations.md).
 
 ## Apply the finding to the actual operator
 
@@ -55,6 +67,13 @@ Use [AGENTS.md](../../../AGENTS.md) and the existing implementation/evaluation
 skills for their applicable gates. Keep kernel parity, propagated model quality,
 task scores, storage and timing evidence separate. Research notes do not override
 accuracy rules or promote runtime defaults.
+
+For compiler and GPU research, separate graph semantics, legal rewrites, emitted
+instructions and measured execution. An opaque custom call does not expose its
+kernel internals or automatically register tuning candidates. Preserve scale,
+cast, accumulation and reduction contracts; distinguish SSA from SASS and gate
+architecture-specific features. Official docs and related papers motivate
+experiments but do not prove QVQ integration, correctness or speedups.
 
 ## Maintain durable evidence
 
