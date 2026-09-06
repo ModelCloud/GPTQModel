@@ -395,6 +395,11 @@ def prepare_rank8(layer, config):
     layer._p32_window_config = config
     layer._p32_rank8_enabled = enabled
     layer._p32_rank8_versions = _versions(layer) if enabled else None
+    # A new policy or factor version must warm the exact projection shape
+    # again before capture; retaining this set would permit a graph to bind a
+    # stale A pointer/algorithm after preparation invalidated the old graph.
+    if hasattr(layer, "_qvq_rank8_concurrent_warm"):
+        layer._qvq_rank8_concurrent_warm.clear()
 
 
 def validate_rank8_state(layer):
