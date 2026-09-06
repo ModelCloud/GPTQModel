@@ -172,6 +172,50 @@ not the current production candidate. Raw reports are in
 [wave 33 results](results/bm64bn32-resident-wave33/) and
 [wave 34 results](results/bm64bn32-resident-ncu-wave34/).
 
+## Resident launch frontier waves 35–36
+
+Wave 35 swept resident-word launches over all eight mapped GPUs, using the
+eight projections `l0/l1 × q/gate/up/down` and all nine row counts. All 72
+cases passed both local gates and the resident output matched the standard
+window reference within the recorded FP16 boundary. The best resident arm was
+`BM64/BN32`, four warps, two stages, at about 1.27× at M=2048; it remained
+slower than the scalar production winner for several projections and low-M
+shapes. The representative fused-vs-window medians were:
+
+| Arm | M=1 | M=16 | M=128 | M=512 | M=2048 |
+|---|---:|---:|---:|---:|---:|
+| w2/s1, l0 q | 1.043× | 0.993× | 0.964× | 0.988× | 1.148× |
+| w2/s2, l1 q | 0.970× | 0.988× | 0.980× | 0.938× | 1.230× |
+| w4/s1, l0 gate | 0.922× | 0.996× | 0.990× | 1.119× | 1.203× |
+| w4/s2, l1 gate | 0.886× | 0.920× | 1.037× | 1.185× | 1.267× |
+| w4/s3, l0 up | 0.944× | 0.913× | 0.955× | 1.137× | 1.264× |
+| w8/s1, l1 up | 0.935× | 0.932× | 0.970× | 1.052× | 1.140× |
+| w8/s2, l0 down | 0.942× | 1.010× | 0.935× | 1.097× | 1.092× |
+| w8/s3, l1 down | 0.857× | 0.964× | 0.956× | 1.092× | 1.101× |
+
+Wave 36 profiled the strongest resident launch, w4/s2 at M=2048, across the
+same eight projections. The medians were:
+
+| Metric | Resident w4/s2 |
+|---|---:|
+| Registers/thread | 56 |
+| Dynamic shared memory/CTA | 8,192 bytes |
+| Achieved occupancy | 51.6% |
+| Integer SASS instructions | 12.19B |
+| Memory SASS instructions | 3.33B |
+| FP16 SASS instructions | 536.87M |
+| HMMA instructions | 16.78M |
+| Long-scoreboard stall | 16.3% |
+| Barrier stall | 19.5% |
+| Math-pipe throttle | 8.1% |
+| MIO throttle | 14.2% |
+
+Relative to the scalar w4/s3 profile, resident w4/s2 lowers registers from
+64 to 56 and integer execution by roughly 17%, while increasing barrier and
+MIO pressure. Its measured runtime still does not approach 3×. Raw JSON,
+CSV, and profiler logs are in [wave 35 results](results/bm64bn32-resident-frontier-wave35/)
+and [wave 36 results](results/bm64bn32-resident-ncu-wave36/).
+
 ## Decision and next target
 
 The current exact dispatch remains production window for M < 512 and the

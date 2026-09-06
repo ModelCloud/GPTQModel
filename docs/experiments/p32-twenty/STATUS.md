@@ -141,5 +141,10 @@ transform boundaries while preserving the M>=512 dispatcher.
 The same record now includes resident-word waves 33–34. Resident staging
 reduces integer SASS by about 14% and registers from 64 to 56, but raises
 barrier/MIO pressure and reaches only about 1.25x pooled M=2048 layer speedup.
-It remains an exact optimization reference; transform fusion and cross-row
-reuse are still required for the 3x target.
+Resident launch/stage wave35 and Nsight wave36 extend this result: all 72
+frontier cases pass, while the best w4/s2 arm reaches only about 1.27x on the
+strongest representative M=2048 projection. Wave36 reports 56 registers,
+51.6% achieved occupancy, 12.19B integer instructions, 19.5% barrier stalls,
+and 14.2% MIO stalls across eight profiled projections. Resident staging is
+therefore rejected as the 3x path; transform fusion and cross-row reuse are
+still required.
