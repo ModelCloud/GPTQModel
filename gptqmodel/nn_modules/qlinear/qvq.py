@@ -940,9 +940,14 @@ class QVQLinear(BaseQuantLinear):
         cached = self._qvq_amd_folded_hot_cache
         # Resolve registered tensors once. nn.Module buffer lookup is not a plain
         # attribute read, and repeated resolution was material in decode forwards.
+        # Window-only deployment releases planar trellis after the CPU repack;
+        # the prepared window is the canonical source for cache identity then.
         buffers = self._buffers if type(self) is QVQLinear else {}
-        # dict.get(default) would eagerly perform the attribute lookup we avoid.
-        trellis = buffers["trellis"] if "trellis" in buffers else self.trellis  # noqa: SIM401
+        source = self.window_words if self.window_only else (
+            buffers["trellis"] if "trellis" in buffers else self.trellis  # noqa: SIM401
+        )
+        if source is None:
+            return None
         bank_ids_source = buffers["bank_ids"] if "bank_ids" in buffers else self.bank_ids  # noqa: SIM401
         bank_alt_source = buffers["bank_alt_id"] if "bank_alt_id" in buffers else self.bank_alt_id  # noqa: SIM401
         su_source = buffers["SU"] if "SU" in buffers else self.SU  # noqa: SIM401
@@ -951,8 +956,8 @@ class QVQLinear(BaseQuantLinear):
         if (
             cached is not None
             and len(cached) == 27
-            and cached[0] is trellis
-            and cached[1] == trellis._version
+            and cached[0] is source
+            and cached[1] == source._version
             and cached[2] is bank_ids_source
             and cached[3] == bank_ids_source._version
             and cached[4] is bank_alt_source
@@ -1018,8 +1023,8 @@ class QVQLinear(BaseQuantLinear):
             window._qvq_p32_amd_folded_cache
         )
         self._qvq_amd_folded_hot_cache = (
-            self.trellis,
-            self.trellis._version,
+            source,
+            source._version,
             self.bank_ids,
             self.bank_ids._version,
             self.bank_alt_id,
