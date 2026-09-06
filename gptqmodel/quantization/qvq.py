@@ -68,6 +68,16 @@ QVQ_YAQA_SAMPLE_TILE_COUNTS = {
 }
 
 
+def _reject_qvq_quantization_capture(operation: str) -> None:
+    """Keep host-side quantization and kernel tuning outside CUDA Graph capture."""
+
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            f"QVQ {operation} cannot run during CUDA Graph capture; "
+            "finish quantization and tuning before capture"
+        )
+
+
 def _yaqa_sample_tile_indices(tile_count: int, sample_strategy: str) -> torch.Tensor:
     """Return deterministic, evenly spaced 16x16 tile indices for a sampled YAQA family screen."""
 
@@ -7245,6 +7255,7 @@ def quantize_qvq_linear(
     not be serialized because QVQ checkpoints contain no custom-codebook
     metadata and the runtime decoder always uses the canonical mapping.
     """
+    _reject_qvq_quantization_capture("linear quantization")
     rank8_original_weight = None
     if rank8_calibration is not None:
         from .qvq_rank8 import Rank8Calibration
