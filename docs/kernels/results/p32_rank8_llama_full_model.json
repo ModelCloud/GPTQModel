@@ -181,7 +181,10 @@
     ]
   },
   "quality": {
-    "audit_rows": 376,
+    "audit_documents": 4,
+    "audit_rows_per_document": 64,
+    "audit_module_document_records": 376,
+    "audit_activation_rows": 24064,
     "mse": {
       "baseline_mean": 0.004408537546907803,
       "recovered_mean": 0.004156945222513509,
