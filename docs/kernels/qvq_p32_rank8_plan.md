@@ -45,6 +45,11 @@ CUDA projection/Viterbi helpers; quantization is preparation work and must
 finish before capture. TP/KV execution and remaining capture-sensitive lazy
 paths still require an explicit audit.
 
+The Python tuner now supports `measure_recovery_candidates=True`, retaining
+matched correction-off/on medians and marginal overhead for every eligible
+geometry. The ZML adapter exposes the equivalent `benchmarkRecoveryPair` API.
+Neither path lets latency override audit or arithmetic-signature eligibility.
+
 The native prepared-graph API owns its temporary allocation pool and can insert
 the existing window/rank8 operator as a child of an enclosing CUDA capture. The
 ZML adapter now retains one such handle per executable buffer set, stream and
