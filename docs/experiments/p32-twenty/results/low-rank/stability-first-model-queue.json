@@ -1,0 +1,53 @@
+{
+  "scope": "Queued model validation; local passing result is not promotion",
+  "jobs": [
+    {
+      "id": "stability71-2048-rank6-tail-c4",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit2048/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-stability/seed71/fit2048/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-stability/seed71/fit2048/model-rank6-tail-c4"
+      ],
+      "result": "/root/p32-stability/seed71/fit2048/model-rank6-tail-c4/report.json",
+      "log": "/root/p32-stability/seed71/fit2048/model-rank6-tail-c4.log"
+    },
+    {
+      "id": "stability71-2048-rank6-tail-arc",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit2048/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-stability/seed71/fit2048/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-stability/seed71/fit2048/model-rank6-tail-arc",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172"
+      ],
+      "result": "/root/p32-stability/seed71/fit2048/model-rank6-tail-arc/report.json",
+      "log": "/root/p32-stability/seed71/fit2048/model-rank6-tail-arc.log"
+    }
+  ]
+}

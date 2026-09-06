@@ -1,0 +1,767 @@
+{
+  "scope": "layer baseline and window candidate; experiment 1/10 partial evidence; profiler and model gates pending",
+  "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8",
+  "worker": 2,
+  "torch": "2.13.0+cu130",
+  "device": "_CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=8be4c651-4058-83df-154b-291f1b86add8, pci_bus_id=100, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "revision": "7d6beddc90b989ed5e8acc17b7118523d13a6740",
+  "rows": [
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 1,
+      "K": 2048,
+      "N": 512,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 512,
+        "mean_abs": 6.992446140829944e-06,
+        "max_abs": 3.4579308703541756e-05,
+        "relative_l2": 0.00044341889167857446,
+        "cosine": 0.9999999017402057,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 512,
+        "mean_abs": 6.992546341566541e-06,
+        "max_abs": 3.456743434071541e-05,
+        "relative_l2": 0.0004433902685090232,
+        "cosine": 0.999999901753528,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 2,
+      "K": 2048,
+      "N": 512,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 1024,
+        "mean_abs": 1.1456575886636955e-05,
+        "max_abs": 8.380413055419922e-05,
+        "relative_l2": 0.00023373658015632677,
+        "cosine": 0.9999999727230642,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 1024,
+        "mean_abs": 1.1455934866066997e-05,
+        "max_abs": 8.383393287658691e-05,
+        "relative_l2": 0.00023372327260609145,
+        "cosine": 0.9999999727260798,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 4,
+      "K": 2048,
+      "N": 512,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 2048,
+        "mean_abs": 1.3768752129439399e-05,
+        "max_abs": 8.380413055419922e-05,
+        "relative_l2": 0.00025758962283219767,
+        "cosine": 0.9999999668582426,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 2048,
+        "mean_abs": 1.376904568883841e-05,
+        "max_abs": 8.377432823181152e-05,
+        "relative_l2": 0.0002575864913906974,
+        "cosine": 0.9999999668589178,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 8,
+      "K": 2048,
+      "N": 512,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 4096,
+        "mean_abs": 1.4172651900179467e-05,
+        "max_abs": 0.00010808929800987244,
+        "relative_l2": 0.00024158079933578436,
+        "cosine": 0.9999999708346495,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 4096,
+        "mean_abs": 1.4171446166666435e-05,
+        "max_abs": 0.00010809674859046936,
+        "relative_l2": 0.0002415721783513696,
+        "cosine": 0.9999999708346976,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 16,
+      "K": 2048,
+      "N": 512,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 8192,
+        "mean_abs": 1.4281322731610202e-05,
+        "max_abs": 0.00010808929800987244,
+        "relative_l2": 0.00023552312046168033,
+        "cosine": 0.99999997231495,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 8192,
+        "mean_abs": 1.4280705782764025e-05,
+        "max_abs": 0.00010808929800987244,
+        "relative_l2": 0.0002355178456964092,
+        "cosine": 0.9999999723141438,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 32,
+      "K": 2048,
+      "N": 512,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 16384,
+        "mean_abs": 1.4550488384820759e-05,
+        "max_abs": 0.00010806694626808167,
+        "relative_l2": 0.00023471376308062744,
+        "cosine": 0.9999999724658554,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 16384,
+        "mean_abs": 1.4546929007834466e-05,
+        "max_abs": 0.00010772049427032471,
+        "relative_l2": 0.00023468984248746903,
+        "cosine": 0.9999999724620572,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 128,
+      "K": 2048,
+      "N": 512,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 65536,
+        "mean_abs": 1.4672341443662919e-05,
+        "max_abs": 0.00012378394603729248,
+        "relative_l2": 0.0002264946597650393,
+        "cosine": 0.999999974350288,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 65536,
+        "mean_abs": 1.4672854466347474e-05,
+        "max_abs": 0.00012351013720035553,
+        "relative_l2": 0.00022650016942385028,
+        "cosine": 0.99999997435137,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 512,
+      "K": 2048,
+      "N": 512,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 262144,
+        "mean_abs": 1.464875618809085e-05,
+        "max_abs": 0.00012379884719848633,
+        "relative_l2": 0.00022569770454781917,
+        "cosine": 0.9999999745303356,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 262144,
+        "mean_abs": 1.4649607745211037e-05,
+        "max_abs": 0.00012356415390968323,
+        "relative_l2": 0.0002257045942348777,
+        "cosine": 0.9999999745319024,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 2048,
+      "K": 2048,
+      "N": 512,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 1048576,
+        "mean_abs": 1.4687700708492515e-05,
+        "max_abs": 0.00012375414371490479,
+        "relative_l2": 0.00022609715065784482,
+        "cosine": 0.9999999744400393,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 1048576,
+        "mean_abs": 1.4688776998897916e-05,
+        "max_abs": 0.00012351945042610168,
+        "relative_l2": 0.0002261074897131263,
+        "cosine": 0.9999999744417795,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 1,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 2048,
+        "mean_abs": 2.0474745014098517e-05,
+        "max_abs": 0.0001226663589477539,
+        "relative_l2": 7.86376394149305e-05,
+        "cosine": 0.999999996933579,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 2048,
+        "mean_abs": 2.047487012646343e-05,
+        "max_abs": 0.0001226663589477539,
+        "relative_l2": 7.863396876766786e-05,
+        "cosine": 0.999999996933886,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 2,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 4096,
+        "mean_abs": 4.62399153655646e-05,
+        "max_abs": 0.0005097389221191406,
+        "relative_l2": 6.880599479119731e-05,
+        "cosine": 0.9999999976498876,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 4096,
+        "mean_abs": 4.6244412790219513e-05,
+        "max_abs": 0.0005097389221191406,
+        "relative_l2": 6.880998925525143e-05,
+        "cosine": 0.9999999976495967,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 4,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 8192,
+        "mean_abs": 5.9878598400731065e-05,
+        "max_abs": 0.0005097389221191406,
+        "relative_l2": 6.343008875618104e-05,
+        "cosine": 0.9999999980214871,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 8192,
+        "mean_abs": 5.988422504299429e-05,
+        "max_abs": 0.0005097389221191406,
+        "relative_l2": 6.343468963759604e-05,
+        "cosine": 0.9999999980211797,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 8,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 16384,
+        "mean_abs": 6.899413416994182e-05,
+        "max_abs": 0.00063323974609375,
+        "relative_l2": 6.37998930250263e-05,
+        "cosine": 0.9999999979654143,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 16384,
+        "mean_abs": 6.899926166525905e-05,
+        "max_abs": 0.0006341934204101562,
+        "relative_l2": 6.380216098619295e-05,
+        "cosine": 0.99999999796541,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 16,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 32768,
+        "mean_abs": 7.206865479975066e-05,
+        "max_abs": 0.0007238388061523438,
+        "relative_l2": 6.317851152758626e-05,
+        "cosine": 0.999999998006137,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 32768,
+        "mean_abs": 7.206427364042645e-05,
+        "max_abs": 0.0007219314575195312,
+        "relative_l2": 6.317231710323707e-05,
+        "cosine": 0.9999999980061187,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 32,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 65536,
+        "mean_abs": 7.27904166560947e-05,
+        "max_abs": 0.0007238388061523438,
+        "relative_l2": 6.203973996526169e-05,
+        "cosine": 0.9999999980849507,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 65536,
+        "mean_abs": 7.265472437124366e-05,
+        "max_abs": 0.0006875991821289062,
+        "relative_l2": 6.190031774430377e-05,
+        "cosine": 0.9999999980842553,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 128,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 262144,
+        "mean_abs": 7.353852281465978e-05,
+        "max_abs": 0.0009088516235351562,
+        "relative_l2": 5.9459763991375244e-05,
+        "cosine": 0.9999999982323347,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 262144,
+        "mean_abs": 7.37940734422916e-05,
+        "max_abs": 0.000949859619140625,
+        "relative_l2": 5.963176294811857e-05,
+        "cosine": 0.9999999982316613,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 512,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 1048576,
+        "mean_abs": 7.343450785776435e-05,
+        "max_abs": 0.0009088516235351562,
+        "relative_l2": 5.767829623710885e-05,
+        "cosine": 0.9999999983366133,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 1048576,
+        "mean_abs": 7.36468320277468e-05,
+        "max_abs": 0.000949859619140625,
+        "relative_l2": 5.782171568899851e-05,
+        "cosine": 0.9999999983361251,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 2048,
+      "K": 2048,
+      "N": 2048,
+      "bits": 2.0,
+      "baseline_metrics": {
+        "elements": 4194304,
+        "mean_abs": 7.337956699350053e-05,
+        "max_abs": 0.0009088516235351562,
+        "relative_l2": 5.703499936087804e-05,
+        "cosine": 0.9999999983739131,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 4194304,
+        "mean_abs": 7.367839811929118e-05,
+        "max_abs": 0.000949859619140625,
+        "relative_l2": 5.7252650521724656e-05,
+        "cosine": 0.9999999983734927,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 1,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 8192,
+        "mean_abs": 6.052878415630956e-05,
+        "max_abs": 0.00048065185546875,
+        "relative_l2": 0.00012986090607612044,
+        "cosine": 0.999999991608623,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 8192,
+        "mean_abs": 6.0527184152291396e-05,
+        "max_abs": 0.00048065185546875,
+        "relative_l2": 0.00012986064111509917,
+        "cosine": 0.9999999916086494,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 2,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 16384,
+        "mean_abs": 4.520679435856016e-05,
+        "max_abs": 0.00048065185546875,
+        "relative_l2": 0.00013803829864453407,
+        "cosine": 0.9999999905063127,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 16384,
+        "mean_abs": 4.520517708052644e-05,
+        "max_abs": 0.00048065185546875,
+        "relative_l2": 0.0001380368440650533,
+        "cosine": 0.9999999905065113,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 4,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 32768,
+        "mean_abs": 3.695897445353687e-05,
+        "max_abs": 0.00048065185546875,
+        "relative_l2": 0.00014783508444241714,
+        "cosine": 0.9999999891061306,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 32768,
+        "mean_abs": 3.6958218333301004e-05,
+        "max_abs": 0.00048065185546875,
+        "relative_l2": 0.00014783406417711093,
+        "cosine": 0.9999999891062764,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 8,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 65536,
+        "mean_abs": 3.332862274361048e-05,
+        "max_abs": 0.0008472204208374023,
+        "relative_l2": 0.00016166282336572938,
+        "cosine": 0.9999999869522999,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 65536,
+        "mean_abs": 3.332805661653189e-05,
+        "max_abs": 0.0008469223976135254,
+        "relative_l2": 0.000161657346177934,
+        "cosine": 0.9999999869523392,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 16,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 131072,
+        "mean_abs": 3.0034383380570526e-05,
+        "max_abs": 0.0008472800254821777,
+        "relative_l2": 0.00017387734496196274,
+        "cosine": 0.9999999848867706,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 131072,
+        "mean_abs": 3.00346610826943e-05,
+        "max_abs": 0.0008469820022583008,
+        "relative_l2": 0.00017387611010362476,
+        "cosine": 0.9999999848865874,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 32,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 262144,
+        "mean_abs": 2.823500523626459e-05,
+        "max_abs": 0.0008472204208374023,
+        "relative_l2": 0.00018449546394847002,
+        "cosine": 0.9999999829822126,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 262144,
+        "mean_abs": 2.8239627623103335e-05,
+        "max_abs": 0.0008492469787597656,
+        "relative_l2": 0.00018448936511825578,
+        "cosine": 0.9999999829825615,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 128,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 1048576,
+        "mean_abs": 2.6956954748678646e-05,
+        "max_abs": 0.0008509159088134766,
+        "relative_l2": 0.0001955403424308353,
+        "cosine": 0.9999999808820155,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 1048576,
+        "mean_abs": 2.696144955657779e-05,
+        "max_abs": 0.0008502006530761719,
+        "relative_l2": 0.00019556292382974999,
+        "cosine": 0.9999999808811698,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 512,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 4194304,
+        "mean_abs": 2.628692966279367e-05,
+        "max_abs": 0.0008607804775238037,
+        "relative_l2": 0.00019670684067456926,
+        "cosine": 0.9999999806532185,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 4194304,
+        "mean_abs": 2.6291028151729438e-05,
+        "max_abs": 0.00086250901222229,
+        "relative_l2": 0.00019673186350401198,
+        "cosine": 0.9999999806521562,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 2048,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.5,
+      "baseline_metrics": {
+        "elements": 16777216,
+        "mean_abs": 2.6559161072559175e-05,
+        "max_abs": 0.001124262809753418,
+        "relative_l2": 0.0001964349433246436,
+        "cosine": 0.9999999807066587,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 16777216,
+        "mean_abs": 2.656300859096241e-05,
+        "max_abs": 0.0011219978332519531,
+        "relative_l2": 0.00019646218408585502,
+        "cosine": 0.9999999807053725,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    }
+  ],
+  "complete": true
+}

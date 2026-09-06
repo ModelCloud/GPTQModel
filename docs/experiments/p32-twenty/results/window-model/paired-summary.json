@@ -1,0 +1,165 @@
+{
+  "scope": "same-device sequential arms; repeat baseline pending; growing-cache decode includes cold first step",
+  "rows": [
+    {
+      "gpu": 2,
+      "regime": "prefill",
+      "tokens": 1,
+      "planar_median_ms": 46.78451156616211,
+      "window_median_ms": 44.01049613952637,
+      "speedup": 1.063030769247438
+    },
+    {
+      "gpu": 2,
+      "regime": "prefill",
+      "tokens": 2,
+      "planar_median_ms": 48.18943977355957,
+      "window_median_ms": 45.351423263549805,
+      "speedup": 1.0625783339481378
+    },
+    {
+      "gpu": 2,
+      "regime": "prefill",
+      "tokens": 4,
+      "planar_median_ms": 48.17919921875,
+      "window_median_ms": 43.350528717041016,
+      "speedup": 1.111386657662859
+    },
+    {
+      "gpu": 2,
+      "regime": "prefill",
+      "tokens": 8,
+      "planar_median_ms": 48.66867256164551,
+      "window_median_ms": 46.32678413391113,
+      "speedup": 1.0505514999911276
+    },
+    {
+      "gpu": 2,
+      "regime": "prefill",
+      "tokens": 16,
+      "planar_median_ms": 46.51417541503906,
+      "window_median_ms": 43.37459182739258,
+      "speedup": 1.0723830116981925
+    },
+    {
+      "gpu": 2,
+      "regime": "prefill",
+      "tokens": 32,
+      "planar_median_ms": 49.88723182678223,
+      "window_median_ms": 40.52992057800293,
+      "speedup": 1.230874157050726
+    },
+    {
+      "gpu": 2,
+      "regime": "prefill",
+      "tokens": 128,
+      "planar_median_ms": 148.1343994140625,
+      "window_median_ms": 43.61625671386719,
+      "speedup": 3.3963116180707273
+    },
+    {
+      "gpu": 2,
+      "regime": "prefill",
+      "tokens": 512,
+      "planar_median_ms": 545.3388671875,
+      "window_median_ms": 76.20249557495117,
+      "speedup": 7.156443671206492
+    },
+    {
+      "gpu": 2,
+      "regime": "prefill",
+      "tokens": 2048,
+      "planar_median_ms": 2162.6219482421875,
+      "window_median_ms": 290.4657897949219,
+      "speedup": 7.445358538673583
+    },
+    {
+      "gpu": 2,
+      "regime": "decode",
+      "tokens": null,
+      "planar_median_ms": 48.33587074279785,
+      "window_median_ms": 42.05875205993652,
+      "speedup": 1.1492464320842428
+    },
+    {
+      "gpu": 3,
+      "regime": "prefill",
+      "tokens": 1,
+      "planar_median_ms": 47.25196838378906,
+      "window_median_ms": 46.98214340209961,
+      "speedup": 1.0057431390343379
+    },
+    {
+      "gpu": 3,
+      "regime": "prefill",
+      "tokens": 2,
+      "planar_median_ms": 47.34873580932617,
+      "window_median_ms": 48.075775146484375,
+      "speedup": 0.984877220701217
+    },
+    {
+      "gpu": 3,
+      "regime": "prefill",
+      "tokens": 4,
+      "planar_median_ms": 46.753278732299805,
+      "window_median_ms": 48.17254447937012,
+      "speedup": 0.9705378704320236
+    },
+    {
+      "gpu": 3,
+      "regime": "prefill",
+      "tokens": 8,
+      "planar_median_ms": 45.68729591369629,
+      "window_median_ms": 48.744449615478516,
+      "speedup": 0.9372820141390735
+    },
+    {
+      "gpu": 3,
+      "regime": "prefill",
+      "tokens": 16,
+      "planar_median_ms": 46.65292739868164,
+      "window_median_ms": 46.93401527404785,
+      "speedup": 0.9940109987665675
+    },
+    {
+      "gpu": 3,
+      "regime": "prefill",
+      "tokens": 32,
+      "planar_median_ms": 47.69843292236328,
+      "window_median_ms": 40.36761665344238,
+      "speedup": 1.1816014141200422
+    },
+    {
+      "gpu": 3,
+      "regime": "prefill",
+      "tokens": 128,
+      "planar_median_ms": 147.81951904296875,
+      "window_median_ms": 40.15360069274902,
+      "speedup": 3.681351522471611
+    },
+    {
+      "gpu": 3,
+      "regime": "prefill",
+      "tokens": 512,
+      "planar_median_ms": 544.9042053222656,
+      "window_median_ms": 75.98591995239258,
+      "speedup": 7.171120724256075
+    },
+    {
+      "gpu": 3,
+      "regime": "prefill",
+      "tokens": 2048,
+      "planar_median_ms": 2162.103271484375,
+      "window_median_ms": 289.17247009277344,
+      "speedup": 7.476864138521625
+    },
+    {
+      "gpu": 3,
+      "regime": "decode",
+      "tokens": null,
+      "planar_median_ms": 46.57254409790039,
+      "window_median_ms": 47.42758369445801,
+      "speedup": 0.9819716812463813
+    }
+  ]
+}

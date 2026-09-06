@@ -1,0 +1,92 @@
+{
+  "scope": "Completed 16K rank6 model arms only; outstanding arms not counted",
+  "results": [
+    {
+      "seed": 71,
+      "tokens": 16384,
+      "task": "c4",
+      "source": "/root/p32-stability/seed71/fit16384-retry1/model-rank6-tail-c4/report.json",
+      "source_sha256": "470015495c62565d8e026c917d7a01cb70e5baae61faf6f84a3607ebecc53e93",
+      "perplexity": 26.987112661308082
+    },
+    {
+      "seed": 71,
+      "tokens": 16384,
+      "task": "arc",
+      "source": "/root/p32-stability/seed71/fit16384-retry1/model-rank6-tail-arc/report.json",
+      "source_sha256": "b2d3ce3c11f48fdeb794cbedb10da94119a60d2bd29d8e44c3b0ecc6faffcaa2",
+      "paired_vs_window": {
+        "accuracy,loglikelihood": {
+          "correct": 391.0,
+          "wins": 10,
+          "losses": 9,
+          "p": 1
+        },
+        "accuracy,loglikelihood_norm": {
+          "correct": 433.0,
+          "wins": 12,
+          "losses": 7,
+          "p": 0.359283447265625
+        }
+      }
+    },
+    {
+      "seed": 72,
+      "tokens": 16384,
+      "task": "c4",
+      "source": "/root/p32-stability/seed72/fit16384/model-rank6-tail-c4/report.json",
+      "source_sha256": "2940af06f72b056d2990cb0be446c195b0dcce7dfb8645cd5ed51095325e7be5",
+      "perplexity": 26.98697176467573
+    },
+    {
+      "seed": 72,
+      "tokens": 16384,
+      "task": "arc",
+      "source": "/root/p32-stability/seed72/fit16384/model-rank6-tail-arc/report.json",
+      "source_sha256": "23e8ae884956273bcc976aa8dcc97fa7654a5ba1b4fea5a706efe0d50b4a45c7",
+      "paired_vs_window": {
+        "accuracy,loglikelihood": {
+          "correct": 393.0,
+          "wins": 11,
+          "losses": 8,
+          "p": 0.6476058959960938
+        },
+        "accuracy,loglikelihood_norm": {
+          "correct": 433.0,
+          "wins": 12,
+          "losses": 7,
+          "p": 0.359283447265625
+        }
+      }
+    },
+    {
+      "seed": 73,
+      "tokens": 16384,
+      "task": "c4",
+      "source": "/root/p32-stability/seed73/fit16384/model-rank6-tail-c4/report.json",
+      "source_sha256": "327f5dca7f7ca03d211691a3bfa9f14518d70d2b7fe7cb8d684fe0baf8df1aea",
+      "perplexity": 26.984771208157905
+    },
+    {
+      "seed": 73,
+      "tokens": 16384,
+      "task": "arc",
+      "source": "/root/p32-stability/seed73/fit16384/model-rank6-tail-arc/report.json",
+      "source_sha256": "86f526f0382b2b5de5eddce573ab59276edb595137e4fcfb2ebaa1ad4cac5ded",
+      "paired_vs_window": {
+        "accuracy,loglikelihood": {
+          "correct": 392.0,
+          "wins": 9,
+          "losses": 7,
+          "p": 0.803619384765625
+        },
+        "accuracy,loglikelihood_norm": {
+          "correct": 433.0,
+          "wins": 11,
+          "losses": 6,
+          "p": 0.332305908203125
+        }
+      }
+    }
+  ]
+}

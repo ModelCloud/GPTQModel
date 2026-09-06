@@ -1,0 +1,145 @@
+{
+  "scope": "Experiment17 native INT4 plus sparse exceptions, no low-rank path; queued not executed evidence",
+  "jobs": [
+    {
+      "id": "int4-sparse-only-channels1",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/rank8_sparse.py",
+        "--uuid",
+        "{uuid}",
+        "--export",
+        "/root/p32-low-rank/worker1/rank0-l2-float16.pt",
+        "--channels",
+        "1",
+        "--output",
+        "/root/p32-native-sparse-only/channels1"
+      ],
+      "result": "/root/p32-native-sparse-only/channels1/report.json",
+      "log": "/root/p32-native-sparse-only/channels1.log"
+    },
+    {
+      "id": "int4-sparse-only-channels1-broader",
+      "requires_complete": [
+        "/root/p32-native-sparse-only/channels1/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-native-sparse-only/channels1/report.json",
+        "--output",
+        "/root/p32-native-sparse-only/channels1/broader.json"
+      ],
+      "result": "/root/p32-native-sparse-only/channels1/broader.json",
+      "log": "/root/p32-native-sparse-only/channels1/broader.log"
+    },
+    {
+      "id": "int4-sparse-only-channels2",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/rank8_sparse.py",
+        "--uuid",
+        "{uuid}",
+        "--export",
+        "/root/p32-low-rank/worker1/rank0-l2-float16.pt",
+        "--channels",
+        "2",
+        "--output",
+        "/root/p32-native-sparse-only/channels2"
+      ],
+      "result": "/root/p32-native-sparse-only/channels2/report.json",
+      "log": "/root/p32-native-sparse-only/channels2.log"
+    },
+    {
+      "id": "int4-sparse-only-channels2-broader",
+      "requires_complete": [
+        "/root/p32-native-sparse-only/channels2/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-native-sparse-only/channels2/report.json",
+        "--output",
+        "/root/p32-native-sparse-only/channels2/broader.json"
+      ],
+      "result": "/root/p32-native-sparse-only/channels2/broader.json",
+      "log": "/root/p32-native-sparse-only/channels2/broader.log"
+    },
+    {
+      "id": "int4-sparse-only-channels4",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/rank8_sparse.py",
+        "--uuid",
+        "{uuid}",
+        "--export",
+        "/root/p32-low-rank/worker1/rank0-l2-float16.pt",
+        "--channels",
+        "4",
+        "--output",
+        "/root/p32-native-sparse-only/channels4"
+      ],
+      "result": "/root/p32-native-sparse-only/channels4/report.json",
+      "log": "/root/p32-native-sparse-only/channels4.log"
+    },
+    {
+      "id": "int4-sparse-only-channels4-broader",
+      "requires_complete": [
+        "/root/p32-native-sparse-only/channels4/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-native-sparse-only/channels4/report.json",
+        "--output",
+        "/root/p32-native-sparse-only/channels4/broader.json"
+      ],
+      "result": "/root/p32-native-sparse-only/channels4/broader.json",
+      "log": "/root/p32-native-sparse-only/channels4/broader.log"
+    },
+    {
+      "id": "int4-sparse-only-channels8",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/rank8_sparse.py",
+        "--uuid",
+        "{uuid}",
+        "--export",
+        "/root/p32-low-rank/worker1/rank0-l2-float16.pt",
+        "--channels",
+        "8",
+        "--output",
+        "/root/p32-native-sparse-only/channels8"
+      ],
+      "result": "/root/p32-native-sparse-only/channels8/report.json",
+      "log": "/root/p32-native-sparse-only/channels8.log"
+    },
+    {
+      "id": "int4-sparse-only-channels8-broader",
+      "requires_complete": [
+        "/root/p32-native-sparse-only/channels8/report.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/validate_low_rank_holdout.py",
+        "--uuid",
+        "{uuid}",
+        "--report",
+        "/root/p32-native-sparse-only/channels8/report.json",
+        "--output",
+        "/root/p32-native-sparse-only/channels8/broader.json"
+      ],
+      "result": "/root/p32-native-sparse-only/channels8/broader.json",
+      "log": "/root/p32-native-sparse-only/channels8/broader.log"
+    }
+  ]
+}

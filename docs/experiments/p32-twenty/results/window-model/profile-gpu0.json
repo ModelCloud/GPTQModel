@@ -1,0 +1,118 @@
+[
+  {
+    "kernel": "void <unnamed>::qvq_gemv_splitk_kernel<__half, 1, 2, 6>(const T1 *, const int *, const unsigned char *, const unsigned char *, const __half *, float *, int, int, int, int, int, int, int, int, int, int, int, int)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "753.856000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "61474560.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "76",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.000000",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "33.901355",
+        "unit": "%"
+      },
+      "launch__shared_mem_per_block": {
+        "value": "15.920000",
+        "unit": "Kbyte/block"
+      }
+    }
+  },
+  {
+    "kernel": "void <unnamed>::qvq_reduce_splitk_kernel<float>(const float *, T1 *, int, int, int, int, int, int, int, int)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "4.832000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "7168.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "32",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.000000",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "12.348940",
+        "unit": "%"
+      },
+      "launch__shared_mem_per_block": {
+        "value": "1.024000",
+        "unit": "Kbyte/block"
+      }
+    }
+  },
+  {
+    "kernel": "void <unnamed>::p32_window_ampere_kernel<6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0>(const __half *, const unsigned int *, const __half *, const unsigned char *, float *, float *, int, int, int, int, int)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "43.712000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "11538176.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "64",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "4.023147",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "34.424848",
+        "unit": "%"
+      },
+      "launch__shared_mem_per_block": {
+        "value": "4.624000",
+        "unit": "Kbyte/block"
+      }
+    }
+  },
+  {
+    "kernel": "void <unnamed>::reduce_split_kernel<0>(const float *, float *, int, int)",
+    "metrics": {
+      "gpu__time_duration.sum": {
+        "value": "6.400000",
+        "unit": "us"
+      },
+      "smsp__inst_executed.sum": {
+        "value": "9792.000000",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "20",
+        "unit": "register/thread"
+      },
+      "sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.000000",
+        "unit": "%"
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "12.189490",
+        "unit": "%"
+      },
+      "launch__shared_mem_per_block": {
+        "value": "1.024000",
+        "unit": "Kbyte/block"
+      }
+    }
+  }
+]

@@ -1,0 +1,95 @@
+{
+  "scope": "layer baseline and window candidate; experiment 1/10 partial evidence; profiler and model gates pending",
+  "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8",
+  "worker": 0,
+  "torch": "2.13.0+cu130",
+  "device": "_CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=8be4c651-4058-83df-154b-291f1b86add8, pci_bus_id=100, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "revision": "9133fda52fcdb5949d169bd7fa4781533d7234cc",
+  "rows": [
+    {
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 1,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.0,
+      "baseline_metrics": {
+        "elements": 8192,
+        "mean_abs": 2.58813404241387e-05,
+        "max_abs": 0.00017833709716796875,
+        "relative_l2": 0.0002312371449111441,
+        "cosine": 0.9999999733704188,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 8192,
+        "mean_abs": 2.5880905180519775e-05,
+        "max_abs": 0.00017833709716796875,
+        "relative_l2": 0.00023123280063694517,
+        "cosine": 0.9999999733714175,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 16,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.0,
+      "baseline_metrics": {
+        "elements": 131072,
+        "mean_abs": 2.6020954863358817e-05,
+        "max_abs": 0.00023633241653442383,
+        "relative_l2": 0.00017072267420276786,
+        "cosine": 0.9999999854430763,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 131072,
+        "mean_abs": 2.601798402247454e-05,
+        "max_abs": 0.00023376941680908203,
+        "relative_l2": 0.00017068993795567514,
+        "cosine": 0.999999985436046,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    },
+    {
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 2048,
+      "K": 2048,
+      "N": 8192,
+      "bits": 3.0,
+      "baseline_metrics": {
+        "elements": 16777216,
+        "mean_abs": 2.486308037066415e-05,
+        "max_abs": 0.0005099177360534668,
+        "relative_l2": 0.00016487187801805792,
+        "cosine": 0.9999999864086415,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "candidate_metrics": {
+        "elements": 16777216,
+        "mean_abs": 2.486724767423479e-05,
+        "max_abs": 0.0005133748054504395,
+        "relative_l2": 0.00016490321510547165,
+        "cosine": 0.9999999864077259,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one planar and one Ampere inner call after warmup"
+    }
+  ],
+  "complete": true
+}

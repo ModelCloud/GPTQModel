@@ -1,0 +1,2470 @@
+{
+  "mode": "ampere",
+  "uuid": "GPU-8be4c651-4058-83df-154b-291f1b86add8",
+  "torch": "2.13.0+cu130",
+  "device": "_CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=8be4c651-4058-83df-154b-291f1b86add8, pci_bus_id=100, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "snapshot": "/root/qvq-results/calibration-fisher-frontier-wave14-v1/llama32-1b-f6_yaqa125x_seed7",
+  "source_revision": "ad900130e69ec45888ab53519efaa5669056ec31",
+  "scope": "bounded downstream evaluation only; never calibration",
+  "quality": [],
+  "performance": [],
+  "ampere_min_rows": 1,
+  "runtime_repack_caches": [
+    {
+      "module": "model.layers.0.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.0.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.0.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.0.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.0.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.1.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.2.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.3.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.4.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.5.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.6.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.6.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.6.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.6.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.6.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.7.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.8.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.8.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.8.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.8.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.8.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.9.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.10.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.11.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.12.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.13.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.14.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.self_attn.q_proj",
+      "window_bytes": 1048576,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.self_attn.k_proj",
+      "window_bytes": 327680,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.self_attn.v_proj",
+      "window_bytes": 458752,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.mlp.gate_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.mlp.up_proj",
+      "window_bytes": 7340032,
+      "levels_bytes": 512
+    },
+    {
+      "module": "model.layers.15.mlp.down_proj",
+      "window_bytes": 6291456,
+      "levels_bytes": 512
+    }
+  ],
+  "runtime_extra_bytes": 327203328,
+  "candidate_contract": "Only P32 inner kernel replaced; production transform/output boundaries retained; planar tensors retained read-only in memory",
+  "recovered_exports": [
+    {
+      "module": "model.layers.0.mlp.down_proj",
+      "path": "/root/p32-native-recovery-expanded/down_proj/rank16.pt",
+      "bytes": 9571091,
+      "sha256": "42a6ab223cfd7986ef55f7f0fa530b647d9044b4382031eaa223e26cc14804fd"
+    }
+  ],
+  "recovery_contract": "Full operator replacement: W4A16 + FP32 correction, output cast to input dtype; teacher files read only",
+  "task": "arc_challenge",
+  "task_max_rows": 128,
+  "task_result": {
+    "model": {
+      "path": "/root/qvq-results/calibration-fisher-frontier-wave14-v1/llama32-1b-f6_yaqa125x_seed7",
+      "label": null,
+      "tokenizer": null,
+      "tokenizer_path": "/monster/data/model/Llama-3.2-1B-Instruct",
+      "revision": null,
+      "trust_remote_code": false,
+      "model_kwargs": {},
+      "tokenizer_kwargs": {}
+    },
+    "engine": {
+      "dtype": "float16",
+      "batch_size": 1,
+      "max_new_tokens": 256,
+      "trust_remote_code": false,
+      "seed": 7,
+      "padding_side": "left",
+      "resolved_engine": "TransformersCompat",
+      "device": "cuda:0",
+      "attn_implementation": "eager",
+      "device_map": null,
+      "loglikelihood_prefix_cache": true,
+      "loglikelihood_prefix_cache_prewarm": true,
+      "loglikelihood_prefix_cache_prewarm_batch_size": 32,
+      "loglikelihood_prefix_cache_release_after_group": true,
+      "loglikelihood_prefix_cache_min_tokens": 256,
+      "loglikelihood_prefix_cache_max_entries": 32,
+      "execution": {
+        "requested_attn_implementation": "eager",
+        "effective_attn_implementation": "eager",
+        "paged_attention": false,
+        "generation_backend": "generate_compat",
+        "standard_batch_size_cap": null
+      }
+    },
+    "tests": [
+      {
+        "name": "arc_challenge",
+        "metrics": {
+          "accuracy,loglikelihood": 0.3828125,
+          "accuracy,loglikelihood_norm": 0.390625
+        },
+        "samples": [
+          {
+            "index": 0,
+            "target": "Planetary days will become shorter.",
+            "prediction": "Planetary days will become shorter.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "18a38ce966dd79d82ad53d9cbd967a02bb4578f1723b4b496db57968ffa22054"
+          },
+          {
+            "index": 1,
+            "target": "buildings will be made safer",
+            "prediction": "buildings will be made safer",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "7f7aa71c1e0de6e9427f71ab5c8c26004d4b37b62375421459f33ff8dd726ed0"
+          },
+          {
+            "index": 2,
+            "target": "Chlorophyll in the leaf captures light energy.",
+            "prediction": "Light energy is converted to chemical energy.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "016faea5d9690fe8389038b6c79ebc8ec09183e7789b82173475493f98c53dc8"
+          },
+          {
+            "index": 3,
+            "target": "the independent (manipulated) variable",
+            "prediction": "the independent (manipulated) variable",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "5d25b50823400aa89655bfa7e3dc9184cdff6036fd2cb9a084f3ee7750d756ab"
+          },
+          {
+            "index": 4,
+            "target": "They have each gained one-half of their maximum kinetic energy.",
+            "prediction": "They have each gained the same amount of potential energy.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "0",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "5522df595348b9d27247d4c18f59330601aa7c1f9aa7b7aa1b675380e3a8e9f8"
+          },
+          {
+            "index": 5,
+            "target": "an infectious, cell-cycle disease",
+            "prediction": "a non-infectious, chronic disease",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "3",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "8eb66a477f345da956715a0adeac5fb96afaa9f7cf10d27adb185115b2277dd4"
+          },
+          {
+            "index": 6,
+            "target": "to store food that will be eaten over the winter months",
+            "prediction": "to provide warmth during the cold winter months",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "e19af92a95bec60c53cdd844c4a948991ad9a1587c0f99878550d00a69169b68"
+          },
+          {
+            "index": 7,
+            "target": "The climate in the area was once tropical.",
+            "prediction": "The climate in the area was once tropical.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "6195a0c84fd5c0f594e3921e2033418fa7237e38a15647082bb9fabfdf842980"
+          },
+          {
+            "index": 8,
+            "target": "Populations of mice and rats would increase.",
+            "prediction": "The chicken population would go down.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "2662723ec0af91327c14bca3faf42a4e838a58757ddb6d7c57098f926e8a8270"
+          },
+          {
+            "index": 9,
+            "target": "the atom",
+            "prediction": "the atom",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "45362221360aa51ccb3522eb499d94363a37ffa9073a9c715db0ed7ab235776f"
+          },
+          {
+            "index": 10,
+            "target": "size differences",
+            "prediction": "size differences",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "ef18398ca72b1d5c2d2e6c64bd9d6657a6d52cb46e609e6966cfa09fc7857648"
+          },
+          {
+            "index": 11,
+            "target": "The Sun influences the formation of waves.",
+            "prediction": "The Sun's rays cause organisms to come to the surface.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "b87cbdaf686c64a4b027577f8587bf313717f1f0bc5588e094ff7ab40a9c84ac"
+          },
+          {
+            "index": 12,
+            "target": "78\u00b0 F",
+            "prediction": "41\u00b0 F",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "03130a511ab1e160f52187d2d06255d0ce52a659b7dea9e724067fa2e88fc0d5"
+          },
+          {
+            "index": 13,
+            "target": "Make a table for recording data.",
+            "prediction": "Make daily observations of the light bulbs.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "c91ee9efc8957c737deef8c6310fdb1b70d8099a869cfd3dda6dca03c9508a7a"
+          },
+          {
+            "index": 14,
+            "target": "water vapor",
+            "prediction": "carbon dioxide",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "18d58cd71303f8f4fe7839da70ae20a464f41baf9593f33dcb1da595a3f3ecdc"
+          },
+          {
+            "index": 15,
+            "target": "0 degrees Celsius",
+            "prediction": "0 degrees Celsius",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "9c197f206e43c20627d753b9e793c13d7738ea0828afe3d600bf27d5fb1e2e99"
+          },
+          {
+            "index": 16,
+            "target": "analyze new data as it becomes available",
+            "prediction": "analyze new data as it becomes available",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "12f223ef24e05c89ca3e83e42e85af6896417769ce44d8f86b4a3d4dc9a023fb"
+          },
+          {
+            "index": 17,
+            "target": "from the tea to the ice",
+            "prediction": "from the tea to the ice",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "ecad0f35cd852a002cea34058001701632a9779800f2ff321b5cd8fc89b8f998"
+          },
+          {
+            "index": 18,
+            "target": "the price of boards will increase",
+            "prediction": "there will be more trees for logging",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "8fa0097067adce4c1b0327beee2a299756460d539847b6e8f70dfcc127f77da7"
+          },
+          {
+            "index": 19,
+            "target": "continued experimentation.",
+            "prediction": "the invention of the microscope.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "6950ad9a5b06ac86d4e1c878c42ae64546d9039358b995faa2b37cc0e60c1b62"
+          },
+          {
+            "index": 20,
+            "target": "breaking down wastes",
+            "prediction": "converting energy from one form into another",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "ff6d99bea71a82d923f15019dd1cfd6faa61ef287f3b3ac83728f4fee4e17b3a"
+          },
+          {
+            "index": 21,
+            "target": "2H_{2}O(l) -> 2H_{2}(g) + O_{2}(g)",
+            "prediction": "2H_{2}O(l) -> 2H_{2}(g) + O_{2}(g)",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "58f9a71fc38cd953bac4e7bbeb68ceea2b3b5170fa190fcebd6bd00d35d2b8ae"
+          },
+          {
+            "index": 22,
+            "target": "Penguins can live in climates with freezing temperatures.",
+            "prediction": "Penguins are some of the most beautiful birds.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "1",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "468797c6bd3bbc402790d77e02a05018cb5be72ca8ef6b4993e3e5dcf487c640"
+          },
+          {
+            "index": 23,
+            "target": "73\u00b0F.",
+            "prediction": "90\u00b0F.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "4b2d63a72904e34c66e163ba64ccd654ac8512f3405183979c6772b15b6f5a8b"
+          },
+          {
+            "index": 24,
+            "target": "water.",
+            "prediction": "water.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "566fb157336547ee559459c3ff6971c20516e2ff3b2f3fe8f4afcb1591554198"
+          },
+          {
+            "index": 25,
+            "target": "It became a solid.",
+            "prediction": "It evaporated.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "ab599ed00ab16d74e7c003327a8870e8eeb9a2c0bed170f87e537328c8fe1d2e"
+          },
+          {
+            "index": 26,
+            "target": "It is a seasonal weather feature with irregular occurrences.",
+            "prediction": "It is a constant climate feature throughout the year.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "c2bd906392d4e2a3a7f2840976210d21fe6d36780ba9aa6b3d31c027b6524c18"
+          },
+          {
+            "index": 27,
+            "target": "Object 1, Object 3, Object 2",
+            "prediction": "Object 2, Object 3, Object 1",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "91c0cb3f096dc7f51c0b1fd1248b759506d95314ec5f614ecab948557f663918"
+          },
+          {
+            "index": 28,
+            "target": "Plankton release oxygen.",
+            "prediction": "Plankton release oxygen.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "8abc0096c3041932f29e3db633cf0cf634c59f5b08985caff2e642a274d15951"
+          },
+          {
+            "index": 29,
+            "target": "Wood is buoyant.",
+            "prediction": "Wood is buoyant.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "05290e0634e8c8efb430a619b760ba4c9de4cc4ebac0c2350d592d0da830e438"
+          },
+          {
+            "index": 30,
+            "target": "the type of environment in which the organisms lived",
+            "prediction": "the type of environment in which the organisms lived",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "2",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "b2f340f88f9659b46ba4e0d73c994315c4fe49c1a3bb931cdd87f46b82656654"
+          },
+          {
+            "index": 31,
+            "target": "its ability to exist as a liquid",
+            "prediction": "its ability to exist as a liquid",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "3",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "4ea770a6e4bc980d3c412e3e24954d0812fc5eca1aab38e62cf8a106aafa603a"
+          },
+          {
+            "index": 32,
+            "target": "Air is a mixture of gases.",
+            "prediction": "Air is a mixture of gases.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "4168d769f30c800146b046450a4e8393107043f185e932e44daac80bd84910ab"
+          },
+          {
+            "index": 33,
+            "target": "It helps explain how things work.",
+            "prediction": "It helps explain how things work.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "9f5e2900ebf0df1b23b0461740d856915daa113c34a102e37c85d7b3828a7e6c"
+          },
+          {
+            "index": 34,
+            "target": "sunrise",
+            "prediction": "solar eclipse",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "8d59472f79fb41d03e30e60c9105c87c73a932aa6ae5413ea1c920d70af99ba5"
+          },
+          {
+            "index": 35,
+            "target": "Volcanism also characterizes the region.",
+            "prediction": "Earthquake centers in the region occur at shallow depths.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "a855b1717f27e31f357354e363d1557be05571904e72a14f52bf90c01074be32"
+          },
+          {
+            "index": 36,
+            "target": "The sun would be tiny next to one of the largest stars.",
+            "prediction": "The sun would be tiny next to one of the largest stars.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "9cd92290c8d5d588c3b9bf679e8722e556e9747359be4cd21e526733856a4530"
+          },
+          {
+            "index": 37,
+            "target": "The solid planets are closer to the Sun.",
+            "prediction": "The planets are arranged in order of increasing size.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "cbc0b4efdf556e3bc1a3a8027f15f1ce4721de67fbadcd8ddac09d1aad02bc49"
+          },
+          {
+            "index": 38,
+            "target": "to convert energy from sunlight into food energy",
+            "prediction": "to allow the passage of carbon dioxide into the plant",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "0a46373b29287efb1645d7fe0c6e8f2e8fdb61060426fd299419275120af0f48"
+          },
+          {
+            "index": 39,
+            "target": "Hydraulic systems involve liquids and pneumatic systems involve gases.",
+            "prediction": "Hydraulic systems are open systems and pneumatic systems are closed systems.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "784e43103fc52289b2d14d30f348acb942939aade492fcd1ea8199df9879f0cc"
+          },
+          {
+            "index": 40,
+            "target": "responding to its environment",
+            "prediction": "completing its life cycle",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "3",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "8007ed6feca9d528d0b61d6b94c3b50ea2313997d9f5e171182605980b68301f"
+          },
+          {
+            "index": 41,
+            "target": "The Moon rises.",
+            "prediction": "The Moon passes in front of the Sun.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "0fbdda1f0fccbfe5d067b7d1b9a5b87a7f49b52be038856b6041214fb266793a"
+          },
+          {
+            "index": 42,
+            "target": "13",
+            "prediction": "6",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "e9a5ee5aeb1fc1134b8e523c04c4b3557ce549bc600b5ceb2233091fbf90d34a"
+          },
+          {
+            "index": 43,
+            "target": "the distance between molecules in the medium",
+            "prediction": "the frequency of the wave",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "bf4a93fa2a12b890b09f0c2f3b08eefb624192f082a996d9abd78c8770ae21f1"
+          },
+          {
+            "index": 44,
+            "target": "Kinetic energy increases and potential energy decreases.",
+            "prediction": "Kinetic energy increases and potential energy decreases.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "c7fae44bb62af2242b2bc4b532686bfbf6f3c0dbd5e6c6f57b4a9f48c9326eee"
+          },
+          {
+            "index": 45,
+            "target": "heat.",
+            "prediction": "a magnet.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "072101def33f301acb256f6298a4c925da0a7925f3abfe8430871206b5a1db70"
+          },
+          {
+            "index": 46,
+            "target": "satellite",
+            "prediction": "satellite",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "cec765c34e4f1dbc313f972378b70114adc1e9585a8fdd1ce102041457d760dd"
+          },
+          {
+            "index": 47,
+            "target": "stopwatch",
+            "prediction": "thermometer",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "4457114b2bfc396e8ee64fe623afb5566fbeef084bfbc544dda96e3fcebda4b6"
+          },
+          {
+            "index": 48,
+            "target": "analogous structures.",
+            "prediction": "homologous structures.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "1f808b59bd2c678b7eaf898c87d201a9bd0fbe4d58f82fa7d05fe958e3f964ad"
+          },
+          {
+            "index": 49,
+            "target": "A tiger hunts a deer.",
+            "prediction": "A mouse runs from a coyote.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "877c31d58479000849109a2862e32f916c030f2ade7ef31cce2b05270efd9cd0"
+          },
+          {
+            "index": 50,
+            "target": "20 g because no matter is added or removed",
+            "prediction": "less than 20 g because oxygen gas is very light",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "0537c6ed07b0a0802072fb4672371c28d9acad4bc8025b5a1022fb2e377074ba"
+          },
+          {
+            "index": 51,
+            "target": "blow up a beach ball or balloon",
+            "prediction": "blow up a beach ball or balloon",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "1",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "375faeb357a760ac3c95d0778de1a1a953619e08d0df349aad293eba6ab79b68"
+          },
+          {
+            "index": 52,
+            "target": "converging boundaries",
+            "prediction": "converging boundaries",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "3",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "0e434b851aa40152626bd705075039f98e444ad0db1467b0542a3d11dafb4915"
+          },
+          {
+            "index": 53,
+            "target": "A tree removes a gas from the air.",
+            "prediction": "A tree removes a gas from the air.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "a12817c1d67c5a9dd2f83a87e249272e2dcfdcb813e607f2f65b70c87b951a50"
+          },
+          {
+            "index": 54,
+            "target": "asteroid impacts",
+            "prediction": "tectonic movements",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "0",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "ad33f2f4eebfe8a773189935c7a2f9f5a7b872e3dc603eea30b80464af6fe844"
+          },
+          {
+            "index": 55,
+            "target": "A construction crew builds an iron bridge.",
+            "prediction": "A farmer grows vegetables to sell at a local market.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "e30b2d647fc4d3e5a9509a4a8e0dc8f31b51d38441205bcbe2e5d1ca22b691d5"
+          },
+          {
+            "index": 56,
+            "target": "a chart",
+            "prediction": "a diagram",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "a2ff8420ead141e517aac756ea5e1b8a1d4b06eb2a3b33107a07a1234560a588"
+          },
+          {
+            "index": 57,
+            "target": "to generate an electric current",
+            "prediction": "to generate an electric current",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "261b196afed9be07f423ecea6a0461da727e926f50ded74d554cbeeb1c66d1cb"
+          },
+          {
+            "index": 58,
+            "target": "Body weight",
+            "prediction": "Blood type",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "6fc96d5ac9d01a2e27a5e4b44c935b2a211c06ddaaf719ecee2344198516c4b0"
+          },
+          {
+            "index": 59,
+            "target": "Double the mass of m_{1} and halve the distance between m_{1} and m_{2}.",
+            "prediction": "Double the mass of m_{1} and double the distance between m_{1} and m_{2}.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "5cc4f78e5f02f2705796911211e2e2e1469c78f0b428c956e1212692737bc676"
+          },
+          {
+            "index": 60,
+            "target": "NaCl + H_{2}O",
+            "prediction": "NaCl + H_{2}O",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "90290dab9419645d53f26a503b1007df58a6221fd7c306a78fa9241e3bcba06f"
+          },
+          {
+            "index": 61,
+            "target": "to capture sunlight",
+            "prediction": "to capture sunlight",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "d247eec238e9ffb5458a6d615a6dde2481b6b3f007fe76474559e11dd9e1cdff"
+          },
+          {
+            "index": 62,
+            "target": "respiratory",
+            "prediction": "respiratory",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "07a73221e145ef6508460d8a3747df2b90f6e7324c3a695ce4099eaad49a3e17"
+          },
+          {
+            "index": 63,
+            "target": "gill",
+            "prediction": "gill",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "49370d53387eaa619ac40476f9ff953939740f77e097606908df1b2b9a660515"
+          },
+          {
+            "index": 64,
+            "target": "They both move toward an energy source.",
+            "prediction": "They both move in the same direction.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "d7f373034c4fb628cfc3cafc6566314ae8d51ba2e83ea711db0a15bd4f4dcdb3"
+          },
+          {
+            "index": 65,
+            "target": "Traits from two parents are combined.",
+            "prediction": "Traits from two parents are combined.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "a7077053d942be23490f04c1c63ce77f2e5352b17ceaf47991759aff3e62551a"
+          },
+          {
+            "index": 66,
+            "target": "W is the softest of the four substances tested.",
+            "prediction": "W is the hardest of the four substances tested.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "3",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "fc70fe39b037e7f9e368f32c37d5cde6446bae26d36562113a76b5d8a473a5d4"
+          },
+          {
+            "index": 67,
+            "target": "runoff from rains",
+            "prediction": "leaching of soils",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "3",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "cb7a6887d12e421fd69b535aa522791ee35a67a51673a55f05e3ffd837a1219d"
+          },
+          {
+            "index": 68,
+            "target": "melting glacial ice.",
+            "prediction": "reactions on the sea floor.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "2",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "977fddb338f5959c27f99140edb2000b8ae55b2afee6b2d0afdb417e9e605132"
+          },
+          {
+            "index": 69,
+            "target": "Earth is heated by the Sun.",
+            "prediction": "Most of Earth is covered with water.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "e7a88403e29485ec0ce1e514fc604d454ece54b9fbe1148e30833c265c84dd4c"
+          },
+          {
+            "index": 70,
+            "target": "4",
+            "prediction": "3",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "60f653cecab638811401c2b27457ae15386f8b4adcaea43ff13c6f58ba379552"
+          },
+          {
+            "index": 71,
+            "target": "a horseshoe magnet",
+            "prediction": "a magnifying glass",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "7d9ca9ef5c05ba0114916135e573ad5b4a3892f21f08308112f2b6ae14ecd3b9"
+          },
+          {
+            "index": 72,
+            "target": "speed of currents in the oceans.",
+            "prediction": "amount of dissolved oxygen in the oceans.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "82e7ecf7db723e7c001dedb2959fd43fa62c5eb5aadef66348542ab90b8d6244"
+          },
+          {
+            "index": 73,
+            "target": "become deeper and wider.",
+            "prediction": "become deeper and wider.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "45e2399a9c3b0436bf7dc5054d14b4dd62dd3774498a88d2bc1945972c8ad949"
+          },
+          {
+            "index": 74,
+            "target": "protection, management, and renewal of resources",
+            "prediction": "health of the living organisms in the environment",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "1",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "1f5c075da5fba9d5e56cfa5d595298f488693dd8b8a95894a77a432243863fea"
+          },
+          {
+            "index": 75,
+            "target": "only the Sun",
+            "prediction": "the Sun, the Moon, and some planets",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "697fc585d3168950c080452b55c40f7a21f0b633109cf0aa69d0d3a0addc5f6c"
+          },
+          {
+            "index": 76,
+            "target": "check to see which diagram shows a nucleus",
+            "prediction": "compare the number of vacuoles in the two cells",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "f7d950bd98197c419ca26f2eb2db00ee05b8aff3c3bf7b42de86f7da485c6260"
+          },
+          {
+            "index": 77,
+            "target": "when there is a limited amount of water in their environment",
+            "prediction": "when tadpoles need to blend in with their surroundings",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "2",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "aaeb5c8d7ac1030531e2d5f09a785a99d3e3fc8964dbe0aac6c1138c6ed003fa"
+          },
+          {
+            "index": 78,
+            "target": "An unbalanced force causes acceleration.",
+            "prediction": "The forces acting on the object are in equilibrium.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "2",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "d15d2cd312d9474e04186b40b0d2d4f194c065b9981a5c7bd96a0625fb51f2f3"
+          },
+          {
+            "index": 79,
+            "target": "cut grass",
+            "prediction": "cut down trees",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "2",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "6494b005baae3ee1e752af6678b082aea831389f4432323610b90f03ddf3cb36"
+          },
+          {
+            "index": 80,
+            "target": "formation of fossil fuels",
+            "prediction": "photosynthesis in plants",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "c6ea0a921cda68670debfd2ecd66ad22386736f5bbbf728cdc81de1628c6ee3c"
+          },
+          {
+            "index": 81,
+            "target": "attracting prey",
+            "prediction": "moving through the water",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "7cc0b5bdba7f62a9b76b490b77123b57ad6119042c0fc79c3c27f36208a1f18e"
+          },
+          {
+            "index": 82,
+            "target": "a solid.",
+            "prediction": "a gas.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "b9c31cc256f022a4bf72368d83fc5b17537a9b381298d9805d8b26cf0b60566f"
+          },
+          {
+            "index": 83,
+            "target": "the scientific method.",
+            "prediction": "the scientific method.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "2",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "b5e1d5568efa7e1c00ab888e7c1f805f9ca2dd8bdda256c93b356ec49a1d6e57"
+          },
+          {
+            "index": 84,
+            "target": "type of fertilizer",
+            "prediction": "type of fertilizer",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "be2551ab0a7c0f2d561dbfc9d2af6b8e65df3937586290a2980ccfa2a2e78c6f"
+          },
+          {
+            "index": 85,
+            "target": "24 hours",
+            "prediction": "24 hours",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "6739e06861a173bd82e767f1f6b0aef93c169d67a3bc34edbc7fa75d8d49b0c0"
+          },
+          {
+            "index": 86,
+            "target": "to explain the mechanism that caused the continents to move",
+            "prediction": "to consider it unlikely that the continents were once together",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "2",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "335248a211d0e443f95d1b498cd7a35edfcf594d3092b7a251b6ad99bfacd877"
+          },
+          {
+            "index": 87,
+            "target": "An individual who flosses daily will be less likely to get gum disease than one who flosses weekly.",
+            "prediction": "An individual who flosses daily will be less likely to get gum disease than one who flosses weekly.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "e587d4ea5b001b4f1d88c75d01007f7570912f27e6897ca429c4349fddc45890"
+          },
+          {
+            "index": 88,
+            "target": "6.0 kg x m/s",
+            "prediction": "6.0 kg x m/s",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "abbd77a45defa2b5a790b0f7b24e02029f17d2c3166e7a1da91b8431b44bd167"
+          },
+          {
+            "index": 89,
+            "target": "leading to tumors in tissue",
+            "prediction": "being passed on to offspring",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "b542cd15c2f3305c1137e3f55bcc37ee4aca1be457977d4771fe4ecbbdc17ce5"
+          },
+          {
+            "index": 90,
+            "target": "the Milky Way galaxy",
+            "prediction": "the Milky Way galaxy",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "3",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "1960ad9a2ace70ce35c2b346f57127d327150eb496215632bba94c2cbcc6929e"
+          },
+          {
+            "index": 91,
+            "target": "an elevator transporting supplies from one floor to another",
+            "prediction": "an anchor holding a boat in place",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "d397d80c4f77b86ad5c8559b7f4ef2ba41fadf0a6648e4cf718d48be61c1554f"
+          },
+          {
+            "index": 92,
+            "target": "Both jars contain mixtures.",
+            "prediction": "Both jars contain mixtures.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "2",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "9e5ffc96a50a24b8beac07a724a67963fb0e995d311b5ca630530296b9c4ba2a"
+          },
+          {
+            "index": 93,
+            "target": "construct a prototype of a boat for testing",
+            "prediction": "test the strength of each material used to construct the boats",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "4c007893431b56003c4df952ec2e72091841ba06a299b1816d9c7a1521da689a"
+          },
+          {
+            "index": 94,
+            "target": "warn residents when a dangerous gas is present.",
+            "prediction": "alert residents to the possibility of fire.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "22b4f59e63899ed9edafa35c801887af31d09ba9045f0dc1a4178233103eb138"
+          },
+          {
+            "index": 95,
+            "target": "properties of matter.",
+            "prediction": "states of matter.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "4666843a17ceda0d90056c75cadce0fb6581c3107db77c3b23ffff1b891e7029"
+          },
+          {
+            "index": 96,
+            "target": "alter their behavior based on past experience.",
+            "prediction": "alter their behavior based on past experience.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "3",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "b66daed0fe9386cfaf8c4556e5ce84ad82825f05c7f9b014d9a14a5d6581ed15"
+          },
+          {
+            "index": 97,
+            "target": "Materials are pressed together.",
+            "prediction": "Magma or lava is cooled.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "748b5548ac9060d3e7c332e7715a842c6dfd969ee73a8bb4f56d6cfe86300b4f"
+          },
+          {
+            "index": 98,
+            "target": "cell membrane, nucleus, mitochondrion",
+            "prediction": "vacuole, chloroplast, nucleus",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "ed7032be824319b41ab9599a53fb210a586ee3e7c4714e663aa6f3b7da5fc104"
+          },
+          {
+            "index": 99,
+            "target": "The ball reflects light.",
+            "prediction": "The ball reflects light.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "beaf6b6a49e7e9e9d8b2f93dc528ec144420ac12e1be3808fb173c6eab5a2db3"
+          },
+          {
+            "index": 100,
+            "target": "The technology is environmentally friendly.",
+            "prediction": "The technology is environmentally friendly.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "a8e393ef0424ff3272486b2d294f0efc51616ee83b1386536ef2d44e3b949d99"
+          },
+          {
+            "index": 101,
+            "target": "The rod gains electrons from the fur.",
+            "prediction": "The rod gains electrons from the fur.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "5a4fc7284faad47a2431e49667ae0cb0801a455e4e1bea63ca873468aa7a5704"
+          },
+          {
+            "index": 102,
+            "target": "making fine incisions.",
+            "prediction": "disinfecting instruments.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "2",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "89828702de2b0b31cd1ec9a57c89be049737fbf0effb78f2dda70fe6e5314fe5"
+          },
+          {
+            "index": 103,
+            "target": "greatest density.",
+            "prediction": "coldest temperature.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "2",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "b25b04cffc0a572b7c37517e2f875b370abef94a576343b892484ae4d55befed"
+          },
+          {
+            "index": 104,
+            "target": "breathing masks",
+            "prediction": "bright light",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "334f94a2a72a202223a4725db5b136f184191764196d98647bc872eea6e1728b"
+          },
+          {
+            "index": 105,
+            "target": "You get thirsty and urinate less.",
+            "prediction": "You get thirsty and urinate more.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "5ce52cd435e98f5c5436f6cb8abf28dcc2b51de5413ae248da11c676b2a774a0"
+          },
+          {
+            "index": 106,
+            "target": "neutralization",
+            "prediction": "neutralization",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "2d48baa66aa3410d2268b6eb6efbbf73563f4a35596073e8efb6372690f673c2"
+          },
+          {
+            "index": 107,
+            "target": "The dog becomes ill, and the tapeworm benefits.",
+            "prediction": "The tapeworm helps the dog survive.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "a6ed704b275fa56f31fa5d13d0393192b0fb567d783de8aabe2ea23e88f1a779"
+          },
+          {
+            "index": 108,
+            "target": "learning a new behavior.",
+            "prediction": "learning a new behavior.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "50c63c671d60e38ae117e66fc06fd72f6bd598da368b3e8a3782e7607abddc28"
+          },
+          {
+            "index": 109,
+            "target": "Hills",
+            "prediction": "Oceans",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "f27c6b22536fea7d4bfed03fe22f5832a29c0548af013364610ec0b23413291e"
+          },
+          {
+            "index": 110,
+            "target": "They will always produce round seeds.",
+            "prediction": "Each offspring plant will have some round and some wrinkled seeds.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "1d79c9c91a1c52d75049ac211e5d7c376a13abf956212eed35474105093e5857"
+          },
+          {
+            "index": 111,
+            "target": "balance",
+            "prediction": "litmus paper",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "1",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "67dfc1fe95fea6c04953f904945d1ccff18ee36c40d95932ad0f17a490083488"
+          },
+          {
+            "index": 112,
+            "target": "will flow toward areas of lower pressure in valleys.",
+            "prediction": "is considered to be less dense than warmer air.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "5c73e1eb4e978547933d64e6eea8ca3a701a238711d7f270d82480ba73bd362b"
+          },
+          {
+            "index": 113,
+            "target": "table salt",
+            "prediction": "table salt",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "eacefdb90b20f2a208ad960a30ae79c0d151354b8ae97b28be9ae9948a8aed61"
+          },
+          {
+            "index": 114,
+            "target": "chemical energy to electrical energy.",
+            "prediction": "chemical energy to electrical energy.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "5585573d3fc381e52e4c3ce4a72e1351813d752a6ac72fc3084580226b2dc5d9"
+          },
+          {
+            "index": 115,
+            "target": "The atom becomes negatively charged.",
+            "prediction": "The atom becomes negatively charged.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "149a78598f94e30ad3649e4039e74aa8ff5126483753b65a42bd877935002e52"
+          },
+          {
+            "index": 116,
+            "target": "deposition of material in the stream",
+            "prediction": "erosion of the stream bank",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "cfcc3fe9d26e4c8dc9e50045561f53214616de4a6360e00ee86ea24c8324f427"
+          },
+          {
+            "index": 117,
+            "target": "Rocks are made of one or more minerals.",
+            "prediction": "Rocks are made of one or more minerals.",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "926e75e4fffe74618ebac0caa0bbf9c443379aff0d3460f3e7c9bc303f9dc4c2"
+          },
+          {
+            "index": 118,
+            "target": "210 km/h",
+            "prediction": "210 km/h",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "3",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "eac612f4a6d41894f054b978c99d3799c41e940237806707e88033dbc612ae31"
+          },
+          {
+            "index": 119,
+            "target": "to have a consistent definition for all scientists",
+            "prediction": "to understand the role of organisms in a food web",
+            "extracted": {
+              "gold_index": "2",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "f0aff3bfb4ae5e7d9dd36fd073ef1e0c34296c770f0e9d08623ba93ee6332c2c"
+          },
+          {
+            "index": 120,
+            "target": "the ability to revolve around the central ball",
+            "prediction": "the ability to revolve around the central ball",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "3",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "92f35efe71ea4c1f760104674b8bef974190bbe7145d140f78811e9f086db835"
+          },
+          {
+            "index": 121,
+            "target": "slower",
+            "prediction": "at the same speed",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "1",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "684dcb4fb0962dd237c46313b4a74e2766187cf4d1d33039cc2ec10b4ff068c0"
+          },
+          {
+            "index": 122,
+            "target": "create recreational ponds and lakes.",
+            "prediction": "increase Earth's surface area.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "7bb63e2cdd6ae0d45d112a944a84fad3316f0d282f3705393c13e901b2056e61"
+          },
+          {
+            "index": 123,
+            "target": "solar heating is greatest near the equator.",
+            "prediction": "the rate of rotation of Earth's surface is less at the equator.",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "0",
+              "predicted_index_norm": "3"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "ba2fca16c9beadb66c079ef1462cd14e93d14a841ab6d4723ba3c640d353005b"
+          },
+          {
+            "index": 124,
+            "target": "Antibodies attach to an invading virus as a target marker.",
+            "prediction": "Antibodies produce proteins that attach to an invading virus.",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "0",
+              "predicted_index_norm": "0"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "7e022fd652aac2fa60ec657290d07ebb3f42cfaa36c5d6140b88205b04b3f486"
+          },
+          {
+            "index": 125,
+            "target": "stop sending signals to the brain.",
+            "prediction": "become a different type of cell.",
+            "extracted": {
+              "gold_index": "3",
+              "predicted_index": "2",
+              "predicted_index_norm": "2"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "e813aa5f17085ae2edea161f45b8656c0c52fd27bd27be254a5f1572ef0bc4d7"
+          },
+          {
+            "index": 126,
+            "target": "iron",
+            "prediction": "carbon",
+            "extracted": {
+              "gold_index": "0",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 0.0,
+              "accuracy,loglikelihood_norm": 0.0
+            },
+            "prompt_sha256": "9dec9a557745f47da5d10cedd5b0b269582b347f3bf865dca2e7a40af4ba0e9b"
+          },
+          {
+            "index": 127,
+            "target": "evaporation",
+            "prediction": "evaporation",
+            "extracted": {
+              "gold_index": "1",
+              "predicted_index": "1",
+              "predicted_index_norm": "1"
+            },
+            "scores": {
+              "accuracy,loglikelihood": 1.0,
+              "accuracy,loglikelihood_norm": 1.0
+            },
+            "prompt_sha256": "3ca208e7f7272497876327850fe88c3fb3c388781ac16386c0c3471b5b9c2d3d"
+          }
+        ],
+        "metadata": {
+          "dataset_path": "allenai/ai2_arc",
+          "dataset_name": "ARC-Challenge",
+          "split": "test",
+          "stream": true,
+          "apply_chat_template": false,
+          "scoring_mode": "multiple_choice_loglikelihood"
+        }
+      }
+    ],
+    "versions": {}
+  },
+  "complete": true
+}

@@ -1,0 +1,73 @@
+{
+  "scope": "Uniform fitting control for diagonal activation energy weighting, queued",
+  "jobs": [
+    {
+      "id": "signed-basis-uniform-tile16",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--tile",
+        "16",
+        "--weighting",
+        "uniform",
+        "--output",
+        "/root/p32-signed-basis/uniform-tile16"
+      ],
+      "result": "/root/p32-signed-basis/uniform-tile16/report.json",
+      "log": "/root/p32-signed-basis/uniform-tile16.log"
+    },
+    {
+      "id": "signed-basis-uniform-tile32",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--tile",
+        "32",
+        "--weighting",
+        "uniform",
+        "--output",
+        "/root/p32-signed-basis/uniform-tile32"
+      ],
+      "result": "/root/p32-signed-basis/uniform-tile32/report.json",
+      "log": "/root/p32-signed-basis/uniform-tile32.log"
+    },
+    {
+      "id": "signed-basis-uniform-tile64",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--tile",
+        "64",
+        "--weighting",
+        "uniform",
+        "--output",
+        "/root/p32-signed-basis/uniform-tile64"
+      ],
+      "result": "/root/p32-signed-basis/uniform-tile64/report.json",
+      "log": "/root/p32-signed-basis/uniform-tile64.log"
+    },
+    {
+      "id": "signed-basis-uniform-tile128",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--tile",
+        "128",
+        "--weighting",
+        "uniform",
+        "--output",
+        "/root/p32-signed-basis/uniform-tile128"
+      ],
+      "result": "/root/p32-signed-basis/uniform-tile128/report.json",
+      "log": "/root/p32-signed-basis/uniform-tile128.log"
+    }
+  ]
+}

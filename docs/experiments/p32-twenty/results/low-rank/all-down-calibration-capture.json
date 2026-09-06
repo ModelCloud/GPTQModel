@@ -1,0 +1,188 @@
+{
+  "scope": "calibration-only activations for residual fitting; disjoint evaluation remains required",
+  "input_manifest": "/root/p32-recovery-calibration/inputs.json",
+  "sequence_token_counts": [
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512,
+    512
+  ],
+  "capture_layers": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "capture_suffix": "down_proj",
+  "complete": true,
+  "modules": [
+    {
+      "module": "model.layers.0.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.0.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.1.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.1.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.2.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.2.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.3.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.3.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.4.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.4.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.5.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.5.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.6.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.6.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.7.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.7.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.8.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.8.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.9.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.9.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.10.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.10.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.11.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.11.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.12.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.12.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.13.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.13.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.14.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.14.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    },
+    {
+      "module": "model.layers.15.mlp.down_proj",
+      "path": "/root/p32-low-rank/all-down-calibration/model.layers.15.mlp.down_proj.pt",
+      "shape": [
+        1,
+        8192,
+        8192
+      ]
+    }
+  ]
+}

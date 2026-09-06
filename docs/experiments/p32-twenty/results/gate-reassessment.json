@@ -1,0 +1,1846 @@
+{
+  "method": "Reassess existing measurements; no kernel rerun or numerical changes. Original reports retain historical gate decisions.",
+  "mean_abs_limit": 0.003,
+  "max_abs_limit": 0.046875,
+  "cases": 108,
+  "baseline_passes": 108,
+  "candidate_passes": 108,
+  "rows": [
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 3.383833415426807e-05,
+        "max_abs": 0.00031188130378723145,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.383674443568907e-05,
+        "max_abs": 0.00031188130378723145,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 4.54058312264749e-05,
+        "max_abs": 0.0004076957702636719,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 4.5400603134737594e-05,
+        "max_abs": 0.0004076957702636719,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 5.590550936851457e-05,
+        "max_abs": 0.00054168701171875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 5.590439771552269e-05,
+        "max_abs": 0.00054168701171875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 5.771955991162869e-05,
+        "max_abs": 0.00054168701171875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 5.7762997785371084e-05,
+        "max_abs": 0.0005426406860351562,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 5.609219032975954e-05,
+        "max_abs": 0.00054168701171875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 5.612281316613732e-05,
+        "max_abs": 0.0005426406860351562,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 5.7893943535961e-05,
+        "max_abs": 0.000624537467956543,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 5.893857722313878e-05,
+        "max_abs": 0.0006647109985351562,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 5.7215975009379874e-05,
+        "max_abs": 0.00086212158203125,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 5.749274705341666e-05,
+        "max_abs": 0.0008363723754882812,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 5.680545188484795e-05,
+        "max_abs": 0.0008625984191894531,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 5.724208698534904e-05,
+        "max_abs": 0.0008368492126464844,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.self_attn.q_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 5.6764365369271426e-05,
+        "max_abs": 0.0009241104125976562,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 5.7203423427800005e-05,
+        "max_abs": 0.000885009765625,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.mlp.up_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 2.3375327723545308e-05,
+        "max_abs": 0.00012472225353121758,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.3375978681707682e-05,
+        "max_abs": 0.00012473901733756065,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.mlp.up_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 2.4680395838408073e-05,
+        "max_abs": 0.00013247132301330566,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.4680890088306026e-05,
+        "max_abs": 0.00013247132301330566,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.mlp.up_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 2.4076114633893135e-05,
+        "max_abs": 0.00013247132301330566,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.407673496075593e-05,
+        "max_abs": 0.00013247132301330566,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.mlp.up_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 2.446114631461172e-05,
+        "max_abs": 0.00014716386795043945,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.446110559179988e-05,
+        "max_abs": 0.00014707446098327637,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.mlp.up_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 2.341350038167128e-05,
+        "max_abs": 0.00015205144882202148,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.3413483657204633e-05,
+        "max_abs": 0.00015205144882202148,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.mlp.up_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 2.25599719398904e-05,
+        "max_abs": 0.0001520216464996338,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.25632576016462e-05,
+        "max_abs": 0.00015145540237426758,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.mlp.up_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 2.2545154584828328e-05,
+        "max_abs": 0.00016629695892333984,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.2548319457251354e-05,
+        "max_abs": 0.00016945600509643555,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.mlp.up_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 2.2315679202193222e-05,
+        "max_abs": 0.00016635656356811523,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.232008416355216e-05,
+        "max_abs": 0.00016951560974121094,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.0.mlp.up_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 2.232508912175159e-05,
+        "max_abs": 0.0001817941665649414,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.2328704877255353e-05,
+        "max_abs": 0.00018027424812316895,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.1.self_attn.v_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 7.668608258182275e-06,
+        "max_abs": 3.3744960092008114e-05,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.66828183884627e-06,
+        "max_abs": 3.373133949935436e-05,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.1.self_attn.v_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 1.6989405673850655e-05,
+        "max_abs": 0.00010970234870910645,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.698940632555157e-05,
+        "max_abs": 0.0001096576452255249,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.1.self_attn.v_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 2.196058852343974e-05,
+        "max_abs": 0.00011757016181945801,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.1960242621799075e-05,
+        "max_abs": 0.00011758506298065186,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.1.self_attn.v_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 2.456110440662851e-05,
+        "max_abs": 0.00015578418970108032,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.456106979892292e-05,
+        "max_abs": 0.0001558735966682434,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.1.self_attn.v_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 2.5675679301506715e-05,
+        "max_abs": 0.00015578418970108032,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.567678573520138e-05,
+        "max_abs": 0.0001558735966682434,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.1.self_attn.v_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 2.6183664562265396e-05,
+        "max_abs": 0.00015581399202346802,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.6191873554196055e-05,
+        "max_abs": 0.00015593506395816803,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.1.self_attn.v_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 2.6624083716522695e-05,
+        "max_abs": 0.00016926787793636322,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.6627070380882967e-05,
+        "max_abs": 0.00016973353922367096,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.1.self_attn.v_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 2.6755071968210305e-05,
+        "max_abs": 0.00019505620002746582,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.6759891059030278e-05,
+        "max_abs": 0.00019487738609313965,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu0.json",
+      "module": "model.layers.1.self_attn.v_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 2.6736474460431816e-05,
+        "max_abs": 0.00020927190780639648,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.6740411599070634e-05,
+        "max_abs": 0.00020895898342132568,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.self_attn.k_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 3.5767285410770455e-05,
+        "max_abs": 0.00019937753677368164,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.575317298043501e-05,
+        "max_abs": 0.00019937753677368164,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.self_attn.k_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 6.0422491628742137e-05,
+        "max_abs": 0.00035768747329711914,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 6.042098862479861e-05,
+        "max_abs": 0.0003579854965209961,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.self_attn.k_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 7.089032545337659e-05,
+        "max_abs": 0.0005184412002563477,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.088760405693506e-05,
+        "max_abs": 0.0005182027816772461,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.self_attn.k_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 7.535063224750616e-05,
+        "max_abs": 0.0005979537963867188,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.534142715215353e-05,
+        "max_abs": 0.0005960464477539062,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.self_attn.k_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 7.532483726713224e-05,
+        "max_abs": 0.0005979537963867188,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.531509198521746e-05,
+        "max_abs": 0.0005960464477539062,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.self_attn.k_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 7.611878892843649e-05,
+        "max_abs": 0.0005979537963867188,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.631763179993811e-05,
+        "max_abs": 0.0005559921264648438,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.self_attn.k_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 7.451828299911978e-05,
+        "max_abs": 0.0006017684936523438,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.449200867212791e-05,
+        "max_abs": 0.0006115436553955078,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.self_attn.k_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 7.42591685675086e-05,
+        "max_abs": 0.0006018877029418945,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.415440253685465e-05,
+        "max_abs": 0.0006151199340820312,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.self_attn.k_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 7.42767261290169e-05,
+        "max_abs": 0.0007638931274414062,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.423282292347115e-05,
+        "max_abs": 0.0008134841918945312,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.mlp.down_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 8.857864582212382e-05,
+        "max_abs": 0.0003879182040691376,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 8.858689861246383e-05,
+        "max_abs": 0.00038799457252025604,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.mlp.down_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 4.688493322618781e-05,
+        "max_abs": 0.00038804300129413605,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 4.6884245008149694e-05,
+        "max_abs": 0.0003878641873598099,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.mlp.down_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 2.537750976891462e-05,
+        "max_abs": 0.00038804300129413605,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.5377125566966585e-05,
+        "max_abs": 0.0003878641873598099,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.mlp.down_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 1.4899980045286754e-05,
+        "max_abs": 0.00038804300129413605,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.4899764507685098e-05,
+        "max_abs": 0.0003878641873598099,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.mlp.down_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 9.298193837083135e-06,
+        "max_abs": 0.00038804300129413605,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 9.29802062305668e-06,
+        "max_abs": 0.0003878641873598099,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.mlp.down_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 6.5852692382398085e-06,
+        "max_abs": 0.00038804300129413605,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 6.603266645539949e-06,
+        "max_abs": 0.0003914274275302887,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.mlp.down_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 4.58352663234445e-06,
+        "max_abs": 0.0003883242607116699,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 4.595242807000694e-06,
+        "max_abs": 0.00039170868694782257,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.mlp.down_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 4.083292689617707e-06,
+        "max_abs": 0.0003879424184560776,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 4.093290709326723e-06,
+        "max_abs": 0.0003913268446922302,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.0.mlp.down_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 4.02260592001706e-06,
+        "max_abs": 0.0003879424184560776,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 4.033428050825115e-06,
+        "max_abs": 0.0003913268446922302,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.1.mlp.gate_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 6.93048191221235e-05,
+        "max_abs": 0.0004894733428955078,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 6.930523261758359e-05,
+        "max_abs": 0.0004895925521850586,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.1.mlp.gate_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 5.1964350169214635e-05,
+        "max_abs": 0.0004895925521850586,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 5.1965189515362775e-05,
+        "max_abs": 0.0004897117614746094,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.1.mlp.gate_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 4.330323862995755e-05,
+        "max_abs": 0.0004895925521850586,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 4.3303720078394226e-05,
+        "max_abs": 0.0004897117614746094,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.1.mlp.gate_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 3.852418412802344e-05,
+        "max_abs": 0.0005173683166503906,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.852480443967271e-05,
+        "max_abs": 0.0005159378051757812,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.1.mlp.gate_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 3.496829697521419e-05,
+        "max_abs": 0.0005173683166503906,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.49687560943588e-05,
+        "max_abs": 0.0005159378051757812,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.1.mlp.gate_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 3.307869995710852e-05,
+        "max_abs": 0.00060272216796875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.309403777741618e-05,
+        "max_abs": 0.0005831718444824219,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.1.mlp.gate_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 3.129040136882977e-05,
+        "max_abs": 0.0007710456848144531,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.130281955554259e-05,
+        "max_abs": 0.0007920265197753906,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.1.mlp.gate_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 3.057907920821963e-05,
+        "max_abs": 0.0009794235229492188,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.058728215060217e-05,
+        "max_abs": 0.0009336471557617188,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu1.json",
+      "module": "model.layers.1.mlp.gate_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 3.089597987751316e-05,
+        "max_abs": 0.0010099411010742188,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.090365080427817e-05,
+        "max_abs": 0.0009961128234863281,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 6.992446140829944e-06,
+        "max_abs": 3.4579308703541756e-05,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 6.992366625768742e-06,
+        "max_abs": 3.457791171967983e-05,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 1.1456575886636955e-05,
+        "max_abs": 8.380413055419922e-05,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.1456974449597368e-05,
+        "max_abs": 8.380413055419922e-05,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 1.3768752129439399e-05,
+        "max_abs": 8.380413055419922e-05,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.376834626920509e-05,
+        "max_abs": 8.383393287658691e-05,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 1.4172651900179467e-05,
+        "max_abs": 0.00010808929800987244,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.4172189161887339e-05,
+        "max_abs": 0.00010808929800987244,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 1.4281322731610202e-05,
+        "max_abs": 0.00010808929800987244,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.4280705782764025e-05,
+        "max_abs": 0.00010808929800987244,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 1.4550488384820759e-05,
+        "max_abs": 0.00010806694626808167,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.4546929007834466e-05,
+        "max_abs": 0.00010772049427032471,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 1.4672341443662919e-05,
+        "max_abs": 0.00012378394603729248,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.4672854466347474e-05,
+        "max_abs": 0.00012351013720035553,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 1.464875618809085e-05,
+        "max_abs": 0.00012379884719848633,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.4649607745211037e-05,
+        "max_abs": 0.00012356415390968323,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.0.self_attn.v_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 1.4687700708492515e-05,
+        "max_abs": 0.00012375414371490479,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.4688776998897916e-05,
+        "max_abs": 0.00012351945042610168,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 2.0474745014098517e-05,
+        "max_abs": 0.0001226663589477539,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.0473395807130146e-05,
+        "max_abs": 0.0001226663589477539,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 4.62399153655646e-05,
+        "max_abs": 0.0005097389221191406,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 4.6237292939732555e-05,
+        "max_abs": 0.0005097389221191406,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 5.9878598400731065e-05,
+        "max_abs": 0.0005097389221191406,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 5.988500316989054e-05,
+        "max_abs": 0.0005097389221191406,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 6.899413416994182e-05,
+        "max_abs": 0.00063323974609375,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 6.89997990795943e-05,
+        "max_abs": 0.0006341934204101562,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 7.206865479975066e-05,
+        "max_abs": 0.0007238388061523438,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.206427364042645e-05,
+        "max_abs": 0.0007219314575195312,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 7.27904166560947e-05,
+        "max_abs": 0.0007238388061523438,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.265472437124366e-05,
+        "max_abs": 0.0006875991821289062,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 7.353852281465978e-05,
+        "max_abs": 0.0009088516235351562,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.37940734422916e-05,
+        "max_abs": 0.000949859619140625,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 7.343450785776435e-05,
+        "max_abs": 0.0009088516235351562,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.36468320277468e-05,
+        "max_abs": 0.000949859619140625,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.self_attn.q_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 7.337956699350053e-05,
+        "max_abs": 0.0009088516235351562,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 7.367839811929118e-05,
+        "max_abs": 0.000949859619140625,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 6.052878415630956e-05,
+        "max_abs": 0.00048065185546875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 6.0527184152291396e-05,
+        "max_abs": 0.00048065185546875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 4.520679435856016e-05,
+        "max_abs": 0.00048065185546875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 4.520517708052644e-05,
+        "max_abs": 0.00048065185546875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 3.695897445353687e-05,
+        "max_abs": 0.00048065185546875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.6958218333301004e-05,
+        "max_abs": 0.00048065185546875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 3.332862274361048e-05,
+        "max_abs": 0.0008472204208374023,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.332805661653189e-05,
+        "max_abs": 0.0008469223976135254,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 3.0034383380570526e-05,
+        "max_abs": 0.0008472800254821777,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.00346610826943e-05,
+        "max_abs": 0.0008469820022583008,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 2.823500523626459e-05,
+        "max_abs": 0.0008472204208374023,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.8239627623103335e-05,
+        "max_abs": 0.0008492469787597656,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 2.6956954748678646e-05,
+        "max_abs": 0.0008509159088134766,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.696144955657779e-05,
+        "max_abs": 0.0008502006530761719,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 2.628692966279367e-05,
+        "max_abs": 0.0008607804775238037,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.6291028151729438e-05,
+        "max_abs": 0.00086250901222229,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu2.json",
+      "module": "model.layers.1.mlp.up_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 2.6559161072559175e-05,
+        "max_abs": 0.001124262809753418,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.656300859096241e-05,
+        "max_abs": 0.0011219978332519531,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 2.58813404241387e-05,
+        "max_abs": 0.00017833709716796875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.5880763780516958e-05,
+        "max_abs": 0.00017833709716796875,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 2.7464292052692407e-05,
+        "max_abs": 0.00023633241653442383,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.7464154707668165e-05,
+        "max_abs": 0.00023627281188964844,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 2.6369555740840545e-05,
+        "max_abs": 0.00023633241653442383,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.6369324590151677e-05,
+        "max_abs": 0.00023627281188964844,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 2.697533656109523e-05,
+        "max_abs": 0.00023633241653442383,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.6974996099180058e-05,
+        "max_abs": 0.00023621320724487305,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 2.6020954863358817e-05,
+        "max_abs": 0.00023633241653442383,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.6020427451338294e-05,
+        "max_abs": 0.00023621320724487305,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 2.5038976096057076e-05,
+        "max_abs": 0.00023621320724487305,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.5036705396085167e-05,
+        "max_abs": 0.00023365020751953125,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 2.5072918169952957e-05,
+        "max_abs": 0.0003371238708496094,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.507832382868322e-05,
+        "max_abs": 0.00033020973205566406,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 2.4827152666374203e-05,
+        "max_abs": 0.0004099607467651367,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.483169572901656e-05,
+        "max_abs": 0.0004050731658935547,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.0.mlp.gate_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 2.486308037066415e-05,
+        "max_abs": 0.0005099177360534668,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.486724767423479e-05,
+        "max_abs": 0.0005133748054504395,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.self_attn.k_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 3.151990962724227e-05,
+        "max_abs": 0.00013572163879871368,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 3.1518788074613724e-05,
+        "max_abs": 0.00013573560863733292,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.self_attn.k_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 6.401878341000256e-05,
+        "max_abs": 0.0004553496837615967,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 6.402695038820738e-05,
+        "max_abs": 0.0004553496837615967,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.self_attn.k_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 8.250243172613914e-05,
+        "max_abs": 0.0005752891302108765,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 8.249644274171963e-05,
+        "max_abs": 0.0005748346447944641,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.self_attn.k_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 9.50525245833056e-05,
+        "max_abs": 0.0006147623062133789,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 9.50161051209708e-05,
+        "max_abs": 0.0006139278411865234,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.self_attn.k_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 0.00010103857324028631,
+        "max_abs": 0.0007791519165039062,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 0.00010104475536476532,
+        "max_abs": 0.0007798671722412109,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.self_attn.k_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 0.0001036162392469564,
+        "max_abs": 0.000779271125793457,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 0.00010413975943163178,
+        "max_abs": 0.000789642333984375,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.self_attn.k_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 0.00010701643407480532,
+        "max_abs": 0.0008601546287536621,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 0.00010736337298668241,
+        "max_abs": 0.0008542537689208984,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.self_attn.k_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 0.00010761880469487006,
+        "max_abs": 0.0009263753890991211,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 0.00010775444641118086,
+        "max_abs": 0.00093841552734375,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.self_attn.k_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 0.00010753639909122771,
+        "max_abs": 0.0009266138076782227,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 0.00010780413433173234,
+        "max_abs": 0.0009386539459228516,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.mlp.down_proj",
+      "M": 1,
+      "baseline_metrics": {
+        "mean_abs": 0.0027302544096556858,
+        "max_abs": 0.0109233558177948,
+        "previous_pass": false,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 0.0027303189164769037,
+        "max_abs": 0.01091650128364563,
+        "previous_pass": false,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.mlp.down_proj",
+      "M": 2,
+      "baseline_metrics": {
+        "mean_abs": 0.0013676878744943721,
+        "max_abs": 0.010937124490737915,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 0.0013676895662544375,
+        "max_abs": 0.01092672348022461,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.mlp.down_proj",
+      "M": 4,
+      "baseline_metrics": {
+        "mean_abs": 0.0006866787762555004,
+        "max_abs": 0.010937124490737915,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 0.0006866796032921618,
+        "max_abs": 0.01092672348022461,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.mlp.down_proj",
+      "M": 8,
+      "baseline_metrics": {
+        "mean_abs": 0.00034618446718948787,
+        "max_abs": 0.010937124490737915,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 0.00034618492480265745,
+        "max_abs": 0.01092672348022461,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.mlp.down_proj",
+      "M": 16,
+      "baseline_metrics": {
+        "mean_abs": 0.00017542900592314777,
+        "max_abs": 0.010937124490737915,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 0.00017542930295139265,
+        "max_abs": 0.01092672348022461,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.mlp.down_proj",
+      "M": 32,
+      "baseline_metrics": {
+        "mean_abs": 9.011055604273574e-05,
+        "max_abs": 0.010937124490737915,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 8.999700255670406e-05,
+        "max_abs": 0.01092103123664856,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.mlp.down_proj",
+      "M": 128,
+      "baseline_metrics": {
+        "mean_abs": 2.6257781694200976e-05,
+        "max_abs": 0.010924309492111206,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 2.6238625202319483e-05,
+        "max_abs": 0.010916084051132202,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.mlp.down_proj",
+      "M": 512,
+      "baseline_metrics": {
+        "mean_abs": 1.3336295047357147e-05,
+        "max_abs": 0.010942786931991577,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.3349752619648942e-05,
+        "max_abs": 0.010934561491012573,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    },
+    {
+      "source": "gpu3.json",
+      "module": "model.layers.1.mlp.down_proj",
+      "M": 2048,
+      "baseline_metrics": {
+        "mean_abs": 1.1602268086059903e-05,
+        "max_abs": 0.012489184737205505,
+        "previous_pass": true,
+        "reassessed_pass": true
+      },
+      "candidate_metrics": {
+        "mean_abs": 1.1621911964431275e-05,
+        "max_abs": 0.012529730796813965,
+        "previous_pass": true,
+        "reassessed_pass": true
+      }
+    }
+  ]
+}

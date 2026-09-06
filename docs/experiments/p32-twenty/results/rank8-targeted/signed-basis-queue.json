@@ -1,0 +1,65 @@
+{
+  "scope": "Real-weight experiments16/28 representation screening; packed GPU execution not implemented",
+  "jobs": [
+    {
+      "id": "signed-basis-tile16",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--tile",
+        "16",
+        "--output",
+        "/root/p32-signed-basis/tile16"
+      ],
+      "result": "/root/p32-signed-basis/tile16/report.json",
+      "log": "/root/p32-signed-basis/tile16.log"
+    },
+    {
+      "id": "signed-basis-tile32",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--tile",
+        "32",
+        "--output",
+        "/root/p32-signed-basis/tile32"
+      ],
+      "result": "/root/p32-signed-basis/tile32/report.json",
+      "log": "/root/p32-signed-basis/tile32.log"
+    },
+    {
+      "id": "signed-basis-tile64",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--tile",
+        "64",
+        "--output",
+        "/root/p32-signed-basis/tile64"
+      ],
+      "result": "/root/p32-signed-basis/tile64/report.json",
+      "log": "/root/p32-signed-basis/tile64.log"
+    },
+    {
+      "id": "signed-basis-tile128",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/signed_basis_screen.py",
+        "--uuid",
+        "{uuid}",
+        "--tile",
+        "128",
+        "--output",
+        "/root/p32-signed-basis/tile128"
+      ],
+      "result": "/root/p32-signed-basis/tile128/report.json",
+      "log": "/root/p32-signed-basis/tile128.log"
+    }
+  ]
+}

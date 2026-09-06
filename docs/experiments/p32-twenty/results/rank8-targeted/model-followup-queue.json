@@ -1,0 +1,93 @@
+{
+  "scope": "Additional model follow-ups; queued, not completed results",
+  "jobs": [
+    {
+      "id": "alpha1-gsm128",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-rank8-targeted/tail-alpha1/rank8-tail-float16.pt",
+        "--output",
+        "/root/p32-rank8-targeted/models/alpha1-gsm128",
+        "--task",
+        "gsm8k_cot",
+        "--task-max-rows",
+        "128"
+      ],
+      "result": "/root/p32-rank8-targeted/models/alpha1-gsm128/report.json",
+      "log": "/root/p32-rank8-targeted/models/alpha1-gsm128.log"
+    },
+    {
+      "id": "joint8-gsm128",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-rank8-targeted/joint8/rank8.pt",
+        "--output",
+        "/root/p32-rank8-targeted/models/joint8-gsm128",
+        "--task",
+        "gsm8k_cot",
+        "--task-max-rows",
+        "128"
+      ],
+      "result": "/root/p32-rank8-targeted/models/joint8-gsm128/report.json",
+      "log": "/root/p32-rank8-targeted/models/joint8-gsm128.log"
+    },
+    {
+      "id": "rank6-sparse32-c4",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-rank8-targeted/sparse-rank6-channels4/nnz32.pt",
+        "--output",
+        "/root/p32-rank8-targeted/models/rank6-sparse32-c4"
+      ],
+      "result": "/root/p32-rank8-targeted/models/rank6-sparse32-c4/report.json",
+      "log": "/root/p32-rank8-targeted/models/rank6-sparse32-c4.log"
+    },
+    {
+      "id": "rank6-sparse32-arc",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-rank8-targeted/sparse-rank6-channels4/nnz32.pt",
+        "--output",
+        "/root/p32-rank8-targeted/models/rank6-sparse32-arc",
+        "--task",
+        "arc_challenge",
+        "--task-max-rows",
+        "1172"
+      ],
+      "result": "/root/p32-rank8-targeted/models/rank6-sparse32-arc/report.json",
+      "log": "/root/p32-rank8-targeted/models/rank6-sparse32-arc.log"
+    }
+  ]
+}

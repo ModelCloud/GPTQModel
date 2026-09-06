@@ -1,0 +1,134 @@
+{
+  "scope": "Fused GSM and 32K rank6 downstream checks; queued",
+  "jobs": [
+    {
+      "id": "fused-alpha1-gsm128",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-rank8-targeted/tail-alpha1/rank8-tail-float16.pt",
+        "--recovered-fused-expansion",
+        "--output",
+        "/root/p32-fused-model/fused-alpha1-gsm128",
+        "--task",
+        "gsm8k_cot",
+        "--task-max-rows",
+        "128"
+      ],
+      "result": "/root/p32-fused-model/fused-alpha1-gsm128/report.json",
+      "log": "/root/p32-fused-model/fused-alpha1-gsm128.log"
+    },
+    {
+      "id": "fused-joint8-gsm128",
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-rank8-targeted/joint8/rank8.pt",
+        "--recovered-fused-expansion",
+        "--output",
+        "/root/p32-fused-model/fused-joint8-gsm128",
+        "--task",
+        "gsm8k_cot",
+        "--task-max-rows",
+        "128"
+      ],
+      "result": "/root/p32-fused-model/fused-joint8-gsm128/report.json",
+      "log": "/root/p32-fused-model/fused-joint8-gsm128.log"
+    },
+    {
+      "id": "stability-71-32k-rank6-model-gsm",
+      "requires_complete": [
+        "/root/p32-stability/seed71/fit32768-retry1/report.json",
+        "/root/p32-stability/seed71/fit32768-retry1/broader.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-stability/seed71/fit32768-retry1/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-stability/seed71/fit32768-retry1/model-rank6-tail-gsm128",
+        "--task",
+        "gsm8k_cot",
+        "--task-max-rows",
+        "128"
+      ],
+      "result": "/root/p32-stability/seed71/fit32768-retry1/model-rank6-tail-gsm128/report.json",
+      "log": "/root/p32-stability/seed71/fit32768-retry1/model-rank6-tail-gsm128.log"
+    },
+    {
+      "id": "stability-72-32k-rank6-model-gsm",
+      "requires_complete": [
+        "/root/p32-stability/seed72/fit32768/report.json",
+        "/root/p32-stability/seed72/fit32768/broader.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-stability/seed72/fit32768/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-stability/seed72/fit32768/model-rank6-tail-gsm128",
+        "--task",
+        "gsm8k_cot",
+        "--task-max-rows",
+        "128"
+      ],
+      "result": "/root/p32-stability/seed72/fit32768/model-rank6-tail-gsm128/report.json",
+      "log": "/root/p32-stability/seed72/fit32768/model-rank6-tail-gsm128.log"
+    },
+    {
+      "id": "stability-73-32k-rank6-model-gsm",
+      "requires_complete": [
+        "/root/p32-stability/seed73/fit32768/report.json",
+        "/root/p32-stability/seed73/fit32768/broader.json"
+      ],
+      "command": [
+        "/root/venv-py3.14t-gil0/bin/python",
+        "scripts/p32_twenty/model_baseline.py",
+        "--mode",
+        "ampere",
+        "--uuid",
+        "{uuid}",
+        "--inputs",
+        "/root/p32-model-baseline/inputs.json",
+        "--recovered-export",
+        "/root/p32-stability/seed73/fit32768/rank6-tail-float16.pt",
+        "--output",
+        "/root/p32-stability/seed73/fit32768/model-rank6-tail-gsm128",
+        "--task",
+        "gsm8k_cot",
+        "--task-max-rows",
+        "128"
+      ],
+      "result": "/root/p32-stability/seed73/fit32768/model-rank6-tail-gsm128/report.json",
+      "log": "/root/p32-stability/seed73/fit32768/model-rank6-tail-gsm128.log"
+    }
+  ]
+}

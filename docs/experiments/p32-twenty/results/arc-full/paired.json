@@ -1,0 +1,122 @@
+[
+  {
+    "candidate": "bf16",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood",
+    "correct": 409.0,
+    "wins": 55,
+    "losses": 36,
+    "discordant": 91,
+    "exact_two_sided_p": 0.05857352841018888
+  },
+  {
+    "candidate": "bf16",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood_norm",
+    "correct": 439.0,
+    "wins": 50,
+    "losses": 39,
+    "discordant": 89,
+    "exact_two_sided_p": 0.2890960806960603
+  },
+  {
+    "candidate": "rank12-l2-float16",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood",
+    "correct": 389.0,
+    "wins": 9,
+    "losses": 10,
+    "discordant": 19,
+    "exact_two_sided_p": 1
+  },
+  {
+    "candidate": "rank12-l2-float16",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood_norm",
+    "correct": 431.0,
+    "wins": 9,
+    "losses": 6,
+    "discordant": 15,
+    "exact_two_sided_p": 0.60723876953125
+  },
+  {
+    "candidate": "rank8-tail-float16",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood",
+    "correct": 391.0,
+    "wins": 10,
+    "losses": 9,
+    "discordant": 19,
+    "exact_two_sided_p": 1
+  },
+  {
+    "candidate": "rank8-tail-float16",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood_norm",
+    "correct": 432.0,
+    "wins": 10,
+    "losses": 6,
+    "discordant": 16,
+    "exact_two_sided_p": 0.454498291015625
+  },
+  {
+    "candidate": "rank16-l2-float32",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood",
+    "correct": 391.0,
+    "wins": 9,
+    "losses": 8,
+    "discordant": 17,
+    "exact_two_sided_p": 1
+  },
+  {
+    "candidate": "rank16-l2-float32",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood_norm",
+    "correct": 431.0,
+    "wins": 8,
+    "losses": 5,
+    "discordant": 13,
+    "exact_two_sided_p": 0.5810546875
+  },
+  {
+    "candidate": "canonical",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood",
+    "correct": 390.0,
+    "wins": 1,
+    "losses": 1,
+    "discordant": 2,
+    "exact_two_sided_p": 1
+  },
+  {
+    "candidate": "canonical",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood_norm",
+    "correct": 430.0,
+    "wins": 2,
+    "losses": 0,
+    "discordant": 2,
+    "exact_two_sided_p": 0.5
+  },
+  {
+    "candidate": "rank8-alpha1",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood",
+    "correct": 389.0,
+    "wins": 8,
+    "losses": 9,
+    "discordant": 17,
+    "exact_two_sided_p": 1
+  },
+  {
+    "candidate": "rank8-alpha1",
+    "baseline": "window",
+    "metric": "accuracy,loglikelihood_norm",
+    "correct": 429.0,
+    "wins": 8,
+    "losses": 7,
+    "discordant": 15,
+    "exact_two_sided_p": 1
+  }
+]

@@ -1,0 +1,17 @@
+{
+  "production": {
+    "matched_prompts": 128,
+    "same_predictions": 127
+  },
+  "ampere": {
+    "matched_prompts": 128,
+    "same_predictions": 127
+  },
+  "bf16": {
+    "matched_prompts": 128,
+    "same_predictions": 115
+  },
+  "window_vs_planar": {
+    "same_predictions": 128
+  }
+}

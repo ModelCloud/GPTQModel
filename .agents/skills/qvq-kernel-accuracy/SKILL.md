@@ -6,7 +6,7 @@ description: Preserve QVQ numerical contracts when optimizing linear kernels, de
 # QVQ kernel accuracy
 
 Optimize the implementation of the accepted mathematics first. A speedup is eligible for production only when it
-preserves the applicable numerical and runtime contracts. Start with redundant math, repeated decode work, and data
+preserves the applicable numerical and runtime contracts, including explicitly approved, scoped human exceptions. Start with redundant math, repeated decode work, and data
 movement; reduced precision is a separate numerical tradeoff, not the default way to make a kernel faster.
 
 ## Lock the operation and accuracy contract
@@ -38,7 +38,9 @@ Preserve the existing [QVQ contract](../gptqmodel-cuda-kernels/SKILL.md#qvq-accu
   Propagated final-logit differences, KL, and top-token agreement are diagnostics, not kernel acceptance gates.
   Do not apply the local thresholds to final logits or reject a locally passing kernel solely for propagated
   final-logit drift. Separately requested model-quality evaluations retain their explicitly agreed criteria.
-- Do not widen these thresholds to make a faster candidate pass, normalize/clip away a failure, modify the oracle to
+- The F6 seed-7 P32 campaign (`scripts/p32_twenty`) has an explicit user-approved MAE limit of
+  **3e-3** instead of 2e-3; maximum error and finite-output requirements are unchanged.
+- Do not autonomously widen these thresholds to make a faster candidate pass, normalize/clip away a failure, modify the oracle to
   mimic the candidate, or hide a failing shape in an average. Revising the contract is a separately scoped task;
   preserve the current baseline and defaults while presenting the evidence and proposed change.
 - This implementation-preservation contract does not prohibit separately requested quantization-algorithm research.
@@ -103,7 +105,8 @@ Test full preprocessing/GEMM/correction/recovery/epilogue composition when any b
   teacher-forced logits/KL, top-token agreement/margins, and paired task effects as the declared scope requires.
   Keep those propagation diagnostics separate from the localized kernel pass/fail decision.
 - Retain an accurate fallback for failing or unvalidated cases. A shape-specific pass licenses only that tested scope.
-  Full-model quality cannot waive the locked kernel gate; a kernel pass alone does not certify full-model quality.
+  Full-model quality cannot automatically waive the locked kernel gate; a human may explicitly approve a
+  scoped exception under the policy below. A kernel pass alone does not certify full-model quality.
 
 For propagation diagnosis or a proposed error-budget change, read
 [references/measure-propagation.md](references/measure-propagation.md). Do not invent model sensitivity constants or
@@ -112,10 +115,38 @@ predict benchmark accuracy from a kernel tolerance.
 For hardware runs and generated-code evidence, also follow the applicable GPU-testing, CUDA/AMD/Metal, and profiling
 skills routed by AGENTS.md. Reuse their hardware/lease and per-device-code-commit audit procedures.
 
+## Human review of high-speedup exceptions
+
+Apply AGENTS.md's human-review policy whenever an accuracy gate blocks a candidate with
+verified measured speed gain over 25%. Compute gain as
+`100 * (baseline_latency / candidate_latency - 1)`; 25%, 100%, and 500% gains correspond
+to 1.25x, 2x, and 6x speedup, respectively (not percent latency reduction).
+
+- Above 25%, present the exception option in the next progress update.
+- Above 100%, escalate promptly after verifying the gain and failure, before waiting for a wave to finish.
+- Above 500%, escalate immediately after verification as a priority human-review item.
+
+Prepare a concrete review packet: matched timing scope and uncertainty; hardware/shapes;
+canonical teacher and baseline; per-case MAE/max errors and limits; candidate-versus-baseline
+drift; whether the baseline also fails; available held-out model-quality evidence and pending
+checks; proposed exception boundary, revised criterion, and fallback. Report localized,
+synthetic, and end-to-end gains under their actual scope. Missing model results must be
+stated, but must not delay surfacing the option once the speed gain and gate failure are verified.
+
+Do not silently discard a high-speedup candidate because of a gate failure. Continue
+already-authorized investigation and prepare reviewable evidence. The user/human reviewer
+alone decides whether to allow the exception; no automatic threshold widening, production
+promotion, or autotune selection is authorized by speed alone. Until approval, retain the
+original gate decision and accurate fallback. Record explicit approval and its exact scope;
+reassess saved measurements transparently under any revised criterion while retaining the
+original errors and historical decision. Prior explicit approvals remain valid and must not
+be requested again. An exception to one gate does not waive other requirements.
+
 ## Make autotuning correctness-constrained
 
 Filter candidates by supported semantics and the declared accuracy gates before ranking accepted candidates by
-warmed latency. Record failed candidates and failing cases; fastest-but-inaccurate is a rejected candidate.
+warmed latency. Record failed candidates and failing cases; a failing candidate is ineligible for automatic
+selection under the current contract. Surface qualifying speed gains for human exception review as above.
 An autotune cache must distinguish the relevant operation/precision contract, hardware, shape/layout/rate, and
 implementation/build identity so an accurate selection cannot silently reuse an incompatible result.
 

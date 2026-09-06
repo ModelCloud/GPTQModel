@@ -1,0 +1,25 @@
+{
+  "scope": "Experiment 1 decoder-cost decomposition wave 2; real captured P32 projections; queued through the four-GPU dispatcher",
+  "jobs": [
+    {
+      "id": "decomposition-wave2-worker0",
+      "worker": 0,
+      "output": "/root/p32-decomposition-wave2/worker0/report.json"
+    },
+    {
+      "id": "decomposition-wave2-worker1",
+      "worker": 1,
+      "output": "/root/p32-decomposition-wave2/worker1/report.json"
+    },
+    {
+      "id": "decomposition-wave2-worker2",
+      "worker": 2,
+      "output": "/root/p32-decomposition-wave2/worker2/report.json"
+    },
+    {
+      "id": "decomposition-wave2-worker3",
+      "worker": 3,
+      "output": "/root/p32-decomposition-wave2/worker3/report.json"
+    }
+  ]
+}

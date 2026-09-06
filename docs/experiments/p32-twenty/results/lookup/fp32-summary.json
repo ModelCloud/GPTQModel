@@ -1,0 +1,20 @@
+[
+  {
+    "mode": 1,
+    "table": "indices",
+    "median_speedup": 0.9120398700161254,
+    "file_bytes": 131164,
+    "sha256": "b8d39625767b567bfc3e38d26d436e99fce8ae7af0be66f6791e588ac6d10c08",
+    "quantized_projection_bpw_with_table": 3.2074368739950248,
+    "whole_inference_file_bpw_with_table": 6.039297337852674
+  },
+  {
+    "mode": 2,
+    "table": "pairs",
+    "median_speedup": 0.8161030648273394,
+    "file_bytes": 262240,
+    "sha256": "c186ec02bba15dae2b52221f723c0dcf6826f84a6bc15dd81013bd7aa2cb85d4",
+    "quantized_projection_bpw_with_table": 3.2085144930872422,
+    "whole_inference_file_bpw_with_table": 6.0401458536168535
+  }
+]
