@@ -415,6 +415,7 @@ class ParoQuantProcessor(LoopProcessor):
                 w_wq_diff = original_weight.to(dtype=torch.float32) - pseudo_weight.to(dtype=torch.float32)
             with self.lock:
                 module.state["w_wq_diff"] = w_wq_diff
+                module.state["wq"] = pseudo_weight.detach().to(device=CPU, copy=True)
 
         module.weight.data = pseudo_weight
 
@@ -2557,6 +2558,7 @@ class ParoQuantProcessor(LoopProcessor):
         module.stream_sync()
         with self.lock:
             module.state.pop("w_wq_diff", None)
+            module.state.pop("wq", None)
             pack_weight = module.state.pop("pack_weight").clone()
             q_zeros = module.state.pop("q_zeros").clone()
             q_scales = module.state.pop("q_scales").clone()

@@ -238,6 +238,8 @@ class QQQProcessor(LoopProcessor):
             with self.lock:
                 module.state.update({
                     "w_wq_diff": w_wq_diff,
+                    # EoRA may rematerialize the module before consuming this.
+                    "wq": wq.detach().to(device=CPU, copy=True),
                 })
 
         # with torch_streamCtx(DEVICE_0_STREAM):
@@ -252,7 +254,10 @@ class QQQProcessor(LoopProcessor):
         """Creates the quantized module and packs the saved QQQ tensors into it."""
 
         # generate complete, safe to move to cpu
-        module.weight.data = move_to(module.weight.data, device=CPU) # large weights is slow to init on cpu
+        if self.calculate_w_wq_diff:
+            module.weight.data = module.state.pop("wq").to(CPU)
+        else:
+            module.weight.data = move_to(module.weight.data, device=CPU)
         module.state.pop("w", None) # no need for original weights now
 
         # cleanup all memory or states vars persistently added by this processor
