@@ -45,12 +45,23 @@ its stated scope, must be recorded with the revised criterion, and must not sile
 other gates. Existing explicit user approvals persist, including the F6 seed-7 3e-3 limit above.
 See the [accuracy skill](.agents/skills/qvq-kernel-accuracy/SKILL.md#human-review-of-high-speedup-exceptions).
 
+## PTQ recovery research
+
+Before designing or reviewing PTQ recovery, activation/KV scale calibration, EoRA,
+QTIP/YAQA rounding, P32 representation changes, or recirculation experiments, use
+[$qvq-ptq-recovery-research](.agents/skills/qvq-ptq-recovery-research/SKILL.md)
+and read the relevant notes in [research/README.md](research/README.md).
+Keep important scientific findings there with primary references, implementation
+provenance, limitations, and explicit separation of measured results from proposed
+QVQ extensions. Research notes do not override the accuracy gates above.
+
 ## Repository map
 
 - `gptqmodel/`: Python package, model adapters, quantization lifecycle, backend selection, and JIT wrappers.
 - `gptqmodel_ext/`: CUDA/C++ extension sources.
 - `tests/`: unit, model, kernel, serialization, and integration tests.
 - `scripts/`: benchmarks and focused validation helpers; do not turn benchmarks into unit tests.
+- `research/`: scientific findings and implementation implications for PTQ recovery; start with its README.
 - `.agents/skills/`: task-specific workflows for quantization, backends, kernels, architectures, and model support.
 
 ## Route work to the local skills
