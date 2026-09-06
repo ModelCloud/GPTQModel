@@ -588,15 +588,21 @@ class QVQHopperGroupedRuntime:
 
         if not isinstance(x, torch.Tensor):
             return "input is not a tensor"
+        if x.ndim < 2 or x.shape[-1] != children[0].in_features or x.numel() == 0:
+            return "input shape is unsupported"
+        rows = x.numel() // children[0].in_features
+        for index, policy in enumerate(policies):
+            if policy is not None and not policy.min_m <= rows <= policy.max_m:
+                return (
+                    f"grouped child {index} M={rows} is outside its prepared "
+                    f"policy range [{policy.min_m}, {policy.max_m}]"
+                )
         if x.requires_grad or any(child.training for child in children):
             return "autograd/training requires the original forward"
         if any(getattr(child, "adapter", None) is not None for child in children):
             return "an attached adapter requires the original forward"
         if x.device.type != "cuda" or x.dtype not in (torch.float16, torch.bfloat16):
             return "grouped Hopper requires FP16 or BF16 CUDA activations"
-        if x.shape[-1] != children[0].in_features or x.numel() == 0:
-            return "input shape is unsupported"
-        rows = x.numel() // children[0].in_features
         if rows < 1 or (maximum_rows is not None and rows > maximum_rows):
             if maximum_rows is None:
                 return "grouped Hopper execution requires at least one row"

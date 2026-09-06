@@ -670,6 +670,27 @@ def test_grouped_hopper_policy_accepts_split_tuple_and_rejects_unimplemented_geo
     reason = runtime._runtime_eligible(torch.randn(1, 256))
     assert reason == "grouped rank8 projection supports separate_reference or input_fused only"
 
+
+def test_grouped_policy_rejects_m_outside_prepared_range_before_device_dispatch():
+    """A shape-tuned grouped policy cannot silently run at another M."""
+    shared = torch.randn(256)
+    children = tuple(
+        _child(name, su=shared, seed=141 + index)
+        for index, name in enumerate(("gate_proj", "up_proj"))
+    )
+    mlp = _MLP(children)
+    assert install_qvq_hopper_groups(mlp, qkv=False, gate_up=True) == {"gate_up": 1}
+    policy = replace(
+        P32WindowConfig(algorithm="hopper_m16", recovery_mode="off"),
+        min_m=64,
+        max_m=64,
+    )
+    for child in children:
+        child._p32_window_config = policy
+    runtime = children[0]._gptqmodel_qvq_grouped_runtime
+    reason = runtime._runtime_eligible(torch.randn(32, 256))
+    assert reason == "grouped child 0 M=32 is outside its prepared policy range [64, 64]"
+
 def test_base_fuse_uses_architecture_roles_and_preserves_qvq_checkpoint_buffers():
     shared = torch.ones(256)
 
