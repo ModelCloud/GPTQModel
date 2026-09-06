@@ -1,0 +1,331 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+"""Synthetic algebra/serialization checks; not evidence of model quality."""
+
+import copy
+
+import pytest
+import torch
+
+from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+from gptqmodel.quantization.qvq import reconstruct_qvq_inner_weight
+from gptqmodel.quantization.qvq_rank8 import (
+    P32WindowConfig,
+    add_rank8_correction,
+    export_window_package,
+    fit_rank8,
+    load_window_package,
+    prepare_rank8,
+    qvq_p32_window_linear,
+    window_package_storage,
+)
+from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
+
+
+def fixture(hadamard=True):
+    torch.manual_seed(74)
+    k, n = 32, 16
+    layer = QVQLinear(
+        bits=2,
+        in_features=k,
+        out_features=n,
+        bank_count=2,
+        v2b2_p32=True,
+        input_hadamard=hadamard,
+        output_hadamard=hadamard,
+    ).eval()
+    layer.trellis.random_(-2147483648, 2147483647)
+    layer.SV.copy_(torch.linspace(0.2, 1.5, n))
+    layer.SU.copy_(torch.linspace(0.5, 1.2, k))
+    weight = reconstruct_qvq_inner_weight(
+        layer.trellis,
+        bits=2,
+        in_features=k,
+        out_features=n,
+        bank_ids=layer.bank_ids,
+        bank_alt_id=layer.bank_alt_id,
+        v2b2_p32=True,
+    )
+    # Construct an exact low-rank teacher difference in transformed coordinates.
+    a = torch.randn(k, 4) * 0.05
+    b = torch.randn(4, n) * 0.05
+    teacher = torch.nn.Linear(k, n, bias=False).eval()
+    eye = torch.eye(k)
+    xp = layer.transform_input(eye)
+    y = xp @ (weight + a @ b)
+    if hadamard:
+        y = matmul_hadU(y)
+    with torch.no_grad():
+        teacher.weight.copy_((y * layer.SV).T)
+    train, heldout = torch.randn(80, k), torch.randn(40, k)
+    return layer, teacher, train, heldout
+
+
+def fit(layer, teacher, train, heldout, **kwargs):
+    return fit_rank8(
+        layer,
+        teacher,
+        train,
+        heldout,
+        train_document_ids=["train"],
+        heldout_document_ids=["heldout"],
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize("hadamard", [False, True])
+def test_recovery_teacher_error_roundtrip_and_off_identity(hadamard, tmp_path):
+    layer, teacher, train, heldout = fixture(hadamard)
+    original = layer(heldout)
+    report = fit(layer, teacher, train, heldout)
+    assert report["validated"]
+    assert set(report["candidates"]) == {"output_l2", "tail_weighted_output_l2"}
+    assert torch.equal(layer(heldout), original)
+    on = P32WindowConfig(recovery_mode="on")
+    actual = qvq_p32_window_linear(layer, heldout, on)
+    assert (actual - teacher(heldout)).square().mean() < (
+        original - teacher(heldout)
+    ).square().mean() * 0.01
+    xp = layer.transform_input(heldout)
+    inner = layer._inner_forward(xp)
+    expected = (
+        inner.float()
+        + (xp.float() @ layer.rank8_A.float()).half().float() @ layer.rank8_B.float()
+    )
+    expected = layer._recover_output_compute_dtype(expected, xp.dtype)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(layer.forward_pretransformed(xp), actual, rtol=0, atol=0)
+    package = export_window_package(layer)
+    assert "trellis" not in package["tensors"]
+    path = tmp_path / "window.pt"
+    torch.save(package, path)
+    loaded = load_window_package(torch.load(path, weights_only=True), config=on)
+    torch.testing.assert_close(loaded(heldout), actual, rtol=0, atol=0)
+    assert path.stat().st_size >= window_package_storage([package])["tensor_bytes"]
+    record = window_package_storage([package])["modules"][0]
+    assert record["recovered_bpw"] - record["window_bpw"] == record["rank8_delta_bpw"]
+    # Ordinary module state_dict also carries recovery; reload starts off.
+    shell, _, _, _ = fixture(hadamard)
+    shell.load_state_dict(layer.state_dict())
+    assert torch.equal(shell(heldout), original)
+    prepare_rank8(shell, on)
+    torch.testing.assert_close(shell(heldout), actual, rtol=0, atol=0)
+    prepare_rank8(layer, P32WindowConfig())
+    layer.rank8_A.fill_(float("nan"))
+    assert torch.equal(layer(heldout), original)
+
+
+def test_off_does_not_access_recovery():
+    class Poison:
+        _p32_rank8_enabled = False
+
+        def __getattr__(self, name):
+            raise AssertionError(name)
+
+    value = torch.ones(1)
+    assert add_rank8_correction(Poison(), None, value) is value
+
+
+def test_binding_and_mutation_guard():
+    layer, teacher, train, heldout = fixture()
+    fit(layer, teacher, train, heldout)
+    package = export_window_package(layer)
+    for name in ("window_words", "SU", "SV", "bank_ids", "rank8_A", "rank8_B"):
+        bad = copy.deepcopy(package)
+        bad["tensors"][name].flatten()[0] += 1
+        with pytest.raises(ValueError, match="hash mismatch"):
+            load_window_package(bad)
+    prepare_rank8(layer, P32WindowConfig(recovery_mode="on"))
+    layer.SV.add_(1)
+    with pytest.raises(RuntimeError, match="state changed"):
+        layer(heldout)
+    with pytest.raises(ValueError, match="base hash mismatch"):
+        prepare_rank8(layer, P32WindowConfig(recovery_mode="on"))
+
+
+@pytest.mark.parametrize("mode", ["fast", "balanced", "quality"])
+def test_quality_policy(mode):
+    layer, teacher, train, heldout = fixture()
+    fit(layer, teacher, train, heldout)
+    prepare_rank8(layer, P32WindowConfig(recovery_mode="auto", quality_mode=mode))
+    assert layer._p32_rank8_enabled == (mode != "fast")
+
+
+def test_reject_provenance_and_unsupported_contracts():
+    layer, teacher, train, heldout = fixture()
+    with pytest.raises(ValueError, match="calibration"):
+        fit(layer, teacher, train, heldout, source_kind="ARC")
+    with pytest.raises(ValueError, match="disjoint"):
+        fit_rank8(
+            layer,
+            teacher,
+            train,
+            heldout,
+            train_document_ids=["same"],
+            heldout_document_ids=["same"],
+        )
+    with pytest.raises(ValueError, match="without validated"):
+        prepare_rank8(layer, P32WindowConfig(recovery_mode="on"))
+    for kwargs in (
+        {"abi_version": 2},
+        {"recovery_mode": "yes"},
+        {"quality_mode": "best"},
+        {"algorithm": "unknown"},
+        {"recovery_kernel": "fully_fused"},
+    ):
+        with pytest.raises(ValueError):
+            P32WindowConfig(**kwargs)
+    train[0, 0] = float("nan")
+    with pytest.raises(ValueError, match="finite"):
+        fit(layer, teacher, train, heldout)
+
+
+def test_empty_and_fast_package():
+    layer, _, _, _ = fixture()
+    package = export_window_package(layer)
+    loaded = load_window_package(package)
+    assert loaded(torch.empty(0, 32)).shape == (0, 16)
+    assert window_package_storage([])["average_bpw"] == 0
+
+
+def _kernel_rank8(layer):
+    """Known factors for kernel algebra only; no quality claim or fitted artifact."""
+    from gptqmodel.quantization.qvq_rank8 import CONTRACT, _base, _digest, _encode
+
+    layer.rank8_A = (
+        torch.randn(layer.in_features, 8, device=layer.trellis.device).half() * 0.05
+    )
+    layer.rank8_B = (
+        torch.randn(8, layer.out_features, device=layer.trellis.device).half() * 0.05
+    )
+    tensors, metadata = _base(layer)
+    layer.rank8_metadata = _encode(
+        {
+            "base_hash": _digest(tensors, metadata),
+            "fit_contract": CONTRACT,
+            "validated": True,
+            "selected": True,
+            "factors_hash": _digest({"A": layer.rank8_A, "B": layer.rank8_B}, {}),
+        },
+        layer.trellis.device,
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "algorithm", ["auto", "hopper_m16", "hopper_direct_decode_mma"]
+)
+@pytest.mark.parametrize("m", [1, 16, 64, 512])
+def test_hopper_rank8_eager_graph(algorithm, m):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child("q_proj", device="cuda").eval()
+    _kernel_rank8(layer)
+    x = torch.randn(m, 256, device="cuda", dtype=torch.float16) * 0.01
+    off = P32WindowConfig(algorithm=algorithm)
+    on = P32WindowConfig(algorithm=algorithm, recovery_mode="on")
+    base = qvq_p32_window_linear(layer, x, off)
+    graphs = []
+    for config in (off, on):
+        prepare_rank8(layer, config)
+        for _ in range(3):
+            eager = layer(x)
+        xp = layer.transform_input(x)
+        inner = layer._inner_forward(xp)
+        if config.recovery_mode == "on":
+            inner = (
+                inner.float()
+                + (xp.float() @ layer.rank8_A.float()).half().float()
+                @ layer.rank8_B.float()
+            )
+        reference = layer._recover_output_compute_dtype(inner, xp.dtype).half()
+        torch.testing.assert_close(eager, reference, atol=0, rtol=0)
+        if config.recovery_mode == "off":
+            assert torch.equal(eager, base)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            output = layer(x)
+        for _ in range(10):
+            graph.replay()
+            assert torch.equal(output, eager)
+        graphs.append((graph, output, eager.clone()))
+    # Python mode now says on; the off graph must retain its captured policy.
+    for graph, output, reference in graphs:
+        graph.replay()
+        assert torch.equal(output, reference)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    "roles", [("q_proj", "k_proj", "v_proj"), ("gate_proj", "up_proj")]
+)
+@pytest.mark.parametrize("m", [1, 64])
+def test_hopper_grouped_rank8_independent_flags(roles, m):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from test_qvq_grouped_runtime import _child
+
+    from gptqmodel.nn_modules.qvq_grouped_runtime import install_qvq_hopper_groups
+
+    children = [
+        _child(role, device="cuda", seed=i + 1).eval() for i, role in enumerate(roles)
+    ]
+    for child in children:
+        child.SU.copy_(children[0].SU)
+    for child in children[::2]:
+        _kernel_rank8(child)
+        prepare_rank8(child, P32WindowConfig(recovery_mode="on"))
+    x = torch.randn(m, 256, device="cuda", dtype=torch.float16) * 0.01
+    references = [child(x) for child in children]
+    parent = torch.nn.Module()
+    for name, child in zip(roles, children):
+        parent.add_module(name, child)
+    parent.eval()
+    assert sum(install_qvq_hopper_groups(parent).values()) == 1
+    for _ in range(3):
+        outputs = [child(x) for child in children]
+    for output, reference in zip(outputs, references):
+        delta = (output.float() - reference.float()).abs()
+        assert delta.mean() <= 2e-3 and delta.max() <= 0.046875
+    assert children[0]._gptqmodel_qvq_grouped_runtime.telemetry.grouped_launches > 0
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = [child(x) for child in children]
+    for _ in range(10):
+        graph.replay()
+        for output, reference in zip(captured, outputs):
+            assert torch.equal(output, reference)
+
+
+def test_quantize_fit_export_is_one_module_job(tmp_path):
+    from gptqmodel.quantization.qvq import quantize_qvq_linear
+    from gptqmodel.quantization.qvq_rank8 import Rank8Calibration, save_window_package
+
+    _, teacher, train, heldout = fixture()
+    calibration = Rank8Calibration(train, heldout, ("train",), ("heldout",))
+    result = quantize_qvq_linear(
+        teacher.weight.detach(),
+        train.T @ train / train.shape[0],
+        bits=2,
+        bank_count=2,
+        v2b2_p32=True,
+        rank8_calibration=calibration,
+    )
+    assert result.rank8_fit_report is not None
+    assert result.rank8_fit_report["source_kind"] == "calibration"
+    layer = QVQLinear(
+        bits=2,
+        in_features=32,
+        out_features=16,
+        bank_count=2,
+        v2b2_p32=True,
+        tensors=result.serialized_tensors(),
+    ).eval()
+    storage = save_window_package(layer, tmp_path / "quantized.pt")
+    assert storage["serialized_bytes"] == (tmp_path / "quantized.pt").stat().st_size
+    reloaded = load_window_package(
+        torch.load(tmp_path / "quantized.pt", weights_only=True)
+    )
+    assert torch.equal(reloaded(heldout), layer(heldout))

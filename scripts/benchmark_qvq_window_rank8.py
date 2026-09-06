@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+"""Matched complete-window/rank8 benchmark; synthetic inputs prove kernel behavior only."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import statistics
+import subprocess
+import sys
+from pathlib import Path
+
+from gpu_idle_preflight import (
+    add_gpu_idle_preflight_args,
+    bootstrap_gpu_idle_preflight,
+    recheck_gpu_exclusivity,
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+
+def main():
+    idle = bootstrap_gpu_idle_preflight()
+    parser = argparse.ArgumentParser(description=__doc__)
+    add_gpu_idle_preflight_args(parser)
+    parser.add_argument("--k", type=int, default=2048)
+    parser.add_argument("--n", type=int, default=2048)
+    parser.add_argument("--m", type=int, nargs="+", default=[1, 16, 128, 512, 2048])
+    parser.add_argument("--bits", type=float, default=3)
+    parser.add_argument("--kernel", default="separate_reference")
+    parser.add_argument("--algorithm", default="auto")
+    parser.add_argument("--package", type=Path)
+    parser.add_argument("--profile", choices=["off", "on"])
+    parser.add_argument("--profile-repeats", type=int, default=200)
+    parser.add_argument("--samples", type=int, default=30)
+    parser.add_argument("--replays", type=int, default=20)
+    parser.add_argument("--output", type=Path, required=True)
+    args = parser.parse_args()
+    if (
+        min(args.k, args.n, *args.m, args.samples, args.replays, args.profile_repeats)
+        <= 0
+    ):
+        parser.error("dimensions and iteration counts must be positive")
+
+    import torch
+
+    from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+    from gptqmodel.quantization.qvq_rank8 import (
+        CONTRACT,
+        P32WindowConfig,
+        _base,
+        _digest,
+        _encode,
+        load_window_package,
+        prepare_rank8,
+    )
+
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.manual_seed(137)
+    props = torch.cuda.get_device_properties(0)
+    if idle is not None and str(props.uuid).removeprefix(
+        "GPU-"
+    ) != idle.uuid.removeprefix("GPU-"):
+        raise RuntimeError("physical device mapping mismatch")
+    if args.package:
+        layer = load_window_package(
+            torch.load(args.package, weights_only=True), device="cuda"
+        )
+    else:
+        layer = (
+            QVQLinear(
+                bits=args.bits,
+                in_features=args.k,
+                out_features=args.n,
+                bank_count=2,
+                v2b2_p32=True,
+            )
+            .eval()
+            .cuda()
+        )
+        layer.trellis.random_(-2147483648, 2147483647)
+        # Known algebra fixture, never exported/promoted as a fitted model.
+        layer.rank8_A = (torch.randn(args.k, 8, device="cuda") * 0.02).half()
+        layer.rank8_B = (torch.randn(8, args.n, device="cuda") * 0.02).half()
+        tensors, metadata = _base(layer)
+        layer.rank8_metadata = _encode(
+            {
+                "base_hash": _digest(tensors, metadata),
+                "fit_contract": CONTRACT,
+                "validated": True,
+                "selected": True,
+                "fixture": "synthetic kernel algebra",
+                "factors_hash": _digest({"A": layer.rank8_A, "B": layer.rank8_B}, {}),
+            },
+            "cuda",
+        )
+    layer.post_init()
+    paths = [
+        "gptqmodel/quantization/qvq_rank8.py",
+        "gptqmodel/nn_modules/qlinear/qvq.py",
+        "gptqmodel/utils/qvq_rank8_triton.py",
+        "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu",
+    ]
+    report = {
+        "scope": "synthetic kernel/performance, not model quality",
+        "revision": subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip(),
+        "sources": {
+            p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest()
+            for p in paths
+            if (ROOT / p).exists()
+        },
+        "hardware": {
+            "name": props.name,
+            "uuid": str(props.uuid),
+            "sm_count": props.multi_processor_count,
+            "memory": props.total_memory,
+            "capability": [props.major, props.minor],
+        },
+        "software": {"torch": str(torch.__version__), "cuda": torch.version.cuda},
+        "preflight": None if idle is None else idle.as_dict(),
+        "rows": [],
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    print(
+        " M      K      N mode kernel                 mean_us median_us   p95_us  MAE       max",
+        flush=True,
+    )
+    for m in args.m:
+        x = torch.randn(m, layer.in_features, device="cuda", dtype=torch.float16) * 0.02
+        for mode in ("off", "on"):
+            prepare_rank8(
+                layer, P32WindowConfig(algorithm=args.algorithm, recovery_mode=mode)
+            )
+            reference = layer(x)
+            prepare_rank8(
+                layer,
+                P32WindowConfig(
+                    algorithm=args.algorithm,
+                    recovery_mode=mode,
+                    recovery_kernel=args.kernel,
+                ),
+            )
+            for _ in range(10):
+                output = layer(x)
+            delta = (output.float() - reference.float()).abs()
+            mae, maximum = delta.mean().item(), delta.max().item()
+            if not torch.isfinite(output).all() or mae > 2e-3 or maximum > 0.046875:
+                raise RuntimeError(
+                    f"local correctness gate failed: M={m} {mode} MAE={mae} max={maximum}"
+                )
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                captured = layer(x)
+            for _ in range(10):
+                graph.replay()
+            torch.cuda.synchronize()
+            if not torch.equal(captured, output):
+                raise RuntimeError("eager/graph mismatch")
+            if idle is not None:
+                recheck_gpu_exclusivity(idle)
+            if args.profile == mode:
+                torch.cuda.cudart().cudaProfilerStart()
+                for _ in range(args.profile_repeats):
+                    with torch.cuda.nvtx.range("p32_rank8_operator"):
+                        layer(x)
+                torch.cuda.synchronize()
+                torch.cuda.cudart().cudaProfilerStop()
+            samples = []
+            for _ in range(args.samples):
+                start, end = (
+                    torch.cuda.Event(enable_timing=True),
+                    torch.cuda.Event(enable_timing=True),
+                )
+                start.record()
+                for _ in range(args.replays):
+                    graph.replay()
+                end.record()
+                end.synchronize()
+                samples.append(start.elapsed_time(end) * 1000 / args.replays)
+            record = {
+                "m": m,
+                "k": layer.in_features,
+                "n": layer.out_features,
+                "bits": layer.bits,
+                "mode": mode,
+                "kernel": args.kernel,
+                "algorithm": args.algorithm,
+                "mean_us": statistics.mean(samples),
+                "median_us": statistics.median(samples),
+                "p95_us": sorted(samples)[int(0.95 * (len(samples) - 1))],
+                "mae": mae,
+                "max": maximum,
+                "samples_us": samples,
+                "allocated_bytes": torch.cuda.memory_allocated(),
+                "peak_allocated_bytes": torch.cuda.max_memory_allocated(),
+            }
+            report["rows"].append(record)
+            print(
+                f"{m:4} {layer.in_features:6} {layer.out_features:6} {mode:4} {args.kernel:22} "
+                f"{record['mean_us']:8.3f} {record['median_us']:9.3f} {record['p95_us']:8.3f} "
+                f"{mae:.3g} {maximum:.3g}",
+                flush=True,
+            )
+            args.output.write_text(json.dumps(report, indent=2) + "\n")
+            del graph, captured, reference, output
+
+
+if __name__ == "__main__":
+    os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    main()

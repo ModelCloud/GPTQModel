@@ -40,7 +40,10 @@ from ...utils.qvq_cuda import (
 )
 from . import BaseQuantLinear, FormatSupport
 
-_QVQ_BUFFER_NAMES = ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id")
+_QVQ_BUFFER_NAMES = (
+    "trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id",
+    "rank8_A", "rank8_B", "rank8_metadata",
+)
 # The real Llama/Qwen transforms that exposed delayed-normalization overflow
 # start at this width. Preserve the original, slightly more accurate FP16
 # operation ordering for narrow transforms; the finite-output retry below
@@ -541,17 +544,24 @@ class QVQLinear(BaseQuantLinear):
                 else None
             ),
             "bank_alt_id": torch.ones(1, dtype=torch.uint8) if v2b2_p32 else None,
+            "rank8_A": None,
+            "rank8_B": None,
+            "rank8_metadata": None,
         }
         for buffer_name in _QVQ_BUFFER_NAMES:
             tensor = tensors.get(
                 buffer_name, defaults[buffer_name] if register_buffers else None
             )
-            if tensor is None:
+            if tensor is None and not buffer_name.startswith("rank8_"):
                 setattr(self, buffer_name, None)
             else:
                 self.register_buffer(buffer_name, tensor)
         if tensors or register_buffers:
             self._validate_tensors()
+
+        # Optional recovery belongs to this operator, never an adapter wrapper.
+        # None buffers keep legacy checkpoints and recovery-off storage unchanged.
+        self._p32_rank8_enabled = False
 
     def __getstate__(self):
         """Exclude transient selector state from deepcopy/pickle."""
@@ -607,6 +617,14 @@ class QVQLinear(BaseQuantLinear):
         unexpected_keys,
         error_msgs,
     ):
+        from ...quantization.qvq_rank8 import RANK8_BUFFERS
+
+        for name in RANK8_BUFFERS:
+            value = state_dict.get(f"{prefix}{name}")
+            if value is not None:
+                setattr(self, name, torch.empty_like(value, device=self.trellis.device))
+        # A newly loaded payload must be validated before enabling recovery.
+        self._p32_rank8_enabled = False
         selector_key = f"{prefix}bank_ids"
         if self.bank_count in (2, 4) and selector_key not in state_dict:
             self._bank_ids_loaded = False
@@ -1284,6 +1302,14 @@ class QVQLinear(BaseQuantLinear):
         return_ordered_partials: bool = False,
         ordered_split_count: int | None = None,
     ) -> torch.Tensor:
+        window_config = getattr(self, "_p32_window_config", None)
+        if (window_config is not None and window_config.algorithm.startswith("hopper_")
+                and x.dtype == torch.float16):
+            if return_ordered_partials or ordered_split_count is not None:
+                raise ValueError("explicit window policy requires complete inner output")
+            from ...quantization.qvq_rank8 import explicit_window_inner
+
+            return explicit_window_inner(self, x, window_config)
         if ordered_split_count is not None and not return_ordered_partials:
             raise ValueError("an explicit ordered split requires partial output")
         if return_ordered_partials:
@@ -1820,7 +1846,11 @@ class QVQLinear(BaseQuantLinear):
             )
         if x.numel() == 0:
             return x.new_empty((*x.shape[:-1], self.out_features))
+        if getattr(self, "_p32_rank8_enabled", False) and self.training:
+            raise RuntimeError("window recovery is inference-only")
         delegate = getattr(self, "_qvq_grouped_p32_delegate", None)
+        if delegate is not None and getattr(self, "_p32_rank8_enabled", False):
+            raise RuntimeError("grouped recovery requires an integrated grouped implementation")
         if delegate is not None:
             state, consumer_index, module_name = delegate
             return state.consume(consumer_index, module_name, self, x)
@@ -1832,7 +1862,10 @@ class QVQLinear(BaseQuantLinear):
         # so it cannot trigger the transform-overflow rescue below. Return at
         # this boundary to avoid an otherwise redundant device-wide finite
         # reduction and host synchronization on every Qwen projection.
-        amd_folded = self._qvq_amd_folded_forward(x_2d, compute_dtype)
+        amd_folded = (
+            None if getattr(self, "_p32_rank8_enabled", False)
+            else self._qvq_amd_folded_forward(x_2d, compute_dtype)
+        )
         if amd_folded is not None:
             return amd_folded.reshape(*x.shape[:-1], self.out_features).to(input_dtype)
 
@@ -2146,6 +2179,10 @@ class QVQLinear(BaseQuantLinear):
         *,
         output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
+        if getattr(self, "_p32_rank8_enabled", False):
+            from ...quantization.qvq_rank8 import validate_rank8_state
+
+            validate_rank8_state(self)
         config = self.activation
         if config is not None and config.target == "p32_operand":
             quantized, scale = quantize_qvq_fp8_activation(
@@ -2187,6 +2224,10 @@ class QVQLinear(BaseQuantLinear):
                 output, torch.float32, target_dtype=output_dtype
             )
         output = self._inner_forward(transformed)
+        if getattr(self, "_p32_rank8_enabled", False):
+            from ...quantization.qvq_rank8 import add_rank8_correction
+
+            output = add_rank8_correction(self, transformed, output)
         return self._recover_output_compute_dtype(output, compute_dtype)
 
     def _recover_output_compute_dtype(

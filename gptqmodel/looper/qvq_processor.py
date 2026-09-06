@@ -211,6 +211,7 @@ class QVQProcessor(LoopProcessor):
         self._automatic_propagation_gate_samples: Dict[str, list[tuple[torch.Tensor, torch.Tensor]]] = {}
         self._additional_calibration_sample_counts: Dict[str, set[int]] = {}
         self._propagation_gates_lock = threading.RLock()
+        self._rank8_calibration = {}
         self._smooth_swiglu_stats: Dict[str, Dict[str, Any]] = {}
         self._smooth_swiglu_prepared = False
         self._atomic_swiglu_inputs: Dict[str, torch.Tensor] = {}
@@ -586,6 +587,21 @@ class QVQProcessor(LoopProcessor):
     def _has_propagation_gate(self, module_full_name: str) -> bool:
         with self._propagation_gates_lock:
             return module_full_name in self._propagation_gates
+
+    def set_rank8_calibration(self, module_full_name, calibration):
+        """Attach disjoint original activation documents before processing a module.
+
+        Collection/provenance belongs to the quantization caller. No evaluation
+        datasets or propagation-gate rows are implicitly reused for this fit.
+        """
+        from ..quantization.qvq_rank8 import Rank8Calibration
+
+        if not isinstance(calibration, Rank8Calibration):
+            raise TypeError("rank8 calibration must be Rank8Calibration")
+        if self.qcfg.format != FORMAT.QVQ_V2B2_P32 or self.qcfg.activation is not None:
+            raise ValueError("rank8 requires P32 A16")
+        with self._propagation_gates_lock:
+            self._rank8_calibration[module_full_name] = calibration
 
     def set_propagation_gate(
         self,
@@ -1266,7 +1282,10 @@ class QVQProcessor(LoopProcessor):
             payload = records[role]["candidates"][selected_id]["serialized_tensors"]
             module.stream_sync()
             with parent_module_lock(name):
-                for key in ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"):
+                for key in (
+                    "trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id",
+                    "rank8_A", "rank8_B", "rank8_metadata",
+                ):
                     module.state.pop(key, None)
             module.stream_state_payload_to_cpu(payload)
             for stat in self.log:
@@ -2629,6 +2648,17 @@ class QVQProcessor(LoopProcessor):
                     result,
                     task_entry,
                 )
+            with self._propagation_gates_lock:
+                rank8_calibration = self._rank8_calibration.pop(module.full_name, None)
+            if rank8_calibration is not None:
+                if atomic_swiglu or self._output_alignment is not None:
+                    raise ValueError("rank8 fitting must follow atomic selection/output alignment; unsupported here")
+                from ..quantization.qvq_rank8 import finish_rank8_quantization
+
+                result = finish_rank8_quantization(
+                    result, canonical_weight, module.bias, rank8_calibration,
+                    bits=module_qcfg.bits, codebook_version=module_qcfg.codebook,
+                )
             duration = time.perf_counter() - started
 
             # Quantized replay temporarily overwrites the dense module. The
@@ -2778,6 +2808,7 @@ class QVQProcessor(LoopProcessor):
                     "bias",
                     "bank_ids",
                     "bank_alt_id",
+                    "rank8_A", "rank8_B", "rank8_metadata",
                     "_qvq_original_weight",
                     "_qvq_runtime_config",
                 ):
@@ -2830,7 +2861,10 @@ class QVQProcessor(LoopProcessor):
                 input_hadamard = runtime_config[8] if len(runtime_config) > 8 else True
                 output_hadamard = runtime_config[9] if len(runtime_config) > 9 else True
                 activation = runtime_config[10] if len(runtime_config) > 10 else None
-                for tensor_name in ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"):
+                for tensor_name in (
+                    "trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id",
+                    "rank8_A", "rank8_B", "rank8_metadata",
+                ):
                     tensor = module.state.get(tensor_name)
                     if tensor is not None:
                         tensors[tensor_name] = tensor.clone()
@@ -2890,6 +2924,7 @@ class QVQProcessor(LoopProcessor):
                         "bias",
                         "bank_ids",
                         "bank_alt_id",
+                        "rank8_A", "rank8_B", "rank8_metadata",
                         "_qvq_original_weight",
                         "_qvq_runtime_config",
                     ):
@@ -2904,6 +2939,7 @@ class QVQProcessor(LoopProcessor):
                 "bias",
                 "bank_ids",
                 "bank_alt_id",
+                "rank8_A", "rank8_B", "rank8_metadata",
                 "_qvq_original_weight",
                 "_qvq_runtime_config",
             ):
@@ -2916,6 +2952,7 @@ class QVQProcessor(LoopProcessor):
     def finalize(self, model: BaseQModel, **kwargs):
         """Mark the model and checkpoint metadata as QVQ after replacement completes."""
 
+        self._rank8_calibration.clear()
         self._module_replay_rows.clear()
         self._module_replay_teacher_logits.clear()
         self._module_replay_model = None

@@ -518,6 +518,12 @@ class QVQHopperGroupedRuntime:
         self, x: torch.Tensor, *, maximum_rows: int | None = None
     ) -> str | None:
         children = self._children()
+        if any(
+            getattr(getattr(child, "_p32_window_config", None), "algorithm", "auto").startswith("hopper_")
+            for child in children
+        ):
+            return "explicit child window policy requires independent dispatch"
+
         if not isinstance(x, torch.Tensor):
             return "input is not a tensor"
         if x.requires_grad or any(child.training for child in children):
@@ -741,9 +747,18 @@ class QVQHopperGroupedRuntime:
         if return_ordered_partials and recover:
             raise ValueError("ordered partial execution cannot recover child outputs")
         children = self._children()
+        rank8_enabled = any(getattr(child, "_p32_rank8_enabled", False) for child in children)
+        if rank8_enabled:
+            from ..quantization.qvq_rank8 import validate_rank8_state
+
+            for child in children:
+                validate_rank8_state(child)
+        if rank8_enabled and return_ordered_partials:
+            raise _R0Fallback("rank8 correction requires completed FP32 inner outputs")
         rows = x.numel() // children[0].in_features
         if (
             recover
+            and not rank8_enabled
             and not return_ordered_partials
             and self._h100_fp8_ondemand_eligible(x, rows)
         ):
@@ -753,6 +768,7 @@ class QVQHopperGroupedRuntime:
                 return self._execute_h100_fp8_ondemand(x, scales)
         if (
             recover
+            and not rank8_enabled
             and not return_ordered_partials
             and self._h100_fp8_prefill_eligible(x, rows)
         ):
@@ -762,6 +778,7 @@ class QVQHopperGroupedRuntime:
                 return self._execute_h100_fp8_prefill(x, prefill_payload)
         if (
             recover
+            and not rank8_enabled
             and not return_ordered_partials
             and self._h100_fp16_prefill_eligible(x, rows)
         ):
@@ -1022,6 +1039,15 @@ class QVQHopperGroupedRuntime:
                     self.telemetry.h100_qwen_linear_decode_prefetch_launches += 1
         if self._h100_w25_n128_gate_up_enabled:
             self.telemetry.h100_w25_n128_gate_up_launches += 1
+        if rank8_enabled:
+            from ..quantization.qvq_rank8 import add_rank8_correction
+
+            # padded is the exact shared SU/H input consumed by grouped WGMMA.
+            # Each child retains independent factors and a static on/off flag.
+            inner_outputs = tuple(
+                add_rank8_correction(child, padded[:rows], inner[:rows])
+                for child, inner in zip(children, inner_outputs, strict=True)
+            )
         if not recover:
             return tuple(inner[:rows] for inner in inner_outputs)
 
@@ -1170,6 +1196,8 @@ class QVQHopperGroupedRuntime:
         if not isinstance(down, QVQLinear):
             return "fused MLP lost its QVQ down projection"
         children = self._children()
+        if any(getattr(child, "_p32_rank8_enabled", False) for child in (*children, down)):
+            return "rank8 uses grouped gate/up and independent down until full MLP fusion is validated"
         if (
             len(children) != 2
             or children[0].out_features != children[1].out_features

@@ -6849,7 +6849,8 @@ class QVQConfig(BaseQuantizeConfig):
         if self.tensor_storage is not None:
             if not isinstance(self.tensor_storage, dict):
                 raise ValueError("QVQConfig: `tensor_storage` must be a dictionary when provided.")
-            allowed_tensors = {"trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id"}
+            allowed_tensors = {"trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id",
+                               "rank8_A", "rank8_B", "rank8_metadata"}
             for module_name, tensors in self.tensor_storage.items():
                 if not isinstance(tensors, dict):
                     raise ValueError(f"QVQConfig: tensor storage for `{module_name}` must be a dictionary.")
