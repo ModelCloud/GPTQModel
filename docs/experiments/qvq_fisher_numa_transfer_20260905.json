@@ -1,0 +1,194 @@
+{
+  "scope": "Pinned 128MiB transfer diagnostic; five warmups, twenty repetitions; explicit numactl CPU-node and memory-node binding; actual page placement from /proc/self/numa_maps",
+  "gpu_uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+  "results": [
+    {
+      "node": "0",
+      "affinity": [
+        0,
+        1,
+        5,
+        7,
+        8,
+        14,
+        17,
+        19,
+        21,
+        22,
+        96,
+        99,
+        100,
+        103,
+        106,
+        107,
+        108,
+        110,
+        112,
+        113,
+        115,
+        116,
+        117
+      ],
+      "bytes": 134217728,
+      "numa_mapping": [
+        "1000a800000 bind:0 file=/dev/zero\\040(deleted) dirty=32768 active=0 N0=32768 kernelpagesize_kB=4"
+      ],
+      "rows": [
+        {
+          "direction": "d2h",
+          "median_cuda_ms": 3.423904061317444,
+          "median_wall_ms": 3.43646150213317,
+          "GBps": 39.20020117279686
+        },
+        {
+          "direction": "h2d",
+          "median_cuda_ms": 2.9304959774017334,
+          "median_wall_ms": 2.9430055001284927,
+          "GBps": 45.800345414226264
+        }
+      ]
+    },
+    {
+      "node": "1",
+      "affinity": [
+        24,
+        25,
+        26,
+        27,
+        28,
+        31,
+        33,
+        36,
+        40,
+        41,
+        42,
+        43,
+        46,
+        47,
+        124,
+        126,
+        127,
+        129,
+        131,
+        132,
+        136,
+        137,
+        138,
+        140
+      ],
+      "bytes": 134217728,
+      "numa_mapping": [
+        "1000a800000 bind:1 file=/dev/zero\\040(deleted) dirty=32768 active=0 N1=32768 kernelpagesize_kB=4"
+      ],
+      "rows": [
+        {
+          "direction": "d2h",
+          "median_cuda_ms": 3.5790239572525024,
+          "median_wall_ms": 3.5913814972445834,
+          "GBps": 37.501209716135705
+        },
+        {
+          "direction": "h2d",
+          "median_cuda_ms": 3.0526559352874756,
+          "median_wall_ms": 3.0658340001537,
+          "GBps": 43.967525605652774
+        }
+      ]
+    },
+    {
+      "node": "2",
+      "affinity": [
+        49,
+        51,
+        52,
+        53,
+        58,
+        59,
+        61,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        144,
+        145,
+        146,
+        148,
+        150,
+        151,
+        152,
+        154,
+        155,
+        159,
+        160,
+        164,
+        165,
+        166
+      ],
+      "bytes": 134217728,
+      "numa_mapping": [
+        "1000a800000 bind:2 file=/dev/zero\\040(deleted) dirty=32768 active=0 N2=32768 kernelpagesize_kB=4"
+      ],
+      "rows": [
+        {
+          "direction": "d2h",
+          "median_cuda_ms": 6.317903995513916,
+          "median_wall_ms": 6.332205999569851,
+          "GBps": 21.244027781255063
+        },
+        {
+          "direction": "h2d",
+          "median_cuda_ms": 3.3351200819015503,
+          "median_wall_ms": 3.349885000716313,
+          "GBps": 40.24374676292749
+        }
+      ]
+    },
+    {
+      "node": "3",
+      "affinity": [
+        72,
+        74,
+        80,
+        83,
+        84,
+        86,
+        87,
+        88,
+        92,
+        93,
+        94,
+        95,
+        169,
+        171,
+        173,
+        176,
+        178,
+        180,
+        182,
+        185,
+        188
+      ],
+      "bytes": 134217728,
+      "numa_mapping": [
+        "1000a800000 bind:3 file=/dev/zero\\040(deleted) dirty=32768 active=0 N3=32768 kernelpagesize_kB=4"
+      ],
+      "rows": [
+        {
+          "direction": "d2h",
+          "median_cuda_ms": 6.2318079471588135,
+          "median_wall_ms": 6.244935000722762,
+          "GBps": 21.537526370849108
+        },
+        {
+          "direction": "h2d",
+          "median_cuda_ms": 3.270416021347046,
+          "median_wall_ms": 3.2843379995028954,
+          "GBps": 41.03995550532965
+        }
+      ]
+    }
+  ]
+}

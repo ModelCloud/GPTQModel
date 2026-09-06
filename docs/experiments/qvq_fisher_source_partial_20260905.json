@@ -1,0 +1,268 @@
+{
+  "status": "Exact operator improvement only; not promoted and not a hybrid end-to-end result",
+  "scope": "Captured real B16/T64/R256 source update; M5120 and17408; H200 SM90; strict FP32",
+  "baseline_commit": "1acd13b95bcb2c4bfc3556d7e710da1385f911f5",
+  "math_review": "Initial fused dot/add changed rounding despite enable_fp_fusion=False. An inline mov boundary preserves each per-sequence dot rounding. Four residue-group partial sums preserve the original batch-reduction order. This removes 12 of16 intermediate per-sequence source tensors for B16.",
+  "audit": {
+    "baseline": {
+      "summary": {
+        "kernels": 2,
+        "executed_warp_instructions": 203308032.0,
+        "predicated_thread_instructions": 6433996800.0,
+        "max_registers_per_thread": 202.0,
+        "local_spill_bytes": 0.0,
+        "shared_spill_bytes": 0.0,
+        "shared_excessive_wavefronts": 0.0,
+        "opcodes": {
+          "FFMA": 142606336.0,
+          "LDS": 9487360.0,
+          "IADD3": 6232064.0,
+          "IMAD": 5570560.0,
+          "ISETP": 5152768.0,
+          "LDGSTS": 3063808.0,
+          "FADD": 2646016.0,
+          "R2P": 2437120.0,
+          "STG": 2367488.0,
+          "STS": 2228224.0,
+          "FMUL": 2228224.0,
+          "FMNMX": 2228224.0,
+          "CS2R": 2210816.0,
+          "MOV": 2001920.0,
+          "ULDC": 1897472.0,
+          "BRA": 1392640.0,
+          "SHF": 1235968.0,
+          "VIADD": 852992.0,
+          "UIADD3": 765952.0,
+          "BAR": 748544.0,
+          "LDC": 644096.0,
+          "LDG": 591872.0,
+          "LEA": 487424.0,
+          "USEL": 417792.0,
+          "UMOV": 400384.0,
+          "UIMAD": 382976.0,
+          "P2R": 330752.0,
+          "LOP3": 295936.0,
+          "SEL": 295936.0,
+          "PLOP3": 278528.0,
+          "UISETP": 278528.0,
+          "S2R": 226304.0,
+          "LDGDEPBAR": 226304.0,
+          "EXIT": 174080.0,
+          "DEPBAR": 174080.0,
+          "BSSY": 174080.0,
+          "BSYNC": 174080.0,
+          "USHF": 139264.0,
+          "S2UR": 69632.0,
+          "HFMA2": 69632.0,
+          "ULEA": 34816.0,
+          "VIADDMNMX": 34816.0,
+          "SHFL": 17408.0,
+          "BRX": 17408.0,
+          "FSETP": 17408.0,
+          "FSEL": 0.0,
+          "CCTL": 0.0,
+          "B2R": 0.0,
+          "YIELD": 0.0,
+          "WARPSYNC": 0.0,
+          "PRMT": 0.0,
+          "R2UR": 0.0,
+          "MEMBAR": 0.0,
+          "ERRBAR": 0.0,
+          "CGAERRBAR": 0.0,
+          "NOP": 0.0,
+          "LEPC": 0.0,
+          "CALL": 0.0,
+          "VOTEU": 0.0,
+          "FLO": 0.0,
+          "POPC": 0.0,
+          "ATOMG": 0.0
+        }
+      },
+      "kernels": [
+        {
+          "name": "void cutlass::Kernel2<cutlass_80_simt_sgemm_128x128_8x4_nt_align1>(T1::Params)",
+          "launch__registers_per_thread": "202",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "12.401352",
+          "smsp__warps_eligible.avg.per_cycle_active": "1.311766",
+          "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct": null,
+          "smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active.pct": null,
+          "gpu__time_duration.sum": "263.296000"
+        },
+        {
+          "name": "void at::reduce_kernel<128, 4, at::ReduceOp<float, at::func_wrapper_t<float, at::sum_functor<float, float, float>::operator ()(at::TensorIterator &)::[lambda(float, float) (instance 1)]>, unsigned int, float, 4, 4>>(T3)",
+          "launch__registers_per_thread": "54",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "51.035493",
+          "smsp__warps_eligible.avg.per_cycle_active": "0.250901",
+          "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct": null,
+          "smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active.pct": null,
+          "gpu__time_duration.sum": "79.552000"
+        }
+      ]
+    },
+    "bad-fusion": {
+      "summary": {
+        "kernels": 1,
+        "executed_warp_instructions": 171764736.0,
+        "predicated_thread_instructions": 5490900992.0,
+        "max_registers_per_thread": 146.0,
+        "local_spill_bytes": 0.0,
+        "shared_spill_bytes": 0.0,
+        "shared_excessive_wavefronts": 0.0,
+        "opcodes": {
+          "FFMA": 142606336.0,
+          "LDS": 18017280.0,
+          "IADD3": 5344256.0,
+          "LDGSTS": 2506752.0,
+          "LDGDEPBAR": 417792.0,
+          "FADD": 417792.0,
+          "UISETP": 217600.0,
+          "MOV": 217600.0,
+          "UIADD3": 208896.0,
+          "SHF": 191488.0,
+          "CS2R": 191488.0,
+          "LOP3": 156672.0,
+          "ULEA": 147968.0,
+          "USEL": 139264.0,
+          "LEA": 104448.0,
+          "IMAD": 104448.0,
+          "BAR": 95744.0,
+          "S2R": 87040.0,
+          "ISETP": 87040.0,
+          "HFMA2": 87040.0,
+          "UMOV": 60928.0,
+          "PLOP3": 43520.0,
+          "DEPBAR": 43520.0,
+          "ULDC": 34816.0,
+          "SEL": 34816.0,
+          "BRA": 34816.0,
+          "STS": 34816.0,
+          "STG": 34816.0,
+          "S2UR": 26112.0,
+          "SGXT": 26112.0,
+          "LDC": 17408.0,
+          "EXIT": 17408.0,
+          "USHF": 8704.0,
+          "NOP": 0.0
+        }
+      },
+      "kernels": [
+        {
+          "name": "source_sum",
+          "launch__registers_per_thread": "146",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "6.246427",
+          "smsp__warps_eligible.avg.per_cycle_active": "0.399779",
+          "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct": null,
+          "smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active.pct": null,
+          "gpu__time_duration.sum": "424.864000"
+        }
+      ]
+    },
+    "partial": {
+      "summary": {
+        "kernels": 2,
+        "executed_warp_instructions": 176865280.0,
+        "predicated_thread_instructions": 5656903680.0,
+        "max_registers_per_thread": 79.0,
+        "local_spill_bytes": 0.0,
+        "shared_spill_bytes": 0.0,
+        "shared_excessive_wavefronts": 0.0,
+        "opcodes": {
+          "FFMA": 142606336.0,
+          "LDS": 17965056.0,
+          "CS2R": 2785280.0,
+          "FADD": 2646016.0,
+          "LEA": 1601536.0,
+          "IADD3": 1531904.0,
+          "LDG": 1253376.0,
+          "STS": 1253376.0,
+          "SHF": 887808.0,
+          "UIADD3": 591872.0,
+          "LOP3": 435200.0,
+          "IMAD": 400384.0,
+          "MOV": 382976.0,
+          "BAR": 348160.0,
+          "UISETP": 278528.0,
+          "SGXT": 208896.0,
+          "USHF": 174080.0,
+          "STG": 174080.0,
+          "ULDC": 156672.0,
+          "ISETP": 156672.0,
+          "UMOV": 139264.0,
+          "UIMAD": 139264.0,
+          "PLOP3": 139264.0,
+          "BRA": 139264.0,
+          "S2R": 104448.0,
+          "S2UR": 104448.0,
+          "EXIT": 104448.0,
+          "LDC": 87040.0,
+          "ULEA": 69632.0,
+          "NOP": 0.0
+        }
+      },
+      "kernels": [
+        {
+          "name": "source_partial",
+          "launch__registers_per_thread": "79",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "36.464820",
+          "smsp__warps_eligible.avg.per_cycle_active": "2.025835",
+          "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct": null,
+          "smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active.pct": null,
+          "gpu__time_duration.sum": "276.192000"
+        },
+        {
+          "name": "finish_partial",
+          "launch__registers_per_thread": "32",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "84.359875",
+          "smsp__warps_eligible.avg.per_cycle_active": "0.137068",
+          "smsp__warp_issue_stalled_short_scoreboard_per_warp_active.pct": null,
+          "smsp__warp_issue_stalled_math_pipe_throttle_per_warp_active.pct": null,
+          "gpu__time_duration.sum": "21.440000"
+        }
+      ]
+    }
+  },
+  "post_profile_correctness_and_cuda_event_timing": [
+    {
+      "B": 16,
+      "M": 5120,
+      "R": 256,
+      "label": "input",
+      "tile": [
+        64,
+        64,
+        8
+      ],
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.11226719617843628,
+      "candidate_ms": 0.09260479807853698
+    },
+    {
+      "B": 16,
+      "M": 17408,
+      "R": 256,
+      "label": "output",
+      "tile": [
+        64,
+        64,
+        8
+      ],
+      "bitwise_equal": true,
+      "max_abs": 0.0,
+      "baseline_ms": 0.34609279632568357,
+      "candidate_ms": 0.2977407932281494
+    }
+  ],
+  "artifact_directory": "/root/qvq-sidecar-artifacts/20260905-reuse",
+  "sources": {
+    "/tmp/qvq-source-partial-kernel.py": "83d3badf89b474df9732ffdf7ae75fc89109dd2e8b32e58b544dd7b714066277",
+    "/tmp/qvq-source-partial-post-audit.py": "94e8b83990345a445ae9b61f05253da17218a0e1d5917cb1378eb0a9d05e665f",
+    "/tmp/qvq-source-instruction-probe.py": "818b1dde0d60c9a6c139b69d83acb59c259958b36ea66cb2d6c70ef8b78e32e5"
+  },
+  "limits": [
+    "No new full-model or quantization acceptance claim.",
+    "The rejected fused variant loses required FADD rounding boundaries.",
+    "Some source-audit summary stall fields are null; complete exported CSVs remain in the artifact directory.",
+    "Profiler timings are diagnostic; warmed unprofiled events are the performance evidence."
+  ]
+}

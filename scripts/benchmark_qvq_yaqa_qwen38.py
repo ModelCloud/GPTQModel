@@ -8,16 +8,23 @@ from __future__ import annotations
 
 import argparse
 import gc
+import hashlib
+import importlib.util
+import inspect
 import json
+import statistics
 import subprocess
 import sys
 import time
+from contextlib import nullcontext
+from importlib import metadata
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from scripts.cpu_runtime_inventory import cpu_runtime_inventory
 from scripts.gpu_idle_preflight import (
     add_gpu_idle_preflight_args,
     bootstrap_gpu_idle_preflight,
@@ -55,10 +62,28 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-activation-checkpointing", action="store_true")
     parser.add_argument("--accumulator-device", choices=("auto", "cuda", "cpu"), default="cuda")
     parser.add_argument("--seed", type=int, default=20260905)
+    parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--cpu-threads", type=int, help="Torch intra-op threads; defaults to the current environment")
+    parser.add_argument("--cpu-interop-threads", type=int, help="Torch inter-op threads; defaults to the runtime default")
     parser.add_argument("--quant-block-size", type=int, default=0)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--collector-source", type=Path, help="Benchmark a local qvq_yaqa.py revision")
+    parser.add_argument("--verify-source", type=Path, help="Require bitwise factors against a local qvq_yaqa.py")
+    parser.add_argument("--trace-output", type=Path, help="Export one warmed operator trace; timing is diagnostic")
     add_gpu_idle_preflight_args(parser)
     return parser
+
+
+def _load_collector_source(path: Path, name: str):
+    module_name = f"gptqmodel.quantization._benchmark_yaqa_{name}"
+    spec = importlib.util.spec_from_file_location(module_name, path.resolve())
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot load collector source: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def _git_revision() -> str:
@@ -137,10 +162,39 @@ def _hardware(torch, preflight) -> dict:
     }
 
 
+def _backend_metadata(model) -> dict:
+    attention_modules = [module for module in model.modules() if hasattr(module, "chunk_gated_delta_rule")]
+
+    def identity(function):
+        if function is None:
+            return "torch.nn.Conv1d fallback"
+        return f"{function.__module__}.{function.__qualname__}"
+
+    versions = {}
+    for package in ("transformers", "flash-linear-attention", "causal-conv1d"):
+        try:
+            versions[package] = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            versions[package] = None
+    return {
+        "packages": versions,
+        "delta_rule": sorted({identity(module.chunk_gated_delta_rule) for module in attention_modules}),
+        "convolution": sorted({identity(module.causal_conv1d_fn) for module in attention_modules}),
+        "gated_normalization": sorted({
+            f"{type(module.norm).__module__}.{type(module.norm).__qualname__}" for module in attention_modules
+        }),
+        "attention": getattr(getattr(model.config, "text_config", model.config), "_attn_implementation", None),
+    }
+
+
 def main() -> None:
     args = _parser().parse_args()
     if min(args.rows, args.batch_size, args.sequence_length) < 1:
         raise ValueError("rows, batch-size, and sequence-length must be positive")
+    if args.trace_output is not None and (len(args.arms) != 1 or args.repeats != 1):
+        raise ValueError("trace capture requires one arm and --repeats 1")
+    if args.warmup < 0 or args.repeats < 1:
+        raise ValueError("warmup must be nonnegative and repeats must be positive")
     if args.layer_count < 0:
         raise ValueError("layer-count must be nonnegative")
     if args.quant_block_size < 0 or args.quant_block_size % 16:
@@ -152,15 +206,34 @@ def main() -> None:
     if any(_strategy(arm)[0] == "batched" for arm in args.arms) and _strategy(args.arms[0])[0] != "batched":
         raise ValueError("the exact benchmark arm must be first when present")
 
+    cpu_inventory = cpu_runtime_inventory()
+    for name in ("cpu_threads", "cpu_interop_threads"):
+        value = getattr(args, name)
+        available = cpu_inventory["allowed_logical_cpus"]
+        if value is not None and (value < 1 or (available is not None and value > available)):
+            raise ValueError(f"{name} must be positive and no larger than the effective CPU affinity")
     preflight = bootstrap_gpu_idle_preflight()
     if preflight is None:
         raise RuntimeError("formal Qwen YAQA timing requires the GPU idle preflight")
 
     import torch
+
+    if args.cpu_threads is not None:
+        torch.set_num_threads(args.cpu_threads)
+    if args.cpu_interop_threads is not None:
+        torch.set_num_interop_threads(args.cpu_interop_threads)
+
     from transformers import AutoModelForImageTextToText, AutoTokenizer
 
     from gptqmodel.quantization.qvq import quantize_qvq_linear
     from gptqmodel.quantization.qvq_yaqa import YaqaGramSketch, capture_yaqa_sketch_b
+
+    if args.collector_source is not None:
+        collector = _load_collector_source(args.collector_source, "timed")
+        capture_yaqa_sketch_b = collector.capture_yaqa_sketch_b
+        YaqaGramSketch = collector.YaqaGramSketch
+    reference = None if args.verify_source is None else _load_collector_source(args.verify_source, "reference")
+    parity_records = []
 
     if torch.cuda.device_count() != 1 or torch.cuda.get_device_name(0) != "NVIDIA H200":
         raise RuntimeError("this formal benchmark requires exactly one visible NVIDIA H200")
@@ -180,6 +253,7 @@ def main() -> None:
         local_files_only=True,
     ).eval()
     load_seconds = time.perf_counter() - load_started
+    backends = _backend_metadata(model)
     layers = tuple(model.model.language_model.layers)
     if not 0 <= args.layer < len(layers):
         raise ValueError(f"layer {args.layer} is outside the {len(layers)}-layer model")
@@ -221,28 +295,56 @@ def main() -> None:
     exact_quant_objective = None
     records = []
     accumulator_device = None if args.accumulator_device == "auto" else torch.device(args.accumulator_device)
-    for arm in args.arms:
+    for arm, repeat in ((arm, repeat) for arm in args.arms for repeat in range(args.repeats)):
         strategy, projection_rank = _strategy(arm)
         gc.collect()
-        torch.cuda.empty_cache()
+        if repeat == 0:
+            torch.cuda.empty_cache()
+        capture_kwargs = {
+            "device": device, "seed": args.seed, "minimum_sequences": args.rows,
+            "first_decoder_layer": layers[0], "checkpoint_modules": checkpoint_modules,
+            "accumulator_device": accumulator_device, "gram_strategy": strategy,
+            "gram_projection_rank": projection_rank,
+        }
+        if repeat == 0 and reference is not None:
+            expected = reference.capture_yaqa_sketch_b(model, batches, modules, **capture_kwargs)
+            actual = capture_yaqa_sketch_b(model, batches, modules, **capture_kwargs)
+            checked = 0
+            for side in (0, 1):
+                for name in modules:
+                    left, right = expected[side][name], actual[side][name]
+                    fields = ("source", "diagonal", "source_diagonal") if strategy == "streaming_projected" else ()
+                    pairs = [(getattr(left, field), getattr(right, field)) for field in fields] or [(left, right)]
+                    if not all(torch.equal(left_tensor, right_tensor) for left_tensor, right_tensor in pairs):
+                        raise AssertionError(f"collector factor mismatch: {arm}, side={side}, module={name}")
+                    if fields and (left.normalizer != right.normalizer or left.seed != right.seed):
+                        raise AssertionError(f"collector metadata mismatch: {arm}, side={side}, module={name}")
+                    checked += 1
+            parity_records.append({"arm": arm, "factors_checked": checked, "bitwise_equal": True})
+            del expected, actual, left, right, pairs
+            print(json.dumps({"parity": parity_records[-1]}), flush=True)
+        if repeat == 0:
+            for _ in range(args.warmup):
+                warm_inputs, warm_outputs, _ = capture_yaqa_sketch_b(model, batches, modules, **capture_kwargs)
+                del warm_inputs, warm_outputs
+                gc.collect()
+            torch.cuda.synchronize()
+        recheck_gpu_exclusivity(preflight)
+        gc.collect()
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
-        started = time.perf_counter()
-        input_factors, output_factors, stats = capture_yaqa_sketch_b(
-            model,
-            batches,
-            modules,
-            device=device,
-            seed=args.seed,
-            minimum_sequences=args.rows,
-            first_decoder_layer=layers[0],
-            checkpoint_modules=checkpoint_modules,
-            accumulator_device=accumulator_device,
-            gram_strategy=strategy,
-            gram_projection_rank=projection_rank,
+        profile = (
+            torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA])
+            if args.trace_output is not None else nullcontext()
         )
-        torch.cuda.synchronize()
-        seconds = time.perf_counter() - started
+        with profile:
+            started = time.perf_counter()
+            input_factors, output_factors, stats = capture_yaqa_sketch_b(model, batches, modules, **capture_kwargs)
+            torch.cuda.synchronize()
+            seconds = time.perf_counter() - started
+        if args.trace_output is not None:
+            args.trace_output.parent.mkdir(parents=True, exist_ok=True)
+            profile.export_chrome_trace(str(args.trace_output))
         factors = {}
         if strategy == "batched" or exact_factors is not None:
             factors = {
@@ -323,6 +425,7 @@ def main() -> None:
             }
         record = {
             "arm": arm,
+            "repeat": repeat,
             "strategy": strategy,
             "projection_rank": projection_rank,
             "seconds": seconds,
@@ -341,13 +444,29 @@ def main() -> None:
             "quant_metrics": quant_metrics,
             "capture": stats,
         }
+        del input_factors, output_factors, factors
         records.append(record)
         print(json.dumps(record, sort_keys=True), flush=True)
-        del input_factors, output_factors, factors
 
     payload = {
         "schema": "qvq.yaqa.qwen38.benchmark.v1",
         "revision": _git_revision(),
+        "collector_source_sha256": hashlib.sha256(
+            Path(inspect.getfile(capture_yaqa_sketch_b)).read_bytes()
+        ).hexdigest(),
+        "projection_kernel_source_sha256": hashlib.sha256(
+            (REPO_ROOT / "gptqmodel/quantization/qvq_yaqa_cuda.py").read_bytes()
+        ).hexdigest(),
+        "warmup": args.warmup,
+        "repeats": args.repeats,
+        "cpu_threads": torch.get_num_threads(),
+        "cpu_interop_threads": torch.get_num_interop_threads(),
+        "cpu_inventory": cpu_inventory,
+        "benchmark_source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "factor_parity": parity_records,
+        "reference_source_sha256": (
+            None if args.verify_source is None else hashlib.sha256(args.verify_source.read_bytes()).hexdigest()
+        ),
         "model": args.model_label,
         "model_path": args.model,
         "dataset": args.dataset,
@@ -364,11 +483,23 @@ def main() -> None:
         "activation_checkpointing": not args.no_activation_checkpointing,
         "accumulator_device": args.accumulator_device,
         "dtype": "bfloat16",
+        "backends": backends,
+        "timing_scope": "profiled diagnostic" if args.trace_output is not None else "warmed collection",
         "load_seconds": load_seconds,
         "hardware": _hardware(torch, preflight),
         "idle_preflight": preflight.as_dict(),
         "results": records,
     }
+    print("+----------------------+---------+------------+------------+------------+", flush=True)
+    print("| Arm                  | Repeats | Median (s) | Min (s)    | Max (s)    |", flush=True)
+    print("+----------------------+---------+------------+------------+------------+", flush=True)
+    for arm in args.arms:
+        times = [record["seconds"] for record in records if record["arm"] == arm]
+        print(
+            f"| {arm:<20} | {len(times):7d} | {statistics.median(times):10.6f} | "
+            f"{min(times):10.6f} | {max(times):10.6f} |", flush=True,
+        )
+    print("+----------------------+---------+------------+------------+------------+", flush=True)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps({"output": str(args.output), "results": records}, sort_keys=True), flush=True)

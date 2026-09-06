@@ -1,0 +1,14 @@
+oneDNN 3.12.0
+onednn_verbose,v1,info,oneDNN v3.12.0 (commit 80afa71049cd69a3df32adcccb623b12cd7baa22)
+onednn_verbose,v1,info,cpu,runtime:OpenMP,nthr:16
+onednn_verbose,v1,info,cpu,isa:Intel AVX10.1 and Intel AMX with bfloat16 and 8-bit integer support
+onednn_verbose,v1,info,gpu,runtime:none
+onednn_verbose,v1,info,graph,backend,0:dnnl_backend
+onednn_verbose,v1,primitive,info,template:operation,engine,primitive,implementation,prop_kind,memory_descriptors,attributes,auxiliary,problem_desc,exec_time
+onednn_verbose,v1,graph,info,template:operation,engine,partition_id,partition_kind,op_names,data_formats,logical_tensors,fpmath_mode,implementation,backend,exec_time
+onednn_verbose,v1,primitive,exec,cpu,matmul,brg_matmul:avx10_1_512_amx,undef,src:bf16::blocked:ab::f0 wei:bf16::blocked:ab::f0 dst:f32::blocked:ab::f0,,,256x512:512x256,1.198
+BF16: verified 65536 outputs; implementation=brg_matmul:avx10_1_512_amx
+onednn_verbose,v1,primitive,exec,cpu,matmul,brg_matmul:avx10_1_512_amx,undef,src:s8::blocked:ab::f0 wei:s8::blocked:ab::f0 dst:f32::blocked:ab::f0,,,256x512:512x256,0.139893
+INT8: verified 65536 outputs; implementation=brg_matmul:avx10_1_512_amx
+onednn_verbose,v1,primitive,exec,cpu,matmul,brg_matmul:avx512_core,undef,src:f32::blocked:ab::f0 wei:f32::blocked:ab::f0 dst:f32::blocked:ab::f0,,,256x512:512x256,0.643066
+FP32: verified 65536 outputs; implementation=brg_matmul:avx512_core

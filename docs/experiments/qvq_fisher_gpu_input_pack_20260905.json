@@ -1,0 +1,1389 @@
+{
+  "status": "Exact GPU transpose/cast and full-factor parity pass; hybrid performance rejected",
+  "scope": "B16/16 rows, T64/R256, Qwen3.5-27B 400 targets, row start96, seed20260909",
+  "audit": {
+    "baseline": {
+      "summary": {
+        "kernels": 1,
+        "executed_warp_instructions": 1601536.0,
+        "predicated_thread_instructions": 51249152.0,
+        "max_registers_per_thread": 32.0,
+        "local_spill_bytes": 0.0,
+        "shared_spill_bytes": 0.0,
+        "shared_excessive_wavefronts": 0.0,
+        "opcodes": {
+          "IMAD": 348160.0,
+          "F2FP": 278528.0,
+          "LDC": 208896.0,
+          "S2R": 139264.0,
+          "ULDC": 139264.0,
+          "LDG": 139264.0,
+          "IADD3": 69632.0,
+          "ISETP": 69632.0,
+          "BRA": 69632.0,
+          "STG": 69632.0,
+          "EXIT": 69632.0,
+          "VIADD": 0.0,
+          "HFMA2": 0.0,
+          "MOV": 0.0,
+          "BSSY": 0.0,
+          "BREAK": 0.0,
+          "BSYNC": 0.0,
+          "WARPSYNC": 0.0,
+          "NOP": 0.0
+        }
+      },
+      "kernels": [
+        {
+          "Kernel Name": "void vectorized_elementwise_kernel<8, bfloat16_copy_kernel_cuda(TensorIteratorBase &)::[lambda(float) (instance 1)], array<char *, 2>, 0>(int, T2, T3)",
+          "gpu__time_duration.sum": "25.056000",
+          "launch__registers_per_thread": "32",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "80.961627",
+          "smsp__warps_eligible.avg.per_cycle_active": "0.085106"
+        }
+      ]
+    },
+    "transposed": {
+      "summary": {
+        "kernels": 1,
+        "executed_warp_instructions": 30916608.0,
+        "predicated_thread_instructions": 918028288.0,
+        "max_registers_per_thread": 18.0,
+        "local_spill_bytes": 0.0,
+        "shared_spill_bytes": 0.0,
+        "shared_excessive_wavefronts": 0.0,
+        "opcodes": {
+          "IMAD": 7102464.0,
+          "ULDC": 6406144.0,
+          "IADD3": 4317184.0,
+          "ISETP": 2785280.0,
+          "BRA": 2646016.0,
+          "SHF": 1671168.0,
+          "MOV": 1114112.0,
+          "LDC": 696320.0,
+          "HFMA2": 696320.0,
+          "CS2R": 557056.0,
+          "LDG": 557056.0,
+          "F2FP": 557056.0,
+          "STG": 557056.0,
+          "S2R": 278528.0,
+          "BSSY": 278528.0,
+          "BSYNC": 278528.0,
+          "EXIT": 278528.0,
+          "LEA": 139264.0,
+          "NOP": 0.0
+        }
+      },
+      "kernels": [
+        {
+          "Kernel Name": "void elementwise_kernel<128, 4, void gpu_kernel_impl_nocast<bfloat16_copy_kernel_cuda(TensorIteratorBase &)::[lambda(float) (instance 1)]>(TensorIteratorBase &, const T1 &)::[lambda(int) (instance 1)]>(int, T3)",
+          "gpu__time_duration.sum": "83.008000",
+          "launch__registers_per_thread": "18",
+          "sm__warps_active.avg.pct_of_peak_sustained_active": "90.343924",
+          "smsp__warps_eligible.avg.per_cycle_active": "0.638760"
+        }
+      ]
+    }
+  },
+  "post_profile_copy_parity_and_cuda_event_timing": [
+    {
+      "sample": "sample-01.pt",
+      "side": "activation",
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "stride": [
+        1114112,
+        17408,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.027801600098609925,
+      "transposed_ms": 0.08345919847488403
+    },
+    {
+      "sample": "sample-01.pt",
+      "side": "gradient",
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "stride": [
+        327680,
+        5120,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.0062304001301527025,
+      "transposed_ms": 0.026675200462341307
+    },
+    {
+      "sample": "sample-02.pt",
+      "side": "activation",
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "stride": [
+        327680,
+        5120,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.005876800045371056,
+      "transposed_ms": 0.02675360143184662
+    },
+    {
+      "sample": "sample-02.pt",
+      "side": "gradient",
+      "shape": [
+        16,
+        64,
+        17408
+      ],
+      "stride": [
+        1114112,
+        17408,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.02773120105266571,
+      "transposed_ms": 0.0834384024143219
+    },
+    {
+      "sample": "sample-03.pt",
+      "side": "activation",
+      "shape": [
+        16,
+        64,
+        6144
+      ],
+      "stride": [
+        393216,
+        6144,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.0074432000517845156,
+      "transposed_ms": 0.03205600082874298
+    },
+    {
+      "sample": "sample-03.pt",
+      "side": "gradient",
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "stride": [
+        327680,
+        5120,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.0061680000275373455,
+      "transposed_ms": 0.02632000148296356
+    },
+    {
+      "sample": "sample-04.pt",
+      "side": "activation",
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "stride": [
+        327680,
+        5120,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.006246399879455566,
+      "transposed_ms": 0.026417601108551025
+    },
+    {
+      "sample": "sample-04.pt",
+      "side": "gradient",
+      "shape": [
+        16,
+        64,
+        1024
+      ],
+      "stride": [
+        65536,
+        1024,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.006759999692440033,
+      "transposed_ms": 0.007147199660539627
+    },
+    {
+      "sample": "sample-05.pt",
+      "side": "activation",
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "stride": [
+        327680,
+        5120,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.007422400265932083,
+      "transposed_ms": 0.02664479911327362
+    },
+    {
+      "sample": "sample-05.pt",
+      "side": "gradient",
+      "shape": [
+        16,
+        64,
+        12288
+      ],
+      "stride": [
+        786432,
+        12288,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.01977760046720505,
+      "transposed_ms": 0.05925120115280151
+    },
+    {
+      "sample": "sample-06.pt",
+      "side": "activation",
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "stride": [
+        327680,
+        5120,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.005903999879956245,
+      "transposed_ms": 0.026395198702812196
+    },
+    {
+      "sample": "sample-06.pt",
+      "side": "gradient",
+      "shape": [
+        16,
+        64,
+        6144
+      ],
+      "stride": [
+        393216,
+        6144,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.007240000367164612,
+      "transposed_ms": 0.03186880052089691
+    },
+    {
+      "sample": "sample-07.pt",
+      "side": "activation",
+      "shape": [
+        16,
+        64,
+        5120
+      ],
+      "stride": [
+        327680,
+        5120,
+        1
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.006035200133919716,
+      "transposed_ms": 0.026745599508285523
+    },
+    {
+      "sample": "sample-07.pt",
+      "side": "gradient",
+      "shape": [
+        16,
+        64,
+        10240
+      ],
+      "stride": [
+        655360,
+        1,
+        64
+      ],
+      "bitwise_equal": true,
+      "contiguous": true,
+      "baseline_ms": 0.016891199350357055,
+      "transposed_ms": 0.016841599345207216
+    }
+  ],
+  "collector": {
+    "accumulator_device": "cuda",
+    "activation_checkpointing": false,
+    "all_targets": true,
+    "backends": {
+      "attention": "eager",
+      "convolution": [
+        "gptqmodel.hf_kernels.causal_conv1d.causal_conv1d_interface.causal_conv1d_fn"
+      ],
+      "delta_rule": [
+        "fla.ops.gated_delta_rule.chunk.chunk_gated_delta_rule"
+      ],
+      "gated_normalization": [
+        "fla.modules.fused_norm_gate.FusedRMSNormGated"
+      ],
+      "packages": {
+        "causal-conv1d": null,
+        "flash-linear-attention": "0.5.2",
+        "transformers": "5.5.4"
+      }
+    },
+    "batch_size": 16,
+    "benchmark_source_sha256": "8bee7ce055043af49d47fefd17c9883b9734865a2ecbf043d4ab90aefe6ad241",
+    "collector_source_sha256": "b023ac32c711bec203581a1a97f95b2887c70f03ec210c0eea7f27d14882e5ef",
+    "cpu_interop_threads": 1,
+    "cpu_inventory": {
+      "affinity": [
+        0,
+        1,
+        5,
+        7,
+        8,
+        14,
+        17,
+        19,
+        21,
+        22,
+        24,
+        25,
+        26,
+        27,
+        28,
+        31,
+        33,
+        36,
+        40,
+        41,
+        42,
+        43,
+        46,
+        47,
+        49,
+        51,
+        52,
+        53,
+        58,
+        59,
+        61,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        72,
+        74,
+        80,
+        83,
+        84,
+        86,
+        87,
+        88,
+        92,
+        93,
+        94,
+        95,
+        96,
+        99,
+        100,
+        103,
+        106,
+        107,
+        108,
+        110,
+        112,
+        113,
+        115,
+        116,
+        117,
+        124,
+        126,
+        127,
+        129,
+        131,
+        132,
+        136,
+        137,
+        138,
+        140,
+        144,
+        145,
+        146,
+        148,
+        150,
+        151,
+        152,
+        154,
+        155,
+        159,
+        160,
+        164,
+        165,
+        166,
+        169,
+        171,
+        173,
+        176,
+        178,
+        180,
+        182,
+        185,
+        188
+      ],
+      "allowed_logical_cpus": 96,
+      "cgroup": {
+        "cpu.max": "max 100000",
+        "cpuset.cpus.effective": "0-1,5,7-8,14,17,19,21-22,24-28,31,33,36,40-43,46-47,49,51-53,58-59,61,64-70,72,74,80,83-84,86-88,92-96,99-100,103,106-108,110,112-113,115-117,124,126-127,129,131-132,136-138,140,144-146,148,150-152,154-155,159-160,164-166,169,171,173,176,178,180,182,185,188",
+        "cpuset.mems.effective": "0-3",
+        "memory.max": "128000000000"
+      },
+      "numa_allowed_cpus": {
+        "node0": [
+          0,
+          1,
+          5,
+          7,
+          8,
+          14,
+          17,
+          19,
+          21,
+          22,
+          96,
+          99,
+          100,
+          103,
+          106,
+          107,
+          108,
+          110,
+          112,
+          113,
+          115,
+          116,
+          117
+        ],
+        "node1": [
+          24,
+          25,
+          26,
+          27,
+          28,
+          31,
+          33,
+          36,
+          40,
+          41,
+          42,
+          43,
+          46,
+          47,
+          124,
+          126,
+          127,
+          129,
+          131,
+          132,
+          136,
+          137,
+          138,
+          140
+        ],
+        "node2": [
+          49,
+          51,
+          52,
+          53,
+          58,
+          59,
+          61,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          144,
+          145,
+          146,
+          148,
+          150,
+          151,
+          152,
+          154,
+          155,
+          159,
+          160,
+          164,
+          165,
+          166
+        ],
+        "node3": [
+          72,
+          74,
+          80,
+          83,
+          84,
+          86,
+          87,
+          88,
+          92,
+          93,
+          94,
+          95,
+          169,
+          171,
+          173,
+          176,
+          178,
+          180,
+          182,
+          185,
+          188
+        ]
+      },
+      "physical_core_groups": [
+        {
+          "allowed_cpus": [
+            0,
+            96
+          ],
+          "core": 0,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            1
+          ],
+          "core": 1,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            99
+          ],
+          "core": 3,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            100
+          ],
+          "core": 4,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            5
+          ],
+          "core": 5,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            7,
+            103
+          ],
+          "core": 7,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            8
+          ],
+          "core": 8,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            106
+          ],
+          "core": 10,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            107
+          ],
+          "core": 11,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            108
+          ],
+          "core": 12,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            14,
+            110
+          ],
+          "core": 14,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            112
+          ],
+          "core": 16,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            17,
+            113
+          ],
+          "core": 17,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            19,
+            115
+          ],
+          "core": 19,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            116
+          ],
+          "core": 20,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            21,
+            117
+          ],
+          "core": 21,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            22
+          ],
+          "core": 22,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            24
+          ],
+          "core": 24,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            25
+          ],
+          "core": 25,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            26
+          ],
+          "core": 26,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            27
+          ],
+          "core": 27,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            28,
+            124
+          ],
+          "core": 28,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            126
+          ],
+          "core": 30,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            31,
+            127
+          ],
+          "core": 31,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            33,
+            129
+          ],
+          "core": 33,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            131
+          ],
+          "core": 35,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            36,
+            132
+          ],
+          "core": 36,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            40,
+            136
+          ],
+          "core": 40,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            41,
+            137
+          ],
+          "core": 41,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            42,
+            138
+          ],
+          "core": 42,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            43
+          ],
+          "core": 43,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            140
+          ],
+          "core": 44,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            46
+          ],
+          "core": 46,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            47
+          ],
+          "core": 47,
+          "socket": 0
+        },
+        {
+          "allowed_cpus": [
+            144
+          ],
+          "core": 0,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            49,
+            145
+          ],
+          "core": 1,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            146
+          ],
+          "core": 2,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            51
+          ],
+          "core": 3,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            52,
+            148
+          ],
+          "core": 4,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            53
+          ],
+          "core": 5,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            150
+          ],
+          "core": 6,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            151
+          ],
+          "core": 7,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            152
+          ],
+          "core": 8,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            58,
+            154
+          ],
+          "core": 10,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            59,
+            155
+          ],
+          "core": 11,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            61
+          ],
+          "core": 13,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            159
+          ],
+          "core": 15,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            64,
+            160
+          ],
+          "core": 16,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            65
+          ],
+          "core": 17,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            66
+          ],
+          "core": 18,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            67
+          ],
+          "core": 19,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            68,
+            164
+          ],
+          "core": 20,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            69,
+            165
+          ],
+          "core": 21,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            70,
+            166
+          ],
+          "core": 22,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            72
+          ],
+          "core": 24,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            169
+          ],
+          "core": 25,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            74
+          ],
+          "core": 26,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            171
+          ],
+          "core": 27,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            173
+          ],
+          "core": 29,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            80,
+            176
+          ],
+          "core": 32,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            178
+          ],
+          "core": 34,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            83
+          ],
+          "core": 35,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            84,
+            180
+          ],
+          "core": 36,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            86,
+            182
+          ],
+          "core": 38,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            87
+          ],
+          "core": 39,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            88
+          ],
+          "core": 40,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            185
+          ],
+          "core": 41,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            92,
+            188
+          ],
+          "core": 44,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            93
+          ],
+          "core": 45,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            94
+          ],
+          "core": 46,
+          "socket": 1
+        },
+        {
+          "allowed_cpus": [
+            95
+          ],
+          "core": 47,
+          "socket": 1
+        }
+      ],
+      "represented_physical_cores": 71,
+      "thread_environment": {
+        "MKL_NUM_THREADS": "16",
+        "OMP_NUM_THREADS": "16",
+        "OMP_PLACES": null,
+        "OMP_PROC_BIND": null,
+        "OPENBLAS_NUM_THREADS": "16"
+      }
+    },
+    "cpu_threads": 16,
+    "dataset": "/monster/data/model/dataset/nm-calibration/llm.parquet",
+    "dtype": "bfloat16",
+    "factor_parity": [
+      {
+        "arm": "streaming_256",
+        "bitwise_equal": true,
+        "factors_checked": 800
+      }
+    ],
+    "hardware": {
+      "compute_capability": [
+        9,
+        0
+      ],
+      "cuda": "13.0",
+      "name": "NVIDIA H200",
+      "pci_bus_id": "00000000:1C:00.0",
+      "physical_id": 0,
+      "sm_count": 132,
+      "torch": "2.15.0.dev20260901+cu130",
+      "total_memory_bytes": 150101688320,
+      "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea"
+    },
+    "idle_preflight": {
+      "config": {
+        "max_driver_memory_mib": 64,
+        "sample_count": 3,
+        "sample_interval_seconds": 1.0
+      },
+      "name": "NVIDIA H200",
+      "pci_bus_id": "00000000:1C:00.0",
+      "physical_id": 0,
+      "samples": [
+        {
+          "compute_processes": [],
+          "memory_used_mib": 0,
+          "name": "NVIDIA H200",
+          "pci_bus_id": "00000000:1C:00.0",
+          "physical_id": 0,
+          "utilization_pct": 0,
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea"
+        },
+        {
+          "compute_processes": [],
+          "memory_used_mib": 0,
+          "name": "NVIDIA H200",
+          "pci_bus_id": "00000000:1C:00.0",
+          "physical_id": 0,
+          "utilization_pct": 0,
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea"
+        },
+        {
+          "compute_processes": [],
+          "memory_used_mib": 0,
+          "name": "NVIDIA H200",
+          "pci_bus_id": "00000000:1C:00.0",
+          "physical_id": 0,
+          "utilization_pct": 0,
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea"
+        }
+      ],
+      "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea"
+    },
+    "layer": 0,
+    "layer_count": 0,
+    "load_seconds": 8.335136242996668,
+    "model": "Qwen/Qwen3.8-27B@1d4bf0f2 (matched local Qwen3.5-27B geometry proxy)",
+    "model_path": "/monster/data/model/Qwen3.5-27B",
+    "projection_kernel_source_sha256": "facb531fecbf67724b004ac4d67bb07c81f9251be10a20e440ad728063c0d312",
+    "reference_source_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+    "repeats": 3,
+    "results": [
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 1913.36572265625,
+          "capture_wall_seconds": 1.9438282609989983,
+          "checkpointed_modules": 0,
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 998.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.00020431000302778557,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 1.3067322130009416,
+            "forward": 0.09048718700069003,
+            "loss": 0.032351613001083024,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 998,
+          "seed": 20260909,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 998
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 79820122624,
+        "peak_reserved_bytes": 81493229568,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 0,
+        "seconds": 1.946860228003061,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 512.6202619197123
+      },
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 1909.055908203125,
+          "capture_wall_seconds": 1.9393024710007012,
+          "checkpointed_modules": 0,
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 998.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.00020342000061646104,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 1.3002646950044436,
+            "forward": 0.08986967400414869,
+            "loss": 0.03388162099872716,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 998,
+          "seed": 20260909,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 998
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 79820122624,
+        "peak_reserved_bytes": 81493229568,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 1,
+        "seconds": 1.9422737900022184,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 513.830750915328
+      },
+      {
+        "arm": "streaming_256",
+        "capture": {
+          "accumulator_bytes": 7016939520,
+          "accumulator_device": "cuda",
+          "activation_checkpointing": false,
+          "activation_quantization_error": null,
+          "capture_cuda_ms": 1935.0638427734375,
+          "capture_wall_seconds": 1.9656138280042796,
+          "checkpointed_modules": 0,
+          "dense_factor_storage_bytes": 321518567424,
+          "effective_weighted_sequences": 16.0,
+          "effective_weighted_tokens": 998.0,
+          "factor_approximate": true,
+          "factor_compression_ratio": 45.82034183244606,
+          "factor_dtype": "float32",
+          "factor_storage_bytes": 7016939520,
+          "factor_transfer_overlap": true,
+          "final_host_transfer_seconds": 0.00021219099289737642,
+          "full_model_backward": true,
+          "gram_exact_diagonal": true,
+          "gram_projection_distribution": "gaussian",
+          "gram_projection_rank": 256,
+          "gram_strategy": "streaming_projected",
+          "independent_sequences": 16,
+          "input_factor_elements": 748191744,
+          "method": "YAQA-v3 Sketch B streaming randomized Fisher",
+          "minimum_sequences": 16,
+          "monte_carlo_samples_per_output": 1,
+          "mps_cleanup_count": 0,
+          "mps_cleanup_interval": 8,
+          "output_factor_elements": 1006043136,
+          "packed_symmetric_accumulators": false,
+          "phase_wall_seconds": {
+            "backward_and_sketch": 1.32999779900274,
+            "forward": 0.09005561399681028,
+            "loss": 0.03386064799997257,
+            "mps_empty_cache": 0.0,
+            "mps_synchronize": 0.0,
+            "python_gc": 0.0
+          },
+          "raw_valid_tokens": 998,
+          "seed": 20260909,
+          "sequence_loss_reduction": "per_sequence_token_sum",
+          "tf32": false,
+          "unique_sequences": 16,
+          "valid_output_samples": 998
+        },
+        "factor_relative_l2": null,
+        "maximum_factor_relative_l2": null,
+        "mean_factor_relative_l2": null,
+        "peak_allocated_bytes": 79820122624,
+        "peak_reserved_bytes": 81493229568,
+        "projection_rank": 256,
+        "quant_metrics": null,
+        "repeat": 2,
+        "seconds": 1.9685363259995938,
+        "speedup_vs_exact": null,
+        "strategy": "streaming_projected",
+        "tokens_per_second": 506.9756584213554
+      }
+    ],
+    "revision": "2e08372dd34ee4cc2a8ef6f03ad19a00d73694a4",
+    "roles": [
+      "gate_proj"
+    ],
+    "row_start": 96,
+    "rows": 16,
+    "schema": "qvq.yaqa.qwen38.benchmark.v1",
+    "sequence_length": 64,
+    "target_count": 400,
+    "timing_scope": "warmed collection",
+    "valid_tokens": 998,
+    "warmup": 2
+  },
+  "math_and_data_review": "Only BF16-representable masked FP32 values enter the gated path. GPU copy performs transpose plus cast in one kernel; CPU conversion then widens contiguous BF16 data without arithmetic. Real captured copy comparisons pass all14 input tensors. Full model comparison passes all800 factors. Generic transpose/cast adds indexing and scalar memory instructions: executed warp instructions1601536to30916608, registers32to18, no spills or shared conflicts. GPU conversion cost rises, and CPU packing remains expensive. Not promoted.",
+  "artifacts": "/root/qvq-sidecar-artifacts/20260905-reuse",
+  "sources": {
+    "/tmp/qvq-sidecar-prototype-gpu-pack.py": "b023ac32c711bec203581a1a97f95b2887c70f03ec210c0eea7f27d14882e5ef",
+    "/tmp/qvq-cpu-linear-pack.cpp": "e738980c838d376739099e0c17ea57ebf0dae3c9d5cba41fc63eef96743c2cd8",
+    "/tmp/qvq-gpu-pack-probe.py": "30b4e8f24be7e7c3a5752ae8f1f4b2c646a01f3917fa63446746efddebe60b30"
+  }
+}

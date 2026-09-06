@@ -1,0 +1,61 @@
+{
+  "status": "No useful hybrid gain; factor parity passes",
+  "scope": "Qwen3.5-27B 400 targets, B4/16 rows (four batches), T64/R256, row start64, seed20260908; two warmups and three repeats; noGIL; active OpenMP waits; node0 pinned memory; all transfers and final drains included",
+  "runs": [
+    {
+      "name": "b4-control",
+      "seconds": [
+        2.3774690690042917,
+        2.3795567370034405,
+        2.380650096005411
+      ],
+      "median_seconds": 2.3795567370034405,
+      "factor_parity": [],
+      "collector_sha256": "b5c2e1093efd1880c31e884a89dc06783f49e57d1b028e3d5acde1ea5119e860",
+      "raw_report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-b4-control.json"
+    },
+    {
+      "name": "b4-hybrid2",
+      "seconds": [
+        2.7279557829970145,
+        2.3530025870059035,
+        2.3611165789989172
+      ],
+      "median_seconds": 2.3611165789989172,
+      "factor_parity": [
+        {
+          "arm": "streaming_256",
+          "bitwise_equal": true,
+          "factors_checked": 800
+        }
+      ],
+      "collector_sha256": "8669a49fbbfd0d00ab3de3ba649539356aa1b99912304b26f4cbe467b55b1a2b",
+      "raw_report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-b4-hybrid2.json"
+    },
+    {
+      "name": "b4-direct-bounded4",
+      "seconds": [
+        2.369086459002574,
+        2.371918114993605,
+        2.4382024709993857
+      ],
+      "median_seconds": 2.371918114993605,
+      "factor_parity": [
+        {
+          "arm": "streaming_256",
+          "bitwise_equal": true,
+          "factors_checked": 800
+        }
+      ],
+      "collector_sha256": "066946cec36b861ced73ab7ca97d478703120e966d811d400495bbd9e2011be3",
+      "raw_report": "/root/qvq-sidecar-artifacts/20260905-reuse/qvq-sidecar-passive-b4-direct-bounded4.json"
+    }
+  ],
+  "classification": "0.3 to0.8percent median differences are not treated as a performance win from these separately run samples. Both hybrids are far short of1.5x.",
+  "sources": {
+    "/tmp/qvq-sidecar-prototype-reuse.py": "8669a49fbbfd0d00ab3de3ba649539356aa1b99912304b26f4cbe467b55b1a2b",
+    "/tmp/qvq-sidecar-prototype-direct-shared-bounded.py": "066946cec36b861ced73ab7ca97d478703120e966d811d400495bbd9e2011be3",
+    "/tmp/qvq-sidecar-b4-final-driver.py": "2ca41d20426f9b6b01a00b8dcb87abaaf3db5acca14989828adc330d5673e70f"
+  },
+  "artifact_directory": "/root/qvq-sidecar-artifacts/20260905-reuse"
+}
