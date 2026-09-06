@@ -24,6 +24,24 @@ def main():
         nargs="+",
         default=["model.layers.0.self_attn.q_proj", "model.layers.0.mlp.gate_proj"],
     )
+    parser.add_argument(
+        "--rows-per-document",
+        type=int,
+        default=64,
+        help="bounded activation rows retained for each module/document",
+    )
+    parser.add_argument(
+        "--max-capture-bytes",
+        type=int,
+        default=512 * 1024 * 1024,
+        help="hard CPU activation-capture bound; increase only with memory headroom",
+    )
+    parser.add_argument(
+        "--max-solver-bytes",
+        type=int,
+        default=256 * 1024 * 1024,
+        help="per-module bounded fitting workspace",
+    )
     args = parser.parse_args()
     import hashlib
     import json
@@ -79,15 +97,28 @@ def main():
                 {"input_ids": torch.tensor([ids], device="cuda")},
             )
         )
-    Rank8Capture(names, tuple(docs[:12]), tuple(docs[12:]))
     print("Capturing dense inputs", flush=True)
     calibration = capture_rank8_calibration(
         teacher,
-        Rank8Capture(names, tuple(docs[:8]), tuple(docs[8:12]), rows_per_document=64),
+        Rank8Capture(
+            names,
+            tuple(docs[:8]),
+            tuple(docs[8:12]),
+            rows_per_document=args.rows_per_document,
+            max_bytes=args.max_capture_bytes,
+            max_solver_bytes=args.max_solver_bytes,
+        ),
     )
     audit = capture_rank8_calibration(
         teacher,
-        Rank8Capture(names, tuple(docs[12:14]), tuple(docs[14:]), rows_per_document=64),
+        Rank8Capture(
+            names,
+            tuple(docs[12:14]),
+            tuple(docs[14:]),
+            rows_per_document=args.rows_per_document,
+            max_bytes=args.max_capture_bytes,
+            max_solver_bytes=args.max_solver_bytes,
+        ),
     )
     for name in names:
         torch.save(
@@ -106,7 +137,10 @@ def main():
     with open(source, "rb") as handle:
         source_hash = hashlib.file_digest(handle, "sha256").hexdigest()
     report = {
-        "scope": "Real first-layer module fitting with separate calibration selection and audit documents; not full-model evaluation.",
+        "scope": (
+            "Real P32 module fitting for the caller-selected module set with "
+            "separate calibration, selection, and audit documents; not full-model evaluation."
+        ),
         "teacher": teacher_path,
         "checkpoint": checkpoint,
         "source": source,
@@ -117,6 +151,11 @@ def main():
         "audit_document_ids": [d.document_id for d in docs[12:]],
         "train_document_ids": [d.document_id for d in docs[:8]],
         "selection_document_ids": [d.document_id for d in docs[8:12]],
+        "capture_contract": {
+            "rows_per_document": args.rows_per_document,
+            "max_capture_bytes": args.max_capture_bytes,
+            "max_solver_bytes": args.max_solver_bytes,
+        },
         "modules": {},
     }
     for name in names:
@@ -138,7 +177,10 @@ def main():
             "in_features": layer.in_features, "out_features": layer.out_features, "bits": layer.bits,
         }
         audit_rows = torch.cat((audit[name].train_inputs, audit[name].heldout_inputs))
-        counts = [min(64, d.inputs["input_ids"].shape[1]) for d in docs[12:]]
+        counts = [
+            min(args.rows_per_document, d.inputs["input_ids"].shape[1])
+            for d in docs[12:]
+        ]
         for document, split in zip(docs[12:], audit_rows.split(counts)):
             x = split.cuda()
             with torch.no_grad():

@@ -8,7 +8,7 @@ steps, not a redefinition of that goal. Baseline includes PR #137 at
 | Phase | Required deliverable | Authoritative current state | Still required |
 |---|---|---|---|
 | 0 | Versioned off/on numerical contract, optional per module/graph, FP32 initial accumulation | `qvq_rank8.py`, local off/on and graph tests | Full supported precision/device/TP matrix |
-| 1 | Normal P32 → lossless window → original-teacher output residual → two output-aware fits in one job, document-disjoint validation | Public `quantize(rank8_capture=...)` for materialized or explicitly lazy teachers; bounded document capture and deterministic memory-capped output-range fitting, module finalizer and tiny-Llama integration; atomic SwiGLU defers fitting until the selected serialized triplet and appends factors to that payload; output-aligned modules defer fitting until final SU/SV state; real H200 Llama first-layer Q/gate fit and four-document audit are recorded | Broader real-model/module coverage and full-model fit provenance |
+| 1 | Normal P32 → lossless window → original-teacher output residual → two output-aware fits in one job, document-disjoint validation | Public `quantize(rank8_capture=...)` for materialized or explicitly lazy teachers; bounded document capture and deterministic memory-capped output-range fitting, module finalizer and tiny-Llama integration; atomic SwiGLU defers fitting until the selected serialized triplet and appends factors to that payload; output-aligned modules defer fitting until final SU/SV state; real H200 Llama first-layer Q/gate fit and four-document audit are recorded; a bounded H200 run fits the full 16-layer eligible P32 set (94/94 modules) with the same disjoint document contract | Broader model families and full-model propagated quality evaluation |
 | 2 | One deployment package, first-class A/B, metadata/hashes, byte/BPW reporting | Standard module buffers plus unified exporter/loader; selected-module weighted window/recovered BPW, rank8 delta and actual serialized container bytes; public tiny-Llama save/reload preserves accepted factors, validates hashes and reproduces corrected module output; applied kernel choices persist as versioned advisory metadata bound to P32/factor hashes and are revalidated on load | Real-model checkpoint matrix |
 | 3 | Production/direct × off/on, integrated API, same transformed input, eager/graphs | H200 tests for auto/M16/row-reuse; independent factors and disabled poison checks; prepared native graph replay is now used by the ZML adapter | Explicit nested ZML user-capture replay through the public executable API and full shape/rate/repetition matrix |
 | 4 | Existing Hopper WGMMA + optional rank8; H100/H200 BM/BN/warp-group/stage candidates | Existing WGMMA retained; explicit BM32/64/128, BN64/128, BK256/stages2; H200 off/on sweep | BN32 and additional stage/warp candidates, grouped explicit controls, integrate rank8 into consumer pipeline, both-device sweep |
@@ -151,5 +151,18 @@ selected serialized payload and immutable dense teacher snapshot, then adds
 `rank8_A`, `rank8_B`, and `rank8_metadata` to that same payload before
 staging. This prevents candidate-zero factors from being paired with a
 different selected bank arm. Output-aligned modules consume the final aligned
-SU/SV payload before fitting. The remaining Phase 1 work is broader model and
-module coverage; the real first-layer H200 fit/audit evidence is complete.
+SU/SV payload before fitting. The full eligible-module H200 fit/audit evidence
+is now recorded separately; broader model families and propagated full-model
+quality evaluation remain open.
+
+The full eligible-module H200 run is now recorded in
+`results/p32_rank8_llama_full_model.json`. It fits 94/94 P32 modules across
+all 16 layers using eight train, four selection, and four audit documents,
+with 64 retained rows per document, a 2 GiB capture bound, and a 256 MiB
+per-module solver bound. Mean audit MSE/MAE/tail error falls by 5.71%/3.29%/
+2.71% over the window baseline. The 94 packages contain 349,869,578 tensor
+bytes (3.11 window BPW and 3.20 recovered BPW); serialized package bytes are
+reported separately. W4 output projections and the W4 up projections in
+layers 6 and 8 are outside the P32/A16 contract and were intentionally
+omitted. This is fit provenance, not a full-model perplexity/task or promotion
+scorecard.

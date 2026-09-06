@@ -1,0 +1,228 @@
+{
+  "scope": "Real Llama-3.2-1B-Instruct P32 module fitting with disjoint calibration/selection/audit documents; fit provenance only, not full-model quality or task evaluation.",
+  "teacher": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "checkpoint": "/root/qvq-results/f6-reproduction-h200/checkpoint",
+  "source": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm128.parquet",
+  "source_sha256": "d773835b52f8b5988e53ff778d591ee0f51a1da3ea1aaf2177587f83a98c20ff",
+  "report_sha256": "cbd345bbe9f9708dbbf774716840d04a223c99df4c6f9b32dfaf8f09a81773cd",
+  "artifact_root": "/root/qvq-results/full-model-rank8-h200-v2",
+  "hardware": {
+    "device": "_CudaDeviceProperties(name='NVIDIA H200', major=9, minor=0, total_memory=143148MB, multi_processor_count=132, uuid=0c667065-5c47-38ce-0b0a-d211392ce9ea, pci_bus_id=28, pci_device_id=0, pci_domain_id=0, L2_cache_size=60MB)",
+    "preflight": {
+      "physical_id": 0,
+      "pci_bus_id": "00000000:1C:00.0",
+      "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+      "name": "NVIDIA H200",
+      "config": {
+        "sample_count": 3,
+        "sample_interval_seconds": 1.0,
+        "max_driver_memory_mib": 16
+      },
+      "samples": [
+        {
+          "physical_id": 0,
+          "pci_bus_id": "00000000:1C:00.0",
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+          "name": "NVIDIA H200",
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "compute_processes": []
+        },
+        {
+          "physical_id": 0,
+          "pci_bus_id": "00000000:1C:00.0",
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+          "name": "NVIDIA H200",
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "compute_processes": []
+        },
+        {
+          "physical_id": 0,
+          "pci_bus_id": "00000000:1C:00.0",
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+          "name": "NVIDIA H200",
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "compute_processes": []
+        }
+      ]
+    }
+  },
+  "torch_version": "2.15.0.dev20260901+cu130",
+  "capture_contract": {
+    "rows_per_document": 64,
+    "max_capture_bytes": 2147483648,
+    "max_solver_bytes": 268435456
+  },
+  "documents": {
+    "train": [
+      "02e78cfbdf9742721d589be8ab574666cbcd8bb9d81843ac805c0f7b818102d0",
+      "034fb2a03c6a4864a5774ad8ac7c0b2d95c4f449a4a62893222cb40ea7f3690a",
+      "8d4e3c1a569ef253413a9819136cb79ebc0c3e994594d23fd1e363dcebccb257",
+      "a383282bfa98ef6d6a96ce98989e3725700d1e85ce008edf57830500331ab7fe",
+      "0481b2de3d24015c07db2731ef8317e4872a0f844ee7008e267b86e932593393",
+      "9d4cba91353c525ce0a38d6b47de3d61cfd64500fb42cd7b6316f55651677b74",
+      "f4318c14760867680a50cc01c61322091060ef372a8471cd6b90a307aa8040d5",
+      "b48afdc44a8a176bfa65fc63bbaf5538793a9d2cc98ebd03eb8c65771bdf5818"
+    ],
+    "selection": [
+      "cd5fdecc74f4e4e46d861d9ec59f2652c7e592729d348d2fa934d5135128864d",
+      "ad3d003921eafddb8ef0e4d701c7057fe2998308cbd79da512cdc181e4e533f7",
+      "ccd0ebc00dd6da84501fc2b730ca6723c01c58112aed4ae6bead117cada62782",
+      "e661831dd8ff7d291844605dd478d32c02cbb7031bb240062a459247c09a27a2"
+    ],
+    "audit": [
+      "d1e2af31c628c305d4fd9423a984c971c2b7636bd57b74795109bca606427be9",
+      "054d7c4482d1d12073422ce8f1ff2852c732d9d09ba40785373a46304feb81e7",
+      "509323a798894d4ce6373c2b49ea053f7d5f146f68c8cc1209df6e0be87050f7",
+      "04baddd43f8d318f7fa122ef65133d18b4066ec56adcb96608aafee496657a25"
+    ]
+  },
+  "modules": {
+    "requested": 94,
+    "validated": 94,
+    "rejected": 0,
+    "names": [
+      "model.layers.0.mlp.down_proj",
+      "model.layers.0.mlp.gate_proj",
+      "model.layers.0.mlp.up_proj",
+      "model.layers.0.self_attn.k_proj",
+      "model.layers.0.self_attn.q_proj",
+      "model.layers.0.self_attn.v_proj",
+      "model.layers.1.mlp.down_proj",
+      "model.layers.1.mlp.gate_proj",
+      "model.layers.1.mlp.up_proj",
+      "model.layers.1.self_attn.k_proj",
+      "model.layers.1.self_attn.q_proj",
+      "model.layers.1.self_attn.v_proj",
+      "model.layers.10.mlp.down_proj",
+      "model.layers.10.mlp.gate_proj",
+      "model.layers.10.mlp.up_proj",
+      "model.layers.10.self_attn.k_proj",
+      "model.layers.10.self_attn.q_proj",
+      "model.layers.10.self_attn.v_proj",
+      "model.layers.11.mlp.down_proj",
+      "model.layers.11.mlp.gate_proj",
+      "model.layers.11.mlp.up_proj",
+      "model.layers.11.self_attn.k_proj",
+      "model.layers.11.self_attn.q_proj",
+      "model.layers.11.self_attn.v_proj",
+      "model.layers.12.mlp.down_proj",
+      "model.layers.12.mlp.gate_proj",
+      "model.layers.12.mlp.up_proj",
+      "model.layers.12.self_attn.k_proj",
+      "model.layers.12.self_attn.q_proj",
+      "model.layers.12.self_attn.v_proj",
+      "model.layers.13.mlp.down_proj",
+      "model.layers.13.mlp.gate_proj",
+      "model.layers.13.mlp.up_proj",
+      "model.layers.13.self_attn.k_proj",
+      "model.layers.13.self_attn.q_proj",
+      "model.layers.13.self_attn.v_proj",
+      "model.layers.14.mlp.down_proj",
+      "model.layers.14.mlp.gate_proj",
+      "model.layers.14.mlp.up_proj",
+      "model.layers.14.self_attn.k_proj",
+      "model.layers.14.self_attn.q_proj",
+      "model.layers.14.self_attn.v_proj",
+      "model.layers.15.mlp.down_proj",
+      "model.layers.15.mlp.gate_proj",
+      "model.layers.15.mlp.up_proj",
+      "model.layers.15.self_attn.k_proj",
+      "model.layers.15.self_attn.q_proj",
+      "model.layers.15.self_attn.v_proj",
+      "model.layers.2.mlp.down_proj",
+      "model.layers.2.mlp.gate_proj",
+      "model.layers.2.mlp.up_proj",
+      "model.layers.2.self_attn.k_proj",
+      "model.layers.2.self_attn.q_proj",
+      "model.layers.2.self_attn.v_proj",
+      "model.layers.3.mlp.down_proj",
+      "model.layers.3.mlp.gate_proj",
+      "model.layers.3.mlp.up_proj",
+      "model.layers.3.self_attn.k_proj",
+      "model.layers.3.self_attn.q_proj",
+      "model.layers.3.self_attn.v_proj",
+      "model.layers.4.mlp.down_proj",
+      "model.layers.4.mlp.gate_proj",
+      "model.layers.4.mlp.up_proj",
+      "model.layers.4.self_attn.k_proj",
+      "model.layers.4.self_attn.q_proj",
+      "model.layers.4.self_attn.v_proj",
+      "model.layers.5.mlp.down_proj",
+      "model.layers.5.mlp.gate_proj",
+      "model.layers.5.mlp.up_proj",
+      "model.layers.5.self_attn.k_proj",
+      "model.layers.5.self_attn.q_proj",
+      "model.layers.5.self_attn.v_proj",
+      "model.layers.6.mlp.down_proj",
+      "model.layers.6.mlp.gate_proj",
+      "model.layers.6.self_attn.k_proj",
+      "model.layers.6.self_attn.q_proj",
+      "model.layers.6.self_attn.v_proj",
+      "model.layers.7.mlp.down_proj",
+      "model.layers.7.mlp.gate_proj",
+      "model.layers.7.mlp.up_proj",
+      "model.layers.7.self_attn.k_proj",
+      "model.layers.7.self_attn.q_proj",
+      "model.layers.7.self_attn.v_proj",
+      "model.layers.8.mlp.down_proj",
+      "model.layers.8.mlp.gate_proj",
+      "model.layers.8.self_attn.k_proj",
+      "model.layers.8.self_attn.q_proj",
+      "model.layers.8.self_attn.v_proj",
+      "model.layers.9.mlp.down_proj",
+      "model.layers.9.mlp.gate_proj",
+      "model.layers.9.mlp.up_proj",
+      "model.layers.9.self_attn.k_proj",
+      "model.layers.9.self_attn.q_proj",
+      "model.layers.9.self_attn.v_proj"
+    ]
+  },
+  "quality": {
+    "audit_rows": 376,
+    "mse": {
+      "baseline_mean": 0.004408537546907803,
+      "recovered_mean": 0.004156945222513509,
+      "relative_reduction": 0.057069339144171116
+    },
+    "mae": {
+      "baseline_mean": 0.03934191467120228,
+      "recovered_mean": 0.03804611547748614,
+      "relative_reduction": 0.03293686147574937
+    },
+    "tail": {
+      "baseline_mean": 0.14332650416074905,
+      "recovered_mean": 0.1394403141198005,
+      "relative_reduction": 0.027114245642871126
+    }
+  },
+  "storage": {
+    "weights": 872415232,
+    "window_tensor_bytes": 339377246,
+    "recovery_tensor_bytes": 9895936,
+    "tensor_bytes": 349273182,
+    "serialized_bytes": 349869578,
+    "window_average_bpw": 3.1120707988739014,
+    "recovered_average_bpw": 3.202815991181594,
+    "rank8_delta_bpw": 0.0907451923076923,
+    "serialized_average_bpw": 3.208284909908588,
+    "actual_artifact_bytes": 945724620
+  },
+  "fit": {
+    "total_seconds": 221.73640775680542,
+    "objectives": [
+      "output_l2",
+      "tail_weighted_output_l2"
+    ],
+    "rank": 8,
+    "dtype": "float16",
+    "fit_device": "cpu FP64 bounded solver"
+  },
+  "limitations": [
+    "The checkpoint has W4 output projections and two W4 up projections that are outside the P32/A16 contract and were intentionally omitted.",
+    "This run does not establish propagated perplexity, ARC/GSM8K, latency promotion, H100/H200 comparison, or TP quality.",
+    "Raw per-module packages and the complete report remain outside the repository under artifact_root."
+  ]
+}

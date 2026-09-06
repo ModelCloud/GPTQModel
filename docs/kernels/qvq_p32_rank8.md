@@ -49,6 +49,15 @@ both splits. Balanced selection additionally requires the configured minimum
 relative MSE improvement (default 1%). Quality accepts every validated module.
 No synthetic test establishes real-model quality or promotion eligibility.
 
+The bounded full-model H200 fitting run is recorded in
+`results/p32_rank8_llama_full_model.json`. It covers the 94 eligible P32
+modules across all 16 Llama-3.2-1B layers, with disjoint train/selection/audit
+documents and hard activation/solver memory limits. It reports the actual
+window-plus-rank8 bytes and weighted BPW, while leaving W4 output modules
+outside the contract. The result establishes broad fitting provenance only;
+propagated perplexity, task accuracy, multi-device performance, and promotion
+gates remain separate validations.
+
 The ordinary checkpoint remains canonical planar P32 with optional rank-8
 buffers; old checkpoints require no additional storage. The explicit unified
 window exporter stores window words instead of planar words (never both),
@@ -468,8 +477,10 @@ capture execution only; the fitting audit below supplies separate evidence.
 P32 checkpoint against its original dense teacher. Its initial document policy
 uses eight calibration documents for fitting, four for candidate selection,
 and four additional audit documents; documents are capped at 512 tokens with
-64 evenly spaced activation rows retained each. IDs and token-content overlap
-are checked across the folds. It saves fitted unified packages, captured
+64 evenly spaced activation rows retained each. The CLI exposes the retained-row
+count and hard capture/solver byte bounds for broader module sets while keeping
+the same bounded, disjoint contract. IDs and token-content overlap are checked
+across the folds. It saves fitted unified packages, captured
 activations, hashes, candidate scores, and per-document audit errors. Fitting
 now explicitly scores the deployed final output dtype, including its final
 conversion, rather than requesting an FP32 final output for half activations.
