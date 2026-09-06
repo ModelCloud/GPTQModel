@@ -157,8 +157,11 @@ extern "C" int qvq_p32_window_linear(
     }
     if (c.rank8_enabled) {
       auto hidden = at::mm(transformed.to(at::kFloat), a.to(at::kFloat)).to(at::kHalf);
-      // Preserve the explicit FP16 hidden boundary and FP32 base/add ordering.
-      inner = inner + at::mm(hidden.to(at::kFloat), b.to(at::kFloat));
+      // Preserve the explicit FP16 hidden boundary while combining the FP32
+      // rank expansion with the decoded base in one BLAS epilogue.  ``addmm``
+      // retains FP32 inputs/accumulation and avoids a separate correction
+      // output allocation and add launch on the native prepared-graph path.
+      inner = at::addmm(inner, hidden.to(at::kFloat), b.to(at::kFloat));
     }
     if (c.output_hadamard) {
       inner = hadamard(inner.contiguous(), c10::IValue(), scale_v,
