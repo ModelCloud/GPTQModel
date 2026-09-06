@@ -99,6 +99,17 @@ def test_yaqa_projection_cpu_fallback():
     assert torch.equal(tiled.project(a, p), torch.bmm(a, p))
 
 
+def test_yaqa_projection_rejects_cold_compile_during_graph_capture(monkeypatch):
+    monkeypatch.setattr(tiled.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        tiled.torch.cuda,
+        "is_current_stream_capturing",
+        lambda: True,
+    )
+    with pytest.raises(RuntimeError, match="warmed before CUDA Graph capture"):
+        tiled._require_project_warm(("cuda", 0, "project", 2))
+
+
 def test_yaqa_projection_without_triton():
     import builtins
     import importlib.util

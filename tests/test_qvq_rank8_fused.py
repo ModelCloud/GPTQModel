@@ -8,6 +8,23 @@ import torch
 from gptqmodel.nn_modules.qlinear.qvq import _qvq_hadamard_fused
 
 
+def test_rank8_triton_rejects_cold_compile_during_graph_capture(monkeypatch):
+    from gptqmodel.utils import qvq_rank8_triton
+
+    monkeypatch.setattr(qvq_rank8_triton.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        qvq_rank8_triton.torch.cuda,
+        "is_current_stream_capturing",
+        lambda: True,
+    )
+    key = (
+        "cuda", 0, "output_epilogue", 1, 256, False, True, True,
+        "torch.float32", "butterfly",
+    )
+    with pytest.raises(RuntimeError, match="warmed before CUDA Graph capture"):
+        qvq_rank8_triton._require_rank8_kernel_warm(key)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("n", [256, 2048, 8192])
 @pytest.mark.parametrize("hadamard", [False, True])
@@ -297,6 +314,7 @@ def test_input_fused_policy_admits_composite_width_without_input_hadamard():
         pytest.skip("SM90 required")
     from test_qvq_grouped_runtime import _child
     from test_qvq_window_recovery import _kernel_rank8
+
     from gptqmodel.quantization.qvq_rank8 import (
         P32WindowConfig,
         prepare_rank8,

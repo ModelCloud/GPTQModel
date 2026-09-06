@@ -85,6 +85,22 @@ def test_h100_large_m_down_split_policy_fails_closed_for_other_devices_and_shape
     )
 
 
+def test_hopper_op_rejects_cold_jit_registration_during_graph_capture(monkeypatch):
+    monkeypatch.setattr(qvq_wgmma_cuda.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        qvq_wgmma_cuda.torch.cuda,
+        "is_current_stream_capturing",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        qvq_wgmma_cuda._QVQ_WGMMA_EXTENSION,
+        "_ops_available",
+        lambda: False,
+    )
+    with pytest.raises(RuntimeError, match="loaded before CUDA Graph capture"):
+        qvq_wgmma_cuda._qvq_wgmma_op("p32_window_m16_tma")
+
+
 def test_hopper_group_plan_retains_child_boundaries_and_policy():
     plan = qvq_p32_window_wgmma_group_plan(
         torch.empty((16, 512)),

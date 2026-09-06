@@ -12,10 +12,38 @@ from __future__ import annotations
 
 import math
 import struct
+import threading
 
 import torch
 import triton
 import triton.language as tl
+
+_GRAPH_WARM_KEYS: set[tuple[object, ...]] = set()
+_GRAPH_WARM_KEYS_LOCK = threading.Lock()
+
+
+def _rank8_graph_key(device: torch.device, *parts: object) -> tuple[object, ...]:
+    return (device.type, device.index, *parts)
+
+
+def _require_rank8_kernel_warm(key: tuple[object, ...]) -> None:
+    """Reject a first Triton compilation/launch from inside graph capture."""
+
+    if (
+        torch.cuda.is_available()
+        and torch.cuda.is_current_stream_capturing()
+    ):
+        with _GRAPH_WARM_KEYS_LOCK:
+            warm = key in _GRAPH_WARM_KEYS
+        if not warm:
+            raise RuntimeError(
+                "QVQ rank8 Triton kernel must be warmed before CUDA Graph capture"
+            )
+
+
+def _mark_rank8_kernel_warm(key: tuple[object, ...]) -> None:
+    with _GRAPH_WARM_KEYS_LOCK:
+        _GRAPH_WARM_KEYS.add(key)
 
 
 @triton.jit
@@ -52,9 +80,12 @@ def rank8_tensor_core_projection(transformed, a):
         raise ValueError("rank8 Tensor Core projection requires positive K")
     hidden = torch.empty((m, 8), device=transformed.device, dtype=torch.float16)
     if m:
+        key = _rank8_graph_key(transformed.device, "tensor_core_projection", m, k)
+        _require_rank8_kernel_warm(key)
         _rank8_tensor_core_projection[(triton.cdiv(m, 32),)](
             transformed, a, hidden, m, k, num_warps=4, num_stages=2
         )
+        _mark_rank8_kernel_warm(key)
     return hidden
 
 
@@ -189,6 +220,18 @@ def rank8_output_epilogue(
     output = torch.empty((m, n), device=base.device, dtype=output_dtype)
     if not m:
         return output
+    key = _rank8_graph_key(
+        base.device,
+        "output_epilogue",
+        m,
+        n,
+        bool(hadamard),
+        bias is not None,
+        bool(rank8_enabled),
+        str(output_dtype),
+        "masked" if not hadamard and n & (n - 1) else "butterfly",
+    )
+    _require_rank8_kernel_warm(key)
     if not hadamard and n & (n - 1):
         block_n = 1 << (n - 1).bit_length()
         _rank8_output_epilogue_masked[(m,)](
@@ -229,6 +272,7 @@ def rank8_output_epilogue(
             num_warps=4 if n <= 4096 else 8,
             enable_fp_fusion=False,
         )
+    _mark_rank8_kernel_warm(key)
     return output
 
 
@@ -348,6 +392,16 @@ def rank8_input_producer(x, su, factors, *, hadamard=True):
         )
     transformed = torch.empty((m, k), device=x.device, dtype=torch.float16)
     hidden = torch.empty((len(factors), m, 8), device=x.device, dtype=torch.float16)
+    key = _rank8_graph_key(
+        x.device,
+        "input_producer",
+        m,
+        k,
+        len(factors),
+        bool(hadamard),
+        "masked" if not hadamard and k & (k - 1) else "butterfly",
+    )
+    _require_rank8_kernel_warm(key)
     if m and not hadamard and k & (k - 1):
         block_k = 1 << (k - 1).bit_length()
         _rank8_input_producer_masked[(m,)](
@@ -385,4 +439,5 @@ def rank8_input_producer(x, su, factors, *, hadamard=True):
             num_warps=4 if k <= 4096 else 8,
             enable_fp_fusion=False,
         )
+    _mark_rank8_kernel_warm(key)
     return transformed, hidden.unbind(0)

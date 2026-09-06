@@ -31,8 +31,9 @@ agent guides route these changes through `graph-safe-kernels`. Completion must
 cover preparation, allocation/pool ownership, non-default streams, grouped child
 lifetimes, mode/shape invalidation, repeated replay, native FFI and actual ZML
 command buffers. Existing Python and native graph tests prove only their tested
-paths. The managed CUDA extension and standalone Ampere window/grouped
-operators now fail closed on cold JIT/operator registration during capture;
+paths. The managed CUDA extension, standalone Hopper WGMMA, Ampere
+window/grouped operators, rank8 Triton producer/epilogue, and YAQA Triton
+projector now fail closed on cold JIT/operator registration during capture;
 callers must prewarm them. ROCm providers, quantization kernel integrations,
 TP/KV execution, and remaining capture-sensitive lazy paths still require an
 explicit audit.

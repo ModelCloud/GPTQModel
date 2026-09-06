@@ -648,6 +648,12 @@ supply geometry/projection/epilogue choices; capture resolves their correction
 state from the requested quality mode instead of trusting a tuner's off/on
 field.
 
+The managed CUDA extension, Hopper WGMMA bridge, Ampere provider, rank8 Triton
+producer/epilogue and YAQA Triton projector all reject cold JIT/operator
+registration during capture. Warm and validate each shape, dtype, device and
+correction state before creating a graph; replay does not tune, allocate
+kernel caches or change policy.
+
 ```python
 from gptqmodel.quantization.qvq_window_graphs import P32WindowGraphs
 
