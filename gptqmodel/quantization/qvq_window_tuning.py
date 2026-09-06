@@ -40,6 +40,98 @@ class WindowTuningResult:
     cache_hit: bool
 
 
+def measure_rank8_overhead(
+    layer,
+    inputs,
+    *,
+    benchmark,
+    config=None,
+):
+    """Measure matched correction-off/on latency for one prepared policy.
+
+    The benchmark callback is invoked outside CUDA graph capture with the
+    same module and input for both states.  This is deliberately separate from
+    candidate selection: a faster arithmetic path cannot use this measurement
+    to bypass the quality/arithmetic-signature gates.  The original policy is
+    restored even when timing or preparation fails.
+
+    ``benchmark(callable, input)`` returns positive latency samples in
+    microseconds.  The returned record is suitable for a scorecard and keeps
+    the selected policy in both rows so external ZML tuners can compare the
+    same geometry without reconstructing Python state.
+    """
+    if not callable(benchmark):
+        raise TypeError("benchmark must be callable")
+    inputs = (inputs,) if isinstance(inputs, torch.Tensor) else tuple(inputs)
+    if not inputs or any(not isinstance(x, torch.Tensor) for x in inputs):
+        raise ValueError("overhead measurement requires activation tensors")
+    first = inputs[0]
+    if (
+        first.ndim < 2
+        or first.shape[-1] != layer.in_features
+        or first.numel() == 0
+        or first.device != layer.runtime_device()
+        or any(
+            x.shape != first.shape or x.dtype != first.dtype or x.device != first.device
+            for x in inputs
+        )
+    ):
+        raise ValueError(
+            "overhead cases must share a nonempty module input shape, dtype and device"
+        )
+    original = getattr(layer, "_p32_window_config", None)
+    if original is None:
+        raise ValueError("prepare the requested window policy before measuring overhead")
+    if (
+        getattr(layer, "rank8_metadata", None) is None
+        or layer.rank8_A is None
+        or layer.rank8_B is None
+    ):
+        raise ValueError("rank8 overhead requires validated recovery tensors")
+    if config is None:
+        config = original
+    if not isinstance(config, P32WindowConfig):
+        raise TypeError("config must be P32WindowConfig")
+    if config.recovery_mode == "off":
+        raise ValueError("overhead measurement requires an on-capable policy")
+    # Preparation performs capture/training/device and quality checks before
+    # timing.  It is intentionally called once before state changes so a cold
+    # operator or stale payload fails before the benchmark starts.
+    prepare_rank8(layer, config)
+    m = first.numel() // layer.in_features
+    base = replace(config, recovery_mode="off", min_m=m, max_m=m)
+    on = replace(config, recovery_mode="on", min_m=m, max_m=m)
+    try:
+        rows = []
+        for state, state_config in (("off", base), ("on", on)):
+            prepare_rank8(layer, state_config)
+            samples = [float(value) for value in benchmark(layer, first)]
+            if not samples or any(not math.isfinite(value) or value <= 0 for value in samples):
+                raise ValueError("benchmark must return finite positive latency samples")
+            rows.append(
+                {
+                    "recovery": state,
+                    "config": state_config.to_backend_config(),
+                    "samples_us": samples,
+                    "median_us": statistics.median(samples),
+                }
+            )
+        off_median = rows[0]["median_us"]
+        on_median = rows[1]["median_us"]
+        return {
+            "version": 1,
+            "m": m,
+            "input_shape": list(first.shape),
+            "input_dtype": str(first.dtype),
+            "off": rows[0],
+            "on": rows[1],
+            "overhead_us": on_median - off_median,
+            "overhead_percent": (on_median / off_median - 1.0) * 100.0,
+        }
+    finally:
+        prepare_rank8(layer, original)
+
+
 def _errors(actual, reference):
     if (
         not isinstance(actual, torch.Tensor)
@@ -84,6 +176,7 @@ def tune_window_kernel(
     compile_candidate=None,
     candidates=None,
     apply=True,
+    measure_recovery=False,
     tp_world_size=1,
     tp_rank=0,
 ):
@@ -93,6 +186,10 @@ def tune_window_kernel(
     ``compile_candidate(backend_config)`` optionally returns an external
     executable accepting one activation tensor. That very executable is
     validated and timed, enabling direct compiler/ZML tile selection.
+
+    Set ``measure_recovery=True`` to append a matched correction-off/on
+    marginal-latency record for the selected candidate.  This is a scorecard
+    measurement only; it never changes quality eligibility.
 
     All input cases must have one shape/dtype/device. Cache entries bind exact
     validation inputs, deployment state, candidate set, hardware and compiler
@@ -261,6 +358,13 @@ def tune_window_kernel(
                         os.unlink(temporary)
     finally:
         prepare_rank8(layer, original)
+    if measure_recovery and enabled:
+        report["recovery_overhead"] = measure_rank8_overhead(
+            layer,
+            first,
+            benchmark=benchmark,
+            config=selected,
+        )
     if apply:
         prepare_rank8(layer, selected)
         # Keep the selected executable policy with the unified deployment

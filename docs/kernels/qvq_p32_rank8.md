@@ -367,6 +367,18 @@ tests alone are not ZML evidence. The native/ZML section below separately
 records actual StableHLO lowering and execution; connecting that executable
 to the latency tuner and its cache remains open.
 
+Use `measure_rank8_overhead(layer, inputs, benchmark=...)` after selecting a
+candidate to record a matched correction-off/on pair. It restores the original
+policy even when timing fails and reports both medians, absolute cost and
+`overhead_percent`; it never promotes an arithmetic implementation or changes
+quality eligibility. `tune_window_kernel(..., measure_recovery=True)` attaches
+the same record to its result. For non-Hopper consumers the Ampere module
+provides the allocation-free `qvq_p32_window_ampere_kernel_candidates` and
+`qvq_p32_window_ampere_grouped_kernel_candidates` APIs; callers benchmark the
+returned split waves before capture and pass the selected split explicitly.
+ZML has the corresponding `enumerateCandidates`, `benchmarkExecutable` and
+`selectFastest` controls. Each backend keeps its own shape/device/rate cache.
+
 An optional `cache_dir` stores atomic JSON entries binding exact activation
 cases and strides, deployment payload and transforms, enabled correction
 factors, device identity, TP, software/driver API, compiler build and candidate
@@ -381,9 +393,11 @@ Run the integrated benchmark with `--autotune --m 128 2048 --tuning-cache DIR`.
 It validates on two independent synthetic activation tensors per M, measures
 all eligible off/on candidates, then separately checks and times the winner.
 These inputs test implementation preservation and do not fit rank8, select
-quality, or establish full-model accuracy. Non-Hopper backends currently
-expose their production candidate; additional backend-specific candidates
-and ZML executable tuning/cache integration remain open.
+quality, or establish full-model accuracy. Non-Hopper backend candidates are
+only eligible when their backend enumerator and executable are explicitly
+provided; no Hopper geometry is silently reused. ZML executable tuning/cache
+integration through this Python helper remains open even though the direct Zig
+controls are available.
 
 The retained [H200 autotuning result](results/p32_window_h200_autotuning.json)
 covers 90 candidate evaluations across M128/M2048 and correction off/on.

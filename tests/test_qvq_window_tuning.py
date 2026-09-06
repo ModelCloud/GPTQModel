@@ -17,7 +17,10 @@ from gptqmodel.quantization.qvq_rank8 import (
     save_window_artifact,
     window_kernel_candidates,
 )
-from gptqmodel.quantization.qvq_window_tuning import tune_window_kernel
+from gptqmodel.quantization.qvq_window_tuning import (
+    measure_rank8_overhead,
+    tune_window_kernel,
+)
 
 
 def test_cpu_cache_revalidates_and_binds_inputs(tmp_path):
@@ -74,6 +77,66 @@ def test_failure_restores_policy_and_cache_does_not_bypass_validation(tmp_path):
             compile_candidate=lambda config: lambda inputs: layer(inputs) + 1,
         )
     assert layer._p32_window_config == original
+
+
+def test_rank8_overhead_measures_matched_states_and_restores_policy():
+    layer, _, x, _ = fixture()
+    _kernel_rank8(layer)
+    original = P32WindowConfig(recovery_mode="on", quality_mode="fast")
+    prepare_rank8(layer, original)
+    seen = []
+
+    def sample(fn, inputs):
+        seen.append(bool(layer._p32_rank8_enabled))
+        fn(inputs)
+        return [1.0 if not layer._p32_rank8_enabled else 1.04]
+
+    report = measure_rank8_overhead(
+        layer,
+        x,
+        benchmark=sample,
+    )
+    assert seen == [False, True]
+    assert report["m"] == x.shape[0]
+    assert report["off"]["median_us"] == 1.0
+    assert report["on"]["median_us"] == 1.04
+    assert report["overhead_us"] == pytest.approx(0.04)
+    assert report["overhead_percent"] == pytest.approx(4.0)
+    assert layer._p32_window_config == original
+    assert layer._p32_rank8_enabled
+
+
+def test_rank8_overhead_rejects_invalid_samples_and_restores_policy():
+    layer, _, x, _ = fixture()
+    _kernel_rank8(layer)
+    original = P32WindowConfig(recovery_mode="on")
+    prepare_rank8(layer, original)
+    with pytest.raises(ValueError, match="finite positive"):
+        measure_rank8_overhead(layer, x, benchmark=lambda _fn, _x: [0])
+    assert layer._p32_window_config == original
+    assert layer._p32_rank8_enabled
+
+
+def test_window_tuner_can_attach_matched_rank8_overhead(tmp_path):
+    layer, _, x, _ = fixture()
+    _kernel_rank8(layer)
+    original = P32WindowConfig(recovery_mode="on")
+    prepare_rank8(layer, original)
+
+    def sample(fn, inputs):
+        fn(inputs)
+        return [1.05 if layer._p32_rank8_enabled else 1.0]
+
+    result = tune_window_kernel(
+        layer,
+        x,
+        benchmark=sample,
+        build_id="overhead",
+        cache_dir=tmp_path,
+        measure_recovery=True,
+    )
+    assert result.report["recovery_overhead"]["overhead_percent"] == pytest.approx(5.0)
+    assert layer._p32_window_config == result.config
 
 
 def test_applied_tuning_metadata_roundtrips_with_unified_package(tmp_path):
