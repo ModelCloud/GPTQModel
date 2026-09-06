@@ -210,6 +210,22 @@ def _validate_kernel_tuning_metadata(layer, tuning):
         raise ValueError("invalid selected window kernel policy") from exc
     if selected not in candidates:
         raise ValueError("selected window kernel is absent from measured candidates")
+    if (
+        getattr(layer, "window_only", False)
+        and layer.runtime_device().type == "cuda"
+        and torch.version.hip is None
+    ):
+        properties = torch.cuda.get_device_properties(layer.runtime_device())
+        if (
+            (properties.major, properties.minor) == (9, 0)
+            and any(name in properties.name for name in ("H100", "H200"))
+            or (properties.major, properties.minor) == (8, 0)
+        ) and any(
+            candidate.algorithm == "production_window" for candidate in candidates
+        ):
+            raise ValueError(
+                "window-only CUDA tuning cannot contain production_window candidates"
+            )
     if tuning.get("quality_mode") != selected.quality_mode:
         raise ValueError("window kernel-tuning quality mode mismatch")
     if type(tuning.get("rank8_enabled")) is not bool:
@@ -2192,6 +2208,7 @@ def window_tuning_key(layer, *, m, quality_mode, tp_world_size=1, tp_rank=0, bui
         m,
         quality_mode,
         bool(getattr(layer, "_p32_rank8_enabled", False)),
+        bool(getattr(layer, "window_only", False)),
         layer.input_hadamard,
         layer.output_hadamard,
     )
