@@ -558,6 +558,18 @@ def fallback_quant(
 
 finalize_capture_H_mutex = threading.Lock()
 
+def _random_signs(size, *, device, seed=None, stream=0):
+    """Per-task randomness: never reseed a generator shared by GPU workers.
+
+    Separate input/output streams also make signs independent of whether a
+    shared Hessian was finalized by another module first.
+    """
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device=device).manual_seed(int(seed) + stream)
+    return (torch.randn(size, device=device, generator=generator).sign() + 1e-5).sign().float()
+
+
 def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
     with finalize_capture_H_mutex:
 
@@ -594,7 +606,7 @@ def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
 
         # Random sign flips for input channel, fixed for the first linear layer to quantize with this H
         k = H.shape[0]
-        su = (torch.randn(k, device = H.device).sign() + 1e-5).sign().to(torch.float).unsqueeze(1)
+        su = _random_signs(k, device=H.device, seed=quant_args.get("seed")).unsqueeze(1)
         H_data["su"] = su
 
         # Input had
@@ -912,9 +924,6 @@ def quantize_exl3(
         assert weight.dtype == torch.float
         tiles_k = weight.shape[0] // 16
 
-        if "seed" in quant_args:
-            torch.manual_seed(quant_args["seed"])
-
         devices = quant_args["devices"]
         if weight.device != torch.device(devices[0]):
             weight = weight.to(devices[0])
@@ -932,7 +941,7 @@ def quantize_exl3(
             su = su.to(device)
         if H_diag.is_cuda:
             H_diag = H_diag.to(device)
-        sv = (torch.randn(n, device = device).sign() + 1e-5).sign().to(torch.float).unsqueeze(0)
+        sv = _random_signs(n, device=device, seed=quant_args.get("seed"), stream=1).unsqueeze(0)
 
         # Move stored L to CPU (if not already), move working L to device
         if H_data["L"] is not None:
