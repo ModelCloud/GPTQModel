@@ -21,7 +21,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--profile-fused", action="store_true")
-    parser.add_argument("--fused-block-m", type=int, choices=(16,32,64))
+    parser.add_argument("--fused-block-m", type=int, choices=(16,32,64,128))
     parser.add_argument("--fused-block-n", type=int, choices=(32,64), default=32)
     parser.add_argument("--fused-split", type=int, default=1)
     parser.add_argument(

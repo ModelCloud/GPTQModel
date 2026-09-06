@@ -180,7 +180,7 @@ def fused_window_mm(
     t = int(2 * bits)
     if (
         bits not in (2, 2.5, 3, 3.5)
-        or block_m not in (16, 32, 64)
+        or block_m not in (16, 32, 64, 128)
         or block_n not in (32, 64)
     ):
         raise ValueError("Unsupported study configuration")
