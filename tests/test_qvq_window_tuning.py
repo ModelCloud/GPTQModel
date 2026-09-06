@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Selection/cache tests; fabricated timings here make no performance claim."""
 
+import json
 from dataclasses import replace
 
 import pytest
@@ -136,6 +137,8 @@ def test_window_tuner_can_attach_matched_rank8_overhead(tmp_path):
         measure_recovery=True,
     )
     assert result.report["recovery_overhead"]["overhead_percent"] == pytest.approx(5.0)
+    cached = next(tmp_path.glob("*.json"))
+    assert json.loads(cached.read_text())["recovery_overhead"]["overhead_percent"] == pytest.approx(5.0)
     assert layer._p32_window_config == result.config
 
 

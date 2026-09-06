@@ -132,6 +132,23 @@ def measure_rank8_overhead(
         prepare_rank8(layer, original)
 
 
+def _write_tuning_cache(cache, report):
+    """Atomically publish a complete tuning report after optional measurements."""
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=cache.parent, delete=False
+        ) as file:
+            temporary = file.name
+            json.dump(report, file, indent=2, allow_nan=False)
+            file.write("\n")
+        os.replace(temporary, cache)
+    finally:
+        if temporary is not None and os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def _errors(actual, reference):
     if (
         not isinstance(actual, torch.Tensor)
@@ -342,20 +359,6 @@ def tune_window_kernel(
             current_tensors, current_metadata = _base(layer)
             if _digest(current_tensors, current_metadata) != state_hash:
                 raise RuntimeError("window state changed during tuning")
-            if cache is not None and not cache_hit:
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                temporary = None
-                try:
-                    with tempfile.NamedTemporaryFile(
-                        mode="w", dir=cache.parent, delete=False
-                    ) as file:
-                        temporary = file.name
-                        json.dump(report, file, indent=2, allow_nan=False)
-                        file.write("\n")
-                    os.replace(temporary, cache)
-                finally:
-                    if temporary is not None and os.path.exists(temporary):
-                        os.unlink(temporary)
     finally:
         prepare_rank8(layer, original)
     if measure_recovery and enabled:
@@ -365,6 +368,8 @@ def tune_window_kernel(
             benchmark=benchmark,
             config=selected,
         )
+    if cache is not None and not cache_hit:
+        _write_tuning_cache(cache, report)
     if apply:
         prepare_rank8(layer, selected)
         # Keep the selected executable policy with the unified deployment
