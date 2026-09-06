@@ -401,6 +401,12 @@ def test_hopper_grouped_rank8_independent_flags(roles, m, recovery_kernel, proje
     ]
     for child in children:
         child.SU.copy_(children[0].SU)
+    for child in children[1::2]:
+        # Invalid optional payload must remain inaccessible in the shared off
+        # epilogue, including when an enabled sibling uses the same launch.
+        child.rank8_A = torch.full((1,), float("nan"), device="cuda")
+        child.rank8_B = torch.full((1,), float("nan"), device="cuda")
+        prepare_rank8(child, P32WindowConfig(recovery_kernel=recovery_kernel))
     for index, child in enumerate(children[::2]):
         _kernel_rank8(child)
         prepare_rank8(

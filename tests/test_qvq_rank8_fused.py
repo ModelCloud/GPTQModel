@@ -9,6 +9,41 @@ from gptqmodel.nn_modules.qlinear.qvq import _qvq_hadamard_fused
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("n", [256, 2048, 8192])
+@pytest.mark.parametrize("hadamard", [False, True])
+def test_window_only_shared_epilogue_never_accesses_factors(n, hadamard):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from gptqmodel.utils.qvq_rank8_triton import rank8_output_epilogue
+
+    class Poison:
+        def __getattribute__(self, name):
+            raise AssertionError("disabled rank8 factors accessed")
+
+    torch.manual_seed(153)
+    base = torch.randn(33, n, device="cuda")
+    sv = torch.randn(n, device="cuda")
+    bias = torch.randn(n, device="cuda")
+    expected = (
+        _qvq_hadamard_fused(base, post_scale=sv, bias=bias, scale_mode=3 if n >= 2048 else 4)
+        if hadamard else base * sv + bias
+    ).half()
+    actual = rank8_output_epilogue(
+        Poison(), Poison(), base, sv, bias, hadamard=hadamard,
+        output_dtype=torch.float16, rank8_enabled=False,
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = rank8_output_epilogue(
+            Poison(), Poison(), base, sv, bias, hadamard=hadamard,
+            output_dtype=torch.float16, rank8_enabled=False,
+        )
+    graph.replay()
+    torch.testing.assert_close(captured, actual, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("n", [2048, 8192])
 @pytest.mark.parametrize("hadamard", [False, True])
 def test_rank8_direct_half_store_matches_final_conversion(n, hadamard):

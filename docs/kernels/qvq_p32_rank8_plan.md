@@ -75,6 +75,16 @@ subset covers 128 documents/47,550 predictions with fixed first-layer Q/gate
 corrections. It shows a small loss benefit over correction off; the padded
 Tensor Core projection loses some of the reference correction's benefit,
 while the reference-projection/fused-epilogue ablation preserves it. Keep
-both implementations explicit. Correction-off transform/store fusion,
-broader model quality, ZML lowering, graph ownership and other phase rows
+both implementations explicit. Broader model quality, ZML lowering, graph ownership and other phase rows
 remain open; this subset is not a full-model promotion scorecard.
+
+Shared correction-off/on transform/store fusion is now implemented and
+validated with 414 passing post-profile tests (86 skips), poisoned disabled
+factor cases and bit-exact off logits on all 128 C4 subset documents. The
+fair matched M8192 marginal costs are Q 6.07% and gate 3.27%, superseding
+the earlier comparisons with a less optimized off epilogue. The retained
+`results/p32_window_h200_shared_epilogue.json` also contains a 144-candidate
+real-Q tuning run: production/shared-input wins at M128, BM128/BN128 with
+Tensor Core projection at M2048. Local numerical acceptance does not waive
+the measured Tensor Core projection model-quality difference. No universal
+geometry or quality implementation is promoted.

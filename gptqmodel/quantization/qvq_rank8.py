@@ -268,8 +268,7 @@ def prepare_rank8(layer, config):
     ):
         raise ValueError("rank8 FP32 reference requires CUDA matmul TF32 disabled")
     if (
-        enabled
-        and config.recovery_kernel == "fused_epilogue"
+        config.recovery_kernel == "fused_epilogue"
         and (
             layer.trellis.device.type != "cuda"
             or torch.cuda.get_device_capability(layer.trellis.device) != (9, 0)
@@ -351,15 +350,17 @@ def fused_rank8_output(layer, transformed, base, compute_dtype, *, hidden=None, 
     validate_rank8_state(layer)
     from ..utils.qvq_rank8_triton import rank8_output_epilogue
 
-    if hidden is None:
+    enabled = bool(getattr(layer, "_p32_rank8_enabled", False))
+    if enabled and hidden is None:
         hidden = _project_rank8(layer, transformed)
     return rank8_output_epilogue(
         hidden,
-        layer.rank8_B,
+        layer.rank8_B if enabled else None,
         base,
         layer._cached_cast("SV", compute_dtype, base.dtype),
         layer._cached_cast("bias", compute_dtype, base.dtype),
         hadamard=layer.output_hadamard,
+        rank8_enabled=enabled,
         # Keep FP32 at the boundary when the surrounding operator may use
         # its range for a BF16 overflow retry. Stable power-of-two FP16 paths
         # already round only at their final store and need no extra cast.
@@ -856,13 +857,11 @@ def window_kernel_candidates(layer, *, m):
             for c in tuple(candidates)
             if c.algorithm == "hopper_direct_decode_mma"
         )
+    if layer.out_features <= 16384 and not layer.out_features & (layer.out_features - 1):
+        candidates.extend(
+            replace(c, recovery_kernel="fused_epilogue") for c in tuple(candidates)
+        )
     if getattr(layer, "_p32_rank8_enabled", False):
-        if layer.out_features <= 16384 and not layer.out_features & (
-            layer.out_features - 1
-        ):
-            candidates.extend(
-                replace(c, recovery_kernel="fused_epilogue") for c in tuple(candidates)
-            )
         separate_candidates = tuple(candidates)
         candidates.extend(
             replace(c, recovery_projection="tensor_core") for c in separate_candidates

@@ -531,8 +531,52 @@ memory and no spills. Post-profile recovered medians change as follows:
 | gate | 2048 | 679.112 | 635.615 |
 | gate | 8192 | 2546.246 | 2373.063 |
 
-At large M the corrected operator can beat the current correction-off path
-because it also replaces output-transform and cast work. This is not evidence
-of intrinsically negative rank8 cost: extending the same transform/store
-implementation to correction-off mode remains necessary for a fair final
-off/on comparison and the fastest unified operator.
+Those store-fusion timings used different output implementations for off and
+on. They are superseded for marginal rank8 cost by the shared-epilogue
+comparison below.
+
+## Shared correction-off/on output epilogue
+
+The same fused output Hadamard/SV/bias/store implementation now serves both
+correction states in single and grouped paths. A compile-time flag removes
+all rank8 projection, factor loads and expansion when disabled. Tests pass
+invalid/poisoned factors to disabled paths and check eager and graph output.
+The epilogue remains explicitly selectable and is included in native/external
+autotuning candidates for both states.
+
+The [shared-epilogue record](results/p32_window_h200_shared_epilogue.json)
+contains the executed instruction audit, post-profile timing, expanded tuning
+run and C4 off-equivalence check. In the M=K=N=2048 W3 profiling fixture,
+original off uses four launches and 148,026,013 source-correlated instructions;
+shared off uses three and 103,378,821; shared on uses four and 107,202,547.
+Both shared epilogues use 40 registers and 8,192 shared bytes, with no spills.
+Post-profile tests pass 414 cases with 86 skips. Switching the two target
+modules to fused-off preserves full-model logits bit for bit on all 128 C4
+subset documents (47,550 predictions).
+
+Matched real-factor/captured-activation timings with BM128/BN128, shared
+output epilogue and Tensor Core rank8 projection are:
+
+| Module | M | Off (us) | On (us) | Marginal correction |
+|---|---:|---:|---:|---:|
+| Q | 128 | 50.524 | 64.813 | 28.28% |
+| Q | 2048 | 198.969 | 225.063 | 13.11% |
+| Q | 8192 | 757.233 | 803.166 | 6.07% |
+| gate | 128 | 63.004 | 78.672 | 24.87% |
+| gate | 2048 | 599.291 | 635.514 | 6.04% |
+| gate | 8192 | 2299.251 | 2374.356 | 3.27% |
+
+These compare equally optimized off/on output paths and supersede earlier
+near-zero marginal-cost estimates. They are module replay measurements,
+not whole-model latency. Wide gate meets the 3–5% large-M overhead target;
+square Q does not. Forced BM128/BN128 is not the best small-M policy.
+
+The real-Q tuning run evaluates 18 off and 54 on candidates at each of M128
+and M2048, each against two independent captured activation cases. At M128
+it selects production window with fused output and, when enabled, shared
+input projection (31.721 us off, 43.393 us on). At M2048 it selects direct
+BM128/BN128 with fused output and Tensor Core projection (199.165 us off,
+225.153 us on). These are per-shape latency selections under the local
+numerical gate, not model-quality promotion of Tensor Core projection.
+Actual ZML lowering, model graph ownership, concurrent native WGMMA/rank8
+fusion and the full model/device/TP scorecard remain open.

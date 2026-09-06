@@ -80,17 +80,21 @@ def _rank8_output_epilogue(
     NORMALIZE_FIRST: tl.constexpr,
     DIVISOR: tl.constexpr,
     RECIPROCAL: tl.constexpr,
+    HAS_RANK8: tl.constexpr,
 ):
     row = tl.program_id(0)
     column = tl.arange(0, N)
-    correction = tl.full((N,), 0, tl.float32)
     # fma contraction is disabled at launch. Products of two FP16 values are
     # exact in FP32; keep the base outside this eight-term reduction.
-    for rank in tl.static_range(8):
-        hidden = tl.load(Hidden + row * 8 + rank).to(tl.float32)
-        weights = tl.load(B + rank * N + column).to(tl.float32)
-        correction = correction + hidden * weights
-    value = tl.load(Base + row * BASE_STRIDE + column).to(tl.float32) + correction
+    if HAS_RANK8:
+        correction = tl.full((N,), 0, tl.float32)
+        for rank in tl.static_range(8):
+            hidden = tl.load(Hidden + row * 8 + rank).to(tl.float32)
+            weights = tl.load(B + rank * N + column).to(tl.float32)
+            correction = correction + hidden * weights
+    value = tl.load(Base + row * BASE_STRIDE + column).to(tl.float32)
+    if HAS_RANK8:
+        value = value + correction
     if HADAMARD:
         value = _round_half_finite(value)
         if NORMALIZE_FIRST:
@@ -114,11 +118,13 @@ def _rank8_output_epilogue(
     tl.store(Output + row * N + column, value)
 
 
-def rank8_output_epilogue(hidden, b, base, sv, bias=None, *, hadamard=True, output_dtype=torch.float32):
+def rank8_output_epilogue(
+    hidden, b, base, sv, bias=None, *, hadamard=True, output_dtype=torch.float32, rank8_enabled=True
+):
     """Complete the existing output epilogue with an optional final FP16 store."""
     if output_dtype not in (torch.float16, torch.float32):
         raise ValueError("rank8 epilogue output must be FP16 or FP32")
-    if base.ndim != 2 or hidden.ndim != 2:
+    if base.ndim != 2 or (rank8_enabled and hidden.ndim != 2):
         raise ValueError("rank8 epilogue requires matrix inputs")
     m, n = base.shape
     if n < 16 or n > 16384 or n & (n - 1):
@@ -130,15 +136,14 @@ def rank8_output_epilogue(hidden, b, base, sv, bias=None, *, hadamard=True, outp
         raise ValueError("rank8 fused epilogue requires SM90")
     if (
         base.dtype != torch.float32
-        or hidden.dtype != torch.float16
-        or b.dtype != torch.float16
+        or (rank8_enabled and (hidden.dtype != torch.float16 or b.dtype != torch.float16))
     ):
         raise ValueError("rank8 fused epilogue requires FP32 base and FP16 hidden/B")
-    if hidden.shape != (m, 8) or b.shape != (8, n) or sv.shape != (n,):
+    if (rank8_enabled and (hidden.shape != (m, 8) or b.shape != (8, n))) or sv.shape != (n,):
         raise ValueError("rank8 fused epilogue shape mismatch")
-    if base.stride(1) != 1 or not hidden.is_contiguous() or not b.is_contiguous():
+    if base.stride(1) != 1 or (rank8_enabled and (not hidden.is_contiguous() or not b.is_contiguous())):
         raise ValueError("rank8 epilogue requires contiguous columns and factors")
-    values = (hidden, b, sv) if bias is None else (hidden, b, sv, bias)
+    values = (sv,) + ((hidden, b) if rank8_enabled else ()) + (() if bias is None else (bias,))
     if any(value.device != base.device for value in values):
         raise ValueError("rank8 epilogue inputs must share one device")
     if not sv.is_contiguous() or (
@@ -152,8 +157,8 @@ def rank8_output_epilogue(hidden, b, base, sv, bias=None, *, hadamard=True, outp
     root = struct.unpack("f", struct.pack("f", math.sqrt(n)))[0]
     reciprocal = struct.unpack("f", struct.pack("f", 1 / root))[0]
     _rank8_output_epilogue[(m,)](
-        hidden,
-        b,
+        hidden if rank8_enabled else None,
+        b if rank8_enabled else None,
         base,
         sv,
         bias,
@@ -166,6 +171,7 @@ def rank8_output_epilogue(hidden, b, base, sv, bias=None, *, hadamard=True, outp
         n >= 2048,
         divisor,
         reciprocal,
+        rank8_enabled,
         num_warps=4 if n <= 4096 else 8,
         enable_fp_fusion=False,
     )

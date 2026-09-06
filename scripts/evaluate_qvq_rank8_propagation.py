@@ -65,7 +65,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--fused", action="store_true", help="Use padded Tensor Core projection and fused epilogue")
     parser.add_argument("--projection", choices=["separate_reference", "tensor_core"], default="tensor_core")
+    parser.add_argument("--verify-off", action="store_true", help="Require fused-off logits to equal original-off logits")
     args = parser.parse_args()
+    if args.verify_off and not args.fused:
+        parser.error("--verify-off requires --fused")
     if args.documents < 1 or args.max_tokens < 2:
         parser.error("positive documents and at least two tokens required")
     import hashlib
@@ -178,6 +181,11 @@ def main():
                 "input_hash": _digest({"input_ids": x}, {}),
                 "teacher": metrics(reference, x),
             }
+            original_off = None
+            if args.verify_off:
+                for child in children:
+                    prepare_rank8(child, P32WindowConfig())
+                original_off = quantized(x, use_cache=False).logits
             for mode in ("fast", "quality"):
                 for child in children:
                     prepare_rank8(
@@ -188,6 +196,10 @@ def main():
                         )
                     )
                 logits = quantized(x, use_cache=False).logits
+                if mode == "fast" and original_off is not None:
+                    entry["off_logits_exact"] = bool(torch.equal(original_off, logits))
+                    if not entry["off_logits_exact"]:
+                        raise ValueError("fused-off model logits differ from original-off logits")
                 entry[mode] = metrics(logits, x, reference)
             report["rows"].append(entry)
             args.output.write_text(json.dumps(report, indent=2) + "\n")

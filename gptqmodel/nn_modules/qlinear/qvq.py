@@ -2116,7 +2116,7 @@ class QVQLinear(BaseQuantLinear):
     ) -> torch.Tensor:
         if self.training:
             compute_dtype = self._qvq_operand_compute_dtype(x_2d, compute_dtype)
-            x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(
+            x_2d, _input_scale, _input_rounding_mode = self._prepare_activation_input(
                 x_2d,
                 compute_dtype,
                 straight_through=True,
@@ -2239,8 +2239,7 @@ class QVQLinear(BaseQuantLinear):
                 output, torch.float32, target_dtype=output_dtype
             )
         output = self._inner_forward(transformed)
-        if (getattr(self, "_p32_rank8_enabled", False)
-                and self._p32_window_config.recovery_kernel == "fused_epilogue"):
+        if getattr(getattr(self, "_p32_window_config", None), "recovery_kernel", None) == "fused_epilogue":
             from ...quantization.qvq_rank8 import fused_rank8_output
 
             return fused_rank8_output(

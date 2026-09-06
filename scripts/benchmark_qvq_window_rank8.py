@@ -49,6 +49,8 @@ def main():
     parser.add_argument("--replays", type=int, default=20)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    if args.profile and len(args.m) != 1:
+        parser.error("profiling requires one M and one quality mode per process")
     if args.activation_file and not args.package:
         parser.error("--activation-file requires --package")
     if (
@@ -222,7 +224,9 @@ def main():
             x, validation_x = [
                 rows[torch.arange(m) % rows.shape[0]].contiguous().cuda() for rows in activation_cases
             ]
-        for mode in ("off", "on"):
+        # A profiler range owns its process. Do not start another quality
+        # mode while profiler replay buffers may remain resident afterward.
+        for mode in ((args.profile,) if args.profile else ("off", "on")):
             prepare_rank8(
                 layer, P32WindowConfig(algorithm=args.algorithm, recovery_mode=mode)
             )
