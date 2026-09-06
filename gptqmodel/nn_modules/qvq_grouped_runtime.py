@@ -1039,6 +1039,23 @@ class QVQHopperGroupedRuntime:
                     self.telemetry.h100_qwen_linear_decode_prefetch_launches += 1
         if self._h100_w25_n128_gate_up_enabled:
             self.telemetry.h100_w25_n128_gate_up_launches += 1
+        if recover and any(
+            getattr(child, "_p32_rank8_enabled", False)
+            and child._p32_window_config.recovery_kernel == "fused_epilogue"
+            for child in children
+        ):
+            from ..quantization.qvq_rank8 import add_rank8_correction, fused_rank8_output
+
+            outputs = []
+            for child, inner in zip(children, inner_outputs, strict=True):
+                if (getattr(child, "_p32_rank8_enabled", False)
+                        and child._p32_window_config.recovery_kernel == "fused_epilogue"):
+                    output = fused_rank8_output(child, padded[:rows], inner[:rows], torch.float16)
+                else:
+                    corrected = add_rank8_correction(child, padded[:rows], inner[:rows])
+                    output = child._qvq_recover_inference_output(corrected, torch.float16)
+                outputs.append(output.reshape(*x.shape[:-1], child.out_features).to(x.dtype))
+            return tuple(outputs)
         if rank8_enabled:
             from ..quantization.qvq_rank8 import add_rank8_correction
 

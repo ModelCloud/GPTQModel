@@ -60,7 +60,7 @@ class P32WindowConfig:
             raise ValueError("invalid recovery mode")
         if self.quality_mode not in ("fast", "balanced", "quality"):
             raise ValueError("invalid quality mode")
-        if self.recovery_kernel != "separate_reference":
+        if self.recovery_kernel not in ("separate_reference", "fused_epilogue"):
             raise ValueError("fused recovery kernels are not implemented")
 
 
@@ -218,6 +218,26 @@ def prepare_rank8(layer, config):
         and torch.backends.cuda.matmul.allow_tf32
     ):
         raise ValueError("rank8 FP32 reference requires CUDA matmul TF32 disabled")
+    if (
+        enabled
+        and config.recovery_kernel == "fused_epilogue"
+        and (
+            layer.trellis.device.type != "cuda"
+            or torch.cuda.get_device_capability(layer.trellis.device) != (9, 0)
+            or layer.out_features > 16384
+            or layer.out_features & (layer.out_features - 1)
+        )
+    ):
+        raise ValueError(
+            "rank8 fused epilogue requires SM90 and power-of-two N <= 16384"
+        )
+    grouped = getattr(layer, "_gptqmodel_qvq_grouped_runtime", None)
+    if grouped is not None:
+        if grouped._outputs is not None:
+            raise RuntimeError(
+                "cannot change rank8 mode during a sibling projection cycle"
+            )
+        grouped.invalidate()
     layer._p32_window_config = config
     layer._p32_rank8_enabled = enabled
     layer._p32_rank8_versions = _versions(layer) if enabled else None
@@ -245,6 +265,22 @@ def add_rank8_correction(layer, transformed, base):
     hidden = (transformed.float() @ layer.rank8_A.float()).half()
     correction = hidden.float() @ layer.rank8_B.float()
     return base.float() + correction
+
+
+def fused_rank8_output(layer, transformed, base, compute_dtype):
+    """Fuse expansion/addition into the existing numerical output-transform contract."""
+    validate_rank8_state(layer)
+    from ..utils.qvq_rank8_triton import rank8_output_epilogue
+
+    hidden = (transformed.float() @ layer.rank8_A.float()).half()
+    return rank8_output_epilogue(
+        hidden,
+        layer.rank8_B,
+        base,
+        layer._cached_cast("SV", compute_dtype, base.dtype),
+        layer._cached_cast("bias", compute_dtype, base.dtype),
+        hadamard=layer.output_hadamard,
+    )
 
 
 def qvq_p32_window_linear(layer, x, config=None):
