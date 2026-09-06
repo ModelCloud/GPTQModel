@@ -1,0 +1,52 @@
+{
+  "scope": "layer baseline and window candidate; experiment 1/10 partial evidence; profiler and model gates pending",
+  "uuid": "GPU-724ea08e-67c3-c0ce-29bb-e6c48e7dde28",
+  "worker": 7,
+  "torch": "2.13.0+cu130",
+  "device": "_CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=724ea08e-67c3-c0ce-29bb-e6c48e7dde28, pci_bus_id=228, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "revision": "845c6c3d3db5d07bbce09c5a94a345fbbe084508",
+  "rows": [
+    {
+      "module": "model.layers.1.mlp.down_proj",
+      "M": 2048,
+      "K": 8192,
+      "N": 2048,
+      "bits": 3.0,
+      "fused_metrics": {
+        "elements": 4194304,
+        "mean_abs": 1.1621911964431275e-05,
+        "max_abs": 0.012529730796813965,
+        "relative_l2": 0.00019921148411881836,
+        "cosine": 0.9999999802278051,
+        "reference_zero_norm": false,
+        "equal_values": false,
+        "local_tolerance_pass": true
+      },
+      "fused_vs_window": {
+        "elements": 4194304,
+        "mean_abs": 0.0,
+        "max_abs": 0.0,
+        "relative_l2": 0.0,
+        "cosine": 1.0,
+        "reference_zero_norm": false,
+        "equal_values": true,
+        "local_tolerance_pass": true
+      },
+      "profile_scope": "one fused decode/MMA inner call after warmup",
+      "fused": {
+        "block_m": 64,
+        "block_n": 32,
+        "split": 1,
+        "promotion_k": 0,
+        "address_mode": "baseline",
+        "bank_mode": "multiply",
+        "decode_mode": "scalar",
+        "lut_cache": "default",
+        "window_mode": "resident-words",
+        "num_warps": 4,
+        "num_stages": 3
+      }
+    }
+  ],
+  "complete": true
+}

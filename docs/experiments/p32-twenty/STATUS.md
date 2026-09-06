@@ -137,3 +137,9 @@ The exact pair-LUT fold reduces integer SASS instructions by about 32% but
 raises long-scoreboard stalls to about 50% and is slower. Cache-qualified LUT
 loads also fail to advance. The next 3x work must remove tile staging and
 transform boundaries while preserving the M>=512 dispatcher.
+
+The same record now includes resident-word waves 33–34. Resident staging
+reduces integer SASS by about 14% and registers from 64 to 56, but raises
+barrier/MIO pressure and reaches only about 1.25x pooled M=2048 layer speedup.
+It remains an exact optimization reference; transform fusion and cross-row
+reuse are still required for the 3x target.

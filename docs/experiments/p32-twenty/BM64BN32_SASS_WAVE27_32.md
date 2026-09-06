@@ -135,6 +135,43 @@ gates. The pooled medians were:
 Neither policy is a speedup path. The raw reports are in
 [wave 32 results](results/bm64bn32-pairlut-cache-wave32/).
 
+## Resident window-word waves 33–34
+
+The exact resident-word mode loads the two BN32 window tiles and their bank
+bytes once per K16 iteration, then gathers each state from the local tile
+image. It uses the same standard window bytes and the same decode arithmetic;
+the only change is where the words are staged.
+
+Wave 33 covered the eight projections and all nine row counts. All 72 cases
+passed both local gates. The pooled full-layer speedup over production window
+was:
+
+| M | 1 | 2 | 4 | 8 | 16 | 32 | 128 | 512 | 2048 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Resident words | 0.962× | 0.961× | 0.935× | 1.030× | 1.022× | 1.023× | 0.960× | 1.148× | 1.249× |
+
+Wave 34 profiled the same resident-word arm at M=2048. Compared with the
+scalar winner, it achieved the intended instruction/resource changes:
+
+| Metric | Scalar | Resident words | Change |
+|---|---:|---:|---:|
+| Registers/thread | 64 | 56 | −8 |
+| Achieved occupancy | 45.6% | 51.7% | +6.1 points |
+| Integer SASS instructions | 14.72B | 12.73B | −13.6% |
+| Memory SASS instructions | 3.23B | 3.33B | +3.1% |
+| HMMA instructions | 16.78M | 16.78M | unchanged |
+| Long-scoreboard stall | 13.9% | 15.9% | +2.0 points |
+| Barrier stall | 11.7% | 17.4% | +5.7 points |
+| Math-pipe throttle | 14.1% | 8.6% | −5.5 points |
+| MIO throttle | 5.4% | 13.3% | +8.0 points |
+
+The lower register footprint and lower integer count do not translate into a
+3× result because gather, memory, and synchronization costs become visible.
+The resident-word mode is therefore an exact resource-reduction reference,
+not the current production candidate. Raw reports are in
+[wave 33 results](results/bm64bn32-resident-wave33/) and
+[wave 34 results](results/bm64bn32-resident-ncu-wave34/).
+
 ## Decision and next target
 
 The current exact dispatch remains production window for M < 512 and the
