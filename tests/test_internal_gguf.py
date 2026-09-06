@@ -68,16 +68,20 @@ def test_internal_gguf_quantizes_official_q1_0_blocks():
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
 
 
-def test_internal_gguf_dequantizes_official_q2_0_blocks():
-    scale = np.array([2.0], dtype=np.float16).view(np.uint8)
-    codes = np.tile(np.array([0, 1, 2, 3], dtype=np.uint8).reshape(4, 1), (1, 16))
-    packed_codes = codes[0] | (codes[1] << 2) | (codes[2] << 4) | (codes[3] << 6)
-    packed = np.concatenate([scale, packed_codes]).reshape(1, -1)
+def test_internal_gguf_quantizes_and_dequantizes_official_q2_0_blocks():
+    values = np.tile(np.array([-1.0, 0.0, 1.0, 0.0], dtype=np.float32), 16).reshape(1, -1)
+    expected_packed = np.concatenate(
+        [
+            np.array([1.0], dtype=np.float16).view(np.uint8),
+            np.full(16, 0x64, dtype=np.uint8),
+        ]
+    ).reshape(1, -1)
 
-    actual = internal_gguf.dequantize(packed, internal_gguf.GGMLQuantizationType.Q2_0)
-    expected = np.repeat(np.array([[-2.0], [0.0], [2.0], [4.0]], dtype=np.float32), 16, axis=1).reshape(1, -1)
+    actual_packed = internal_gguf.quantize(values, internal_gguf.GGMLQuantizationType.Q2_0)
+    actual_values = internal_gguf.dequantize(expected_packed, internal_gguf.GGMLQuantizationType.Q2_0)
 
-    np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+    np.testing.assert_array_equal(actual_packed, expected_packed)
+    np.testing.assert_allclose(actual_values, values, rtol=0.0, atol=0.0)
 
 
 def test_internal_gguf_dequantizes_nvfp4_blocks():
@@ -90,6 +94,27 @@ def test_internal_gguf_dequantizes_nvfp4_blocks():
     expected = np.tile(expected_group, 4).reshape(1, -1)
 
     np.testing.assert_allclose(actual, expected, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize(
+    ("tensor_qtype", "type_size", "block_size"),
+    [
+        (internal_gguf.GGMLQuantizationType.Q2_0, 18, 64),
+        (internal_gguf.GGMLQuantizationType.TQ1_0, 54, 256),
+        (internal_gguf.GGMLQuantizationType.TQ2_0, 66, 256),
+        (internal_gguf.GGMLQuantizationType.MXFP4, 17, 32),
+        (internal_gguf.GGMLQuantizationType.NVFP4, 36, 64),
+    ],
+)
+def test_internal_gguf_new_dequantizers_preserve_leading_dimensions(tensor_qtype, type_size, block_size):
+    one_dimensional = internal_gguf.dequantize(np.zeros(type_size, dtype=np.uint8), tensor_qtype)
+    stacked = internal_gguf.dequantize(np.zeros((2, 3, type_size * 2), dtype=np.uint8), tensor_qtype)
+
+    assert one_dimensional.shape == (block_size,)
+    assert stacked.shape == (2, 3, block_size * 2)
+
+    with pytest.raises(ValueError, match="row byte width"):
+        internal_gguf.dequantize(np.zeros(type_size + 1, dtype=np.uint8), tensor_qtype)
 
 
 def test_internal_gguf_dequantize_uses_torch_sign_only_path_when_requested(monkeypatch):
@@ -167,6 +192,7 @@ def test_internal_gguf_reader_uses_current_nvfp4_storage_size(tmp_path):
     assert tensor.n_elements == 64
     assert tensor.n_bytes == 36
     np.testing.assert_array_equal(tensor.data, packed)
+    assert internal_gguf.dequantize(tensor.data, tensor.tensor_type).shape == (64,)
 
 
 @pytest.mark.parametrize(

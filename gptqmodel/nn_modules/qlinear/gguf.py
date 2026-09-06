@@ -210,8 +210,8 @@ def _gguf_quantize_q2_0(blocks: np.ndarray) -> np.ndarray:
     with np.errstate(divide="ignore"):
         inv_d = np.where(d == 0, 0, 1.0 / d)
     qs = np.clip(_gguf_roundf(blocks * inv_d).astype(np.int8) + 1, 0, 3).astype(np.uint8)
-    qs = qs.reshape(blocks.shape[0], 4, 16)
-    packed = qs[:, 0] | (qs[:, 1] << 2) | (qs[:, 2] << 4) | (qs[:, 3] << 6)
+    qs = qs.reshape(blocks.shape[0], 16, 4)
+    packed = qs[..., 0] | (qs[..., 1] << 2) | (qs[..., 2] << 4) | (qs[..., 3] << 6)
     return np.concatenate([d.astype(np.float16).view(np.uint8), packed], axis=-1)
 
 
@@ -667,17 +667,28 @@ def _dequantize_q4_k_numpy(qweight: np.ndarray) -> np.ndarray:
     return (d * q - dm).reshape(rows, -1)
 
 
+def _gguf_dequantized_shape(qweight: np.ndarray, tensor_qtype: str) -> tuple[int, ...]:
+    block_size = _GGUF_TYPE_INFO[tensor_qtype]["block_size"]
+    type_size = _GGUF_TYPE_INFO[tensor_qtype]["type_size"]
+    if qweight.ndim == 0 or qweight.shape[-1] % type_size != 0:
+        raise ValueError(
+            f"GGUF {tensor_qtype} row byte width must be divisible by {type_size}, got "
+            f"{qweight.shape[-1] if qweight.ndim else 0} for shape {qweight.shape}."
+        )
+    return (*qweight.shape[:-1], qweight.shape[-1] // type_size * block_size)
+
+
 def _dequantize_q2_0_numpy(qweight: np.ndarray) -> np.ndarray:
-    rows = qweight.shape[0]
+    output_shape = _gguf_dequantized_shape(qweight, "Q2_0")
     blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["Q2_0"]["type_size"])
     d = blocks[:, :2].view(np.float16).astype(np.float32)
-    qs = blocks[:, 2:].reshape(-1, 1, 16)
-    values = ((qs >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 4, 1)) & 0x03).reshape(-1, 64)
-    return (d * (values.astype(np.int8) - 1).astype(np.float32)).reshape(rows, -1)
+    qs = blocks[:, 2:].reshape(-1, 16, 1)
+    values = ((qs >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 1, 4)) & 0x03).reshape(-1, 64)
+    return (d * (values.astype(np.int8) - 1).astype(np.float32)).reshape(output_shape)
 
 
 def _dequantize_tq1_0_numpy(qweight: np.ndarray) -> np.ndarray:
-    rows = qweight.shape[0]
+    output_shape = _gguf_dequantized_shape(qweight, "TQ1_0")
     blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["TQ1_0"]["type_size"])
     qs, qh, d = blocks[:, :48], blocks[:, 48:52], blocks[:, 52:]
     d = d.view(np.float16).astype(np.float32)
@@ -693,25 +704,25 @@ def _dequantize_tq1_0_numpy(qweight: np.ndarray) -> np.ndarray:
         axis=-1,
     )
     values = ((values.astype(np.uint16) * 3) >> 8).astype(np.int8) - 1
-    return (d * values.astype(np.float32)).reshape(rows, -1)
+    return (d * values.astype(np.float32)).reshape(output_shape)
 
 
 def _dequantize_tq2_0_numpy(qweight: np.ndarray) -> np.ndarray:
-    rows = qweight.shape[0]
+    output_shape = _gguf_dequantized_shape(qweight, "TQ2_0")
     blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["TQ2_0"]["type_size"])
     qs, d = blocks[:, :64], blocks[:, 64:]
     d = d.view(np.float16).astype(np.float32)
     values = ((qs.reshape(-1, 2, 1, 32) >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 1, 4, 1)) & 0x03)
-    return (d * (values.reshape(-1, 256).astype(np.int8) - 1).astype(np.float32)).reshape(rows, -1)
+    return (d * (values.reshape(-1, 256).astype(np.int8) - 1).astype(np.float32)).reshape(output_shape)
 
 
 def _dequantize_mxfp4_numpy(qweight: np.ndarray) -> np.ndarray:
-    rows = qweight.shape[0]
+    output_shape = _gguf_dequantized_shape(qweight, "MXFP4")
     blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["MXFP4"]["type_size"])
     d = _gguf_e8m0_to_fp32_half(blocks[:, :1])
     qs = ((blocks[:, 1:].reshape(-1, 1, 16) >> np.array([0, 4], dtype=np.uint8).reshape(1, 2, 1)) & 0x0F)
     values = _GGUF_FP4_VALUES[qs].reshape(-1, 32)
-    return (d * values.astype(np.float32)).reshape(rows, -1)
+    return (d * values.astype(np.float32)).reshape(output_shape)
 
 
 def _gguf_ue4m3_to_fp32(values: np.ndarray) -> np.ndarray:
@@ -726,13 +737,13 @@ def _gguf_ue4m3_to_fp32(values: np.ndarray) -> np.ndarray:
 
 
 def _dequantize_nvfp4_numpy(qweight: np.ndarray) -> np.ndarray:
-    rows = qweight.shape[0]
+    output_shape = _gguf_dequantized_shape(qweight, "NVFP4")
     blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["NVFP4"]["type_size"])
     scales = _gguf_ue4m3_to_fp32(blocks[:, :4]).reshape(-1, 4, 1)
     qs = blocks[:, 4:].reshape(-1, 4, 8)
     values = np.concatenate([qs & 0x0F, qs >> 4], axis=-1)
     values = _GGUF_FP4_VALUES[values].reshape(-1, 64)
-    return (scales * values.reshape(-1, 4, 16).astype(np.float32)).reshape(rows, -1)
+    return (scales * values.reshape(-1, 4, 16).astype(np.float32)).reshape(output_shape)
 
 
 def _dequantize_q5_k_numpy(qweight: np.ndarray) -> np.ndarray:
