@@ -55,7 +55,7 @@ def packed_module_spec(module, config):
             )
         }
     if getattr(module, "QUANT_TYPE", None) == "bitsandbytes":
-        spec["compute_dtype"] = str(module.compute_dtype)
+        spec["compute_dtype"] = str(module.compute_dtype) if module.compute_dtype is not None else None
         if module.is_4bit:
             # Packed QuantState JSON length depends on values, not dimensions.
             spec["quant_state_shape"] = list(module.weight_quant_state.shape)
@@ -90,6 +90,7 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
         kind = spec.pop("kind", None)
         group_scales = spec.pop("group_scales", True)
         options = spec.pop("options", {})
+        has_compute_dtype = "compute_dtype" in spec
         dtype_name = spec.pop("compute_dtype", None)
         quant_state_shape = spec.pop("quant_state_shape", None)
         if kind == "paro":
@@ -103,7 +104,9 @@ def restore_packed_module(spec, *, name, config, kernel, lm_head_name):
         }
         kwargs.update(config.quant_linear_init_kwargs())
         kwargs.update(options)
-        if dtype_name is not None:
+        if has_compute_dtype and dtype_name is None:
+            kwargs["dtype"] = None
+        elif dtype_name is not None:
             dtype = {
                 "torch.float16": torch.float16,
                 "torch.bfloat16": torch.bfloat16,

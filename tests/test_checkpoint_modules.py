@@ -146,7 +146,8 @@ def test_exl3_explicit_buffer_schema():
     assert restored.out_dtype == torch.bfloat16
 
 
-def test_bitsandbytes_schema_under_meta_and_inference_context():
+@pytest.mark.parametrize("compute_dtype", [torch.float32, None])
+def test_bitsandbytes_schema_under_meta_and_inference_context(compute_dtype):
     from gptqmodel.nn_modules.qlinear.bitsandbytes import (
         BITSANDBYTES_AVAILABLE,
         BitsAndBytesLinear,
@@ -163,9 +164,9 @@ def test_bitsandbytes_schema_under_meta_and_inference_context():
         sym=True,
         in_features=128,
         out_features=128,
-        dtype=torch.float32,
+        dtype=compute_dtype,
     )
     module.pack_original(torch.nn.Linear(128, 128, bias=False), None, None)
     with torch.inference_mode():
         restored = assert_schema_roundtrip(module, config)
-    assert restored.compute_dtype == torch.float32
+    assert restored.compute_dtype == compute_dtype
