@@ -1894,8 +1894,6 @@ class QVQLinear(BaseQuantLinear):
         if getattr(self, "_p32_rank8_enabled", False) and self.training:
             raise RuntimeError("window recovery is inference-only")
         delegate = getattr(self, "_qvq_grouped_p32_delegate", None)
-        if delegate is not None and getattr(self, "_p32_rank8_enabled", False):
-            raise RuntimeError("grouped recovery requires an integrated grouped implementation")
         if delegate is not None:
             state, consumer_index, module_name = delegate
             return state.consume(consumer_index, module_name, self, x)

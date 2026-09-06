@@ -7,6 +7,11 @@ This module deliberately knows nothing about projection roles.  Architecture
 implementors assign generic shared-basis identifiers in a
 ``QVQTransformPlan``; the coordinator below validates the packed modules and
 reuses their complete input transform across every declared consumer.
+
+Checkpointed grouped P32 consumers retain independent optional rank8 factors.
+The grouped decoder publishes one transformed activation, then each child adds
+its own FP32 inner-domain correction before its output Hadamard/SV/bias path.
+All rank8 policy changes are prepared before execution or graph capture.
 """
 
 from __future__ import annotations
@@ -22,7 +27,6 @@ from gptqmodel.quantization.qvq_transform_planner import (
     QVQTransformPlan,
     TransformPlacement,
 )
-
 
 QVQ_GROUPED_P32_RUNTIME_META_KEY = "qvq_grouped_p32_runtime"
 QVQ_GROUPED_P32_RUNTIME_SCHEMA = "qvq_grouped_p32_v1"
@@ -190,7 +194,7 @@ class QVQSharedInputLinear(torch.nn.Module):
 
 
 class QVQGroupedP32InputTransformState(torch.nn.Module):
-    """One shared input transform and one grouped CUDA P32 decode."""
+    """One shared input transform, grouped CUDA P32 decode, and child rank8."""
 
     def __init__(
         self, group: QVQSharedInputTransformGroup, modules: dict[str, QVQLinear]
@@ -352,6 +356,33 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
         self.grouped_gemv_invocations = 0
         self.completed_cycles = 0
         self.payloads_released = False
+        # Rank8 factors remain child-local even though the P32 decode payload
+        # is interleaved.  Validate each immutable base hash while canonical
+        # child payloads are present; factor bytes are checked only when a
+        # quality mode enables that child, so recovery-off never reads them.
+        self._rank8_metadata: list[dict | None] = []
+        self._rank8_base_hashes: list[str | None] = []
+        self._rank8_factor_hashes: list[str | None] = []
+        self._rank8_enabled = [False] * len(self.linears)
+        self._rank8_configs: list[object | None] = [None] * len(self.linears)
+        from .qvq_rank8 import _base, _digest, _metadata
+
+        for consumer_index, module in enumerate(self.linears):
+            raw_metadata = module.rank8_metadata
+            if raw_metadata is None:
+                self._rank8_metadata.append(None)
+                self._rank8_base_hashes.append(None)
+                self._rank8_factor_hashes.append(None)
+                continue
+            metadata = _metadata(module)
+            tensors, base_metadata = _base(module)
+            if metadata.get("base_hash") != _digest(tensors, base_metadata):
+                raise ValueError(
+                    f"grouped QVQ P32 consumer {self.group.module_names[consumer_index]!r} has a rank8 base hash mismatch"
+                )
+            self._rank8_metadata.append(metadata)
+            self._rank8_base_hashes.append(metadata["base_hash"])
+            self._rank8_factor_hashes.append(metadata["factors_hash"])
 
     @property
     def pending_consumers(self) -> tuple[str, ...]:
@@ -441,13 +472,113 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
         self.grouped_gemv_invocations += 1
         leading_shape = transformed.shape[:-1]
         pieces = grouped_inner.split(self.output_widths, dim=-1)
-        return tuple(
-            module.recover_output(
-                piece.contiguous().reshape(*leading_shape, module.out_features),
-                output_dtype=output_dtype,
+        flat_input = flat.float() if any(self._rank8_enabled) else None
+        outputs = []
+        for index, (module, piece) in enumerate(zip(self.linears, pieces, strict=True)):
+            # The grouped decoder already returns an FP32 inner accumulator.
+            # Add each child correction in that same domain, before the
+            # child-local output Hadamard/SV/bias recovery.  Disabled children
+            # never touch their factor buffers.
+            if self._rank8_enabled[index]:
+                self.validate_rank8(index, module)
+                hidden = flat_input @ module.rank8_A.float()
+                piece = piece.float() + hidden @ module.rank8_B.float()
+            outputs.append(
+                module.recover_output(
+                    piece.contiguous().reshape(*leading_shape, module.out_features),
+                    output_dtype=output_dtype,
+                )
             )
-            for module, piece in zip(self.linears, pieces, strict=True)
-        )
+        return tuple(outputs)
+
+    def prepare_rank8(
+        self, consumer_index: int, module: QVQLinear, config: object
+    ) -> None:
+        """Bind one child quality policy after grouped payload installation.
+
+        Grouped installation releases canonical trellis/selectors, so the
+        ordinary per-module preparation path cannot recompute its base hash.
+        This method uses the hashes captured during installation and only
+        changes static per-child execution flags outside CUDA capture.
+        """
+
+        from .qvq_rank8 import CONTRACT, P32WindowConfig, _digest, _versions
+
+        if not isinstance(config, P32WindowConfig):
+            raise TypeError("config must be P32WindowConfig")
+        if consumer_index < 0 or consumer_index >= len(self.linears):
+            raise IndexError("grouped QVQ P32 consumer index is out of range")
+        if module is not self.linears[consumer_index]:
+            raise RuntimeError("grouped QVQ P32 child binding is inconsistent")
+        if self._outputs is not None:
+            raise RuntimeError("cannot change rank8 mode during a grouped projection cycle")
+        if config.algorithm.startswith("hopper_"):
+            raise ValueError(
+                "explicit Hopper geometry requires an independent window consumer"
+            )
+        if config.recovery_projection != "separate_reference":
+            raise ValueError(
+                "grouped checkpointed P32 currently uses the shared-input reference rank8 projection"
+            )
+        if config.recovery_kernel != "separate_reference":
+            raise ValueError(
+                "grouped checkpointed P32 currently uses the separate rank8 epilogue"
+            )
+
+        enabled = False
+        if config.recovery_mode != "off" and not (
+            config.recovery_mode == "auto" and config.quality_mode == "fast"
+        ):
+            metadata = self._rank8_metadata[consumer_index]
+            if metadata is None:
+                if config.recovery_mode == "on":
+                    raise ValueError("recovery requested without validated tensors")
+            else:
+                if metadata.get("fit_contract") != CONTRACT or not metadata.get(
+                    "validated"
+                ):
+                    raise ValueError("unvalidated or incompatible recovery contract")
+                if module.rank8_A is None or module.rank8_B is None:
+                    raise ValueError("recovery requested without validated tensors")
+                expected = (
+                    (module.in_features, 8),
+                    (8, module.out_features),
+                )
+                if module.rank8_A.shape != expected[0] or module.rank8_B.shape != expected[1]:
+                    raise ValueError("invalid rank-8 tensor shapes")
+                for tensor in (module.rank8_A, module.rank8_B):
+                    if tensor.dtype != torch.float16 or tensor.device != module.trellis.device:
+                        raise ValueError("recovery tensors must be FP16 on the window device")
+                    if not torch.isfinite(tensor).all():
+                        raise ValueError("non-finite recovery tensors")
+                factor_hash = _digest({"A": module.rank8_A, "B": module.rank8_B}, {})
+                if factor_hash != self._rank8_factor_hashes[consumer_index]:
+                    raise ValueError("recovery factors hash mismatch")
+                enabled = (
+                    config.recovery_mode == "on"
+                    or config.quality_mode == "quality"
+                    or (
+                        config.quality_mode == "balanced"
+                        and metadata.get("selected", False)
+                    )
+                )
+        if enabled and module.trellis.device.type == "cuda" and torch.backends.cuda.matmul.allow_tf32:
+            raise ValueError("rank8 FP32 reference requires CUDA matmul TF32 disabled")
+        self._rank8_enabled[consumer_index] = enabled
+        self._rank8_configs[consumer_index] = config
+        module._p32_window_config = config
+        module._p32_rank8_enabled = enabled
+        module._p32_rank8_versions = _versions(module) if enabled else None
+
+    def validate_rank8(self, consumer_index: int, module: QVQLinear) -> None:
+        from .qvq_rank8 import _versions
+
+        if not self._rank8_enabled[consumer_index]:
+            return
+        if _versions(module) != module._p32_rank8_versions:
+            raise RuntimeError(
+                "grouped window/recovery state changed; prepare recovery again before execution"
+            )
 
     def consume(
         self,

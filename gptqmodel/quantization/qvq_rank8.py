@@ -193,6 +193,11 @@ def prepare_rank8(layer, config):
         raise ValueError("window recovery is inference-only")
     if layer.trellis.device.type == "cuda" and torch.cuda.is_current_stream_capturing():
         raise RuntimeError("prepare rank8 and kernel policy before CUDA Graph capture")
+    grouped_delegate = getattr(layer, "_qvq_grouped_p32_delegate", None)
+    if grouped_delegate is not None:
+        state, consumer_index, _ = grouped_delegate
+        state.prepare_rank8(consumer_index, layer, config)
+        return
     if config.algorithm.startswith("hopper_"):
         if layer.trellis.device.type != "cuda":
             raise ValueError("explicit Hopper policy requires an SM90 CUDA device")
@@ -257,10 +262,6 @@ def prepare_rank8(layer, config):
                     and metadata.get("selected", False)
                 )
             )
-    if enabled and getattr(layer, "_qvq_grouped_p32_delegate", None) is not None:
-        raise ValueError(
-            "prepare recovery before grouping; grouped recovery is not implemented"
-        )
     if (
         enabled
         and layer.trellis.device.type == "cuda"
