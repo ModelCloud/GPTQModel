@@ -112,6 +112,18 @@ def test_stale_tuning_metadata_cannot_be_exported_or_loaded():
         load_window_package(package)
 
 
+def test_tuning_metadata_rejects_unmeasured_selected_kernel():
+    layer, _, x, _ = fixture()
+    prepare_rank8(layer, P32WindowConfig())
+    tune_window_kernel(layer, x, benchmark=lambda fn, inputs: [1], build_id="candidate")
+    package = export_window_package(layer)
+    package["kernel_tuning"]["selected"].update(
+        algorithm="hopper_direct_decode_mma", block_m=32, block_n=64, warp_groups=1
+    )
+    with pytest.raises(ValueError, match="absent from measured candidates"):
+        load_window_package(package)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_hopper_external_candidate_gates_and_fixed_quality(tmp_path):
     if torch.cuda.get_device_capability() != (9, 0):

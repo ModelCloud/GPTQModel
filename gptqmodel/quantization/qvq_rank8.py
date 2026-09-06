@@ -159,12 +159,22 @@ def _validate_kernel_tuning_metadata(layer, tuning):
     if not isinstance(tuning, dict) or tuning.get("version") != 1:
         raise ValueError("invalid window kernel-tuning metadata")
     try:
-        P32WindowConfig.from_backend_config(tuning["selected"])
+        selected = P32WindowConfig.from_backend_config(tuning["selected"])
         identity = tuning["identity"]
         expected_state = identity["state_hash"]
         expected_factors = identity["factors_hash"]
+        candidates = tuple(
+            P32WindowConfig.from_backend_config(candidate)
+            for candidate in identity["candidates"]
+        )
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("invalid selected window kernel policy") from exc
+    if selected not in candidates:
+        raise ValueError("selected window kernel is absent from measured candidates")
+    if tuning.get("quality_mode") != selected.quality_mode:
+        raise ValueError("window kernel-tuning quality mode mismatch")
+    if type(tuning.get("rank8_enabled")) is not bool:
+        raise ValueError("invalid window kernel-tuning correction state")
     if expected_state != _digest(*_base(layer)):
         raise ValueError("window kernel-tuning state hash mismatch")
     if expected_factors is not None:
