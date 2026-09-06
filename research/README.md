@@ -39,6 +39,32 @@ for enum/config coverage, dispatch boundaries, and implementation status.
 `qvq_yaqa.py` and the linked paper. No separate VAQA publication is asserted.
 P32 is documented as a QVQ implementation, not an independently identified paper.
 
+## Compiler and GPU research
+
+These are compiler, execution and measurement topics, not additional quantization
+METHOD members. “stablehalo” is interpreted as **StableHLO**. SSA and SASS refer
+to different stages of compilation.
+
+| Topic | Note | Role |
+|---|---|---|
+| ZML | [ZML](zml.md) | Symbolic model construction and device execution |
+| XLA | [XLA](xla.md) | Graph optimization, backend lowering and tuning boundaries |
+| StableHLO | [StableHLO](stablehlo.md) | Operation semantics and compiler portability |
+| SSA / SASS | [Analysis and folding](ssa-sass.md) | IR simplification versus emitted GPU instructions |
+| Nsight | [Profiling workflow](nsight-profiling.md) | System timeline, kernel counters and replay limits |
+| CUDA execution | [SMs, Tensor Cores, TMA, async and barriers](cuda-execution.md) | Architecture capabilities and pipeline correctness |
+| SSA foundations | [Cytron et al.](ssa-paper.md) | Program representations for optimization |
+| Equality saturation | [egg](egg.md) | Exploring equivalent expressions with valid rewrite rules |
+| Performance modeling | [Roofline](roofline.md) | Operational intensity and compute/bandwidth bounds |
+| Asynchronous attention | [FlashAttention-3](flashattention-3.md) | Hopper overlap and low-precision attention research |
+| Task scheduling | [Task-Based Tensor Computations](task-based-tensor-computations.md) | Coordination of asynchronous GPU units |
+
+The compiler/GPU notes reference official documentation reviewed on 2026-09-06
+and QVQ's P32 ABI at merged main
+[`263ed4b`](https://github.com/ModelCloud/QvQ/tree/263ed4baf7be5e9547b4e731c9031bef5f48cf69).
+They distinguish proposed integration from implemented behavior; no new compiler,
+GPU profiling or model-quality experiments were run for these notes.
+
 ## How the pieces relate
 
 Quantizer choice, rounding objective, numeric scales, storage layout, additive
