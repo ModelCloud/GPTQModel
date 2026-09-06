@@ -1319,7 +1319,9 @@ class QVQLinear(BaseQuantLinear):
                 self.codebook_version,
             )
             if self.bank_ids is not None:
-                self._qvq_mps_bank_ids = self._prepare_mps_bank_ids(self.trellis.device)
+                self._qvq_mps_bank_ids = self._prepare_mps_bank_ids(
+                    self.runtime_device()
+                )
 
     def _apply(self, fn):
         grouped_runtime = getattr(self, "_gptqmodel_qvq_grouped_runtime", None)
@@ -1853,6 +1855,7 @@ class QVQLinear(BaseQuantLinear):
                 self.trellis_window != 16
                 or self.vector_size != 2
                 or self.dual_v2
+                or self.window_only
                 or not qvq_cpu_supported()
             ):
                 return self._reference_inner_forward(x)
