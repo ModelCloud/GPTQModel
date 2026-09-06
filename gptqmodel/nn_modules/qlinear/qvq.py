@@ -1881,6 +1881,13 @@ class QVQLinear(BaseQuantLinear):
                 cuda_bank_ids = cached[5]
                 bank_alt_id = cached[6]
             else:
+                # FP8 WGMMA snapshots and packs mutable bank metadata on a
+                # cache miss.  This is preparation work and must never occur
+                # during CUDA Graph capture, where the clone/device transfer
+                # would allocate and the alternative-bank read would sync.
+                self._require_prepared_outside_capture(
+                    input.device, "FP8 bank selector payload"
+                )
                 cuda_bank_ids = pack_qvq_binary_bank_ids(
                     unpack_qvq_binary_bank_ids(source.detach().clone(), selector_count)
                 ).to(device=input.device)
