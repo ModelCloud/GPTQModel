@@ -39,9 +39,9 @@ from ..utils.looper_helpers import find_last_quantized_layer_index, normalize_de
 from ..utils.model import find_modules, get_layer_name, get_module
 from ..utils.offload import offload_to_disk
 from ..utils.torch import CPU, torch_empty_cache, torch_sync
-from .resume import (activation_cache_available, load_activation_cache, marker_layer_finalized_count,
-                     read_resume_target, resume_state_path, restore_completed_layer,
-                     restore_completed_layer_class_only, save_activation_cache, write_resume_marker)
+from .resume import (load_activation_cache, marker_layer_finalized_count, read_resume_target,
+                     resume_state_path, restore_completed_layer, restore_completed_layer_class_only,
+                     save_activation_cache, write_resume_marker)
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
 
@@ -363,8 +363,15 @@ def _resume_replay_layer(
     pb,
     log,
     region_timer,
+    preloaded_cache=None,
 ) -> None:
     """Fast-forward one already-quantized layer during a resumed run.
+
+    `preloaded_cache`, when given, is this layer's already-loaded
+    `load_activation_cache` result (the caller already had to load it once
+    to decide the fast-forward strategy -- see `resume_target_cache` in
+    `run_layer_stage` -- so this avoids re-reading the same safetensors
+    file for the same layer a second time).
 
     Replays the layer using its ORIGINAL (pre-quantization) checkpoint
     weights, then swaps in the packed quant modules from the offload
@@ -381,8 +388,7 @@ def _resume_replay_layer(
 
     pb.title(f"{layer_title} (resume replay)").subtitle("").draw()
 
-    # Materialize original weights on CPU: this is the same state the normal
-    # loop's subset/replay forward operates on.
+    # Use the same CPU-resident weights as the normal replay path.
     module = model.shell_module_materialize(target_submodule=module, device=CPU)
     model_type = model.model.config.model_type
     if model_type in MODULE_CONVERTER_MAP:
@@ -397,14 +403,10 @@ def _resume_replay_layer(
     cur_layer_device = get_device(module)
 
     processor = looper.processors[-1]
-    cached = load_activation_cache(looper, layer_index, layer_count)
+    cached = preloaded_cache if preloaded_cache is not None else load_activation_cache(looper, layer_index, layer_count)
     if cached is not None:
         cached_layer_outputs, cached_shared_kv = cached
-        # Skip the forward replay entirely: this layer's output was already
-        # computed and cached on a previous resumed run. Move it back onto
-        # the device the normal (uncached) replay would have produced it on
-        # (see forward_executor.run_single: outputs land on cur_layer_device
-        # unless calibration_data_device pins them elsewhere).
+        # Reuse cached outputs and restore the paired shared state.
         calib_device_cfg = model.quantize_config.calibration_data_device
         target_device = cur_layer_device if calib_device_cfg is None else CPU
         layer_outputs = [
@@ -412,10 +414,7 @@ def _resume_replay_layer(
             for batch in cached_layer_outputs
         ]
         if cached_shared_kv is not None:
-            # Restore the dict entry the skipped forward would have written,
-            # so layer_index + 1's `reuse_kv` read (e.g. a DSA-style indexer's
-            # "shared" top-k indices) sees the same value it would without
-            # caching.
+            # Restore the shared state consumed by the next layer.
             shared_kv_cache_dict[layer_index] = cached_shared_kv.to(cur_layer_device)
         log.info(
             "Resume: layer %s used the cached activation output; skipped forward replay.",
@@ -444,11 +443,7 @@ def _resume_replay_layer(
     processor.clear_cache_data()
     processor.receive_layer_inputs(layer_outputs)
 
-    # Only now -- after the layer has produced the next layer's input from its
-    # ORIGINAL weights, exactly like the normal finalize-after-replay order --
-    # swap in the packed quant modules so this layer is correctly quantized in
-    # the saved model. create_quant_module() asserts CPU residency, matching
-    # what the normal finalize path expects too.
+    # Replay with original weights, then restore the packed modules.
     module = model.post_quantize(module)
     layers[layer_index] = module
     restored = restore_completed_layer(looper, layer_prefix)
@@ -460,9 +455,7 @@ def _resume_replay_layer(
         )
     expected_count = marker_layer_finalized_count(model.quantize_config, layer_index)
     if expected_count is not None and len(restored) != expected_count:
-        # A partial offload directory must fail loudly: every un-restored
-        # module would otherwise keep its original weights and be saved into
-        # the final model as silently unquantized.
+        # Missing modules would otherwise remain unquantized in the saved model.
         raise RuntimeError(
             f"Resume: layer {layer_index} restored {len(restored)} quant modules but the "
             f"marker records {expected_count} finalized modules. The offload directory is "
@@ -483,8 +476,7 @@ def _resume_replay_layer(
     )
 
     layers[layer_index] = model.post_quantize(module)
-    # Re-offload the restored modules so the fast-forward keeps RAM/VRAM flat
-    # no matter how many completed layers it walks through.
+    # Re-offload restored modules to keep memory flat during replay.
     if model.quantize_config.offload_to_disk:
         offload_to_disk(
             model=model.model,
@@ -492,9 +484,7 @@ def _resume_replay_layer(
             disk_path=model.quantize_config.offload_to_disk_path,
             force=True,
         )
-    # Mirror the normal loop's end-of-layer eviction: without this pop the
-    # DSA-style indexer's top-k tensors of every fast-forwarded layer pile up
-    # for the whole resume replay (potentially several GB across many layers).
+    # Evict per-layer shared state to prevent unbounded growth.
     shared_kv_cache_dict.pop(layer_index - 1, None)
     torch_empty_cache(device=cur_layer_device)
 
@@ -526,9 +516,7 @@ def _resume_restore_only_layer(
     restore_title = layer_title.replace("Quantizing", "Restoring", 1)
     pb.title(f"{restore_title} (no replay)").subtitle("").draw()
 
-    # Materialize on CPU only -- create_quant_module() (called by
-    # restore_completed_layer) asserts CPU residency, but nothing here needs
-    # GPU compute since no forward pass runs for a pure pass-through layer.
+    # CPU materialization is needed for restore; no GPU compute is required.
     module = model.shell_module_materialize(target_submodule=module, device=CPU)
     model_type = model.model.config.model_type
     if model_type in MODULE_CONVERTER_MAP:
@@ -538,12 +526,7 @@ def _resume_restore_only_layer(
 
     layer_prefix = layer_name if layer_name else f"{model.extract_layers_node()}.{layer_index}"
 
-    # Class-only restore: no tensor data is read or re-written here (see
-    # restore_completed_layer_class_only's docstring) -- this layer's output
-    # is never consumed by anything, so the only requirement left is that the
-    # live module tree's class matches what's on disk, with parameters left
-    # on meta so save() fetches the real values from the (untouched) offload
-    # bundle directly.
+    # Restore only module classes; save() reads weights from the offload bundle.
     restored = restore_completed_layer_class_only(looper, layer_prefix)
     if not restored:
         raise RuntimeError(
@@ -553,9 +536,7 @@ def _resume_restore_only_layer(
         )
     expected_count = marker_layer_finalized_count(model.quantize_config, layer_index)
     if expected_count is not None and len(restored) != expected_count:
-        # A partial offload directory must fail loudly: every un-restored
-        # module would otherwise keep its original weights and be saved into
-        # the final model as silently unquantized.
+        # Missing modules would otherwise remain unquantized in the saved model.
         raise RuntimeError(
             f"Resume: layer {layer_index} restored {len(restored)} quant modules but the "
             f"marker records {expected_count} finalized modules. The offload directory is "
@@ -707,9 +688,12 @@ def run_layer_stage(
     # its cached output short-circuits the whole 0..resume_target chain: none
     # of the earlier layers' forward outputs are consumed by anything, so
     # they can skip forward replay entirely (see `_resume_restore_only_layer`).
-    resume_target_cache_hit = (
-        resume_target is not None and activation_cache_available(looper, resume_target, layer_count)
+    # Loaded once here (not just checked) so _resume_replay_layer below can
+    # reuse the same result instead of re-reading the same file.
+    resume_target_cache = (
+        load_activation_cache(looper, resume_target, layer_count) if resume_target is not None else None
     )
+    resume_target_cache_hit = resume_target_cache is not None
     if resume_target is not None:
         log.info(
             "Resume: layers 0..%s are already quantized on disk; "
@@ -788,10 +772,7 @@ def run_layer_stage(
                 layer_count - 1 if not is_embeddings_module else layer_title.replace("Quantizing ", ""),
                 layer_title,
             )
-        # Not gated behind durable_progress_logs: that flag is False in the
-        # production live-progress-bar mode, which would otherwise silence
-        # this diagnostic entirely. One line per GPU per layer is cheap
-        # enough to always emit.
+        # Emit diagnostics even when live progress logs are disabled.
         _log_cuda_memory_diagnostics(log, layer_index if not is_lm_head_module else "lm_head")
 
         should_quantize_layer = getattr(looper.gptq_model, "should_quantize_layer", None)
@@ -801,9 +782,7 @@ def run_layer_stage(
             layer_index,
             looper.gptq_model.quantize_config,
         ):
-            # Mirrors the original run: layers excluded from quantization were
-            # skipped without any forward there too, so a resumed run must not
-            # try to restore (there are no offload bundles) nor replay them.
+            # Excluded layers have no bundles and remain skipped on resume.
             continue
 
         if _is_resume_fastforward_candidate(
@@ -834,6 +813,7 @@ def run_layer_stage(
                     pb=pb,
                     log=log,
                     region_timer=region_timer,
+                    preloaded_cache=resume_target_cache if layer_index == resume_target else None,
                 )
             continue
 

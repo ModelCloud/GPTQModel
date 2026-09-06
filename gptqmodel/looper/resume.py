@@ -1,33 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Layer-boundary snapshot markers and mid-quantization resume support.
+"""Layer-boundary markers and opt-in mid-quantization resume support.
 
-Sequential GPTQ quantization of very large models can run for tens of hours.
-This module makes a crash survivable by exploiting state the looper already
-persists: every finalized module is packed into its quant-linear form and
-disk-offloaded under ``offload_to_disk_path/<module full name>/``. All that is
-missing for a restart is (1) a durable record of the last layer whose modules
-are all finalized on disk, and (2) a fast-forward path that rebuilds the
-calibration activations for the first unfinished layer.
-
-Opt-in via env ``GPTQMODEL_RESUME=1`` on the run you want to be resumable
-(with ``offload_to_disk`` configured) -- the marker (``quant_resume_state.json``)
-is then written at each layer boundary, forcing submodule finalizers to drain
-synchronously so it never lies about what's actually durable on disk. Runs
-that don't set the flag pay none of this: no marker, no forced sync drain.
-
-On restart with the same env var set, the layer stage replays completed
-layers forward-only: the original (meta) submodules are swapped for quant
-modules loaded from the offload directory, one whole-layer forward regenerates
-the next layer's inputs, and quantization resumes at the first unfinished
-layer. Replay runs through the original (pre-quantization) weights, so the
-regenerated activations match the original run exactly, up to the same
-floating-point reduction-order nondeterminism any rerun has.
-
-The forward replay for the single most-recently-completed layer can itself be
-skipped: ``save_activation_cache``/``load_activation_cache`` persist that
-layer's output (and any paired ``shared_kv_cache_dict`` state) the first time
-it is computed, so a *second* resume that fast-forwards through the same
-layer again reuses the cached result instead of recomputing it.
+With ``GPTQMODEL_RESUME=1`` and disk offload enabled, completed layers are
+recorded in ``quant_resume_state.json``. A restart restores packed modules,
+replays completed layers with the original weights, and resumes at the first
+unfinished layer. Markers are written after finalizers drain, and fingerprints
+prevent mixing incompatible model, quantization, or calibration state. The most
+recent replay output can also be cached, including shared KV state, to avoid
+repeating that forward pass on a later resume.
 """
 
 from __future__ import annotations
@@ -36,6 +16,7 @@ import hashlib
 import json
 import os
 import time
+import uuid
 from typing import List, Optional, Tuple
 
 import torch
@@ -53,24 +34,65 @@ RESUME_STATE_FILENAME = "quant_resume_state.json"
 RESUME_ENV_FLAG = "GPTQMODEL_RESUME"
 
 
-def calibration_dataset_hash(dataset) -> str:
-    """SHA-256 over each sample's input_ids, so equal-length calibration data with different content is detected.
+def _hash_int_sequence(hasher, value) -> None:
+    """Feed one length-prefixed integer sequence into `hasher`.
 
-    Must be called before `LoopProcessor.release_calibration_dataset()` frees
-    `dataset` -- by the time any layer's resume marker is written, it is
-    already gone, so callers stash this on the processor up front (see
-    `module_looper.py`) and `_resume_fingerprint` only ever reads that.
+    Length prefixes preserve sample and field boundaries in the hash.
+    """
+    ids = value.reshape(-1).tolist() if torch.is_tensor(value) else list(value)
+    hasher.update(len(ids).to_bytes(8, "big"))
+    hasher.update(torch.tensor(ids, dtype=torch.int64).numpy().tobytes())
+
+
+def calibration_dataset_hash(dataset) -> str:
+    """Hash each sample's IDs and masks, detecting content and padding changes.
+
+    Call before dataset release and stash the result for later marker writes.
+    Hash failures return a unique value so failed runs cannot appear compatible.
     """
     hasher = hashlib.sha256()
     try:
         for row in dataset:
-            # Same access pattern as this row's other consumer (loop_processor.py's
-            # avg-length check): works for a plain dict or a BatchEncoding alike.
-            input_ids = row["input_ids"]
-            ids = input_ids.reshape(-1).tolist() if torch.is_tensor(input_ids) else list(input_ids)
-            hasher.update(torch.tensor(ids, dtype=torch.int64).numpy().tobytes())
+            # Match loop_processor.py's access pattern; supports dict-like rows.
+            _hash_int_sequence(hasher, row["input_ids"])
+            attention_mask = row.get("attention_mask") if hasattr(row, "get") else None
+            if attention_mask is not None:
+                _hash_int_sequence(hasher, attention_mask)
     except Exception:  # pragma: no cover - hashing must never break the run
+        return f"unhashable:{uuid.uuid4().hex}"
+    return hasher.hexdigest()
+
+
+_CHECKPOINT_WEIGHT_EXTENSIONS = (".safetensors", ".bin", ".gguf", ".pt")
+
+
+def _checkpoint_fingerprint(model_local_path) -> str:
+    """Cheap stand-in for a full weight hash: (relative path, size, mtime)
+    of every checkpoint weight file, sorted for determinism.
+
+    Detects a revision swap or a manually replaced/edited weight file at the
+    same path without reading any weight data -- a full content hash would
+    be far too slow for checkpoints that can run into the hundreds of GB.
+    """
+    if not model_local_path or not os.path.isdir(model_local_path):
         return ""
+    entries = []
+    for root, _dirs, files in os.walk(model_local_path):
+        for name in files:
+            if not name.endswith(_CHECKPOINT_WEIGHT_EXTENSIONS):
+                continue
+            path = os.path.join(root, name)
+            try:
+                stat = os.stat(path)
+            except OSError:
+                continue
+            entries.append((os.path.relpath(path, model_local_path), stat.st_size, int(stat.st_mtime)))
+    if not entries:
+        return ""
+    entries.sort()
+    hasher = hashlib.sha256()
+    for rel_path, size, mtime in entries:
+        hasher.update(f"{rel_path}:{size}:{mtime}\n".encode())
     return hasher.hexdigest()
 
 
@@ -110,6 +132,7 @@ def _resume_fingerprint(looper, layer_count: int) -> dict:
         "model_name_or_path": str(getattr(model_config, "_name_or_path", "") or ""),
         "hidden_size": int(getattr(model_config, "hidden_size", 0) or 0),
         "vocab_size": int(getattr(model_config, "vocab_size", 0) or 0),
+        "checkpoint_fingerprint": _checkpoint_fingerprint(getattr(looper.gptq_model, "model_local_path", None)),
         "calibration_batches": int(calibration_batches),
         "calibration_tokens": int(calibration_tokens),
         "calibration_hash": calibration_hash,
@@ -178,7 +201,7 @@ def write_resume_marker(looper, layer_index: int, layer_count: int, finalized_co
             json.dump(payload, fp, indent=2)
         os.replace(tmp_path, state_path)
     except OSError as exc:
-        # Marker persistence is best-effort insurance; never fail the quant run.
+        # Marker persistence is best-effort; never fail quantization.
         log.warn("Resume: failed to write marker %s: %s", state_path, exc)
 
 
@@ -265,7 +288,7 @@ def save_activation_cache(
             json.dump(meta, fp)
         os.replace(meta_tmp, meta_final)
     except OSError as exc:
-        # Best-effort: a missing/stale cache only costs a slower resume later.
+        # A missing or stale cache only makes a later resume slower.
         log.warn("Resume: failed to save activation cache for layer %s: %s", layer_index, exc)
 
 
@@ -408,6 +431,14 @@ def read_resume_target(looper, layer_count: int) -> Optional[int]:
         return None
 
     expected = _resume_fingerprint(looper, layer_count)
+    if not expected.get("checkpoint_fingerprint"):
+        # An empty value doesn't mean "no weight files": it means the
+        # checkpoint couldn't be fingerprinted at all (no model_local_path,
+        # or no recognized weight file extension under it), which can't
+        # distinguish this checkpoint from a *different* one that also
+        # failed to fingerprint. Never trust a marker in that case.
+        log.warn("Resume: could not fingerprint checkpoint weight files; refusing to trust any marker.")
+        return None
     if payload.get("fingerprint") != expected:
         log.warn(
             "Resume: marker fingerprint %s does not match current run %s; starting from layer 0.",

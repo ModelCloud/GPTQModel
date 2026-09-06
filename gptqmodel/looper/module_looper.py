@@ -1540,8 +1540,7 @@ class ModuleLooper():
 
         # release calibration_dataset
         for processor in self.processors:
-            # Resume markers are written well after this dataset is gone, so
-            # fingerprint its content now, before releasing it.
+            # Markers are written after release; fingerprint the data first.
             processor.calibration_dataset_hash = calibration_dataset_hash(processor.calibration_dataset)
             processor.release_calibration_dataset()
 
