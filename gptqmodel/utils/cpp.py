@@ -490,22 +490,22 @@ def _system_include_roots() -> tuple[Path, ...]:
         from torch.utils.cpp_extension import include_paths as _torch_include_paths
 
         roots.extend(Path(p).expanduser().resolve(strict=False) for p in _torch_include_paths())
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("Torch include roots unavailable; continuing without them: %s", exc, exc_info=True)
     try:
         import sysconfig
 
         roots.append(Path(sysconfig.get_paths()["include"]).expanduser().resolve(strict=False))
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("Python include root unavailable; continuing without it: %s", exc, exc_info=True)
     try:
         roots.extend(Path(p).expanduser().resolve(strict=False) for p in detected_local_cuda_include_paths())
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("Local CUDA include roots unavailable; continuing without them: %s", exc, exc_info=True)
     try:
         roots.extend(Path(p).expanduser().resolve(strict=False) for p in detected_cuda_wheel_include_paths())
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("CUDA wheel include roots unavailable; continuing without them: %s", exc, exc_info=True)
 
     seen: set[Path] = set()
     deduped: list[Path] = []
