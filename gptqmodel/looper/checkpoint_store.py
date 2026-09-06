@@ -32,8 +32,11 @@ class CheckpointConfig:
     resume: str = "auto"
     every_layers: int = 1
     keep_last: int = 2
+    skip_strict_gpu_check: bool = False
 
     def __post_init__(self):
+        if type(self.skip_strict_gpu_check) is not bool:
+            raise ValueError("skip_strict_gpu_check must be a boolean")
         if self.resume not in {"auto", "required", "never"}:
             raise ValueError("resume must be auto, required, or never")
         if type(self.every_layers) is not int or self.every_layers < 1:
@@ -62,8 +65,9 @@ def _sync_directory(path):
 class CheckpointStore:
     VERSION = 1
 
-    def __init__(self, config: CheckpointConfig):
+    def __init__(self, config: CheckpointConfig, *, identity_projection=None):
         self.config = config
+        self._identity_projection = identity_projection or (lambda identity: identity)
         self.root = Path(config.path).absolute()
         self._lease = None
         self._owner = None
@@ -255,12 +259,15 @@ class CheckpointStore:
             except CheckpointCorrupt as exc:
                 failures.append(str(exc))
                 continue
-            if _json(manifest["identity"]) != _json(identity):
+            expected_identity = self._identity_projection(manifest["identity"])
+            actual_identity = self._identity_projection(identity)
+            if _json(expected_identity) != _json(actual_identity):
                 fields = sorted(
                     key
-                    for key in identity.keys() | manifest["identity"].keys()
-                    if _json(identity.get(key)) != _json(manifest["identity"].get(key))
-                    or (key in identity) != (key in manifest["identity"])
+                    for key in actual_identity.keys() | expected_identity.keys()
+                    if _json(actual_identity.get(key))
+                    != _json(expected_identity.get(key))
+                    or (key in actual_identity) != (key in expected_identity)
                 )
                 raise CheckpointError(
                     f"incompatible checkpoint identity fields: {', '.join(fields)}"

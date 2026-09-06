@@ -6,6 +6,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Protocol
 
+from ..utils.device_telemetry import emit_device_telemetry
+from .checkpoint_devices import checkpoint_identity_without_physical_gpu_ids
 from .checkpoint_store import CheckpointConfig, CheckpointError, CheckpointStore
 from .continuation import ContinuationCodec
 from .extension import LoopBoundary, LoopPlan
@@ -38,7 +40,12 @@ class CheckpointExtension:
     """
 
     def __init__(self, config: CheckpointConfig, adapter: CheckpointAdapter):
-        self.store = CheckpointStore(config)
+        self.store = CheckpointStore(
+            config,
+            identity_projection=checkpoint_identity_without_physical_gpu_ids
+            if config.skip_strict_gpu_check
+            else None,
+        )
         self.adapter = adapter
         self.plan = None
         self.next_step = 0
@@ -59,19 +66,64 @@ class CheckpointExtension:
             **identity,
             "execution_plan": [asdict(step) for step in plan.steps],
         }
-        manifest = self.store.load(self.identity)
+        emit_device_telemetry(
+            "checkpoint_prepare",
+            root=str(self.store.root),
+            device_topology=identity.get("device_topology"),
+        )
+        try:
+            manifest = self.store.load(self.identity)
+        except CheckpointError as exc:
+            emit_device_telemetry(
+                "checkpoint_prepare_rejected",
+                root=str(self.store.root),
+                reason=str(exc),
+            )
+            raise
         if manifest is not None:
             if manifest["cursor"] > len(plan.steps):
                 raise CheckpointError("checkpoint cursor is outside the execution plan")
-            continuation = ContinuationCodec.loads(
-                self.store.get(manifest["continuation"])
+            physical_identity_matched = manifest["identity"].get(
+                "device_topology"
+            ) == identity.get("device_topology")
+            if self.store.config.skip_strict_gpu_check:
+                logging.getLogger(__name__).warning(
+                    "Checkpoint strict GPU UUID/serial checks explicitly disabled; "
+                    "GPU count, indices, pools, model and capability checks remain enforced. "
+                    "Bit-exact quantization across different hardware is not guaranteed."
+                )
+            emit_device_telemetry(
+                "checkpoint_topology_validated",
+                cursor=manifest["cursor"],
+                expected_topology=manifest["identity"].get("device_topology"),
+                actual_topology=identity.get("device_topology"),
+                matched=True,
+                strict_gpu_check=not self.store.config.skip_strict_gpu_check,
+                physical_identity_matched=physical_identity_matched,
             )
-            artifacts = {
-                name: self.store.object_path(ref)
-                for name, ref in manifest["artifacts"].items()
-            }
-            self.adapter.restore(continuation, artifacts)
+            emit_device_telemetry(
+                "checkpoint_restore_begin",
+                cursor=manifest["cursor"],
+                continuation=manifest["continuation"],
+            )
+            try:
+                continuation = ContinuationCodec.loads(
+                    self.store.get(manifest["continuation"])
+                )
+                artifacts = {
+                    name: self.store.object_path(ref)
+                    for name, ref in manifest["artifacts"].items()
+                }
+                self.adapter.restore(continuation, artifacts)
+            except Exception as exc:
+                emit_device_telemetry(
+                    "checkpoint_restore_failed",
+                    cursor=manifest["cursor"],
+                    error_type=type(exc).__name__,
+                )
+                raise
             self.next_step = self._committed_cursor = manifest["cursor"]
+            emit_device_telemetry("checkpoint_restore_complete", cursor=self.next_step)
         self.plan = plan
         return self.next_step
 
@@ -94,6 +146,7 @@ class CheckpointExtension:
         )
         if due:
             boundary.quiesce()
+            emit_device_telemetry("checkpoint_capture_begin", cursor=cursor)
             continuation, artifacts = self.adapter.capture()
             continuation_ref = self.store.put(ContinuationCodec.dumps(continuation))
             artifact_refs = {
@@ -109,6 +162,12 @@ class CheckpointExtension:
                 artifacts=artifact_refs,
             )
             self._committed_cursor = cursor
+            emit_device_telemetry(
+                "checkpoint_committed",
+                cursor=cursor,
+                continuation=continuation_ref,
+                artifact_count=len(artifact_refs),
+            )
             callback = getattr(self.adapter, "committed", None)
             if callback is not None:
                 callback(
@@ -126,4 +185,5 @@ class CheckpointExtension:
                 )
         self.next_step = cursor
         if self._stop_requested:
+            emit_device_telemetry("checkpoint_stopped", cursor=cursor)
             raise CheckpointStopped(f"checkpoint committed; resume from step {cursor}")
