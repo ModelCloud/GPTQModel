@@ -1235,8 +1235,6 @@ class QVQHopperGroupedRuntime:
         if not isinstance(down, QVQLinear):
             return "fused MLP lost its QVQ down projection"
         children = self._children()
-        if any(getattr(child, "_p32_rank8_enabled", False) for child in (*children, down)):
-            return "rank8 uses grouped gate/up and independent down until full MLP fusion is validated"
         if (
             len(children) != 2
             or children[0].out_features != children[1].out_features
@@ -1920,6 +1918,7 @@ class QVQHopperGroupedRuntime:
         )
 
         rows = x.numel() // self._children()[0].in_features
+        rank8_down_enabled = bool(getattr(down, "_p32_rank8_enabled", False))
         if rows > 4096:
             chunk_rows = self._autotune_large_m_chunk_rows(
                 x, rows, scope="mlp"
@@ -1945,7 +1944,12 @@ class QVQHopperGroupedRuntime:
             return self._execute_mlp_chunked(x, 16)
         fp8_prefill = (
             self._ensure_h100_fp8_prefill_payload()
-            if self._h100_fp8_prefill_eligible(x, rows)
+            if not rank8_down_enabled
+            and not any(
+                getattr(child, "_p32_rank8_enabled", False)
+                for child in self._children()
+            )
+            and self._h100_fp8_prefill_eligible(x, rows)
             else None
         )
         if fp8_prefill is not None:
@@ -2207,6 +2211,7 @@ class QVQHopperGroupedRuntime:
             and self._h100_multiblock_intermediate_enabled
             and down.output_hadamard
             and (down.in_features, down.out_features) == (8192, 2048)
+            and not rank8_down_enabled
         )
         if fused_down_recovery:
             partials = down._inner_forward(
@@ -2237,6 +2242,7 @@ class QVQHopperGroupedRuntime:
             and down.output_hadamard
             and (down.in_features, down.out_features) == (17408, 5120)
             and qwen_transition_bits == 6
+            and not rank8_down_enabled
         )
         if use_qwen_ordered_composite_recovery:
             from ..quantization.rotation.hadamard_utils import _get_hadK_on
@@ -2271,6 +2277,16 @@ class QVQHopperGroupedRuntime:
             return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
 
         inner = down._inner_forward(transformed)
+        if rank8_down_enabled:
+            # ``transformed`` is the exact down input domain after SU and any
+            # input Hadamard.  The specialized down reductions above are
+            # disabled for this case because rank-8 needs the completed FP32
+            # inner output before expansion/addition.  Keep the correction in
+            # the same FP32 domain as the base accumulator and let the
+            # existing output transform/store finish the MLP epilogue.
+            from ..quantization.qvq_rank8 import add_rank8_correction
+
+            inner = add_rank8_correction(down, transformed, inner)
         use_large_m_multiblock_down_recovery = (
             rows > 16
             and self._h100_multiblock_intermediate_enabled

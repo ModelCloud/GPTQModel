@@ -96,9 +96,13 @@ Grouped dispatch retains its existing geometry policy.
 Grouped QKV and gate/up apply child corrections to completed FP32 outputs using
 exactly the shared padded activation that fed WGMMA, then run existing child
 or paired output transforms. Each child may independently enable correction.
-Folded alternatives without that activation boundary are bypassed. Whole-MLP
-fusion falls back to grouped gate/up plus ordinary down forward while rank-8
-is active; raw split partials cannot accept correction before reduction.
+Folded alternatives without that activation boundary are bypassed. Fused MLP
+execution now carries rank-8 through gate/up, SiLU/product, and the down
+projection: the down correction is added after its completed FP32 inner output
+and before the existing output transform/store. Raw split partials cannot
+accept correction before reduction, so those specialized reductions are
+disabled for a rank-8 down child while the graph-safe completed-output path is
+used instead.
 
 ## Remaining work and promotion boundary
 

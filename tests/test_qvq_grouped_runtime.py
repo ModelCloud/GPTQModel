@@ -948,6 +948,94 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_safe(bits):
     assert telemetry["fused_mlp_fallbacks"] == 0
 
 
+def test_rank8_grouped_mlp_includes_down_correction_and_graph_replay():
+    """Gate/up and down rank-8 corrections share one captured MLP path."""
+
+    device = _h100_device() or _h200_device()
+    if device is None:
+        pytest.skip("requires an H100 or H200 SM90 validation device")
+
+    from test_qvq_window_recovery import _kernel_rank8
+
+    from gptqmodel.quantization.qvq_rank8 import P32WindowConfig, prepare_rank8
+
+    class Rank8MLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            shared = torch.ones(256, device=device)
+            self.gate_proj = _child(
+                "gate_proj",
+                in_features=256,
+                out_features=256,
+                bits=3,
+                su=shared,
+                seed=20260930,
+                device=device,
+                output_hadamard=False,
+            )
+            self.up_proj = _child(
+                "up_proj",
+                in_features=256,
+                out_features=256,
+                bits=3,
+                su=shared,
+                seed=20260931,
+                device=device,
+                output_hadamard=False,
+            )
+            self.down_proj = _child(
+                "down_proj",
+                in_features=256,
+                out_features=256,
+                bits=3,
+                su=torch.ones(256, device=device),
+                seed=20260932,
+                device=device,
+                input_hadamard=False,
+            )
+            with torch.no_grad():
+                for child in (self.gate_proj, self.up_proj, self.down_proj):
+                    child.SV.fill_(0.002)
+                    child.bias.zero_()
+            for child in (self.gate_proj, self.up_proj, self.down_proj):
+                _kernel_rank8(child)
+                prepare_rank8(child, P32WindowConfig(recovery_mode="on"))
+            self.act_fn = nn.SiLU()
+
+        def forward(self, x):
+            return self.down_proj(
+                self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+            )
+
+    mlp = Rank8MLP().eval()
+    static_input = torch.randn(
+        (2, 256), device=device, dtype=torch.float16
+    ) * 0.02
+    with torch.inference_mode():
+        reference = mlp(static_input).clone()
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+    assert hasattr(mlp, "_gptqmodel_qvq_fused_mlp_runtime")
+
+    with torch.inference_mode():
+        eager = mlp(static_input).clone()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = mlp(static_input)
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    torch.testing.assert_close(eager, reference, rtol=0, atol=2e-3)
+    assert torch.equal(captured, eager)
+    for _ in range(4):
+        graph.replay()
+        torch.cuda.synchronize(device)
+        assert torch.equal(captured, eager)
+    telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
+    assert telemetry["fused_mlp_launches"] == 2
+    assert telemetry["fused_mlp_fallbacks"] == 0
+    assert telemetry["independent_recovery_children"] >= 4
+
+
 @pytest.mark.parametrize("bits, expected_fused_tiles", [(2.0, 0), (3.0, 2)])
 def test_qwen38_m32_rate_specific_path_is_cuda_graph_safe(
     bits, expected_fused_tiles
