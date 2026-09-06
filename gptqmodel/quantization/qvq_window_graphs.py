@@ -169,6 +169,10 @@ class P32WindowGraphs:
             with torch.cuda.device(device):
                 if torch.cuda.is_current_stream_capturing():
                     raise RuntimeError("prepare window graphs outside CUDA capture")
+                from ..utils.qvq_cuda import prewarm_qvq_cuda
+
+                if not prewarm_qvq_cuda():
+                    raise RuntimeError("QVQ CUDA extension is unavailable for graph capture")
                 if self._event is not None:
                     self._event.synchronize()
                 stream = torch.cuda.Stream(device=device)

@@ -1775,7 +1775,21 @@ def qvq_cuda_error() -> str:
 
 
 def prewarm_qvq_cuda() -> bool:
-    return _extension_api().load(name="qvq_cuda")["qvq_cuda"]
+    """Load the extension and resolve the core inference handles eagerly.
+
+    Graph owners call this before capture because some shapes take the native
+    window path only after a policy change, while another shape may first use
+    the generic GEMV fallback.  Resolving both handles here keeps either path
+    free of first-use registration during capture.
+    """
+
+    loaded = _extension_api().load(name="qvq_cuda")["qvq_cuda"]
+    if not loaded:
+        return False
+    _qvq_cuda_op()
+    _qvq_cuda_v4_op()
+    _qvq_cuda_hadamard_op()
+    return True
 
 
 def _integer_argument(name: str, value: int) -> int:
