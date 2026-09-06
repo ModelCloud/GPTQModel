@@ -49,6 +49,7 @@ const GraphKey = struct {
     buffers: [10]usize,
     buffer_bytes: [10]u64,
     buffer_types: [10]u8,
+    device_ordinal: usize,
     stream: usize,
     config: Config,
 };
@@ -65,6 +66,7 @@ const GraphKeyContext = struct {
         for (key.buffer_types) |dtype| {
             result = std.hash.Wyhash.hash(result, std.mem.asBytes(&dtype));
         }
+        result = std.hash.Wyhash.hash(result, std.mem.asBytes(&key.device_ordinal));
         result = std.hash.Wyhash.hash(result, std.mem.asBytes(&key.stream));
         return std.hash.Wyhash.hash(result, std.mem.asBytes(&key.config));
     }
@@ -73,6 +75,7 @@ const GraphKeyContext = struct {
         return std.mem.eql(usize, &left.buffers, &right.buffers) and
             std.mem.eql(u64, &left.buffer_bytes, &right.buffer_bytes) and
             std.mem.eql(u8, &left.buffer_types, &right.buffer_types) and
+            left.device_ordinal == right.device_ordinal and
             left.stream == right.stream and
             std.mem.eql(u8, std.mem.asBytes(&left.config), std.mem.asBytes(&right.config));
     }
@@ -1037,11 +1040,19 @@ fn handler(frame: *zml.pjrt.ffi.CallFrame) callconv(.c) ?*zml.pjrt.ffi.Error {
     }
     const output = zml.pjrtx.CustomCallBuffer.fromPjrt(outputs[0]);
     buffers[9] = .{ .data = output.ptr, .bytes = output.shape.byteSize() };
+    const device_ordinal: usize = @intCast(frame.ctx.getDeviceOrdinal(frame.api) catch {
+        return zml.pjrt.ffi.Error.create(
+            frame.api,
+            .failed_precondition,
+            "unable to identify PJRT device for native window graph",
+        );
+    });
     const stream: ?*anyopaque = @ptrCast(frame.api.stream(frame.ctx));
     var key: GraphKey = .{
         .buffers = undefined,
         .buffer_bytes = undefined,
         .buffer_types = undefined,
+        .device_ordinal = device_ordinal,
         .stream = pointerValue(stream),
         .config = config,
     };
@@ -1243,6 +1254,7 @@ test "graph identity includes buffer layout and element dtype" {
         .buffers = @splat(11),
         .buffer_bytes = @splat(32),
         .buffer_types = @splat(1),
+        .device_ordinal = 0,
         .stream = 7,
         .config = std.mem.zeroes(Config),
     };
@@ -1253,6 +1265,9 @@ test "graph identity includes buffer layout and element dtype" {
     right = left;
     right.buffer_types[0] = 2;
     try std.testing.expect(!GraphKeyContext.eql(.{}, left, right));
+    right = left;
+    right.device_ordinal = 1;
+    try std.testing.expect(!GraphKeyContext.eql(.{}, left, right));
 }
 
 test "graph registry replay locks the retained entry" {
@@ -1262,6 +1277,7 @@ test "graph registry replay locks the retained entry" {
         .buffers = @splat(19),
         .buffer_bytes = @splat(64),
         .buffer_types = @splat(1),
+        .device_ordinal = 0,
         .stream = 3,
         .config = std.mem.zeroes(Config),
     };
