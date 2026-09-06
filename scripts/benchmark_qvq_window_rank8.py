@@ -35,6 +35,12 @@ def main():
     parser.add_argument("--kernel", default="separate_reference")
     parser.add_argument("--projection", default="separate_reference")
     parser.add_argument("--algorithm", default="auto")
+    parser.add_argument(
+        "--quality-mode",
+        choices=("fast", "balanced", "quality"),
+        default="fast",
+        help="numerical policy used while selecting and preparing BM/BN candidates",
+    )
     parser.add_argument("--block-m", type=int, default=0)
     parser.add_argument("--block-n", type=int, default=0)
     parser.add_argument("--chunk-m", type=int, default=0)
@@ -186,6 +192,7 @@ def main():
         "preflight": None if idle is None else idle.as_dict(),
         "tuning_policy": {
             "autotune": args.autotune,
+            "quality_mode": args.quality_mode,
             "measure_recovery_candidates": args.measure_recovery_candidates,
             "max_recovery_overhead_percent": args.max_recovery_overhead_percent,
         },
@@ -249,7 +256,12 @@ def main():
         # mode while profiler replay buffers may remain resident afterward.
         for mode in ((args.profile,) if args.profile else ("off", "on")):
             prepare_rank8(
-                layer, P32WindowConfig(algorithm=args.algorithm, recovery_mode=mode)
+                layer,
+                P32WindowConfig(
+                    algorithm=args.algorithm,
+                    recovery_mode=mode,
+                    quality_mode=args.quality_mode,
+                ),
             )
             reference = layer(x)
             prepare_rank8(
@@ -259,6 +271,7 @@ def main():
                     recovery_mode=mode,
                     recovery_kernel=args.kernel,
                     recovery_projection=args.projection,
+                    quality_mode=args.quality_mode,
                     block_m=args.block_m,
                     block_n=args.block_n,
                     chunk_m=args.chunk_m,
