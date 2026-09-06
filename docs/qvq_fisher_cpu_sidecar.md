@@ -551,3 +551,37 @@ Moving only MLP Grams to the CPU took 2.613114 seconds; offloading the complemen
 smaller groups took 2.372078 seconds. Neither improved on grouped GPU-only.
 The CPU source-diagonal experiment instead consumes source matrices already
 required on the host, avoiding additional transfers; its full timing is pending.
+
+
+## 2026-09-06: reproducible bounded CPU/GPU result
+
+The opt-in [collector and reproduction command](../scripts/experiments/qvq_cpu_sidecar/README.md)
+reached **1.739x** over the current accepted GPU collector in a final same-model,
+three-arm paired run: 4.012427 seconds current GPU, 2.359056 seconds grouped GPU,
+and 2.307548 seconds grouped GPU plus CPU factor finalization (three warmed samples
+each). Scope: Qwen3.5-27B geometry proxy, all 400 targets, BF16 model/FP32 statistics,
+B2/T64/R256, 16 rows starting at 64, seed 20260908. Timers include required copies,
+CPU completion, and synchronization. All 800 factors matched bitwise.
+
+Most gain comes from GPU grouping. CPU finalization uses two pinned workers for
+352 modules and has a small, noisy incremental effect: a separate six-pair run
+measured 2.313712 versus 2.295275 seconds. This does not demonstrate a large
+many-core or AMX gain, and larger-batch CPU Gram offload remained slower.
+oneDNN 3.12.0 OpenMP is installed with verified AMX BF16/INT8 and AVX-512 FP32
+dispatch; those AMX GEMMs are not used by the retained collector.
+
+Normal library behavior is unchanged. The experiment guards hardware, source hash,
+Torch build, batch geometry, and runtime, and falls back for unsupported calls.
+Eight lifecycle/fallback/canonical-factor serialization tests passed. Final packaged
+NCU/SASS instruction totals match the preceding grouped GPU implementation;
+post-profile checks passed on all seven captured geometries, followed by this
+full-model paired timing. Full quantized-model save/load/inference was not rerun.
+
+The explicit 80 MiB GPU accounting allowance follows an isolated attribution
+probe: 11 MiB context difference plus 2 MiB per GiB of pinned host memory. At 32 GiB,
+the difference was 75 MiB and returned to 11 MiB after clearing the host cache.
+Foreign GPU processes remain rejected. Raw evidence and its SHA-256 manifest are
+in `/root/qvq-sidecar-artifacts/20260906-final/`.
+See the [final report](experiments/qvq_fisher_cpu_gpu_result_20260906.json) for every
+sample, hardware metadata, source hashes, checks, and audit details. The result
+supports this warmed small-batch opt-in configuration, not a default promotion.
