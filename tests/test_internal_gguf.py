@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear import gguf as gguf_qlinear
 from gptqmodel.utils import internal_gguf
 
 
@@ -82,6 +83,40 @@ def test_internal_gguf_quantizes_and_dequantizes_official_q2_0_blocks():
 
     np.testing.assert_array_equal(actual_packed, expected_packed)
     np.testing.assert_allclose(actual_values, values, rtol=0.0, atol=0.0)
+
+
+@pytest.mark.parametrize(
+    ("tensor_qtype", "block_size"),
+    [
+        (internal_gguf.GGMLQuantizationType.Q2_0, 64),
+        (internal_gguf.GGMLQuantizationType.TQ1_0, 256),
+        (internal_gguf.GGMLQuantizationType.TQ2_0, 256),
+    ],
+)
+def test_internal_gguf_fallback_rounds_float32_half_thresholds(monkeypatch, tensor_qtype, block_size):
+    monkeypatch.setattr(gguf_qlinear, "_GGUF_AVAILABLE", False)
+    positive_below = np.nextafter(np.float32(0.5), np.float32(0.0))
+    positive_above = np.nextafter(np.float32(0.5), np.float32(1.0))
+    negative_below = np.nextafter(np.float32(-0.5), np.float32(-1.0))
+    negative_above = np.nextafter(np.float32(-0.5), np.float32(0.0))
+
+    values = np.zeros((1, block_size), dtype=np.float32)
+    values[0, :7] = [
+        1.0,
+        positive_below,
+        0.5,
+        positive_above,
+        negative_below,
+        -0.5,
+        negative_above,
+    ]
+    expected = np.zeros_like(values)
+    expected[0, :7] = [1.0, 0.0, 1.0, 1.0, -1.0, -1.0, 0.0]
+
+    packed = internal_gguf.quantize(values, tensor_qtype)
+    actual = internal_gguf.dequantize(packed, tensor_qtype)
+
+    np.testing.assert_array_equal(actual, expected)
 
 
 def test_internal_gguf_dequantizes_nvfp4_blocks():

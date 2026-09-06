@@ -202,7 +202,9 @@ def _gguf_quantize_sign_only(blocks: np.ndarray, *, block_size: int) -> np.ndarr
 
 
 def _gguf_roundf(values: np.ndarray) -> np.ndarray:
-    return np.sign(values) * np.floor(np.abs(values) + 0.5)
+    absolute = np.abs(values)
+    floored = np.floor(absolute)
+    return np.sign(values) * (floored + np.floor(2 * (absolute - floored)))
 
 
 def _gguf_quantize_q2_0(blocks: np.ndarray) -> np.ndarray:
