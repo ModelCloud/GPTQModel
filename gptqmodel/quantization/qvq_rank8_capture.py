@@ -22,9 +22,9 @@ class Rank8Capture:
     heldout: tuple[Rank8Document, ...]
     rows_per_document: int = 128
     max_bytes: int = 512 * 1024 * 1024
-    max_solver_bytes: int = 256 * 1024 * 1024
     minimum_improvement: float = 0.01
     source_kind: str = "calibration"
+    max_solver_bytes: int = 256 * 1024 * 1024
 
     def __post_init__(self):
         if self.source_kind != "calibration":
