@@ -119,7 +119,12 @@ def _gemm(
             mixed = (mixed * 40503 + 17011) & 65535
             mixed = mixed ^ (mixed >> 7)
             index = tl.where((cols[None, :] % 2) == 0, mixed >> 8, mixed & 255)
-            b = tl.load(LEVELS + index)
+            if LUT_CACHE_CA:
+                b = tl.load(LEVELS + index, cache_modifier=".ca")
+            elif LUT_CACHE_CG:
+                b = tl.load(LEVELS + index, cache_modifier=".cg")
+            else:
+                b = tl.load(LEVELS + index)
         if DECODE_ONLY:
             tl.store(Y + krow[:, None] * N + cols[None, :], b, cols[None, :] < N)
         a = tl.load(X + rows[:, None] * K + krow[None, :], rows[:, None] < M, 0)
