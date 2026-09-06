@@ -226,10 +226,14 @@ factor pointers through the same producer without concatenating checkpoint
 state. Disabled children do not supply factors. BF16 execution retains the
 reference projection path.
 
-This explicit candidate requires SM90, FP16 operands and a power-of-two K
-between 16 and 16384. The output epilogue has its own N eligibility gate.
-It is not `fully_fused`: the window consumer and epilogue are separate
-launches, and transformed activations still cross global memory.
+For input Hadamard modules this candidate requires SM90, FP16 operands and a
+power-of-two K between 16 and 16384. Folded-input modules with
+`input_hadamard=false` also admit composite K widths through a masked producer
+(for example K=5120), while retaining the same FP16 transform and hidden
+boundaries. The output epilogue has a corresponding folded-width path when
+`output_hadamard=false`; Hadamard composite widths remain outside this
+candidate. It is not `fully_fused`: the window consumer and epilogue are
+separate launches, and transformed activations still cross global memory.
 
 The [H200 producer measurements](results/p32_rank8_h200_producer.json) show
 116 focused tests passing after profiling and a four-launch M16 operator,
