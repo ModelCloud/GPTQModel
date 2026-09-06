@@ -185,6 +185,16 @@ SU/SV payload before fitting. The full eligible-module H200 fit/audit evidence
 is now recorded separately; broader model families and propagated full-model
 quality evaluation remain open.
 
+A fresh current-code Q-projection replay scorecard is recorded in
+`results/p32_rank8_qproj_h200_m128_8192_current.json`. It uses a newly accepted
+four-document-audit package and fixed audit activation buffers at M=128, 2048,
+and 8192. The separate-reference correction costs 64.04%, 24.09%, and 23.43%
+respectively; the fused epilogue costs 44.81%, 16.92%, and 17.01%. These are
+complete graph-replay timings on the same serialized factors, not synthetic
+algebra. They show that large-M rank8 is not generally free for this Q module
+and that the 3--5% promotion target still requires concurrent producer/consumer
+fusion and shape-specific tuning.
+
 The full eligible-module H200 run is now recorded in
 `results/p32_rank8_llama_full_model.json`. It fits 94/94 P32 modules across
 all 16 layers using eight train, four selection, and four audit documents,

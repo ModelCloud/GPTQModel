@@ -1,0 +1,433 @@
+{
+  "scope": "Real accepted rank8 Q-projection package and disjoint audit activations; complete graph-replay operator timings on one H200. This is a module scorecard, not full-model promotion evidence.",
+  "package": "/root/qvq-results/current-qproj-fit/model.layers.0.self_attn.q_proj.pt",
+  "runs": [
+    {
+      "implementation": "separate_reference",
+      "revision": "ec3ce2d245dfe7008ed7282ee50bd0c266c39bca",
+      "worktree_dirty": false,
+      "scope": "real fitted module, cyclic replay of captured activations; not full-model prefill or quality",
+      "hardware": {
+        "name": "NVIDIA H200",
+        "uuid": "0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "sm_count": 132,
+        "memory": 150101688320,
+        "capability": [
+          9,
+          0
+        ]
+      },
+      "software": {
+        "torch": "2.15.0.dev20260901+cu130",
+        "cuda": "13.0"
+      },
+      "activation_source": {
+        "path": "/root/qvq-results/current-qproj-fit/model.layers.0.self_attn.q_proj.activations.pt",
+        "sha256": "39fd8a245eb0bfbada06206abbdd7497967a1ca4e4c7651e35c87339b23594a3",
+        "rows": [
+          128,
+          128
+        ],
+        "expansion": "cyclic row replay to requested M; not a full-model prefill"
+      },
+      "rows": [
+        {
+          "m": 128,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "off",
+          "kernel": "separate_reference",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 34.385279417037964,
+          "median_us": 34.222400188446045,
+          "p95_us": 34.26559865474701,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            35.02880036830902,
+            34.26559865474701,
+            34.222400188446045,
+            34.19199883937836,
+            34.21759903430939
+          ],
+          "allocated_bytes": 4850688,
+          "peak_allocated_bytes": 6947840
+        },
+        {
+          "m": 128,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "on",
+          "kernel": "separate_reference",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 56.29151940345764,
+          "median_us": 56.13759756088257,
+          "p95_us": 56.21439814567566,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            56.87199831008911,
+            56.21439814567566,
+            56.13759756088257,
+            56.13600015640259,
+            56.09760284423828
+          ],
+          "allocated_bytes": 71959552,
+          "peak_allocated_bytes": 75107328
+        },
+        {
+          "m": 2048,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "off",
+          "kernel": "separate_reference",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 234.59168434143066,
+          "median_us": 234.50400829315186,
+          "p95_us": 234.54720973968506,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            235.2207899093628,
+            234.54720973968506,
+            234.35521125793457,
+            234.50400829315186,
+            234.33120250701904
+          ],
+          "allocated_bytes": 93455360,
+          "peak_allocated_bytes": 127009792
+        },
+        {
+          "m": 2048,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "on",
+          "kernel": "separate_reference",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 291.05600357055664,
+          "median_us": 290.99841117858887,
+          "p95_us": 291.0048007965088,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            291.57440662384033,
+            290.99841117858887,
+            291.0048007965088,
+            290.84320068359375,
+            290.85919857025146
+          ],
+          "allocated_bytes": 127009792,
+          "peak_allocated_bytes": 177374208
+        },
+        {
+          "m": 8192,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "off",
+          "kernel": "separate_reference",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 904.8934364318848,
+          "median_us": 904.7151565551758,
+          "p95_us": 904.7920227050781,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            905.7600021362305,
+            904.7151565551758,
+            904.6256065368652,
+            904.5743942260742,
+            904.7920227050781
+          ],
+          "allocated_bytes": 269616128,
+          "peak_allocated_bytes": 403833856
+        },
+        {
+          "m": 8192,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "on",
+          "kernel": "separate_reference",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 1117.1366500854492,
+          "median_us": 1116.6671752929688,
+          "p95_us": 1118.0543899536133,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            1118.0543899536133,
+            1118.3168411254883,
+            1116.6671752929688,
+            1116.5216445922852,
+            1116.1231994628906
+          ],
+          "allocated_bytes": 303170560,
+          "peak_allocated_bytes": 504628224
+        }
+      ],
+      "matched_overhead": {
+        "128": {
+          "off_median_us": 34.222400188446045,
+          "on_median_us": 56.13759756088257,
+          "overhead_us": 21.915197372436523,
+          "overhead_percent": 64.03758138459091
+        },
+        "2048": {
+          "off_median_us": 234.50400829315186,
+          "on_median_us": 290.99841117858887,
+          "overhead_us": 56.49440288543701,
+          "overhead_percent": 24.09101801569795
+        },
+        "8192": {
+          "off_median_us": 904.7151565551758,
+          "on_median_us": 1116.6671752929688,
+          "overhead_us": 211.95201873779297,
+          "overhead_percent": 23.427486231669725
+        }
+      }
+    },
+    {
+      "implementation": "fused_epilogue",
+      "revision": "ec3ce2d245dfe7008ed7282ee50bd0c266c39bca",
+      "worktree_dirty": false,
+      "scope": "real fitted module, cyclic replay of captured activations; not full-model prefill or quality",
+      "hardware": {
+        "name": "NVIDIA H200",
+        "uuid": "0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "sm_count": 132,
+        "memory": 150101688320,
+        "capability": [
+          9,
+          0
+        ]
+      },
+      "software": {
+        "torch": "2.15.0.dev20260901+cu130",
+        "cuda": "13.0"
+      },
+      "activation_source": {
+        "path": "/root/qvq-results/current-qproj-fit/model.layers.0.self_attn.q_proj.activations.pt",
+        "sha256": "39fd8a245eb0bfbada06206abbdd7497967a1ca4e4c7651e35c87339b23594a3",
+        "rows": [
+          128,
+          128
+        ],
+        "expansion": "cyclic row replay to requested M; not a full-model prefill"
+      },
+      "rows": [
+        {
+          "m": 128,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "off",
+          "kernel": "fused_epilogue",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 31.90656006336212,
+          "median_us": 31.699201464653015,
+          "p95_us": 31.731200218200684,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            32.78400003910065,
+            31.731200218200684,
+            31.699201464653015,
+            31.66399896144867,
+            31.654399633407593
+          ],
+          "allocated_bytes": 4850688,
+          "peak_allocated_bytes": 6423552
+        },
+        {
+          "m": 128,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "on",
+          "kernel": "fused_epilogue",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 46.03808045387268,
+          "median_us": 45.90240120887756,
+          "p95_us": 45.90559899806976,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            46.63040041923523,
+            45.90559899806976,
+            45.90240120887756,
+            45.8512008190155,
+            45.900800824165344
+          ],
+          "allocated_bytes": 71959552,
+          "peak_allocated_bytes": 74126336
+        },
+        {
+          "m": 2048,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "off",
+          "kernel": "fused_epilogue",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 213.4601593017578,
+          "median_us": 213.31520080566406,
+          "p95_us": 213.4495973587036,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            213.96160125732422,
+            213.30080032348633,
+            213.4495973587036,
+            213.27359676361084,
+            213.31520080566406
+          ],
+          "allocated_bytes": 93455360,
+          "peak_allocated_bytes": 119669760
+        },
+        {
+          "m": 2048,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "on",
+          "kernel": "fused_epilogue",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 249.8860788345337,
+          "median_us": 249.399995803833,
+          "p95_us": 250.31840801239014,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            250.97119808197021,
+            249.399995803833,
+            249.36959743499756,
+            250.31840801239014,
+            249.37119483947754
+          ],
+          "allocated_bytes": 127009792,
+          "peak_allocated_bytes": 160695296
+        },
+        {
+          "m": 8192,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "off",
+          "kernel": "fused_epilogue",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 813.0931282043457,
+          "median_us": 812.8432273864746,
+          "p95_us": 812.9599571228027,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            814.0080451965332,
+            812.8432273864746,
+            812.8255844116211,
+            812.9599571228027,
+            812.8288269042969
+          ],
+          "allocated_bytes": 269616128,
+          "peak_allocated_bytes": 387056640
+        },
+        {
+          "m": 8192,
+          "k": 2048,
+          "n": 2048,
+          "bits": 2,
+          "mode": "on",
+          "kernel": "fused_epilogue",
+          "projection": "separate_reference",
+          "algorithm": "auto",
+          "block_m": 0,
+          "block_n": 0,
+          "chunk_m": 0,
+          "mean_us": 951.1667060852051,
+          "median_us": 951.1247634887695,
+          "p95_us": 951.1839866638184,
+          "mae": 0.0,
+          "max": 0.0,
+          "samples_us": [
+            951.6639709472656,
+            951.1247634887695,
+            950.9504318237305,
+            951.1839866638184,
+            950.9103775024414
+          ],
+          "allocated_bytes": 303170560,
+          "peak_allocated_bytes": 437715968
+        }
+      ],
+      "matched_overhead": {
+        "128": {
+          "off_median_us": 31.699201464653015,
+          "on_median_us": 45.90240120887756,
+          "overhead_us": 14.203199744224548,
+          "overhead_percent": 44.80617519675434
+        },
+        "2048": {
+          "off_median_us": 213.31520080566406,
+          "on_median_us": 249.399995803833,
+          "overhead_us": 36.084794998168945,
+          "overhead_percent": 16.916185467271582
+        },
+        "8192": {
+          "off_median_us": 812.8432273864746,
+          "on_median_us": 951.1247634887695,
+          "overhead_us": 138.28153610229492,
+          "overhead_percent": 17.012079506021106
+        }
+      }
+    }
+  ],
+  "interpretation": "The fused epilogue lowers base latency and marginal cost, but separate rank8 projection remains well above the 3-5% target at M8192. Large-M rank8 is therefore not universally free; the result motivates concurrent producer/consumer fusion and shape-specific tuning."
+}
