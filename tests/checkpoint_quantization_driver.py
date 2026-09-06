@@ -4,14 +4,23 @@
 
 def main():
     import argparse
+    import faulthandler
     import os
     import signal
     import sys
 
+    faulthandler.dump_traceback_later(60)
+
     import torch
     from transformers import AutoConfig
 
-    from gptqmodel import BACKEND, CheckpointConfig, GPTQModel, QuantizeConfig
+    from gptqmodel import (
+        BACKEND,
+        CheckpointConfig,
+        GPTQModel,
+        QuantizeConfig,
+        TelemetryConfig,
+    )
     from gptqmodel.looper.checkpoint import CheckpointExtension, CheckpointStopped
     from gptqmodel.quantization.config import ExpertsRoutingOverride, MoEConfig
 
@@ -20,7 +29,26 @@ def main():
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output", required=True)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--require-gpus", type=int, default=0)
     parser.add_argument("--audit-hessians", action="store_true")
+    parser.add_argument("--eora", action="store_true")
+    parser.add_argument("--format")
+    parser.add_argument("--paro-no-cudagraph", action="store_true")
+    parser.add_argument(
+        "--method",
+        choices=[
+            "gptq",
+            "awq",
+            "rtn",
+            "fp8",
+            "gguf",
+            "bitsandbytes",
+            "qqq",
+            "paro",
+            "exl3",
+        ],
+        default="gptq",
+    )
     parser.add_argument(
         "--mode",
         default="run",
@@ -40,6 +68,12 @@ def main():
     if os.environ.get("PYTHON_GIL") == "0":
         assert not sys._is_gil_enabled(), "GIL enabled after model-stack imports"
     torch.manual_seed(6789)
+    import random
+
+    import numpy as np
+
+    random.seed(6789)
+    np.random.seed(6789)
     config = AutoConfig.from_pretrained(args.model)
     calibration = [
         {
@@ -48,10 +82,85 @@ def main():
         }
         for _ in range(4)
     ]
-    qcfg = QuantizeConfig(
-        bits=4,
-        group_size=32,
-        desc_act=False,
+    from gptqmodel.adapter.adapter import Lora
+    from gptqmodel.quantization import FORMAT, METHOD
+    from gptqmodel.quantization.config import (
+        AWQConfig,
+        BitsAndBytesConfig,
+        EXL3Config,
+        FP8Config,
+        GGUFConfig,
+        ParoConfig,
+        QQQConfig,
+        RTNConfig,
+    )
+
+    config_class = {
+        "awq": AWQConfig,
+        "rtn": RTNConfig,
+        "fp8": FP8Config,
+        "gguf": GGUFConfig,
+        "bitsandbytes": BitsAndBytesConfig,
+        "qqq": QQQConfig,
+        "paro": ParoConfig,
+        "exl3": EXL3Config,
+    }.get(args.method, QuantizeConfig)
+    method_settings = {
+        "gptq": {"method": METHOD.GPTQ, "format": FORMAT.GPTQ, "bits": 4},
+        "awq": {"method": METHOD.AWQ, "format": FORMAT.GEMM, "bits": 4},
+        "rtn": {"bits": 4},
+        "fp8": {"bits": 8},
+        "gguf": {"bits": "q4_0"},
+        "bitsandbytes": {"bits": 4},
+        "qqq": {"bits": 4},
+        "paro": {
+            "bits": 4,
+            "opt_rotation_epochs": 1,
+            "opt_finetune_epochs": 1,
+            "opt_train_samples": 4,
+            "opt_validation_samples": 1,
+        },
+        "exl3": {"bits": 3.0},
+    }[args.method]
+    if args.format:
+        method_settings["format"] = args.format
+        if args.method == "bitsandbytes" and args.format == "int8":
+            method_settings["bits"] = 8
+    if args.paro_no_cudagraph:
+        method_settings["opt_stage_cudagraph"] = False
+    if args.method != "gguf":
+        method_settings.update(
+            group_size=128
+            if args.method == "qqq"
+            else -1
+            if args.method == "exl3"
+            else 32,
+            desc_act=False,
+        )
+    if args.format == "gemv_fast":
+        method_settings.update(group_size=128, pack_dtype=torch.int16)
+    backend = {
+        "fp8": BACKEND.FP8_TORCH,
+        "gguf": BACKEND.GGUF_TORCH,
+        "bitsandbytes": BACKEND.BITSANDBYTES,
+        "qqq": BACKEND.QQQ,
+        "paro": BACKEND.PAROQUANT_TRITON,
+        "exl3": BACKEND.EXL3_EXLLAMA_V3,
+    }.get(args.method, BACKEND.TORCH)
+    if args.format in {"gemv", "gemv_fast"}:
+        backend = BACKEND.AWQ_GEMV if args.format == "gemv" else BACKEND.AWQ_GEMV_FAST
+    elif args.format == "bitblas":
+        backend = BACKEND.AWQ_BITBLAS if args.method == "awq" else BACKEND.GPTQ_BITBLAS
+    elif args.format == "llm-awq":
+        backend = BACKEND.AUTO
+
+    qcfg = config_class(
+        **method_settings,
+        adapter=Lora(rank=4, path=args.checkpoint + "-adapter") if args.eora else None,
+        # Enable diagnostics only on resume: this must not invalidate identity.
+        telemetry=TelemetryConfig(
+            device=bool(args.require_gpus) and args.mode == "run"
+        ),
         device=args.device,
         offload_to_disk=True,
         offload_to_disk_path=args.output + "-offload",
@@ -59,7 +168,36 @@ def main():
         if config.model_type == "qwen3_moe"
         else None,
     )
-    model = GPTQModel.load(args.model, quantize_config=qcfg, backend=BACKEND.TORCH)
+    model = GPTQModel.load(args.model, quantize_config=qcfg, backend=backend)
+
+    if args.require_gpus:
+        import json
+        import threading
+
+        from gptqmodel.quantization.gptq import GPTQ
+
+        assert torch.cuda.device_count() == args.require_gpus
+        placement_lock = threading.Lock()
+        observed_devices = set()
+        original_finalize = GPTQ.finalize_hessian
+
+        def record_placement(task, *positional, **keywords):
+            hessian = original_finalize(task, *positional, **keywords)
+            with placement_lock:
+                observed_devices.add(str(hessian.device))
+                print(
+                    "QUANT_DEVICE "
+                    + json.dumps(
+                        {
+                            "name": task._named_module.full_name,
+                            "device": str(hessian.device),
+                        }
+                    ),
+                    flush=True,
+                )
+            return hessian
+
+        GPTQ.finalize_hessian = record_placement
 
     if args.audit_hessians:
         # Observe actual task construction, accumulated batches and the exact
@@ -177,7 +315,7 @@ def main():
         model.quantize(
             calibration,
             batch_size=1,
-            backend=BACKEND.TORCH,
+            backend=backend,
             calibration_data_min_length=1,
             checkpoint=None
             if args.mode == "baseline"
@@ -189,7 +327,35 @@ def main():
         if args.mode != "error" or str(exc) != "injected publication failure":
             raise
         return 74
+    if args.require_gpus:
+        assert observed_devices == {f"cuda:{i}" for i in range(args.require_gpus)}
+    if os.environ.get("PYTHON_GIL") == "0":
+        assert not sys._is_gil_enabled(), "GIL enabled during quantization"
+    if args.require_gpus:
+        from gptqmodel.utils.device_telemetry import get_device_telemetry_records
+
+        records = get_device_telemetry_records()
+        if args.mode == "run":
+            assert {
+                record["target_device"]
+                for record in records
+                if record["event"] == "quant_prepare"
+            } == {f"cuda:{index}" for index in range(args.require_gpus)}, (
+                "configured telemetry must propagate to both GPU worker paths"
+            )
+        for record in records:
+            if record["event"].startswith("checkpoint_"):
+                print("CHECKPOINT_TELEMETRY " + json.dumps(record), flush=True)
     model.save(args.output)
+    if args.eora:
+        from pathlib import Path
+
+        from safetensors.torch import load_file, save_file
+
+        tensors = load_file(
+            Path(args.checkpoint + "-adapter") / "adapter_model.safetensors"
+        )
+        save_file(tensors, Path(args.output) / "adapter_model.safetensors")
     return 0
 
 

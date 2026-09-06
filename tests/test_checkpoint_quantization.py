@@ -2,6 +2,7 @@
 """Real two-layer quantization equivalence; no replay of completed layers."""
 
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -29,20 +30,65 @@ def assert_identical_tensors(expected, actual):
         assert (
             tensor.shape == actual[name].shape and tensor.dtype == actual[name].dtype
         ), name
-        # Compare exact element bits, including signed zero, not a tolerance
-        # or dtype-coercing numerical comparison.
+        # Compare exact element bits, including signed zero.
         assert torch.equal(
             tensor.contiguous().reshape(-1).view(torch.uint8),
             actual[name].contiguous().reshape(-1).view(torch.uint8),
         ), name
 
 
+def run_guarded_driver(command, *, tmp_path, mode, timeout):
+    stdout_path = tmp_path / f"{mode}.stdout.log"
+    stderr_path = tmp_path / f"{mode}.stderr.log"
+    # Files preserve diagnostics on timeout and avoid inherited pipe writers
+    # keeping communicate() alive after a hostile kill of the driver.
+    with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
+        process = subprocess.Popen(
+            command,
+            stdout=stdout,
+            stderr=stderr,
+            start_new_session=True,
+            env={**os.environ, "PYTHONHASHSEED": "0"},
+        )
+        try:
+            returncode = process.wait(timeout=timeout)
+        finally:
+            # Only this test-owned session: also clean up forkserver children.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+    return subprocess.CompletedProcess(
+        command, returncode, stdout_path.read_bytes(), stderr_path.read_bytes()
+    )
+
+
 @pytest.mark.parametrize("family", ["llama", "qwen3_moe"])
 @pytest.mark.parametrize(
     "mode",
-    ["kill-before", "kill-after", "error", "int", "kill-hessian", "kill-hessian-early"],
+    [
+        "kill-before",
+        "kill-after",
+        "error",
+        "int",
+        "term",
+        "kill-hessian",
+        "kill-hessian-early",
+    ],
 )
-def test_subprocess_recovery(tmp_path, family, mode, device="cpu"):
+def test_subprocess_recovery(
+    tmp_path,
+    family,
+    mode,
+    device="cpu",
+    required_gpus=0,
+    eora=False,
+    method="gptq",
+    format=None,
+    driver_args=(),
+    native_model=None,
+):
     torch.manual_seed(1234)
     native = tmp_path / "native"
     args = {
@@ -56,25 +102,36 @@ def test_subprocess_recovery(tmp_path, family, mode, device="cpu"):
         "bos_token_id": 1,
         "eos_token_id": 2,
     }
+    if method in {"qqq", "exl3"} or format == "gemv_fast":
+        args.update(hidden_size=128, intermediate_size=256)
     if family == "llama":
         model = LlamaForCausalLM(LlamaConfig(**args))
     else:
         model = Qwen3MoeForCausalLM(
             Qwen3MoeConfig(
                 **args,
-                moe_intermediate_size=32,
+                moe_intermediate_size=128
+                if method in {"qqq", "exl3"}
+                else 64
+                if method == "awq"
+                else 32,
                 num_experts=4,
                 num_experts_per_tok=2,
             )
         )
-    model.save_pretrained(native)
-    _build_local_tokenizer(native)
+    if method in {"awq", "qqq", "paro", "exl3"}:
+        model.half()
+    if native_model is None:
+        model.save_pretrained(native)
+        _build_local_tokenizer(native)
+    else:
+        native = Path(native_model)
     driver = Path(__file__).with_name("checkpoint_quantization_driver.py")
     audit = mode.startswith("kill-hessian")
 
     def run(mode, expected):
         output = tmp_path / mode
-        result = subprocess.run(
+        result = run_guarded_driver(
             [
                 sys.executable,
                 str(driver),
@@ -88,11 +145,18 @@ def test_subprocess_recovery(tmp_path, family, mode, device="cpu"):
                 mode,
                 "--device",
                 device,
+                "--require-gpus",
+                str(required_gpus),
+                "--method",
+                method,
                 *(["--audit-hessians"] if audit else []),
+                *(["--eora"] if eora else []),
+                *(["--format", format] if format else []),
+                *driver_args,
             ],
-            capture_output=True,
-            timeout=120,
-            check=False,
+            tmp_path=tmp_path,
+            mode=mode,
+            timeout=600 if native_model else 120,
         )
         assert result.returncode == expected, (
             result.stdout.decode()[-10000:] + result.stderr.decode()[-10000:]
@@ -101,7 +165,8 @@ def test_subprocess_recovery(tmp_path, family, mode, device="cpu"):
 
     reference, baseline_path = run("baseline", 0)
     interrupted, _ = run(
-        mode, 74 if mode == "error" else 75 if mode == "int" else -signal.SIGKILL
+        mode,
+        74 if mode == "error" else 75 if mode in {"int", "term"} else -signal.SIGKILL,
     )
     if audit:
         root = tmp_path / "checkpoints"
@@ -116,6 +181,72 @@ def test_subprocess_recovery(tmp_path, family, mode, device="cpu"):
     baseline = load_file(baseline_path / "model.safetensors")
     resumed = load_file(resumed_path / "model.safetensors")
     assert_identical_tensors(baseline, resumed)
+    if eora:
+        baseline_adapters = load_file(baseline_path / "adapter_model.safetensors")
+        resumed_adapters = load_file(resumed_path / "adapter_model.safetensors")
+        assert baseline_adapters
+        assert_identical_tensors(baseline_adapters, resumed_adapters)
+    if required_gpus:
+
+        def placements(output):
+            decoder = json.JSONDecoder()
+            return {
+                record["name"]: record["device"]
+                for line in output.decode().splitlines()
+                if "QUANT_DEVICE " in line
+                for record, _ in [decoder.raw_decode(line.split("QUANT_DEVICE ", 1)[1])]
+            }
+
+        reference_devices = placements(reference.stdout)
+        resumed_devices = placements(result.stdout)
+        assert set(resumed_devices.values()) == {
+            f"cuda:{index}" for index in range(required_gpus)
+        }
+        assert resumed_devices == {
+            name: device
+            for name, device in reference_devices.items()
+            if ".layers.0." not in name
+        }
+        root = tmp_path / "checkpoints"
+        current = json.loads((root / "CURRENT").read_text())
+        manifest = json.loads(
+            (root / "objects" / current["generations"][0]).read_text()
+        )
+        assert manifest["identity"]["device_topology"]["gpu_count"] == required_gpus
+        decoder = json.JSONDecoder()
+        telemetry = [
+            decoder.raw_decode(line.split("CHECKPOINT_TELEMETRY ", 1)[1])[0]
+            for line in result.stdout.decode().splitlines()
+            if "CHECKPOINT_TELEMETRY " in line
+        ]
+        names = [record["event"] for record in telemetry]
+        assert names.index("checkpoint_topology_validated") < names.index(
+            "checkpoint_tensor_restored"
+        )
+        assert names.index("checkpoint_rng_restored") < names.index(
+            "checkpoint_restore_complete"
+        )
+        for event in [
+            "checkpoint_tensor_restored",
+            "checkpoint_execution_restored",
+            "checkpoint_rng_restored",
+        ]:
+            records = [record for record in telemetry if record["event"] == event]
+            assert records and all(record["matched"] for record in records)
+        execution = next(
+            record
+            for record in telemetry
+            if record["event"] == "checkpoint_execution_restored"
+        )
+        assert execution["expected"] == execution["actual"]
+        adapter = next(
+            record
+            for record in telemetry
+            if record["event"] == "checkpoint_adapter_restored"
+        )
+        assert adapter["packed_tensor_devices"] == ["meta"]
+        assert adapter["packed_storage"] == "disk"
+        assert adapter["cuda_rng_indices"] == list(range(required_gpus))
     if audit:
 
         def events(output):
@@ -127,10 +258,12 @@ def test_subprocess_recovery(tmp_path, family, mode, device="cpu"):
             ]
 
         expected = [
-            event for event in events(reference.stdout) if ".layers.1." in event["name"]
+            event
+            for event in events(reference.stdout)
+            if ".layers.0." not in event["name"]
         ]
         actual = events(result.stdout)
-        assert actual and all(".layers.1." in event["name"] for event in actual)
+        assert actual and all(".layers.0." not in event["name"] for event in actual)
         # Compare the full set/multiplicity of task initializations and input
         # batches, plus sample counts and exact pre-quantization Hessian hashes.
         canonical = lambda records: sorted(

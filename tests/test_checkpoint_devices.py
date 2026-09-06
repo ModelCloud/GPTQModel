@@ -185,7 +185,8 @@ def test_codec_uses_saved_logical_index(monkeypatch):
         return tensor
 
     monkeypatch.setattr(torch.Tensor, "to", record)
-    assert ContinuationCodec.loads(data).shape == (2,)
+    with pytest.raises(ValueError, match="device placement restore mismatch"):
+        ContinuationCodec.loads(data)
     assert destinations == ["cuda:1"]
 
 
@@ -208,7 +209,19 @@ def test_real_cuda_tensor_and_metadata_placement(count):
 
 
 @pytest.mark.parametrize("family", ["llama", "qwen3_moe"])
-def test_real_multigpu_partial_hessian_recovery(tmp_path, monkeypatch, family):
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "term",
+        "int",
+        "kill-before",
+        "kill-after",
+        "error",
+        "kill-hessian",
+        "kill-hessian-early",
+    ],
+)
+def test_real_multigpu_partial_hessian_recovery(tmp_path, monkeypatch, family, mode):
     if torch.cuda.device_count() < 2:
         pytest.skip("requires two physical CUDA devices for quantization/recovery")
     # Preserve visible physical identity if the caller already selected GPUs.
@@ -219,4 +232,4 @@ def test_real_multigpu_partial_hessian_recovery(tmp_path, monkeypatch, family):
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     from test_checkpoint_quantization import test_subprocess_recovery
 
-    test_subprocess_recovery(tmp_path, family, "kill-hessian", device="cuda:0")
+    test_subprocess_recovery(tmp_path, family, mode, device="cuda:0", required_gpus=2)
