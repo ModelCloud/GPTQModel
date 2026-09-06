@@ -25,6 +25,7 @@ class Rank8Capture:
     minimum_improvement: float = 0.01
     source_kind: str = "calibration"
     max_solver_bytes: int = 256 * 1024 * 1024
+    rank_candidates: tuple[int, ...] = (8,)
 
     def __post_init__(self):
         if self.source_kind != "calibration":
@@ -38,6 +39,17 @@ class Rank8Capture:
             raise ValueError("rank8 capture bounds must be positive integers")
         if not 0 <= self.minimum_improvement < 1:
             raise ValueError("minimum_improvement must be in [0,1)")
+        ranks = tuple(self.rank_candidates)
+        if (
+            not ranks
+            or 8 not in ranks
+            or len(set(ranks)) != len(ranks)
+            or any(type(rank) is not int or rank not in (2, 4, 6, 8, 12) for rank in ranks)
+        ):
+            raise ValueError(
+                "rank_candidates must include distinct members of (2, 4, 6, 8, 12), including 8"
+            )
+        object.__setattr__(self, "rank_candidates", ranks)
         ids = [tuple(d.document_id for d in split) for split in (self.train, self.heldout)]
         _check_documents(*ids)
         hashes = []
@@ -172,6 +184,7 @@ def capture_rank8_calibration(model, request, *, materialize_teacher=None):
                 minimum_improvement=request.minimum_improvement,
                 teacher_hash=teacher_hashes[name],
                 max_solver_bytes=request.max_solver_bytes,
+                rank_candidates=request.rank_candidates,
             )
             for name, values in samples.items()
         }

@@ -1260,6 +1260,7 @@ class Rank8Calibration:
     minimum_improvement: float = 0.01
     teacher_hash: str | None = None
     max_solver_bytes: int = 256 * 1024 * 1024
+    rank_candidates: tuple[int, ...] = (8,)
 
     def __post_init__(self):
         if self.source_kind != "calibration":
@@ -1267,6 +1268,20 @@ class Rank8Calibration:
         _check_documents(self.train_document_ids, self.heldout_document_ids)
         if type(self.max_solver_bytes) is not int or self.max_solver_bytes < 1:
             raise ValueError("max_solver_bytes must be a positive integer")
+        ranks = tuple(self.rank_candidates)
+        if (
+            not ranks
+            or 8 not in ranks
+            or len(set(ranks)) != len(ranks)
+            or any(
+                type(rank) is not int or rank not in RANK8_SWEEP_CANDIDATES
+                for rank in ranks
+            )
+        ):
+            raise ValueError(
+                f"rank_candidates must include distinct members of {RANK8_SWEEP_CANDIDATES}, including 8"
+            )
+        object.__setattr__(self, "rank_candidates", ranks)
 
 
 def finish_rank8_quantization(
@@ -1360,6 +1375,7 @@ def fit_rank8_serialized_payload(
         source_kind=calibration.source_kind,
         minimum_improvement=calibration.minimum_improvement,
         max_solver_bytes=calibration.max_solver_bytes,
+        rank_candidates=calibration.rank_candidates,
     )
     return layer.rank8_A, layer.rank8_B, layer.rank8_metadata, report
 

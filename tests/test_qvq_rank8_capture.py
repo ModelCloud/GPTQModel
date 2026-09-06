@@ -31,11 +31,15 @@ def request(**kwargs):
 def test_capture_preserves_documents_padding_and_dense_inputs():
     teacher = Teacher().eval()
     original = {k: v.clone() for k, v in teacher.state_dict().items()}
-    captured = capture_rank8_calibration(teacher, request(rows_per_document=2))["projection"]
+    captured = capture_rank8_calibration(
+        teacher,
+        request(rows_per_document=2, rank_candidates=(2, 4, 6, 8, 12)),
+    )["projection"]
     torch.testing.assert_close(captured.train_inputs, teacher.embedding(torch.tensor([1, 2])))
     torch.testing.assert_close(captured.heldout_inputs, teacher.embedding(torch.tensor([4, 5])))
     assert captured.train_document_ids == ("train",)
     assert captured.heldout_document_ids == ("heldout",)
+    assert captured.rank_candidates == (2, 4, 6, 8, 12)
     assert not teacher.projection._forward_pre_hooks
     for name, value in teacher.state_dict().items():
         torch.testing.assert_close(value, original[name], rtol=0, atol=0)

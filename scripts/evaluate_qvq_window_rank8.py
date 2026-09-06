@@ -42,6 +42,14 @@ def main():
         default=256 * 1024 * 1024,
         help="per-module bounded fitting workspace",
     )
+    parser.add_argument(
+        "--rank-candidates",
+        nargs="+",
+        type=int,
+        choices=(2, 4, 6, 8, 12),
+        default=[8],
+        help="preparation-time rank comparison set; rank 8 remains the deployment ABI",
+    )
     args = parser.parse_args()
     import hashlib
     import json
@@ -108,6 +116,7 @@ def main():
             rows_per_document=args.rows_per_document,
             max_bytes=args.max_capture_bytes,
             max_solver_bytes=args.max_solver_bytes,
+            rank_candidates=tuple(args.rank_candidates),
         ),
     )
     audit = capture_rank8_calibration(
@@ -119,6 +128,7 @@ def main():
             rows_per_document=args.rows_per_document,
             max_bytes=args.max_capture_bytes,
             max_solver_bytes=args.max_solver_bytes,
+            rank_candidates=tuple(args.rank_candidates),
         ),
     )
     for name in names:
