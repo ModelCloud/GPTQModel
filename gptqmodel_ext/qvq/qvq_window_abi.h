@@ -6,8 +6,10 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
-// All tensors are contiguous CUDA buffers. x/SU/SV/bias/A/B/levels/y are
-// FP16; window is int32; banks is one unpacked uint8 selector per 16x16 tile.
+// All tensors are contiguous CUDA buffers. x/levels/A/B/y are FP16; SU/SV and
+// bias may be FP16 or FP32 (the native path narrows them to its FP16 transform
+// contract); window is int32; banks is one unpacked uint8 selector per 16x16
+// tile.
 // The caller validates the unified artifact's cryptographic binding at load.
 typedef struct { void* data; uint64_t bytes; } QvqWindowBuffer;
 typedef struct {

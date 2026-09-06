@@ -38,6 +38,12 @@ at::Tensor tensor(QvqWindowBuffer buffer, at::IntArrayRef shape,
         "native window buffers must reside on the input CUDA device");
   return at::from_blob(buffer.data, shape, at::TensorOptions().dtype(dtype).device(at::kCUDA, device));
 }
+at::ScalarType floating_storage_dtype(QvqWindowBuffer buffer, uint64_t count) {
+  check(buffer.data && (buffer.bytes == count * sizeof(at::Half) ||
+                        buffer.bytes == count * sizeof(float)),
+        "window ABI floating buffer must contain contiguous FP16 or FP32 values");
+  return buffer.bytes == count * sizeof(at::Half) ? at::kHalf : at::kFloat;
+}
 at::Tensor hadamard(const at::Tensor& x, c10::IValue pre,
                     c10::IValue post, c10::IValue bias, int64_t mode) {
   return invoke("gptqmodel_qvq::hadamard",
@@ -93,11 +99,13 @@ extern "C" int qvq_p32_window_linear(
     auto words = tensor(window, {tiles, 4 * c.transition_bits}, at::kInt, device);
     auto selectors = tensor(banks, {tiles}, at::kByte, device);
     auto codebook = tensor(levels, {256}, at::kHalf, device);
-    auto scale_u = tensor(su, {c.k}, at::kHalf, device);
-    auto scale_v = tensor(sv, {c.n}, at::kHalf, device);
+    auto scale_u = tensor(su, {c.k}, floating_storage_dtype(su, c.k), device).to(at::kHalf);
+    auto scale_v = tensor(sv, {c.n}, floating_storage_dtype(sv, c.n), device).to(at::kFloat);
     auto output = tensor(y, {c.m, c.n}, at::kHalf, device);
     check(bias.data || bias.bytes == 0, "absent bias must have zero bytes");
-    auto output_bias = bias.data ? tensor(bias, {c.n}, at::kHalf, device) : at::Tensor();
+    auto output_bias = bias.data
+        ? tensor(bias, {c.n}, floating_storage_dtype(bias, c.n), device).to(at::kFloat)
+        : at::Tensor();
     at::Tensor a, b;
     if (c.rank8_enabled) {
       a = tensor(rank8_a, {c.k, 8}, at::kHalf, device);
@@ -113,8 +121,6 @@ extern "C" int qvq_p32_window_linear(
             "native window output must not overlap its inputs or artifact");
     }
     // All structural/device checks precede the first device computation.
-    scale_v = scale_v.to(at::kFloat);
-    if (output_bias.defined()) output_bias = output_bias.to(at::kFloat);
     auto transformed = c.input_hadamard
         ? hadamard(input, scale_u, c10::IValue(), c10::IValue(), 2)
         : input * scale_u;

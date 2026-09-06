@@ -176,6 +176,315 @@ pub const Input = struct {
     rank8_b: zml.Tensor,
 };
 
+pub const ArtifactPayload = struct {
+    window: zml.Buffer,
+    banks: zml.Buffer,
+    levels: zml.Buffer,
+    su: zml.Buffer,
+    sv: zml.Buffer,
+    bias: zml.Buffer,
+    rank8_a: zml.Buffer,
+    rank8_b: zml.Buffer,
+
+    pub fn deinit(self: *@This()) void {
+        self.window.deinit();
+        self.banks.deinit();
+        self.levels.deinit();
+        self.su.deinit();
+        self.sv.deinit();
+        self.bias.deinit();
+        self.rank8_a.deinit();
+        self.rank8_b.deinit();
+    }
+};
+
+pub const Artifact = struct {
+    config: Config,
+    payload: ArtifactPayload,
+
+    pub fn deinit(self: *@This()) void {
+        self.payload.deinit();
+    }
+
+    /// Return compiler-side tensor shapes for a runtime activation tensor.
+    pub fn inputTensors(self: *const @This(), x: zml.Tensor) Input {
+        return .{
+            .x = x,
+            .window = .fromShape(self.payload.window.shape()),
+            .banks = .fromShape(self.payload.banks.shape()),
+            .levels = .fromShape(self.payload.levels.shape()),
+            .su = .fromShape(self.payload.su.shape()),
+            .sv = .fromShape(self.payload.sv.shape()),
+            .bias = .fromShape(self.payload.bias.shape()),
+            .rank8_a = .fromShape(self.payload.rank8_a.shape()),
+            .rank8_b = .fromShape(self.payload.rank8_b.shape()),
+        };
+    }
+
+    /// Bind a runtime activation buffer to the immutable artifact payload.
+    pub fn arguments(self: *const @This(), x: zml.Buffer) zml.Bufferized(Input) {
+        return .{
+            .x = x,
+            .window = self.payload.window,
+            .banks = self.payload.banks,
+            .levels = self.payload.levels,
+            .su = self.payload.su,
+            .sv = self.payload.sv,
+            .bias = self.payload.bias,
+            .rank8_a = self.payload.rank8_a,
+            .rank8_b = self.payload.rank8_b,
+        };
+    }
+};
+
+pub const ArtifactOptions = struct {
+    m: u32,
+    algorithm: u32 = 1,
+    block_m: u32 = 0,
+    block_n: u32 = 0,
+    block_k: u32 = 256,
+    warp_groups: u32 = 0,
+    pipeline_stages: u32 = 2,
+    split_k: u32 = 1,
+    min_m: u32 = 1,
+    max_m: u32 = 8192,
+    rank8_enabled: bool = false,
+};
+
+fn artifactObject(value: std.json.Value) !std.json.ObjectMap {
+    return switch (value) {
+        .object => |object| object,
+        else => error.InvalidWindowArtifactManifest,
+    };
+}
+
+fn artifactField(object: std.json.ObjectMap, name: []const u8) !std.json.Value {
+    return object.get(name) orelse error.InvalidWindowArtifactManifest;
+}
+
+fn artifactString(value: std.json.Value) ![]const u8 {
+    return switch (value) {
+        .string => |string| string,
+        else => error.InvalidWindowArtifactManifest,
+    };
+}
+
+fn artifactU32(value: std.json.Value) !u32 {
+    return switch (value) {
+        .integer => |integer| if (integer >= 0 and integer <= std.math.maxInt(u32))
+            @intCast(integer)
+        else
+            error.InvalidWindowArtifactManifest,
+        .float => |float| if (float >= 0 and float <= std.math.maxInt(u32) and @trunc(float) == float)
+            @intFromFloat(float)
+        else
+            error.InvalidWindowArtifactManifest,
+        else => error.InvalidWindowArtifactManifest,
+    };
+}
+
+fn artifactBool(value: std.json.Value) !bool {
+    return switch (value) {
+        .bool => |boolean| boolean,
+        else => error.InvalidWindowArtifactManifest,
+    };
+}
+
+fn artifactShapeEquals(value: std.json.Value, expected: []const u32) !void {
+    const array = switch (value) {
+        .array => |array| array,
+        else => return error.InvalidWindowArtifactManifest,
+    };
+    if (array.items.len != expected.len) return error.InvalidWindowArtifactManifest;
+    for (array.items, expected) |actual, wanted| {
+        if (try artifactU32(actual) != wanted) return error.InvalidWindowArtifactManifest;
+    }
+}
+
+fn artifactHashMatches(bytes: []const u8, expected: []const u8) !void {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    if (!std.mem.eql(u8, &hex, expected)) return error.WindowArtifactHashMismatch;
+}
+
+fn artifactTensor(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    directory: *std.Io.Dir,
+    tensors: std.json.ObjectMap,
+    name: []const u8,
+    dtype: []const u8,
+    shape: []const u32,
+    platform: *const zml.Platform,
+) !zml.Buffer {
+    const entry = try artifactObject(tensors.get(name) orelse return error.InvalidWindowArtifactManifest);
+    const file = try artifactString(try artifactField(entry, "file"));
+    var expected_file: [64]u8 = undefined;
+    const expected_file_slice = try std.fmt.bufPrint(&expected_file, "{s}.bin", .{name});
+    if (!std.mem.eql(u8, file, expected_file_slice)) return error.InvalidWindowArtifactManifest;
+    if (!std.mem.eql(u8, try artifactString(try artifactField(entry, "dtype")), dtype))
+        return error.InvalidWindowArtifactManifest;
+    try artifactShapeEquals(try artifactField(entry, "shape"), shape);
+    const expected_bytes = try artifactU32(try artifactField(entry, "bytes"));
+    const bytes = try directory.readFileAlloc(io, file, allocator, .limited(1 << 30));
+    defer allocator.free(bytes);
+    if (bytes.len != expected_bytes) return error.InvalidWindowArtifactManifest;
+    try artifactHashMatches(bytes, try artifactString(try artifactField(entry, "sha256")));
+    return zml.Buffer.fromBytes(
+        io,
+        platform,
+        zml.Shape.init(shape, if (std.mem.eql(u8, dtype, "float16")) .f16 else if (std.mem.eql(u8, dtype, "float32")) .f32 else if (std.mem.eql(u8, dtype, "int32")) .i32 else .u8),
+        .replicated,
+        bytes,
+    );
+}
+
+fn emptyArtifactTensor(io: std.Io, platform: *const zml.Platform) !zml.Buffer {
+    return zml.Buffer.fromBytes(io, platform, zml.Shape.init(.{0}, .f16), .replicated, &.{});
+}
+
+/// Load and validate the unified Python window artifact before device upload.
+/// The loader owns the resulting device buffers; callers must keep the Artifact
+/// alive until every executable and prepared graph using its buffers is gone.
+pub fn loadArtifact(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    path: []const u8,
+    options: ArtifactOptions,
+) !Artifact {
+    var directory = try std.Io.Dir.cwd().openDir(io, path, .{});
+    defer directory.close(io);
+    const manifest_bytes = try directory.readFileAlloc(io, "manifest.json", allocator, .limited(1 << 20));
+    defer allocator.free(manifest_bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, manifest_bytes, .{});
+    defer parsed.deinit();
+    const root = try artifactObject(parsed.value);
+    if (!std.mem.eql(u8, try artifactString(try artifactField(root, "format")), "qvq_p32_window_artifact"))
+        return error.UnsupportedWindowArtifactFormat;
+    if (try artifactU32(try artifactField(root, "version")) != 1)
+        return error.UnsupportedWindowArtifactVersion;
+    const metadata = try artifactObject(try artifactField(root, "metadata"));
+    const tensors = try artifactObject(try artifactField(root, "tensors"));
+    const k = try artifactU32(try artifactField(metadata, "in_features"));
+    const n = try artifactU32(try artifactField(metadata, "out_features"));
+    const bits = try artifactField(metadata, "bits");
+    const transition_bits: u32 = switch (bits) {
+        .integer => |value| switch (value) {
+            2 => 4,
+            3 => 6,
+            else => return error.UnsupportedWindowArtifactRate,
+        },
+        .float => |value| if (value == 2.5) 5 else if (value == 3.5) 7 else return error.UnsupportedWindowArtifactRate,
+        else => return error.InvalidWindowArtifactManifest,
+    };
+    if (options.m == 0 or options.m > 8192 or k == 0 or n == 0)
+        return error.InvalidWindowArtifactShape;
+    const tile_count = (k * n) / 256;
+    if (k % 16 != 0 or n % 16 != 0 or tile_count == 0)
+        return error.InvalidWindowArtifactShape;
+    const input_hadamard = if (try artifactBool(try artifactField(metadata, "input_hadamard"))) @as(u32, 1) else 0;
+    const output_hadamard = if (try artifactBool(try artifactField(metadata, "output_hadamard"))) @as(u32, 1) else 0;
+    const bank_alt_entry = try artifactObject(tensors.get("bank_alt_id") orelse return error.InvalidWindowArtifactManifest);
+    const bank_alt_file = try artifactString(try artifactField(bank_alt_entry, "file"));
+    if (!std.mem.eql(u8, bank_alt_file, "bank_alt_id.bin") or
+        !std.mem.eql(u8, try artifactString(try artifactField(bank_alt_entry, "dtype")), "uint8"))
+        return error.InvalidWindowArtifactManifest;
+    try artifactShapeEquals(try artifactField(bank_alt_entry, "shape"), &.{1});
+    const bank_alt_bytes = try directory.readFileAlloc(io, bank_alt_file, allocator, .limited(16));
+    defer allocator.free(bank_alt_bytes);
+    if (bank_alt_bytes.len != 1 or try artifactU32(try artifactField(bank_alt_entry, "bytes")) != 1)
+        return error.InvalidWindowArtifactShape;
+    try artifactHashMatches(bank_alt_bytes, try artifactString(try artifactField(bank_alt_entry, "sha256")));
+    const config = Config{
+        .m = options.m,
+        .k = k,
+        .n = n,
+        .transition_bits = transition_bits,
+        .bank_alt_id = bank_alt_bytes[0],
+        .algorithm = options.algorithm,
+        .block_m = options.block_m,
+        .block_n = options.block_n,
+        .block_k = options.block_k,
+        .warp_groups = options.warp_groups,
+        .pipeline_stages = options.pipeline_stages,
+        .split_k = options.split_k,
+        .min_m = options.min_m,
+        .max_m = options.max_m,
+        .input_hadamard = input_hadamard,
+        .output_hadamard = output_hadamard,
+        .rank8_enabled = if (options.rank8_enabled) 1 else 0,
+    };
+    var payload = ArtifactPayload{
+        .window = undefined,
+        .banks = undefined,
+        .levels = undefined,
+        .su = undefined,
+        .sv = undefined,
+        .bias = undefined,
+        .rank8_a = undefined,
+        .rank8_b = undefined,
+    };
+    var initialized: [8]bool = @splat(false);
+    errdefer {
+        if (initialized[0]) payload.window.deinit();
+        if (initialized[1]) payload.banks.deinit();
+        if (initialized[2]) payload.levels.deinit();
+        if (initialized[3]) payload.su.deinit();
+        if (initialized[4]) payload.sv.deinit();
+        if (initialized[5]) payload.bias.deinit();
+        if (initialized[6]) payload.rank8_a.deinit();
+        if (initialized[7]) payload.rank8_b.deinit();
+    }
+    payload.window = try artifactTensor(allocator, io, &directory, tensors, "window_words", "int32", &.{ tile_count, 4 * transition_bits }, platform);
+    initialized[0] = true;
+    payload.banks = try artifactTensor(allocator, io, &directory, tensors, "bank_ids", "uint8", &.{tile_count}, platform);
+    initialized[1] = true;
+    payload.levels = try artifactTensor(allocator, io, &directory, tensors, "levels", "float16", &.{256}, platform);
+    initialized[2] = true;
+    payload.su = try artifactTensor(allocator, io, &directory, tensors, "SU", "float32", &.{k}, platform);
+    initialized[3] = true;
+    payload.sv = try artifactTensor(allocator, io, &directory, tensors, "SV", "float32", &.{n}, platform);
+    initialized[4] = true;
+    if (tensors.get("bias")) |bias_value| {
+        const bias_entry = try artifactObject(bias_value);
+        const bias_dtype = try artifactString(try artifactField(bias_entry, "dtype"));
+        if (std.mem.eql(u8, bias_dtype, "float16")) {
+            payload.bias = try artifactTensor(allocator, io, &directory, tensors, "bias", "float16", &.{n}, platform);
+        } else if (std.mem.eql(u8, bias_dtype, "float32")) {
+            payload.bias = try artifactTensor(allocator, io, &directory, tensors, "bias", "float32", &.{n}, platform);
+        } else {
+            return error.InvalidWindowArtifactManifest;
+        }
+    } else {
+        payload.bias = try emptyArtifactTensor(io, platform);
+    }
+    initialized[5] = true;
+    const recovery = root.get("recovery") orelse .null;
+    if (recovery != .null) {
+        const recovery_object = try artifactObject(recovery);
+        if (try artifactU32(try artifactField(recovery_object, "rank")) != 8)
+            return error.UnsupportedWindowArtifactRank;
+        if (!std.mem.eql(u8, try artifactString(try artifactField(recovery_object, "dtype")), "float16") or
+            !std.mem.eql(u8, try artifactString(try artifactField(recovery_object, "input_domain")), "p32_transformed") or
+            !try artifactBool(try artifactField(recovery_object, "validated")))
+            return error.InvalidWindowArtifactRecovery;
+        payload.rank8_a = try artifactTensor(allocator, io, &directory, tensors, "rank8_A", "float16", &.{ k, 8 }, platform);
+        initialized[6] = true;
+        payload.rank8_b = try artifactTensor(allocator, io, &directory, tensors, "rank8_B", "float16", &.{ 8, n }, platform);
+        initialized[7] = true;
+    } else {
+        if (options.rank8_enabled or tensors.get("rank8_A") != null or tensors.get("rank8_B") != null)
+            return error.InvalidWindowArtifactRecovery;
+        payload.rank8_a = try emptyArtifactTensor(io, platform);
+        initialized[6] = true;
+        payload.rank8_b = try emptyArtifactTensor(io, platform);
+        initialized[7] = true;
+    }
+    return .{ .config = config, .payload = payload };
+}
+
 /// Native Hopper configurations that ZML may compile and benchmark for one
 /// shape. The list intentionally retains every supported BM/BN choice: the
 /// winning geometry is shape-, device- and correction-state dependent.
@@ -308,7 +617,15 @@ pub fn linear(input: Input, config: Config) zml.Tensor {
             .u8
         else
             .f16;
-        std.debug.assert(@field(input, field.name).dtype() == expected);
+        if (comptime std.mem.eql(u8, field.name, "su") or
+            std.mem.eql(u8, field.name, "sv") or
+            std.mem.eql(u8, field.name, "bias"))
+        {
+            std.debug.assert(@field(input, field.name).dtype() == .f16 or
+                @field(input, field.name).dtype() == .f32);
+        } else {
+            std.debug.assert(@field(input, field.name).dtype() == expected);
+        }
     }
     // Ordinary typedCustomCall keeps replication semantics; no TP ownership
     // claim is made until the sharding contract is separately validated.
