@@ -1139,6 +1139,12 @@ def fit_rank8(
         )
         report = {
             "fit_contract": CONTRACT,
+            # The native/ZML quality gate uses this signature to distinguish
+            # the reference rank8 arithmetic from experimental projections.
+            # Fitted factors are always produced in the reference domain;
+            # alternate signatures require an explicit, separately certified
+            # runtime candidate and must never be inferred from latency.
+            "arithmetic_signature": "reference_fp32_v1",
             "rank": 8,
             "dtype": "float16",
             "input_domain": "p32_transformed",

@@ -112,6 +112,7 @@ def test_rank8_audit_gate_requires_every_document_and_records_confirmation():
         minimum_improvement=0.0,
     )
     assert report["validated"]
+    assert report["arithmetic_signature"] == "reference_fp32_v1"
     accepted = apply_rank8_audit(
         layer,
         [
