@@ -2520,7 +2520,6 @@ class QVQLinear(BaseQuantLinear):
             return self._recover_output_compute_dtype(
                 output, torch.float32, target_dtype=output_dtype
             )
-        concurrent_hidden = rank8_hidden
         concurrent_done = None
         concurrent_stream = None
         concurrent = (
@@ -2554,7 +2553,7 @@ class QVQLinear(BaseQuantLinear):
             ready.record(current_stream)
             with torch.cuda.stream(concurrent_stream):
                 concurrent_stream.wait_event(ready)
-                concurrent_hidden = (
+                rank8_hidden = (
                     transformed.float() @ self._cached_rank8_factor("A")
                 ).half()
                 done.record(concurrent_stream)
