@@ -751,6 +751,14 @@ class QVQLinear(BaseQuantLinear):
         self._require_prepared_outside_capture(
             self.runtime_device(), "auxiliary dtype caches"
         )
+        # The BF16 overflow-rescue branch uses the legacy GEMV consumer while
+        # the native P32 WGMMA path is FP16-only.  A window-owned module has
+        # released its planar source, so materialize the transient fallback
+        # before capture as part of graph preparation.  The fallback is a
+        # cache owned by the graph warmup and is never serialized or restored
+        # as production planar storage.
+        if self.window_only:
+            self._prepare_planar_fallback()
         signature = tuple(
             (name, id(tensor), tensor._version, tensor.device)
             for name in ("SU", "SV", "bias")
