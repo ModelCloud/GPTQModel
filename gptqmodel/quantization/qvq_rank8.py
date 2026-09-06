@@ -2011,9 +2011,13 @@ def grouped_window_kernel_candidates(layers, *, m):
             chunk_m=0,
             min_m=m,
             max_m=m,
-            recovery_kernel="separate_reference",
-            recovery_projection="separate_reference",
-            arithmetic_signature="reference_fp32_v1",
+            # Grouped tuning changes only the window consumer geometry. Keep
+            # each child's already-prepared rank8 arithmetic policy visible so
+            # a grouped benchmark measures the requested fused/reference path
+            # rather than silently replacing it with a separate correction.
+            recovery_kernel=child._p32_window_config.recovery_kernel,
+            recovery_projection=child._p32_window_config.recovery_projection,
+            arithmetic_signature=child._p32_window_config.arithmetic_signature,
         )
 
     device = reference.runtime_device()

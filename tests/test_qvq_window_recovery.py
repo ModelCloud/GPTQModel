@@ -357,7 +357,11 @@ def test_grouped_window_candidates_preserve_child_split_tuples(monkeypatch):
 def test_grouped_hopper_candidates_keep_child_local_split_choices(monkeypatch):
     """SM90 grouping exposes shape-valid ordered split tuples for ZML/native tuning."""
 
-    config = P32WindowConfig(quality_mode="fast")
+    config = P32WindowConfig(
+        quality_mode="fast",
+        recovery_kernel="fused_epilogue",
+        arithmetic_signature="unverified_fused_epilogue",
+    )
 
     class Child:
         v2b2_p32 = True
@@ -390,6 +394,8 @@ def test_grouped_hopper_candidates_keep_child_local_split_choices(monkeypatch):
         child.algorithm == "hopper_m16"
         and child.min_m == child.max_m == 128
         and child.split_k in (1, 2, 4, 8)
+        and child.recovery_kernel == "fused_epilogue"
+        and child.arithmetic_signature == "unverified_fused_epilogue"
         for candidate in candidates
         for child in candidate
     )
