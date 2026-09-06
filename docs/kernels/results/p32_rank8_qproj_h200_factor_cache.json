@@ -1,0 +1,228 @@
+{
+  "scope": "accepted-factor Q projection replay with prepared FP32 rank8 factor cache; graph-safe fused epilogue; not full-model quality",
+  "revision": "d342a644add40430d69b09e86eb8b17d3c1723bc",
+  "worktree_dirty": false,
+  "sources": {
+    "gptqmodel/quantization/qvq_rank8.py": "7888700e9c4c15ddcd43523e17cb047074d47bd6082a316653ead6c342f429b8",
+    "gptqmodel/nn_modules/qlinear/qvq.py": "f998e50da3c785e8c272e581ef5d7d26928cfdaa4c28713d42b7cb383a620a52",
+    "gptqmodel/nn_modules/qvq_grouped_runtime.py": "32f2cb18868c6d79afb5dcdb7f0c379c10521b9b21a585ca43ca5a8640e071fd",
+    "gptqmodel/utils/qvq_rank8_triton.py": "c54088e365a3c1e38feb87964efa01c399cd47be725b10c4e5e38dd49f84349f",
+    "gptqmodel/utils/qvq_wgmma_cuda.py": "3051316ac9ff31df0e126b3670773ccdfd9263c7b5c4fa98e74f203eba5c92be",
+    "gptqmodel/quantization/qvq_window_tuning.py": "409a4a5cdf0a085e2693e03ada41ae07e24a9ff3b46125a96bc3199f93dca51e",
+    "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu": "b6d3fecf48829a6bb1642e16bbe8fecc8c9b17136ddd131be3b904628058f156"
+  },
+  "hardware": {
+    "name": "NVIDIA H200",
+    "uuid": "0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "sm_count": 132,
+    "memory": 150101688320,
+    "capability": [
+      9,
+      0
+    ]
+  },
+  "software": {
+    "torch": "2.15.0.dev20260901+cu130",
+    "cuda": "13.0"
+  },
+  "build_identity": {
+    "qvq": "93bf5ed612db632a",
+    "wgmma": "0468d173c8fdfcdd",
+    "triton": "3.8.0",
+    "driver": "610.57.04"
+  },
+  "preflight": null,
+  "rows": [
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 31.70400083065033,
+      "median_us": 31.60960078239441,
+      "p95_us": 31.644800305366516,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        32.09120035171509,
+        31.644800305366516,
+        31.60960078239441,
+        31.600001454353333,
+        31.574401259422302
+      ],
+      "allocated_bytes": 4850688,
+      "peak_allocated_bytes": 6423552
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 43.90175998210907,
+      "median_us": 43.7936007976532,
+      "p95_us": 43.8511997461319,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        44.283199310302734,
+        43.8511997461319,
+        43.7936007976532,
+        43.78879964351654,
+        43.79200041294098
+      ],
+      "allocated_bytes": 72090624,
+      "peak_allocated_bytes": 74191872
+    },
+    {
+      "m": 2048,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 213.22495937347412,
+      "median_us": 213.1887912750244,
+      "p95_us": 213.19360733032227,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        213.71519565582275,
+        213.1887912750244,
+        212.9568099975586,
+        213.19360733032227,
+        213.07039260864258
+      ],
+      "allocated_bytes": 93586432,
+      "peak_allocated_bytes": 119800832
+    },
+    {
+      "m": 2048,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 246.39103889465332,
+      "median_us": 246.29600048065186,
+      "p95_us": 246.41759395599365,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        246.88479900360107,
+        246.41759395599365,
+        246.29600048065186,
+        246.16799354553223,
+        246.1888074874878
+      ],
+      "allocated_bytes": 127140864,
+      "peak_allocated_bytes": 160760832
+    },
+    {
+      "m": 8192,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 812.8790473937988,
+      "median_us": 812.8416061401367,
+      "p95_us": 812.8911972045898,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        813.1471633911133,
+        812.8416061401367,
+        812.7712249755859,
+        812.7440452575684,
+        812.8911972045898
+      ],
+      "allocated_bytes": 269747200,
+      "peak_allocated_bytes": 387187712
+    },
+    {
+      "m": 8192,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 948.3593559265137,
+      "median_us": 948.3504295349121,
+      "p95_us": 948.3663558959961,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        948.6063957214355,
+        948.3504295349121,
+        948.1904029846191,
+        948.2831954956055,
+        948.3663558959961
+      ],
+      "allocated_bytes": 303301632,
+      "peak_allocated_bytes": 437781504
+    }
+  ],
+  "activation_source": {
+    "path": "/root/qvq-results/current-qproj-fit/model.layers.0.self_attn.q_proj.activations.pt",
+    "sha256": "39fd8a245eb0bfbada06206abbdd7497967a1ca4e4c7651e35c87339b23594a3",
+    "rows": [
+      128,
+      128
+    ],
+    "expansion": "cyclic row replay to requested M; not a full-model prefill"
+  },
+  "candidate": "separate_reference_with_cached_factors",
+  "comparison": {
+    "128": {
+      "window_off_us": 31.60960078239441,
+      "cached_reference_on_us": 43.7936007976532,
+      "overhead_percent": 38.5452511695273
+    },
+    "2048": {
+      "window_off_us": 213.1887912750244,
+      "cached_reference_on_us": 246.29600048065186,
+      "overhead_percent": 15.529526204272837
+    },
+    "8192": {
+      "window_off_us": 812.8416061401367,
+      "cached_reference_on_us": 948.3504295349121,
+      "overhead_percent": 16.670999905904573
+    }
+  },
+  "interpretation": "Prepared FP32 A/B factor residency removes repeated factor conversion allocations while preserving reference FP32 projection and FP16 hidden rounding. The measured H200 Q fixture improves marginal fused-epilogue cost, but remains above the 3-5% promotion target; shape-specific fusion is still required.",
+  "command": "benchmark_qvq_window_rank8.py --package current-qproj-fit --activation-file current-qproj-fit/...activations.pt --kernel fused_epilogue --projection separate_reference --m 128 2048 8192 --samples 5 --replays 20"
+}

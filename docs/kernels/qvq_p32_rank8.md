@@ -271,6 +271,15 @@ resource-contended on this shape. It remains exposed to the shape tuner and is
 never a default quality choice; the measurement is recorded in
 `results/p32_rank8_qproj_h200_concurrent_reference.json`.
 
+Reference rank8 projections now retain prepared contiguous FP32 A/B factor
+buffers per module and invalidate them on factor version changes. This removes
+the repeated factor-conversion allocations from eager and captured replay while
+leaving the FP32 projection, FP16 hidden boundary, and FP32 expansion ordering
+unchanged. The refreshed accepted-Q H200 replay measures fused-epilogue
+marginal costs of 38.5%/15.5%/16.7% at M128/2048/8192; the complete rows are in
+`results/p32_rank8_qproj_h200_factor_cache.json`. Factor residency is an exact
+optimization, but it does not by itself meet the 3--5% promotion target.
+
 Post-profile tests: **87 passed,86 skipped**, including output widths through
 16384, per-operation overflow rescue, no-bias/strided outputs, independent
 single/grouped composition, and ten graph replays per case. Skips are mostly
