@@ -114,6 +114,13 @@ layout or build. ZML and other external consumers must enumerate and benchmark
 their own eligible executables, then cache the result under the full
 device/shape/rate/M/TP/correction key.
 
+The non-Hopper SM80 consumer exposes the same rule through
+`qvq_p32_window_ampere_kernel_candidates((M, K), out_features=N, bits=...)`.
+It returns the measured shape-specific split first, followed by a bounded
+probe set, without CUDA allocation or timing. A kernel tuner or ZML can time
+those explicit `split_count` values before capture and pass the winner to
+`qvq_p32_window_ampere`; a cold graph never launches the event-based tuner.
+
 Grouped QKV and gate/up apply child corrections to completed FP32 outputs using
 exactly the shared padded activation that fed WGMMA, then run existing child
 or paired output transforms. Each child may independently enable correction.

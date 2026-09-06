@@ -379,6 +379,107 @@ def _resolve_transition_bits(bits: float) -> int:
     return transition_bits
 
 
+def _static_split_count(*, m: int, k: int, n: int, transition_bits: int) -> int:
+    """Return the measured shape policy before optional timing autotune.
+
+    This is deliberately a pure shape function.  It is shared by the runtime
+    dispatcher and the public candidate enumerator so external tuners (including
+    ZML) see the same Ampere baseline without importing a CUDA tensor or doing
+    work during graph capture.
+    """
+
+    if m > 16:
+        return 1
+    if m == 1 and k == 5120 and n in (1024, 12288):
+        return 56 if n == 1024 else 40
+    if m in (2, 4) and k == 5120 and n == 1024:
+        return 64
+    if n == 1024 and (m, k) == (8, 5120):
+        return 48
+    if n == 17408 and (m, k) in ((8, 5120), (16, 5120)):
+        return 10
+    if n == 12288 and (m, k) == (16, 5120):
+        return 9
+    if n == 10240 and (m, k) == (16, 5120):
+        return 10
+    if n == 1024 and (m, k) == (16, 5120):
+        return 32
+    if n == 5120 and (m, k) == (8, 17408):
+        return 40
+    if n == 5120 and (m, k) == (8, 6144):
+        return 24
+    if n == 6144 and (m, k) == (8, 5120):
+        return 40
+    if n == 10240 and (m, k) == (8, 5120):
+        return 16
+    if n == 12288 and (m, k) == (8, 5120):
+        return 14
+    if n == 5120 and (m, k) == (16, 17408):
+        return 24
+    if n == 5120 and (m, k) == (16, 6144):
+        return 12
+    if n == 6144 and (m, k) == (16, 5120):
+        return 10
+    if (m, k) == (1, 6144) and n == 5120:
+        return 48
+    if (m, k) == (2, 6144) and n == 5120:
+        return 64 if transition_bits == 7 else 48
+    if (m, k) == (4, 5120) and n == 6144:
+        return 40
+    return 0
+
+
+def qvq_p32_window_ampere_kernel_candidates(
+    input_shape: Sequence[int],
+    *,
+    out_features: int,
+    bits: float,
+    sm_count: int = 108,
+    max_candidates: int = 12,
+) -> tuple[int, ...]:
+    """Enumerate legal Ampere split waves for one exact ``(M, K, N, rate)``.
+
+    The result contains the measured shape policy first, followed by a bounded
+    probe set suitable for a kernel-level autotuner.  Enumeration performs no
+    CUDA allocation, event timing, or synchronization and is therefore safe to
+    call while constructing a graph plan.  Benchmark and cache the selected
+    ``split_count`` before capture, then pass it explicitly to
+    :func:`qvq_p32_window_ampere` during replay.
+    """
+
+    shape = tuple(int(value) for value in input_shape)
+    if len(shape) != 2 or shape[0] <= 0 or shape[1] <= 0:
+        raise ValueError("Ampere candidate shape must be a positive (M,K) pair")
+    if shape[1] % 16:
+        raise ValueError("Ampere P32 input width must be divisible by 16")
+    if type(out_features) is not int or out_features <= 0 or out_features % 16:
+        raise ValueError("Ampere P32 output width must be a positive multiple of 16")
+    if type(sm_count) is not int or sm_count <= 0:
+        raise ValueError("Ampere SM count must be positive")
+    if type(max_candidates) is not int or max_candidates < 1:
+        raise ValueError("max_candidates must be positive")
+    transition_bits = _resolve_transition_bits(bits)
+    k_tiles = shape[1] // 16
+    fallback = _static_split_count(
+        m=shape[0], k=shape[1], n=out_features, transition_bits=transition_bits
+    )
+    if fallback == 0:
+        fallback = _auto_split_count(
+            in_features=shape[1],
+            out_features=out_features,
+            k_tiles=k_tiles,
+            sm_count=sm_count,
+        )
+    fallback = min(max(1, fallback), k_tiles)
+    return tuple(
+        _autotune_candidates(
+            fallback=fallback,
+            k_tiles=k_tiles,
+            max_candidates=max_candidates,
+        )
+    )
+
+
 def _resolve_split_count(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -396,58 +497,14 @@ def _resolve_split_count(
         raise ValueError("QVQ P32 Ampere split_count must be non-negative")
     if split_count:
         return int(split_count)
-    # Prefill batches are tiled in 16-row WMMA CTAs by the native Ampere
-    # launcher.  Once there are more than one row tile, a single K wave keeps
-    # enough independent CTAs resident and avoids materializing a split-K
-    # partial tensor proportional to M.
-    if input.shape[0] > 16:
-        return 1
-    if (
-        input.shape[0] == 1
-        and input.shape[1] == 5120
-        and out_features in (1024, 12288)
-    ):
-        return 56 if out_features == 1024 else 40
-    if (
-        input.shape[0] in (2, 4)
-        and input.shape[1] == 5120
-        and out_features == 1024
-    ):
-        return 64
-    if out_features == 1024 and input.shape == (8, 5120):
-        return 48
-    if out_features == 17408 and input.shape == (8, 5120):
-        return 10
-    if out_features == 17408 and input.shape == (16, 5120):
-        return 10
-    if out_features == 12288 and input.shape == (16, 5120):
-        return 9
-    if out_features == 10240 and input.shape == (16, 5120):
-        return 10
-    if out_features == 1024 and input.shape == (16, 5120):
-        return 32
-    if out_features == 5120 and input.shape == (8, 17408):
-        return 40
-    if out_features == 5120 and input.shape == (8, 6144):
-        return 24
-    if out_features == 6144 and input.shape == (8, 5120):
-        return 40
-    if out_features == 10240 and input.shape == (8, 5120):
-        return 16
-    if out_features == 12288 and input.shape == (8, 5120):
-        return 14
-    if out_features == 5120 and input.shape == (16, 17408):
-        return 24
-    if out_features == 5120 and input.shape == (16, 6144):
-        return 12
-    if out_features == 6144 and input.shape == (16, 5120):
-        return 10
-    if input.shape == (1, 6144) and out_features == 5120:
-        return 48
-    if input.shape == (2, 6144) and out_features == 5120:
-        return 64 if transition_bits == 7 else 48
-    if input.shape == (4, 5120) and out_features == 6144:
-        return 40
+    static = _static_split_count(
+        m=int(input.shape[0]),
+        k=int(input.shape[1]),
+        n=int(out_features),
+        transition_bits=transition_bits,
+    )
+    if static:
+        return min(static, int(input.shape[1]) // 16)
 
     # Environment configuration is process-level. Reading ``os.environ`` on
     # every cached launch costs more than the cache lookup itself, so refresh
@@ -1169,5 +1226,6 @@ __all__ = [
     "qvq_p32_window_ampere_group_plan",
     "qvq_p32_window_ampere_grouped",
     "qvq_p32_window_ampere_grouped_packed",
+    "qvq_p32_window_ampere_kernel_candidates",
     "qvq_pack_p32_window_ampere_group",
 ]

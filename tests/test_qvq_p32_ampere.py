@@ -22,6 +22,7 @@ from gptqmodel.utils.qvq_ampere_cuda import (
     _autotune_candidates,
     _autotune_enabled,
     qvq_p32_window_ampere,
+    qvq_p32_window_ampere_kernel_candidates,
 )
 
 
@@ -64,6 +65,29 @@ def test_p32_ampere_autotune_defaults_on_and_is_bounded(monkeypatch):
     wide_candidates = _autotune_candidates(fallback=128, k_tiles=1088)
     assert wide_candidates == [128, 64, 8, 16, 24, 32, 40, 48, 96]
     assert max(wide_candidates) == 128
+
+
+def test_p32_ampere_public_candidates_share_shape_policy_without_cuda_work():
+    m1 = qvq_p32_window_ampere_kernel_candidates(
+        (1, 5120), out_features=1024, bits=3, sm_count=108, max_candidates=5
+    )
+    assert m1 == (56, 28, 112, 8, 16)
+    large_m = qvq_p32_window_ampere_kernel_candidates(
+        (512, 5120), out_features=1024, bits=3, sm_count=124, max_candidates=4
+    )
+    assert large_m == (1, 2, 8, 16)
+    assert qvq_p32_window_ampere_kernel_candidates(
+        (2, 6144), out_features=5120, bits=3.5, max_candidates=1
+    ) == (64,)
+
+
+@pytest.mark.parametrize(
+    ("shape", "n", "bits"),
+    [((0, 5120), 1024, 3), ((1, 5119), 1024, 3), ((1, 5120), 1025, 3)],
+)
+def test_p32_ampere_public_candidates_reject_invalid_shapes(shape, n, bits):
+    with pytest.raises(ValueError):
+        qvq_p32_window_ampere_kernel_candidates(shape, out_features=n, bits=bits)
 
 
 def test_p32_ampere_autotune_setting_refreshes_with_cache_clear(monkeypatch):
