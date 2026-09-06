@@ -15,12 +15,16 @@ Treat every QvQ feature branch as concurrently writable. Never push a stale loca
 - Never resolve a conflict by blindly choosing all of `ours` or `theirs`. Read the base, local change, and incoming
   change; integrate both intents when compatible.
 
-## Start every new branch from the live remote main tip
+## Start every new branch from the live remote main tip after PR lifecycle changes
 
 Multiple agents may merge pull requests while another task is running. Before creating any new feature or benchmark
 branch, fetch `origin` again and branch directly from the newly resolved `origin/main`. Do not branch from a local
 `main`, the current feature-branch `HEAD`, a merge commit on an old feature branch, or an `origin/main` value fetched
 earlier in the session.
+
+After a PR is merged, closed, removed, abandoned, or its branch is deleted, this rule is mandatory: never resume from
+that old PR point. Start the next task from the freshly fetched `origin/main` so changes merged by other workers and
+agents are included.
 
 1. Preserve or commit the current task's intended changes and leave unrelated collaborator files untouched.
 2. Confirm `origin` still points at ModelCloud/QvQ, then run `git fetch origin --prune` immediately before branching.

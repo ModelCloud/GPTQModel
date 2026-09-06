@@ -1,0 +1,4 @@
+interface:
+  display_name: "QvQ Model Artifact Snapshots"
+  short_description: "Save complete QvQ models with calibration data"
+  default_prompt: "Use $qvq-model-artifact-snapshot to save this QvQ experiment as a complete reproducible model snapshot."
