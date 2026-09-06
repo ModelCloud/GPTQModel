@@ -384,6 +384,30 @@ def test_forward_pretransformed_propagates_requested_store_dtype():
     assert seen["output_dtype"] == torch.float16
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_window_package_owns_window_payload_without_planar_vram_copy():
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    source = QVQLinear(
+        bits=2,
+        in_features=256,
+        out_features=256,
+        bank_count=2,
+        v2b2_p32=True,
+    ).to("cuda").eval()
+    source.trellis.random_(-2147483648, 2147483647)
+    source.SU.fill_(1)
+    source.SV.fill_(0.1)
+    source.post_init()
+    package = export_window_package(source)
+    loaded = load_window_package(package, device="cuda")
+    assert loaded.window_only
+    assert loaded.window_words.device.type == "cuda"
+    assert loaded.trellis.device.type == "cpu"
+    x = torch.randn(16, 256, device="cuda", dtype=torch.float16) * 0.01
+    torch.testing.assert_close(loaded(x), source(x), rtol=0, atol=0)
+
+
 def test_binding_and_mutation_guard():
     layer, teacher, train, heldout = fixture()
     fit(layer, teacher, train, heldout)
