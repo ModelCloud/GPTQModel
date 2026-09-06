@@ -25,7 +25,12 @@ state in its cache. A latency result cannot establish model-quality eligibility.
 ordinary Zig data, so a ZML autotune pass can compile the exact same `linear`
 call for each geometry and retain the winner in its shape/device cache. The
 list is deliberately not pruned globally: a geometry that wins one M or
-projection shape remains available to the tuner for other shapes.
+projection shape remains available to the tuner for other shapes. After each
+candidate has been warmed and measured outside capture, pass its correctness
+and median timings to `selectFastest`; the selector applies the same MAE/max
+error gate as the Python tuner and uses stable enumeration order for ties.
+Compile the serving executable only after selection, then warm its prepared
+native graph before any enclosing ZML/CUDA graph capture.
 
 The bridge links LibTorch and the existing QVQ CUDA/WGMMA operator libraries,
 but execution does not require Python. The caller must validate the unified

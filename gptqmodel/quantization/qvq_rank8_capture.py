@@ -63,13 +63,15 @@ class Rank8Capture:
 
 
 @torch.no_grad()
-def capture_rank8_calibration(model, request):
+def capture_rank8_calibration(model, request, *, materialize_teacher=None):
     """Capture original inputs before any quantized replay; leave no hooks behind.
 
     Documents retain their boundaries and are never concatenated or sorted with
     ordinary quantizer calibration. Input tensors must already be on the model's
-    execution device. This initial path requires materialized eval-mode Linear
-    modules; it does not load a second teacher or materialize lazy weights.
+    execution device. A lazy teacher may provide ``materialize_teacher``; it is
+    called at most once, before hooks or forwards, and must materialize the
+    requested eval-mode Linear modules in place. Loading is intentionally kept
+    outside CUDA graph capture and the callback cannot replace the model object.
     """
     if not isinstance(request, Rank8Capture):
         raise TypeError("rank8_capture must be Rank8Capture")
@@ -79,6 +81,23 @@ def capture_rank8_calibration(model, request):
     if torch.is_autocast_enabled("cuda") or torch.is_autocast_enabled("cpu"):
         raise ValueError("rank8 capture requires explicit teacher precision, without autocast")
     modules = dict(model.named_modules())
+    missing = [
+        name
+        for name in request.module_names
+        if not isinstance(modules.get(name), torch.nn.Linear)
+        or modules[name].weight.is_meta
+    ]
+    if missing and materialize_teacher is not None:
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError("teacher materialization must happen before CUDA graph capture")
+        if not callable(materialize_teacher):
+            raise TypeError("materialize_teacher must be callable")
+        returned = materialize_teacher(model)
+        if returned is not None and returned is not model:
+            raise ValueError("materialize_teacher must materialize the supplied model in place")
+        if model.training:
+            raise ValueError("materialize_teacher changed the teacher to training mode")
+        modules = dict(model.named_modules())
     for name in request.module_names:
         child = modules.get(name)
         if not isinstance(child, torch.nn.Linear) or child.weight.is_meta or child.training:

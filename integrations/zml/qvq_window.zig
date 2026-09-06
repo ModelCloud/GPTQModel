@@ -181,6 +181,55 @@ pub const Input = struct {
 /// winning geometry is shape-, device- and correction-state dependent.
 pub const max_candidate_count: usize = 7;
 
+/// Result of one correctness-gated ZML candidate measurement. The executable
+/// and timing loop belong to the caller so it can use its own PJRT client and
+/// stream. Measurements must be collected before the final executable is
+/// captured; this selector is allocation-free and safe to call during graph
+/// planning, but must not be called from a captured custom-call handler.
+pub const CandidateMeasurement = struct {
+    median_ns: u64,
+    mean_absolute_error: f32,
+    max_absolute_error: f32,
+    accepted: bool,
+};
+
+pub const TuningResult = struct {
+    config: Config,
+    median_ns: u64,
+    candidate_index: usize,
+};
+
+/// Select the fastest locally correct candidate in stable enumeration order.
+/// The error gate matches the Python/native QvQ contract: a finite output,
+/// mean absolute error <= 2e-3 and max absolute error <= 3/64. Invalid or
+/// zero-duration samples are rejected rather than silently becoming winners.
+/// ZML callers compile, warm and benchmark each `linear` candidate outside
+/// capture, then pass the resulting samples here before compiling the graph
+/// that will serve requests.
+pub fn selectFastest(
+    candidates: []const Config,
+    measurements: []const CandidateMeasurement,
+) !TuningResult {
+    if (candidates.len == 0) return error.NoCandidates;
+    if (candidates.len != measurements.len) return error.MeasurementCountMismatch;
+    var selected: ?TuningResult = null;
+    for (candidates, measurements, 0..) |candidate, measurement, index| {
+        if (!measurement.accepted or measurement.median_ns == 0 or
+            !std.math.isFinite(measurement.mean_absolute_error) or
+            !std.math.isFinite(measurement.max_absolute_error) or
+            measurement.mean_absolute_error > 2e-3 or
+            measurement.max_absolute_error > 3.0 / 64.0) continue;
+        if (selected == null or measurement.median_ns < selected.?.median_ns) {
+            selected = .{
+                .config = candidate,
+                .median_ns = measurement.median_ns,
+                .candidate_index = index,
+            };
+        }
+    }
+    return selected orelse error.NoViableCandidate;
+}
+
 pub fn enumerateCandidates(base: Config, output: []Config) usize {
     if (output.len < max_candidate_count) return 0;
     var count: usize = 0;
@@ -314,5 +363,21 @@ test "native window ABI layout" {
     try std.testing.expectEqual(@as(u32, 2), candidates[1].algorithm);
     try std.testing.expectEqual(@as(u32, 32), candidates[1].block_m);
     try std.testing.expectEqual(@as(u32, 64), candidates[1].block_n);
+    var measurements: [max_candidate_count]CandidateMeasurement = @splat(.{
+        .median_ns = 100,
+        .mean_absolute_error = 0,
+        .max_absolute_error = 0,
+        .accepted = true,
+    });
+    measurements[3].median_ns = 20;
+    const winner = try selectFastest(candidates[0..count], &measurements);
+    try std.testing.expectEqual(@as(usize, 3), winner.candidate_index);
+    try std.testing.expectEqual(@as(u64, 20), winner.median_ns);
+    measurements[3].accepted = false;
+    const fallback = try selectFastest(candidates[0..count], &measurements);
+    try std.testing.expectEqual(@as(usize, 0), fallback.candidate_index);
+    for (&measurements) |*measurement| measurement.accepted = false;
+    measurements[0].max_absolute_error = 1;
+    try std.testing.expectError(error.NoViableCandidate, selectFastest(candidates[0..count], &measurements));
     std.testing.refAllDecls(@This());
 }

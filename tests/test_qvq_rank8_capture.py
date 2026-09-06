@@ -41,6 +41,39 @@ def test_capture_preserves_documents_padding_and_dense_inputs():
         torch.testing.assert_close(value, original[name], rtol=0, atol=0)
 
 
+def test_capture_materializes_lazy_teacher_once_before_hooks():
+    teacher = Teacher().eval()
+    teacher.projection = torch.nn.Linear(16, 16, device="meta").eval()
+    calls = []
+
+    def materialize(model):
+        calls.append(model)
+        module = model.projection
+        module.to_empty(device="cpu")
+        with torch.no_grad():
+            module.weight.zero_()
+            module.bias.zero_()
+
+    captured = capture_rank8_calibration(
+        teacher, request(rows_per_document=2), materialize_teacher=materialize
+    )["projection"]
+    assert calls == [teacher]
+    assert not teacher.projection.weight.is_meta
+    assert captured.train_inputs.shape == (2, 16)
+    assert not teacher.projection._forward_pre_hooks
+
+
+def test_capture_rejects_teacher_replacement_callback():
+    teacher = Teacher().eval()
+    teacher.projection = torch.nn.Linear(16, 16, device="meta").eval()
+    with pytest.raises(ValueError, match="in place"):
+        capture_rank8_calibration(
+            teacher,
+            request(),
+            materialize_teacher=lambda model: Teacher().eval(),
+        )
+
+
 def test_capture_failure_removes_hooks_and_enforces_budget():
     teacher = Teacher().eval()
     with pytest.raises(ValueError, match="max_bytes"):
