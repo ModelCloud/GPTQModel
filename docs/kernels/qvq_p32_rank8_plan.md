@@ -117,6 +117,15 @@ five launches and reduces source-correlated executed instructions from
 shared exchange/reduction work; instruction reduction does not establish a
 large-M latency improvement.
 
+The Ampere continuous-window operator now participates in the same
+`P32WindowConfig` and `window_kernel_candidates` policy. On SM80, the
+shape-specific split-wave enumerator publishes explicit `ampere_window`
+candidates, preparation prewarms the operator, and replay passes the selected
+`split_k` without re-autotuning. Grouped runtimes reject that explicit policy
+until their independent grouped SM80 consumer is selected, so a candidate
+cannot be silently ignored. The candidate API remains pure and graph-safe;
+ZML's existing split-count tuner can consume the same explicit shape policy.
+
 The six existing Hopper geometry choices are now externally selectable,
 and their H200 off/on sweep is recorded in `results/p32_window_h200_geometry.json`.
 BM128/BN128 improves M2048 but loses at smaller M. The API retains every
