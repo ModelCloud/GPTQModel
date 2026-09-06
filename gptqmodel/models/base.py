@@ -1066,6 +1066,7 @@ class BaseQModel(nn.Module):
         layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
         freeze_others: bool = True,
         rank8_capture: object | None = None,
+        rank8_teacher_materializer=None,
     ) -> Dict[str, List[Dict[str, str]]]:
         """Quantize the model, optionally limited to a subset of layers.
 
@@ -1081,6 +1082,10 @@ class BaseQModel(nn.Module):
         QVQ module-granular replay requires explicit, disjoint
         `module_replay_search_calibration` and `module_replay_confirmation_calibration`
         streams. They are never inferred from ordinary or YAQA calibration.
+
+        `rank8_teacher_materializer` optionally materializes a lazy dense teacher
+        in place before rank-8 calibration capture. It is called outside graph
+        capture and only when a requested module is still on the meta device.
         """
 
         # Layer-scope dynamic overrides are temporary. Snapshot the original map so
@@ -1113,6 +1118,7 @@ class BaseQModel(nn.Module):
                 layer_scope=layer_scope,
                 freeze_others=freeze_others,
                 rank8_capture=rank8_capture,
+                rank8_teacher_materializer=rank8_teacher_materializer,
             )
             self._configure_qvq_fp8_kv_cache_runtime()
             return result
@@ -1170,6 +1176,7 @@ class BaseQModel(nn.Module):
         layer_scope: Optional[Union[int, slice, str, List[Union[int, str]]]] = None,
         freeze_others: bool = True,
         rank8_capture: object | None = None,
+        rank8_teacher_materializer=None,
     ) -> Dict[str, List[Dict[str, str]]]:
         embed_quant_config = self._normalize_embed_quant_config(
             embed_quant_config=embed_quant_config,
@@ -1202,7 +1209,11 @@ class BaseQModel(nn.Module):
                 effective = clone_qvq_config_for_module(self.quantize_config, name)
                 if effective is None or effective.format != FORMAT.QVQ_V2B2_P32:
                     raise ValueError(f"rank8 capture module is excluded or not P32: {name}")
-            rank8_activations = capture_rank8_calibration(self.model, rank8_capture)
+            rank8_activations = capture_rank8_calibration(
+                self.model,
+                rank8_capture,
+                materialize_teacher=rank8_teacher_materializer,
+            )
 
         timer = getattr(self, "quant_region_timer", None)
         if timer is not None:

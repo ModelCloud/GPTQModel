@@ -77,6 +77,11 @@ def test_capture_rejects_teacher_replacement_callback():
         )
 
 
+def test_capture_validates_materializer_type_even_for_dense_teacher():
+    with pytest.raises(TypeError, match="callable"):
+        capture_rank8_calibration(Teacher().eval(), request(), materialize_teacher=object())
+
+
 def test_capture_failure_removes_hooks_and_enforces_budget():
     teacher = Teacher().eval()
     with pytest.raises(ValueError, match="max_bytes"):

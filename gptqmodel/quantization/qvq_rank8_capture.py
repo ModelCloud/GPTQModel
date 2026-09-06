@@ -84,6 +84,8 @@ def capture_rank8_calibration(model, request, *, materialize_teacher=None):
         raise ValueError("rank8 capture requires an eval-mode dense teacher")
     if torch.is_autocast_enabled("cuda") or torch.is_autocast_enabled("cpu"):
         raise ValueError("rank8 capture requires explicit teacher precision, without autocast")
+    if materialize_teacher is not None and not callable(materialize_teacher):
+        raise TypeError("materialize_teacher must be callable")
     modules = dict(model.named_modules())
     missing = [
         name
@@ -94,8 +96,6 @@ def capture_rank8_calibration(model, request, *, materialize_teacher=None):
     if missing and materialize_teacher is not None:
         if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
             raise RuntimeError("teacher materialization must happen before CUDA graph capture")
-        if not callable(materialize_teacher):
-            raise TypeError("materialize_teacher must be callable")
         returned = materialize_teacher(model)
         if returned is not None and returned is not model:
             raise ValueError("materialize_teacher must materialize the supplied model in place")
