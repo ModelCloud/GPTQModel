@@ -21,7 +21,7 @@ from ..nn_modules.qlinear.gguf import (
 )
 
 
-__version__ = "0.10.0"
+__version__ = "0.19.0"
 _INTERNAL_GGUF_DEQUANT_DEVICE_ENV = "GPTQMODEL_INTERNAL_GGUF_DEQUANT_DEVICE"
 _INTERNAL_GGUF_DEQUANT_MAX_BYTES_ENV = "GPTQMODEL_INTERNAL_GGUF_DEQUANT_MAX_BYTES"
 _INTERNAL_GGUF_DEQUANT_DEFAULT_MAX_BYTES = 256 * 1024 * 1024
@@ -67,8 +67,10 @@ class GGMLQuantizationType(IntEnum):
     TQ1_0 = 34
     TQ2_0 = 35
     MXFP4 = 39
-    Q1_0 = 40
-    Q1_0_g128 = 41
+    NVFP4 = 40
+    Q1_0 = 41
+    Q1_0_g128 = Q1_0
+    Q2_0 = 42
 
 
 class GGUFEndian(IntEnum):
@@ -125,12 +127,12 @@ GGML_QUANT_SIZES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.TQ1_0: (256, 2 + 4 * 13),
     GGMLQuantizationType.TQ2_0: (256, 2 + 64),
     GGMLQuantizationType.MXFP4: (32, 1 + 16),
-    GGMLQuantizationType.Q1_0: (32, 2 + 4),
-    GGMLQuantizationType.Q1_0_g128: (128, 2 + 16),
+    GGMLQuantizationType.NVFP4: (64, 4 + 32),
+    GGMLQuantizationType.Q1_0: (128, 2 + 16),
+    GGMLQuantizationType.Q2_0: (64, 2 + 16),
 }
 _TORCH_SIGN_ONLY_QTYPES: dict[GGMLQuantizationType, tuple[int, int]] = {
     GGMLQuantizationType.Q1_0: GGML_QUANT_SIZES[GGMLQuantizationType.Q1_0],
-    GGMLQuantizationType.Q1_0_g128: GGML_QUANT_SIZES[GGMLQuantizationType.Q1_0_g128],
 }
 
 MODEL_ARCH_QWEN3 = "qwen3"
@@ -174,7 +176,7 @@ _QWEN3_LINEAR_TENSOR_RE = pcre.compile(
 )
 _GGUF_BITS_ALIAS_BY_QTYPE: dict[GGMLQuantizationType, str] = {
     GGMLQuantizationType.Q1_0: "q1_0",
-    GGMLQuantizationType.Q1_0_g128: "q1_0_g128",
+    GGMLQuantizationType.Q2_0: "q2_0",
     GGMLQuantizationType.Q4_0: "q4_0",
     GGMLQuantizationType.Q8_0: "q8_0",
     GGMLQuantizationType.Q4_K: "q4_k",

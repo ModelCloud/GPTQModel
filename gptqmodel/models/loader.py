@@ -333,10 +333,10 @@ def _resolve_native_gguf_profile(
 
     if (
         native_gguf_qspec is not None
-        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
         and profile == PROFILE.AUTO
     ):
-        log.info("Loader: Bonsai/Prism Q1_0_g128 PROFILE.AUTO resolved to PROFILE.FAST.")
+        log.info("Loader: Q1_0 PROFILE.AUTO resolved to PROFILE.FAST.")
         return PROFILE.FAST
     return profile
 
@@ -350,7 +350,7 @@ def _should_use_dense_native_gguf_path(
 
     return (
         native_gguf_qspec is not None
-        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
         and profile == PROFILE.FAST
     )
 
@@ -768,7 +768,7 @@ def ModelLoader(cls):
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
             if (
                 native_gguf_qspec is not None
-                and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+                and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
                 and atten_impl in {None, "auto"}
                 and _is_accelerated_attention_device(resolved_device)
                 and (config.model_type == "qwen3" or _supports_flash_attn_2(config))
@@ -1096,29 +1096,26 @@ def ModelLoader(cls):
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
         backend = normalize_backend(backend, quant_method=export_quant_method)
 
-        # Prism/Bonsai sign-only GGUF tensors only have a torch runtime today.
-        # Bypass higher-priority GGUF backends that either do not support 1-bit
-        # formats or depend on optional external runtimes.
         if (
             native_gguf_qspec is not None
             and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
+            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON}
+        ):
+            raise ValueError(
+                "Native Q1_0 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or BACKEND.GGUF_TRITON. "
+                f"Actual backend: `{backend}`."
+            )
+        elif (
+            native_gguf_qspec is not None
+            and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q2_0
         ):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.GGUF_TORCH
             elif backend != BACKEND.GGUF_TORCH:
                 raise ValueError(
-                    "Native Q1_0 GGUF checkpoints currently require BACKEND.GGUF_TORCH. "
+                    "Native Q2_0 GGUF checkpoints currently require BACKEND.GGUF_TORCH. "
                     f"Actual backend: `{backend}`."
                 )
-        elif (
-            native_gguf_qspec is not None
-            and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
-            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON}
-        ):
-            raise ValueError(
-                "Native Q1_0_g128 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or BACKEND.GGUF_TRITON. "
-                f"Actual backend: `{backend}`."
-            )
 
         if format_code == FORMAT.EXL3:
             if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH):

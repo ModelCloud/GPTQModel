@@ -1403,10 +1403,10 @@ class GGUFTritonKernel(GGUFTorchLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        if self.gguf_tensor_qtype not in {"Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"}:
+        if self.gguf_tensor_qtype not in {"Q1_0", "Q1_0_g128", "Q4_K", "Q5_K", "Q6_K"}:
             raise NotImplementedError(
                 f"{self.__class__.__name__} only supports fused GGUF Triton formats "
-                f"(Q1_0_g128, Q4_K, Q5_K, Q6_K). Actual GGUF qtype: {self.gguf_tensor_qtype}. "
+                f"(Q1_0, Q4_K, Q5_K, Q6_K). Actual GGUF qtype: {self.gguf_tensor_qtype}. "
                 "Use BACKEND.GGUF_TORCH for unsupported GGUF formats."
             )
         self._gguf_triton_cache: dict[tuple[int, str], dict[str, Any]] = {}
@@ -1435,7 +1435,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
     def _build_triton_cache(self, device: torch.device) -> dict[str, Any]:
         blocks, _, _ = self._reshape_blocks(device=device)
 
-        if self.gguf_tensor_qtype == "Q1_0_g128":
+        if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:
             scale = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).permute(1, 0).contiguous()
             capability = _cuda_device_capability(device)
             if _select_q1_0_g128_u32_layout(
@@ -1543,7 +1543,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
 
         cache = self._get_triton_cache(x_work.device)
 
-        if self.gguf_tensor_qtype == "Q1_0_g128":
+        if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:
             if cache.get("use_u32"):
                 fixed_u32_config = _select_q1_0_g128_u32_fixed_launch_config(
                     capability=_cuda_device_capability(x_work.device),

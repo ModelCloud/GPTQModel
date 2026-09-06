@@ -226,7 +226,7 @@ Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accum
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
-* ✨ Prism Bonsai `Q1_0_g128` GGUF checkpoints can be loaded for post-quantized inference through the normal `model_id_or_path` argument. GPT-QModel normalizes the GGUF artifact internally for HF Transformers via its native GGUF runtime, and does not support Prism Bonsai quantization or export.
+* ✨ Current GGUF tensor assignments are supported, with native quantization and dequantization for `Q1_0`, `Q2_0`, `TQ1_0`, `TQ2_0`, and `MXFP4`, plus native `NVFP4` dequantization. Prism Bonsai `Q1_0_g128` remains accepted as a compatibility alias for the official 128-element `Q1_0` layout.
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
