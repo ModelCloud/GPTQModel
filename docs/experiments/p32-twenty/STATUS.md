@@ -162,4 +162,8 @@ layer scorecard but still does not establish a 3x result. Nsight wave40
 bracketed the same BM64 decode/MMA call on all eight GPUs and reproduced 64
 registers, 45.6% achieved occupancy, 14.72B integer SASS, and 13.8%
 long-scoreboard stalls. The transform fold changes boundary cost only; it does
-not yet overlap transform work with MMA.
+not yet overlap transform work with MMA. Model dispatcher wave42 corrected the
+subthreshold fallback and reran four window controls plus four BM64/BN32 arms
+across eight GPUs. The corrected pooled full-model speedup is 1.411x at M=512
+and 1.425x at M=2048, with window dispatch retained below M=512 and decode.
+See [model dispatcher wave42](MODEL_DISPATCH_WAVE42.md).
