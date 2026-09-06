@@ -108,6 +108,16 @@ def native_window_linear(layer, x, config):
     if (x.ndim != 2 or x.dtype != torch.float16 or x.device != layer.trellis.device
             or x.shape[1] != layer.in_features or not x.is_contiguous()):
         raise ValueError("native ABI input must be a contiguous FP16 module matrix")
+    # This entry point allocates an output tensor and calls the raw native ABI,
+    # whose workspace is intentionally not capture-safe.  Reject before rank8
+    # preparation, metadata packing, or allocation so a caller cannot enter a
+    # capture with a partially initialized path.  Use the prepared graph API
+    # for command-buffer/CUDA-graph execution instead.
+    if x.device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "native_window_linear cannot run during CUDA Graph capture; "
+            "prepare and replay a native window graph instead"
+        )
     library = native_window_library()
     prepare_rank8(layer, config)
     window, banks, alt_id = layer._prepare_amd_p32_metadata(x.device)

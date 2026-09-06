@@ -148,6 +148,17 @@ def test_native_disabled_pointers_and_external_capture_rejection(monkeypatch):
     torch.testing.assert_close(sentinel, x + 1, atol=0, rtol=0)
 
 
+def test_native_window_linear_rejects_capture_before_preparation():
+    """The raw ABI entry point must fail before allocating inside capture."""
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child("capture_guard", in_features=2048, out_features=256, device="cuda").eval()
+    x = torch.randn(1, 2048, device="cuda", dtype=torch.float16) * 0.01
+    graph = torch.cuda.CUDAGraph()
+    with pytest.raises(RuntimeError, match="prepare and replay a native window graph"), torch.cuda.graph(graph):
+        native_window_linear(layer, x, P32WindowConfig(algorithm="hopper_m16"))
+
+
 @pytest.mark.parametrize("bm,bn", [(0, 0), (128, 128)])
 def test_native_abi_maximum_m(bm, bn):
     test_native_abi_matches_existing_full_operator(8192, 256, 3, True, bm, bn)
