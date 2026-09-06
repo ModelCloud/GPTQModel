@@ -392,6 +392,7 @@ capture = Rank8Capture(
     heldout=(Rank8Document("calibration/heldout/document-id", heldout_token_tensors),),
     rows_per_document=128,
     max_bytes=512 * 1024 * 1024,
+    max_solver_bytes=256 * 1024 * 1024,
 )
 model.quantize(calibration, rank8_capture=capture)
 ```
@@ -408,11 +409,16 @@ weights used by the finalizer; preprocessing that changes that teacher fails
 explicitly. Unconsumed module requests also fail rather than silently losing
 the requested fit.
 
-The initial public path requires an already materialized eval-mode dense
-teacher, calibration-based P32 A16, and explicit target module names. Lazy
-teacher materialization, atomic replay/output alignment and weight-only jobs
-remain unsupported for this capture path. The CPU FP64 fitter remains bounded
-by the selected activation rows; its scalable replacement is still pending.
+The public path requires calibration-based P32 A16 and explicit target module
+names. A lazy dense teacher can be supplied through
+`rank8_teacher_materializer=callable` on `model.quantize`; the callback
+materializes requested meta-device Linear modules in place once, before hooks
+or any graph capture. Atomic replay/output alignment and weight-only jobs
+remain unsupported for this capture path. The FP64 fitter uses its exact
+least-squares/SVD reference while the estimated workspace fits
+`max_solver_bytes`, then switches to a fixed-seed rank-8 output-range solver
+for larger K×N projections. The selected solver and cap are recorded in the
+fit metadata.
 
 The complete tiny-Llama integration test exercises public quantize, accepted
 rank8 fitting, normal model save/reload, exact factor preservation, payload
