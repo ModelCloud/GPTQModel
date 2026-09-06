@@ -30,6 +30,7 @@ def _gemm(
     PAIR_LEVEL_LUT: tl.constexpr = False,
     LUT_CACHE_CA: tl.constexpr = False,
     LUT_CACHE_CG: tl.constexpr = False,
+    RESIDENT_WINDOW_WORDS: tl.constexpr = False,
     DECODE_ONLY: tl.constexpr = False,
 ):
     rows = tl.program_id(0) * BM + tl.arange(0, BM)
@@ -41,7 +42,47 @@ def _gemm(
     start = tl.program_id(2) * (K // SPLIT)
     for offset in range(0, K // SPLIT, 16):
         krow = start + offset + kk
-        if FOLDED_ADDRESSES:
+        if RESIDENT_WINDOW_WORDS:
+            kblock = (start + offset) // 16
+            pair_col = npair % 8
+            pair = kk[:, None] * 8 + pair_col[None, :]
+            tile_slots = tl.arange(0, BN // 16)
+            tile_ids = (
+                kblock * (N // 16)
+                + tl.program_id(1) * (BN // 16)
+                + tile_slots
+            )
+            # Triton arange bounds must be powers of two.  The largest P32
+            # window tile is 28 words, so load a masked 32-word register tile.
+            word_ids = tl.arange(0, 32)
+            tile_words = tl.load(
+                W + tile_ids[:, None] * (4 * T) + word_ids[None, :],
+                mask=(tile_ids[:, None] < (K // 16) * (N // 16))
+                & (word_ids[None, :] < 4 * T),
+                other=0,
+            )
+            flat_words = tl.reshape(tile_words, (BN // 16) * 32)
+            tile_slot = npair // 8 - tl.program_id(1) * (BN // 16)
+            bit = (127 - pair) * T
+            word, shift = bit // 32, bit % 32
+            word_index = tile_slot[None, :] * 32 + word
+            next_word_index = tile_slot[None, :] * 32 + (word + 1) % (4 * T)
+            lo = tl.reshape(
+                tl.gather(flat_words, tl.reshape(word_index, (16 * BN,)), axis=0),
+                (16, BN),
+            ).to(tl.uint32)
+            hi = tl.reshape(
+                tl.gather(flat_words, tl.reshape(next_word_index, (16 * BN,)), axis=0),
+                (16, BN),
+            ).to(tl.uint32)
+            state = ((lo >> shift) | tl.where(shift > 0, hi << (32 - shift), 0)) & 65535
+            tile_banks = tl.load(
+                BANK + tile_ids,
+                mask=tile_ids < (K // 16) * (N // 16),
+                other=0,
+            ).to(tl.uint32)
+            bank = tl.gather(tile_banks, tile_slot, axis=0)[None, :]
+        elif FOLDED_ADDRESSES:
             # For every K16 step, all 16 lanes in the K dimension address the
             # same window tile column. Keep that address vector one-dimensional
             # so the compiler does not regenerate it for each decoded value.
@@ -53,13 +94,13 @@ def _gemm(
             tile = (krow[:, None] // 16) * (N // 16) + npair[None, :] // 8
             pair = (kk[:, None] % 16) * 8 + npair[None, :] % 8
             tile_for_load = tile
-        bit = (127 - pair) * T
-        word, shift = bit // 32, bit % 32
-        mask = npair[None, :] < N // 2
-        lo = tl.load(W + tile_for_load * (4 * T) + word, mask, 0).to(tl.uint32)
-        hi = tl.load(W + tile_for_load * (4 * T) + (word + 1) % (4 * T), mask, 0).to(tl.uint32)
-        state = ((lo >> shift) | tl.where(shift > 0, hi << (32 - shift), 0)) & 65535
-        bank = tl.load(BANK + tile_for_load, mask, 0).to(tl.uint32)
+            bit = (127 - pair) * T
+            word, shift = bit // 32, bit % 32
+            mask = npair[None, :] < N // 2
+            lo = tl.load(W + tile_for_load * (4 * T) + word, mask, 0).to(tl.uint32)
+            hi = tl.load(W + tile_for_load * (4 * T) + (word + 1) % (4 * T), mask, 0).to(tl.uint32)
+            state = ((lo >> shift) | tl.where(shift > 0, hi << (32 - shift), 0)) & 65535
+            bank = tl.load(BANK + tile_for_load, mask, 0).to(tl.uint32)
         bank_bit = (bank >> (pair // 16)) & 1
         if PREDICATED_BANK_XOR:
             state = state ^ tl.where(bank_bit != 0, ALT, 0)
@@ -115,6 +156,7 @@ def fused_window_mm(
     bank_mode="multiply",
     decode_mode="scalar",
     lut_cache="default",
+    window_mode="standard",
     num_warps=4,
     num_stages=2,
 ):
@@ -156,6 +198,8 @@ def fused_window_mm(
         raise ValueError("Unsupported decode mode")
     if lut_cache not in ("default", "ca", "cg"):
         raise ValueError("Unsupported LUT cache mode")
+    if window_mode not in ("standard", "resident-words"):
+        raise ValueError("Unsupported window mode")
     expected_levels = 256 if decode_mode == "scalar" else 65536 * 2
     if levels.numel() != expected_levels:
         raise ValueError(f"Expected {expected_levels} decode levels for {decode_mode}")
@@ -197,6 +241,7 @@ def fused_window_mm(
         decode_mode == "pair-lut",
         lut_cache == "ca",
         lut_cache == "cg",
+        window_mode == "resident-words",
         num_warps=num_warps,
         num_stages=num_stages,
     )

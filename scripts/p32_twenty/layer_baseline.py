@@ -36,6 +36,9 @@ def main():
     parser.add_argument(
         "--fused-lut-cache", choices=("default", "ca", "cg"), default="default"
     )
+    parser.add_argument(
+        "--fused-window-mode", choices=("standard", "resident-words"), default="standard"
+    )
     parser.add_argument("--fused-num-warps", type=int, choices=(2, 4, 8), default=4)
     parser.add_argument("--fused-num-stages", type=int, choices=(1, 2, 3, 4), default=2)
     parser.add_argument(
@@ -255,6 +258,7 @@ def main():
                         bank_mode=args.fused_bank_mode,
                         decode_mode=args.fused_decode_mode,
                         lut_cache=args.fused_lut_cache,
+                        window_mode=args.fused_window_mode,
                         num_warps=args.fused_num_warps,
                         num_stages=args.fused_num_stages,
                     )
@@ -288,6 +292,7 @@ def main():
                             "bank_mode": args.fused_bank_mode,
                             "decode_mode": args.fused_decode_mode,
                             "lut_cache": args.fused_lut_cache,
+                            "window_mode": args.fused_window_mode,
                             "num_warps": args.fused_num_warps,
                             "num_stages": args.fused_num_stages,
                         },
