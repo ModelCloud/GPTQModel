@@ -857,6 +857,22 @@ def fit_rank8(
                         candidates.append((objective, a, b, scores))
             rank_sweep[objective] = objective_sweep
         baseline = [_metrics(r) for r in residual]
+        for objective_sweep in rank_sweep.values():
+            for candidate in objective_sweep.values():
+                scores = candidate.get("scores")
+                if scores is None:
+                    candidate["eligible"] = False
+                    candidate["selected_quality"] = False
+                    continue
+                candidate["eligible"] = all(
+                    score["mse"] < reference["mse"]
+                    and score["tail"] <= reference["tail"]
+                    for score, reference in zip(scores, baseline)
+                )
+                candidate["selected_quality"] = candidate["eligible"] and all(
+                    score["mse"] < reference["mse"] * (1 - minimum_improvement)
+                    for score, reference in zip(scores, baseline)
+                )
         eligible = [
             c
             for c in candidates
