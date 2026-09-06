@@ -541,7 +541,11 @@ def _project_rank8(layer, transformed):
     ):
         from ..utils.qvq_rank8_triton import rank8_tensor_core_projection
 
-        return rank8_tensor_core_projection(transformed, layer.rank8_A)
+        block_n = getattr(layer._p32_window_config, "block_n", 0)
+        num_warps = 4 if block_n == 64 else 8 if block_n == 128 else None
+        return rank8_tensor_core_projection(
+            transformed, layer.rank8_A, num_warps=num_warps
+        )
     project_a = layer._cached_rank8_factor("A") if transformed.device.type == "cuda" else layer.rank8_A.float()
     return (transformed.float() @ project_a).half()
 

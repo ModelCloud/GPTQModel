@@ -79,7 +79,7 @@ def _rank8_tensor_core_projection(X, A, U, M: tl.constexpr, K: tl.constexpr):
              (rows[:, None] < M) & (rank[None, :] < 8))
 
 
-def rank8_tensor_core_projection(transformed, a):
+def rank8_tensor_core_projection(transformed, a, *, num_warps=None):
     """Project published FP16 X' with rank padded to 16 and FP32 accumulation."""
     if transformed.ndim != 2 or a.shape != (transformed.shape[-1], 8):
         raise ValueError("rank8 Tensor Core projection requires X[M,K] and A[K,8]")
@@ -96,10 +96,15 @@ def rank8_tensor_core_projection(transformed, a):
         raise ValueError("rank8 Tensor Core projection requires positive K")
     hidden = torch.empty((m, 8), device=transformed.device, dtype=torch.float16)
     if m:
-        key = _rank8_graph_key(transformed.device, "tensor_core_projection", m, k)
+        # Keep the published Tensor Core projection default at four warps;
+        # only an explicit BM/BN policy may widen it.
+        launch_warps = _rank8_num_warps(2048, num_warps)
+        key = _rank8_graph_key(
+            transformed.device, "tensor_core_projection", m, k, launch_warps
+        )
         _require_rank8_kernel_warm(key)
         _rank8_tensor_core_projection[(triton.cdiv(m, 32),)](
-            transformed, a, hidden, m, k, num_warps=4, num_stages=2
+            transformed, a, hidden, m, k, num_warps=launch_warps, num_stages=2
         )
         _mark_rank8_kernel_warm(key)
     return hidden
