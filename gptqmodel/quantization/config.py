@@ -200,6 +200,7 @@ class PreProcessorCode(str, Enum):
 _GGUF_BITS_ALIAS_INFO = {
     "q1_0": {"bits": 1, "version": "q", "variant": "0", "quality": None},
     "q1_0_g128": {"bits": 1, "version": "q", "variant": "0", "quality": "g128"},
+    "q2_0": {"bits": 2, "version": "q", "variant": "0", "quality": None},
     "q4_0": {"bits": 4, "version": "q", "variant": "0", "quality": None},
     "q8_0": {"bits": 8, "version": "q", "variant": "0", "quality": None},
     "q4_k": {"bits": 4, "version": "q", "variant": "k", "quality": None},
@@ -212,14 +213,16 @@ _GGUF_BITS_ALIAS_INFO = {
 }
 _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH = {
     1: "q1_0",
+    2: "q2_0",
     4: "q4_0",
     5: "q5_k_m",
     6: "q6_k",
     8: "q8_0",
 }
 _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS = {
-    "q1_0": 1.5,
+    "q1_0": 1.125,
     "q1_0_g128": 1.125,
+    "q2_0": 2.25,
     "q4_0": 4.5,
     "q8_0": 8.5,
     "q4_k": 4.5,

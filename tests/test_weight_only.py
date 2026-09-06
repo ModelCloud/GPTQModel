@@ -639,7 +639,7 @@ def test_rtn_microbench_gguf_export_accepts_structured_bits():
     assert output_stats["max"] < 0.012
 
 
-@pytest.mark.parametrize("bits", ["q4_0", "q4_k_m"])
+@pytest.mark.parametrize("bits", ["q2_0", "q4_0", "q4_k_m"])
 def test_gguf_dequantize_weight_accepts_requested_dtype_and_device(bits: str):
     dtype = torch.float16 if torch.cuda.is_available() else torch.bfloat16
     case = _build_rtn_microbench_case(dtype, bits=bits)

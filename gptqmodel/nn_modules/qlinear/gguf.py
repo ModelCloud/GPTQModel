@@ -43,17 +43,23 @@ except Exception:  # pragma: no cover - optional dependency
 setup_logger()
 
 _GGUF_TYPE_INFO = {
-    "Q1_0": {"bits": 1, "block_size": 32, "type_size": 6},
+    "Q1_0": {"bits": 1, "block_size": 128, "type_size": 18},
     "Q1_0_g128": {"bits": 1, "block_size": 128, "type_size": 18},
+    "Q2_0": {"bits": 2, "block_size": 64, "type_size": 18},
     "Q4_0": {"bits": 4, "block_size": 32, "type_size": 18},
     "Q8_0": {"bits": 8, "block_size": 32, "type_size": 34},
     "Q4_K": {"bits": 4, "block_size": 256, "type_size": 144},
     "Q5_K": {"bits": 5, "block_size": 256, "type_size": 176},
     "Q6_K": {"bits": 6, "block_size": 256, "type_size": 210},
+    "TQ1_0": {"bits": 1, "block_size": 256, "type_size": 54},
+    "TQ2_0": {"bits": 2, "block_size": 256, "type_size": 66},
+    "MXFP4": {"bits": 4, "block_size": 32, "type_size": 17},
+    "NVFP4": {"bits": 4, "block_size": 64, "type_size": 36},
 }
 _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE = {
     "q1_0": "Q1_0",
     "q1_0_g128": "Q1_0_g128",
+    "q2_0": "Q2_0",
     "q4_0": "Q4_0",
     "q8_0": "Q8_0",
     "q4_k": "Q4_K",
@@ -72,7 +78,10 @@ PRISM_Q1_0_G128_VALUE = 41
 PRISM_Q1_0_G128_BLOCK_SIZE = 128
 PRISM_Q1_0_G128_TYPE_SIZE = 18
 _GGUF_SIGN_ONLY_TYPE_INFO = {
-    "Q1_0": {"block_size": 32, "type_size": 6},
+    "Q1_0": {
+        "block_size": PRISM_Q1_0_G128_BLOCK_SIZE,
+        "type_size": PRISM_Q1_0_G128_TYPE_SIZE,
+    },
     PRISM_Q1_0_G128_NAME: {
         "block_size": PRISM_Q1_0_G128_BLOCK_SIZE,
         "type_size": PRISM_Q1_0_G128_TYPE_SIZE,
@@ -87,8 +96,12 @@ _GGUF_TENSOR_QTYPE_BY_VALUE = {
     13: "Q5_K",
     14: "Q6_K",
     30: "BF16",
-    40: "Q1_0",
+    34: "TQ1_0",
+    35: "TQ2_0",
+    39: "MXFP4",
+    40: "NVFP4",
     PRISM_Q1_0_G128_VALUE: PRISM_Q1_0_G128_NAME,
+    42: "Q2_0",
 }
 _GGUF_SIGN_ONLY_LUT = (
     np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="little").astype(np.int8) * 2 - 1
@@ -186,6 +199,78 @@ def _gguf_quantize_sign_only(blocks: np.ndarray, *, block_size: int) -> np.ndarr
     packed[:, :2] = scales.view(np.uint8).reshape(-1, 2)
     packed[:, 2:] = sign_bits
     return packed
+
+
+def _gguf_roundf(values: np.ndarray) -> np.ndarray:
+    return np.sign(values) * np.floor(np.abs(values) + 0.5)
+
+
+def _gguf_quantize_q2_0(blocks: np.ndarray) -> np.ndarray:
+    d = np.abs(blocks).max(axis=-1, keepdims=True)
+    with np.errstate(divide="ignore"):
+        inv_d = np.where(d == 0, 0, 1.0 / d)
+    qs = np.clip(_gguf_roundf(blocks * inv_d).astype(np.int8) + 1, 0, 3).astype(np.uint8)
+    qs = qs.reshape(blocks.shape[0], 4, 16)
+    packed = qs[:, 0] | (qs[:, 1] << 2) | (qs[:, 2] << 4) | (qs[:, 3] << 6)
+    return np.concatenate([d.astype(np.float16).view(np.uint8), packed], axis=-1)
+
+
+def _gguf_quantize_tq1_0(blocks: np.ndarray) -> np.ndarray:
+    d = np.abs(blocks).max(axis=-1, keepdims=True)
+    with np.errstate(divide="ignore"):
+        inv_d = np.where(d == 0, 0, 1.0 / d)
+    qs = (_gguf_roundf(blocks * inv_d).astype(np.int8) + 1).astype(np.uint8)
+
+    qs0, qs1, qh = qs[..., :160], qs[..., 160:240], qs[..., 240:]
+    qs0 = qs0.reshape(blocks.shape[0], -1, 5, 32) * np.array([81, 27, 9, 3, 1], dtype=np.uint8).reshape(1, 1, 5, 1)
+    qs1 = qs1.reshape(blocks.shape[0], -1, 5, 16) * np.array([81, 27, 9, 3, 1], dtype=np.uint8).reshape(1, 1, 5, 1)
+    qh = qh.reshape(blocks.shape[0], -1, 4, 4) * np.array([81, 27, 9, 3], dtype=np.uint8).reshape(1, 1, 4, 1)
+    qs = np.concatenate(
+        [
+            np.sum(qs0, axis=-2).reshape(blocks.shape[0], -1),
+            np.sum(qs1, axis=-2).reshape(blocks.shape[0], -1),
+            np.sum(qh, axis=-2).reshape(blocks.shape[0], -1),
+        ],
+        axis=-1,
+    )
+    qs = ((qs.astype(np.uint16) * 256 + 242) // 243).astype(np.uint8)
+    return np.concatenate([qs, d.astype(np.float16).view(np.uint8)], axis=-1)
+
+
+def _gguf_quantize_tq2_0(blocks: np.ndarray) -> np.ndarray:
+    d = np.abs(blocks).max(axis=-1, keepdims=True)
+    with np.errstate(divide="ignore"):
+        inv_d = np.where(d == 0, 0, 1.0 / d)
+    qs = (_gguf_roundf(blocks * inv_d).astype(np.int8) + 1).astype(np.uint8)
+    qs = qs.reshape(blocks.shape[0], -1, 4, 32)
+    packed = qs[..., 0, :] | (qs[..., 1, :] << 2) | (qs[..., 2, :] << 4) | (qs[..., 3, :] << 6)
+    return np.concatenate([packed.reshape(blocks.shape[0], -1), d.astype(np.float16).view(np.uint8)], axis=-1)
+
+
+_GGUF_FP4_VALUES = np.array((0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12), dtype=np.int8)
+
+
+def _gguf_e8m0_to_fp32_half(values: np.ndarray) -> np.ndarray:
+    bits = np.where(
+        values < 2,
+        np.uint32(0x00200000) << values.astype(np.uint32),
+        (values.astype(np.uint32) - 1) << np.uint32(23),
+    )
+    return bits.view(np.float32)
+
+
+def _gguf_quantize_mxfp4(blocks: np.ndarray) -> np.ndarray:
+    d = np.abs(blocks).max(axis=-1, keepdims=True)
+    with np.errstate(divide="ignore"):
+        e = np.where(d > 0, np.floor(np.log2(d)) - 2 + 127, 0).astype(np.uint8)
+    scales = _gguf_e8m0_to_fp32_half(e)
+    errors = np.abs(
+        scales.reshape(blocks.shape[0], 1, 1) * _GGUF_FP4_VALUES.astype(np.float32).reshape(1, 1, 16)
+        - blocks.reshape(blocks.shape[0], 32, 1)
+    )
+    best = np.argmin(errors, axis=-1).reshape(blocks.shape[0], 2, 16).astype(np.uint8)
+    packed = best[:, 0] | (best[:, 1] << 4)
+    return np.concatenate([e, packed], axis=-1)
 
 
 def _pack_q4_k_scale_min(scales: np.ndarray, mins: np.ndarray) -> np.ndarray:
@@ -395,6 +480,8 @@ def _fallback_gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray
     blocks = weight.reshape(-1, block_size)
     if tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
         quantized_blocks = _gguf_quantize_sign_only(blocks, block_size=block_size)
+    elif tensor_qtype == "Q2_0":
+        quantized_blocks = _gguf_quantize_q2_0(blocks)
     elif tensor_qtype == "Q4_0":
         quantized_blocks = _gguf_quantize_q4_0(blocks)
     elif tensor_qtype == "Q8_0":
@@ -405,6 +492,12 @@ def _fallback_gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray
         quantized_blocks = _gguf_quantize_q5_k(blocks)
     elif tensor_qtype == "Q6_K":
         quantized_blocks = _gguf_quantize_q6_k(blocks)
+    elif tensor_qtype == "TQ1_0":
+        quantized_blocks = _gguf_quantize_tq1_0(blocks)
+    elif tensor_qtype == "TQ2_0":
+        quantized_blocks = _gguf_quantize_tq2_0(blocks)
+    elif tensor_qtype == "MXFP4":
+        quantized_blocks = _gguf_quantize_mxfp4(blocks)
     else:  # pragma: no cover - guarded by class SUPPORTS_BITS
         raise NotImplementedError(f"Unsupported GGUF qtype: {tensor_qtype}")
 
@@ -443,7 +536,7 @@ def _resolve_gguf_tensor_qtype(tensor_type) -> str:
 
 
 def _is_prism_q1_0_g128(tensor_type) -> bool:
-    return _resolve_gguf_tensor_qtype(tensor_type) == PRISM_Q1_0_G128_NAME
+    return _resolve_gguf_tensor_qtype(tensor_type) in {"Q1_0", PRISM_Q1_0_G128_NAME}
 
 
 def _dequantize_sign_only_numpy(
@@ -574,6 +667,74 @@ def _dequantize_q4_k_numpy(qweight: np.ndarray) -> np.ndarray:
     return (d * q - dm).reshape(rows, -1)
 
 
+def _dequantize_q2_0_numpy(qweight: np.ndarray) -> np.ndarray:
+    rows = qweight.shape[0]
+    blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["Q2_0"]["type_size"])
+    d = blocks[:, :2].view(np.float16).astype(np.float32)
+    qs = blocks[:, 2:].reshape(-1, 1, 16)
+    values = ((qs >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 4, 1)) & 0x03).reshape(-1, 64)
+    return (d * (values.astype(np.int8) - 1).astype(np.float32)).reshape(rows, -1)
+
+
+def _dequantize_tq1_0_numpy(qweight: np.ndarray) -> np.ndarray:
+    rows = qweight.shape[0]
+    blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["TQ1_0"]["type_size"])
+    qs, qh, d = blocks[:, :48], blocks[:, 48:52], blocks[:, 52:]
+    d = d.view(np.float16).astype(np.float32)
+    qs0 = qs[:, :32].reshape(-1, 1, 1, 32) * np.array([1, 3, 9, 27, 81], dtype=np.uint8).reshape(1, 1, 5, 1)
+    qs1 = qs[:, 32:].reshape(-1, 1, 1, 16) * np.array([1, 3, 9, 27, 81], dtype=np.uint8).reshape(1, 1, 5, 1)
+    qh = qh.reshape(-1, 1, 1, 4) * np.array([1, 3, 9, 27], dtype=np.uint8).reshape(1, 1, 4, 1)
+    values = np.concatenate(
+        [
+            qs0.reshape(blocks.shape[0], -1),
+            qs1.reshape(blocks.shape[0], -1),
+            qh.reshape(blocks.shape[0], -1),
+        ],
+        axis=-1,
+    )
+    values = ((values.astype(np.uint16) * 3) >> 8).astype(np.int8) - 1
+    return (d * values.astype(np.float32)).reshape(rows, -1)
+
+
+def _dequantize_tq2_0_numpy(qweight: np.ndarray) -> np.ndarray:
+    rows = qweight.shape[0]
+    blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["TQ2_0"]["type_size"])
+    qs, d = blocks[:, :64], blocks[:, 64:]
+    d = d.view(np.float16).astype(np.float32)
+    values = ((qs.reshape(-1, 2, 1, 32) >> np.array([0, 2, 4, 6], dtype=np.uint8).reshape(1, 1, 4, 1)) & 0x03)
+    return (d * (values.reshape(-1, 256).astype(np.int8) - 1).astype(np.float32)).reshape(rows, -1)
+
+
+def _dequantize_mxfp4_numpy(qweight: np.ndarray) -> np.ndarray:
+    rows = qweight.shape[0]
+    blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["MXFP4"]["type_size"])
+    d = _gguf_e8m0_to_fp32_half(blocks[:, :1])
+    qs = ((blocks[:, 1:].reshape(-1, 1, 16) >> np.array([0, 4], dtype=np.uint8).reshape(1, 2, 1)) & 0x0F)
+    values = _GGUF_FP4_VALUES[qs].reshape(-1, 32)
+    return (d * values.astype(np.float32)).reshape(rows, -1)
+
+
+def _gguf_ue4m3_to_fp32(values: np.ndarray) -> np.ndarray:
+    exponent = ((values >> 3) & 0x0F).astype(np.int32)
+    mantissa = (values & 0x07).astype(np.float32)
+    decoded = np.where(
+        exponent == 0,
+        mantissa * (2.0**-9),
+        (1.0 + mantissa / 8.0) * (2.0 ** (exponent.astype(np.float32) - 7)),
+    )
+    return np.where((values == 0) | (values == 0x7F), 0.0, decoded * 0.5)
+
+
+def _dequantize_nvfp4_numpy(qweight: np.ndarray) -> np.ndarray:
+    rows = qweight.shape[0]
+    blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["NVFP4"]["type_size"])
+    scales = _gguf_ue4m3_to_fp32(blocks[:, :4]).reshape(-1, 4, 1)
+    qs = blocks[:, 4:].reshape(-1, 4, 8)
+    values = np.concatenate([qs & 0x0F, qs >> 4], axis=-1)
+    values = _GGUF_FP4_VALUES[values].reshape(-1, 64)
+    return (scales * values.reshape(-1, 4, 16).astype(np.float32)).reshape(rows, -1)
+
+
 def _dequantize_q5_k_numpy(qweight: np.ndarray) -> np.ndarray:
     rows = qweight.shape[0]
     type_size = _GGUF_TYPE_INFO["Q5_K"]["type_size"]
@@ -648,12 +809,22 @@ def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
         d = blocks[:, :2].view(np.float16).astype(np.float32)
         q = blocks[:, 2:].view(np.int8).astype(np.float32)
         return (d * q).reshape(rows.shape[0], -1)
+    if resolved_qtype == "Q2_0":
+        return _dequantize_q2_0_numpy(np.asarray(data, dtype=np.uint8))
     if resolved_qtype == "Q4_K":
         return _dequantize_q4_k_numpy(np.asarray(data, dtype=np.uint8))
     if resolved_qtype == "Q5_K":
         return _dequantize_q5_k_numpy(np.asarray(data, dtype=np.uint8))
     if resolved_qtype == "Q6_K":
         return _dequantize_q6_k_numpy(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "TQ1_0":
+        return _dequantize_tq1_0_numpy(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "TQ2_0":
+        return _dequantize_tq2_0_numpy(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "MXFP4":
+        return _dequantize_mxfp4_numpy(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "NVFP4":
+        return _dequantize_nvfp4_numpy(np.asarray(data, dtype=np.uint8))
     if resolved_qtype == "Q1_0":
         return _dequantize_sign_only_numpy(
             data,
@@ -670,7 +841,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TORCH]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 15}
-    SUPPORTS_BITS = [1, 4, 5, 6, 8]
+    SUPPORTS_BITS = [1, 2, 4, 5, 6, 8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True
@@ -1069,6 +1240,8 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             weight = self._dequantize_q8_0(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
             weight = self._dequantize_sign_only(device=device, dtype=dtype)
+        elif self.gguf_tensor_qtype == "Q2_0":
+            weight = self._dequantize_numpy(_dequantize_q2_0_numpy, device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q4_K":
             target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
             blocks, _, _ = self._reshape_blocks(device=target_device)
