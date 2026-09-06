@@ -15,6 +15,7 @@ from gptqmodel.quantization.qvq_rank8 import (
     P32WindowConfig,
     _rank8_output_fit,
     _window_artifact_binding_digest,
+    apply_rank8_audit,
     add_rank8_correction,
     export_window_package,
     fit_rank8,
@@ -66,6 +67,69 @@ def fixture(hadamard=True):
         teacher.weight.copy_((y * layer.SV).T)
     train, heldout = torch.randn(80, k), torch.randn(40, k)
     return layer, teacher, train, heldout
+
+
+def test_rank8_audit_gate_requires_every_document_and_records_confirmation():
+    layer, teacher, train, heldout = fixture(hadamard=False)
+    report = fit_rank8(
+        layer,
+        teacher,
+        train,
+        heldout,
+        train_document_ids=["train"],
+        heldout_document_ids=["heldout"],
+        max_solver_bytes=1,
+        minimum_improvement=0.0,
+    )
+    assert report["validated"]
+    accepted = apply_rank8_audit(
+        layer,
+        [
+            {
+                "document_id": "audit-1",
+                "rows": 2,
+                "baseline": {"mse": 2.0, "mae": 1.0, "max": 2.0, "tail": 1.5},
+                "recovered": {"mse": 1.0, "mae": 0.8, "max": 1.8, "tail": 1.4},
+            },
+            {
+                "document_id": "audit-2",
+                "rows": 2,
+                "baseline": {"mse": 2.0, "mae": 1.0, "max": 2.0, "tail": 1.5},
+                "recovered": {"mse": 1.5, "mae": 0.8, "max": 1.8, "tail": 1.4},
+            },
+        ],
+    )
+    assert accepted["accepted"]
+    assert accepted["fit_validated"]
+    assert json.loads(bytes(layer.rank8_metadata.tolist()).decode())["audit_validated"]
+
+
+def test_rank8_audit_rejection_rolls_back_registered_factors():
+    layer, teacher, train, heldout = fixture(hadamard=False)
+    fit_rank8(
+        layer,
+        teacher,
+        train,
+        heldout,
+        train_document_ids=["train"],
+        heldout_document_ids=["heldout"],
+        max_solver_bytes=1,
+        minimum_improvement=0.0,
+    )
+    rejected = apply_rank8_audit(
+        layer,
+        [
+            {
+                "document_id": "audit-1",
+                "rows": 2,
+                "baseline": {"mse": 1.0, "mae": 1.0, "max": 2.0, "tail": 1.5},
+                "recovered": {"mse": 1.1, "mae": 1.0, "max": 2.0, "tail": 1.6},
+            }
+        ],
+    )
+    assert not rejected["accepted"]
+    assert layer.rank8_A is None and layer.rank8_B is None
+    assert layer.rank8_metadata is None
 
 
 def test_rank8_large_output_uses_bounded_randomized_solver():
@@ -298,6 +362,26 @@ def test_off_does_not_access_recovery():
 
     value = torch.ones(1)
     assert add_rank8_correction(Poison(), None, value) is value
+
+
+def test_forward_pretransformed_propagates_requested_store_dtype():
+    layer, _, train, _ = fixture(hadamard=False)
+    seen = {}
+    original = layer._forward_pretransformed_compute_dtype
+
+    def wrapped(transformed, compute_dtype, *, output_dtype=None, rank8_hidden=None):
+        seen["output_dtype"] = output_dtype
+        return original(
+            transformed,
+            compute_dtype,
+            output_dtype=output_dtype,
+            rank8_hidden=rank8_hidden,
+        )
+
+    layer._forward_pretransformed_compute_dtype = wrapped
+    transformed = layer.transform_input(train)
+    layer.forward_pretransformed(transformed, output_dtype=torch.float16)
+    assert seen["output_dtype"] == torch.float16
 
 
 def test_binding_and_mutation_guard():

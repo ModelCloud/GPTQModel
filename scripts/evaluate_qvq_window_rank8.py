@@ -55,6 +55,7 @@ def main():
     from gptqmodel.quantization.qvq_rank8 import (
         P32WindowConfig,
         _metrics,
+        apply_rank8_audit,
         fit_rank8,
         prepare_rank8,
         save_window_package,
@@ -199,6 +200,13 @@ def main():
                     "recovered": _metrics(y - recovered),
                 }
             )
+        audit_gate = apply_rank8_audit(layer, entry["audit"])
+        fitted["audit_acceptance"] = audit_gate
+        fitted["audit_validated"] = bool(audit_gate["accepted"])
+        # apply_rank8_audit performs exact buffer rollback on rejection.  The
+        # package is therefore emitted only after independent confirmation,
+        # never merely because train/held-out fitting selected a candidate.
+        fitted["validated"] = bool(fitted["validated"] and audit_gate["accepted"])
         if fitted["validated"]:
             entry["storage"] = save_window_package(layer, out / (name + ".pt"))
         report["modules"][name] = entry

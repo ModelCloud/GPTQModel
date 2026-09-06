@@ -125,6 +125,23 @@ def test_tuning_metadata_rejects_unmeasured_selected_kernel():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_quality_rank8_candidates_are_reference_arithmetic_only():
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child("q_proj", device="cuda").eval()
+    _kernel_rank8(layer)
+    prepare_rank8(
+        layer,
+        P32WindowConfig(recovery_mode="on", quality_mode="quality"),
+    )
+    candidates = window_kernel_candidates(layer, m=33)
+    assert candidates
+    assert all(c.arithmetic_signature == "reference_fp32_v1" for c in candidates)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_hopper_external_candidate_gates_and_fixed_quality(tmp_path):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 required")

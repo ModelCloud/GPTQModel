@@ -1244,8 +1244,14 @@ class QVQHopperGroupedRuntime:
             return "fused MLP projection geometry changed"
         if down.training or getattr(down, "adapter", None) is not None:
             return "fused MLP down projection requires the original path"
-        if down.trellis.device != x.device:
+        if down.runtime_device() != x.device:
             return "fused MLP down payload and activation devices differ"
+        down_policy = getattr(down, "_p32_window_config", None)
+        if getattr(down, "_p32_rank8_enabled", False) and down_policy is not None:
+            if down_policy.recovery_projection == "input_fused":
+                return (
+                    "fused MLP down rank8 input_fused is unsupported; use separate_reference"
+                )
         if not callable(self._mlp_act_fn):
             return "fused MLP activation is unavailable"
         return None
@@ -2277,6 +2283,22 @@ class QVQHopperGroupedRuntime:
             return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
 
         inner = down._inner_forward(transformed)
+        down_policy = getattr(down, "_p32_window_config", None)
+        if (
+            rank8_down_enabled
+            and down_policy is not None
+            and down_policy.recovery_kernel == "fused_epilogue"
+        ):
+            from ..quantization.qvq_rank8 import fused_rank8_output
+
+            recovered = fused_rank8_output(
+                down,
+                transformed,
+                inner,
+                torch.float16,
+                output_dtype=x.dtype,
+            )
+            return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
         if rank8_down_enabled:
             # ``transformed`` is the exact down input domain after SU and any
             # input Hadamard.  The specialized down reductions above are

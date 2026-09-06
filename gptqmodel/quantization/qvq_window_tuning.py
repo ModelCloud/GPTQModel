@@ -110,7 +110,7 @@ def tune_window_kernel(
         first.ndim < 2
         or first.shape[-1] != layer.in_features
         or first.numel() == 0
-        or first.device != layer.trellis.device
+        or first.device != layer.runtime_device()
         or any(
             x.shape != first.shape or x.dtype != first.dtype or x.device != first.device
             for x in inputs
@@ -133,6 +133,12 @@ def tune_window_kernel(
             "candidates must belong to the prepared quality policy and shape"
         )
     choices = tuple(dict.fromkeys(choices))
+    if enabled and original.quality_mode in ("balanced", "quality") and any(
+        c.arithmetic_signature != "reference_fp32_v1" for c in choices
+    ):
+        raise ValueError(
+            "unverified rank8 arithmetic cannot be selected for balanced/quality tuning"
+        )
     baseline = replace(eligible[0], algorithm="production_window")
     tensors, metadata = _base(layer)
     state_hash = _digest(tensors, metadata)

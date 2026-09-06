@@ -49,6 +49,11 @@ both splits. Balanced selection additionally requires the configured minimum
 relative MSE improvement (default 1%). Quality accepts every validated module.
 No synthetic test establishes real-model quality or promotion eligibility.
 
+Promotion has a separate hard confirmation boundary: the independent audit
+must be finite on every document, improve MSE by the requested threshold, and
+not worsen p99 tail error. A failed audit clears A/B/metadata and marks the
+module rejected; only accepted audit evidence is serialized in the package.
+
 The bounded full-model H200 fitting run is recorded in
 `results/p32_rank8_llama_full_model.json`. It covers the 94 eligible P32
 modules across all 16 Llama-3.2-1B layers, with disjoint train/selection/audit
@@ -62,8 +67,9 @@ The ordinary checkpoint remains canonical planar P32 with optional rank-8
 buffers; old checkpoints require no additional storage. The explicit unified
 window exporter stores window words instead of planar words (never both),
 actual codebook levels, selectors, transforms, bias, factors and fit metadata.
-Loading reconstructs canonical planar ownership for existing QVQLinear and
-uses its existing transient window cache. This is the same reversible layout,
+Loading uses window-owned CUDA storage and retains a CPU planar reconstruction
+only for legacy/debug access; a normal planar module remains available when a
+legacy backend explicitly requests it. This is the same reversible layout,
 not another rank-8 weight format. The package and standard state_dict both
 reload with correction off until explicitly prepared.
 
@@ -462,8 +468,13 @@ or any graph capture. Atomic replay/output alignment and weight-only jobs
 remain unsupported for this capture path. The FP64 fitter uses its exact
 least-squares/SVD reference while the estimated workspace fits
 `max_solver_bytes`, then switches to a fixed-seed rank-8 output-range solver
-for larger K×N projections. The selected solver and cap are recorded in the
-fit metadata.
+for larger K×N projections. That path range-finds the predictable residual
+`P_X R` with four oversampling columns, then derives output directions from
+`Q_Z^T R`, rather than spending rank on unpredictable residual components. The
+selected solver and cap are recorded in the fit metadata. Unverified
+fused/input-fused/Tensor-Core arithmetic signatures remain available for fast
+experiments but are excluded from balanced/quality latency selection until
+independent equivalence certification exists.
 
 The complete tiny-Llama integration test exercises public quantize, accepted
 rank8 fitting, normal model save/reload, exact factor preservation, payload
@@ -754,6 +765,13 @@ own stream, and replayed or inserted as a child graph. Capture before warmup
 fails closed. Replicated sharding semantics remain unchanged. Caller-owned
 workspace, native grouped/fused correction, TP-aware lowering and broader
 model validation remain required.
+
+Window package loading now has an explicit `window_only` ownership mode. CUDA
+loads retain continuous `window_words` on the execution device and keep the
+canonical planar reconstruction CPU-side for legacy/debug access; Hopper and
+other window consumers never repack or retain a device planar source. The
+window-owned module fails closed if a shape selects an unsupported planar
+fallback, so legacy callers must request a normal planar module explicitly.
 
 On the non-unified gfx950 path, `qvq_p32_amd_kernel_candidates(M, N, K)`
 publishes the bounded `QVQAMDLaunchConfig` sweep (including the measured

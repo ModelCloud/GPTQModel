@@ -47,6 +47,8 @@ const NativeGraphDestroy = *const fn (
 
 const GraphKey = struct {
     buffers: [10]usize,
+    buffer_bytes: [10]u64,
+    buffer_types: [10]u8,
     stream: usize,
     config: Config,
 };
@@ -57,39 +59,62 @@ const GraphKeyContext = struct {
         for (key.buffers) |pointer| {
             result = std.hash.Wyhash.hash(result, std.mem.asBytes(&pointer));
         }
+        for (key.buffer_bytes) |bytes| {
+            result = std.hash.Wyhash.hash(result, std.mem.asBytes(&bytes));
+        }
+        for (key.buffer_types) |dtype| {
+            result = std.hash.Wyhash.hash(result, std.mem.asBytes(&dtype));
+        }
         result = std.hash.Wyhash.hash(result, std.mem.asBytes(&key.stream));
         return std.hash.Wyhash.hash(result, std.mem.asBytes(&key.config));
     }
 
     pub fn eql(_: @This(), left: GraphKey, right: GraphKey) bool {
-        return std.mem.eql(usize, &left.buffers, &right.buffers) and left.stream == right.stream and std.mem.eql(u8, std.mem.asBytes(&left.config), std.mem.asBytes(&right.config));
+        return std.mem.eql(usize, &left.buffers, &right.buffers) and
+            std.mem.eql(u64, &left.buffer_bytes, &right.buffer_bytes) and
+            std.mem.eql(u8, &left.buffer_types, &right.buffer_types) and
+            left.stream == right.stream and
+            std.mem.eql(u8, std.mem.asBytes(&left.config), std.mem.asBytes(&right.config));
     }
+};
+
+const GraphLock = struct {
+    held: std.atomic.Mutex = .unlocked,
+
+    fn lock(self: *@This()) void {
+        while (!self.held.tryLock()) {
+            // The registry is never held over native creation/replay. Yield
+            // rather than burning a CPU in a tight busy-spin when two PJRT
+            // threads insert or evict different executable handles.
+            std.Thread.yield() catch {};
+        }
+    }
+
+    fn unlock(self: *@This()) void {
+        self.held.unlock();
+    }
+};
+
+const GraphEntry = struct {
+    handle: ?*anyopaque,
+    last_used: u64,
+    run_lock: GraphLock = .{},
 };
 
 const GraphMap = std.HashMap(
     GraphKey,
-    ?*anyopaque,
+    *GraphEntry,
     GraphKeyContext,
     std.hash_map.default_max_load_percentage,
 );
-
-const GraphLock = struct {
-    held: std.atomic.Value(bool) = .init(false),
-
-    fn lock(self: *@This()) void {
-        while (self.held.swap(true, .acquire)) {}
-    }
-
-    fn unlock(self: *@This()) void {
-        self.held.store(false, .release);
-    }
-};
+const max_graph_handles: usize = 256;
 
 var native_graph_create: ?NativeGraphCreate = null;
 var native_graph_run: ?NativeGraphRun = null;
 var native_graph_destroy: ?NativeGraphDestroy = null;
 var graph_mutex: GraphLock = .{};
 var graph_handles: ?GraphMap = null;
+var graph_use_counter: u64 = 0;
 
 fn pointerValue(pointer: ?*anyopaque) usize {
     return if (pointer) |value| @intFromPtr(value) else 0;
@@ -132,6 +157,7 @@ pub const Runtime = struct {
         });
         graph_mutex.lock();
         graph_handles = GraphMap.init(std.heap.c_allocator);
+        graph_use_counter = 0;
         graph_mutex.unlock();
         return .{ .libraries = libraries };
     }
@@ -142,15 +168,19 @@ pub const Runtime = struct {
             var iterator = handles.iterator();
             var message: [4096]u8 = @splat(0);
             while (iterator.next()) |entry| {
+                entry.value_ptr.*.run_lock.lock();
                 _ = native_graph_destroy.?(
-                    entry.value_ptr.*,
+                    entry.value_ptr.*.handle,
                     &message,
                     message.len,
                 );
+                entry.value_ptr.*.run_lock.unlock();
+                std.heap.c_allocator.destroy(entry.value_ptr.*);
             }
             handles.deinit();
             graph_handles = null;
         }
+        graph_use_counter = 0;
         graph_mutex.unlock();
         native_graph_create = null;
         native_graph_run = null;
@@ -893,22 +923,37 @@ fn handler(frame: *zml.pjrt.ffi.CallFrame) callconv(.c) ?*zml.pjrt.ffi.Error {
     const stream: ?*anyopaque = @ptrCast(frame.api.stream(frame.ctx));
     var key: GraphKey = .{
         .buffers = undefined,
+        .buffer_bytes = undefined,
+        .buffer_types = undefined,
         .stream = pointerValue(stream),
         .config = config,
     };
-    for (buffers, 0..) |buffer, i| key.buffers[i] = pointerValue(buffer.data);
+    for (inputs, 0..) |value, i| {
+        const shape = zml.pjrtx.CustomCallBuffer.fromPjrt(value).shape;
+        key.buffers[i] = pointerValue(buffers[i].data);
+        key.buffer_bytes[i] = buffers[i].bytes;
+        key.buffer_types[i] = @intFromEnum(shape.dtype());
+    }
+    key.buffers[9] = pointerValue(buffers[9].data);
+    key.buffer_bytes[9] = buffers[9].bytes;
+    key.buffer_types[9] = @intFromEnum(zml.pjrtx.CustomCallBuffer.fromPjrt(outputs[0]).shape.dtype());
 
     // A first eager call prepares the retained native graph. Once the backend
     // starts capture, a missing key is rejected by graph_create before any
     // allocation or event creation, so callers must warm each executable and
     // buffer set before capturing it.
-    graph_mutex.lock();
-    defer graph_mutex.unlock();
     const handles = if (graph_handles) |*value| value else return zml.pjrt.ffi.Error.create(frame.api, .failed_precondition, "native window graph registry is not initialized");
     var handle: ?*anyopaque = null;
-    if (handles.getPtr(key)) |entry| {
-        handle = entry.*;
+    graph_mutex.lock();
+    graph_use_counter +%= 1;
+    if (handles.getPtr(key)) |entry_ptr| {
+        entry_ptr.*.last_used = graph_use_counter;
+        handle = entry_ptr.*.handle;
     } else {
+        // Do not hold the registry mutex while native graph creation may
+        // allocate, synchronize, or compile. Another request may create the
+        // same key concurrently; the duplicate is discarded after insertion.
+        graph_mutex.unlock();
         var message: [4096]u8 = @splat(0);
         const status = native_graph_create.?(
             &buffers,
@@ -920,12 +965,60 @@ fn handler(frame: *zml.pjrt.ffi.CallFrame) callconv(.c) ?*zml.pjrt.ffi.Error {
         );
         if (status != 0 or handle == null)
             return zml.pjrt.ffi.Error.create(frame.api, .internal, std.mem.sliceTo(&message, 0));
-        handles.put(key, handle) catch {
+        graph_mutex.lock();
+        graph_use_counter +%= 1;
+        if (handles.getPtr(key)) |existing_ptr| {
             var cleanup_message: [4096]u8 = @splat(0);
             _ = native_graph_destroy.?(handle, &cleanup_message, cleanup_message.len);
-            return zml.pjrt.ffi.Error.create(frame.api, .resource_exhausted, "unable to retain native window graph handle");
-        };
+            existing_ptr.*.last_used = graph_use_counter;
+            handle = existing_ptr.*.handle;
+        } else {
+            if (handles.count() >= max_graph_handles) {
+                var oldest_key: ?GraphKey = null;
+                var oldest_use: u64 = std.math.maxInt(u64);
+                var iterator = handles.iterator();
+                while (iterator.next()) |entry| {
+                    if (entry.value_ptr.*.last_used < oldest_use) {
+                        oldest_use = entry.value_ptr.*.last_used;
+                        oldest_key = entry.key_ptr.*;
+                    }
+                }
+                if (oldest_key) |evicted| {
+                    if (handles.fetchRemove(evicted)) |removed| {
+                        removed.value.*.run_lock.lock();
+                        var cleanup_message: [4096]u8 = @splat(0);
+                        _ = native_graph_destroy.?(removed.value.*.handle, &cleanup_message, cleanup_message.len);
+                        removed.value.*.run_lock.unlock();
+                        std.heap.c_allocator.destroy(removed.value);
+                    }
+                }
+            }
+            const entry = std.heap.c_allocator.create(GraphEntry) catch {
+                graph_mutex.unlock();
+                var cleanup_message: [4096]u8 = @splat(0);
+                _ = native_graph_destroy.?(handle, &cleanup_message, cleanup_message.len);
+                return zml.pjrt.ffi.Error.create(frame.api, .resource_exhausted, "unable to retain native window graph handle");
+            };
+            entry.* = .{ .handle = handle, .last_used = graph_use_counter };
+            handles.put(key, entry) catch {
+                graph_mutex.unlock();
+                std.heap.c_allocator.destroy(entry);
+                var cleanup_message: [4096]u8 = @splat(0);
+                _ = native_graph_destroy.?(handle, &cleanup_message, cleanup_message.len);
+                return zml.pjrt.ffi.Error.create(frame.api, .resource_exhausted, "unable to retain native window graph handle");
+            };
+        }
     }
+    const run_entry = (handles.getPtr(key) orelse {
+        graph_mutex.unlock();
+        return zml.pjrt.ffi.Error.create(frame.api, .internal, "native window graph registry lost its inserted handle");
+    }).*;
+    // Acquire the per-key lock while the registry lock is held so LRU eviction
+    // cannot remove this entry between lookup and replay. The registry lock is
+    // released before native work begins, so unrelated keys remain concurrent.
+    run_entry.run_lock.lock();
+    graph_mutex.unlock();
+    defer run_entry.run_lock.unlock();
     var message: [4096]u8 = @splat(0);
     const status = native_graph_run.?(
         handle,

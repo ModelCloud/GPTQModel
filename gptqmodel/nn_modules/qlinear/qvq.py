@@ -42,6 +42,7 @@ from . import BaseQuantLinear, FormatSupport
 
 _QVQ_BUFFER_NAMES = (
     "trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id",
+    "window_words",
     "rank8_A", "rank8_B", "rank8_metadata",
 )
 # The real Llama/Qwen transforms that exposed delayed-normalization overflow
@@ -316,6 +317,7 @@ class QVQLinear(BaseQuantLinear):
         activation: QVQActivationConfig | dict | bool | None = None,
         input_hadamard: bool = True,
         output_hadamard: bool = True,
+        window_only: bool = False,
         **kwargs,
     ):
         del kwargs
@@ -421,6 +423,9 @@ class QVQLinear(BaseQuantLinear):
             raise TypeError("QVQ transform-axis flags must be bools")
         self.input_hadamard = input_hadamard
         self.output_hadamard = output_hadamard
+        if not isinstance(window_only, bool):
+            raise TypeError("QVQ window_only must be a bool")
+        self.window_only = window_only
         if (
             isinstance(bank_count, bool)
             or not isinstance(bank_count, int)
@@ -545,6 +550,7 @@ class QVQLinear(BaseQuantLinear):
                 else None
             ),
             "bank_alt_id": torch.ones(1, dtype=torch.uint8) if v2b2_p32 else None,
+            "window_words": None,
             "rank8_A": None,
             "rank8_B": None,
             "rank8_metadata": None,
@@ -625,7 +631,7 @@ class QVQLinear(BaseQuantLinear):
         for name in RANK8_BUFFERS:
             value = state_dict.get(f"{prefix}{name}")
             if value is not None:
-                setattr(self, name, torch.empty_like(value, device=self.trellis.device))
+                setattr(self, name, torch.empty_like(value, device=self.runtime_device()))
         # A newly loaded payload must be validated before enabling recovery.
         self._p32_rank8_enabled = False
         self._qvq_p32_amd_warm_key = None
@@ -658,10 +664,10 @@ class QVQLinear(BaseQuantLinear):
         Keep this preparation explicit and outside capture; the forward path
         remains free of host synchronization and cache mutation.
         """
-        if self.trellis.device.type != "cuda":
+        if self.runtime_device().type != "cuda":
             return
         self._require_prepared_outside_capture(
-            self.trellis.device, "auxiliary dtype caches"
+            self.runtime_device(), "auxiliary dtype caches"
         )
         signature = tuple(
             (name, id(tensor), tensor._version, tensor.device)
@@ -696,7 +702,9 @@ class QVQLinear(BaseQuantLinear):
         per module after the weights reach the accelerator and reuse the result.
         """
 
-        source = self.trellis
+        source = self.window_words if self.window_only else self.trellis
+        if source is None:
+            raise RuntimeError("QVQ window-only module is missing window_words")
         source_version = source._version
         cached = self._qvq_cuda_window_cache
         if (
@@ -707,10 +715,16 @@ class QVQLinear(BaseQuantLinear):
         ):
             return cached[3]
         self._require_prepared_outside_capture(device, "window payload")
-        window = repack_p32_planar_to_window(source.contiguous(), bits=self.bits).to(
-            device=device
-        )
-        if self.trellis is not source or source._version != source_version:
+        if self.window_only:
+            if source.device != device:
+                raise RuntimeError("QVQ window_words must reside on the execution device")
+            window = source.contiguous()
+        else:
+            window = repack_p32_planar_to_window(source.contiguous(), bits=self.bits).to(
+                device=device
+            )
+        current_source = self.window_words if self.window_only else self.trellis
+        if current_source is not source or source._version != source_version:
             raise RuntimeError(
                 "QVQ P32 trellis changed while preparing the window payload"
             )
@@ -1096,6 +1110,15 @@ class QVQLinear(BaseQuantLinear):
                 raise TypeError(f"QVQ `{name}` must use {dtype}, got {tensor.dtype}")
             if name != "trellis" and not tensor.is_floating_point():
                 raise TypeError(f"QVQ `{name}` must use a floating-point dtype")
+        if self.window_only:
+            if self.window_words is None:
+                raise ValueError("window_only QVQ modules require window_words")
+            if tuple(self.window_words.shape) != expected_trellis:
+                raise ValueError(
+                    f"QVQ `window_words` must have shape {expected_trellis}, got {tuple(self.window_words.shape)}"
+                )
+            if self.window_words.dtype != torch.int32:
+                raise TypeError("QVQ `window_words` must use torch.int32")
         if self.bank_ids is not None:
             if self.bank_count not in (2, 4) or (
                 self.vector_size != 4 and not self.v2b4_p64 and not self.v2b2_p32
@@ -1160,7 +1183,14 @@ class QVQLinear(BaseQuantLinear):
                 )
             if not self.bias.is_floating_point():
                 raise TypeError("QVQ `bias` must use a floating-point dtype")
-        devices = {getattr(self, name).device for name in ("trellis", "SU", "SV")}
+        active_device = (
+            self.window_words.device
+            if self.window_only and self.window_words is not None
+            else self.trellis.device
+        )
+        devices = {active_device, self.SU.device, self.SV.device}
+        if not self.window_only:
+            devices.add(self.trellis.device)
         if self.bank_ids is not None:
             devices.add(self.bank_ids.device)
         if self.bank_alt_id is not None:
@@ -1168,7 +1198,9 @@ class QVQLinear(BaseQuantLinear):
         if self.bias is not None:
             devices.add(self.bias.device)
         if len(devices) != 1:
-            raise ValueError("QVQ module tensors must share one device")
+            raise ValueError(
+                "QVQ module tensors must share one device (or window_only may keep planar trellis on CPU)"
+            )
         floating_tensors = (
             (self.SU, self.SV) if self.bias is None else (self.SU, self.SV, self.bias)
         )
@@ -1181,6 +1213,8 @@ class QVQLinear(BaseQuantLinear):
             )
 
     def runtime_device(self) -> torch.device | None:
+        if self.window_only and self.window_words is not None:
+            return self.window_words.device
         return None if self.trellis is None else self.trellis.device
 
     def post_init(self) -> None:
@@ -1210,11 +1244,11 @@ class QVQLinear(BaseQuantLinear):
             self._qvq_cuda_window_cache = None
             self._qvq_amd_folded_hot_cache = None
             self._qvq_p32_amd_warm_key = None
-        if self.trellis.device.type == "mps":
+        if self.runtime_device().type == "mps":
             from ...utils.qvq_mps import _prepare_qvq_mps_compander
 
             self._qvq_mps_compander = _prepare_qvq_mps_compander(
-                self.trellis.device,
+                self.runtime_device(),
                 self.codebook_version,
             )
             if self.bank_ids is not None:
@@ -1707,6 +1741,10 @@ class QVQLinear(BaseQuantLinear):
                     )
                     return output if return_ordered_partials else output[: x.shape[0]]
 
+            if self.window_only:
+                raise RuntimeError(
+                    "window-only QVQ module has no device planar fallback; prepare a window-compatible kernel"
+                )
             return qvq_cuda_gemv(
                 x.contiguous(),
                 self.trellis.contiguous(),
@@ -2066,6 +2104,7 @@ class QVQLinear(BaseQuantLinear):
         output = self._forward_pretransformed_compute_dtype(
             transformed_2d,
             compute_dtype,
+            output_dtype=output_dtype,
         )
         return output.reshape(*transformed.shape[:-1], self.out_features).to(
             target_dtype

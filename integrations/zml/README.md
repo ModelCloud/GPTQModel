@@ -84,15 +84,17 @@ the handle. Destroy waits for stream work before releasing the private pool.
 This is an explicit low-level ownership contract; arbitrary external pointer
 mutation or overlapping use is not automatically tracked by the C ABI.
 
-The Zig adapter owns one handle registry for its loaded runtime. It destroys
-every prepared handle after the owning stream is synchronized during
-`Runtime.deinit`; callers must destroy ZML executables and enclosing graphs
-before deinitializing the adapter. Each handle is keyed by all input/output
-buffer addresses, stream and static config, so a different executable or graph
-lane cannot reuse a stale native graph. A capture attempted before warmup is a
-reported precondition error; it is never silently downgraded to an allocating
-raw call. This keeps preparation and allocator activity out of capture and
-connects the native handle lifetime to the ZML runtime lifetime.
+The Zig adapter owns one bounded (256-entry) handle registry for its loaded
+runtime. It destroys every prepared handle after the owning stream is
+synchronized during `Runtime.deinit`, and LRU eviction destroys older handles
+before inserting new executable/buffer sets. Each entry is keyed by all
+input/output addresses, byte sizes, element dtypes, stream and static config;
+per-entry locks serialize replay and prevent eviction during an in-flight call,
+while unrelated keys remain concurrent. Callers must destroy ZML executables
+and enclosing graphs before deinitializing the adapter. A capture attempted
+before warmup is a reported precondition error; it is never silently downgraded
+to an allocating raw call. This keeps preparation and allocator activity out
+of capture and connects native handle lifetime to the ZML runtime owner.
 
 ## Build and verify
 

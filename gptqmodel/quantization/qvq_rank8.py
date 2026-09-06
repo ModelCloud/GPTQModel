@@ -32,6 +32,7 @@ class P32WindowConfig:
     recovery_mode: str = "off"
     recovery_kernel: str = "separate_reference"
     recovery_projection: str = "separate_reference"
+    arithmetic_signature: str = "reference_fp32_v1"
     quality_mode: str = "fast"
     split_k: int = 1
     min_m: int = 1
@@ -108,6 +109,13 @@ class P32WindowConfig:
             raise ValueError("unsupported rank8 projection implementation")
         if self.recovery_kernel not in ("separate_reference", "fused_epilogue"):
             raise ValueError("fused recovery kernels are not implemented")
+        if self.arithmetic_signature not in (
+            "reference_fp32_v1",
+            "unverified_fused_epilogue",
+            "unverified_input_fused",
+            "unverified_tensor_core",
+        ):
+            raise ValueError("unsupported rank8 arithmetic signature")
 
 
 def _digest(tensors, metadata):
@@ -137,7 +145,11 @@ def _base(layer):
         "output_hadamard": layer.output_hadamard,
     }
     tensors = {
-        "window_words": repack_p32_planar_to_window(layer.trellis, bits=layer.bits),
+        "window_words": (
+            layer.window_words
+            if getattr(layer, "window_only", False)
+            else repack_p32_planar_to_window(layer.trellis, bits=layer.bits)
+        ),
         "bank_ids": layer.bank_ids,
         "bank_alt_id": layer.bank_alt_id,
         "SU": layer.SU,
@@ -200,6 +212,7 @@ def _versions(layer):
         "bias",
         "bank_ids",
         "bank_alt_id",
+        "window_words",
         *RANK8_BUFFERS,
     )
     return (
@@ -223,17 +236,24 @@ def prepare_rank8(layer, config):
         raise ValueError("window configuration requires P32")
     if layer.training:
         raise ValueError("window recovery is inference-only")
-    if layer.trellis.device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+    runtime_device = layer.runtime_device()
+    if runtime_device.type == "cuda" and torch.cuda.is_current_stream_capturing():
         raise RuntimeError("prepare rank8 and kernel policy before CUDA Graph capture")
+    if runtime_device.type == "cuda":
+        # A policy change can expose the generic GEMV/BF16 rescue branch during
+        # a later captured replay. Resolve both native handles while eager.
+        from ..utils.qvq_cuda import prewarm_qvq_cuda
+
+        prewarm_qvq_cuda()
     grouped_delegate = getattr(layer, "_qvq_grouped_p32_delegate", None)
     if grouped_delegate is not None:
         state, consumer_index, _ = grouped_delegate
         state.prepare_rank8(consumer_index, layer, config)
         return
     if config.algorithm.startswith("hopper_"):
-        if layer.trellis.device.type != "cuda":
+        if runtime_device.type != "cuda":
             raise ValueError("explicit Hopper policy requires an SM90 CUDA device")
-        properties = torch.cuda.get_device_properties(layer.trellis.device)
+        properties = torch.cuda.get_device_properties(runtime_device)
         if (
             (properties.major, properties.minor) != (9, 0)
             or not any(name in properties.name for name in ("H100", "H200"))
@@ -245,7 +265,7 @@ def prepare_rank8(layer, config):
         ):
             raise ValueError("unsupported explicit Hopper P32 contract")
         # Reuse the existing versioned window/selector cache; no new packing.
-        layer._prepare_amd_p32_metadata(layer.trellis.device)
+        layer._prepare_amd_p32_metadata(runtime_device)
         # That cache validates the canonical selectors. The BF16 rescue branch
         # captured for narrow K must not repeat their host-side validation.
         layer._bank_ids_loaded = True
@@ -275,7 +295,7 @@ def prepare_rank8(layer, config):
             for tensor in (layer.rank8_A, layer.rank8_B):
                 if (
                     tensor.dtype != torch.float16
-                    or tensor.device != layer.trellis.device
+                    or tensor.device != runtime_device
                 ):
                     raise ValueError(
                         "recovery tensors must be FP16 on the window device"
@@ -296,15 +316,15 @@ def prepare_rank8(layer, config):
             )
     if (
         enabled
-        and layer.trellis.device.type == "cuda"
+        and runtime_device.type == "cuda"
         and torch.backends.cuda.matmul.allow_tf32
     ):
         raise ValueError("rank8 FP32 reference requires CUDA matmul TF32 disabled")
     if (
         config.recovery_kernel == "fused_epilogue"
         and (
-            layer.trellis.device.type != "cuda"
-            or torch.cuda.get_device_capability(layer.trellis.device) != (9, 0)
+            runtime_device.type != "cuda"
+            or torch.cuda.get_device_capability(runtime_device) != (9, 0)
             or layer.out_features > 16384
             or (layer.output_hadamard and layer.out_features & (layer.out_features - 1))
         )
@@ -316,8 +336,8 @@ def prepare_rank8(layer, config):
         enabled
         and config.recovery_projection == "input_fused"
         and (
-            layer.trellis.device.type != "cuda"
-            or torch.cuda.get_device_capability(layer.trellis.device) != (9, 0)
+            runtime_device.type != "cuda"
+            or torch.cuda.get_device_capability(runtime_device) != (9, 0)
             or layer.in_features > 16384
             or (layer.input_hadamard and layer.in_features & (layer.in_features - 1))
         )
@@ -326,8 +346,8 @@ def prepare_rank8(layer, config):
             "rank8 input producer requires SM90 and K <= 16384; input Hadamard mode requires power-of-two K"
         )
     if enabled and config.recovery_projection == "tensor_core" and (
-        layer.trellis.device.type != "cuda"
-        or torch.cuda.get_device_capability(layer.trellis.device) != (9, 0)
+        runtime_device.type != "cuda"
+        or torch.cuda.get_device_capability(runtime_device) != (9, 0)
     ):
         raise ValueError("rank8 Tensor Core projection requires SM90")
     grouped = getattr(layer, "_gptqmodel_qvq_grouped_runtime", None)
@@ -352,7 +372,7 @@ def validate_rank8_state(layer):
         raise RuntimeError(
             "window/recovery state changed; prepare recovery again before execution"
         )
-    if layer.trellis.device.type == "cuda" and torch.backends.cuda.matmul.allow_tf32:
+    if layer.runtime_device().type == "cuda" and torch.backends.cuda.matmul.allow_tf32:
         raise RuntimeError("rank8 FP32 reference requires CUDA matmul TF32 disabled")
 
 
@@ -427,6 +447,105 @@ def _metrics(error):
     }
 
 
+def rank8_audit_acceptance(audit_rows, *, minimum_improvement=0.0):
+    """Apply the independent confirmation contract to per-document metrics.
+
+    The fitter's train/held-out ``validated`` bit is deliberately not enough
+    to ship factors.  Every independent document must have finite metrics and
+    show the requested MSE improvement without worsening the tail error.  The
+    returned record is JSON-friendly and is stored in the deployment report.
+    """
+    if not 0 <= minimum_improvement < 1:
+        raise ValueError("minimum_improvement must be in [0, 1)")
+    rows = list(audit_rows)
+    if not rows:
+        return {
+            "accepted": False,
+            "reason": "empty_independent_audit",
+            "documents": [],
+        }
+    documents = []
+    accepted = True
+    for row in rows:
+        try:
+            baseline = row["baseline"]
+            recovered = row["recovered"]
+            values = tuple(
+                float(baseline[name])
+                for name in ("mse", "mae", "max", "tail")
+            ) + tuple(
+                float(recovered[name])
+                for name in ("mse", "mae", "max", "tail")
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("invalid rank8 audit metrics") from exc
+        finite = all(torch.isfinite(torch.tensor(value)) for value in values)
+        baseline_mse, _, _, baseline_tail, recovered_mse, _, _, recovered_tail = values
+        mse_ok = recovered_mse <= baseline_mse * (1 - minimum_improvement)
+        tail_ok = recovered_tail <= baseline_tail
+        document_ok = bool(finite and mse_ok and tail_ok)
+        accepted = accepted and document_ok
+        documents.append(
+            {
+                "document_id": row.get("document_id"),
+                "rows": int(row.get("rows", 0)),
+                "finite": finite,
+                "mse_ok": bool(mse_ok),
+                "tail_ok": bool(tail_ok),
+                "accepted": document_ok,
+            }
+        )
+    return {
+        "accepted": bool(accepted),
+        "reason": None if accepted else "independent_audit_regression",
+        "documents": documents,
+        "minimum_improvement": minimum_improvement,
+    }
+
+
+def apply_rank8_audit(layer, audit_rows, *, minimum_improvement=0.0):
+    """Bind independent audit evidence or roll factors back exactly.
+
+    This is intentionally the only promotion boundary used by exporters.  A
+    fit that passed train/held-out selection but failed independent confirmation
+    has its registered buffers cleared and is marked unavailable for dispatch.
+    """
+    if layer.rank8_metadata is None:
+        gate = {
+            "accepted": False,
+            "reason": "fit_not_present",
+            "documents": [],
+        }
+        if layer.rank8_A is not None or layer.rank8_B is not None:
+            with torch.inference_mode(False):
+                layer.rank8_A = None
+                layer.rank8_B = None
+        prepare_rank8(layer, P32WindowConfig())
+        return gate
+    metadata = _metadata(layer)
+    fit_validated = bool(metadata.get("validated") and metadata.get("selected"))
+    gate = rank8_audit_acceptance(
+        audit_rows, minimum_improvement=minimum_improvement
+    )
+    gate["fit_validated"] = fit_validated
+    if not fit_validated:
+        gate["accepted"] = False
+        gate["reason"] = "fit_selection_rejected"
+    if not gate["accepted"]:
+        with torch.inference_mode(False):
+            layer.rank8_A = None
+            layer.rank8_B = None
+            layer.rank8_metadata = None
+        prepare_rank8(layer, P32WindowConfig())
+        return gate
+    metadata["audit_acceptance"] = gate
+    metadata["audit_validated"] = True
+    metadata["validated"] = True
+    with torch.inference_mode(False):
+        layer.rank8_metadata = _encode(metadata, layer.runtime_device())
+    return gate
+
+
 def _check_documents(train_ids, heldout_ids):
     if not train_ids or not heldout_ids or set(train_ids) & set(heldout_ids):
         raise ValueError("fit and held-out document IDs must be nonempty and disjoint")
@@ -455,7 +574,7 @@ def _rank8_output_fit(
     response = residual * weights
     rows, k = design.shape
     n = response.shape[1]
-    rank = min(8, k, n)
+    rank = min(8, rows, k, n)
     full_bytes = 8 * (k * n + rows * n)
     if full_bytes <= max_solver_bytes:
         solution = torch.linalg.lstsq(design, response, driver="gelsd", rcond=rcond).solution
@@ -465,13 +584,24 @@ def _rank8_output_fit(
         b = vh[:rank]
         return a, b, "full_lstsq_svd"
 
-    # Randomized range finding is deterministic for a fixed contract seed.
-    # Oversampling is deliberately omitted: the deployed factor rank is fixed
-    # at eight and the extra columns would only increase capture memory.
+    # Randomized range finding is deterministic for a fixed contract seed.  The
+    # range must be taken from the *predictable* residual P_X R, rather than
+    # from R directly: output directions that the transformed activation
+    # cannot predict waste the deployed rank.  Four oversampling columns make
+    # the range estimate robust while the temporary state remains O(rank).
     generator = torch.Generator(device="cpu").manual_seed(seed)
-    omega = torch.randn((n, rank), dtype=response.dtype, generator=generator)
-    q, _ = torch.linalg.qr(response @ omega, mode="reduced")
-    output_basis, _ = torch.linalg.qr(response.T @ q, mode="reduced")
+    sketch_rank = min(rank + 4, n, rows)
+    omega = torch.randn((n, sketch_rank), dtype=response.dtype, generator=generator)
+    response_sketch = response @ omega
+    projected_sketch = design @ torch.linalg.lstsq(
+        design, response_sketch, driver="gelsd", rcond=rcond
+    ).solution
+    q_z, _ = torch.linalg.qr(projected_sketch, mode="reduced")
+    # SVD of Q_Z^T R is only sketch_rank x N.  It selects the best deployed
+    # rank output directions inside the predictable range without materializing
+    # the dense predicted rows x N matrix.
+    _, _, vh = torch.linalg.svd(q_z.T @ response, full_matrices=False)
+    output_basis = vh[:rank].T.contiguous()
     a = torch.linalg.lstsq(
         design, response @ output_basis, driver="gelsd", rcond=rcond
     ).solution
@@ -711,11 +841,29 @@ def load_window_package(package, *, device="cpu", config=None):
         levels.cpu(), pgc16_levels_for_version(metadata["codebook_version"]).cpu()
     ):
         raise ValueError("window package codebook levels mismatch")
-    tensors["trellis"] = repack_p32_window_to_planar(
-        tensors.pop("window_words"), bits=metadata["bits"]
-    )
+    window_words = tensors["window_words"]
+    if str(device) == "cpu":
+        planar = repack_p32_window_to_planar(window_words, bits=metadata["bits"])
+        window_only = False
+        tensors.pop("window_words")
+    else:
+        # The deployment package owns the continuous window on the execution
+        # device.  Keep the canonical planar reconstruction CPU-side only for
+        # legacy/debug access; Hopper/Ampere window consumers never repack or
+        # retain a device planar copy.
+        planar = repack_p32_window_to_planar(
+            package["tensors"]["window_words"], bits=metadata["bits"]
+        )
+        window_only = True
+    tensors["trellis"] = planar
+    tensors["window_words"] = window_words
     layer = QVQLinear(
-        **metadata, tensors=tensors, bank_count=2, v2b2_p32=True, bias="bias" in tensors
+        **metadata,
+        tensors=tensors,
+        bank_count=2,
+        v2b2_p32=True,
+        bias="bias" in tensors,
+        window_only=window_only,
     ).eval()
     if recovery is not None:
         layer.rank8_A, layer.rank8_B = a, b
@@ -1167,11 +1315,12 @@ def window_kernel_candidates(layer, *, m):
         max_m=m,
         recovery_kernel="separate_reference",
         recovery_projection="separate_reference",
+        arithmetic_signature="reference_fp32_v1",
     )
     candidates = [policy]
-    if layer.trellis.device.type != "cuda":
+    if layer.runtime_device().type != "cuda":
         return tuple(candidates)
-    props = torch.cuda.get_device_properties(layer.trellis.device)
+    props = torch.cuda.get_device_properties(layer.runtime_device())
     if (
         (props.major, props.minor) != (9, 0)
         or not any(name in props.name for name in ("H100", "H200"))
@@ -1202,24 +1351,46 @@ def window_kernel_candidates(layer, *, m):
             for c in tuple(candidates)
             if c.algorithm == "hopper_direct_decode_mma"
         )
-    if layer.out_features <= 16384 and (
+    # Alternate epilogues have not yet passed the independent arithmetic
+    # signature certification.  Keep them visible for fast/off experiments,
+    # but do not make them eligible for balanced/quality correction tuning.
+    allow_unverified = (
+        not getattr(layer, "_p32_rank8_enabled", False)
+        or layer._p32_window_config.quality_mode == "fast"
+    )
+    if allow_unverified and layer.out_features <= 16384 and (
         not layer.output_hadamard
         or not layer.out_features & (layer.out_features - 1)
     ):
         candidates.extend(
-            replace(c, recovery_kernel="fused_epilogue") for c in tuple(candidates)
+            replace(
+                c,
+                recovery_kernel="fused_epilogue",
+                arithmetic_signature="unverified_fused_epilogue",
+            )
+            for c in tuple(candidates)
         )
-    if getattr(layer, "_p32_rank8_enabled", False):
+    if getattr(layer, "_p32_rank8_enabled", False) and allow_unverified:
         separate_candidates = tuple(candidates)
         candidates.extend(
-            replace(c, recovery_projection="tensor_core") for c in separate_candidates
+            replace(
+                c,
+                recovery_projection="tensor_core",
+                arithmetic_signature="unverified_tensor_core",
+            )
+            for c in separate_candidates
         )
         if layer.in_features <= 16384 and (
             not layer.input_hadamard
             or not layer.in_features & (layer.in_features - 1)
         ):
             candidates.extend(
-                replace(c, recovery_projection="input_fused") for c in separate_candidates
+                replace(
+                    c,
+                    recovery_projection="input_fused",
+                    arithmetic_signature="unverified_input_fused",
+                )
+                for c in separate_candidates
             )
     return tuple(candidates)
 
@@ -1232,7 +1403,7 @@ def window_tuning_key(layer, *, m, quality_mode, tp_world_size=1, tp_rank=0, bui
         "quality",
     ):
         raise ValueError("invalid quality/TP policy")
-    device = layer.trellis.device
+    device = layer.runtime_device()
     if device.type == "cuda":
         props = torch.cuda.get_device_properties(device)
         identity = (
