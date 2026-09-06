@@ -1875,6 +1875,96 @@ def window_kernel_candidates(layer, *, m):
     return tuple(candidates)
 
 
+def grouped_window_kernel_candidates(layers, *, m):
+    """Enumerate one shared-transform policy for a grouped P32 projection.
+
+    SM80 grouped consumers need a split count per child because the optimum is
+    a function of each child's ``N``.  Return candidate tuples in child order
+    so the grouped runtime and an external tuner can benchmark/select one
+    complete policy without collapsing the widths into a synthetic total.
+    Other grouped backends retain the generic production consumer until their
+    architecture-specific grouped implementation is explicitly certified.
+    Enumeration is shape arithmetic only and performs no CUDA work.
+    """
+
+    children = tuple(layers)
+    if len(children) not in (2, 3):
+        raise ValueError("grouped window candidates require two or three children")
+    if type(m) is not int or not 1 <= m <= 8192:
+        raise ValueError("grouped window candidate enumeration requires M in [1,8192]")
+    for child in children:
+        if not hasattr(child, "_p32_window_config"):
+            raise ValueError("prepare every grouped module policy before enumeration")
+        if getattr(child, "_p32_rank8_enabled", False):
+            validate_rank8_state(child)
+        if (
+            not child.v2b2_p32
+            or child.in_features % 16
+            or child.out_features % 16
+        ):
+            raise ValueError("grouped window candidates require aligned V2B2-P32 modules")
+    reference = children[0]
+    for child in children[1:]:
+        if (
+            child.runtime_device() != reference.runtime_device()
+            or child.in_features != reference.in_features
+            or child.bits != reference.bits
+            or child.codebook_version != reference.codebook_version
+        ):
+            raise ValueError("grouped window candidates require one shared P32 shape/rate")
+
+    def policy(child, *, algorithm, split_k):
+        return replace(
+            child._p32_window_config,
+            algorithm=algorithm,
+            block_m=0,
+            block_n=0,
+            warp_groups=0,
+            split_k=split_k,
+            chunk_m=0,
+            min_m=m,
+            max_m=m,
+            recovery_kernel="separate_reference",
+            recovery_projection="separate_reference",
+            arithmetic_signature="reference_fp32_v1",
+        )
+
+    device = reference.runtime_device()
+    if device.type != "cuda":
+        return (
+            tuple(
+                policy(child, algorithm="production_window", split_k=1)
+                for child in children
+            ),
+        )
+    properties = torch.cuda.get_device_properties(device)
+    if (properties.major, properties.minor) != (8, 0):
+        return (
+            tuple(
+                policy(child, algorithm="production_window", split_k=1)
+                for child in children
+            ),
+        )
+
+    from ..utils.qvq_ampere_cuda import (
+        qvq_p32_window_ampere_grouped_kernel_candidates,
+    )
+
+    split_tuples = qvq_p32_window_ampere_grouped_kernel_candidates(
+        (m, reference.in_features),
+        out_features=tuple(child.out_features for child in children),
+        bits=reference.bits,
+        sm_count=int(properties.multi_processor_count),
+    )
+    return tuple(
+        tuple(
+            policy(child, algorithm="ampere_window", split_k=split)
+            for child, split in zip(children, split_counts, strict=True)
+        )
+        for split_counts in split_tuples
+    )
+
+
 def window_tuning_key(layer, *, m, quality_mode, tp_world_size=1, tp_rank=0, build_id):
     """External tuner key; quality eligibility is resolved before latency tuning."""
     if not 0 <= tp_rank < tp_world_size or quality_mode not in (

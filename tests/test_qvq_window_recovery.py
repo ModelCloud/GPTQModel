@@ -21,6 +21,7 @@ from gptqmodel.quantization.qvq_rank8 import (
     export_window_package,
     fit_rank8,
     fit_rank_candidates,
+    grouped_window_kernel_candidates,
     load_window_artifact,
     load_window_package,
     prepare_rank8,
@@ -281,6 +282,46 @@ def test_ampere_window_candidates_are_explicit_and_shape_specific(monkeypatch):
     assert P32WindowConfig.from_backend_config(
         candidates[0].to_backend_config()
     ) == candidates[0]
+
+
+def test_grouped_window_candidates_preserve_child_split_tuples(monkeypatch):
+    """The high-level grouped API exposes the SM80 tuple tuner directly."""
+
+    config = P32WindowConfig(quality_mode="fast")
+
+    class Child:
+        v2b2_p32 = True
+        in_features = 5120
+        bits = 3
+        codebook_version = "V2"
+
+        def __init__(self, out_features):
+            self.out_features = out_features
+            self._p32_window_config = config
+
+        @staticmethod
+        def runtime_device():
+            return torch.device("cuda", 0)
+
+    children = (Child(1024), Child(12288))
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: type("Properties", (), {"major": 8, "minor": 0, "multi_processor_count": 108})(),
+    )
+    candidates = grouped_window_kernel_candidates(children, m=1)
+
+    assert len(candidates) >= 2
+    assert all(len(candidate) == 2 for candidate in candidates)
+    assert all(
+        tuple(child.split_k for child in candidate) == expected
+        for candidate, expected in zip(
+            candidates[:2], ((56, 40), (28, 40)), strict=True
+        )
+    )
+    assert all(
+        child.algorithm == "ampere_window" for candidate in candidates for child in candidate
+    )
 
 
 def test_external_window_controls_roundtrip_and_cpu_candidates():
