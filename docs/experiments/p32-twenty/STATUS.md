@@ -167,3 +167,6 @@ subthreshold fallback and reran four window controls plus four BM64/BN32 arms
 across eight GPUs. The corrected pooled full-model speedup is 1.411x at M=512
 and 1.425x at M=2048, with window dispatch retained below M=512 and decode.
 See [model dispatcher wave42](MODEL_DISPATCH_WAVE42.md).
+Scalar level-table cache wave43 applied `.ca` to the exact 512-byte PGC16
+table and passed 72/72 local cases, but pooled speedup fell to 1.170x at M=512
+and 1.284x at M=2048. The default scalar load remains selected.

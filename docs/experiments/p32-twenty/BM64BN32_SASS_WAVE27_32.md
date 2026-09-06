@@ -308,6 +308,20 @@ MMA; the next 3× experiment must fuse the transform work into the CTA or
 reduce the decode/MMA critical path. Raw profiles are in
 [wave 40 results](results/bm64bn32-transform-ncu-wave40/).
 
+## Scalar level-table cache wave 43
+
+Wave 43 applied `.ca` to the 512-byte scalar PGC16 level-table loads in the
+standard BM64/BN32 w4/s3 kernel. This is an exact SASS cache-policy test; all
+72/72 projection/row-count cases passed the local gates. It did not improve
+the kernel:
+
+| M | 1 | 2 | 4 | 8 | 16 | 32 | 128 | 512 | 2048 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Scalar `.ca` | 0.979× | 0.954× | 0.934× | 0.962× | 0.966× | 0.962× | 0.966× | 1.170× | 1.284× |
+
+The default scalar load remains the selected exact path. Raw results are in
+[wave 43 results](results/bm64bn32-scalar-ca-wave43/).
+
 ## Decision and next target
 
 The current exact dispatch remains production window for M < 512 and the
