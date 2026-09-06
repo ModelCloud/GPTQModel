@@ -232,7 +232,7 @@ def _validate_kernel_tuning_metadata(layer, tuning):
         raise ValueError("invalid window kernel-tuning correction state")
     paired = tuning.get("candidate_recovery_overhead", [])
     if not isinstance(paired, list):
-        raise ValueError("invalid per-candidate recovery timing metadata")
+        raise TypeError("invalid per-candidate recovery timing metadata")
     target = tuning.get("max_recovery_overhead_percent")
     if target is not None and (
         isinstance(target, bool)

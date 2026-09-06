@@ -732,7 +732,7 @@ def test_base_fuse_honors_qvq_only_architecture_group_declarations():
             self.linear_attn.gate = _child("gate", su=shared, seed=76)
 
     class QModel(BaseQModel):
-        qvq_grouped_p32_candidates = {
+        qvq_grouped_p32_candidates: ClassVar[dict[str, tuple[tuple[str, ...], ...]]] = {
             "qkv": (("packed", "gate"),),
         }
 
