@@ -164,6 +164,7 @@ def fused_window_mm(
     window_mode="standard",
     num_warps=4,
     num_stages=2,
+    maxnreg=0,
 ):
     if x.dtype != torch.float16 or levels.dtype != torch.float16:
         raise ValueError("FP16 activation and canonical level buffers required")
@@ -217,6 +218,8 @@ def fused_window_mm(
         raise ValueError("Standard window payload must use torch.int32")
     if num_warps not in (2, 4, 8) or num_stages not in (1, 2, 3, 4):
         raise ValueError("Unsupported launch configuration")
+    if maxnreg not in (0, 48, 56, 64, 72, 80, 96):
+        raise ValueError("Unsupported register cap")
     masks = {
         4: [0, 0x5A5A, 0x3C3C, 0xC3C3],
         5: [0, 0x9696, 0x3C3C, 0xC3C3],
@@ -226,6 +229,9 @@ def fused_window_mm(
     if bank_alt_id not in range(4):
         raise ValueError("Invalid bank alternate")
     partial = torch.empty((split, m, n), device=x.device, dtype=torch.float32)
+    launch = dict(num_warps=num_warps, num_stages=num_stages)
+    if maxnreg:
+        launch["maxnreg"] = maxnreg
     _gemm[(triton.cdiv(m, block_m), triton.cdiv(n, block_n), split)](
         x,
         window,
@@ -247,7 +253,6 @@ def fused_window_mm(
         lut_cache == "ca",
         lut_cache == "cg",
         window_mode == "resident-words",
-        num_warps=num_warps,
-        num_stages=num_stages,
+        **launch,
     )
     return partial[0] if split == 1 else partial.sum(0)

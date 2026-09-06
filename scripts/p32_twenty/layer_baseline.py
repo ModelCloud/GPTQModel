@@ -45,6 +45,9 @@ def main():
     parser.add_argument("--fused-num-warps", type=int, choices=(2, 4, 8), default=4)
     parser.add_argument("--fused-num-stages", type=int, choices=(1, 2, 3, 4), default=2)
     parser.add_argument(
+        "--fused-maxnreg", type=int, choices=(0, 48, 56, 64, 72, 80, 96), default=0
+    )
+    parser.add_argument(
         "--fused-promotion-k", type=int, choices=(0, 16, 32, 64, 128, 256), default=0
     )
     parser.add_argument("--module")
@@ -283,6 +286,7 @@ def main():
                         window_mode=args.fused_window_mode,
                         num_warps=args.fused_num_warps,
                         num_stages=args.fused_num_stages,
+                        maxnreg=args.fused_maxnreg,
                     )
 
             if args.profile_fused:
@@ -318,6 +322,7 @@ def main():
                             "transform_mode": args.fused_transform_mode,
                             "num_warps": args.fused_num_warps,
                             "num_stages": args.fused_num_stages,
+                            "maxnreg": args.fused_maxnreg,
                         },
                     }
                 )
@@ -379,6 +384,7 @@ def main():
                     "split": args.fused_split,
                     "promotion_k": args.fused_promotion_k,
                     "transform_mode": args.fused_transform_mode,
+                    "maxnreg": args.fused_maxnreg,
                     "metrics": layer_metrics(fused_output, teacher),
                     "vs_window": layer_metrics(fused_output, candidate),
                     "inner": timing(lambda: fused(transformed)),
