@@ -643,6 +643,7 @@ class QVQLinear(BaseQuantLinear):
     def _dtype_cache_clear(self) -> None:
         """Drop cached dtype conversions (call if SU/SV/bias are replaced)."""
         self._dtype_cache = {}
+        self._qvq_cuda_aux_cache_signature = None
 
     def _prepare_cuda_graph_auxiliary_caches(self) -> None:
         """Materialize constant dtype variants used by graph-safe fallback paths.
@@ -658,11 +659,19 @@ class QVQLinear(BaseQuantLinear):
         self._require_prepared_outside_capture(
             self.trellis.device, "auxiliary dtype caches"
         )
+        signature = tuple(
+            (name, id(tensor), tensor._version, tensor.device)
+            for name in ("SU", "SV", "bias")
+            if (tensor := getattr(self, name)) is not None
+        )
+        if getattr(self, "_qvq_cuda_aux_cache_signature", None) == signature:
+            return
         for compute_dtype in (torch.float16, torch.bfloat16):
             self._cached_cast("SU", compute_dtype)
             for output_dtype in (torch.float16, torch.bfloat16, torch.float32):
                 self._cached_cast("SV", compute_dtype, output_dtype)
                 self._cached_cast("bias", compute_dtype, output_dtype)
+        self._qvq_cuda_aux_cache_signature = signature
 
     @staticmethod
     def _require_prepared_outside_capture(device: torch.device, what: str) -> None:
@@ -1191,6 +1200,7 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_mps_compander = None
         self._qvq_mps_bank_ids = None
         self._qvq_mps_bank_ids_cache = None
+        self._dtype_cache_clear()
         with self._qvq_cuda_bank_cache_lock:
             self._qvq_cuda_bank_cache = None
             self._qvq_cuda_window_cache = None
@@ -1892,6 +1902,28 @@ class QVQLinear(BaseQuantLinear):
         input_dtype = x.dtype
         compute_dtype = _qvq_compute_dtype(input_dtype, x.device.type)
         x_2d = x.reshape(-1, self.in_features)
+
+        # Composite-width and BF16 forwards may execute the capture-safe
+        # overflow-rescue branch even when ordinary warmup data is finite.
+        # Materialize its constant dtype variants during eager warmup so a raw
+        # torch.cuda.graph caller receives the same no-allocation guarantee as
+        # P32WindowGraphs.capture.
+        rescue_possible = input_dtype == torch.bfloat16 or (
+            input_dtype == torch.float16
+            and (
+                self.in_features < _FP16_STABLE_HADAMARD_MIN_WIDTH
+                or self.in_features > _QVQ_HADAMARD_MAX_WIDTH
+                or self.in_features & (self.in_features - 1)
+                or self.out_features > _QVQ_HADAMARD_MAX_WIDTH
+                or self.out_features & (self.out_features - 1)
+            )
+        )
+        if (
+            rescue_possible
+            and x.device.type == "cuda"
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            self._prepare_cuda_graph_auxiliary_caches()
 
         # The folded gfx950 path has no low-precision butterfly intermediate,
         # so it cannot trigger the transform-overflow rescue below. Return at
