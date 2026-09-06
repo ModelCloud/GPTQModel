@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 from types import MethodType
 from typing import ClassVar
@@ -163,6 +164,18 @@ def test_window_only_dense_reference_reconstructs_planar_temporarily():
     actual = child.get_inner_weight_tensor()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     torch.testing.assert_close(child(x), expected_output, rtol=0, atol=0)
+
+
+def test_window_planar_fallback_cache_is_transient_across_copy():
+    child = _child("q_proj", device="cpu", seed=96)
+    child.window_words = repack_p32_planar_to_window(child.trellis, bits=child.bits)
+    child.window_only = True
+    child.trellis = None
+    fallback = child._prepare_planar_fallback()
+    assert fallback.shape == child.window_words.shape
+    assert child._qvq_planar_fallback_cache is not None
+    cloned = copy.deepcopy(child)
+    assert cloned._qvq_planar_fallback_cache is None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

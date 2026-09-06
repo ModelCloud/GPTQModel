@@ -606,6 +606,7 @@ class QVQLinear(BaseQuantLinear):
         state.pop("_qvq_grouped_p32_delegate", None)
         state["_qvq_cuda_bank_cache"] = None
         state["_qvq_cuda_window_cache"] = None
+        state["_qvq_planar_fallback_cache"] = None
         state["_qvq_fp8_levels_cache"] = None
         state["_qvq_amd_folded_hot_cache"] = None
         state["_qvq_p32_amd_warm_key"] = None
