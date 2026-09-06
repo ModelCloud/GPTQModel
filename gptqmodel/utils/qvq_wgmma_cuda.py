@@ -865,6 +865,8 @@ def qvq_p32_window_wgmma_grouped_reuse2_packed(
     input: torch.Tensor,
     payload: QVQHopperGroupedP32Payload,
     levels: torch.Tensor,
+    *,
+    block_n: int = 0,
 ) -> tuple[torch.Tensor, ...]:
     """Decode once for each pair of M16 row tiles in a grouped Hopper grid."""
 
@@ -897,6 +899,7 @@ def qvq_p32_window_wgmma_grouped_reuse2_packed(
         widths,
         [segment.bank_alt_id for segment in plan.segments],
         [segment.split_count for segment in plan.segments],
+        block_n,
     )
     return tuple(
         child.reshape(rows, width)
@@ -912,6 +915,8 @@ def qvq_p32_window_wgmma_grouped_reuse4_packed(
     input: torch.Tensor,
     payload: QVQHopperGroupedP32Payload,
     levels: torch.Tensor,
+    *,
+    block_n: int = 0,
 ) -> tuple[torch.Tensor, ...]:
     """Decode once for each group of four M16 row tiles on Hopper."""
 
@@ -944,6 +949,7 @@ def qvq_p32_window_wgmma_grouped_reuse4_packed(
         widths,
         [segment.bank_alt_id for segment in plan.segments],
         [segment.split_count for segment in plan.segments],
+        block_n,
     )
     return tuple(
         child.reshape(rows, width)
@@ -959,6 +965,8 @@ def qvq_p32_window_wgmma_grouped_reuse8_packed(
     input: torch.Tensor,
     payload: QVQHopperGroupedP32Payload,
     levels: torch.Tensor,
+    *,
+    block_n: int = 0,
 ) -> tuple[torch.Tensor, ...]:
     """Decode once for each group of eight M16 row tiles on Hopper."""
 
@@ -987,6 +995,7 @@ def qvq_p32_window_wgmma_grouped_reuse8_packed(
         widths,
         [segment.bank_alt_id for segment in plan.segments],
         [segment.split_count for segment in plan.segments],
+        block_n,
     )
     return tuple(
         child.reshape(rows, width)
@@ -1002,6 +1011,8 @@ def qvq_p32_window_wgmma_grouped_reuse11_packed(
     input: torch.Tensor,
     payload: QVQHopperGroupedP32Payload,
     levels: torch.Tensor,
+    *,
+    block_n: int = 0,
 ) -> tuple[torch.Tensor, ...]:
     """Decode once for each group of eleven M16 row tiles on Hopper."""
 
@@ -1030,6 +1041,7 @@ def qvq_p32_window_wgmma_grouped_reuse11_packed(
         widths,
         [segment.bank_alt_id for segment in plan.segments],
         [segment.split_count for segment in plan.segments],
+        block_n,
     )
     return tuple(
         child.reshape(rows, width)

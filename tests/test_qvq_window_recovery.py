@@ -416,7 +416,11 @@ def test_grouped_hopper_candidates_keep_child_local_split_choices(monkeypatch):
     )
     candidates = grouped_window_kernel_candidates(children, m=128)
 
-    assert len(candidates) == 64
+    # The 64 ordered split tuples remain, plus three validated unsplit BM
+    # geometry choices for grouped consumers. BN128 is reserved for the
+    # single-projection specialization until a generic multi-segment proof is
+    # available.
+    assert len(candidates) == 67
     assert all(len(candidate) == 3 for candidate in candidates)
     assert all(
         child.algorithm == "hopper_m16"
@@ -429,6 +433,11 @@ def test_grouped_hopper_candidates_keep_child_local_split_choices(monkeypatch):
     )
     assert any(
         tuple(child.split_k for child in candidate) == (1, 2, 4)
+        for candidate in candidates
+    )
+    assert any(
+        tuple((child.block_m, child.block_n) for child in candidate)
+        == ((64, 64), (64, 64), (64, 64))
         for candidate in candidates
     )
 

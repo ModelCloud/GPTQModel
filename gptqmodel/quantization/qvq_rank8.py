@@ -91,7 +91,7 @@ class P32WindowConfig:
             if self.block_k != 256 or self.pipeline_stages != 2:
                 raise ValueError("current Hopper pipeline requires BK256 and two stages")
             if (self.block_m or self.block_n or self.warp_groups) and (
-                self.algorithm != "hopper_direct_decode_mma"
+                self.algorithm not in ("hopper_direct_decode_mma", "hopper_m16")
                 or self.block_m not in (32, 64, 128)
                 or self.block_n not in (64, 128)
                 or self.warp_groups not in (0, self.block_n // 64)
@@ -2085,13 +2085,13 @@ def grouped_window_kernel_candidates(layers, *, m):
         ):
             raise ValueError("grouped window candidates require one shared P32 shape/rate")
 
-    def policy(child, *, algorithm, split_k):
+    def policy(child, *, algorithm, split_k, block_m=0, block_n=0, warp_groups=0):
         return replace(
             child._p32_window_config,
             algorithm=algorithm,
-            block_m=0,
-            block_n=0,
-            warp_groups=0,
+            block_m=block_m,
+            block_n=block_n,
+            warp_groups=warp_groups,
             split_k=split_k,
             chunk_m=0,
             min_m=m,
@@ -2164,13 +2164,34 @@ def grouped_window_kernel_candidates(layers, *, m):
         if measured is not None:
             measured = tuple(int(value) for value in measured)
             split_tuples.sort(key=lambda value: (value != measured, value))
-        return tuple(
-            tuple(
-                policy(child, algorithm="hopper_m16", split_k=split)
-                for child, split in zip(children, split_counts, strict=True)
+        geometry_options = [(0, 0, 0)]
+        if m >= 32:
+            geometry_options.extend(
+                (block_m, 64, 1)
+                for block_m in (32, 64, 128)
+                if m % block_m == 0
             )
-            for split_counts in split_tuples
-        )
+        candidates = []
+        for split_counts in split_tuples:
+            # The native grouped row-reuse kernel accepts an explicit BN only
+            # for unsplit work. Ordered split reductions retain block-free
+            # policies and their child-local split choices.
+            geometries = geometry_options if all(split == 1 for split in split_counts) else [(0, 0, 0)]
+            for block_m, block_n, warp_groups in geometries:
+                candidates.append(
+                    tuple(
+                        policy(
+                            child,
+                            algorithm="hopper_m16",
+                            split_k=split,
+                            block_m=block_m,
+                            block_n=block_n,
+                            warp_groups=warp_groups,
+                        )
+                        for child, split in zip(children, split_counts, strict=True)
+                    )
+                )
+        return tuple(candidates)
 
     from ..utils.qvq_ampere_cuda import (
         qvq_p32_window_ampere_grouped_kernel_candidates,

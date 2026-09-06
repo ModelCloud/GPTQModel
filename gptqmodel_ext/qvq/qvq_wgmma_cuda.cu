@@ -2984,6 +2984,9 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       segment_count >= 1 && segment_count <= kMaxGroupedP32Segments,
       "grouped QVQ P32 TMA WGMMA requires one to three segments");
   TORCH_CHECK(
+      block_n != 128 || segment_count == 1,
+      "explicit grouped BN128 requires a single-segment specialization");
+  TORCH_CHECK(
       static_cast<int64_t>(bank_alt_ids.size()) == segment_count &&
           static_cast<int64_t>(split_counts.size()) == segment_count,
       "grouped QVQ P32 TMA WGMMA metadata lengths must match");
@@ -3261,41 +3264,86 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
           1,
           0);
     } else {
-      using ReuseSharedStorage =
-          P32WgmmaTmaSharedStorageFor<TransitionBits, 1, RowTilesPerCta>;
-      auto reuse_kernel = qvq_p32_window_wgmma_m16_tma_kernel<
-          TransitionBits,
-          true,
-          OrderedSplit,
-          false,
-          true,
-          1,
-          false,
-          RowTilesPerCta,
-          decltype(input_tma),
-          decltype(trellis_tma),
-          decltype(bank_tma),
-          HopperGroupedP32LaunchParams>;
-      C10_CUDA_CHECK(cudaFuncSetAttribute(
-          reuse_kernel,
-          cudaFuncAttributeMaxDynamicSharedMemorySize,
-          static_cast<int>(sizeof(ReuseSharedStorage))));
-      reuse_kernel<<<
-          grid,
-          kTmaThreads,
-          sizeof(ReuseSharedStorage),
-          stream>>>(
-          input_tma,
-          trellis_tma,
-          bank_tma,
-          reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
-          partial_output.data_ptr<float>(),
-          grouped_params,
-          size_m,
-          size_k,
-          static_cast<int>(total_n),
-          1,
-          0);
+      if (block_n == 128) {
+        // Explicit BN128 uses two independent N64 consumers per CTA.  This
+        // branch is reserved for the validated single-segment specialization;
+        // generic multi-segment grouped policies fail closed above.
+        using WideReuseSharedStorage =
+            P32WgmmaTmaSharedStorageFor<TransitionBits, 2, RowTilesPerCta>;
+        auto wide_reuse_kernel = qvq_p32_window_wgmma_m16_tma_kernel<
+            TransitionBits,
+            true,
+            OrderedSplit,
+            false,
+            true,
+            2,
+            false,
+            RowTilesPerCta,
+            decltype(input_tma),
+            decltype(trellis_tma),
+            decltype(bank_tma),
+            HopperGroupedP32LaunchParams>;
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            wide_reuse_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(sizeof(WideReuseSharedStorage))));
+        const dim3 wide_reuse_grid(
+            static_cast<unsigned>(max_n64_blocks / 2),
+            static_cast<unsigned>(segment_count * row_ctas),
+            static_cast<unsigned>(max_split_count));
+        wide_reuse_kernel<<<
+            wide_reuse_grid,
+            kTmaThreads + kThreads,
+            sizeof(WideReuseSharedStorage),
+            stream>>>(
+            input_tma,
+            trellis_tma,
+            bank_tma,
+            reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+            partial_output.data_ptr<float>(),
+            grouped_params,
+            size_m,
+            size_k,
+            static_cast<int>(total_n),
+            1,
+            0);
+      } else {
+        using ReuseSharedStorage =
+            P32WgmmaTmaSharedStorageFor<TransitionBits, 1, RowTilesPerCta>;
+        auto reuse_kernel = qvq_p32_window_wgmma_m16_tma_kernel<
+            TransitionBits,
+            true,
+            OrderedSplit,
+            false,
+            true,
+            1,
+            false,
+            RowTilesPerCta,
+            decltype(input_tma),
+            decltype(trellis_tma),
+            decltype(bank_tma),
+            HopperGroupedP32LaunchParams>;
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            reuse_kernel,
+            cudaFuncAttributeMaxDynamicSharedMemorySize,
+            static_cast<int>(sizeof(ReuseSharedStorage))));
+        reuse_kernel<<<
+            grid,
+            kTmaThreads,
+            sizeof(ReuseSharedStorage),
+            stream>>>(
+            input_tma,
+            trellis_tma,
+            bank_tma,
+            reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+            partial_output.data_ptr<float>(),
+            grouped_params,
+            size_m,
+            size_k,
+            static_cast<int>(total_n),
+            1,
+            0);
+      }
     }
   } else if (use_h100_qwen_ordered_fixed) {
     const HopperFixedGateUpLaunchParams fixed_params{
@@ -3727,20 +3775,21 @@ at::Tensor qvq_p32_window_wgmma_m32_tma_grouped_reuse2(
     int64_t transition_bits,
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
-    at::IntArrayRef split_counts) {
+    at::IntArrayRef split_counts,
+    int64_t block_n) {
   switch (transition_bits) {
     case 4:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<4, false, false, 2>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 5:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<5, false, false, 2>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 6:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<6, false, false, 2>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 7:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<7, false, false, 2>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     default:
       TORCH_CHECK(
           false,
@@ -3756,20 +3805,21 @@ at::Tensor qvq_p32_window_wgmma_m32_tma_grouped_ordered_reuse2(
     int64_t transition_bits,
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
-    at::IntArrayRef split_counts) {
+    at::IntArrayRef split_counts,
+    int64_t block_n) {
   switch (transition_bits) {
     case 4:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<4, true, false, 2>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 5:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<5, true, false, 2>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 6:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<6, true, false, 2>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 7:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<7, true, false, 2>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     default:
       TORCH_CHECK(
           false,
@@ -3785,20 +3835,21 @@ at::Tensor qvq_p32_window_wgmma_m64_tma_grouped_reuse4(
     int64_t transition_bits,
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
-    at::IntArrayRef split_counts) {
+    at::IntArrayRef split_counts,
+    int64_t block_n) {
   switch (transition_bits) {
     case 4:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<4, false, false, 4>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 5:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<5, false, false, 4>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 6:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<6, false, false, 4>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 7:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<7, false, false, 4>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     default:
       TORCH_CHECK(
           false,
@@ -3814,20 +3865,21 @@ at::Tensor qvq_p32_window_wgmma_m128_tma_grouped_reuse8(
     int64_t transition_bits,
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
-    at::IntArrayRef split_counts) {
+    at::IntArrayRef split_counts,
+    int64_t block_n) {
   switch (transition_bits) {
     case 4:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<4, false, false, 8>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 5:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<5, false, false, 8>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 6:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<6, false, false, 8>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 7:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<7, false, false, 8>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     default:
       TORCH_CHECK(
           false,
@@ -3843,20 +3895,21 @@ at::Tensor qvq_p32_window_wgmma_m176_tma_grouped_reuse11(
     int64_t transition_bits,
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
-    at::IntArrayRef split_counts) {
+    at::IntArrayRef split_counts,
+    int64_t block_n) {
   switch (transition_bits) {
     case 4:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<4, false, false, 11>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 5:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<5, false, false, 11>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 6:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<6, false, false, 11>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 7:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<7, false, false, 11>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     default:
       TORCH_CHECK(
           false,
@@ -3872,20 +3925,21 @@ at::Tensor qvq_p32_window_wgmma_m64_tma_grouped_ordered_reuse4(
     int64_t transition_bits,
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
-    at::IntArrayRef split_counts) {
+    at::IntArrayRef split_counts,
+    int64_t block_n) {
   switch (transition_bits) {
     case 4:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<4, true, false, 4>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 5:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<5, true, false, 4>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 6:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<6, true, false, 4>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     case 7:
       return qvq_p32_window_wgmma_m16_tma_grouped_impl<7, true, false, 4>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts, block_n);
     default:
       TORCH_CHECK(
           false,
@@ -4326,12 +4380,12 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("p32_window_m16_tma_grouped_ordered_partials(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
   m.def("p32_window_fp8_m16(Tensor input, Tensor input_scale, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id, float level_scale) -> Tensor");
   m.def("p32_window_tuned(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id, int block_m, int block_n) -> Tensor");
-  m.def("p32_window_m32_tma_grouped_reuse2(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
-  m.def("p32_window_m32_tma_grouped_ordered_reuse2(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
-  m.def("p32_window_m64_tma_grouped_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
-  m.def("p32_window_m64_tma_grouped_ordered_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
-  m.def("p32_window_m128_tma_grouped_reuse8(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
-  m.def("p32_window_m176_tma_grouped_reuse11(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
+  m.def("p32_window_m32_tma_grouped_reuse2(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts, int block_n=0) -> Tensor");
+  m.def("p32_window_m32_tma_grouped_ordered_reuse2(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts, int block_n=0) -> Tensor");
+  m.def("p32_window_m64_tma_grouped_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts, int block_n=0) -> Tensor");
+  m.def("p32_window_m64_tma_grouped_ordered_reuse4(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts, int block_n=0) -> Tensor");
+  m.def("p32_window_m128_tma_grouped_reuse8(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts, int block_n=0) -> Tensor");
+  m.def("p32_window_m176_tma_grouped_reuse11(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts, int block_n=0) -> Tensor");
   m.def("p32_window_decode_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids) -> Tensor");
   m.def("p32_window_prepare_grouped_fp16(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");
   m.def("p32_window_prepare_grouped_fp8(Tensor trellis, Tensor levels, Tensor bank_ids, Tensor input_scale, Tensor[] output_scales, Tensor weight_scale, int transition_bits, int in_features, int[] out_features, int[] bank_alt_ids, int[] output_hadamards) -> Tensor");

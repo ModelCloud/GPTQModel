@@ -207,6 +207,50 @@ def test_h200_grouped_window_only_payload_is_exact_and_graph_safe():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_h200_grouped_explicit_bm_bn_policy_is_graph_safe():
+    """Grouped launches must honor one explicit BM/BN geometry for every child."""
+    device = _h200_device()
+    if device is None:
+        pytest.skip("H200 required")
+    children = tuple(
+        _child(name, device=device, seed=121 + index)
+        for index, name in enumerate(("gate_proj", "up_proj"))
+    )
+    for child in children[1:]:
+        child.SU.copy_(children[0].SU)
+    config = P32WindowConfig(
+        algorithm="hopper_m16",
+        block_m=64,
+        block_n=64,
+        block_k=256,
+        warp_groups=1,
+        split_k=1,
+        recovery_mode="off",
+    )
+    x = torch.randn(64, 256, device=device, dtype=torch.float16) * 0.01
+    with torch.inference_mode():
+        references = tuple(child(x).clone() for child in children)
+        for child in children:
+            prepare_rank8(child, config)
+        parent = nn.Module()
+        parent.gate_proj, parent.up_proj = children
+        assert install_qvq_hopper_groups(parent, qkv=False, gate_up=True)["gate_up"] == 1
+        outputs = (parent.gate_proj(x), parent.up_proj(x))
+        for output, reference in zip(outputs, references, strict=True):
+            torch.testing.assert_close(output, reference, rtol=0, atol=0)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = (parent.gate_proj(x), parent.up_proj(x))
+        for _ in range(3):
+            graph.replay()
+            for output, reference in zip(captured, outputs, strict=True):
+                torch.testing.assert_close(output, reference, rtol=0, atol=0)
+    runtime = children[0]._gptqmodel_qvq_grouped_runtime
+    assert runtime.telemetry.grouped_launches >= 2
+    assert runtime.telemetry.plain_fallbacks == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_h200_window_only_rank8_capture_matches_planar_reference():
     device = _h200_device()
     if device is None:
@@ -564,6 +608,18 @@ def test_grouped_hopper_policy_accepts_split_tuple_and_rejects_unimplemented_geo
         child._p32_window_config = direct
     reason = runtime._runtime_eligible(torch.randn(1, 256))
     assert reason == "grouped Hopper tuning requires hopper_m16 for every child; direct BM/BN geometry is single-child only"
+
+    grouped_geometry = replace(
+        base,
+        algorithm="hopper_m16",
+        block_m=64,
+        block_n=128,
+        warp_groups=2,
+    )
+    for child in children:
+        child._p32_window_config = grouped_geometry
+    reason = runtime._runtime_eligible(torch.randn(64, 256))
+    assert reason == "grouped Hopper BN128 requires a single-segment specialization"
 
     split_policy = replace(direct, algorithm="hopper_m16", block_m=0, block_n=0, warp_groups=0)
     for child in children:

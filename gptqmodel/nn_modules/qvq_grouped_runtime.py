@@ -547,12 +547,27 @@ class QVQHopperGroupedRuntime:
                     "grouped Hopper tuning requires hopper_m16 for every child; "
                     "direct BM/BN geometry is single-child only"
                 )
-            if any(
-                getattr(policy, field, 0)
+            geometry = tuple(
+                (getattr(policy, "block_m", 0), getattr(policy, "block_n", 0), getattr(policy, "warp_groups", 0), getattr(policy, "chunk_m", 0))
                 for policy in policies
-                for field in ("block_m", "block_n", "warp_groups", "chunk_m")
-            ):
-                return "grouped Hopper BM/BN/chunk controls are not implemented"
+            )
+            if any(value[3] for value in geometry):
+                return "grouped Hopper chunk_m control is not implemented"
+            if any(value != geometry[0] for value in geometry[1:]):
+                return "grouped Hopper BM/BN controls must match across children"
+            block_m, block_n, warp_groups, _ = geometry[0]
+            if block_m or block_n or warp_groups:
+                if block_m not in (32, 64, 128) or block_n not in (64, 128):
+                    return "grouped Hopper geometry requires BM32/64/128 and BN64/128"
+                if block_n == 128:
+                    return "grouped Hopper BN128 requires a single-segment specialization"
+                if warp_groups not in (0, block_n // 64):
+                    return "grouped Hopper warp_groups must match BN"
+                if any(getattr(policy, "split_k", 1) != 1 for policy in policies):
+                    return "grouped Hopper explicit BM/BN requires split_k=1"
+                rows = x.numel() // children[0].in_features if isinstance(x, torch.Tensor) and x.ndim >= 2 else 0
+                if rows and rows % block_m:
+                    return f"grouped Hopper explicit BM{block_m} requires rows divisible by BM"
         if any(
             getattr(child, "_p32_rank8_enabled", False)
             and getattr(policy, "recovery_projection", "separate_reference")
@@ -1008,7 +1023,11 @@ class QVQHopperGroupedRuntime:
             and tuple(child.out_features for child in children)
             == (17408, 17408)
         )
+        requested_block_m = getattr(getattr(children[0], "_p32_window_config", None), "block_m", 0)
+        requested_block_n = getattr(getattr(children[0], "_p32_window_config", None), "block_n", 0)
         use_h100_reuse11_gate_up = (
+            not requested_block_m
+            and
             rows in (512, 1024, 2048, 4096)
             and all(segment.split_count == 1 for segment in payload.plan.segments)
             and (
@@ -1029,6 +1048,8 @@ class QVQHopperGroupedRuntime:
             reuse11_padded[:rows].copy_(padded[:rows])
             padded = reuse11_padded
         use_h100_reuse8_gate_up = (
+            not requested_block_m
+            and
             padded.shape[0] >= 128
             and padded.shape[0] % 128 == 0
             and all(segment.split_count == 1 for segment in payload.plan.segments)
@@ -1041,7 +1062,13 @@ class QVQHopperGroupedRuntime:
                 or use_qwen_large_m_reuse
             )
         )
-        if use_h100_reuse11_gate_up:
+        if requested_block_m == 32:
+            grouped_inner = qvq_p32_window_wgmma_grouped_reuse2_packed
+        elif requested_block_m == 64:
+            grouped_inner = qvq_p32_window_wgmma_grouped_reuse4_packed
+        elif requested_block_m == 128:
+            grouped_inner = qvq_p32_window_wgmma_grouped_reuse8_packed
+        elif use_h100_reuse11_gate_up:
             grouped_inner = qvq_p32_window_wgmma_grouped_reuse11_packed
         elif use_h100_reuse8_gate_up:
             grouped_inner = qvq_p32_window_wgmma_grouped_reuse8_packed
@@ -1055,11 +1082,19 @@ class QVQHopperGroupedRuntime:
                 if any(segment.split_count != 1 for segment in payload.plan.segments)
                 else qvq_p32_window_wgmma_grouped_packed
             )
-        inner_outputs = grouped_inner(
-            padded,
-            payload,
-            _pgc16_levels(x.device, children[0].codebook_version),
-        )
+        if requested_block_n:
+            inner_outputs = grouped_inner(
+                padded,
+                payload,
+                _pgc16_levels(x.device, children[0].codebook_version),
+                block_n=requested_block_n,
+            )
+        else:
+            inner_outputs = grouped_inner(
+                padded,
+                payload,
+                _pgc16_levels(x.device, children[0].codebook_version),
+            )
         if children[0].activation is not None:
             self.telemetry.grouped_a8_launches += 1
         if (
