@@ -66,10 +66,9 @@ from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
-from .extension import LoopExtensions
+from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
-from .resume import calibration_dataset_hash
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
 
@@ -1548,8 +1547,6 @@ class ModuleLooper():
 
         # release calibration_dataset
         for processor in self.processors:
-            # Markers are written after release; fingerprint the data first.
-            processor.calibration_dataset_hash = calibration_dataset_hash(processor.calibration_dataset)
             processor.release_calibration_dataset()
 
         if self.gptq_model.quantize_config.offload_to_disk:
@@ -1615,6 +1612,24 @@ class ModuleLooper():
             processor.pb = pb
 
         shared_kv_cache_dict = {}
+
+        # An extension may restore a complete continuation and select the next
+        # execution step. Persistence and model-specific schemas live outside
+        # the looper. Non-checkpoint observers may omit on_start entirely.
+        from ..utils.model import get_layer_name
+
+        steps = []
+        if quant_input_embeddings:
+            steps.append(LoopStep("input_embeddings", -1, "input_embeddings"))
+        steps.extend(LoopStep("layer", index, get_layer_name(layer_names, index))
+                     for index in range(layer_count))
+        if quant_output_embeddings:
+            steps.append(LoopStep("output_embeddings", layer_count, "output_embeddings"))
+        elif self.gptq_model.quantize_config.lm_head:
+            steps.append(LoopStep("lm_head", layer_count, "lm_head"))
+        self.start_step = self.extensions.start(LoopContext(
+            LoopPlan(tuple(steps)), self.gptq_model, tuple(self.processors), shared_kv_cache_dict,
+        ))
 
         if self.gptq_model.quantize_config.lm_head:
             lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)

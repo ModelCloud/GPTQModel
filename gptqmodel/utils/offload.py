@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import contextlib
-import fcntl
 import json
 import os
 import shutil
@@ -183,20 +182,9 @@ def _offload_disk(module: nn.Module, name: str, disk_path: str = ".", force: boo
 
 
 def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = ".", force: bool = False):
-    # Free-threaded quantization may run finalizers in worker processes. The
-    # in-memory parent lock only protects threads within one process; this
-    # lock also serializes writers sharing an offload root across processes.
-    os.makedirs(disk_path, exist_ok=True)
-    lock_path = os.path.join(disk_path, ".offload.lock")
-    with open(lock_path, "a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            return _offload_disk_locked_impl(module, name, disk_path, force)
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-
-
-def _offload_disk_locked_impl(module: nn.Module, name: str, disk_path: str = ".", force: bool = False):
+    # Finalizers are threads, protected by the parent-module lock above.
+    # Checkpoint runs additionally hold a run lease and use private attempt
+    # directories; unrelated modules do not need a global offload lock.
     if is_meta_module(module):
         # print(f"[skip] '{name}' is on meta; leaving as-is")
         return

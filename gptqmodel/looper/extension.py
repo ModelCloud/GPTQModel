@@ -22,6 +22,28 @@ class LoopStep:
     name: str
 
 
+@dataclass(frozen=True)
+class LoopPlan:
+    steps: tuple[LoopStep, ...]
+
+    def __post_init__(self):
+        if type(self.steps) is not tuple or len(set(self.steps)) != len(self.steps):
+            raise ValueError(
+                "execution plan requires an immutable sequence of unique steps"
+            )
+
+    def after(self, step):
+        return self.steps.index(step) + 1
+
+
+@dataclass(frozen=True)
+class LoopContext:
+    plan: LoopPlan
+    model: object
+    processors: tuple
+    shared_state: dict
+
+
 class LoopBoundary:
     def __init__(self, step: LoopStep, futures: tuple[Future, ...]):
         self.step = step
@@ -60,6 +82,25 @@ class LoopExtensions:
     def __bool__(self):
         return bool(self._extensions)
 
+    def start(self, context: LoopContext) -> int:
+        """Let extensions install continuation before any planned step runs."""
+        cursors = []
+        for extension in self._extensions:
+            callback = getattr(extension, "on_start", None)
+            if callback is not None:
+                cursor = callback(context)
+                if cursor is not None:
+                    if type(cursor) is not int or not 0 <= cursor <= len(
+                        context.plan.steps
+                    ):
+                        raise ValueError(
+                            "extension returned an invalid execution cursor"
+                        )
+                    cursors.append(cursor)
+        if len(set(cursors)) > 1:
+            raise ValueError("extensions returned conflicting execution cursors")
+        return cursors[0] if cursors else 0
+
     def publish(self, step: LoopStep, futures=()) -> None:
         if not self:
             return
@@ -73,6 +114,7 @@ class LoopExtensions:
         # Retain failures/cancellations until quiesce surfaces them. Successful
         # completed futures no longer need to be held across later boundaries.
         self._pending = [
-            future for future in self._pending
+            future
+            for future in self._pending
             if not future.done() or future.cancelled() or future.exception() is not None
         ]

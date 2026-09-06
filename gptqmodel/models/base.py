@@ -103,6 +103,7 @@ from .writer import ModelWriter
 
 
 if TYPE_CHECKING:
+    from ..looper.checkpoint_store import CheckpointConfig
     try:
         from datasets import Dataset as HFDatasetType
         from datasets import IterableDataset as HFIterableDatasetType
@@ -915,6 +916,7 @@ class BaseQModel(nn.Module):
         calibration_concat_separator: Optional[str] = None,
         embed_quant_config: Optional[Union[QuantizeEmbedConfig, QuantizeEmbed]] = None,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
+        checkpoint: Optional["CheckpointConfig"] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         embed_quant_config = self._normalize_embed_quant_config(
             embed_quant_config=embed_quant_config,
@@ -923,6 +925,16 @@ class BaseQModel(nn.Module):
 
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
+
+        if os.environ.get("GPTQMODEL_RESUME") == "1":
+            raise ValueError("GPTQMODEL_RESUME is retired; use checkpoint=CheckpointConfig(path=...) in a new directory")
+        if checkpoint is not None:
+            from ..looper.checkpoint_store import CheckpointConfig
+            from ..looper.gptq_checkpoint import validate_checkpoint_support
+
+            if not isinstance(checkpoint, CheckpointConfig):
+                raise TypeError("checkpoint must be a CheckpointConfig")
+            validate_checkpoint_support(self, embed_quant_config=embed_quant_config, adapter=adapter)
 
         if self.quantized and embed_quant_config is None:
             raise EnvironmentError("quantize() is called a model that is already quantized")
@@ -1141,6 +1153,7 @@ class BaseQModel(nn.Module):
                 adapter_calibration_dataset=adapter_calibration_dataset,
                 calibration_concat_separator=calibration_concat_separator,
                 embed_quant_config=embed_quant_config,
+                checkpoint=checkpoint,
             )
 
         timer = getattr(self, "quant_region_timer", None)
@@ -1253,6 +1266,7 @@ class BaseQModel(nn.Module):
         adapter_calibration_dataset,
         calibration_concat_separator: Optional[str],
         embed_quant_config: Optional[QuantizeEmbedConfig],
+        checkpoint: Optional["CheckpointConfig"] = None,
     ):
         from ..adapter.adapter import Lora
         from ..looper.eora_processor import EoraProcessor
@@ -1378,23 +1392,32 @@ class BaseQModel(nn.Module):
                 )
             )
 
-        module_looper = ModuleLooper(
-            self,
-            processors=processors,
-            embed_quant_config=embed_quant_config,
-        )
-
         gc_context = (
             DEVICE_THREAD_POOL.no_auto_gc()
             if self.quantize_config.gc_mode == GcMode.ON_STAGE_END
             else nullcontext()
         )
 
-        with gc_context:
-            return module_looper.loop(
-                backend=backend,
-                fallback=self.quantize_config.fallback,
+        from ..looper.gptq_checkpoint import checkpoint_session
+
+        checkpoint_context = checkpoint_session(checkpoint, self) if checkpoint is not None else nullcontext()
+        with gc_context, checkpoint_context as extension:
+            module_looper = ModuleLooper(
+                self, processors=processors, embed_quant_config=embed_quant_config,
+                extensions=(extension,) if extension is not None else (),
             )
+            use_cache = getattr(self.model.config, "use_cache", False)
+            try:
+                return module_looper.loop(backend=backend, fallback=self.quantize_config.fallback)
+            finally:
+                # Keep the run lease until every worker has stopped accessing
+                # the attempt directory, including exceptional/stop exits.
+                if extension is not None:
+                    try:
+                        DEVICE_THREAD_POOL.wait()
+                        module_looper.wait_dangling_threads()
+                    finally:
+                        self.model.config.use_cache = use_cache
 
     def _quantize_weight_only(
         self,

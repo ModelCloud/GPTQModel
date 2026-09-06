@@ -4,9 +4,40 @@ from threading import Event, get_ident
 
 import pytest
 
-from gptqmodel.looper.extension import LoopExtensions, LoopStep
+from gptqmodel.looper.extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 
 STEP = LoopStep("layer", 0, "model.layers.0")
+
+
+@pytest.mark.parametrize("cursor", [-1, 2, True])
+def test_start_rejects_invalid_cursor(cursor):
+    class Extension:
+        def on_start(self, context):
+            return cursor
+
+    with pytest.raises(ValueError, match="invalid execution cursor"):
+        LoopExtensions([Extension()]).start(
+            LoopContext(LoopPlan((STEP,)), None, (), {})
+        )
+
+
+def test_start_rejects_conflicting_cursors():
+    class Extension:
+        def __init__(self, cursor):
+            self.cursor = cursor
+
+        def on_start(self, context):
+            return self.cursor
+
+    with pytest.raises(ValueError, match="conflicting execution cursors"):
+        LoopExtensions([Extension(0), Extension(1)]).start(
+            LoopContext(LoopPlan((STEP,)), None, (), {})
+        )
+
+
+def test_plan_requires_unique_steps():
+    with pytest.raises(ValueError, match="unique steps"):
+        LoopPlan((STEP, STEP))
 
 
 def test_disabled_extensions_do_not_wait():
@@ -61,9 +92,11 @@ def test_boundary_rejects_retention_and_cross_thread_access():
     class Extension:
         def on_boundary(self, boundary):
             retained.append(boundary)
-            with ThreadPoolExecutor(max_workers=1) as pool:
-                with pytest.raises(RuntimeError, match="orchestration thread"):
-                    pool.submit(boundary.quiesce).result(timeout=5)
+            with (
+                ThreadPoolExecutor(max_workers=1) as pool,
+                pytest.raises(RuntimeError, match="orchestration thread"),
+            ):
+                pool.submit(boundary.quiesce).result(timeout=5)
             assert boundary.quiesce() == ()
 
     LoopExtensions([Extension()]).publish(STEP)
@@ -112,4 +145,6 @@ def test_extension_on_real_moe_boundary(tmp_path, monkeypatch):
     step, results = observed[0]
     assert step.kind == "layer"
     assert step.index == 0
-    assert len(results) == 16  # Four attention projections and twelve expert projections.
+    assert (
+        len(results) == 16
+    )  # Four attention projections and twelve expert projections.
