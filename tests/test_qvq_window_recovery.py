@@ -305,6 +305,7 @@ def test_hopper_explicit_geometry_rank8_matrix(block_m, block_n, bits, m, chunk_
         "separate_reference",
         "input_fused",
         "tensor_core",
+        "project_output_fused",
     }
     for mode in ("off", "on"):
         prepare_rank8(

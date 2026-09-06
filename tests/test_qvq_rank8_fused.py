@@ -208,6 +208,45 @@ def test_rank8_fused_epilogue_supports_composite_folded_output_width():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("k,n,hadamard", [(256, 256, False), (2048, 2048, True)])
+def test_rank8_fused_projection_output_matches_two_stage_and_graph(k, n, hadamard):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from gptqmodel.utils.qvq_rank8_triton import (
+        rank8_output_epilogue,
+        rank8_project_output_epilogue,
+    )
+
+    torch.manual_seed(159)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    m = 17
+    x = torch.randn(m, k, device="cuda", dtype=torch.float16) * 0.1
+    a = torch.randn(k, 8, device="cuda", dtype=torch.float16) * 0.02
+    b = torch.randn(8, n, device="cuda", dtype=torch.float16) * 0.02
+    base = torch.randn(m, n, device="cuda", dtype=torch.float32)
+    sv = torch.randn(n, device="cuda", dtype=torch.float32)
+    bias = torch.randn(n, device="cuda", dtype=torch.float32)
+    hidden = (x.float() @ a.float()).half()
+    expected = rank8_output_epilogue(
+        hidden, b, base, sv, bias, hadamard=hadamard, output_dtype=torch.float32
+    )
+    actual = rank8_project_output_epilogue(
+        x, a, b, base, sv, bias, hadamard=hadamard, output_dtype=torch.float32
+    )
+    error = (actual - expected).abs()
+    assert torch.isfinite(actual).all()
+    assert error.mean() <= 2e-3 and error.max() <= 0.046875
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = rank8_project_output_epilogue(
+            x, a, b, base, sv, bias, hadamard=hadamard, output_dtype=torch.float32
+        )
+    for _ in range(3):
+        graph.replay()
+        torch.testing.assert_close(captured, actual, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("k", [16, 256, 2048, 8192, 16384])
 @pytest.mark.parametrize("groups", [1, 3])
 @pytest.mark.parametrize("hadamard", [False, True])

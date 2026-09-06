@@ -106,7 +106,12 @@ class P32WindowConfig:
             raise ValueError("invalid recovery mode")
         if self.quality_mode not in ("fast", "balanced", "quality"):
             raise ValueError("invalid quality mode")
-        if self.recovery_projection not in ("separate_reference", "input_fused", "tensor_core"):
+        if self.recovery_projection not in (
+            "separate_reference",
+            "input_fused",
+            "tensor_core",
+            "project_output_fused",
+        ):
             raise ValueError("unsupported rank8 projection implementation")
         if self.recovery_kernel not in ("separate_reference", "fused_epilogue"):
             raise ValueError("fused recovery kernels are not implemented")
@@ -115,6 +120,7 @@ class P32WindowConfig:
             "unverified_fused_epilogue",
             "unverified_input_fused",
             "unverified_tensor_core",
+            "unverified_project_output_fused",
         ):
             raise ValueError("unsupported rank8 arithmetic signature")
 
@@ -421,6 +427,30 @@ def fused_rank8_output(layer, transformed, base, compute_dtype, *, hidden=None, 
     from ..utils.qvq_rank8_triton import rank8_output_epilogue
 
     enabled = bool(getattr(layer, "_p32_rank8_enabled", False))
+    if (
+        enabled
+        and hidden is None
+        and transformed.dtype == torch.float16
+        and getattr(layer._p32_window_config, "recovery_projection", None)
+        == "project_output_fused"
+    ):
+        from ..utils.qvq_rank8_triton import rank8_project_output_epilogue
+
+        return rank8_project_output_epilogue(
+            transformed,
+            layer.rank8_A,
+            layer.rank8_B,
+            base,
+            layer._cached_cast("SV", compute_dtype, base.dtype),
+            layer._cached_cast("bias", compute_dtype, base.dtype),
+            hadamard=layer.output_hadamard,
+            output_dtype=(
+                torch.float16 if output_dtype == torch.float16
+                and 2048 <= layer.in_features <= 16384
+                and not layer.in_features & (layer.in_features - 1)
+                else torch.float32
+            ),
+        )
     if enabled and hidden is None:
         hidden = _project_rank8(layer, transformed)
     return rank8_output_epilogue(
@@ -1712,6 +1742,16 @@ def window_kernel_candidates(layer, *, m):
                     c,
                     recovery_projection="input_fused",
                     arithmetic_signature="unverified_input_fused",
+                )
+                for c in separate_candidates
+            )
+        if layer.in_features <= 16384:
+            candidates.extend(
+                replace(
+                    c,
+                    recovery_kernel="fused_epilogue",
+                    recovery_projection="project_output_fused",
+                    arithmetic_signature="unverified_project_output_fused",
                 )
                 for c in separate_candidates
             )

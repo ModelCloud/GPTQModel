@@ -183,6 +183,123 @@ def _rank8_output_epilogue_masked(
     tl.store(Output + row * N + column, value, mask=mask)
 
 
+@triton.jit
+def _rank8_project_output_epilogue(
+    X,
+    A,
+    B,
+    Base,
+    SV,
+    Bias,
+    Output,
+    N: tl.constexpr,
+    LOG_N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BASE_STRIDE: tl.constexpr,
+    HADAMARD: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+    NORMALIZE_FIRST: tl.constexpr,
+    DIVISOR: tl.constexpr,
+    RECIPROCAL: tl.constexpr,
+    OUTPUT_FP16: tl.constexpr,
+):
+    """Project X' and expand the rank-8 correction in one row-owned CTA.
+
+    This is the no-hidden-buffer fused path.  The projection accumulator is
+    explicitly narrowed to FP16 before B expansion, matching the versioned
+    rank8 contract.  The output transform is kept byte-for-byte in the same
+    ordering as :func:`_rank8_output_epilogue`.
+    """
+
+    row = tl.program_id(0)
+    column = tl.arange(0, N)
+    rank = tl.arange(0, 8)
+    projected = tl.zeros((8,), tl.float32)
+    for offset in tl.range(0, K, BLOCK_K):
+        k = offset + tl.arange(0, BLOCK_K)
+        x = tl.load(X + row * K + k, mask=k < K, other=0).to(tl.float32)
+        a = tl.load(
+            A + k[:, None] * 8 + rank[None, :],
+            mask=k[:, None] < K,
+            other=0,
+        ).to(tl.float32)
+        projected += tl.sum(x[:, None] * a, axis=0)
+    # Preserve the declared hidden FP16 boundary before the expansion.
+    hidden = projected.to(tl.float16).to(tl.float32)
+    weights = tl.load(B + rank[:, None] * N + column[None, :]).to(tl.float32)
+    correction = tl.sum(hidden[:, None] * weights, axis=0)
+    value = tl.load(Base + row * BASE_STRIDE + column).to(tl.float32) + correction
+    if HADAMARD:
+        value = _round_half_finite(value)
+        if NORMALIZE_FIRST:
+            value = _round_half_finite(tl.div_rn(value, DIVISOR))
+        for stage in tl.static_range(0, LOG_N):
+            partner = tl.gather(value, column ^ (1 << stage), axis=0)
+            value = tl.where(
+                (column & (1 << stage)) == 0, value + partner, partner - value
+            )
+            value = _round_half_finite(value)
+        if not NORMALIZE_FIRST:
+            value = _round_half_finite(value * RECIPROCAL)
+    value = value * tl.load(SV + column).to(tl.float32)
+    if HADAMARD:
+        value = _round_half_finite(value)
+    if HAS_BIAS:
+        value = value + tl.load(Bias + column).to(tl.float32)
+        if HADAMARD:
+            value = _round_half_finite(value)
+    tl.store(Output + row * N + column, value)
+
+
+@triton.jit
+def _rank8_project_output_epilogue_masked(
+    X,
+    A,
+    B,
+    Base,
+    SV,
+    Bias,
+    Output,
+    N: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    K: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+    BASE_STRIDE: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+):
+    """Composite-width variant of the fused projection/output epilogue."""
+
+    row = tl.program_id(0)
+    column = tl.arange(0, BLOCK_N)
+    mask = column < N
+    rank = tl.arange(0, 8)
+    projected = tl.zeros((8,), tl.float32)
+    for offset in tl.range(0, K, BLOCK_K):
+        k = offset + tl.arange(0, BLOCK_K)
+        x = tl.load(X + row * K + k, mask=k < K, other=0).to(tl.float32)
+        a = tl.load(
+            A + k[:, None] * 8 + rank[None, :],
+            mask=k[:, None] < K,
+            other=0,
+        ).to(tl.float32)
+        projected += tl.sum(x[:, None] * a, axis=0)
+    hidden = projected.to(tl.float16).to(tl.float32)
+    weights = tl.load(
+        B + rank[:, None] * N + column[None, :],
+        mask=mask[None, :],
+        other=0,
+    ).to(tl.float32)
+    correction = tl.sum(hidden[:, None] * weights, axis=0)
+    value = tl.load(
+        Base + row * BASE_STRIDE + column, mask=mask, other=0
+    ).to(tl.float32) + correction
+    value = value * tl.load(SV + column, mask=mask, other=0).to(tl.float32)
+    if HAS_BIAS:
+        value = value + tl.load(Bias + column, mask=mask, other=0).to(tl.float32)
+    tl.store(Output + row * N + column, value, mask=mask)
+
+
 def rank8_output_epilogue(
     hidden, b, base, sv, bias=None, *, hadamard=True, output_dtype=torch.float32, rank8_enabled=True
 ):
@@ -272,6 +389,133 @@ def rank8_output_epilogue(
             reciprocal,
             rank8_enabled,
             num_warps=4 if n <= 4096 else 8,
+            enable_fp_fusion=False,
+        )
+    _mark_rank8_kernel_warm(key)
+    return output
+
+
+def rank8_project_output_epilogue(
+    transformed,
+    a,
+    b,
+    base,
+    sv,
+    bias=None,
+    *,
+    hadamard=True,
+    output_dtype=torch.float32,
+):
+    """Fuse ``X' @ A`` with rank8 expansion and the output epilogue.
+
+    ``transformed`` is already the exact P32 activation domain.  The kernel
+    therefore removes the intermediate hidden allocation and the separate
+    projection launch while preserving the FP16 hidden rounding boundary.
+    Preparation/warming is tracked independently for every shape so the first
+    Triton compile cannot occur during CUDA Graph capture.
+    """
+
+    if output_dtype not in (torch.float16, torch.float32):
+        raise ValueError("rank8 fused epilogue output must be FP16 or FP32")
+    if (
+        transformed.ndim != 2
+        or a.ndim != 2
+        or b.ndim != 2
+        or base.ndim != 2
+        or transformed.dtype != torch.float16
+        or a.dtype != torch.float16
+        or b.dtype != torch.float16
+        or base.dtype != torch.float32
+    ):
+        raise ValueError(
+            "fused rank8 projection requires FP16 X'/A/B and FP32 base"
+        )
+    m, k = transformed.shape
+    base_m, n = base.shape
+    if (
+        base_m != m
+        or a.shape != (k, 8)
+        or b.shape != (8, n)
+        or sv.shape != (n,)
+        or n < 16
+        or n > 16384
+        or (hadamard and n & (n - 1))
+    ):
+        raise ValueError("fused rank8 projection/output shapes are unsupported")
+    values = (transformed, a, b, base, sv) + (() if bias is None else (bias,))
+    if any(value.device != base.device for value in values):
+        raise ValueError("fused rank8 projection inputs must share one device")
+    if any(not value.is_contiguous() for value in values):
+        raise ValueError("fused rank8 projection inputs must be contiguous")
+    if bias is not None and (bias.shape != (n,)):
+        raise ValueError("fused rank8 projection bias shape mismatch")
+    if base.device.type != "cuda" or torch.cuda.get_device_capability(base.device) != (
+        9,
+        0,
+    ):
+        raise ValueError("fused rank8 projection requires SM90")
+    output = torch.empty((m, n), device=base.device, dtype=output_dtype)
+    if not m:
+        return output
+    key = _rank8_graph_key(
+        base.device,
+        "project_output_epilogue",
+        m,
+        k,
+        n,
+        bool(hadamard),
+        bias is not None,
+        str(output_dtype),
+        str(sv.dtype),
+        None if bias is None else str(bias.dtype),
+        "masked" if not hadamard and n & (n - 1) else "butterfly",
+    )
+    _require_rank8_kernel_warm(key)
+    if not hadamard and n & (n - 1):
+        block_n = 1 << (n - 1).bit_length()
+        _rank8_project_output_epilogue_masked[(m,)](
+            transformed,
+            a,
+            b,
+            base,
+            sv,
+            bias,
+            output,
+            n,
+            block_n,
+            k,
+            64,
+            base.stride(0),
+            bias is not None,
+            num_warps=4 if n <= 4096 else 8,
+            num_stages=2,
+            enable_fp_fusion=False,
+        )
+    else:
+        root = struct.unpack("f", struct.pack("f", math.sqrt(n)))[0]
+        divisor = struct.unpack("e", struct.pack("e", math.sqrt(n)))[0]
+        reciprocal = struct.unpack("f", struct.pack("f", 1 / root))[0]
+        _rank8_project_output_epilogue[(m,)](
+            transformed,
+            a,
+            b,
+            base,
+            sv,
+            bias,
+            output,
+            n,
+            n.bit_length() - 1,
+            k,
+            64,
+            base.stride(0),
+            hadamard,
+            bias is not None,
+            n >= 2048,
+            divisor,
+            reciprocal,
+            output_dtype == torch.float16,
+            num_warps=4 if n <= 4096 else 8,
+            num_stages=2,
             enable_fp_fusion=False,
         )
     _mark_rank8_kernel_warm(key)

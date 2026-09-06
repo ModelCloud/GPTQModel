@@ -243,6 +243,18 @@ opportunities, not evidence that fewer instructions guarantees lower latency.
 The expanded correction and its casts/add/global-memory boundary disappear;
 the input projection and its casts/reduction remain separate.
 
+`recovery_projection="project_output_fused"` is an additional fast-mode
+candidate that removes that separate projection launch as well. It computes
+`X' @ A` inside the row-owned output epilogue, rounds the hidden state to the
+declared FP16 boundary, and then applies `B`, the output Hadamard, SV and bias.
+The candidate is graph-safe after shape-specific Triton warming and is marked
+`unverified_project_output_fused`, so balanced and quality policies reject it
+until an arithmetic signature is certified. On the current accepted Q
+projection (H200, K=N=2048, M=8192), the candidate measured 1,015.8 us versus
+951.2 us for the reference-projection/fused-epilogue path; the tuner therefore
+must be allowed to reject it per shape. This is an exposed experiment, not a
+claim of universal fusion benefit.
+
 Post-profile tests: **87 passed,86 skipped**, including output widths through
 16384, per-operation overflow rescue, no-bias/strided outputs, independent
 single/grouped composition, and ten graph replays per case. Skips are mostly
