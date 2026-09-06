@@ -67,6 +67,7 @@ from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
 from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
+from .execution_state import DeviceAssignmentState
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
 from .stage_inputs_capture import StageInputsCapture
@@ -161,7 +162,7 @@ def io_write_performance() -> Optional[float]:
     return _IO_WRITE_SPEED_MB
 
 
-class ModuleLooper():
+class ModuleLooper(DeviceAssignmentState):
     """Drive the per-layer quantisation workflow over one or more devices.
 
     The looper executes work on the shared global :class:`DeviceThreadPool`
@@ -937,34 +938,6 @@ class ModuleLooper():
             "moe": [str(device) for device in self._moe_quant_devices],
             "forward": [str(device) for device in forward_devices],
         }
-
-    def execution_state_dict(self) -> dict:
-        """Capture scheduler continuation at a quiescent execution boundary."""
-        with self._quant_device_lock:
-            return {
-                "version": 1,
-                "next_device": self._quant_device_rr,
-                "module_devices": {name: str(device) for name, device in self._module_device_map.items()},
-            }
-
-    def load_execution_state_dict(self, state: dict) -> None:
-        """Restore scheduling without replaying completed device assignments."""
-        if (
-            not isinstance(state, dict) or state.get("version") != 1
-            or type(state.get("next_device")) is not int or state["next_device"] < 0
-        ):
-            raise ValueError("invalid execution scheduler continuation")
-        devices = state.get("module_devices")
-        allowed = {str(device) for device in self._quant_devices} | {str(CPU)}
-        if not isinstance(devices, dict) or any(
-            not isinstance(name, str) or not isinstance(device, str) or device not in allowed
-            for name, device in devices.items()
-        ):
-            raise ValueError("execution continuation contains an unavailable device")
-        restored = {name: torch.device(device) for name, device in devices.items()}
-        with self._quant_device_lock:
-            self._quant_device_rr = state["next_device"]
-            self._module_device_map = restored
 
     def _assign_quant_device_for_module(
         self,

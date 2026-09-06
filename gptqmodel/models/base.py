@@ -1133,6 +1133,7 @@ class BaseQModel(nn.Module):
 
         if self.quantize_config.uses_weight_only_lifecycle():
             result = self._quantize_weight_only(
+                checkpoint=checkpoint,
                 calibration=calibration,
                 calibration_concat_size=calibration_concat_size,
                 calibration_sort=calibration_sort,
@@ -1424,6 +1425,7 @@ class BaseQModel(nn.Module):
     def _quantize_weight_only(
         self,
         *,
+        checkpoint=None,
         calibration,
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
@@ -1460,7 +1462,6 @@ class BaseQModel(nn.Module):
             tokenizer=self.tokenizer,
             qcfg=self.quantize_config,
         )
-        module_looper = WeightOnlyLooper(model=self, processor=processor, embed_quant_config=embed_quant_config)
 
         gc_context = (
             DEVICE_THREAD_POOL.no_auto_gc()
@@ -1468,8 +1469,18 @@ class BaseQModel(nn.Module):
             else nullcontext()
         )
 
-        with gc_context:
-            return module_looper.loop(backend=backend)
+        from ..looper.gptq_checkpoint import checkpoint_session
+
+        with gc_context, (checkpoint_session(checkpoint, self) if checkpoint else nullcontext()) as extension:
+            module_looper = WeightOnlyLooper(
+                model=self, processor=processor, embed_quant_config=embed_quant_config,
+                extensions=(extension,) if extension else (),
+            )
+            try:
+                return module_looper.loop(backend=backend)
+            finally:
+                if checkpoint:
+                    DEVICE_THREAD_POOL.wait()
 
     def _eora_generate(
         self,

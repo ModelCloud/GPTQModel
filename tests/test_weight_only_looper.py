@@ -209,6 +209,37 @@ class _FakeProcessor:
         self.finalize_called = True
 
 
+@pytest.mark.parametrize("cursor", [0, 1, 2])
+def test_weight_only_extension_resumes_at_quiescent_boundary(monkeypatch, cursor):
+    qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
+    model = _FakeQModel(qcfg)
+    processor = _FakeProcessor(qcfg)
+    seen = []
+
+    class Extension:
+        def on_start(self, context):
+            assert [step.name for step in context.plan.steps] == ["layers.0", "layers.1"]
+            assert context.processors == (processor,)
+            state = context.execution.execution_state_dict()
+            context.execution.load_execution_state_dict(state)
+            assert context.execution.execution_state_dict() == state
+            return cursor
+
+        def on_boundary(self, boundary):
+            boundary.quiesce()
+            assert processor.finalized[-1][0] == f"layers.{boundary.step.index}.linear"
+            seen.append(boundary.step.index)
+
+    monkeypatch.setattr(weight_only_looper_module, "log", _FakeLogger())
+    monkeypatch.setattr(weight_only_looper_module, "get_layers_with_prefixes",
+                        lambda *_: (list(model.model.layers), ["layers.0", "layers.1"]))
+    WeightOnlyLooper(model, processor, extensions=(Extension(),)).loop()
+    assert seen == list(range(cursor, 2))
+    assert processor.quantized == [f"layers.{index}.linear" for index in range(cursor, 2)]
+    assert processor.finalize_called
+    assert model.model.config.use_cache
+
+
 def test_weight_only_looper_reports_logbar_progress(monkeypatch):
     qcfg = RTNConfig(bits=4, group_size=4, offload_to_disk=False, device="cpu")
     qcfg.lm_head = False
