@@ -23,6 +23,7 @@ from gptqmodel.quantization.qvq_transform_runtime import (
     QVQ_GROUPED_P32_PAYLOAD_LAYOUT,
     QVQ_GROUPED_P32_RUNTIME_META_KEY,
     QVQ_GROUPED_P32_RUNTIME_SCHEMA,
+    QVQGroupedP32InputTransformState,
     QVQGroupedP32Linear,
     QVQSharedInputLinear,
     install_qvq_checkpointed_p32_runtime,
@@ -35,6 +36,62 @@ from gptqmodel.quantization.qvq_transform_runtime import (
     set_qvq_grouped_p32_checkpoint_metadata,
 )
 from gptqmodel.utils.qvq_cuda import qvq_cuda_gemv
+
+
+def test_grouped_ampere_payload_is_prepared_once_from_released_window_storage(monkeypatch):
+    """Explicit SM80 child policies own a packed, capture-ready grouped payload."""
+
+    from gptqmodel.quantization.qvq_rank8 import P32WindowConfig
+    from gptqmodel.utils import qvq_ampere_cuda, qvq_cuda
+
+    widths = (64, 32)
+    k = 256
+    k_tiles = k // 16
+    words_per_tile = 24  # W3 / vector size 2
+    total_tiles = k_tiles * (sum(widths) // 16)
+    state = object.__new__(QVQGroupedP32InputTransformState)
+    state.linears = tuple(
+        SimpleNamespace(
+            bits=3,
+            in_features=k,
+            out_features=width,
+            codebook_version="V2",
+            trellis=torch.empty(0, words_per_tile, dtype=torch.int32),
+            bank_alt_id=torch.empty(0, dtype=torch.uint8),
+        )
+        for width in widths
+    )
+    state.trellis = torch.arange(
+        total_tiles * words_per_tile, dtype=torch.int32
+    ).reshape(-1, words_per_tile)
+    state.bank_ids = torch.arange(total_tiles, dtype=torch.uint8)
+    state.bank_alt_ids = torch.tensor((3, 1), dtype=torch.uint8)
+    state.out_features = sum(widths)
+    state._rank8_configs = tuple(
+        P32WindowConfig(algorithm="ampere_window", split_k=split)
+        for split in (4, 2)
+    )
+
+    warm_calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda,
+        "prewarm_qvq_ampere_grouped",
+        lambda: warm_calls.append(True),
+    )
+    monkeypatch.setattr(
+        qvq_cuda,
+        "_pgc16_levels",
+        lambda device, version: torch.empty(256, dtype=torch.float16, device=device),
+    )
+
+    state._prepare_ampere_payload()
+
+    assert warm_calls == [True]
+    assert state._ampere_levels.shape == (256,)
+    assert state._ampere_payload.trellis.numel() == state.trellis.numel()
+    assert state._ampere_payload.plan.out_features == sum(widths)
+    assert [segment.split_count for segment in state._ampere_payload.plan.segments] == [4, 2]
+    assert [segment.bank_alt_id for segment in state._ampere_payload.plan.segments] == [3, 1]
 
 
 def _packed_layer(

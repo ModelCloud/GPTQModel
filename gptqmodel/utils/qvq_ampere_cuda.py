@@ -214,6 +214,18 @@ def prewarm_qvq_ampere() -> None:
     _p32_window_op()
 
 
+def prewarm_qvq_ampere_grouped() -> None:
+    """Load both grouped SM80 operators before CUDA Graph capture.
+
+    Grouped callers select and pack their child payloads during preparation;
+    replay must never trigger lazy TorchOp registration for either the
+    segmented fallback or the fused grouped dispatcher.
+    """
+
+    _p32_window_grouped_op()
+    _p32_window_grouped_fused_op()
+
+
 def _require_warm_operator_for_capture(operator: object | None, name: str) -> None:
     """Reject lazy TorchOp registration from inside a CUDA graph capture."""
 
@@ -1344,6 +1356,7 @@ __all__ = [
     "QVQAmpereP32SegmentPlan",
     "clear_qvq_ampere_autotune_cache",
     "prewarm_qvq_ampere",
+    "prewarm_qvq_ampere_grouped",
     "qvq_p32_window_ampere",
     "qvq_p32_window_ampere_group_plan",
     "qvq_p32_window_ampere_grouped",

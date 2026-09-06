@@ -121,10 +121,13 @@ The Ampere continuous-window operator now participates in the same
 `P32WindowConfig` and `window_kernel_candidates` policy. On SM80, the
 shape-specific split-wave enumerator publishes explicit `ampere_window`
 candidates, preparation prewarms the operator, and replay passes the selected
-`split_k` without re-autotuning. Grouped runtimes reject that explicit policy
-until their independent grouped SM80 consumer is selected, so a candidate
-cannot be silently ignored. The candidate API remains pure and graph-safe;
-ZML's existing split-count tuner can consume the same explicit shape policy.
+`split_k` without re-autotuning. Grouped runtimes now consume a common set of
+explicit child `ampere_window` policies through the existing segmented/fused
+SM80 dispatcher; their packed payload and PGC16 level table are prepared once
+before capture and retained by the grouped runtime. Mixed grouped consumers
+fail closed rather than silently ignoring a child policy. The candidate API
+remains pure and graph-safe; ZML's existing split-count tuner can consume the
+same explicit shape policy.
 
 The six existing Hopper geometry choices are now externally selectable,
 and their H200 off/on sweep is recorded in `results/p32_window_h200_geometry.json`.
