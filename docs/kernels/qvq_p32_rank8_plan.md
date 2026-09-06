@@ -53,6 +53,13 @@ Promotion jobs may additionally pass `max_recovery_overhead_percent` to reject
 every measured geometry above the explicit 3--5% budget; the default remains
 report-only because current modules do not all meet that budget.
 
+The matched benchmark CLI exposes the same policy for reproducible scorecards:
+`scripts/benchmark_qvq_window_rank8.py --autotune
+--measure-recovery-candidates --max-recovery-overhead-percent 5`. The report
+records the requested gate and each candidate's correction-off/on medians;
+without the explicit gate, timing remains diagnostic and cannot change quality
+or arithmetic-signature eligibility.
+
 The native prepared-graph API owns its temporary allocation pool and can insert
 the existing window/rank8 operator as a child of an enclosing CUDA capture. The
 ZML adapter now retains one such handle per executable buffer set, stream and

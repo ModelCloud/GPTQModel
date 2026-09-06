@@ -40,6 +40,16 @@ def main():
     parser.add_argument("--chunk-m", type=int, default=0)
     parser.add_argument("--autotune", action="store_true")
     parser.add_argument("--tuning-cache", type=Path)
+    parser.add_argument(
+        "--measure-recovery-candidates",
+        action="store_true",
+        help="benchmark matched correction-off/on pairs for every autotune candidate",
+    )
+    parser.add_argument(
+        "--max-recovery-overhead-percent",
+        type=float,
+        help="exclude enabled candidates above this paired median overhead (requires --measure-recovery-candidates)",
+    )
     parser.add_argument("--package", type=Path)
     parser.add_argument("--activation-file", type=Path,
                         help="Replay audit_1/audit_2 matrices saved by evaluate_qvq_window_rank8.py")
@@ -53,6 +63,12 @@ def main():
         parser.error("profiling requires one M and one quality mode per process")
     if args.activation_file and not args.package:
         parser.error("--activation-file requires --package")
+    if args.max_recovery_overhead_percent is not None and not args.autotune:
+        parser.error("--max-recovery-overhead-percent requires --autotune")
+    if args.max_recovery_overhead_percent is not None and not args.measure_recovery_candidates:
+        parser.error(
+            "--max-recovery-overhead-percent requires --measure-recovery-candidates"
+        )
     if (
         min(args.k, args.n, *args.m, args.samples, args.replays, args.profile_repeats)
         <= 0
@@ -168,6 +184,11 @@ def main():
         "software": {"torch": str(torch.__version__), "cuda": torch.version.cuda},
         "build_identity": build_identity,
         "preflight": None if idle is None else idle.as_dict(),
+        "tuning_policy": {
+            "autotune": args.autotune,
+            "measure_recovery_candidates": args.measure_recovery_candidates,
+            "max_recovery_overhead_percent": args.max_recovery_overhead_percent,
+        },
         "rows": [],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -256,6 +277,8 @@ def main():
                         ).encode()
                     ).hexdigest(),
                     cache_dir=args.tuning_cache,
+                    measure_recovery_candidates=args.measure_recovery_candidates,
+                    max_recovery_overhead_percent=args.max_recovery_overhead_percent,
                 )
                 report.setdefault("tuning", []).append(
                     {
