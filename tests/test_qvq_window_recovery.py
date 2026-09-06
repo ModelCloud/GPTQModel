@@ -748,6 +748,25 @@ def test_quality_policy(mode):
     assert layer._p32_rank8_enabled == (mode != "fast")
 
 
+def test_fit_rank8_supports_window_owned_module():
+    layer, teacher, train, heldout = fixture(hadamard=False)
+    layer.window_words = repack_p32_planar_to_window(layer.trellis, bits=layer.bits)
+    layer.trellis = None
+    layer.window_only = True
+    report = fit_rank8(
+        layer,
+        teacher,
+        train,
+        heldout,
+        train_document_ids=["train"],
+        heldout_document_ids=["heldout"],
+        max_solver_bytes=1,
+    )
+    assert report["fit_device"] == "cpu"
+    assert layer.rank8_metadata is not None
+    assert layer.trellis is None
+
+
 def test_reject_provenance_and_unsupported_contracts():
     layer, teacher, train, heldout = fixture()
     with pytest.raises(ValueError, match="calibration"):

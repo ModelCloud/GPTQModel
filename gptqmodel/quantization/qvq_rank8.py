@@ -1201,7 +1201,12 @@ def fit_rank8(
             with torch.inference_mode(False):
                 layer.rank8_A = a.clone()
                 layer.rank8_B = b.clone()
-                layer.rank8_metadata = _encode(report, layer.trellis.device)
+                # ``fit_rank8`` may run after an evaluated CUDA module has
+                # transferred ownership from planar ``trellis`` to the
+                # continuous window payload.  Bind metadata to the live
+                # runtime device instead of reaching through the released
+                # planar source.
+                layer.rank8_metadata = _encode(report, fit_device)
         return report
     finally:
         prepare_rank8(layer, old_config)
