@@ -110,6 +110,19 @@ def test_yaqa_projection_rejects_cold_compile_during_graph_capture(monkeypatch):
         tiled._require_project_warm(("cuda", 0, "project", 2))
 
 
+def test_rocm_yaqa_rejects_cold_compile_during_graph_capture(monkeypatch):
+    from gptqmodel.utils import qvq_yaqa_amd
+
+    monkeypatch.setattr(qvq_yaqa_amd.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        qvq_yaqa_amd.torch.cuda,
+        "is_current_stream_capturing",
+        lambda: True,
+    )
+    with pytest.raises(RuntimeError, match="warmed before CUDA Graph capture"):
+        qvq_yaqa_amd._require_kernel_warm(("gfx950", "banked", 1))
+
+
 def test_yaqa_projection_without_triton():
     import builtins
     import importlib.util
