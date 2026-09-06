@@ -415,6 +415,16 @@ def test_gguf_prism_q2_0_config_round_trip():
     assert reloaded.runtime_bits.to_string() == "q2_0"
 
 
+def test_gguf_q2_0_bits_string_parser_round_trip():
+    bits = GGUFBits.from_string("q2_0")
+
+    assert bits.bits == 2
+    assert bits.version == "q"
+    assert bits.variant == "0"
+    assert bits.quality is None
+    assert bits.to_string() == "q2_0"
+
+
 def test_weight_only_payload_dispatches_to_rtn():
     cfg = QuantizeConfig(
         bits=4,

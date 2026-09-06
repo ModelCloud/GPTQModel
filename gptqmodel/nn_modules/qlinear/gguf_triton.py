@@ -13,7 +13,7 @@ from ...nn_modules.qlinear import FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.python import has_gil_disabled
-from .gguf import PRISM_Q2_0_TYPE_SIZE, GGUFTorchLinear, _unpack_q4_k_scale_min_torch
+from .gguf import PRISM_Q2_0_NAME, PRISM_Q2_0_TYPE_SIZE, GGUFTorchLinear, _unpack_q4_k_scale_min_torch
 
 
 try:
@@ -1644,10 +1644,11 @@ class GGUFTritonKernel(GGUFTorchLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
-        if self.gguf_tensor_qtype not in {"Q1_0_g128", "Q2_0", "Q4_K", "Q5_K", "Q6_K"}:
+        if self.gguf_tensor_qtype not in {"Q1_0", "Q1_0_g128", PRISM_Q2_0_NAME, "Q4_K", "Q5_K", "Q6_K"}:
             raise NotImplementedError(
                 f"{self.__class__.__name__} only supports fused GGUF Triton formats "
-                f"(Q1_0_g128, Q2_0, Q4_K, Q5_K, Q6_K). Actual GGUF qtype: {self.gguf_tensor_qtype}. "
+                f"(Q1_0, Q1_0_g128, {PRISM_Q2_0_NAME}, Q4_K, Q5_K, Q6_K). "
+                f"Actual GGUF qtype: {self.gguf_tensor_qtype}. "
                 "Use BACKEND.GGUF_TORCH for unsupported GGUF formats."
             )
         self._gguf_triton_cache: dict[tuple[int, str], dict[str, Any]] = {}
@@ -1675,7 +1676,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
     def release_q2_prefill_cache(self) -> None:
         """Keep only Q2_0 scales needed by native decode; a later prefill rebuilds its code cache."""
 
-        if self.gguf_tensor_qtype != "Q2_0":
+        if self.gguf_tensor_qtype != PRISM_Q2_0_NAME:
             return
         for key, cached in self._gguf_triton_cache.items():
             if cached.get("qweight_ptr") != self.qweight.data_ptr():
@@ -1692,7 +1693,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
     def _build_triton_cache(self, device: torch.device) -> dict[str, Any]:
         blocks, _, _ = self._reshape_blocks(device=device)
 
-        if self.gguf_tensor_qtype == "Q1_0_g128":
+        if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:
             scale = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1).permute(1, 0).contiguous()
             capability = _cuda_device_capability(device)
             if _select_q1_0_g128_u32_layout(
@@ -1731,7 +1732,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
                 "use_u32": False,
             }
 
-        if self.gguf_tensor_qtype == "Q2_0":
+        if self.gguf_tensor_qtype == PRISM_Q2_0_NAME:
             cache_key = self._triton_cache_key(device)
             native_cache = self._gguf_q2_native_scale_cache.get(cache_key)
             if native_cache is not None and native_cache.get("qweight_ptr") == self.qweight.data_ptr():
@@ -1839,7 +1840,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
             x_work = x_flat.contiguous()
 
         capability = _cuda_device_capability(x_work.device)
-        if self.gguf_tensor_qtype == "Q2_0" and _use_q2_0_native_gemv(
+        if self.gguf_tensor_qtype == PRISM_Q2_0_NAME and _use_q2_0_native_gemv(
             capability=capability,
             rows=x_work.shape[0],
             in_features=self.padded_in_features,
@@ -1853,7 +1854,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
 
         cache = self._get_triton_cache(x_work.device)
 
-        if self.gguf_tensor_qtype == "Q1_0_g128":
+        if self.gguf_tensor_qtype in {"Q1_0", "Q1_0_g128"}:
             if cache.get("use_u32"):
                 fixed_u32_config = _select_q1_0_g128_u32_fixed_launch_config(
                     capability=_cuda_device_capability(x_work.device),
@@ -1903,7 +1904,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
             ):
                 return fused_q1_0_g128_k2048_matmul(x_work, cache["sign_bytes"], cache["scale"])
             return fused_q1_0_g128_matmul(x_work, cache["sign_bytes"], cache["scale"])
-        if self.gguf_tensor_qtype == "Q2_0":
+        if self.gguf_tensor_qtype == PRISM_Q2_0_NAME:
             fixed_config = _select_q2_0_fixed_launch_config(
                 capability=capability,
                 rows=x_work.shape[0],

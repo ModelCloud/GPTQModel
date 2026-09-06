@@ -879,9 +879,9 @@ _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH = {
     8: "q8_0",
 }
 _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS = {
-    "q1_0": 1.5,
+    "q1_0": 1.125,
     "q1_0_g128": 1.125,
-    "q2_0": 2.125,
+    "q2_0": 2.25,
     "q4_0": 4.5,
     "q8_0": 8.5,
     "q4_k": 4.5,

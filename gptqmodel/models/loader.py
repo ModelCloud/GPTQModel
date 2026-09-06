@@ -44,7 +44,6 @@ from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profi
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
-    build_shell_model,
     get_hf_config_dtype,
     get_hf_gguf_load_kwargs,
     has_native_transformers_causallm_support,
@@ -67,10 +66,8 @@ from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
 from ..utils.machete import _validate_machete_device_support
 from ..utils.marlin import _marlin_capability_supported, _validate_marlin_device_support
+from ..utils.swordfish import _validate_swordfish_device_support
 from ..utils.model import (
-    _checkpoint_quantized_module_names,
-    _checkpoint_tensor_keys,
-    _quantized_weight_suffix,
     apply_no_placement_to_device_map,
     auto_dtype,
     convert_gptq_v1_to_v2_format,
@@ -84,15 +81,9 @@ from ..utils.model import (
     is_embeddings_module_quantized,
     load_checkpoint_in_model_then_tie_weights,
     make_quant,
-    materialize_meta_tensors,
     no_placement_module_names,
     simple_dispatch_model,
 )
-from ..utils.moe_dispatch import (
-    enable_grouped_dispatch_for_model,
-    register_linear_loop_experts,
-)
-from ..utils.swordfish import _validate_swordfish_device_support
 from ._const import DEVICE, HAS_NPU, normalize_device
 
 
@@ -105,13 +96,13 @@ _EXTERNAL_BACKEND_FORMATS = {
         FORMAT.GPTQ,
         FORMAT.GEMM,
     },
+    BACKEND.SGLANG: {
+        FORMAT.GPTQ,
+        FORMAT.GPTQ_V2,
+        FORMAT.GEMM,
+        FORMAT.MARLIN,
+    },
 }
-
-
-def _normalize_attn_implementation(attn_implementation: Optional[str]) -> Optional[str]:
-    if attn_implementation == "auto":
-        return None
-    return attn_implementation
 
 
 def _validate_external_backend_format(backend: BACKEND, format_code: FORMAT) -> None:
@@ -120,21 +111,6 @@ def _validate_external_backend_format(backend: BACKEND, format_code: FORMAT) -> 
         return
     supported = ", ".join(f"FORMAT.{item.name}" for item in sorted(supported_formats, key=lambda item: item.name))
     raise ValueError(f"{backend} backend only supports {supported}: actual = {format_code}")
-
-
-def _external_preload_backend(backend: BACKEND, method: METHOD, format_code: FORMAT) -> BACKEND:
-    """Select the Torch shell that owns checkpoint tensors before external conversion."""
-
-    if backend == BACKEND.MLX and method == METHOD.QVQ and format_code in (
-        FORMAT.QVQ,
-        FORMAT.QVQ_V4,
-        FORMAT.QVQ_V4_L18,
-        FORMAT.QVQ_DUAL_V2,
-        FORMAT.QVQ_V2B4_P64,
-        FORMAT.QVQ_V2B2_P32,
-    ):
-        return BACKEND.QVQ
-    return backend
 
 
 def _external_runtime_device_kwargs(
@@ -185,7 +161,7 @@ def _maybe_print_module_tree(model) -> None:
         print_module_tree(model=model)
 
 
-def _convert_model_with_defuser(cls, model, cleanup_original: bool, enable_grouped_moe_dispatch: bool = False) -> bool:
+def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
     converted = defuser.convert_model(model, cleanup_original=cleanup_original)
 
     defuser_module_paths = getattr(cls, "defuser_module_paths", ())
@@ -196,12 +172,6 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool, enable_group
                 log.warn("Loader: defuser module path `%s` was not found.", module_path)
                 continue
             converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
-
-    # Only swap in the grouped GEMM MoE dispatch for post-quantization inference;
-    # quantization still needs the defused per-expert forward for per-module calibration.
-    if converted and enable_grouped_moe_dispatch:
-        register_linear_loop_experts()
-        enable_grouped_dispatch_for_model(model)
 
     return converted
 
@@ -264,6 +234,44 @@ def _override_attn_implementation(config: PretrainedConfig, attn_implementation:
             pass
 
 
+def _set_paged_attention_safe_cuda_graphs(model) -> None:
+    """Disable CUDA graph capture for paged attention by default.
+
+    ``transformers`` continuous batching defaults ``use_cuda_graph=True`` for flash-attention
+    paths, but ``flash_attn_with_kvcache`` is not currently CUDA-graph capture-safe. Setting
+    the model's default ``continuous_batching_config`` keeps paged Flash Attention working for
+    direct ``generate_batch`` / ``init_continuous_batching`` callers without requiring a monkey
+    patch.
+    """
+    if not hasattr(model, "config") or not isinstance(model.config, PretrainedConfig):
+        return
+
+    attn = getattr(model.config, "_attn_implementation", None) or getattr(
+        model.config, "attn_implementation", None
+    )
+    if not isinstance(attn, str) or "paged" not in [part.strip() for part in attn.split("|")]:
+        return
+
+    try:
+        from transformers import ContinuousBatchingConfig, GenerationConfig
+    except Exception:
+        return
+
+    gen_config = getattr(model, "generation_config", None)
+    if gen_config is None:
+        try:
+            gen_config = GenerationConfig.from_model_config(model.config)
+        except Exception:
+            return
+        model.generation_config = gen_config
+
+    cb_config = getattr(gen_config, "continuous_batching_config", None)
+    if not isinstance(cb_config, ContinuousBatchingConfig):
+        gen_config.continuous_batching_config = ContinuousBatchingConfig(use_cuda_graph=(False, False))
+    elif getattr(cb_config, "use_cuda_graph", None) is None:
+        cb_config.use_cuda_graph = (False, False)
+
+
 def _setup_rotation_online_had(model, rotation: Optional[str]) -> None:
     """Attach online Hadamard transform state to QuantLinear modules for rotation inference.
 
@@ -305,39 +313,15 @@ def _setup_rotation_online_had(model, rotation: Optional[str]) -> None:
 
 
 def _is_accelerated_attention_device(device: object) -> bool:
-    """Return True when the selected device can run fused attention."""
+    """Return True when the selected device can run CUDA/ROCm flash attention."""
 
     if isinstance(device, torch.device):
-        return device.type in {"cuda", "hip", "npu"}
+        return device.type in {"cuda", "hip"}
     if isinstance(device, DEVICE):
-        return device in {DEVICE.CUDA, DEVICE.ROCM, DEVICE.NPU}
+        return device in {DEVICE.CUDA, DEVICE.ROCM}
     if isinstance(device, str):
-        return device in {"cuda", "rocm", "hip", "npu"} or device.startswith("npu:")
+        return device in {"cuda", "rocm", "hip"}
     return False
-
-
-def _npu_flash_attention_available() -> bool:
-    if not HAS_NPU:
-        return False
-    try:
-        npu_ops = torch.ops.npu
-        return hasattr(npu_ops, "npu_prompt_flash_attention") and hasattr(npu_ops, "npu_incre_flash_attention")
-    except (AttributeError, RuntimeError):
-        return False
-
-
-def _flash_attention_2_available_for_device(device: object) -> bool:
-    if isinstance(device, torch.device):
-        if device.type == "npu":
-            return _npu_flash_attention_available()
-    elif isinstance(device, DEVICE):
-        if device == DEVICE.NPU:
-            return _npu_flash_attention_available()
-    elif isinstance(device, str):
-        if device == "npu" or device.startswith("npu:"):
-            return _npu_flash_attention_available()
-
-    return is_flash_attn_2_available()
 
 
 def _resolve_native_gguf_profile(
@@ -349,10 +333,10 @@ def _resolve_native_gguf_profile(
 
     if (
         native_gguf_qspec is not None
-        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
         and profile == PROFILE.AUTO
     ):
-        log.info("Loader: Bonsai/Prism Q1_0_g128 PROFILE.AUTO resolved to PROFILE.FAST.")
+        log.info("Loader: Q1_0 PROFILE.AUTO resolved to PROFILE.FAST.")
         return PROFILE.FAST
     return profile
 
@@ -366,7 +350,7 @@ def _should_use_dense_native_gguf_path(
 
     return (
         native_gguf_qspec is not None
-        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
         and profile == PROFILE.FAST
     )
 
@@ -469,46 +453,6 @@ def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype
 
     log.info(f"Loading Quantized Model: Auto fix `dtype` to `torch.float16` for `{qlinear.__name__}`")
     return torch.float16
-
-
-def _checkpoint_load_dtype(*, format_code: FORMAT, dtype):
-    """Choose Accelerate's checkpoint coercion policy for a quantized format."""
-
-    if format_code in (
-        FORMAT.QVQ,
-        FORMAT.QVQ_V4,
-        FORMAT.QVQ_V4_L18,
-        FORMAT.QVQ_DUAL_V2,
-        FORMAT.QVQ_V2B4_P64,
-        FORMAT.QVQ_V2B2_P32,
-    ):
-        # QVQ checkpoints intentionally mix FP32 SU/SV codec auxiliaries with
-        # model-dtype dense tensors and bias. Passing one global dtype to
-        # Accelerate destroys that contract; the already typed model shell is
-        # the point of truth for every checkpoint tensor instead.
-        return None
-    return dtype
-
-
-_SGLANG_SUPPORTED_QUANTIZATION = frozenset(
-    {
-        (METHOD.GPTQ, FORMAT.GPTQ),
-        (METHOD.GPTQ, FORMAT.GPTQ_V2),
-        (METHOD.GPTQ, FORMAT.MARLIN),
-        (METHOD.AWQ, FORMAT.GEMM),
-        (METHOD.AWQ, FORMAT.MARLIN),
-    }
-)
-
-
-def _validate_sglang_quantization(method: METHOD, format_code: FORMAT) -> None:
-    if (method, format_code) in _SGLANG_SUPPORTED_QUANTIZATION:
-        return
-
-    raise ValueError(
-        "SGLANG backend only supports GPTQ/GPTQ, GPTQ/GPTQ_V2, GPTQ/MARLIN, AWQ/GEMM, or AWQ/MARLIN: "
-        f"actual method = {method}, format = {format_code}"
-    )
 
 
 def check_versions(model_class, requirements: List[str]):
@@ -651,14 +595,7 @@ def _load_quantized_gguf_checkpoint_into_model(
     model: torch.nn.Module,
     gguf_checkpoint_path: str,
     tensor_key_mapping: dict[str, str],
-    device_map: Optional[Dict[str, Union[str, int, torch.device]]] = None,
 ) -> None:
-    from accelerate.utils.modeling import set_module_tensor_to_device
-    from transformers.modeling_utils import get_device
-
-    if device_map is None:
-        raise ValueError("Loader: `device_map` is required for native quantized GGUF loading.")
-
     reader = internal_gguf.GGUFReader(gguf_checkpoint_path)
     loaded: set[str] = set()
 
@@ -673,10 +610,6 @@ def _load_quantized_gguf_checkpoint_into_model(
 
         if isinstance(target_module, GGUFTorchLinear) and attr_name == "weight":
             resolved_target_name = f"{module_name}.qweight" if module_name else "qweight"
-
-        target_device = get_device(device_map, resolved_target_name, valid_torch_device=True)
-
-        if isinstance(target_module, GGUFTorchLinear) and attr_name == "weight":
             packed = torch.from_numpy(np.array(tensor.data, dtype=np.uint8, copy=True, order="C"))
             expected = _lookup_model_slot_tensor(model, resolved_target_name)
             if tuple(packed.shape) != tuple(expected.shape):
@@ -684,13 +617,7 @@ def _load_quantized_gguf_checkpoint_into_model(
                     f"Loader: GGUF qweight shape mismatch for `{resolved_target_name}`. "
                     f"Expected {tuple(expected.shape)}, got {tuple(packed.shape)}."
                 )
-            set_module_tensor_to_device(
-                model,
-                resolved_target_name,
-                target_device,
-                value=packed,
-                clear_cache=False,
-            )
+            _assign_model_slot_tensor(model, resolved_target_name, packed)
             loaded.add(resolved_target_name)
             continue
 
@@ -698,16 +625,10 @@ def _load_quantized_gguf_checkpoint_into_model(
         weights = internal_gguf.dequantize_to_torch(
             tensor.data,
             tensor.tensor_type,
-            device=target_device,
+            device=reference.device,
             dtype=reference.dtype,
         )
-        set_module_tensor_to_device(
-            model,
-            resolved_target_name,
-            target_device,
-            value=weights,
-            clear_cache=False,
-        )
+        _assign_model_slot_tensor(model, resolved_target_name, weights)
         loaded.add(resolved_target_name)
 
     missing_qweights = []
@@ -740,10 +661,9 @@ def ModelLoader(cls):
             device: Optional[Union[str, int]] = None,
             **model_init_kwargs,
     ):
-        # Compilation during quantization is gated by `torch_compile` in `utils/torch`
-        # (`hessian_inverse` compilation stays disabled). Do not globally disable
-        # dynamo here; that would also suppress legitimate `TorchLinear` and
-        # `model.optimize()` compilation after quantization.
+        # quantization is unsafe with GIL=0 and torch.compile/graphs
+        import torch._dynamo
+        torch._dynamo.disable()
 
         pretrained_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             pretrained_model_id_or_path,
@@ -761,13 +681,6 @@ def ModelLoader(cls):
         hf_gguf_load_kwargs = get_hf_gguf_load_kwargs(model_init_kwargs)
         model_init_kwargs_without_internal = dict(model_init_kwargs)
         model_init_kwargs_without_internal.pop(INTERNAL_HF_GGUF_FILE_KWARG, None)
-        atten_impl = _normalize_attn_implementation(
-            model_init_kwargs_without_internal.get(ATTN_IMPLEMENTATION, None)
-        )
-        if atten_impl is None:
-            model_init_kwargs_without_internal.pop(ATTN_IMPLEMENTATION, None)
-        else:
-            model_init_kwargs_without_internal[ATTN_IMPLEMENTATION] = atten_impl
 
         tokenizer_trust_remote_code = model_init_kwargs_without_internal.pop("tokenizer_trust_remote_code", trust_remote_code)
         model_local_path = get_model_local_path(pretrained_model_id_or_path, **model_init_kwargs_without_internal)
@@ -782,7 +695,9 @@ def ModelLoader(cls):
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         prepare_remote_model_init_compat(model_local_path, config)
 
-        if atten_impl is not None:
+        atten_impl = model_init_kwargs.get("attn_implementation", None)
+
+        if atten_impl is not None and atten_impl != "auto":
             log.info(f"Loader: overriding attn_implementation in config to `{atten_impl}`")
             _override_attn_implementation(config, atten_impl)
 
@@ -853,11 +768,11 @@ def ModelLoader(cls):
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
             if (
                 native_gguf_qspec is not None
-                and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+                and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
                 and atten_impl in {None, "auto"}
                 and _is_accelerated_attention_device(resolved_device)
                 and (config.model_type == "qwen3" or _supports_flash_attn_2(config))
-                and _flash_attention_2_available_for_device(resolved_device)
+                and is_flash_attn_2_available()
             ):
                 hf_model_init_kwargs[ATTN_IMPLEMENTATION] = "flash_attention_2"
                 log.info("Loader: Auto enabling flash_attention_2 for dense Bonsai PROFILE.%s.", effective_profile.name)
@@ -882,6 +797,8 @@ def ModelLoader(cls):
                 trust_remote_code=trust_remote_code,
                 model_local_path=model_local_path,
             )
+            _set_paged_attention_safe_cuda_graphs(instance.model)
+
             return instance
 
         load_start = time.perf_counter()
@@ -967,12 +884,12 @@ def ModelLoader(cls):
                     )
                     if getattr(model, "config", None) is config:
                         model.config = copy.deepcopy(config)
-                    _convert_model_with_defuser(cls, model, cleanup_original=False, enable_grouped_moe_dispatch=False)
+                    _convert_model_with_defuser(cls, model, cleanup_original=False)
                     model._model_init_kwargs = fallback_init_kwargs
                     _maybe_print_module_tree(model=model)
                     turtle_model = None
                 else:
-                    _convert_model_with_defuser(cls, model, cleanup_original=False, enable_grouped_moe_dispatch=False)
+                    _convert_model_with_defuser(cls, model, cleanup_original=False)
                     shell_model_init_kwargs = dict(model_init_kwargs_without_internal)
                     shell_model_init_kwargs.update(hf_gguf_load_kwargs)
                     model._model_init_kwargs = shell_model_init_kwargs
@@ -986,7 +903,6 @@ def ModelLoader(cls):
                             cls.resolve_hf_conversion_map_reversed(target_model=model)
                         ),
                         target_model=model,
-                        max_pinned_gb=getattr(quantize_config, "lazy_turtle_max_pinned_gb", None),
                     )
 
                     if turtle_model is None:
@@ -1009,7 +925,7 @@ def ModelLoader(cls):
                 )
                 if getattr(model, "config", None) is config:
                     model.config = copy.deepcopy(config)
-                _convert_model_with_defuser(cls, model, cleanup_original=False, enable_grouped_moe_dispatch=False)
+                _convert_model_with_defuser(cls, model, cleanup_original=False)
                 direct_model_init_kwargs = dict(model_init_kwargs_without_internal)
                 direct_model_init_kwargs.update(hf_gguf_load_kwargs)
                 model._model_init_kwargs = direct_model_init_kwargs
@@ -1038,6 +954,8 @@ def ModelLoader(cls):
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
         )
+        _set_paged_attention_safe_cuda_graphs(instance.model)
+
         timer = getattr(instance, "quant_region_timer", None)
         if timer is not None:
             source_label = getattr(instance, "model_local_path", None) or str(pretrained_model_id_or_path)
@@ -1059,6 +977,7 @@ def ModelLoader(cls):
             trust_remote_code: bool = False,
             **kwargs,
     ):
+
         # post-quant is safe with GIL=0 and torch.compile/graphs
 
         import torch._dynamo
@@ -1121,9 +1040,7 @@ def ModelLoader(cls):
         revision = kwargs_without_internal.pop("revision", None)
         subfolder = kwargs_without_internal.pop("subfolder", "")
         commit_hash = kwargs_without_internal.pop("_commit_hash", None)
-        attn_implementation = _normalize_attn_implementation(
-            kwargs_without_internal.pop(ATTN_IMPLEMENTATION, None)
-        )
+        attn_implementation = kwargs_without_internal.pop("attn_implementation", None)
 
         cached_file_kwargs = {
             "cache_dir": cache_dir,
@@ -1175,48 +1092,30 @@ def ModelLoader(cls):
             )
         else:
             qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
-        qcfg.device = device
-        qcfg.offload_to_disk = False
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
         backend = normalize_backend(backend, quant_method=export_quant_method)
 
-        # Prism/Bonsai sign-only GGUF tensors only have a torch runtime today.
-        # Bypass higher-priority GGUF backends that either do not support 1-bit
-        # formats or depend on optional external runtimes.
         if (
             native_gguf_qspec is not None
             and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
+            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON}
+        ):
+            raise ValueError(
+                "Native Q1_0 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or BACKEND.GGUF_TRITON. "
+                f"Actual backend: `{backend}`."
+            )
+        elif (
+            native_gguf_qspec is not None
+            and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q2_0
         ):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.GGUF_TORCH
             elif backend != BACKEND.GGUF_TORCH:
                 raise ValueError(
-                    "Native Q1_0 GGUF checkpoints currently require BACKEND.GGUF_TORCH. "
+                    "Native Q2_0 GGUF checkpoints currently require BACKEND.GGUF_TORCH. "
                     f"Actual backend: `{backend}`."
                 )
-        elif (
-            native_gguf_qspec is not None
-            and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
-            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON}
-        ):
-            raise ValueError(
-                "Native Q1_0_g128 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or BACKEND.GGUF_TRITON. "
-                f"Actual backend: `{backend}`."
-            )
-        elif (
-            native_gguf_qspec is not None
-            and native_gguf_qspec.tensor_qtype
-            in {
-                internal_gguf.GGMLQuantizationType.Q2_0,
-                internal_gguf.GGMLQuantizationType.PQ2_0,
-            }
-            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON}
-        ):
-            raise ValueError(
-                "Native Prism Q2_0/PQ2_0 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or "
-                f"BACKEND.GGUF_TRITON. Actual backend: `{backend}`."
-            )
 
         if format_code == FORMAT.EXL3:
             if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH):
@@ -1242,7 +1141,6 @@ def ModelLoader(cls):
             dtype = torch.float16
 
         dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
-        checkpoint_load_dtype = _checkpoint_load_dtype(format_code=format_code, dtype=dtype)
 
         # inject adapter into qcfg
         if adapter is not None:
@@ -1259,10 +1157,7 @@ def ModelLoader(cls):
 
         if backend == BACKEND.VLLM or backend == BACKEND.SGLANG:
             runtime_generate = None
-            if backend == BACKEND.SGLANG:
-                _validate_sglang_quantization(export_quant_method, format_code)
-            else:
-                _validate_external_backend_format(backend, format_code)
+            _validate_external_backend_format(backend, format_code)
 
             if backend == BACKEND.VLLM:
                 from ..utils.vllm import (
@@ -1293,7 +1188,7 @@ def ModelLoader(cls):
                 model, hf_config = load_model_by_sglang(
                     model=model_local_path,
                     trust_remote_code=trust_remote_code,
-                    dtype=dtype,
+                    dtype=torch.float16,
                     **sglang_kwargs,
                 )
                 model.config = hf_config
@@ -1309,6 +1204,7 @@ def ModelLoader(cls):
                 model_local_path=model_local_path,
             )
             instance._runtime_generate = runtime_generate
+            _set_paged_attention_safe_cuda_graphs(instance.model)
             return instance
 
         if format_code == FORMAT.MARLIN:
@@ -1396,35 +1292,58 @@ def ModelLoader(cls):
                 supports_flash_attn = None
 
             args = {}
-            if supports_flash_attn and _is_accelerated_attention_device(device):
+            if supports_flash_attn and device in [DEVICE.CUDA, DEVICE.ROCM]:
                 if attn_implementation is not None:
                     args[ATTN_IMPLEMENTATION] = attn_implementation
-                elif _flash_attention_2_available_for_device(device):
+                elif is_flash_attn_2_available():
                     args = {ATTN_IMPLEMENTATION: "flash_attention_2"}
                     log.info("Loader: Auto enabling flash attention2")
             set_dtype_compat(args, dtype)
 
             try:
-                model = build_shell_model(
-                    cls.loader,
-                    config,
-                    trust_remote_code=trust_remote_code,
-                    **args,
-                )
-            except RuntimeError as exc:
-                # Some trust_remote_code model constructors call int()/item() on tensors
-                # during __init__, which breaks when the shell is built on the meta device.
-                if not _is_meta_shell_build_error(exc):
-                    raise
-                log.warn(
-                    "Loader: meta-device shell build failed for `%s`; falling back to direct CPU load: %s",
-                    model_local_path,
-                    exc,
-                )
                 model = cls.loader.from_config(
                     config, trust_remote_code=trust_remote_code, **args
                 )
-            _convert_model_with_defuser(cls, model, cleanup_original=True, enable_grouped_moe_dispatch=True)
+            except FileNotFoundError as exc:
+                # trust_remote_code dynamic-module caches can be incomplete for
+                # legacy Deci files; rebuild missing shim + refresh once.
+                missing_path = str(exc)
+                if (
+                    trust_remote_code
+                    and "transformers_modules" in missing_path
+                    and "No such file or directory" in missing_path
+                ):
+                    missing_file = None
+                    if "'" in missing_path:
+                        parts = missing_path.split("'")
+                        if len(parts) >= 2:
+                            missing_file = parts[1]
+
+                    if (
+                        missing_file
+                        and missing_file.endswith("__configuration_llama.py")
+                        and not os.path.exists(missing_file)
+                    ):
+                        os.makedirs(os.path.dirname(missing_file), exist_ok=True)
+                        with open(missing_file, "w", encoding="utf-8") as fp:
+                            fp.write("from transformers.models.llama.configuration_llama import *\n")
+
+                    auto_map = getattr(config, "auto_map", None) or {}
+                    class_ref = auto_map.get("AutoModelForCausalLM")
+                    if isinstance(class_ref, str):
+                        from transformers.dynamic_module_utils import get_class_from_dynamic_module
+                        get_class_from_dynamic_module(
+                            class_ref,
+                            str(getattr(config, "_name_or_path", "")),
+                            force_download=True,
+                        )
+
+                    model = cls.loader.from_config(
+                        config, trust_remote_code=trust_remote_code, **args
+                    )
+                else:
+                    raise
+            _convert_model_with_defuser(cls, model, cleanup_original=True)
             model.checkpoint_file_name = model_save_name
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
@@ -1435,8 +1354,10 @@ def ModelLoader(cls):
 
             modules = find_modules(model)
             ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
-            input_embed_name = get_module_name(model, model.get_input_embeddings()) if model.get_input_embeddings() is not None else None
-            output_embed_name = get_module_name(model, model.get_output_embeddings()) if model.get_output_embeddings() is not None else None
+            input_embeddings = model.get_input_embeddings()
+            output_embeddings = model.get_output_embeddings()
+            input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
+            output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
             input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
                 model_dir=model_local_path,
                 input_embed_name=input_embed_name,
@@ -1450,6 +1371,7 @@ def ModelLoader(cls):
                 if output_embed_quantized and name == output_embed_name:
                     continue
 
+                # allow loading of quantized lm_head
                 if qcfg.lm_head and name == cls.lm_head:
                     continue
 
@@ -1492,61 +1414,16 @@ def ModelLoader(cls):
                 )
                 preload_qlinear_kernel = exl3_module_cls
             else:
-                # Partial GPTQ/AWQ checkpoints mix quantized modules (qweight present)
-                # with dense modules (weight present). Remove dense modules here so
-                # make_quant only replaces already-quantized modules with QLinear.
-                # QVQ uses trellis as its authoritative weight payload.
-                # QQQ stores weights as `B`, not `qweight`, so it is excluded from
-                # this probe; EXL3 is handled above.
-                if qcfg.method in (METHOD.GPTQ, METHOD.AWQ, METHOD.QVQ):
-                    checkpoint_keys = _checkpoint_tensor_keys(model_save_name)
-                    if checkpoint_keys is not None:
-                        payload_names = set(
-                            _checkpoint_quantized_module_names(
-                                checkpoint_keys,
-                                qcfg,
-                                candidates=set(modules),
-                            )
-                        )
-                        weight_suffix = _quantized_weight_suffix(qcfg)
-                        if 0 < len(payload_names) < len(modules):
-                            for name in list(modules.keys()):
-                                if name not in payload_names:
-                                    log.info(
-                                        "Partial checkpoint: `%s` has no %s payload, leaving dense.",
-                                        name,
-                                        weight_suffix,
-                                    )
-                                    del modules[name]
-                        elif payload_names:
-                            # Full quantized checkpoint: every module has its format-owned weight payload.
-                            pass
-                        elif qcfg.method == METHOD.QVQ:
-                            raise ValueError(
-                                "QVQ checkpoint has no `.trellis` tensors; refusing to replace dense modules "
-                                "with empty quantized buffers."
-                            )
-                        else:
-                            log.warn(
-                                "Checkpoint for %s method has no `.qweight` keys; "
-                                "leaving all modules dense. This may indicate a method/format mismatch.",
-                                qcfg.method.value,
-                            )
-
                 preload_qlinear_kernel = make_quant(
                     model,
                     qcfg=qcfg,
                     quant_result=modules,
-                    backend=_external_preload_backend(backend, qcfg.method, format_code),
+                    backend=backend,
                     lm_head_name=cls.lm_head,
                     device=device,
                     dtype=dtype,
                     is_sharded=is_sharded,
                 )
-                if qcfg.method == METHOD.QVQ:
-                    from ..quantization.qvq_rank8_checkpoint import prepare_rank8_checkpoint_buffers
-
-                    prepare_rank8_checkpoint_buffers(model, model_save_name, checkpoint_keys)
 
         if isinstance(requested_device_map, str) and requested_device_map not in [
                 "auto",
@@ -1886,7 +1763,7 @@ def ModelLoader(cls):
         ]:
             load_checkpoint_in_model_then_tie_weights(
                 model,
-                dtype=checkpoint_load_dtype,
+                dtype=dtype,
                 # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
                 checkpoint=model_save_name,
                 device_map=device_map,
@@ -1895,42 +1772,22 @@ def ModelLoader(cls):
             )
 
         if native_gguf_qspec is not None:
-            # Only materialize computed non-persistent buffers (e.g. RoPE inv_freq).
-            # The GGUF loader below allocates each quantized weight directly on its
-            # target device, so we avoid a transient full-model garbage allocation.
-            materialize_meta_tensors(model, device_map, only_non_persistent_buffers=True)
+            model = simple_dispatch_model(model, dispatch_device_map)
             _load_quantized_gguf_checkpoint_into_model(
                 model=model,
                 gguf_checkpoint_path=gguf_checkpoint_path,
                 tensor_key_mapping=gguf_tensor_key_mapping,
-                device_map=device_map,
             )
-            # Any non-quant persistent parameters/buffers not covered by the GGUF
-            # checkpoint are materialized after the load, then the model is dispatched.
-            materialize_meta_tensors(model, device_map)
-            model = simple_dispatch_model(model, dispatch_device_map)
         else:
-            # Buffers not present in the checkpoint (e.g. RoPE inv_freq) can be left on
-            # meta after init_empty_weights; allocate them on the right device before dispatch.
-            materialize_meta_tensors(model, device_map)
             # TODO: Why are we using this custom function and not dispatch_model?
             model = simple_dispatch_model(model, dispatch_device_map)
 
-        if backend == BACKEND.MLX and qcfg.method == METHOD.QVQ:
-            # MLX QVQ keeps the format-native Torch shell until the conversion
-            # below replaces its QVQLinear modules with QVQMLXLinear.  MLX is
-            # intentionally not a Torch quant-linear backend, so asking the
-            # generic selector for `backend=mlx` here rejects a valid QVQ
-            # checkpoint before the native conversion can run.
-            qlinear_kernel = preload_qlinear_kernel
-        elif format_code == FORMAT.EXL3:
+        if format_code == FORMAT.EXL3:
             qlinear_kernel = ExllamaV3TorchLinear if backend == BACKEND.EXL3_TORCH else ExllamaV3Linear
         else:
             qlinear_kernel = select_quant_linear(
                 bits=qcfg.runtime_bits,
-                # make_quant already selected dynamic modules independently;
-                # this value represents the default model contract.
-                dynamic=None,
+                dynamic=qcfg.dynamic,
                 group_size=qcfg.group_size,
                 desc_act=qcfg.desc_act,
                 sym=qcfg.sym,
@@ -1939,7 +1796,6 @@ def ModelLoader(cls):
                 quant_method=export_quant_method,
                 device=device,
                 pack_dtype=qcfg.pack_dtype,
-                dtype=dtype,
                 is_sharded=is_sharded,
             )
 
@@ -1959,123 +1815,29 @@ def ModelLoader(cls):
 
         model.eval()
 
-        if qcfg.method == METHOD.QVQ and backend != BACKEND.MLX:
-            from ..quantization.qvq_axis_policy import (
-                apply_qvq_transform_axis_overrides,
-                qvq_transform_axis_overrides_from_config,
-            )
-            from ..quantization.qvq_transform_runtime import (
-                install_qvq_grouped_p32_runtime_from_config,
-            )
-
-            apply_qvq_transform_axis_overrides(
-                model, qvq_transform_axis_overrides_from_config(qcfg)
-            )
-            grouped_p32_runtime = install_qvq_grouped_p32_runtime_from_config(
-                model, qcfg
-            )
-            if grouped_p32_runtime is not None:
-                log.info(
-                    "Kernel: compiled %d grouped QVQ P32 bases with %d plain "
-                    "fallbacks from %d bytes of checkpoint metadata.",
-                    len(grouped_p32_runtime.grouped_states),
-                    len(grouped_p32_runtime.plain_fallbacks),
-                    grouped_p32_runtime.checkpoint_metadata_bytes,
-                )
-
-        from ..nn_modules.qlinear.trilin import AwqTrilinLinear, TrilinLinear
-
-        if (
-            qlinear_kernel in (TrilinLinear, AwqTrilinLinear)
-            and qcfg.runtime_bits == 3
-            and qcfg.group_size == 128
-            and not qcfg.desc_act
-            and qcfg.sym
-        ):
-            from ..nn_modules.triton_utils.trilin_qkv import install_trilin_3bit_qkv
-            from ..nn_modules.triton_utils.trilin_swiglu import install_trilin_3bit_swiglu
-
-            fused_trilin_qkv = install_trilin_3bit_qkv(model)
-            if fused_trilin_qkv:
-                log.info(f"Kernel: installed {fused_trilin_qkv} sm80 Trilin 3-bit QKV kernels.")
-            fused_trilin_swiglu = install_trilin_3bit_swiglu(model)
-            if fused_trilin_swiglu:
-                log.info(f"Kernel: installed {fused_trilin_swiglu} sm80 Trilin 3-bit SwiGLU kernels.")
-
-        if (
-            native_gguf_qspec is not None
-            and native_gguf_qspec.tensor_qtype
-            in {
-                internal_gguf.GGMLQuantizationType.Q2_0,
-                internal_gguf.GGMLQuantizationType.PQ2_0,
-            }
-            and getattr(qlinear_kernel, "__name__", None) == "GGUFTritonKernel"
-        ):
-            from ..nn_modules.triton_utils.q2_attention import install_prism_q2_gqa_attention
-            from ..nn_modules.triton_utils.q2_qkv import install_prism_q2_qkv
-            from ..nn_modules.triton_utils.q2_residual import install_prism_q2_residuals
-            from ..nn_modules.triton_utils.q2_rotary import install_prism_q2_rotary
-            from ..nn_modules.triton_utils.q2_swiglu import install_prism_q2_swiglu
-            from ..nn_modules.triton_utils.rms_norm import install_prism_q2_rms_norms
-
-            fused_rms_norms = install_prism_q2_rms_norms(model)
-            if fused_rms_norms:
-                log.info(f"Kernel: installed {fused_rms_norms} sm80 Prism Q2 RMSNorm kernels.")
-            fused_swiglu = install_prism_q2_swiglu(model)
-            if fused_swiglu:
-                log.info(f"Kernel: installed {fused_swiglu} sm80 Prism Q2 SwiGLU kernels.")
-            fused_qkv = install_prism_q2_qkv(model)
-            if fused_qkv:
-                log.info(f"Kernel: installed {fused_qkv} sm80 Prism Q2 QKV kernels.")
-            fused_rotary = install_prism_q2_rotary(model)
-            if fused_rotary:
-                log.info(f"Kernel: installed {fused_rotary} sm80 Prism Q2 rotary kernels.")
-            fused_attention = install_prism_q2_gqa_attention(model)
-            if fused_attention:
-                log.info(f"Kernel: installed {fused_attention} sm80 Prism Q2 GQA attention kernels.")
-            fused_residuals = install_prism_q2_residuals(model)
-            if fused_residuals:
-                log.info(f"Kernel: installed {fused_residuals} sm80 Prism Q2 residual-fused decoder layers.")
-
         if backend == BACKEND.MLX:
             import tempfile
             try:
                 from mlx_lm import load
                 from mlx_lm.utils import save_config, save_model
 
-                from ..utils.mlx import (
-                    convert_gptq_to_mlx_weights,
-                    convert_qvq_to_mlx_model,
-                    mlx_generate,
-                )
+                from ..utils.mlx import convert_gptq_to_mlx_weights, mlx_generate
             except ModuleNotFoundError as exception:
                 raise type(exception)(
                     "GPT-QModel load mlx model required dependencies are not installed.",
                     "Please install via `pip install gptqmodel[mlx] --no-build-isolation`.",
                 )
 
-            if format_code in (
-                FORMAT.QVQ,
-                FORMAT.QVQ_V4,
-                FORMAT.QVQ_V4_L18,
-                FORMAT.QVQ_DUAL_V2,
-                FORMAT.QVQ_V2B4_P64,
-                FORMAT.QVQ_V2B2_P32,
-            ):
-                model = convert_qvq_to_mlx_model(model_id_or_path, model, cls.lm_head)
-            else:
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    mlx_weights, mlx_config = convert_gptq_to_mlx_weights(
-                        model_id_or_path, model, qcfg.to_dict(), cls.lm_head
-                    )
+            with tempfile.TemporaryDirectory() as temp_dir:
+                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, qcfg.to_dict(), cls.lm_head)
 
-                    save_model(temp_dir, mlx_weights, donate_model=True)
-                    save_config(mlx_config, config_path=temp_dir + "/config.json")
-                    tokenizer.save_pretrained(temp_dir)
+                save_model(temp_dir, mlx_weights, donate_model=True)
+                save_config(mlx_config, config_path=temp_dir + "/config.json")
+                tokenizer.save_pretrained(temp_dir)
 
-                    model, _ = load(temp_dir)
+                model, _ = load(temp_dir)
 
-            cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
+                cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
 
 
         instance = cls(
@@ -2089,6 +1851,7 @@ def ModelLoader(cls):
             model_local_path=model_local_path,
         )
         _setup_rotation_online_had(instance.model, qcfg.rotation)
+        _set_paged_attention_safe_cuda_graphs(instance.model)
         return instance
 
     cls.from_quantized = from_quantized
