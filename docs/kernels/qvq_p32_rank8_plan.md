@@ -31,8 +31,11 @@ agent guides route these changes through `graph-safe-kernels`. Completion must
 cover preparation, allocation/pool ownership, non-default streams, grouped child
 lifetimes, mode/shape invalidation, repeated replay, native FFI and actual ZML
 command buffers. Existing Python and native graph tests prove only their tested
-paths. Ampere/ROCm providers, quantization kernel integrations, TP/KV execution,
-and remaining capture-sensitive lazy paths still require an explicit audit.
+paths. The managed CUDA extension and standalone Ampere window/grouped
+operators now fail closed on cold JIT/operator registration during capture;
+callers must prewarm them. ROCm providers, quantization kernel integrations,
+TP/KV execution, and remaining capture-sensitive lazy paths still require an
+explicit audit.
 
 The native prepared-graph API owns its temporary allocation pool and can insert
 the existing window/rank8 operator as a child of an enclosing CUDA capture. The
