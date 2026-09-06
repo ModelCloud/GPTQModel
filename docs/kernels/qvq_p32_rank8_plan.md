@@ -166,6 +166,12 @@ shared-memory exchange and factor reuse, then evaluate padded Tensor Core
 projection and integration with the WGMMA producer/consumer pipeline. The
 full phase requirements above remain open.
 
+Grouped execution now also enforces each child's prepared `min_m`/`max_m`
+range before selecting a backend. A grouped policy tuned for one M therefore
+falls back before launch when presented with another M, instead of silently
+reusing a BM/BN policy outside its measured shape bucket. The boundary is
+covered by `test_grouped_policy_rejects_m_outside_prepared_range_before_device_dispatch`.
+
 A direct H200 probe removed the single-segment BN128 guard for two 256-wide
 children. At M64 it produced mismatched grouped output in 16,132 of 16,384
 elements (maximum absolute error about 4.79). The guard therefore remains in
