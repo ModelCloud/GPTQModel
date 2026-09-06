@@ -8,6 +8,17 @@ import torch
 from gptqmodel.nn_modules.qlinear.qvq import _qvq_hadamard_fused
 
 
+def test_rank8_epilogue_warp_policy_is_explicit_and_validated():
+    from gptqmodel.utils.qvq_rank8_triton import _rank8_num_warps
+
+    assert _rank8_num_warps(2048, None) == 4
+    assert _rank8_num_warps(8192, 0) == 8
+    assert _rank8_num_warps(8192, 4) == 4
+    assert _rank8_num_warps(8192, 8) == 8
+    with pytest.raises(ValueError, match="num_warps"):
+        _rank8_num_warps(8192, 3)
+
+
 def test_rank8_triton_rejects_cold_compile_during_graph_capture(monkeypatch):
     from gptqmodel.utils import qvq_rank8_triton
 

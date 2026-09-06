@@ -22,6 +22,22 @@ _GRAPH_WARM_KEYS: set[tuple[object, ...]] = set()
 _GRAPH_WARM_KEYS_LOCK = threading.Lock()
 
 
+def _rank8_num_warps(n: int, requested: int | None) -> int:
+    """Resolve the epilogue launch width from the selected BM/BN policy.
+
+    The rank8 epilogue is part of the complete tuned operator.  When the base
+    window candidate supplies a BN-sized warp policy, carry that decision into
+    the correction epilogue instead of silently launching a different fixed
+    geometry.  A zero/None request preserves the historical width heuristic.
+    """
+
+    if requested in (None, 0):
+        return 4 if n <= 4096 else 8
+    if requested not in (1, 2, 4, 8):
+        raise ValueError("rank8 epilogue num_warps must be one of 1, 2, 4, or 8")
+    return requested
+
+
 def _rank8_graph_key(device: torch.device, *parts: object) -> tuple[object, ...]:
     return (device.type, device.index, *parts)
 
@@ -301,7 +317,16 @@ def _rank8_project_output_epilogue_masked(
 
 
 def rank8_output_epilogue(
-    hidden, b, base, sv, bias=None, *, hadamard=True, output_dtype=torch.float32, rank8_enabled=True
+    hidden,
+    b,
+    base,
+    sv,
+    bias=None,
+    *,
+    hadamard=True,
+    output_dtype=torch.float32,
+    rank8_enabled=True,
+    num_warps=None,
 ):
     """Complete the existing output epilogue with an optional final FP16 store."""
     if output_dtype not in (torch.float16, torch.float32):
@@ -337,6 +362,7 @@ def rank8_output_epilogue(
     output = torch.empty((m, n), device=base.device, dtype=output_dtype)
     if not m:
         return output
+    launch_warps = _rank8_num_warps(n, num_warps)
     key = _rank8_graph_key(
         base.device,
         "output_epilogue",
@@ -349,6 +375,7 @@ def rank8_output_epilogue(
         str(sv.dtype),
         None if bias is None else str(bias.dtype),
         "masked" if not hadamard and n & (n - 1) else "butterfly",
+        launch_warps,
     )
     _require_rank8_kernel_warm(key)
     if not hadamard and n & (n - 1):
@@ -365,7 +392,7 @@ def rank8_output_epilogue(
             base.stride(0),
             bias is not None,
             rank8_enabled,
-            num_warps=4 if n <= 4096 else 8,
+            num_warps=launch_warps,
             enable_fp_fusion=False,
         )
     else:
@@ -388,7 +415,7 @@ def rank8_output_epilogue(
             divisor,
             reciprocal,
             rank8_enabled,
-            num_warps=4 if n <= 4096 else 8,
+            num_warps=launch_warps,
             enable_fp_fusion=False,
         )
     _mark_rank8_kernel_warm(key)
@@ -405,6 +432,7 @@ def rank8_project_output_epilogue(
     *,
     hadamard=True,
     output_dtype=torch.float32,
+    num_warps=None,
 ):
     """Fuse ``X' @ A`` with rank8 expansion and the output epilogue.
 
@@ -457,6 +485,7 @@ def rank8_project_output_epilogue(
     output = torch.empty((m, n), device=base.device, dtype=output_dtype)
     if not m:
         return output
+    launch_warps = _rank8_num_warps(n, num_warps)
     key = _rank8_graph_key(
         base.device,
         "project_output_epilogue",
@@ -469,6 +498,7 @@ def rank8_project_output_epilogue(
         str(sv.dtype),
         None if bias is None else str(bias.dtype),
         "masked" if not hadamard and n & (n - 1) else "butterfly",
+        launch_warps,
     )
     _require_rank8_kernel_warm(key)
     if not hadamard and n & (n - 1):
@@ -487,7 +517,7 @@ def rank8_project_output_epilogue(
             64,
             base.stride(0),
             bias is not None,
-            num_warps=4 if n <= 4096 else 8,
+            num_warps=launch_warps,
             num_stages=2,
             enable_fp_fusion=False,
         )
@@ -514,7 +544,7 @@ def rank8_project_output_epilogue(
             divisor,
             reciprocal,
             output_dtype == torch.float16,
-            num_warps=4 if n <= 4096 else 8,
+            num_warps=launch_warps,
             num_stages=2,
             enable_fp_fusion=False,
         )

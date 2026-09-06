@@ -563,6 +563,13 @@ def fused_rank8_output(layer, transformed, base, compute_dtype, *, hidden=None, 
     validate_rank8_state(layer)
     from ..utils.qvq_rank8_triton import rank8_output_epilogue
 
+    # The correction epilogue is part of the same whole-operator candidate as
+    # the window kernel.  Carry an explicit BN-derived warp width when the
+    # selected Hopper policy provides one; M16/legacy policies retain the
+    # historical N-based heuristic.
+    block_n = getattr(layer._p32_window_config, "block_n", 0)
+    rank8_num_warps = 4 if block_n == 64 else 8 if block_n == 128 else None
+
     enabled = bool(getattr(layer, "_p32_rank8_enabled", False))
     if (
         enabled
@@ -587,6 +594,7 @@ def fused_rank8_output(layer, transformed, base, compute_dtype, *, hidden=None, 
                 and not layer.in_features & (layer.in_features - 1)
                 else torch.float32
             ),
+            num_warps=rank8_num_warps,
         )
     if enabled and hidden is None:
         hidden = _project_rank8(layer, transformed)
@@ -607,6 +615,7 @@ def fused_rank8_output(layer, transformed, base, compute_dtype, *, hidden=None, 
             and not layer.in_features & (layer.in_features - 1)
             else torch.float32
         ),
+        num_warps=rank8_num_warps,
     )
 
 
