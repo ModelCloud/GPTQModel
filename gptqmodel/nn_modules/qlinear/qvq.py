@@ -496,6 +496,7 @@ class QVQLinear(BaseQuantLinear):
             "rejection_reasons": {},
         }
         self._qvq_amd_folded_hot_cache: tuple | None = None
+        self._qvq_p32_amd_warm_key: tuple | None = None
         pgc16_levels_for_version(self.codebook_version)
 
         missing = {"trellis", "SU", "SV"} - set(tensors) if tensors else set()
@@ -573,6 +574,7 @@ class QVQLinear(BaseQuantLinear):
         state["_qvq_cuda_window_cache"] = None
         state["_qvq_fp8_levels_cache"] = None
         state["_qvq_amd_folded_hot_cache"] = None
+        state["_qvq_p32_amd_warm_key"] = None
         return state
 
     def __setstate__(self, state):
@@ -597,6 +599,7 @@ class QVQLinear(BaseQuantLinear):
             self._qvq_fp8_telemetry.setdefault("fallback_reasons", {})
             self._qvq_fp8_telemetry.setdefault("rejection_reasons", {})
         self._qvq_amd_folded_hot_cache = None
+        self._qvq_p32_amd_warm_key = None
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         super()._save_to_state_dict(destination, prefix, keep_vars)
@@ -625,6 +628,7 @@ class QVQLinear(BaseQuantLinear):
                 setattr(self, name, torch.empty_like(value, device=self.trellis.device))
         # A newly loaded payload must be validated before enabling recovery.
         self._p32_rank8_enabled = False
+        self._qvq_p32_amd_warm_key = None
         selector_key = f"{prefix}bank_ids"
         if self.bank_count in (2, 4) and selector_key not in state_dict:
             self._bank_ids_loaded = False
@@ -1205,6 +1209,7 @@ class QVQLinear(BaseQuantLinear):
             self._qvq_cuda_bank_cache = None
             self._qvq_cuda_window_cache = None
             self._qvq_amd_folded_hot_cache = None
+            self._qvq_p32_amd_warm_key = None
         if self.trellis.device.type == "mps":
             from ...utils.qvq_mps import _prepare_qvq_mps_compander
 
@@ -1230,6 +1235,7 @@ class QVQLinear(BaseQuantLinear):
             self._qvq_cuda_bank_cache = None
             self._qvq_cuda_window_cache = None
             self._qvq_amd_folded_hot_cache = None
+            self._qvq_p32_amd_warm_key = None
         # ModuleLooper performs device handoffs from inference-mode workers.
         # Letting Module._apply inherit that mode would recreate all cache-keyed
         # buffers without mutation counters immediately after post_init made
