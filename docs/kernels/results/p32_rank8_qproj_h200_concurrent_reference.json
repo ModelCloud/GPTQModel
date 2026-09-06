@@ -1,9 +1,9 @@
 {
   "scope": "accepted-factor Q projection replay with experimental concurrent reference rank8 producer; graph-safe stream/event overlap candidate; not full-model quality",
-  "revision": "65b23353fe4576531a1981ceb32c1ca6d9ffcc42",
+  "revision": "6d2ec2c5c1007c8ac0687f49a4ebe1c97a063fd7",
   "worktree_dirty": false,
   "sources": {
-    "gptqmodel/quantization/qvq_rank8.py": "7352d5e8478a74a96b11c212dece0a745571bd511f4c863cc83999139c368279",
+    "gptqmodel/quantization/qvq_rank8.py": "bc01671a3f4f3723226f3842f5ad1dfb1c943494ec44e4795adc103dac0db9fc",
     "gptqmodel/nn_modules/qlinear/qvq.py": "345476592554e9bb0240fe596d98d2dcc744fdf959a4401d7f8d7801031cbd38",
     "gptqmodel/nn_modules/qvq_grouped_runtime.py": "32f2cb18868c6d79afb5dcdb7f0c379c10521b9b21a585ca43ca5a8640e071fd",
     "gptqmodel/utils/qvq_rank8_triton.py": "c54088e365a3c1e38feb87964efa01c399cd47be725b10c4e5e38dd49f84349f",
@@ -45,17 +45,17 @@
       "block_m": 0,
       "block_n": 0,
       "chunk_m": 0,
-      "mean_us": 31.800320744514465,
-      "median_us": 31.71040117740631,
-      "p95_us": 31.71840012073517,
+      "mean_us": 31.77631974220276,
+      "median_us": 31.697601079940796,
+      "p95_us": 31.727999448776245,
       "mae": 0.0,
       "max": 0.0,
       "samples_us": [
-        32.26560056209564,
-        31.71840012073517,
-        31.71040117740631,
-        31.68320059776306,
-        31.624001264572144
+        32.150399684906006,
+        31.727999448776245,
+        31.697601079940796,
+        31.66559934616089,
+        31.63999915122986
       ],
       "allocated_bytes": 4850688,
       "peak_allocated_bytes": 6423552
@@ -72,17 +72,17 @@
       "block_m": 0,
       "block_n": 0,
       "chunk_m": 0,
-      "mean_us": 58.32480072975159,
-      "median_us": 58.24480056762695,
-      "p95_us": 58.25120210647583,
+      "mean_us": 58.33696007728577,
+      "median_us": 58.240002393722534,
+      "p95_us": 58.30399990081787,
       "mae": 0.0,
       "max": 0.0,
       "samples_us": [
-        58.67199897766113,
-        58.24480056762695,
-        58.238399028778076,
-        58.25120210647583,
-        58.21760296821594
+        58.71359705924988,
+        58.30399990081787,
+        58.240002393722534,
+        58.23519825935364,
+        58.19200277328491
       ],
       "allocated_bytes": 105513984,
       "peak_allocated_bytes": 107682816
@@ -99,17 +99,17 @@
       "block_m": 0,
       "block_n": 0,
       "chunk_m": 0,
-      "mean_us": 214.27583694458008,
-      "median_us": 214.2143964767456,
-      "p95_us": 214.23840522766113,
+      "mean_us": 214.2246389389038,
+      "median_us": 214.13118839263916,
+      "p95_us": 214.2064094543457,
       "mae": 0.0,
       "max": 0.0,
       "samples_us": [
-        214.63840007781982,
-        214.17279243469238,
-        214.2143964767456,
-        214.23840522766113,
-        214.11519050598145
+        214.69919681549072,
+        214.2064094543457,
+        213.99519443511963,
+        214.09120559692383,
+        214.13118839263916
       ],
       "allocated_bytes": 127009792,
       "peak_allocated_bytes": 153224192
@@ -126,17 +126,17 @@
       "block_m": 0,
       "block_n": 0,
       "chunk_m": 0,
-      "mean_us": 302.643837928772,
-      "median_us": 302.5968074798584,
-      "p95_us": 302.6671886444092,
+      "mean_us": 302.5964832305908,
+      "median_us": 302.5696039199829,
+      "p95_us": 302.79200077056885,
       "mae": 0.0,
       "max": 0.0,
       "samples_us": [
-        303.12159061431885,
-        302.3200035095215,
-        302.51359939575195,
-        302.6671886444092,
-        302.5968074798584
+        302.80799865722656,
+        302.37441062927246,
+        302.79200077056885,
+        302.5696039199829,
+        302.4384021759033
       ],
       "allocated_bytes": 160564224,
       "peak_allocated_bytes": 194282496
@@ -153,17 +153,17 @@
       "block_m": 0,
       "block_n": 0,
       "chunk_m": 0,
-      "mean_us": 814.5123291015625,
-      "median_us": 814.6240234375,
-      "p95_us": 814.6927833557129,
+      "mean_us": 814.4735908508301,
+      "median_us": 814.4224166870117,
+      "p95_us": 814.6512031555176,
       "mae": 0.0,
       "max": 0.0,
       "samples_us": [
-        814.8112297058105,
-        814.6927833557129,
-        814.6240234375,
-        814.4656181335449,
-        813.9679908752441
+        815.0959968566895,
+        814.6512031555176,
+        814.4224166870117,
+        814.2895698547363,
+        813.9087677001953
       ],
       "allocated_bytes": 303170560,
       "peak_allocated_bytes": 420611072
@@ -180,17 +180,17 @@
       "block_m": 0,
       "block_n": 0,
       "chunk_m": 0,
-      "mean_us": 1106.5510368347168,
-      "median_us": 1106.6543579101562,
-      "p95_us": 1106.715202331543,
+      "mean_us": 1106.5926361083984,
+      "median_us": 1106.6368103027344,
+      "p95_us": 1106.710433959961,
       "mae": 0.0,
       "max": 0.0,
       "samples_us": [
-        1106.715202331543,
-        1105.9632301330566,
-        1106.4224243164062,
-        1106.9999694824219,
-        1106.6543579101562
+        1107.1215629577637,
+        1106.710433959961,
+        1106.6368103027344,
+        1106.3023567199707,
+        1106.1920166015625
       ],
       "allocated_bytes": 336724992,
       "peak_allocated_bytes": 471401472
@@ -208,19 +208,19 @@
   "candidate": "concurrent_reference",
   "comparison": {
     "128": {
-      "window_off_us": 31.71040117740631,
-      "concurrent_reference_on_us": 58.24480056762695,
-      "overhead_percent": 83.67727434847599
+      "window_off_us": 31.697601079940796,
+      "concurrent_reference_on_us": 58.240002393722534,
+      "overhead_percent": 83.73630940348535
     },
     "2048": {
-      "window_off_us": 214.2143964767456,
-      "concurrent_reference_on_us": 302.5968074798584,
-      "overhead_percent": 41.25885676068802
+      "window_off_us": 214.13118839263916,
+      "concurrent_reference_on_us": 302.5696039199829,
+      "overhead_percent": 41.30104362246366
     },
     "8192": {
-      "window_off_us": 814.6240234375,
-      "concurrent_reference_on_us": 1106.6543579101562,
-      "overhead_percent": 35.84848053465999
+      "window_off_us": 814.4224166870117,
+      "concurrent_reference_on_us": 1106.6368103027344,
+      "overhead_percent": 35.87995463145788
     }
   },
   "interpretation": "The prepared auxiliary stream preserves reference arithmetic and graph replay correctness, but this H200 Q fixture shows no useful overlap: the candidate is slower than the established fused-epilogue reference at M128/2048/8192. It remains exposed to shape-level tuning and is not promoted by default.",
