@@ -661,7 +661,10 @@ The managed CUDA extension, Hopper WGMMA bridge, Ampere provider, rank8 Triton
 producer/epilogue, YAQA Triton projector and ROCm YAQA trusted recurrence all
 reject cold JIT/operator registration during capture. Warm and validate each
 shape, dtype, device and correction state before creating a graph; replay does
-not tune, allocate kernel caches or change policy.
+not tune, allocate kernel caches or change policy. The managed CUDA path also
+requires the PGC16 level table and vector-size-four bank selectors to be
+prepared and validated before capture, so those first-use allocations and
+device-side validation synchronizations cannot enter a graph.
 
 ```python
 from gptqmodel.quantization.qvq_window_graphs import P32WindowGraphs

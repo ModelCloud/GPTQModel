@@ -1719,6 +1719,7 @@ class QVQLinear(BaseQuantLinear):
                 v2b4_p64=self.v2b4_p64,
                 v2b2_p32=self.v2b2_p32,
                 bank_alt_id=cuda_bank_alt_id,
+                _bank_ids_validated=True,
             )
         if x.device.type == "cpu":
             from ...utils.qvq_cpu import qvq_cpu_gemv, qvq_cpu_supported

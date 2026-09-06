@@ -88,6 +88,32 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_viterbi_v2_segment_banked,
 )
 
+
+@pytest.mark.parametrize(
+    ("cache_name", "resolver", "label"),
+    (
+        ("_QVQ_CUDA_OP", qvq_cuda_utils._qvq_cuda_op, "gemv"),
+        ("_QVQ_CUDA_V4_OP", qvq_cuda_utils._qvq_cuda_v4_op, "gemv_v4"),
+        ("_QVQ_CUDA_HADAMARD_OP", qvq_cuda_utils._qvq_cuda_hadamard_op, "hadamard"),
+    ),
+)
+def test_qvq_cuda_resolvers_reject_cold_registration_during_graph_capture(
+    monkeypatch, cache_name, resolver, label
+):
+    monkeypatch.setattr(qvq_cuda_utils, cache_name, None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match=f"{label}.*before CUDA Graph capture"):
+        resolver()
+
+
+def test_qvq_cuda_level_cache_rejects_cold_allocation_during_graph_capture(monkeypatch):
+    monkeypatch.setattr(qvq_cuda_utils, "_PGC16_LEVELS", {})
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match="PGC16 level table.*before CUDA Graph capture"):
+        qvq_cuda_utils._pgc16_levels(torch.device("cuda", 0), PGC16_CODEBOOK_VERSION)
+
 pytestmark = [
     pytest.mark.cuda,
     pytest.mark.skipif(

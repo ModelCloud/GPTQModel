@@ -468,6 +468,7 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
             bank_alt_ids=self.bank_alt_ids,
             bank_alt_boundaries=self.bank_alt_boundaries,
             _bank_alt_ids_validated=True,
+            _bank_ids_validated=True,
         )
         self.grouped_gemv_invocations += 1
         leading_shape = transformed.shape[:-1]
