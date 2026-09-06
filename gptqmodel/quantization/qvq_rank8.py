@@ -1369,6 +1369,7 @@ class Rank8Calibration:
             if (
                 self.audit_inputs.ndim != 2
                 or not self.audit_inputs.shape[0]
+                or self.audit_inputs.shape[1] != self.train_inputs.shape[1]
                 or not torch.isfinite(self.audit_inputs).all()
                 or not audit_ids
                 or len(audit_ids) != len(counts)
