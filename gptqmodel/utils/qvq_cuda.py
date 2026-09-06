@@ -105,6 +105,13 @@ def _require_qvq_cuda_op_warm(op: object | None, name: str) -> None:
         )
 
 
+def _reject_qvq_cuda_capture(name: str) -> None:
+    """Reject host-validated quantization helpers during CUDA Graph capture."""
+
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(f"QVQ CUDA {name} cannot run during CUDA Graph capture")
+
+
 def _qvq_cuda_root() -> Path:
     return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "qvq"
 
@@ -192,6 +199,7 @@ def _extension_api():
 def qvq_cuda_norm_rank_telemetry_snapshot(device: torch.device | str | int) -> dict[str, int | float | bool | str]:
     """Return cumulative exact-pruning work counters for one CUDA device."""
 
+    _reject_qvq_cuda_capture("norm-rank telemetry")
     resolved = torch.device("cuda", device) if isinstance(device, int) else torch.device(device)
     with torch.cuda.device(resolved):
         values = _extension_api().op("qvq_cuda", "norm_rank_telemetry_snapshot")()
@@ -686,6 +694,7 @@ def qvq_cuda_viterbi(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the exact L16 Viterbi recurrence in one persistent block per sequence."""
 
+    _reject_qvq_cuda_capture("Viterbi quantization")
     bits = normalize_qvq_rate(bits)
     if vector_size not in (2, 4):
         raise ValueError("QVQ CUDA Viterbi vector_size must be 2 or 4")
@@ -746,6 +755,7 @@ def _qvq_cuda_viterbi_trusted(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run V2 after YAQA has deferred all dynamic value/range checks."""
 
+    _reject_qvq_cuda_capture("trusted Viterbi quantization")
     transition_bits = qvq_transition_bits(normalize_qvq_rate(bits), vector_size=2)
     return _qvq_cuda_viterbi_trusted_op()(sequences, codebook, transition_bits, overlap, step_weights)
 
@@ -764,6 +774,7 @@ def qvq_cuda_viterbi_banked(
     retained as a separately computed oracle.
     """
 
+    _reject_qvq_cuda_capture("banked Viterbi quantization")
     bits = normalize_qvq_rate(bits)
     transition_bits = qvq_transition_bits(bits, vector_size=4)
     if transition_bits not in (4, 6, 8, 10, 12, 14, 16):
@@ -832,6 +843,7 @@ def qvq_cuda_viterbi_v2_segment_banked(
     direct low-level callers keep the historical automatic behavior.
     """
 
+    _reject_qvq_cuda_capture("segmented Viterbi quantization")
     bits = normalize_qvq_rate(bits)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     if transition_bits not in (2, 3, 4, 5, 6, 7):

@@ -134,6 +134,13 @@ def test_qvq_cuda_grouped_bank_validation_rejects_capture_sync(monkeypatch):
             _bank_alt_ids_validated=False,
         )
 
+
+def test_qvq_cuda_quantization_helpers_reject_graph_capture(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match="cannot run during CUDA Graph capture"):
+        qvq_cuda_utils._reject_qvq_cuda_capture("Viterbi quantization")
+
 pytestmark = [
     pytest.mark.cuda,
     pytest.mark.skipif(
