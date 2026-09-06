@@ -3942,8 +3942,8 @@ def test_qvq_cuda_bfloat16_recovery_uses_completed_output_finiteness():
     layer = QVQLinear(bits=2, in_features=16, out_features=16, tensors=tensors).eval()
     calls = []
 
-    def fake_compute(inputs, compute_dtype):
-        calls.append((inputs.dtype, compute_dtype))
+    def fake_compute(inputs, compute_dtype, *, output_dtype=None):
+        calls.append((inputs.dtype, compute_dtype, output_dtype))
         return torch.full((inputs.shape[0], 16), float("inf"), device="cuda") if len(calls) == 1 else torch.ones(
             (inputs.shape[0], 16), device="cuda"
         )
