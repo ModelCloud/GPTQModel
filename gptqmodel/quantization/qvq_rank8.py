@@ -1272,14 +1272,20 @@ def load_window_package(package, *, device="cpu", config=None, retain_planar=Fal
         tensors.pop("window_words")
     else:
         # The deployment package owns the continuous window on the execution
-        # device.  Keep the canonical planar reconstruction CPU-side only for
-        # legacy/debug access; Hopper/Ampere window consumers never repack or
-        # retain a device planar copy.
-        planar = repack_p32_window_to_planar(
-            package["tensors"]["window_words"], bits=metadata["bits"]
+        # device.  Do not reconstruct planar state during a normal CUDA load;
+        # the window-only constructor validates the payload directly.  The
+        # explicit legacy/debug option is the sole compatibility path that
+        # materializes a CPU planar tensor.
+        planar = (
+            repack_p32_window_to_planar(
+                package["tensors"]["window_words"], bits=metadata["bits"]
+            )
+            if retain_planar
+            else None
         )
         window_only = True
-    tensors["trellis"] = planar
+    if planar is not None:
+        tensors["trellis"] = planar
     tensors["window_words"] = window_words
     layer = QVQLinear(
         **metadata,
@@ -1297,14 +1303,6 @@ def load_window_package(package, *, device="cpu", config=None, retain_planar=Fal
     _validate_kernel_tuning_metadata(layer, tuning)
     layer._p32_window_tuning = tuning
     prepare_rank8(layer, config or P32WindowConfig())
-    if window_only and not retain_planar:
-        # The constructor needs a temporary planar tensor for legacy shape and
-        # selector validation.  Release it after all setup so production CUDA
-        # ownership is solely the continuous window payload.
-        with torch.inference_mode(False):
-            layer.trellis = None
-        layer._validate_tensors()
-        prepare_rank8(layer, config or P32WindowConfig())
     return layer
 
 

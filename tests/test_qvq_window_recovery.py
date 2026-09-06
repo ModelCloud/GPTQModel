@@ -670,7 +670,7 @@ def test_forward_pretransformed_propagates_requested_store_dtype():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_cuda_window_package_owns_window_payload_without_planar_vram_copy():
+def test_cuda_window_package_owns_window_payload_without_planar_vram_copy(monkeypatch):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 required")
     source = QVQLinear(
@@ -685,12 +685,26 @@ def test_cuda_window_package_owns_window_payload_without_planar_vram_copy():
     source.SV.fill_(0.1)
     source.post_init()
     package = export_window_package(source)
+    import gptqmodel.quantization.qvq_rank8 as qvq_rank8_module
+
+    original_repack = qvq_rank8_module.repack_p32_window_to_planar
+    repack_calls = []
+
+    def record_repack(*args, **kwargs):
+        repack_calls.append(True)
+        return original_repack(*args, **kwargs)
+
+    monkeypatch.setattr(
+        qvq_rank8_module, "repack_p32_window_to_planar", record_repack
+    )
     loaded = load_window_package(package, device="cuda")
     assert loaded.window_only
     assert loaded.window_words.device.type == "cuda"
     assert loaded.trellis is None
+    assert repack_calls == []
     legacy = load_window_package(package, device="cuda", retain_planar=True)
     assert legacy.trellis.device.type == "cpu"
+    assert len(repack_calls) == 1
     x = torch.randn(16, 256, device="cuda", dtype=torch.float16) * 0.01
     torch.testing.assert_close(loaded(x), source(x), rtol=0, atol=0)
     # Production ownership must remain window-only at the largest supported
