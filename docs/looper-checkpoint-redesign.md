@@ -9,9 +9,10 @@ try:
     model.quantize(
         calibration,
         checkpoint=CheckpointConfig(
-            path="./quant-checkpoint",
+            # Defaults to the quantization config's offload_to_disk_path.
+            path="auto",
             resume="auto",  # also "required" or "never"
-            every_layers=1,
+            interval="layer:1",
             keep_last=2,
         ),
     )
@@ -36,6 +37,15 @@ when a published checkpoint is incompatible or all retained generations are
 corrupt. `required` rejects a missing checkpoint; `never` requires a new
 directory. Legacy `GPTQMODEL_RESUME` is retired: old marker/offload files cannot
 provide a complete continuation and are not migrated or replayed.
+
+`interval` currently uses the form `"layer:<positive integer>"`; for example,
+`"layer:2"` publishes after every two completed layers. Checkpointing requires
+`QuantizeConfig(offload_to_disk=True)`. Each attempt receives a private
+offload directory under the checkpoint path, and those durable offload bundles
+are the artifacts used by resume and final model saving.
+The default `path="auto"` uses `QuantizeConfig.offload_to_disk_path`; provide an
+explicit path when the checkpoint must survive recreation of an automatically
+managed offload directory.
 
 ## Responsibilities
 
@@ -111,8 +121,8 @@ recorded but cannot be verified on resume, strict resume fails closed.
 Topology schema version 2 includes serial availability; older topology schemas
 are rejected rather than silently upgraded.
 
-`CheckpointConfig(path, skip_strict_gpu_check=False)` is the default.
-The explicit opt-in `skip_strict_gpu_check=True` bypasses only UUID/serial
+`CheckpointConfig(path="auto", strict_device_check=True)` is the default.
+The explicit opt-out `strict_device_check=False` bypasses only UUID/serial
 comparison. GPU counts, logical indices, ordered pools, GPU model/capability,
 source model, calibration, algorithm and runtime identity still must match.
 An unconditional warning identifies this override. It cannot enable a
@@ -152,7 +162,7 @@ indices have explicit restore events. `checkpoint_adapter_restored` distinguishe
 disk-backed packed `meta` tensors from live CUDA continuation tensors.
 `checkpoint_restore_complete` is emitted only after all restore checks succeed;
 rejection/failure events never masquerade as successful restore. An identity
-override is reported as `strict_gpu_check=False`, with its actual physical
+override is reported as `strict_device_check=False`, with its actual physical
 identity match result, rather than claiming the GPUs matched.
 Telemetry contains placement/shape/dtype metadata, not tensor contents, and uses
 the existing thread-safe in-memory device telemetry collector and logger.

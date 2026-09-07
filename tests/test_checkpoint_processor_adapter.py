@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 import threading
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
 
 from gptqmodel.looper.checkpoint_store import CheckpointError
+from gptqmodel.looper.checkpoint_store import CheckpointConfig
 from gptqmodel.looper.continuation import ContinuationCodec
+from gptqmodel.looper import checkpoint as checkpoint_module
+from gptqmodel.looper import gptq_checkpoint
 from gptqmodel.looper.gptq_checkpoint import QuantizationCheckpointAdapter
 
 
@@ -22,6 +27,35 @@ def adapter_for(model, tmp_path):
     adapter.offload = tmp_path
     adapter._artifacts = {}
     return adapter
+
+
+def test_auto_checkpoint_path_uses_offload_root(tmp_path):
+    offload_root = tmp_path / "offload"
+    offload_root.mkdir()
+    captured = {}
+
+    class DummyExtension:
+        def __init__(self, config, adapter):
+            captured["path"] = config.path
+            self.store = SimpleNamespace(root=Path(config.path))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    model = SimpleNamespace(
+        quantize_config=SimpleNamespace(
+            offload_to_disk=True,
+            offload_to_disk_path=str(offload_root),
+        )
+    )
+    with patch.object(checkpoint_module, "CheckpointExtension", DummyExtension):
+        with gptq_checkpoint.checkpoint_session(CheckpointConfig(), model):
+            pass
+    assert captured["path"] == str(offload_root)
+    assert model.quantize_config.offload_to_disk_path != str(offload_root)
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda:0", "cuda:1"])

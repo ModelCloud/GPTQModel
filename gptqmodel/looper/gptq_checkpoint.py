@@ -8,6 +8,7 @@ import signal
 import tempfile
 import threading
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -46,8 +47,23 @@ def checkpoint_session(config, model):
         raise ValueError(
             "checkpoint quantization must run on the main thread for signal handling"
         )
+    if not model.quantize_config.offload_to_disk:
+        raise ValueError("checkpoint requires quantize_config.offload_to_disk=True")
+    if config.path == "auto":
+        offload_path = model.quantize_config.offload_to_disk_path
+        if not offload_path:
+            raise ValueError(
+                "checkpoint path='auto' requires quantize_config.offload_to_disk_path"
+            )
+        # The automatic checkpoint location follows the existing disk-offload
+        # root. An explicit path remains independent and can be durable across
+        # separately loaded model/config objects.
+        config = replace(config, path=offload_path)
     with CheckpointExtension(config, QuantizationCheckpointAdapter()) as extension:
         attempt = tempfile.mkdtemp(prefix="attempt-", dir=extension.store.root)
+        # Checkpointed quantization deliberately uses the same disk-offload
+        # mechanism as ordinary quantization, but each attempt gets a private
+        # directory so a failed run cannot overwrite a prior attempt's bundles.
         model.quantize_config.offload_to_disk_path = attempt
         handlers = {
             sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)

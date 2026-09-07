@@ -33,14 +33,25 @@ def commit(store, cursor):
     "kwargs",
     [
         {"resume": "sometimes"},
-        {"every_layers": 0},
-        {"every_layers": True},
+        {"interval": "layer:0"},
+        {"interval": "layer:step"},
+        {"strict_device_check": 1},
         {"keep_last": 1},
     ],
 )
 def test_invalid_config(tmp_path, kwargs):
     with pytest.raises(ValueError):
         CheckpointConfig(tmp_path, **kwargs)
+
+
+def test_checkpoint_config_defaults_and_interval(tmp_path):
+    config = CheckpointConfig()
+    assert config.path == "auto"
+    config = CheckpointConfig(tmp_path)
+    assert config.interval == "layer:1"
+    assert config.interval_layers == 1
+    assert config.strict_device_check is True
+    assert CheckpointConfig(tmp_path, interval="layer:3").interval_layers == 3
 
 
 def test_commit_load_and_retention(tmp_path):

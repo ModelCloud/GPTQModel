@@ -105,10 +105,10 @@ def test_resume_installs_continuation_without_replaying(tmp_path):
     assert resumed.artifacts == uninterrupted.artifacts
 
 
-def test_checkpoint_frequency_and_final_boundary(tmp_path):
+def test_checkpoint_interval_and_final_boundary(tmp_path):
     adapter = Adapter()
     with CheckpointExtension(
-        CheckpointConfig(tmp_path, every_layers=2), adapter
+        CheckpointConfig(tmp_path, interval="layer:2"), adapter
     ) as extension:
         extension.prepare(PLAN, {})
         dispatch = LoopExtensions([extension])

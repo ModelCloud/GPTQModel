@@ -43,7 +43,7 @@ class CheckpointExtension:
         self.store = CheckpointStore(
             config,
             identity_projection=checkpoint_identity_without_physical_gpu_ids
-            if config.skip_strict_gpu_check
+            if not config.strict_device_check
             else None,
         )
         self.adapter = adapter
@@ -86,9 +86,9 @@ class CheckpointExtension:
             physical_identity_matched = manifest["identity"].get(
                 "device_topology"
             ) == identity.get("device_topology")
-            if self.store.config.skip_strict_gpu_check:
+            if not self.store.config.strict_device_check:
                 logging.getLogger(__name__).warning(
-                    "Checkpoint strict GPU UUID/serial checks explicitly disabled; "
+                    "Checkpoint strict device UUID/serial checks explicitly disabled; "
                     "GPU count, indices, pools, model and capability checks remain enforced. "
                     "Bit-exact quantization across different hardware is not guaranteed."
                 )
@@ -98,7 +98,7 @@ class CheckpointExtension:
                 expected_topology=manifest["identity"].get("device_topology"),
                 actual_topology=identity.get("device_topology"),
                 matched=True,
-                strict_gpu_check=not self.store.config.skip_strict_gpu_check,
+                strict_device_check=self.store.config.strict_device_check,
                 physical_identity_matched=physical_identity_matched,
             )
             emit_device_telemetry(
@@ -140,7 +140,7 @@ class CheckpointExtension:
         if cursor != self.next_step + 1:
             raise CheckpointError("boundary does not follow the execution cursor")
         due = (
-            cursor - self._committed_cursor >= self.store.config.every_layers
+            cursor - self._committed_cursor >= self.store.config.interval_layers
             or cursor == len(self.plan.steps)
             or self._stop_requested
         )

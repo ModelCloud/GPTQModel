@@ -28,23 +28,33 @@ class CheckpointCorrupt(CheckpointError):
 
 @dataclass(frozen=True)
 class CheckpointConfig:
-    path: str | Path
+    path: str | Path = "auto"
     resume: str = "auto"
-    every_layers: int = 1
+    interval: str = "layer:1"
     keep_last: int = 2
-    skip_strict_gpu_check: bool = False
+    strict_device_check: bool = True
 
     def __post_init__(self):
-        if type(self.skip_strict_gpu_check) is not bool:
-            raise ValueError("skip_strict_gpu_check must be a boolean")
+        if type(self.strict_device_check) is not bool:
+            raise ValueError("strict_device_check must be a boolean")
         if self.resume not in {"auto", "required", "never"}:
             raise ValueError("resume must be auto, required, or never")
-        if type(self.every_layers) is not int or self.every_layers < 1:
-            raise ValueError("every_layers must be a positive integer")
+        if not isinstance(self.interval, str):
+            raise ValueError("interval must be a string such as 'layer:1'")
+        match = re.fullmatch(r"layer:(\d+)", self.interval.strip())
+        if match is None or int(match.group(1)) < 1:
+            raise ValueError(
+                "interval must use the form 'layer:<positive integer>'"
+            )
         if type(self.keep_last) is not int or self.keep_last < 2:
             raise ValueError("keep_last must be at least two")
         if not str(self.path):
             raise ValueError("checkpoint path cannot be empty")
+
+    @property
+    def interval_layers(self) -> int:
+        """Return the layer interval encoded by ``interval``."""
+        return int(self.interval.split(":", 1)[1])
 
 
 def _json(value):

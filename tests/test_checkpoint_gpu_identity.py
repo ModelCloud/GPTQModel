@@ -65,9 +65,9 @@ def test_unavailable_serial_query_falls_back_to_uuid(monkeypatch, failure):
 
 
 @pytest.mark.parametrize("invalid", [0, 1, "false", "true", None])
-def test_strict_gpu_override_requires_explicit_bool(tmp_path, invalid):
+def test_strict_device_check_requires_explicit_bool(tmp_path, invalid):
     with pytest.raises(ValueError, match="must be a boolean"):
-        CheckpointConfig(tmp_path, skip_strict_gpu_check=invalid)
+        CheckpointConfig(tmp_path, strict_device_check=invalid)
 
 
 def identity():
@@ -130,7 +130,7 @@ def test_strict_physical_identity_rejected_before_decode(tmp_path, monkeypatch, 
         pytest.fail("physical identity must gate before tensor decode")
 
     monkeypatch.setattr(ContinuationCodec, "loads", fail_decode)
-    assert not CheckpointConfig(tmp_path).skip_strict_gpu_check
+    assert CheckpointConfig(tmp_path).strict_device_check
     with (
         CheckpointExtension(CheckpointConfig(tmp_path), Adapter()) as extension,
         pytest.raises(CheckpointError, match="device_topology"),
@@ -151,7 +151,7 @@ def test_override_allows_physical_identity_change_and_reports_bypass(
     with (
         device_telemetry_scope(True),
         CheckpointExtension(
-            CheckpointConfig(tmp_path, skip_strict_gpu_check=True), Adapter()
+            CheckpointConfig(tmp_path, strict_device_check=False), Adapter()
         ) as extension,
     ):
         assert extension.prepare(PLAN, actual) == 1
@@ -162,7 +162,7 @@ def test_override_allows_physical_identity_change_and_reports_bypass(
     ]
     assert (
         event["matched"]
-        and not event["strict_gpu_check"]
+        and not event["strict_device_check"]
         and not event["physical_identity_matched"]
     )
     assert event["expected_topology"] != event["actual_topology"]
@@ -198,7 +198,7 @@ def test_override_still_requires_exact_logical_topology_and_model(tmp_path, chan
         actual["model"] = "different model"
     with (
         CheckpointExtension(
-            CheckpointConfig(tmp_path, skip_strict_gpu_check=True), Adapter()
+            CheckpointConfig(tmp_path, strict_device_check=False), Adapter()
         ) as extension,
         pytest.raises(CheckpointError, match="incompatible checkpoint identity"),
     ):
