@@ -320,6 +320,13 @@ free at large M. The complete graph-replay records are in
 `results/p32_rank8_h200_grouped_input_fused.json`; neither policy is promoted
 on this evidence, and true WGMMA-integrated rank8 fusion remains open.
 
+The same grouped fixture was measured with the `input_fused` producer and
+`fused_epilogue` output kernel. It measured 83.42%/172.86%/104.27% overhead at
+M=128/2048/8192, so the fused epilogue does not rescue this grouped shape and
+is not promoted. The result is retained in
+`results/p32_rank8_h200_grouped_input_fused_epilogue.json` as a negative tuning
+candidate.
+
 Fused MLP down projection policy validation now fails closed for projection
 choices that the down path cannot execute with their declared contract
 (`input_fused`, `concurrent_reference`, and `project_output_fused`). The
