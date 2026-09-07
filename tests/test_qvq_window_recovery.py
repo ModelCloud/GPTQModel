@@ -217,6 +217,20 @@ def test_rank8_fp32_factor_cache_is_prepared_and_versioned():
     assert refreshed_a.data_ptr() != first_a.data_ptr()
 
 
+def test_rank8_fp32_factor_cache_accepts_inference_mode_tensors():
+    """Inference tensors have no version counter but remain graph-safe constants."""
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child("q_proj", in_features=32, out_features=32).eval()
+    with torch.inference_mode():
+        layer.rank8_A = torch.randn(32, 8, dtype=torch.float16)
+        layer.rank8_B = torch.randn(8, 32, dtype=torch.float16)
+    prepared = layer._cached_rank8_factor("A")
+    assert prepared.dtype == torch.float32
+    assert prepared.is_contiguous()
+    assert prepared.data_ptr() == layer._cached_rank8_factor("A").data_ptr()
+
+
 def test_rank_candidate_sweep_uses_predictable_output_fit_and_reports_all_ranks():
     torch.manual_seed(1412)
     x = torch.randn((48, 32), dtype=torch.float64)

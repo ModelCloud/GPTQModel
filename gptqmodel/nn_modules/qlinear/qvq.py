@@ -740,7 +740,11 @@ class QVQLinear(BaseQuantLinear):
         source = getattr(self, "rank8_" + name, None)
         if source is None:
             raise RuntimeError(f"rank8 factor {name} is unavailable")
-        key = (id(source), source._version, source.device)
+        # Inference tensors intentionally do not expose a version counter.
+        # Use the shared helper so preparation remains valid for tensors loaded
+        # under ``torch.inference_mode()``; object identity still invalidates
+        # the cache when a factor is replaced.
+        key = (id(source), _qvq_buffer_version(source), source.device)
         cached = self._qvq_rank8_factor_cache.get(name)
         if cached is not None and cached[1:] == key:
             return cached[0]
