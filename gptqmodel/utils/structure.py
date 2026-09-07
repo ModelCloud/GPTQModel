@@ -1841,6 +1841,7 @@ class LazyTurtle:
         require_class_match: bool = True,
         verify_shapes: bool = True,
         tie_after: bool = True,
+        skip_module_types: tuple[type, ...] = (),
     ) -> int:
         del require_class_match, verify_shapes
 
@@ -1856,6 +1857,8 @@ class LazyTurtle:
         try:
             with self._lock, torch.inference_mode():
                 for idx, (qname, shell_sub) in enumerate(modules):
+                    if isinstance(shell_sub, skip_module_types):
+                        continue
                     module_label = qname or "<root>"
                     progress.current_iter_step = idx
                     progress.subtitle(f"Writing {module_label} ({idx + 1}/{len(modules)})")
@@ -4128,6 +4131,7 @@ def alias_all_from_turtle_if_meta(
     require_class_match: bool = True,
     verify_shapes: bool = True,
     tie_after: bool = True,
+    skip_module_types: tuple[type, ...] = (),
 ) -> int:
     """
     Materialize any remaining direct meta tensors in `shell_model` from the lazy turtle source.
@@ -4144,4 +4148,5 @@ def alias_all_from_turtle_if_meta(
         require_class_match=require_class_match,
         verify_shapes=verify_shapes,
         tie_after=tie_after,
+        **({"skip_module_types": skip_module_types} if skip_module_types else {}),
     )

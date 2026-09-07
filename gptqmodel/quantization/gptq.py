@@ -121,6 +121,12 @@ def _device_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
     return dev.type, dev.index
 
 
+def _device_reduction_key(device: torch.device) -> Tuple[str, int]:
+    """Order reductions by device identity, never worker arrival order."""
+    dev = torch.device(device)
+    return dev.type, -1 if dev.index is None else dev.index
+
+
 def _workspace_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
     return _device_cache_key(device)
 
@@ -1156,7 +1162,8 @@ class GPTQ:
                     else:
                         scale_new = 1.0
 
-                    for counts in self._device_embedding_counts.values():
+                    for partial_device in sorted(self._device_embedding_counts, key=_device_reduction_key):
+                        counts = self._device_embedding_counts[partial_device]
                         counts = counts.to(device=device, dtype=torch.float32)
                         diag.add_(counts, alpha=scale_new)
 
@@ -1240,8 +1247,10 @@ class GPTQ:
             else:
                 scale_new = 1.0
 
-            while self._device_hessian_partials:
-                _, partial = self._device_hessian_partials.popitem()
+            # GPU workers can finish in a different order after restart. A
+            # stable reduction order avoids changing floating-point rounding.
+            for partial_device in sorted(list(self._device_hessian_partials), key=_device_reduction_key):
+                partial = self._device_hessian_partials.pop(partial_device)
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
                     try:
                         partial = partial.to(device=result_accum.device, dtype=torch.float32)

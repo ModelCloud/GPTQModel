@@ -84,8 +84,12 @@ def _tensor_nbytes(tensor: torch.Tensor) -> int:
     return tensor.numel() * itemsize
 
 
-def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
+def _bundle_module_state_dict(module: nn.Module, offload_dir: str, index_dir: Optional[str] = None) -> dict:
+    """Serialize module state into offload_dir. index_dir is the directory
+    the index.json should reference -- pass the final destination when writing
+    into a temporary directory that will be atomically renamed into place."""
     bundle_path = os.path.join(offload_dir, "module.safetensors")
+    index_bundle_path = os.path.join(index_dir, "module.safetensors") if index_dir else bundle_path
     index: dict[str, dict] = {}
     tensors: dict[str, torch.Tensor] = {}
 
@@ -98,7 +102,7 @@ def _bundle_module_state_dict(module: nn.Module, offload_dir: str) -> dict:
             entry = {
                 "dtype": str(cpu_tensor.dtype).replace("torch.", ""),
                 "shape": list(cpu_tensor.shape),
-                "safetensors_file": os.path.abspath(bundle_path),
+                "safetensors_file": os.path.abspath(index_bundle_path),
                 "weight_name": key,
             }
             index[key] = entry
@@ -133,6 +137,7 @@ def offload_to_disk(
     model: nn.Module,
     disk_path: str = ".",
     module_full_name: Optional[str] = None,
+    force: bool = False,
 ):
     """Offload a module's tensors to disk.
 
@@ -145,6 +150,7 @@ def offload_to_disk(
         model=model,
         disk_path=disk_path,
         module_full_name=module_full_name,
+        force=force,
     )
 
 
@@ -153,6 +159,7 @@ def _offload_to_disk_impl(
     model: nn.Module,
     disk_path: str = ".",
     module_full_name: Optional[str] = None,
+    force: bool = False,
 ):
     """Dispatch offload work for a single module or a list of dotted module paths.
 
@@ -172,7 +179,7 @@ def _offload_to_disk_impl(
             if isinstance(m, NamedModule):
                 m = m.module
 
-            _offload_disk(module=m, name=name, disk_path=disk_path)
+            _offload_disk(module=m, name=name, disk_path=disk_path, force=force)
     else:
         # unwrap named module
         if isinstance(module, NamedModule):
@@ -184,7 +191,7 @@ def _offload_to_disk_impl(
         if module_full_name is None:
             module_full_name = get_module_fullname(model=model, module=module)
 
-        _offload_disk(module=module, name=module_full_name, disk_path=disk_path)
+        _offload_disk(module=module, name=module_full_name, disk_path=disk_path, force=force)
 
     if hasattr(module, "config") and hasattr(module, "tie_weights") and getattr(module.config,
                                              "tie_word_embeddings", False):
@@ -198,15 +205,18 @@ def _offload_to_disk_impl(
 #_OFFLOAD_SAFE = ThreadSafe(sys.modules[__name__])
 #offload_to_disk = _OFFLOAD_SAFE.offload_to_disk
 
-def _offload_disk(module: nn.Module, name: str, disk_path: str = "."):
+def _offload_disk(module: nn.Module, name: str, disk_path: str = ".", force: bool = False):
     # Serialize `setattr`/hook mutations on siblings under the same parent.
     # `parent_module_lock` uses the leaf's parent path, so replacing unrelated
     # branches can still run in parallel while this per-parent write completes.
     with parent_module_lock(name):
-        _offload_disk_locked(module=module, name=name, disk_path=disk_path)
+        _offload_disk_locked(module=module, name=name, disk_path=disk_path, force=force)
 
 
-def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = "."):
+def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = ".", force: bool = False):
+    # Finalizers are threads, protected by the parent-module lock above.
+    # Checkpoint runs additionally hold a run lease and use private attempt
+    # directories; unrelated modules do not need a global offload lock.
     if is_meta_module(module):
         # print(f"[skip] '{name}' is on meta; leaving as-is")
         return
@@ -231,11 +241,27 @@ def _offload_disk_locked(module: nn.Module, name: str, disk_path: str = "."):
     for tensor in state_items:
         total_bytes += _tensor_nbytes(tensor)
 
-    if total_bytes <= _SMALL_MODULE_OFFLOAD_BYTES:
+    if not force and total_bytes <= _SMALL_MODULE_OFFLOAD_BYTES:
         return
 
-    _prepare_offload_directory(module_offload_dir)
-    _bundle_module_state_dict(module, module_offload_dir)
+    # Write the new bundle into a sibling temp dir and swap it in with two
+    # renames. The previous scheme (rmtree the live dir, then serialize into
+    # it) had a wide crash window during which the only durable copy of the
+    # module was destroyed -- fatal when that copy is a finalized quant
+    # module a resumed run needs to restore. The index.json inside the
+    # bundle must reference the final path, not the temp path (index_dir=).
+    tmp_dir = f"{module_offload_dir}.tmp"
+    old_dir = f"{module_offload_dir}.old"
+    _prepare_offload_directory(tmp_dir)
+    if os.path.isdir(old_dir):
+        shutil.rmtree(old_dir)
+    _bundle_module_state_dict(module, tmp_dir, index_dir=module_offload_dir)
+
+    if os.path.isdir(module_offload_dir):
+        os.rename(module_offload_dir, old_dir)
+    os.rename(tmp_dir, module_offload_dir)
+    if os.path.isdir(old_dir):
+        shutil.rmtree(old_dir)
 
     _ = disk_offload(
         module,

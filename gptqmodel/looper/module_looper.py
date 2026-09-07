@@ -65,11 +65,12 @@ from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
+from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
+from .execution_state import DeviceAssignmentState
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
-
 
 log = setup_logger()
 
@@ -160,7 +161,7 @@ def io_write_performance() -> Optional[float]:
     return _IO_WRITE_SPEED_MB
 
 
-class ModuleLooper():
+class ModuleLooper(DeviceAssignmentState):
     """Drive the per-layer quantisation workflow over one or more devices.
 
     The looper executes work on the shared global :class:`DeviceThreadPool`
@@ -173,10 +174,18 @@ class ModuleLooper():
     input_embeddings_name: Optional[str] = None
     output_embeddings_name: Optional[str] = None
 
-    def __init__(self, model: BaseQModel, processors: List[LoopProcessor], embed_quant_config: Optional[QuantizeEmbedConfig] = None):
+    def __init__(
+        self,
+        model: BaseQModel,
+        processors: List[LoopProcessor],
+        embed_quant_config: Optional[QuantizeEmbedConfig] = None,
+        *,
+        extensions=(),
+    ):
         """Initialize loop state, device policy, and callback wiring."""
 
         self.processors = processors
+        self.extensions = LoopExtensions(extensions)
         self.gptq_model = model
 
         # Processors need to inspect the active model (e.g. MoE lifecycle hooks)
@@ -217,6 +226,7 @@ class ModuleLooper():
         quant_devices = select_forward_devices(normalized_quant_device) if normalized_quant_device else [CPU]
         if not quant_devices:
             quant_devices = [CPU]
+        self._primary_quant_device = quant_devices[0]
 
         # Apply compute device filter if provided to determine which devices to use for quantization
         compute_device_filter = getattr(self.gptq_model.quantize_config, "compute_device_filter", None)
@@ -875,6 +885,21 @@ class ModuleLooper():
             return False
 
         return True
+
+    def execution_device_pools(self) -> Dict[str, List[str]]:
+        """Ordered placement pools, including forward-only visible devices."""
+        forward_devices = (
+            select_forward_devices(self._primary_quant_device)
+            if getattr(self.gptq_model.quantize_config, "auto_forward_data_parallel", True)
+            else [self._primary_quant_device]
+        )
+        return {
+            "primary": [str(self._primary_quant_device)],
+            "quantization": [str(device) for device in self._quant_devices],
+            "dense": [str(device) for device in self._dense_quant_devices],
+            "moe": [str(device) for device in self._moe_quant_devices],
+            "forward": [str(device) for device in forward_devices],
+        }
 
     def _assign_quant_device_for_module(
         self,
@@ -1673,6 +1698,33 @@ class ModuleLooper():
 
         if self.gptq_model.quantize_config.lm_head or quant_output_embeddings:
             self.hook_embeddings_module(self.output_embeddings_module)
+        # An extension may restore a complete continuation and select the next
+        # execution step. Persistence and model-specific schemas live outside
+        # the looper. Non-checkpoint observers may omit on_start entirely.
+        from ..utils.model import get_layer_name
+
+        steps = []
+        if quant_input_embeddings:
+            steps.append(LoopStep("input_embeddings", -1, "input_embeddings"))
+        steps.extend(LoopStep("layer", index, get_layer_name(layer_names, index))
+                     for index in range(layer_count))
+        if quant_output_embeddings:
+            steps.append(LoopStep("output_embeddings", layer_count, "output_embeddings"))
+        elif self.gptq_model.quantize_config.lm_head:
+            steps.append(LoopStep("lm_head", layer_count, "lm_head"))
+        self.start_step = self.extensions.start(LoopContext(
+            LoopPlan(tuple(steps)), self.gptq_model, tuple(self.processors), shared_kv_cache_dict, self,
+        ))
+
+        if self.gptq_model.quantize_config.lm_head:
+            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
+            if lm_head_module and isinstance(lm_head_module, torch.nn.Linear):
+                hooked_lm_head = HookedLinear.from_linear(lm_head_module)
+                module_path = self.gptq_model.lm_head.split('.')
+                parent = self.gptq_model.model
+                for part in module_path[:-1]:
+                    parent = getattr(parent, part)
+                setattr(parent, module_path[-1], hooked_lm_head)
 
         run_layer_stage(
             self,

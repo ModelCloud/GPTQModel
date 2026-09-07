@@ -17,7 +17,14 @@ import sysconfig
 import threading
 import time
 import traceback
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX hosts fall back to process-local locking
+    fcntl = None
+
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -75,6 +82,12 @@ _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 _TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
 _CUDA_BUILD_SCHEDULING_FLAGS_WITH_VALUE = frozenset(("--threads", "--split-compile"))
 _CUDA_BUILD_SCHEDULING_FLAG_PREFIXES = ("--threads=", "--split-compile=")
+# Cross-process JIT build lock tuning. The lock itself is a kernel-released
+# flock, so a killed holder can never leave the cache permanently locked; the
+# timeout only bounds how long a process waits for another's in-flight build.
+_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV = "GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT"
+_TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS = 600.0
+_TORCH_OPS_FILE_LOCK_POLL_SECONDS = 0.1
 
 
 def _python_abi_tag() -> str:
@@ -442,6 +455,50 @@ def default_torch_ops_build_root(subdir: str) -> Path:
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
 
 
+def _torch_ops_file_lock_timeout_seconds() -> float:
+    """Resolve how long one process waits on another's in-flight JIT build."""
+
+    raw_timeout = os.getenv(_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV)
+    if raw_timeout is None:
+        return _TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS
+    try:
+        return max(0.0, float(raw_timeout))
+    except ValueError:
+        return _TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS
+
+
+@contextmanager
+def _cross_process_build_lock(lock_path: Path, *, timeout_seconds: float):
+    """Serialize on-disk JIT cache mutation across OS processes."""
+
+    if fcntl is None:
+        yield True
+        return
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    acquired = False
+    try:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(_TORCH_OPS_FILE_LOCK_POLL_SECONDS)
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:  # pragma: no cover - closing the fd still releases the lock
+                pass
+        os.close(lock_fd)
+
+
 def _dedupe_path_strings(paths: Sequence[str]) -> list[str]:
     """Normalize and deduplicate include/library path strings while preserving order."""
 
@@ -454,6 +511,88 @@ def _dedupe_path_strings(paths: Sequence[str]) -> list[str]:
         seen.add(normalized)
         deduped.append(normalized)
     return deduped
+
+
+# Directory that contains the ``gptqmodel`` package.  In editable installs this
+# is the repository root; in wheel installs it is the site-packages root.
+# Fingerprint paths below this root are emitted as relative POSIX strings so the
+# cache key does not depend on checkout location or unrelated sibling files.
+_FINGERPRINT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _fingerprint_path_key(path: Path) -> str:
+    """Return a stable, location-independent key for *path*.
+
+    Paths inside the package/project root are returned relative to that root so
+    the cache key is not tied to where the repository is cloned or installed.
+    Paths outside the project root (system CUDA headers, third-party wheels,
+    etc.) are kept absolute because they are toolchain/dependency inputs.
+    """
+
+    normalized = path.expanduser().resolve(strict=False)
+    try:
+        relative = normalized.relative_to(_FINGERPRINT_ROOT)
+    except ValueError:
+        return str(normalized)
+    return relative.as_posix()
+
+
+@lru_cache(maxsize=None)
+def _system_include_roots() -> tuple[Path, ...]:
+    """Return system/dependency include directories used by the toolchain.
+
+    These roots identify headers (e.g. ``torch/``, ``ATen/``, ``c10/``,
+    ``Python.h``, ``cuda*.h``) whose contents are captured by the ABI/toolchain
+    portion of the cache key rather than by hashing the header files directly.
+    """
+
+    roots: list[Path] = []
+    try:
+        from torch.utils.cpp_extension import include_paths as _torch_include_paths
+
+        roots.extend(Path(p).expanduser().resolve(strict=False) for p in _torch_include_paths())
+    except Exception as exc:
+        log.debug("Torch include roots unavailable; continuing without them: %s", exc, exc_info=True)
+    try:
+        import sysconfig
+
+        roots.append(Path(sysconfig.get_paths()["include"]).expanduser().resolve(strict=False))
+    except Exception as exc:
+        log.debug("Python include root unavailable; continuing without it: %s", exc, exc_info=True)
+    try:
+        roots.extend(Path(p).expanduser().resolve(strict=False) for p in detected_local_cuda_include_paths())
+    except Exception as exc:
+        log.debug("Local CUDA include roots unavailable; continuing without them: %s", exc, exc_info=True)
+    try:
+        roots.extend(Path(p).expanduser().resolve(strict=False) for p in detected_cuda_wheel_include_paths())
+    except Exception as exc:
+        log.debug("CUDA wheel include roots unavailable; continuing without them: %s", exc, exc_info=True)
+
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        deduped.append(root)
+    return tuple(deduped)
+
+
+def _is_system_or_dependency_header(include_name: str) -> bool:
+    """Return True if *include_name* names a system/dependency header.
+
+    The check is conservative: only headers that actually exist under a known
+    system include directory (torch, Python, CUDA, etc.) are skipped. This lets
+    legitimate local angle-bracket headers (e.g. ``<wrapper.h>`` under an
+    extension-specific include root) still be hashed while preventing files
+    dropped by unrelated kernels (e.g. ``gptqmodel_ext/torch/all.h``) from
+    leaking into an extension's cache key.
+    """
+
+    for root in _system_include_roots():
+        if (root / include_name).is_file():
+            return True
+    return False
 
 
 def detected_cuda_wheel_include_paths() -> list[str]:
@@ -875,6 +1014,37 @@ class TorchOpsJitExtension:
             return Path(override).expanduser()
         return self._resolve_path(self.default_build_root)
 
+    def _build_lock_timeout_seconds(self) -> float:
+        """Resolve the cross-process build lock wait, honoring the env override."""
+
+        if os.getenv(_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV) is not None:
+            return _torch_ops_file_lock_timeout_seconds()
+        baseline_seconds = self.compile_baseline_seconds or 0.0
+        return max(_TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS, 5.0 * baseline_seconds)
+
+    def _cross_process_lock_path(self) -> Path:
+        """Return the flock path, kept outside the directory cache clears delete."""
+
+        base_build_root = self.base_build_root()
+        return base_build_root.parent / f"{base_build_root.name}.lock"
+
+    def _remove_stale_torch_build_lock(self, build_root: Path) -> None:
+        """Drop a leftover torch FileBaton lock while holding the process lock."""
+
+        baton_path = build_root / "lock"
+        if not baton_path.exists():
+            return
+        log.warning(
+            "%s: removing stale torch JIT build lock left by a dead process: pid=%s path=%s",
+            self.display_name,
+            os.getpid(),
+            baton_path,
+        )
+        try:
+            baton_path.unlink()
+        except FileNotFoundError:  # pragma: no cover - already gone
+            pass
+
     def _source_cache_fingerprint_payload(self, source: str, include_paths: Sequence[str]) -> list[str]:
         """Hash one source file plus recursively discovered local includes."""
 
@@ -887,7 +1057,7 @@ class TorchOpsJitExtension:
             if normalized in visited:
                 return
             visited.add(normalized)
-            payload.append(str(normalized))
+            payload.append(_fingerprint_path_key(normalized))
 
             if not normalized.exists():
                 payload.append("missing")
@@ -903,16 +1073,31 @@ class TorchOpsJitExtension:
 
             source_text = source_bytes.decode("utf-8", errors="ignore")
             for delimiter, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
-                included_path = _resolve_local_include_path(
-                    include_name,
-                    including_path=normalized,
-                    include_search_roots=include_search_roots,
-                )
-                if included_path is None:
-                    if delimiter == '"':
-                        payload.append(f"missing_include={normalized}:{include_name}")
-                    continue
-                visit(included_path)
+                if delimiter == '"':
+                    included_path = _resolve_local_include_path(
+                        include_name,
+                        including_path=normalized,
+                        include_search_roots=include_search_roots,
+                    )
+                    if included_path is None:
+                        payload.append(f"missing_include={_fingerprint_path_key(normalized)}:{include_name}")
+                        continue
+                    visit(included_path)
+                else:
+                    # Angle-bracket headers name system/dependency headers whose
+                    # contents are captured by ABI/toolchain flags. Do not hash
+                    # them when they are part of the installed toolchain; only
+                    # follow local angle-bracket headers that are not shadowing
+                    # a system header (e.g. the synthetic ``<wrapper.h>`` in tests).
+                    if _is_system_or_dependency_header(include_name):
+                        continue
+                    included_path = _resolve_local_include_path(
+                        include_name,
+                        including_path=normalized,
+                        include_search_roots=include_search_roots,
+                    )
+                    if included_path is not None:
+                        visit(included_path)
 
         visit(Path(source))
         return payload
@@ -934,7 +1119,12 @@ class TorchOpsJitExtension:
             except OSError:
                 return
             texts.append((normalized, source_text))
-            for _, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
+            for delimiter, include_name in _SOURCE_INCLUDE_PATTERN.findall(source_text):
+                # ABI detection only needs the extension's own source graph.
+                # Installed system/dependency headers are captured by the
+                # ABI/toolchain flags rather than by reading their contents.
+                if delimiter != '"' and _is_system_or_dependency_header(include_name):
+                    continue
                 included_path = _resolve_local_include_path(
                     include_name,
                     including_path=normalized,
@@ -959,7 +1149,7 @@ class TorchOpsJitExtension:
             for item in self._source_texts(source, include_paths)
         ]
         source_key = tuple(
-            (str(path), hashlib.sha256(text.encode("utf-8")).hexdigest())
+            (_fingerprint_path_key(path), hashlib.sha256(text.encode("utf-8")).hexdigest())
             for path, text in source_texts
         )
         cache_key = (source_key, tuple(include_paths))
@@ -1085,7 +1275,7 @@ class TorchOpsJitExtension:
 
         payload.extend(extra_cflags)
         payload.extend(_cuda_cache_relevant_flags(extra_cuda_cflags))
-        payload.extend(include_paths)
+        payload.extend(_fingerprint_path_key(Path(include_path)) for include_path in include_paths)
         payload.extend(extra_ldflags)
         digest = hashlib.sha256("\0".join(payload).encode("utf-8")).hexdigest()
         return digest[:16]
@@ -1205,11 +1395,23 @@ class TorchOpsJitExtension:
             self._op_cache = {}
             build_root = self.base_build_root()
             if build_root.exists():
-                _log_cache_clear_callsite(
-                    reason=f"{self.display_name}.clear_cache",
-                    target_path=build_root,
-                )
-                shutil.rmtree(build_root, ignore_errors=True)
+                lock_timeout_seconds = self._build_lock_timeout_seconds()
+                with _cross_process_build_lock(
+                    self._cross_process_lock_path(), timeout_seconds=lock_timeout_seconds
+                ) as build_lock_acquired:
+                    if not build_lock_acquired:
+                        log.warning(
+                            "%s: skipping on-disk cache clear; timed out after %.0fs waiting for the "
+                            "cross-process JIT build lock (another process may be building here).",
+                            self.display_name,
+                            lock_timeout_seconds,
+                        )
+                        return
+                    _log_cache_clear_callsite(
+                        reason=f"{self.display_name}.clear_cache",
+                        target_path=build_root,
+                    )
+                    shutil.rmtree(build_root, ignore_errors=True)
 
     def last_error_message(self) -> str:
         """Return the most recent human-readable load failure."""
@@ -1237,6 +1439,26 @@ class TorchOpsJitExtension:
         return ""
 
     def load(self) -> bool:
+        """Load the extension while serializing cache mutation across processes."""
+
+        lock_timeout_seconds = self._build_lock_timeout_seconds()
+        with _cross_process_build_lock(
+            self._cross_process_lock_path(), timeout_seconds=lock_timeout_seconds
+        ) as build_lock_acquired:
+            if not build_lock_acquired:
+                self._load_attempted = True
+                self._load_result = False
+                self._last_error = (
+                    f"{self.display_name}: timed out after {lock_timeout_seconds:.0f}s waiting for the "
+                    f"cross-process JIT build lock `{self._cross_process_lock_path()}`; another process "
+                    f"may be stuck building this extension. Adjust via `{_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV}`."
+                )
+                log.warning("%s", self._last_error)
+                setup_logger().info(f"{self.display_name}: JIT build lock wait timed out; using fallback path.")
+                return False
+            return self._load_unlocked()
+
+    def _load_unlocked(self) -> bool:
         """Load the extension from cache or JIT-compile it on first use."""
 
         stable_abi_error = self._stable_abi_runtime_error()
@@ -1314,6 +1536,8 @@ class TorchOpsJitExtension:
                 self._load_result = True
                 self._last_error = ""
                 return True
+
+            self._remove_stale_torch_build_lock(build_root)
 
             logger = setup_logger()
             logger.info(f"{self.display_name}: compiling torch.ops JIT extension in `{build_root}`.")

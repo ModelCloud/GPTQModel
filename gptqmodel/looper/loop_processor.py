@@ -1032,6 +1032,39 @@ class LoopProcessor:
         with self._results_lock:
             return dict(self._results)
 
+    def continuation_state_dict(self):
+        """Return boundary state, never live tasks, locks, or partial accumulators.
+
+        The execution must be quiescent. Processors with additional persistent
+        state extend this protocol instead of teaching the looper their internals.
+        """
+        with self.lock:
+            return {
+                "cache": self.inputs_cache.unwrap(),
+                "log": self.log,
+                "num_batches": self.num_batches,
+                "total_calibration_tokens": self.total_calibration_tokens,
+                "results": self.results(),
+                "statistics": {
+                    key: getattr(self, key)
+                    for key in ("durations", "module_names", "gpu_memorys", "cpu_memorys", "log_call_count", "avg_losses")
+                    if hasattr(self, key)
+                },
+            }
+
+    def load_continuation_state_dict(self, state):
+        """Restore completed work; unfinished tasks are created by normal replay."""
+        with self.lock:
+            self.receive_input_cache(state["cache"])
+            self.log = state["log"]
+            self.num_batches = state["num_batches"]
+            self.total_calibration_tokens = state["total_calibration_tokens"]
+            with self._results_lock:
+                self._results = dict(state["results"])
+            for key in ("durations", "module_names", "gpu_memorys", "cpu_memorys", "log_call_count", "avg_losses"):
+                if key in state.get("statistics", {}):
+                    setattr(self, key, state["statistics"][key])
+
     def collect_memory_info(self, layer_index: int):
         """Records current accelerator and CPU memory snapshots for diagnostics."""
 
@@ -1082,7 +1115,15 @@ class LoopProcessor:
     def receive_input_cache(self, input_cache: Any):
         """Injects the shared input cache for the current processor stage."""
 
-        with self._cache_lock:
+        # Keep compatibility with processors constructed by older callers that
+        # used the pre-checkpoint `_input_cache_lock` name.
+        cache_lock = getattr(self, "_cache_lock", None)
+        if cache_lock is None:
+            cache_lock = getattr(self, "_input_cache_lock", None)
+        if cache_lock is None:
+            cache_lock = threading.RLock()
+        object.__setattr__(self, "_cache_lock", cache_lock)
+        with cache_lock:
             current = getattr(self, "inputs_cache", None)
             if isinstance(current, _ThreadSafeInputCache):
                 current.set_cache(input_cache)

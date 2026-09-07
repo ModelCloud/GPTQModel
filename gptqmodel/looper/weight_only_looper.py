@@ -60,12 +60,14 @@ from ..utils.model import (
     move_to,
 )
 from ..utils.offload import offload_to_disk
+from .execution_state import DeviceAssignmentState
+from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 
 
 log = setup_logger()
 
 
-class WeightOnlyLooper:
+class WeightOnlyLooper(DeviceAssignmentState):
     """Run the simplified per-layer lifecycle for weight-only quantization."""
 
     def __init__(
@@ -73,12 +75,14 @@ class WeightOnlyLooper:
         model: BaseQModel,
         processor: WeightOnlyProcessor,
         embed_quant_config: Optional[QuantizeEmbedConfig] = None,
+        extensions=(),
     ):
         """Initializes the looper with the model being quantized and its processor."""
 
         self.gptq_model = model
         self._turtle_lock = model._turtle_lock
         self.processor = processor
+        self.extensions = LoopExtensions(extensions)
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
         self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
         self._quant_with_rtn = isinstance(self.gptq_model.quantize_config, RTNConfig)
@@ -87,6 +91,14 @@ class WeightOnlyLooper:
         self._module_device_map: Dict[str, torch.device] = {}
         self._quant_device_lock = threading.Lock()
         self._resolve_strategy_device_pools()
+
+    def execution_device_pools(self):
+        return {
+            "quantization": [str(device) for device in self._quant_devices],
+            "dense": [str(device) for device in self._dense_quant_devices],
+            "moe": [str(device) for device in self._moe_quant_devices],
+            "forward": [],
+        }
 
     def _resolve_quant_devices(self) -> List[torch.device]:
         """Resolve the device pool used by weight-only module quantization."""
@@ -899,6 +911,8 @@ class WeightOnlyLooper:
             )
 
         embedding_targets = self._embedding_quant_targets()
+        if self.extensions and embedding_targets:
+            raise NotImplementedError("weight-only boundary extensions do not yet support embeddings")
         if embedding_targets and not isinstance(quant_config, RTNConfig):
             raise NotImplementedError(
                 "Weight-only input/output embeddings fast quantization currently supports RTNConfig only."
@@ -1007,12 +1021,18 @@ class WeightOnlyLooper:
             )
 
         try:
+            plan = LoopPlan(tuple(
+                LoopStep("layer", index, get_layer_name(layer_names, index))
+                for index in range(layer_count)
+            ) + ((LoopStep("lm_head", layer_count, lm_head_name),) if quant_lm_head_in_loop else ()))
+            start_step = self.extensions.start(LoopContext(
+                plan, self.gptq_model, (self.processor,), {}, self,
+            ))
             self._quantize_embedding_targets(
                 embedding_targets,
                 layer_count=layer_count,
                 pb=pb,
             )
-
             if embed_only:
                 total_log = {self.processor.name(): self.processor.log}
                 self.gptq_model.quant_log = self.processor.log
@@ -1032,6 +1052,8 @@ class WeightOnlyLooper:
 
             for progress_index in range(len(embedding_targets), total_layers):
                 layer_index = progress_index - len(embedding_targets)
+                if layer_index < start_step:
+                    continue
                 is_lm_head_module = layer_index >= layer_count
 
                 if (
@@ -1168,12 +1190,12 @@ class WeightOnlyLooper:
                     self.gptq_model.post_quantize(module)
                 else:
                     layers[layer_index] = self.gptq_model.post_quantize(module)
-
                 # Keep per-shard safetensors handles open across weight-only layers.
                 # Re-opening and re-registering the host mmap per layer is more
                 # expensive than the file descriptors; LazyTurtle cleans them up on
                 # destruction.
 
+                self.extensions.publish(plan.steps[layer_index])
                 if pb is not None:
                     pb.current_iter_step = progress_index + 1
                     pb.draw()

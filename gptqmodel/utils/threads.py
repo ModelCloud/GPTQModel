@@ -10,6 +10,8 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 
+from .device_telemetry import capture_device_telemetry
+
 
 class AsyncManager:
     """Single-queue async offloader. Submit only callables (fn or lambda)."""
@@ -36,7 +38,7 @@ class AsyncManager:
                 traceback.print_exc()
                 raise  # propagate to Future so .result() fails
 
-        fut = self._exec.submit(_runner)
+        fut = self._exec.submit(capture_device_telemetry(_runner))
         fut.add_done_callback(self._discard_future)
         with self._lock:
             self._futures.add(fut)
@@ -108,7 +110,7 @@ class SerialWorker:
     def submit(self, fn):
         if not callable(fn):
             raise TypeError("submit expects a callable")
-        self._q.put(fn)
+        self._q.put(capture_device_telemetry(fn))
 
     def join(self, timeout=None):
         self._q.join()
