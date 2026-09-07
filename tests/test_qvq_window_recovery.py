@@ -354,6 +354,42 @@ def test_gfx950_window_candidates_use_real_launch_controls(monkeypatch):
     ) == candidates[0]
 
 
+def test_hopper_off_policy_keeps_unverified_candidates_visible(monkeypatch):
+    """Correction-off tuning may retain faster unverified launch variants."""
+
+    class Layer:
+        window_only = True
+        activation = None
+        bits = 2
+        v2b2_p32 = True
+        in_features = 256
+        out_features = 256
+        input_hadamard = False
+        output_hadamard = False
+        _p32_window_config = P32WindowConfig(recovery_mode="off")
+
+        @staticmethod
+        def runtime_device():
+            return torch.device("cuda")
+
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: type(
+            "Properties",
+            (),
+            {"major": 9, "minor": 0, "name": "NVIDIA H200"},
+        )(),
+    )
+    candidates = window_kernel_candidates(Layer(), m=8192)
+    assert candidates
+    assert any(
+        candidate.arithmetic_signature.startswith("unverified")
+        for candidate in candidates
+    )
+    assert all(candidate.recovery_mode == "off" for candidate in candidates)
+
+
 def test_grouped_window_candidates_preserve_child_split_tuples(monkeypatch):
     """The high-level grouped API exposes the SM80 tuple tuner directly."""
 
