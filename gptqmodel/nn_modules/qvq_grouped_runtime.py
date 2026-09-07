@@ -1244,9 +1244,13 @@ class QVQHopperGroupedRuntime:
 
             outputs = []
             for child, inner in zip(children, inner_outputs, strict=True):
-                if getattr(getattr(child, "_p32_window_config", None), "recovery_kernel", None) in (
-                    "fused_epilogue",
-                    "fully_fused",
+                if (
+                    getattr(child, "_p32_rank8_enabled", False)
+                    and getattr(getattr(child, "_p32_window_config", None), "recovery_kernel", None)
+                    in (
+                        "fused_epilogue",
+                        "fully_fused",
+                    )
                 ):
                     output = fused_rank8_output(
                         child, padded[:rows], inner[:rows], torch.float16,
