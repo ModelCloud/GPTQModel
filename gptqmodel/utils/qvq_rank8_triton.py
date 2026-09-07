@@ -391,6 +391,8 @@ def rank8_output_epilogue(
         launch_warps,
     )
     _require_rank8_kernel_warm(key)
+    if not m:
+        return torch.empty((m, n), device=base.device, dtype=output_dtype)
     if composite_hadamard:
         # Keep the same FP32 base/correction arithmetic, then delegate the
         # existing factored Hadamard implementation for the composite width.
