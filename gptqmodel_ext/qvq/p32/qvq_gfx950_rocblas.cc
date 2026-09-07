@@ -8,6 +8,7 @@
 #include <cstring>
 #include <new>
 #include <vector>
+#include <limits>
 
 struct NativeBlasPlan {
   rocblas_handle handle;
@@ -141,6 +142,107 @@ extern "C" int qvq_gfx950_rocblas_solutions(void* opaque, const void* x,
       rocblas_datatype_f32_r, rocblas_gemm_algo_solution_index, 0, list, count);
 #pragma GCC diagnostic pop
   return int(status);
+}
+
+extern "C" int qvq_gfx950_rocblas_autotune(void* opaque, const void* x,
+    const void* weights, void* y, const qvq_gfx950_tuning_options* options,
+    qvq_gfx950_tuning_result* result) {
+  auto* plan = static_cast<NativeBlasPlan*>(opaque);
+  if (!plan || !x || !weights || !y || !result ||
+      result->struct_size != sizeof(*result) || result->version != 1 ||
+      result->reserved)
+    return -int(hipErrorInvalidValue);
+  qvq_gfx950_tuning_options defaults{sizeof(defaults), 1, 1, 3, 0};
+  const auto& config = options ? *options : defaults;
+  if (config.struct_size != sizeof(config) || config.version != 1 ||
+      !config.benchmark_iterations || config.warmup_iterations > 100 ||
+      config.benchmark_iterations > 100 || config.reserved)
+    return -int(hipErrorInvalidValue);
+  int device;
+  auto hs = hipGetDevice(&device);
+  if (hs != hipSuccess) return -int(hs);
+  if (device != plan->device) return -int(hipErrorInvalidDevice);
+  hipStreamCaptureStatus capture;
+  hs = hipStreamIsCapturing(plan->stream, &capture);
+  if (hs != hipSuccess) return -int(hs);
+  if (capture != hipStreamCaptureStatusNone)
+    return -int(hipErrorStreamCaptureUnsupported);
+
+  int32_t count = 0;
+  int status = qvq_gfx950_rocblas_solutions(plan, x, weights, y, nullptr, &count);
+  if (status || count <= 0) return status ? status : -int(hipErrorNotFound);
+  std::vector<int32_t> solutions;
+  try {
+    solutions.resize(size_t(count));
+  } catch (const std::bad_alloc&) {
+    return -int(hipErrorOutOfMemory);
+  }
+  status = qvq_gfx950_rocblas_solutions(plan, x, weights, y, solutions.data(), &count);
+  if (status) return status;
+  solutions.resize(size_t(count));
+
+  hipEvent_t start = nullptr, stop = nullptr;
+  hs = hipEventCreate(&start);
+  if (hs == hipSuccess) hs = hipEventCreate(&stop);
+  if (hs != hipSuccess) {
+    if (start) { const auto ignored = hipEventDestroy(start); (void)ignored; }
+    if (stop) { const auto ignored = hipEventDestroy(stop); (void)ignored; }
+    return -int(hs);
+  }
+  const int previous_solution = plan->solution;
+  qvq_gfx950_tuning_result measured = {sizeof(measured), 1, 0, 0, 0, 0, 0.0f, 0};
+  float best = std::numeric_limits<float>::infinity();
+  for (const int32_t solution : solutions) {
+    status = 0;
+    plan->solution = solution;
+    bool failed = false;
+    for (uint32_t i = 0; i < config.warmup_iterations; ++i) {
+      status = execute_blas(plan, x, weights, y, plan->stream, false);
+      if (status) { failed = true; break; }
+    }
+    if (!failed) {
+      hs = hipStreamSynchronize(plan->stream);
+      if (hs != hipSuccess) { status = -int(hs); failed = true; }
+    }
+    std::vector<float> samples;
+    if (!failed) {
+      try { samples.reserve(config.benchmark_iterations); }
+      catch (const std::bad_alloc&) { status = -int(hipErrorOutOfMemory); failed = true; }
+    }
+    for (uint32_t i = 0; !failed && i < config.benchmark_iterations; ++i) {
+      hs = hipEventRecord(start, plan->stream);
+      if (hs == hipSuccess) status = execute_blas(plan, x, weights, y, plan->stream, false);
+      if (hs == hipSuccess && !status) hs = hipEventRecord(stop, plan->stream);
+      if (hs == hipSuccess && !status) hs = hipEventSynchronize(stop);
+      if (hs != hipSuccess || status) { failed = true; break; }
+      float milliseconds = 0.0f;
+      hs = hipEventElapsedTime(&milliseconds, start, stop);
+      if (hs != hipSuccess) { status = -int(hs); failed = true; break; }
+      samples.push_back(milliseconds * 1000.0f);
+    }
+    if (failed) {
+      ++measured.candidates_failed;
+      continue;
+    }
+    ++measured.candidates_tested;
+    measured.samples += uint32_t(samples.size());
+    std::sort(samples.begin(), samples.end());
+    const float median = samples[samples.size() / 2];
+    if (median < best) {
+      best = median;
+      measured.solution_index = solution;
+      measured.median_us = median;
+    }
+  }
+  const auto destroy_stop = hipEventDestroy(stop);
+  const auto destroy_start = hipEventDestroy(start);
+  plan->solution = previous_solution;
+  if (destroy_stop != hipSuccess) return -int(destroy_stop);
+  if (destroy_start != hipSuccess) return -int(destroy_start);
+  if (!measured.candidates_tested) return status ? status : -int(hipErrorNotFound);
+  plan->solution = measured.solution_index;
+  *result = measured;
+  return 0;
 }
 
 extern "C" int qvq_gfx950_rocblas_prepare_config(const qvq_gfx950_blas_config* config,
