@@ -428,6 +428,7 @@ def test_fully_fused_policy_routes_project_output_epilogue_and_graph():
         pytest.skip("SM90 required")
     from test_qvq_grouped_runtime import _child
     from test_qvq_window_recovery import _kernel_rank8
+
     from gptqmodel.quantization.qvq_rank8 import P32WindowConfig, prepare_rank8
 
     torch.backends.cuda.matmul.allow_tf32 = False
