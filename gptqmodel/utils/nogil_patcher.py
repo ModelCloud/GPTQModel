@@ -112,14 +112,22 @@ def patch_triton_autotuner() -> None:
     module.CacheFuture = CacheFuture
 
     original_init = autotuner_cls.__init__
-    cache_init_lock = threading.Lock()
+    rlock_type = type(threading.RLock())
 
     def ensure_threadsafe_cache(self):
-        if getattr(self, "_gptqmodel_cache_initialized", False):
+        if (
+            getattr(self, "cache", None) is getattr(self, "_cache", None)
+            and isinstance(getattr(self, "_cache_lock", None), rlock_type)
+            and isinstance(getattr(self, "_cache_futures", None), dict)
+        ):
             return
 
-        with cache_init_lock:
-            if getattr(self, "_gptqmodel_cache_initialized", False):
+        with TritonPatch._apply_lock:
+            if (
+                getattr(self, "cache", None) is getattr(self, "_cache", None)
+                and isinstance(getattr(self, "_cache_lock", None), rlock_type)
+                and isinstance(getattr(self, "_cache_futures", None), dict)
+            ):
                 return
 
             cache_map = getattr(self, "cache", {})
@@ -127,7 +135,6 @@ def patch_triton_autotuner() -> None:
             self.cache = self._cache
             self._cache_lock = threading.RLock()
             self._cache_futures = {}
-            self._gptqmodel_cache_initialized = True
 
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
