@@ -52,7 +52,9 @@ extern "C" int qvq_gfx950_decode_window(const void* window, const void* levels,
     const void* banks, void* dense, unsigned k, unsigned n, unsigned bits,
     unsigned bank_alt_id, void* stream) {
   if (!window || !levels || !banks || !dense || !k || !n || k % 16 || n % 16 ||
-      bits < 4 || bits > 7 || bank_alt_id > 3) return hipErrorInvalidValue;
+      bits < 4 || bits > 8 ||
+      (bits == 8 ? bank_alt_id != 0 : bank_alt_id > 3))
+    return hipErrorInvalidValue;
   int device;
   hipDeviceProp_t props{};
   hipError_t status = hipGetDevice(&device);
@@ -62,9 +64,10 @@ extern "C" int qvq_gfx950_decode_window(const void* window, const void* levels,
   if (std::strncmp(props.gcnArchName, "gfx950", 6) != 0 ||
       (props.gcnArchName[6] != '\0' && props.gcnArchName[6] != ':'))
     return hipErrorNoBinaryForGpu;
-  constexpr uint32_t masks[4][4] = {
+  constexpr uint32_t masks[5][4] = {
       {0, 0x5a5a, 0x3c3c, 0xc3c3}, {0, 0x9696, 0x3c3c, 0xc3c3},
-      {0, 0x6969, 0x5a5a, 0x3c3c}, {0, 0xc3c3, 0x9696, 0x5a5a}};
+      {0, 0x6969, 0x5a5a, 0x3c3c}, {0, 0xc3c3, 0x9696, 0x5a5a},
+      {0, 0, 0, 0}};
   // Two-dimensional ownership eliminates runtime division/remainder in every
   // wave. Limit Y to the portable HIP grid bound; do not truncate dimensions.
   if (k / 16 > 65535) return hipErrorInvalidValue;
@@ -80,6 +83,7 @@ extern "C" int qvq_gfx950_decode_window(const void* window, const void* levels,
     case 5: launch.template operator()<5>(); break;
     case 6: launch.template operator()<6>(); break;
     case 7: launch.template operator()<7>(); break;
+    case 8: launch.template operator()<8>(); break;
   }
   return hipGetLastError();
 }

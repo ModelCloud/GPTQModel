@@ -72,13 +72,19 @@ class NativePlanHostTests(unittest.TestCase):
         tiles = k * n // 256
         generator = torch.Generator().manual_seed(951)
         levels_cpu = (torch.arange(256, dtype=torch.float16) - 128) / 256
-        for bits, alternate in ((4, 0x5A5A), (5, 0x9696), (6, 0x6969), (7, 0xC3C3)):
+        for bits, alternate, bank_alt_id in (
+            (4, 0x5A5A, 1),
+            (5, 0x9696, 1),
+            (6, 0x6969, 1),
+            (7, 0xC3C3, 1),
+            (8, 0, 0),
+        ):
             config = NativeConfig(
                 c.sizeof(NativeConfig),
                 1,
                 BlasConfig(c.sizeof(BlasConfig), 1, m, k, n, 1, 0, 0),
                 bits,
-                1,
+                bank_alt_id,
                 256,
                 0,
             )
@@ -251,7 +257,6 @@ class NativePlanHostTests(unittest.TestCase):
         for field, value in (
             ("version", 2),
             ("struct_size", 0),
-            ("transition_bits", 8),
             ("bank_alt_id", 4),
             ("decode_threads", 128),
             ("cache_policy", 1),
@@ -261,6 +266,11 @@ class NativePlanHostTests(unittest.TestCase):
             size.value = 123
             self.assertNotEqual(query(c.byref(invalid), c.byref(size)), 0)
             self.assertEqual(size.value, 0)
+        w4 = NativeConfig.from_buffer_copy(config)
+        w4.transition_bits = 8
+        w4.bank_alt_id = 0
+        self.assertEqual(query(c.byref(w4), c.byref(size)), 0)
+        self.assertEqual(size.value, 5120 * 1024 * 2)
         for field, value in (
             ("e", 2),
             ("m", 0),
