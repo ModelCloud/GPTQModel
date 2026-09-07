@@ -226,6 +226,31 @@ def test_rank_candidate_weights_are_square_root_objective_weights():
     )
 
 
+def test_bounded_solver_selects_only_predictable_residual_directions():
+    """The bounded range finder must project R through the activation span."""
+    torch.manual_seed(31)
+    x = torch.randn(20, 4, dtype=torch.float64)
+    target = torch.randn(1, 48, dtype=torch.float64)
+    predictable = x[:, :1] @ target
+    noise = torch.randn_like(predictable)
+    # Make the large residual component exactly orthogonal to X.  A solver
+    # that ranges raw R would spend its only rank on this un-deployable noise.
+    noise = noise - x @ torch.linalg.lstsq(x, noise).solution
+    residual = predictable + 50.0 * noise
+    _, basis, mode = _rank8_output_fit(
+        x,
+        residual,
+        torch.ones((x.shape[0], 1), dtype=torch.float64),
+        rank=1,
+        max_solver_bytes=1,
+        rcond=1e-5,
+        seed=19,
+    )
+    assert mode == "randomized_output_range"
+    cosine = torch.nn.functional.cosine_similarity(basis, target, dim=1).abs()
+    assert cosine.item() > 0.99
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_rank8_fp32_factor_cache_is_prepared_and_versioned():
     from test_qvq_grouped_runtime import _child
@@ -241,6 +266,43 @@ def test_rank8_fp32_factor_cache_is_prepared_and_versioned():
     layer.rank8_A = layer.rank8_A.clone()
     refreshed_a = layer._cached_rank8_factor("A")
     assert refreshed_a.data_ptr() != first_a.data_ptr()
+
+
+def test_rank8_fp32_factor_cache_accepts_inference_mode_tensors():
+    """Inference tensors have no version counter but remain graph-safe constants."""
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child("q_proj", in_features=32, out_features=32).eval()
+    with torch.inference_mode():
+        layer.rank8_A = torch.randn(32, 8, dtype=torch.float16)
+        layer.rank8_B = torch.randn(8, 32, dtype=torch.float16)
+    prepared = layer._cached_rank8_factor("A")
+    assert prepared.dtype == torch.float32
+    assert prepared.is_contiguous()
+    assert prepared.data_ptr() == layer._cached_rank8_factor("A").data_ptr()
+
+
+def test_rank8_fp32_factor_cache_invalidates_on_in_place_mutation():
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child("q_proj", in_features=32, out_features=32).eval()
+    layer.rank8_A = torch.randn(32, 8, dtype=torch.float16)
+    first = layer._cached_rank8_factor("A")
+    with torch.no_grad():
+        layer.rank8_A.add_(1)
+    refreshed = layer._cached_rank8_factor("A")
+    assert refreshed.data_ptr() != first.data_ptr()
+
+
+def test_qvq_auxiliary_cache_accepts_inference_mode_buffer():
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child("q_proj", in_features=32, out_features=32).eval()
+    with torch.inference_mode():
+        layer.SU = torch.ones(32)
+    prepared = layer._cached_cast("SU", torch.float16)
+    assert prepared.dtype == torch.float16
+    assert prepared.data_ptr() == layer._cached_cast("SU", torch.float16).data_ptr()
 
 
 def test_rank_candidate_sweep_uses_predictable_output_fit_and_reports_all_ranks():
@@ -380,6 +442,42 @@ def test_gfx950_window_candidates_use_real_launch_controls(monkeypatch):
     ) == candidates[0]
 
 
+def test_hopper_off_policy_keeps_unverified_candidates_visible(monkeypatch):
+    """Correction-off tuning may retain faster unverified launch variants."""
+
+    class Layer:
+        window_only = True
+        activation = None
+        bits = 2
+        v2b2_p32 = True
+        in_features = 256
+        out_features = 256
+        input_hadamard = False
+        output_hadamard = False
+        _p32_window_config = P32WindowConfig(recovery_mode="off")
+
+        @staticmethod
+        def runtime_device():
+            return torch.device("cuda")
+
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: type(
+            "Properties",
+            (),
+            {"major": 9, "minor": 0, "name": "NVIDIA H200"},
+        )(),
+    )
+    candidates = window_kernel_candidates(Layer(), m=8192)
+    assert candidates
+    assert any(
+        candidate.arithmetic_signature.startswith("unverified")
+        for candidate in candidates
+    )
+    assert all(candidate.recovery_mode == "off" for candidate in candidates)
+
+
 def test_grouped_window_candidates_preserve_child_split_tuples(monkeypatch):
     """The high-level grouped API exposes the SM80 tuple tuner directly."""
 
@@ -476,6 +574,13 @@ def test_grouped_hopper_candidates_keep_child_local_split_choices(monkeypatch):
     assert any(
         tuple((child.block_m, child.block_n) for child in candidate)
         == ((64, 64), (64, 64), (64, 64))
+        for candidate in candidates
+    )
+    # Generic grouped BN128 remains deliberately ineligible.  The native
+    # wide consumer is validated for a single projection; a multi-segment
+    # launch must not infer that specialization from a shape-only speed hint.
+    assert all(
+        all(child.block_n != 128 for child in candidate)
         for candidate in candidates
     )
 
@@ -687,6 +792,18 @@ def test_off_does_not_access_recovery():
 
     value = torch.ones(1)
     assert add_rank8_correction(Poison(), None, value) is value
+
+
+def test_off_fused_policy_does_not_enter_rank8_epilogue():
+    """Matched off-state geometry metadata must not require rank8 factors."""
+    layer, _, inputs, _ = fixture(hadamard=False)
+    layer._p32_window_config = P32WindowConfig(
+        recovery_mode="off", recovery_kernel="fused_epilogue"
+    )
+    layer._p32_rank8_enabled = False
+    with torch.no_grad():
+        output = layer(inputs)
+    assert output.shape == (inputs.shape[0], layer.out_features)
 
 
 def test_forward_pretransformed_propagates_requested_store_dtype():

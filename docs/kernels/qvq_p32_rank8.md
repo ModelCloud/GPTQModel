@@ -21,6 +21,15 @@ FP16 hidden rounding and FP32 expansion/addition; it does not fold A/B into
 weights. Recovery-off does not inspect correction tensors in forward and
 retains existing dispatch and arithmetic. No A100 M512 crossover is installed.
 
+Kernel tuning follows the same distinction. When `rank8_enabled=0`, every
+finite locally-correct launch row remains eligible, including rows carrying an
+unverified producer signature; an optional recovery-overhead budget is ignored
+because no correction executes. Once rank8 is enabled, balanced and quality
+policies continue to require their certified arithmetic signatures, and an
+explicit overhead budget applies only to candidates with a matched off/on
+measurement. The 3--6% scorecard target is report-only unless a caller
+supplies a promotion cap.
+
 ## Quantization and artifact ownership
 
 `quantize_qvq_linear(..., rank8_calibration=Rank8Calibration(...))` retains the

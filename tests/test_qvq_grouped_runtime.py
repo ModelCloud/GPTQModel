@@ -152,6 +152,38 @@ def test_group_validation_uses_window_only_child_storage():
     assert _source_key(children) != key_before
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_grouped_correction_off_ignores_fused_recovery_metadata():
+    """All-off grouped candidates must not touch absent rank8 factors."""
+    device = _h200_device() or _h100_device()
+    if device is None:
+        pytest.skip("requires an H100 or H200 SM90 validation device")
+    shared = torch.ones(2048, device=device)
+    children = tuple(
+        _child(
+            name,
+            in_features=2048,
+            out_features=256,
+            su=shared,
+            seed=20261100 + index,
+            device=device,
+            input_hadamard=False,
+            output_hadamard=False,
+        )
+        for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+    )
+    policy = P32WindowConfig(
+        recovery_mode="off", recovery_kernel="fused_epilogue"
+    )
+    for child in children:
+        prepare_rank8(child, policy)
+    parent = _Attention(children)
+    assert install_qvq_hopper_groups(parent, gate_up=False) == {"qkv": 1}
+    x = torch.randn(1, 2048, device=device, dtype=torch.float16) * 0.01
+    outputs = (parent.q_proj(x), parent.k_proj(x), parent.v_proj(x))
+    assert all(torch.isfinite(output).all() for output in outputs)
+
+
 def test_window_only_dense_reference_reconstructs_planar_temporarily():
     child = _child("q_proj", seed=93)
     expected = child.get_inner_weight_tensor()

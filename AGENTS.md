@@ -2,6 +2,17 @@
 
 This file governs the whole repository. Keep changes narrowly scoped, preserve CPU and non-target GPU fallbacks, and never infer hardware capabilities from a fixed CUDA index.
 
+## Git branches and pull requests
+
+Use [$qvq-multi-agent-git-sync](.agents/skills/qvq-multi-agent-git-sync/SKILL.md)
+when creating a branch or PR, continuing after a PR lifecycle change, or pushing.
+Immediately fetch `origin` before every new branch and start explicitly from
+fresh `origin/main`, never local `main` or a previous feature branch. Record the
+base SHA. Preserve dirty work before switching; carry forward only reviewed
+changes after creating the fresh branch. Before opening a PR, fetch again,
+inspect incoming main changes and set the PR base explicitly to `main`.
+If the prior PR was merged, create a new branch and PR rather than reusing it.
+
 ## Accuracy before kernel speed
 
 For QVQ kernel optimization, use [$qvq-kernel-accuracy](.agents/skills/qvq-kernel-accuracy/SKILL.md) before choosing
@@ -203,6 +214,23 @@ git diff --check
 CUDA tests must state whether they ran, skipped, or only compiled. Model-affecting changes should include a small quantize/save/load/inference path and, when practical, an evaluation comparison against the dense baseline.
 
 ## Required graph safety and compilation limits
+
+### AMD native kernel tuning ownership
+
+For the gfx950 native P32 ABI, expose logical M/K/N/E and supported backend
+tuning controls to consuming runtimes. ZML must be able to enumerate eligible
+configurations, measure them, select one explicitly, and prepare a frozen plan.
+QVQ must honor that selection without hidden retuning or backend substitution.
+Standalone QVQ may autotune during preparation when no explicit configuration
+is supplied. Never autotune during execution or graph capture/replay.
+
+Treat E as the expert/group dimension (E=1 for the current dense Qwen path),
+not as permission to claim unimplemented grouped support. Expose only controls
+the backend actually honors, including resource/workspace requirements and
+configuration/build identity. Reject unsupported selections explicitly.
+Candidate eligibility and numerical gates remain QVQ responsibilities; external
+tuning does not authorize lower precision, changed banks, or relaxed gates.
+See [native experiment/tuning contract](docs/kernels/qvq_gfx950_native_experiment.md).
 
 All kernel code and integration with QvQ or other kernel libraries must be made
 graph safe. This includes single/grouped operators, transforms, correction
