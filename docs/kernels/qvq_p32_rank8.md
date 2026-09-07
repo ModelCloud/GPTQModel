@@ -883,3 +883,13 @@ factors are appended to that same payload before host staging. This preserves
 the base-payload binding when the selector chooses a nonzero candidate arm.
 When output alignment is enabled, both ordinary and atomic modules defer the
 fit one step further, until alignment has finished revising SU/SV.
+
+The native ABI now exposes `recovery_projection=1` as the graph-safe
+`concurrent_reference` producer. A prepared graph owns its auxiliary CUDA
+stream and ready/done events; the producer consumes the same transformed
+activation `X'` as the window decoder and joins before rank expansion. Raw ABI
+calls retain the synchronous reference behavior, while graph replay performs
+no stream/event allocation. The H200 K=N=2048 BM64/BN64 spot sweep measured
+52.42%, 35.60%, and 34.76% marginal overhead at M=128, 2048, and 8192,
+respectively. These measurements keep the policy opt-in and below no default
+promotion budget; large-M rank8 remains shape- and kernel-dependent.
