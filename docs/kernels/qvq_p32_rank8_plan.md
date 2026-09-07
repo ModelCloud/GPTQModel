@@ -89,8 +89,15 @@ or arithmetic-signature eligibility.
 The CLI also accepts `--quality-mode fast|balanced|quality`. This value is
 carried into every candidate preparation and the emitted tuning report, so a
 direct BM/BN sweep uses the same arithmetic policy as the serving graphs:
-`fast` permits permissive correction-off exploration, `balanced` admits only
-reference or certified arithmetic, and `quality` admits reference arithmetic.
+`fast` permits every finite, locally correct implementation when correction is
+explicitly enabled (including unverified Tensor Core and fused candidates),
+`balanced` admits only reference or certified arithmetic, and `quality` admits
+reference arithmetic with independent audit confirmation. The package default
+still keeps correction off, so the fast policy never loads rank8 factors unless
+the caller requests recovery or runs an enabled tuning sweep. An overhead
+budget is an optional promotion filter; without one, a valid faster candidate
+remains eligible even when its measured recovery overhead exceeds the
+aspirational 3--6% range.
 
 The native prepared-graph API owns its temporary allocation pool and can insert
 the existing window/rank8 operator as a child of an enclosing CUDA capture. The
