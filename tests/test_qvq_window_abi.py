@@ -141,7 +141,8 @@ def test_native_composite_qwen_shape_matches_window_reference():
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-def test_native_transform_free_rank8_fused_epilogue_matches_and_replays():
+@pytest.mark.parametrize("projection", ["separate_reference", "concurrent_reference"])
+def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(projection):
     """The native composite path uses one graph-safe fused rank8 epilogue."""
     from test_qvq_grouped_runtime import _child
     from test_qvq_window_recovery import _kernel_rank8
@@ -159,6 +160,7 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays():
         algorithm="hopper_m16",
         recovery_mode="on",
         recovery_kernel="fused_epilogue",
+        recovery_projection=projection,
     )
     x = torch.randn(33, 2048, device="cuda", dtype=torch.float16) * 0.01
     with torch.no_grad():

@@ -67,7 +67,8 @@ static int qvq_p32_window_linear_impl(
     QvqWindowBuffer bias, QvqWindowBuffer rank8_a, QvqWindowBuffer rank8_b,
     QvqWindowBuffer y, const QvqP32WindowConfig* config, void* cuda_stream,
     char* error, uint64_t error_capacity, const at::Tensor& prepared_rank8_a,
-    const at::Tensor& prepared_rank8_b) {
+    const at::Tensor& prepared_rank8_b, cudaStream_t recovery_stream,
+    cudaEvent_t recovery_ready, cudaEvent_t recovery_done) {
   try {
     check(config && config->abi_version == 3 &&
               config->struct_bytes >= offsetof(QvqP32WindowConfig, recovery_kernel) &&
@@ -95,8 +96,8 @@ static int qvq_p32_window_linear_impl(
           "native reference ABI requires BK256, stages2, split1");
     check(c.input_hadamard <= 1 && c.output_hadamard <= 1 && c.rank8_enabled <= 1,
           "native window flags must be zero or one");
-    check(recovery_kernel <= 1 && recovery_projection == 0,
-          "native rank8 policy supports separate_reference or fused_epilogue with separate_reference projection");
+    check(recovery_kernel <= 1 && recovery_projection <= 1,
+          "native rank8 policy supports separate_reference or fused_epilogue with separate_reference or concurrent_reference projection");
     check(recovery_kernel != 1 || !c.output_hadamard,
           "native fused rank8 epilogue requires output_hadamard=false");
     check(!c.input_hadamard || power2(c.k),
@@ -190,12 +191,31 @@ static int qvq_p32_window_linear_impl(
           .view({padded_m, c.n}).slice(0, 0, c.m);
     }
     bool wrote_output = false;
-    if (c.rank8_enabled && recovery_kernel == 1 && !c.output_hadamard) {
+    const bool concurrent_projection = c.rank8_enabled && recovery_projection == 1;
+    if (concurrent_projection && recovery_kernel == 1 && !c.output_hadamard) {
+      // Prepared graph execution supplies a dedicated stream and event pair.
+      // Raw linear calls intentionally leave these null and execute the same
+      // reference projection on the caller stream.
+      if (recovery_stream != nullptr) {
+        C10_CUDA_CHECK(cudaEventRecord(recovery_ready, static_cast<cudaStream_t>(cuda_stream)));
+        C10_CUDA_CHECK(cudaStreamWaitEvent(recovery_stream, recovery_ready, 0));
+      }
       const auto& a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
       // Keep projection on the existing captured FP32 GEMM path, then use a
       // direct-store epilogue. This avoids the uncompetitive serial custom
       // projection while preserving the explicit FP16 hidden boundary.
-      auto hidden = at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
+      at::Tensor hidden;
+      if (recovery_stream != nullptr) {
+        c10::cuda::CUDAStreamGuard recovery_guard(c10::cuda::getStreamFromExternal(
+            recovery_stream, device));
+        hidden = at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
+        C10_CUDA_CHECK(cudaEventRecord(recovery_done, recovery_stream));
+      } else {
+        hidden = at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
+      }
+      if (recovery_stream != nullptr) {
+        C10_CUDA_CHECK(cudaStreamWaitEvent(static_cast<cudaStream_t>(cuda_stream), recovery_done, 0));
+      }
       // The transform-free composite path uses one graph-safe CUDA epilogue:
       // it consumes X'A at the explicit FP16 hidden boundary, expands in
       // FP32, adds the decoded base, and stores the final FP16 result directly
@@ -207,7 +227,20 @@ static int qvq_p32_window_linear_impl(
     } else if (c.rank8_enabled) {
       const auto& a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
       const auto& b_float = prepared_rank8_b.defined() ? prepared_rank8_b : b.to(at::kFloat);
-      auto hidden = at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
+      at::Tensor hidden;
+      if (concurrent_projection && recovery_stream != nullptr) {
+        C10_CUDA_CHECK(cudaEventRecord(recovery_ready, static_cast<cudaStream_t>(cuda_stream)));
+        C10_CUDA_CHECK(cudaStreamWaitEvent(recovery_stream, recovery_ready, 0));
+        {
+          c10::cuda::CUDAStreamGuard recovery_guard(c10::cuda::getStreamFromExternal(
+              recovery_stream, device));
+          hidden = at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
+          C10_CUDA_CHECK(cudaEventRecord(recovery_done, recovery_stream));
+        }
+        C10_CUDA_CHECK(cudaStreamWaitEvent(static_cast<cudaStream_t>(cuda_stream), recovery_done, 0));
+      } else {
+        hidden = at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
+      }
       // Preserve the explicit FP16 hidden boundary while combining the FP32
       // rank expansion with the decoded base in one BLAS epilogue.  ``addmm``
       // retains FP32 inputs/accumulation for the output-Hadamard reference
@@ -241,7 +274,8 @@ extern "C" int qvq_p32_window_linear(
     char* error, uint64_t error_capacity) {
   return qvq_p32_window_linear_impl(
       x, window, banks, levels, su, sv, bias, rank8_a, rank8_b, y,
-      config, cuda_stream, error, error_capacity, at::Tensor(), at::Tensor());
+      config, cuda_stream, error, error_capacity, at::Tensor(), at::Tensor(),
+      nullptr, nullptr, nullptr);
 }
 
 namespace {
@@ -251,7 +285,16 @@ struct PreparedWindow {
   int device;
   at::Tensor rank8_a_float;
   at::Tensor rank8_b_float;
+  cudaStream_t recovery_stream{nullptr};
+  cudaEvent_t recovery_ready{nullptr};
+  cudaEvent_t recovery_done{nullptr};
   std::mutex mutex;
+
+  ~PreparedWindow() {
+    if (recovery_ready != nullptr) cudaEventDestroy(recovery_ready);
+    if (recovery_done != nullptr) cudaEventDestroy(recovery_done);
+    if (recovery_stream != nullptr) cudaStreamDestroy(recovery_stream);
+  }
 };
 template <typename Function>
 int graph_boundary(Function&& function, char* error, uint64_t capacity) {
@@ -303,13 +346,25 @@ extern "C" int qvq_p32_window_graph_create(
       prepared->rank8_b_float = tensor(
           buffers[8], {8, config->n}, at::kHalf, prepared->device).to(at::kFloat);
     }
+    if (config->rank8_enabled && config->recovery_projection == 1) {
+      // The auxiliary producer is owned by the prepared graph.  Creating it
+      // here, before capture, keeps replay free of stream/event allocation.
+      C10_CUDA_CHECK(cudaStreamCreateWithFlags(
+          &prepared->recovery_stream, cudaStreamNonBlocking));
+      C10_CUDA_CHECK(cudaEventCreateWithFlags(
+          &prepared->recovery_ready, cudaEventDisableTiming));
+      C10_CUDA_CHECK(cudaEventCreateWithFlags(
+          &prepared->recovery_done, cudaEventDisableTiming));
+    }
     auto invoke_prepared = [&] {
       char message[4096]{};
       const int status = qvq_p32_window_linear_impl(
           buffers[0], buffers[1], buffers[2], buffers[3], buffers[4],
           buffers[5], buffers[6], buffers[7], buffers[8], buffers[9],
           config, cuda_stream, message, sizeof(message),
-          prepared->rank8_a_float, prepared->rank8_b_float);
+          prepared->rank8_a_float, prepared->rank8_b_float,
+          prepared->recovery_stream, prepared->recovery_ready,
+          prepared->recovery_done);
       if (status) throw std::runtime_error(message);
     };
     prepared->graph.capture_begin();
