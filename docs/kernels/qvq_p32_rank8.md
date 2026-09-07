@@ -791,7 +791,7 @@ device-side validation synchronizations cannot enter a graph.
 ```python
 from gptqmodel.quantization.qvq_window_graphs import P32WindowGraphs
 
-owner = P32WindowGraphs(model.eval())
+owner = P32WindowGraphs(model.eval(), max_graphs=8)
 try:
     owner.capture(
         "prefill128",
@@ -806,6 +806,12 @@ try:
 finally:
     owner.close()
 ```
+
+`max_graphs` bounds retained input signatures; each resident signature owns up
+to one graph for each quality mode. Least-recently-used retirement synchronizes
+the latest replay event before releasing its CUDA graph/pool references. Use
+`owner.residency_stats()` while idle to record resident keys and retirements in
+the graph scorecard.
 
 Input tensors must have the captured shape, dtype and CUDA device. Static
 keywords are immutable scalar values; outputs are tensor pytrees. This API
