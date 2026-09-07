@@ -14,9 +14,8 @@
 #include <memory>
 #include <mutex>
 
-extern "C" void qvq_rank8_fused_no_hadamard(
-    const at::Tensor& transformed,
-    const at::Tensor& rank8_a,
+extern "C" void qvq_rank8_epilogue_no_hadamard(
+    const at::Tensor& hidden,
     const at::Tensor& rank8_b,
     const at::Tensor& base,
     const at::Tensor& scale_v,
@@ -193,13 +192,16 @@ static int qvq_p32_window_linear_impl(
     bool wrote_output = false;
     if (c.rank8_enabled && recovery_kernel == 1 && !c.output_hadamard) {
       const auto& a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
-      const auto& b_float = prepared_rank8_b.defined() ? prepared_rank8_b : b.to(at::kFloat);
+      // Keep projection on the existing captured FP32 GEMM path, then use a
+      // direct-store epilogue. This avoids the uncompetitive serial custom
+      // projection while preserving the explicit FP16 hidden boundary.
+      auto hidden = at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
       // The transform-free composite path uses one graph-safe CUDA epilogue:
-      // it computes X'A cooperatively per row, applies the explicit FP16
-      // hidden boundary, expands in FP32, adds the decoded base, and stores
-      // the final FP16 result directly into the caller-owned output buffer.
-      qvq_rank8_fused_no_hadamard(
-          transformed, a_float, b_float, inner, scale_v, output_bias, output,
+      // it consumes X'A at the explicit FP16 hidden boundary, expands in
+      // FP32, adds the decoded base, and stores the final FP16 result directly
+      // into the caller-owned output buffer.
+      qvq_rank8_epilogue_no_hadamard(
+          hidden, b, inner, scale_v, output_bias, output,
           static_cast<cudaStream_t>(cuda_stream));
       wrote_output = true;
     } else if (c.rank8_enabled) {
