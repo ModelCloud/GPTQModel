@@ -46,6 +46,17 @@ def main():
     )
     parser.add_argument("--kernel", default="separate_reference")
     parser.add_argument("--projection", default="separate_reference")
+    parser.add_argument(
+        "--arithmetic-signature",
+        choices=(
+            "reference_fp32_v1",
+            "unverified_fused_epilogue",
+            "unverified_input_fused",
+            "unverified_tensor_core",
+            "unverified_project_output_fused",
+        ),
+        help="explicit arithmetic policy for the requested rank8 implementation",
+    )
     parser.add_argument("--algorithm", default="auto")
     parser.add_argument(
         "--quality-mode",
@@ -77,6 +88,18 @@ def main():
     parser.add_argument("--replays", type=int, default=20)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+    arithmetic_signature = args.arithmetic_signature
+    if arithmetic_signature is None:
+        if args.projection == "project_output_fused":
+            arithmetic_signature = "unverified_project_output_fused"
+        elif args.kernel == "fused_epilogue":
+            arithmetic_signature = "unverified_fused_epilogue"
+        elif args.projection == "input_fused":
+            arithmetic_signature = "unverified_input_fused"
+        elif args.projection == "tensor_core":
+            arithmetic_signature = "unverified_tensor_core"
+        else:
+            arithmetic_signature = "reference_fp32_v1"
     if args.profile and len(args.m) != 1:
         parser.error("profiling requires one M and one quality mode per process")
     if args.activation_file and not args.package:
@@ -295,6 +318,7 @@ def main():
                     recovery_mode=mode,
                     recovery_kernel=args.kernel,
                     recovery_projection=args.projection,
+                    arithmetic_signature=arithmetic_signature,
                     quality_mode=args.quality_mode,
                     block_m=args.block_m,
                     block_n=args.block_n,

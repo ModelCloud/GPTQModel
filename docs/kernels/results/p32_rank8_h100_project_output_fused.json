@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "scope": "synthetic W3 kernel/performance fixture; not model quality",
+  "revision": "d1b48bc0a335f16dc7f76d27fcd97a66ec688876",
+  "hardware": {
+    "name": "NVIDIA H100",
+    "memory_bytes": 102077169664,
+    "compute_capability": [9, 0]
+  },
+  "shape": {"k": 2048, "n": 2048, "bits": 3},
+  "samples": 8,
+  "replays_per_sample": 20,
+  "rows": [
+    {"algorithm": "hopper_m16", "m": 1, "reference_us": 43.9576, "fused_us": 41.1856, "speedup": 1.0673, "reference_max_abs": 0.0, "fused_max_abs": 0.0},
+    {"algorithm": "hopper_m16", "m": 16, "reference_us": 46.7168, "fused_us": 38.8080, "speedup": 1.2038, "reference_max_abs": 0.0, "fused_max_abs": 0.0},
+    {"algorithm": "hopper_m16", "m": 128, "reference_us": 165.6160, "fused_us": 155.4208, "speedup": 1.0656, "reference_max_abs": 0.0, "fused_max_abs": 0.0},
+    {"algorithm": "hopper_m16", "m": 512, "reference_us": 591.8056, "fused_us": 565.8024, "speedup": 1.0460, "reference_max_abs": 0.0, "fused_max_abs": 0.001953125},
+    {"algorithm": "hopper_direct_decode_mma", "m": 1, "reference_us": 47.1632, "fused_us": 44.0808, "speedup": 1.0700, "reference_max_abs": 0.0, "fused_max_abs": 0.0},
+    {"algorithm": "hopper_direct_decode_mma", "m": 16, "reference_us": 52.4528, "fused_us": 44.3928, "speedup": 1.1816, "reference_max_abs": 0.0, "fused_max_abs": 0.0},
+    {"algorithm": "hopper_direct_decode_mma", "m": 128, "reference_us": 54.9216, "fused_us": 44.2016, "speedup": 1.2425, "reference_max_abs": 0.0, "fused_max_abs": 0.0},
+    {"algorithm": "hopper_direct_decode_mma", "m": 512, "reference_us": 98.6168, "fused_us": 75.7960, "speedup": 1.3011, "reference_max_abs": 0.0, "fused_max_abs": 0.001953125}
+  ]
+}
