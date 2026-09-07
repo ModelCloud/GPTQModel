@@ -231,6 +231,18 @@ def test_rank8_fp32_factor_cache_accepts_inference_mode_tensors():
     assert prepared.data_ptr() == layer._cached_rank8_factor("A").data_ptr()
 
 
+def test_rank8_fp32_factor_cache_invalidates_on_in_place_mutation():
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child("q_proj", in_features=32, out_features=32).eval()
+    layer.rank8_A = torch.randn(32, 8, dtype=torch.float16)
+    first = layer._cached_rank8_factor("A")
+    with torch.no_grad():
+        layer.rank8_A.add_(1)
+    refreshed = layer._cached_rank8_factor("A")
+    assert refreshed.data_ptr() != first.data_ptr()
+
+
 def test_rank_candidate_sweep_uses_predictable_output_fit_and_reports_all_ranks():
     torch.manual_seed(1412)
     x = torch.randn((48, 32), dtype=torch.float64)
