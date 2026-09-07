@@ -195,8 +195,10 @@ the same matching solutions, measures complete GEMM dispatches with bounded
 warmup/sample counts outside stream capture, and returns the selected solution,
 median time, tested/failed counts and sample count. The winning solution is
 frozen in the plan for subsequent execution; no tuning or synchronization occurs
-during replay. The new native-plan test exercises this contract at M=1,K=256,N=256
-and independently checks the FP32 result against the FP64 reference.
+during replay. Solution index zero is a valid measured standard-algorithm winner,
+not a failure sentinel. The new native-plan test exercises this contract at
+M=1,K=256,N=256 and independently checks the FP32 result against the FP64
+reference.
 
 - Describe logical M (activation rows), K (reduction), N (output columns), and
   E (experts/groups). Current dense support is E=1; reject E>1 until grouped
