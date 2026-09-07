@@ -51,12 +51,13 @@ at::Tensor hadamard(const at::Tensor& x, c10::IValue pre,
 }
 } // namespace
 
-extern "C" int qvq_p32_window_linear(
+static int qvq_p32_window_linear_impl(
     QvqWindowBuffer x, QvqWindowBuffer window, QvqWindowBuffer banks,
     QvqWindowBuffer levels, QvqWindowBuffer su, QvqWindowBuffer sv,
     QvqWindowBuffer bias, QvqWindowBuffer rank8_a, QvqWindowBuffer rank8_b,
     QvqWindowBuffer y, const QvqP32WindowConfig* config, void* cuda_stream,
-    char* error, uint64_t error_capacity) {
+    char* error, uint64_t error_capacity, const at::Tensor& prepared_rank8_a,
+    const at::Tensor& prepared_rank8_b) {
   try {
     check(config && config->abi_version == 3 && config->struct_bytes == sizeof(*config),
           "unsupported window ABI version or configuration size");
@@ -118,6 +119,17 @@ extern "C" int qvq_p32_window_linear(
     if (c.rank8_enabled) {
       a = tensor(rank8_a, {c.k, 8}, at::kHalf, device);
       b = tensor(rank8_b, {8, c.n}, at::kHalf, device);
+      if (prepared_rank8_a.defined() || prepared_rank8_b.defined()) {
+        check(prepared_rank8_a.defined() && prepared_rank8_b.defined(),
+              "native prepared rank8 factors must be provided as a pair");
+        check(prepared_rank8_a.scalar_type() == at::kFloat &&
+                  prepared_rank8_b.scalar_type() == at::kFloat &&
+                  prepared_rank8_a.device() == a.device() &&
+                  prepared_rank8_b.device() == b.device() &&
+                  prepared_rank8_a.sizes() == a.sizes() &&
+                  prepared_rank8_b.sizes() == b.sizes(),
+              "native prepared rank8 factor cache has an invalid layout");
+      }
     }
     std::vector<QvqWindowBuffer> sources{x, window, banks, levels, su, sv, bias};
     if (c.rank8_enabled) { sources.push_back(rank8_a); sources.push_back(rank8_b); }
@@ -156,12 +168,14 @@ extern "C" int qvq_p32_window_linear(
           .view({padded_m, c.n}).slice(0, 0, c.m);
     }
     if (c.rank8_enabled) {
-      auto hidden = at::mm(transformed.to(at::kFloat), a.to(at::kFloat)).to(at::kHalf);
+      const auto& a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
+      const auto& b_float = prepared_rank8_b.defined() ? prepared_rank8_b : b.to(at::kFloat);
+      auto hidden = at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
       // Preserve the explicit FP16 hidden boundary while combining the FP32
       // rank expansion with the decoded base in one BLAS epilogue.  ``addmm``
       // retains FP32 inputs/accumulation and avoids a separate correction
       // output allocation and add launch on the native prepared-graph path.
-      inner = at::addmm(inner, hidden.to(at::kFloat), b.to(at::kFloat));
+      inner = at::addmm(inner, hidden.to(at::kFloat), b_float);
     }
     if (c.output_hadamard) {
       inner = hadamard(inner.contiguous(), c10::IValue(), scale_v,
@@ -182,11 +196,24 @@ extern "C" int qvq_p32_window_linear(
   }
 }
 
+extern "C" int qvq_p32_window_linear(
+    QvqWindowBuffer x, QvqWindowBuffer window, QvqWindowBuffer banks,
+    QvqWindowBuffer levels, QvqWindowBuffer su, QvqWindowBuffer sv,
+    QvqWindowBuffer bias, QvqWindowBuffer rank8_a, QvqWindowBuffer rank8_b,
+    QvqWindowBuffer y, const QvqP32WindowConfig* config, void* cuda_stream,
+    char* error, uint64_t error_capacity) {
+  return qvq_p32_window_linear_impl(
+      x, window, banks, levels, su, sv, bias, rank8_a, rank8_b, y,
+      config, cuda_stream, error, error_capacity, at::Tensor(), at::Tensor());
+}
+
 namespace {
 struct PreparedWindow {
   at::cuda::CUDAGraph graph{true};
   cudaStream_t stream;
   int device;
+  at::Tensor rank8_a_float;
+  at::Tensor rank8_b_float;
   std::mutex mutex;
 };
 template <typename Function>
@@ -233,10 +260,25 @@ extern "C" int qvq_p32_window_graph_create(
     auto prepared = std::make_unique<PreparedWindow>();
     prepared->stream = stream;
     prepared->device = attributes.device;
+    if (config->rank8_enabled) {
+      prepared->rank8_a_float = tensor(
+          buffers[7], {config->k, 8}, at::kHalf, prepared->device).to(at::kFloat);
+      prepared->rank8_b_float = tensor(
+          buffers[8], {8, config->n}, at::kHalf, prepared->device).to(at::kFloat);
+    }
+    auto invoke_prepared = [&] {
+      char message[4096]{};
+      const int status = qvq_p32_window_linear_impl(
+          buffers[0], buffers[1], buffers[2], buffers[3], buffers[4],
+          buffers[5], buffers[6], buffers[7], buffers[8], buffers[9],
+          config, cuda_stream, message, sizeof(message),
+          prepared->rank8_a_float, prepared->rank8_b_float);
+      if (status) throw std::runtime_error(message);
+    };
     prepared->graph.capture_begin();
     try {
       owned_capture = true;
-      invoke_linear();
+      invoke_prepared();
       owned_capture = false;
       prepared->graph.capture_end();
     } catch (...) {

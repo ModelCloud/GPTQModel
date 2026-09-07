@@ -30,7 +30,9 @@ int qvq_p32_window_linear(
     QvqWindowBuffer y, const QvqP32WindowConfig* config, void* cuda_stream,
     char* error, uint64_t error_capacity);
 
-// A prepared graph retains its private ATen allocation pool. Buffers are in
+// A prepared graph retains its private ATen allocation pool and, when rank8
+// is enabled, one FP32 copy of each immutable factor so replay does not recast
+// FP16 factors. Buffers are in
 // linear() argument order, including y. Caller owns all ten buffers and keeps
 // their addresses valid until destroy; artifact values and config are immutable.
 // Create performs warmup and synchronizes the supplied non-default stream.
