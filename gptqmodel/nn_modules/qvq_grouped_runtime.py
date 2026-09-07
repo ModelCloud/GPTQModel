@@ -1419,14 +1419,26 @@ class QVQHopperGroupedRuntime:
         if down.runtime_device() != x.device:
             return "fused MLP down payload and activation devices differ"
         down_policy = getattr(down, "_p32_window_config", None)
-        if (
-            getattr(down, "_p32_rank8_enabled", False)
-            and down_policy is not None
-            and down_policy.recovery_projection == "input_fused"
-        ):
-            return (
-                "fused MLP down rank8 input_fused is unsupported; use separate_reference"
-            )
+        if getattr(down, "_p32_rank8_enabled", False) and down_policy is not None:
+            if down_policy.recovery_projection in (
+                "input_fused",
+                "concurrent_reference",
+                "project_output_fused",
+            ):
+                return (
+                    "fused MLP down rank8 projection "
+                    f"{down_policy.recovery_projection} is unsupported; use "
+                    "separate_reference or tensor_core"
+                )
+            if down_policy.recovery_kernel not in (
+                "separate_reference",
+                "fused_epilogue",
+            ):
+                return (
+                    "fused MLP down rank8 kernel "
+                    f"{down_policy.recovery_kernel} is unsupported; use "
+                    "separate_reference or fused_epilogue"
+                )
         if not callable(self._mlp_act_fn):
             return "fused MLP activation is unavailable"
         return None
