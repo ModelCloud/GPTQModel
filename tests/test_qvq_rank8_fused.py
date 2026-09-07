@@ -432,7 +432,8 @@ def test_rank8_input_producer_supports_composite_hadamard_width_graph_replay():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_input_fused_policy_admits_composite_width_without_input_hadamard():
+@pytest.mark.parametrize("input_hadamard", [False, True])
+def test_input_fused_policy_admits_composite_width(input_hadamard):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 required")
     from test_qvq_grouped_runtime import _child
@@ -449,7 +450,7 @@ def test_input_fused_policy_admits_composite_width_without_input_hadamard():
         in_features=5120,
         out_features=5120,
         device="cuda",
-        input_hadamard=False,
+        input_hadamard=input_hadamard,
     )
     _kernel_rank8(layer)
     prepare_rank8(layer, P32WindowConfig(recovery_mode="on"))

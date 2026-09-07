@@ -2090,6 +2090,7 @@ def window_kernel_candidates(layer, *, m):
         if layer.in_features <= 16384 and (
             not layer.input_hadamard
             or not layer.in_features & (layer.in_features - 1)
+            or _supported_composite_hadamard_width(layer.in_features)
         ):
             candidates.extend(
                 replace(
