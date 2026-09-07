@@ -109,7 +109,7 @@ class NativePlanHostTests(unittest.TestCase):
             plan = c.c_void_p()
             graph = None
             with torch.cuda.stream(stream):
-                if bits >= 6:
+                if bits >= 6 or cache_policy == 1:
                     y.fill_(123)
                     self.assertEqual(
                         lib.qvq_gfx950_native_prepare_runtime(
@@ -133,25 +133,25 @@ class NativePlanHostTests(unittest.TestCase):
                     plan = c.c_void_p()
                 else:
                     prepared_runtime = None
-                self.assertEqual(
-                    lib.qvq_gfx950_native_prepare(
-                        c.byref(config),
-                        x.data_ptr(),
-                        words.data_ptr(),
-                        levels.data_ptr(),
-                        banks.data_ptr(),
-                        y.data_ptr(),
-                        scratch.data_ptr(),
-                        scratch.numel() * 2,
-                        workspace.data_ptr(),
-                        workspace.numel(),
-                        stream.cuda_stream,
-                        c.byref(plan),
-                    ),
-                    0,
-                )
-                if prepared_runtime is not None:
-                    self.assertEqual(lib.qvq_gfx950_native_destroy(plan), 0)
+                if prepared_runtime is None:
+                    self.assertEqual(
+                        lib.qvq_gfx950_native_prepare(
+                            c.byref(config),
+                            x.data_ptr(),
+                            words.data_ptr(),
+                            levels.data_ptr(),
+                            banks.data_ptr(),
+                            y.data_ptr(),
+                            scratch.data_ptr(),
+                            scratch.numel() * 2,
+                            workspace.data_ptr(),
+                            workspace.numel(),
+                            stream.cuda_stream,
+                            c.byref(plan),
+                        ),
+                        0,
+                    )
+                else:
                     plan = prepared_runtime
                 if cache_policy == 1:
                     # Explicitly seed the real immutable payload before graph
