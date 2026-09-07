@@ -115,6 +115,17 @@ per capture; separate fast/balanced/quality captures must be owned by the
 execution graph caller. Tests retain and replay off/on graphs after changing
 the eager policy. There is no graph manager that silently changes modes.
 
+Automatic tuning and automatic activation are separate decisions. A prepared
+`fast` rank8 sweep measures every eligible projection, including Tensor Core,
+and applies the fastest numerically accepted candidate without requiring a
+3--5% overhead result. The package default remains recovery-off because rank8
+factors are optional per module and Tensor Core currently has an unverified
+arithmetic signature; changing that default would change the established
+window output for models that did not request correction. Run the sweep and
+prepare the resulting policy before capture to make Tensor Core automatic for
+that exact device, shape and M bucket. Balanced/quality still require the
+validated audit and a certified/reference arithmetic signature.
+
 `auto`/`production_window` preserve existing dispatch. Explicit `hopper_m16`
 and `hopper_direct_decode_mma` expose existing M16 and row-reuse WGMMA
 consumers, split count and M range for external correctness/timing comparisons.
