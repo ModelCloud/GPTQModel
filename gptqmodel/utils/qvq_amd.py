@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 import threading
 from dataclasses import dataclass
 from operator import index
@@ -44,6 +45,8 @@ _COMPOSITE_HADAMARD_CACHE: dict[
     torch.device, tuple[torch.Tensor, torch.Tensor, int, int]
 ] = {}
 _COMPOSITE_HADAMARD_CACHE_LOCK = threading.Lock()
+_AMD_AUTOTUNE_CACHE: dict[tuple[object, ...], "QVQAMDLaunchConfig"] = {}
+_AMD_AUTOTUNE_CACHE_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -118,6 +121,145 @@ def qvq_p32_amd_kernel_candidates(m: int, n: int, k: int) -> tuple[QVQAMDLaunchC
         stages = 1 if block_m == 1024 else (3 if m <= 64 else 2)
         add(QVQAMDLaunchConfig(block_m, 64, block_k, 8, stages))
     return tuple(candidates)
+
+
+def select_qvq_p32_amd_kernel_candidate(
+    candidates: tuple[QVQAMDLaunchConfig, ...] | list[QVQAMDLaunchConfig],
+    timings_ms: tuple[float, ...] | list[float],
+) -> QVQAMDLaunchConfig:
+    """Select the fastest measured gfx950 launch without doing device work.
+
+    Candidate timing belongs to preparation, before HIP/CUDA graph capture.
+    Keeping selection as a pure helper lets model runtimes (including ZML
+    hosts) benchmark with their own stream/timer and install the same launch
+    contract without introducing a hidden shape heuristic.
+    """
+
+    candidates = tuple(candidates)
+    timings_ms = tuple(timings_ms)
+    if not candidates:
+        raise ValueError("AMD P32 autotune requires at least one candidate")
+    if len(candidates) != len(timings_ms):
+        raise ValueError("AMD P32 candidate/timing counts must match")
+    if any(not isinstance(candidate, QVQAMDLaunchConfig) for candidate in candidates):
+        raise TypeError("AMD P32 candidates must be QVQAMDLaunchConfig values")
+    valid: list[tuple[float, int]] = []
+    for index, timing in enumerate(timings_ms):
+        if not isinstance(timing, (int, float)) or not math.isfinite(float(timing)):
+            continue
+        if float(timing) <= 0:
+            continue
+        valid.append((float(timing), index))
+    if not valid:
+        raise RuntimeError("AMD P32 autotune produced no finite positive timings")
+    # min() preserves candidate enumeration order for exact timing ties, so a
+    # report is reproducible even when two launches quantize to the same timer
+    # tick.
+    return candidates[min(valid)[1]]
+
+
+def clear_qvq_p32_amd_autotune_cache() -> None:
+    """Clear process-local gfx950 launch winners before a new tuning session."""
+
+    with _AMD_AUTOTUNE_CACHE_LOCK:
+        _AMD_AUTOTUNE_CACHE.clear()
+
+
+def qvq_p32_amd_autotune(
+    x: torch.Tensor,
+    window: torch.Tensor,
+    levels: torch.Tensor,
+    bank_ids: torch.Tensor,
+    bits: float,
+    *,
+    out_features: int,
+    bank_alt_id: int,
+    output_fp32: bool = True,
+    max_candidates: int = 7,
+    warmup: int = 2,
+    iterations: int = 8,
+    use_cache: bool = True,
+) -> QVQAMDLaunchConfig:
+    """Benchmark and cache one fused gfx950 launch for an exact shape.
+
+    This is an explicit preparation API. It rejects an active graph capture,
+    runs every candidate with ``cache_weight=False`` so launch geometry is
+    actually exercised, and returns a config that can be passed to
+    :func:`qvq_p32_amd` for all subsequent eager and graph-replay calls.
+    """
+
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError("AMD P32 autotune must run before CUDA/HIP Graph capture")
+    if type(max_candidates) is not int or max_candidates < 1:
+        raise ValueError("max_candidates must be a positive integer")
+    if type(warmup) is not int or warmup < 0:
+        raise ValueError("warmup must be a non-negative integer")
+    if type(iterations) is not int or iterations < 1:
+        raise ValueError("iterations must be a positive integer")
+    if type(output_fp32) is not bool:
+        raise TypeError("output_fp32 must be boolean")
+    if not qvq_p32_amd_supported(x.device):
+        raise RuntimeError("AMD P32 autotune requires a ROCm gfx950 device")
+    if x.ndim != 2:
+        raise ValueError("AMD P32 autotune expects a 2D input")
+    candidates = qvq_p32_amd_kernel_candidates(
+        int(x.shape[0]), out_features, int(x.shape[1])
+    )[:max_candidates]
+    properties = torch.cuda.get_device_properties(x.device)
+    key = (
+        "gfx950-v1",
+        str(getattr(properties, "gcnArchName", "gfx950")),
+        x.get_device(),
+        tuple(int(value) for value in x.shape),
+        int(out_features),
+        float(bits),
+        int(bank_alt_id),
+        bool(output_fp32),
+        tuple(candidates),
+    )
+    if use_cache:
+        with _AMD_AUTOTUNE_CACHE_LOCK:
+            cached = _AMD_AUTOTUNE_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+    stream = torch.cuda.current_stream(x.device)
+    timings: list[float] = []
+    for candidate in candidates:
+        try:
+            for _ in range(warmup):
+                output = qvq_p32_amd(
+                    x, window, levels, bank_ids, bits,
+                    out_features=out_features, bank_alt_id=bank_alt_id,
+                    output_fp32=output_fp32, cache_weight=False,
+                    launch_config=candidate,
+                )
+                del output
+            samples: list[float] = []
+            for _ in range(iterations):
+                start = torch.cuda.Event(enable_timing=True)
+                end = torch.cuda.Event(enable_timing=True)
+                start.record(stream)
+                output = qvq_p32_amd(
+                    x, window, levels, bank_ids, bits,
+                    out_features=out_features, bank_alt_id=bank_alt_id,
+                    output_fp32=output_fp32, cache_weight=False,
+                    launch_config=candidate,
+                )
+                del output
+                end.record(stream)
+                end.synchronize()
+                samples.append(float(start.elapsed_time(end)))
+            timings.append(statistics.median(samples))
+        except (RuntimeError, ValueError):
+            # Preserve the candidate's position so selection remains stable;
+            # an unavailable launch is represented by an invalid timing.
+            timings.append(float("nan"))
+    selected = select_qvq_p32_amd_kernel_candidate(candidates, timings)
+    if use_cache:
+        with _AMD_AUTOTUNE_CACHE_LOCK:
+            _AMD_AUTOTUNE_CACHE[key] = selected
+    return selected
 
 
 def qvq_p32_amd_supported(device: torch.device | str) -> bool:
@@ -1272,9 +1414,12 @@ def qvq_p32_amd_folded(
 
 __all__ = [
     "QVQAMDLaunchConfig",
+    "clear_qvq_p32_amd_autotune_cache",
     "qvq_p32_amd",
+    "qvq_p32_amd_autotune",
     "qvq_p32_amd_folded",
     "qvq_p32_amd_kernel_candidates",
+    "select_qvq_p32_amd_kernel_candidate",
     "qvq_p32_amd_folded_case_supported",
     "qvq_p32_amd_folded_prefers_fp32_output",
     "qvq_p32_amd_folded_shape_supported",

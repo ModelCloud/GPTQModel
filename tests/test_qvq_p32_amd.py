@@ -25,12 +25,14 @@ from gptqmodel.utils.qvq_amd import (
     _launch_config,
     _use_gemv,
     qvq_p32_amd,
+    qvq_p32_amd_autotune,
     qvq_p32_amd_folded,
     qvq_p32_amd_folded_case_supported,
     qvq_p32_amd_folded_prefers_fp32_output,
     qvq_p32_amd_folded_shape_supported,
     qvq_p32_amd_kernel_candidates,
     qvq_p32_amd_supported,
+    select_qvq_p32_amd_kernel_candidate,
 )
 from scripts.benchmark_qvq_p32_amd import _target_process_ids
 
@@ -210,6 +212,34 @@ def test_qvq_p32_amd_kernel_candidates_expose_shape_tuning_without_hidden_dispat
     assert {candidate.block_m for candidate in candidates} == {16, 32, 64, 128, 256, 512, 1024}
     assert all(candidate.block_n == 64 and candidate.num_warps == 8 for candidate in candidates)
     assert all(6144 % candidate.block_k == 0 for candidate in candidates)
+
+
+def test_qvq_p32_amd_candidate_selector_is_pure_and_stable_on_ties():
+    candidates = qvq_p32_amd_kernel_candidates(128, 5120, 6144)
+    assert select_qvq_p32_amd_kernel_candidate(candidates, [9, 3, 3, 7, 8, 6, 5]) == candidates[1]
+    with pytest.raises(ValueError, match="counts must match"):
+        select_qvq_p32_amd_kernel_candidate(candidates, [1])
+    with pytest.raises(RuntimeError, match="no finite positive timings"):
+        select_qvq_p32_amd_kernel_candidate(candidates, [0, float("nan"), -1, float("inf"), 0, 0, 0])
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not _gfx950_available(), reason="requires a ROCm gfx950 GPU")
+def test_qvq_p32_amd_autotune_rejects_graph_capture():
+    # The implementation must fail before candidate timing or event creation;
+    # this is the contract that keeps the returned launch fixed for replay.
+    with patch("torch.cuda.is_current_stream_capturing", return_value=True), pytest.raises(
+        RuntimeError, match="before CUDA/HIP Graph capture"
+    ):
+        qvq_p32_amd_autotune(
+            torch.empty((16, 256), device="cuda", dtype=torch.float16),
+            torch.empty((256, 16), device="cuda", dtype=torch.int32),
+            torch.empty((256,), device="cuda", dtype=torch.float16),
+            torch.empty((256,), device="cuda", dtype=torch.uint8),
+            2.0,
+            out_features=256,
+            bank_alt_id=1,
+        )
 
 
 @pytest.mark.parametrize(
