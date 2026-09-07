@@ -21,30 +21,22 @@
 
 ## Latest News 🗞️🚀
 
-* 09/07/2026 7.4.0-dev `main`: ✨ Added XHToken `ouro` and `spark2_5` quantization support.
-* 09/02/2026 7.4.0-dev `main`: ✨ Added `apertus1p5` and `apertus1p5_text` quantization.
-* 09/01/2026 7.4.0-dev `main`: ✨ Added `glm5_next` / GLM-5.3-Flash quantization support.
-* 08/31/2026 7.4.0-dev `main`: ✨ Added Qwen3.8-Flash-Next (`qwen4_exp`) quantization.
-* 08/26/2026 7.4.0-dev `main`: ✨ Added NVIDIA `LocateAnything-3B` quantization support.
-* 08/25/2026 7.4.0-dev `main`: ✨ Added Tencent `HunyuanOCR` quantization support.
-* 08/25/2026 7.4.0-dev `main`: ✨ Added `lm_head` and embedding quantization lifecycle.
-* 08/24/2026 7.4.0-dev `main`: ✨ Added Baidu `Unlimited-OCR` quantization support.
-* 08/20/2026 7.4.0-dev `main`: ✨ Added `deepseek_v32` / DeepSeek V3.2; `muse_glimmer` / Muse Glimmer multimodal; `mage_vl` / Mage-VL; Cohere `North Micro Vision` (`cohere_compass`); `axk2` (A.X-K2) model support.
-* 08/04/2026 7.4.0-dev `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
-* 07/24/2026 7.3.1 `main`: ✨ Added `solar_open` and `solar_open2`; `Intern S2 PreView`; `inkling_mm_model`; Poolside `Laguna S 2.1` model support.
-* 07/14/2026 7.3.0-dev `main`: ✨ Added `nemotron_h_puzzle`; `deepseek_vl`; `deepseek_ocr2`; `deepseek_vl_v2` model support.
-* 06/30/2026 7.2.0-dev `main`: ✨ Added `lfm2` and `lfm2_vl`; `minimax_m3_vl` / MiniMax M3; `cohere2_moe` model support.
-* 05/25/2026 7.1.0-dev `main`: ✨ Added `hy_3` and `ministral3`; `hunyuan_v1_dense` and `hunyuan_v1_moe`; `nemotron_labs_diffusion`; `interns1`, `ovis2_5`, `ovis2_6_moe` and `ovis2_6_next`; `mimo_v2`; `minicpmv_4_6` and `DeepSeek V4`; `GLM-4.5V`, `GLM-4.6V`, `Zamba` and `Zamba2` model support.
-* 04/29/2026 7.1.0-dev `main`: ✨ Added PoolSideAI `Laguna` model support for fused Laguna MoE checkpoints. Added `ERNIE 4.5 VL MoE`, `Ling-2.6-flash` and NVIDIA `Nemotron 3 Nano Omni` model support.
-* 04/28/2026 [7.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.0.0): 🚀 Added Huawei Ascend NPU support through native torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3. Added `internvl_chat`, `gemma3n`, `GLM-OCR`, `GLM-ASR`, and `falcon_mamba` model support.
-* 04/16/2026 [6.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.1.0): 🚀🔥⚡ CUDA kernels are now fully JIT-compiled, shrinking the wheel by about 300x and building only what you use; Marlin now supports NVIDIA `Turing+` GPUs, Machete kernel validation now covers supported GPUs, `GLM 5/5.1` joins the lineup, and LazyTurtle plus AWQ / multi-GPU MoE fixes make large-model quantization easier, lighter, and smoother.
-* 04/03/2026 [6.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.0.3): 🎉 New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`, and `FOEM: First-Order Error Matters`. Added PrismML/Bonsai 1bit model quantization (inference only), faster ParoQuant/AWQ kernels, ParoQuant `optimization scope` control: `module` (Paro Lite) or `layer` (Paro reference), plus `Gemma4`, `MiniCPM-O`, `MiniCPM-V`, and `GLM4 MoE Lite` model support.
+* 09/07/2026 [7.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.4.0): 🎉 Added resumable quantization checkpoints, shared-input Hessian deduplication, `lm_head` and embedding requantization, and updated native GGUF support. Added GLM-5.3-Flash, Apertus 1.5, and XHToken `ouro` / `spark2_5` quantization support, plus quantization, JIT cache, and Triton compatibility fixes.
+* 08/31/2026 [7.3.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.6): ✨ Added HunyuanOCR, NVIDIA LocateAnything-3B, and Qwen3.8-Flash-Next quantization support. Added tile-misaligned GPTQ/AWQ Marlin support, reduced QQQ packing memory, and improved JIT extension cache reuse.
+* 08/25/2026 [7.3.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.5): ✨ Added `lm_head` and embedding quantization lifecycle support; Unlimited-OCR, DeepSeek V3.2, Mage-VL, Muse Glimmer, OLMo 3, and SmolLM3 model support.
+* 08/19/2026 [7.3.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.4): 🚀🔥⚡ Added the `Swordfish` Blackwell GPTQ/AWQ kernel, planar GPTQ checkpoint formats, native MPS quantization, and Cohere Compass / A.X-K2 model support, with quantization performance and reliability improvements.
+* 07/25/2026 [7.3.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.2): ✨ Added quantized embedding inference and Solar Open, Solar Open 2, Intern S2 Preview, Inkling, and Poolside Laguna S 2.1 model support.
+* 07/20/2026 [7.3.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.1): ✨ Added DeepSeek VL/VL2/OCR2 and Nemotron H Puzzle model support, Windows ExllamaV2 compatibility, and ModelOpt NVFP4 dequantization.
+* 07/03/2026 [7.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.2.0): ✨ Added LFM2/LFM2-VL, MiniMax M3 VL, Cohere2 MoE, Gemma4 Unified, and text-only multimodal model definitions.
+* 06/08/2026 [7.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.1.0): ✨ Added Laguna, ERNIE 4.5 VL MoE, Ling 2.6 Flash, Nemotron 3 Nano Omni, GLM4V MoE, Zamba/Zamba2, MiniCPM-V 4.6, DeepSeek V4, MiMo V2, Ovis 2.5/2.6, Intern S1, Nemotron Labs Diffusion, and Hunyuan V1 model support.
+* 04/28/2026 [7.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.0.0): 🚀 Added Huawei Ascend NPU support through native torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3. CUDA kernels are now JIT-compiled, reducing wheel size and building only the kernels in use; Marlin supports NVIDIA Turing+ GPUs, with new GLM 5/5.1, InternVL Chat, Gemma3n, GLM-OCR, GLM-ASR, and Falcon Mamba model support.
+* 04/02/2026 [6.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.0.3): 🎉 New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`, and `FOEM: First-Order Error Matters`. Added PrismML/Bonsai 1bit model quantization (inference only), faster ParoQuant/AWQ kernels, ParoQuant `optimization scope` control: `module` (Paro Lite) or `layer` (Paro reference), plus `Gemma4`, `MiniCPM-O`, `MiniCPM-V`, and `GLM4 MoE Lite` model support.
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
 
 <details>
 
 <summary>Archived News</summary>
-* 02/09/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): ✨New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
+* 02/10/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): ✨New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
 `AWQ` `qcfg.zero_point` property has been merged with a unified `sym` symmetry property; `zero_point=True` is now `sym=False`.
 Fixed `AWQ` `sym=True` packing/inference and quantization compatibility with some Qwen3 models. Exaone 4.0 support.
 
