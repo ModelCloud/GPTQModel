@@ -488,17 +488,21 @@ def prepare_rank8(layer, config):
         and torch.backends.cuda.matmul.allow_tf32
     ):
         raise ValueError("rank8 FP32 reference requires CUDA matmul TF32 disabled")
-    if (
-        config.recovery_kernel in ("fused_epilogue", "fully_fused")
-        and (
-            runtime_device.type != "cuda"
-            or torch.cuda.get_device_capability(runtime_device) != (9, 0)
-            or layer.out_features > 16384
-            or (layer.output_hadamard and layer.out_features & (layer.out_features - 1))
+    if config.recovery_kernel in ("fused_epilogue", "fully_fused") and (
+        runtime_device.type != "cuda"
+        or torch.cuda.get_device_capability(runtime_device) != (9, 0)
+        or layer.out_features > 16384
+        or (
+            layer.output_hadamard
+            and layer.out_features & (layer.out_features - 1)
+            and (
+                config.recovery_projection == "project_output_fused"
+                or not _supported_composite_hadamard_width(layer.out_features)
+            )
         )
     ):
         raise ValueError(
-            "rank8 fused epilogue requires SM90 and N <= 16384; output Hadamard mode requires power-of-two N"
+            "rank8 fused epilogue requires SM90 and N <= 16384; project-output fusion requires power-of-two N"
         )
     if (
         enabled
@@ -507,7 +511,11 @@ def prepare_rank8(layer, config):
             runtime_device.type != "cuda"
             or torch.cuda.get_device_capability(runtime_device) != (9, 0)
             or layer.in_features > 16384
-            or (layer.input_hadamard and layer.in_features & (layer.in_features - 1))
+            or (
+                layer.input_hadamard
+                and layer.in_features & (layer.in_features - 1)
+                and not _supported_composite_hadamard_width(layer.in_features)
+            )
         )
     ):
         raise ValueError(
@@ -2091,7 +2099,11 @@ def window_kernel_candidates(layer, *, m):
                 )
                 for c in separate_candidates
             )
-        if layer.in_features <= 16384:
+        project_output_supported = (
+            not layer.output_hadamard
+            or not layer.out_features & (layer.out_features - 1)
+        )
+        if layer.in_features <= 16384 and project_output_supported:
             candidates.extend(
                 replace(
                     c,
