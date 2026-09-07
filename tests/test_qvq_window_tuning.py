@@ -205,6 +205,32 @@ def test_window_tuner_can_attach_matched_rank8_overhead(tmp_path):
     assert layer._p32_window_config == result.config
 
 
+def test_window_tuner_keeps_improvement_without_default_overhead_cap(tmp_path):
+    layer, _, x, _ = fixture()
+    _kernel_rank8(layer)
+    original = P32WindowConfig(recovery_mode="on", quality_mode="fast")
+    prepare_rank8(layer, original)
+
+    def sample(fn, inputs):
+        fn(inputs)
+        # This deliberately exceeds the aspirational 3--5% scorecard target.
+        # With no explicit cap, a numerically accepted improvement remains a
+        # valid tuning result and its measured cost is retained in the report.
+        return [1.20 if layer._p32_rank8_enabled else 1.0]
+
+    result = tune_window_kernel(
+        layer,
+        x,
+        benchmark=sample,
+        build_id="uncapped-improvement",
+        cache_dir=tmp_path,
+        measure_recovery=True,
+    )
+    assert result.report["recovery_overhead"]["overhead_percent"] == pytest.approx(20.0)
+    assert result.report["identity"]["max_recovery_overhead_percent"] is None
+    assert layer._p32_window_config == result.config
+
+
 def test_window_tuner_can_measure_recovery_pair_for_each_candidate(tmp_path):
     layer, _, x, _ = fixture()
     _kernel_rank8(layer)

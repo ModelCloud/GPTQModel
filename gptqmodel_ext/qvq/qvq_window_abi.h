@@ -19,8 +19,12 @@ typedef struct {
   uint32_t block_m, block_n, block_k, warp_groups, pipeline_stages, split_k;
   uint32_t min_m, max_m, input_hadamard, output_hadamard, rank8_enabled;
   // Optional extension fields (present when struct_bytes reaches the end of
-  // this struct): 0 = separate reference, 1 = fused epilogue; projection
-  // currently remains 0 = separate/reference for the native ABI.
+  // this struct): recovery_kernel 0 = separate reference, 1 = fused
+  // epilogue; recovery_projection 0 = separate/reference, 1 = concurrent
+  // reference producer, 2 = concurrent Tensor Core producer (prepared graph
+  // handles own its auxiliary stream). Projection 2 is unverified and must
+  // remain outside balanced/quality policy until its numerical signature is
+  // certified.
   uint32_t recovery_kernel, recovery_projection;
 } QvqP32WindowConfig;
 // Returns zero on successful asynchronous submission. Errors are copied into

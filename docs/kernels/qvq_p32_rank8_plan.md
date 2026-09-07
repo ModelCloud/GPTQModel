@@ -56,6 +56,25 @@ Promotion jobs may additionally pass `max_recovery_overhead_percent` to reject
 every measured geometry above the explicit 3--5% budget; the default remains
 report-only because current modules do not all meet that budget.
 
+### Overhead-gate audit
+
+The prior experiments were checked against the selector history and their
+recorded rows. The result is that a valid kernel was never discarded merely
+for missing the aspirational 3--6% range:
+
+| Experiment | Explicit cap | Result | Evidence |
+| --- | ---: | --- | --- |
+| Native ZML addmm, M33 | none | Selected candidate index 5 at `-18.56%`; other locally accepted rows at `6.80%`, `8.72%` and `9.23%` remained visible | `results/p32_window_native_zml_addmm.json` |
+| Native ZML policy, M8192 | none | Selected index 6 at `11.095%` | `results/p32_window_native_zml_m8192_policy.json` (`unbudgeted`) |
+| H200 Tensor Core sweep, M2048 | none | Fast candidate retained at `7.448%`; M8192 measured `0.634%` | `results/p32_rank8_h200_tensor_core.json` |
+| Native ZML policy, M8192 | 5% | Rows above 5% were excluded by the requested promotion budget; index 2 at `4.855%` won | `results/p32_window_native_zml_m8192_policy.json` (`budget5`) |
+
+The 5% run is therefore an intentional budgeted promotion experiment, not the
+default tuning policy. Current Python coverage also asserts that a locally
+accepted improvement with 20% measured overhead remains selectable when no cap
+is supplied. Failed numerical rows remain in the report for review; only an
+explicit overhead cap can remove an otherwise accepted timing row.
+
 The matched benchmark CLI exposes the same policy for reproducible scorecards:
 `scripts/benchmark_qvq_window_rank8.py --autotune
 --measure-recovery-candidates --max-recovery-overhead-percent 5`. The report

@@ -115,6 +115,17 @@ per capture; separate fast/balanced/quality captures must be owned by the
 execution graph caller. Tests retain and replay off/on graphs after changing
 the eager policy. There is no graph manager that silently changes modes.
 
+Automatic tuning and automatic activation are separate decisions. A prepared
+`fast` rank8 sweep measures every eligible projection, including Tensor Core,
+and applies the fastest numerically accepted candidate without requiring a
+3--5% overhead result. The package default remains recovery-off because rank8
+factors are optional per module and Tensor Core currently has an unverified
+arithmetic signature; changing that default would change the established
+window output for models that did not request correction. Run the sweep and
+prepare the resulting policy before capture to make Tensor Core automatic for
+that exact device, shape and M bucket. Balanced/quality still require the
+validated audit and a certified/reference arithmetic signature.
+
 `auto`/`production_window` preserve existing dispatch. Explicit `hopper_m16`
 and `hopper_direct_decode_mma` expose existing M16 and row-reuse WGMMA
 consumers, split count and M range for external correctness/timing comparisons.
@@ -883,3 +894,34 @@ factors are appended to that same payload before host staging. This preserves
 the base-payload binding when the selector chooses a nonzero candidate arm.
 When output alignment is enabled, both ordinary and atomic modules defer the
 fit one step further, until alignment has finished revising SU/SV.
+
+The native ABI now exposes `recovery_projection=1` as the graph-safe
+`concurrent_reference` producer. A prepared graph owns its auxiliary CUDA
+stream and ready/done events; the producer consumes the same transformed
+activation `X'` as the window decoder and joins before rank expansion. Raw ABI
+calls retain the synchronous reference behavior, while graph replay performs
+no stream/event allocation. The H200 K=N=2048 BM64/BN64 spot sweep measured
+52.42%, 35.60%, and 34.76% marginal overhead at M=128, 2048, and 8192,
+respectively. These measurements keep the policy opt-in and below no default
+promotion budget; large-M rank8 remains shape- and kernel-dependent.
+
+The native ABI also exposes `recovery_projection=2` as the concurrent FP16
+Tensor Core producer. It is tagged `unverified_tensor_core` and is available
+only to fast-mode tuning until every shape passes the local MAE/max-error
+contract and independent model-quality confirmation. The reference projection
+modes and correction-off path are unchanged.
+
+An H200 graph-replay spot sweep for K=N=2048, BM64/BN64 measured the
+Tensor Core producer's marginal overhead at 35.86% (M=128), 18.64% (M=2048),
+and 16.61% (M=8192). This is an improvement over the reference concurrent
+producer but remains above the 3--5% promotion target, so the candidate stays
+fast-only and requires wider shape/device validation. The target is a scorecard
+goal rather than an automatic discard criterion; explicit overhead budgets may
+still reject a candidate when requested.
+
+The concurrent producer now launches immediately after `X'` and before the
+base WGMMA, with the existing event join retained before expansion. A sequential
+H200 spot rerun at K=N=2048, BM64/BN64 measured reference-concurrent overhead of
+30.06% at M=8192 and Tensor Core overhead of 15.89% at M=8192. These are
+measured improvements and remain available to explicit tuning; the 3--5% value
+is a target, not an automatic discard gate.

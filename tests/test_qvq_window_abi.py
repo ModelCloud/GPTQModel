@@ -141,7 +141,10 @@ def test_native_composite_qwen_shape_matches_window_reference():
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-def test_native_transform_free_rank8_fused_epilogue_matches_and_replays():
+@pytest.mark.parametrize(
+    "projection", ["separate_reference", "concurrent_reference", "tensor_core"]
+)
+def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(projection):
     """The native composite path uses one graph-safe fused rank8 epilogue."""
     from test_qvq_grouped_runtime import _child
     from test_qvq_window_recovery import _kernel_rank8
@@ -159,6 +162,7 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays():
         algorithm="hopper_m16",
         recovery_mode="on",
         recovery_kernel="fused_epilogue",
+        recovery_projection=projection,
     )
     x = torch.randn(33, 2048, device="cuda", dtype=torch.float16) * 0.01
     with torch.no_grad():
@@ -183,6 +187,12 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays():
         stream.synchronize()
     finally:
         library.qvq_p32_window_linear = original
+    native_config = ctypes.cast(recorded[10], ctypes.POINTER(WindowConfig)).contents
+    assert native_config.recovery_projection == {
+        "separate_reference": 0,
+        "concurrent_reference": 1,
+        "tensor_core": 2,
+    }[projection]
     error = (actual.float() - expected.float()).abs()
     assert error.mean() <= 2e-3 and error.max() <= 0.046875
 
@@ -215,6 +225,157 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays():
         stream.synchronize()
         value_error = (actual.float() - expected_replay.float()).abs()
         assert value_error.mean() <= 2e-3 and value_error.max() <= 0.046875
+    finally:
+        status = library.qvq_p32_window_graph_destroy(handle, error, len(error))
+        assert status == 0, error.value
+
+
+@pytest.mark.parametrize("projection", ["concurrent_reference", "tensor_core"])
+def test_native_concurrent_rank8_output_hadamard_graph_matches_reference(
+    monkeypatch, projection
+):
+    """Concurrent rank8 producers compose with output-Hadamard graph replay."""
+    from test_qvq_grouped_runtime import _child
+    from test_qvq_window_recovery import _kernel_rank8
+
+    layer = _child(
+        f"native_rank8_{projection}_hadamard",
+        in_features=2048,
+        out_features=2048,
+        device="cuda",
+    ).eval()
+    _kernel_rank8(layer)
+    config = P32WindowConfig(
+        algorithm="hopper_m16",
+        recovery_mode="on",
+        recovery_projection=projection,
+    )
+    x = torch.randn(33, 2048, device="cuda", dtype=torch.float16) * 0.01
+    prepare_rank8(layer, config)
+    with torch.no_grad():
+        expected = layer(x)
+
+    library = native_window_library()
+    original = library.qvq_p32_window_linear
+    recorded = []
+
+    def record(*args):
+        recorded[:] = args
+        return original(*args)
+
+    monkeypatch.setattr(library, "qvq_p32_window_linear", record)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        actual = native_window_linear(layer, x, config)
+    stream.synchronize()
+    if projection == "tensor_core":
+        error_values = (actual.float() - expected.float()).abs()
+        assert error_values.mean() <= 2e-3 and error_values.max() <= 0.046875
+    else:
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    buffers = (WindowBuffer * 10)(*recorded[:10])
+    handle = ctypes.c_void_p()
+    error = ctypes.create_string_buffer(4096)
+    status = library.qvq_p32_window_graph_create(
+        buffers,
+        recorded[10],
+        stream.cuda_stream,
+        ctypes.byref(handle),
+        error,
+        len(error),
+    )
+    assert status == 0, error.value
+    try:
+        with torch.cuda.stream(stream), torch.no_grad():
+            x.mul_(2)
+            expected_replay = layer(x)
+            status = library.qvq_p32_window_graph_run(
+                handle, stream.cuda_stream, error, len(error)
+            )
+            assert status == 0, error.value
+        stream.synchronize()
+        if projection == "tensor_core":
+            error_values = (actual.float() - expected_replay.float()).abs()
+            assert error_values.mean() <= 2e-3 and error_values.max() <= 0.046875
+        else:
+            torch.testing.assert_close(actual, expected_replay, atol=0, rtol=0)
+
+        parent = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(parent, stream=stream):
+            status = library.qvq_p32_window_graph_run(
+                handle, stream.cuda_stream, error, len(error)
+            )
+        assert status == 0, error.value
+        parent.replay()
+        stream.synchronize()
+        if projection == "tensor_core":
+            error_values = (actual.float() - expected_replay.float()).abs()
+            assert error_values.mean() <= 2e-3 and error_values.max() <= 0.046875
+        else:
+            torch.testing.assert_close(actual, expected_replay, atol=0, rtol=0)
+        parent.reset()
+    finally:
+        status = library.qvq_p32_window_graph_destroy(handle, error, len(error))
+        assert status == 0, error.value
+
+
+def test_native_graph_accepts_legacy_76_byte_config(monkeypatch):
+    """Older hosts must default trailing rank8 policies to reference mode."""
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child(
+        "native_legacy_abi",
+        in_features=2048,
+        out_features=256,
+        device="cuda",
+        input_hadamard=False,
+        output_hadamard=False,
+    ).eval()
+    config = P32WindowConfig(algorithm="hopper_m16", recovery_mode="off")
+    x = torch.randn(1, 2048, device="cuda", dtype=torch.float16) * 0.01
+    library = native_window_library()
+    original = library.qvq_p32_window_linear
+    recorded = []
+
+    def record(*args):
+        recorded[:] = args
+        return original(*args)
+
+    monkeypatch.setattr(library, "qvq_p32_window_linear", record)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        native_window_linear(layer, x, config)
+    stream.synchronize()
+
+    class LegacyWindowConfig(ctypes.Structure):
+        _fields_ = WindowConfig._fields_[:-2]
+
+    full = ctypes.cast(recorded[10], ctypes.POINTER(WindowConfig)).contents
+    legacy = LegacyWindowConfig()
+    for name, _ctype in LegacyWindowConfig._fields_:
+        setattr(legacy, name, getattr(full, name))
+    legacy.struct_bytes = ctypes.sizeof(LegacyWindowConfig)
+    buffers = (WindowBuffer * 10)(*recorded[:10])
+    handle = ctypes.c_void_p()
+    error = ctypes.create_string_buffer(4096)
+    status = library.qvq_p32_window_graph_create(
+        buffers,
+        ctypes.cast(ctypes.byref(legacy), ctypes.POINTER(WindowConfig)),
+        stream.cuda_stream,
+        ctypes.byref(handle),
+        error,
+        len(error),
+    )
+    assert status == 0, error.value
+    try:
+        status = library.qvq_p32_window_graph_run(
+            handle, stream.cuda_stream, error, len(error)
+        )
+        assert status == 0, error.value
+        stream.synchronize()
     finally:
         status = library.qvq_p32_window_graph_destroy(handle, error, len(error))
         assert status == 0, error.value
