@@ -112,14 +112,33 @@ def patch_triton_autotuner() -> None:
     module.CacheFuture = CacheFuture
 
     original_init = autotuner_cls.__init__
+    rlock_type = type(threading.RLock())
+
+    def ensure_threadsafe_cache(self):
+        if (
+            getattr(self, "cache", None) is getattr(self, "_cache", None)
+            and isinstance(getattr(self, "_cache_lock", None), rlock_type)
+            and isinstance(getattr(self, "_cache_futures", None), dict)
+        ):
+            return
+
+        with TritonPatch._apply_lock:
+            if (
+                getattr(self, "cache", None) is getattr(self, "_cache", None)
+                and isinstance(getattr(self, "_cache_lock", None), rlock_type)
+                and isinstance(getattr(self, "_cache_futures", None), dict)
+            ):
+                return
+
+            cache_map = getattr(self, "cache", {})
+            self._cache = dict(cache_map)
+            self.cache = self._cache
+            self._cache_lock = threading.RLock()
+            self._cache_futures = {}
 
     def patched_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
-        cache_map = getattr(self, "cache", {})
-        self._cache = dict(cache_map)
-        self.cache = self._cache
-        self._cache_lock = threading.RLock()
-        self._cache_futures = {}
+        ensure_threadsafe_cache(self)
 
     def patched_check_disk_cache(self, tuning_key, configs, bench_fn):
         if not tuning_key or any(cfg.pre_hook for cfg in configs):
@@ -170,6 +189,7 @@ def patch_triton_autotuner() -> None:
         return False, bench_time, configs_timings, best_config
 
     def _get_config_for_key(self, key, args, kwargs):
+        ensure_threadsafe_cache(self)
         with self._cache_lock:
             cached = self._cache.get(key)
             if cached is not None:
@@ -232,6 +252,7 @@ def patch_triton_autotuner() -> None:
                 self._cache_futures.pop(key, None)
 
     def patched_run(self, *args, **kwargs):
+        ensure_threadsafe_cache(self)
         nargs = dict(zip(self.arg_names, args))
         self.nargs = nargs
         used_cached_result = True
