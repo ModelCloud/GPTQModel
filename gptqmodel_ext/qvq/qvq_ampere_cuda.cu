@@ -4,6 +4,7 @@
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
+#include <ATen/ops/mm.h>
 #include <cuda_fp16.h>
 #include <cuda_pipeline.h>
 #include <cuda_runtime.h>
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <vector>
@@ -1502,6 +1504,8 @@ struct GroupedP32LaunchParams {
   int n_tiles[kMaxGroupedP32Segments];
   int bank_alt_id[kMaxGroupedP32Segments];
   int split_count[kMaxGroupedP32Segments];
+  int rank8_offset[kMaxGroupedP32Segments];
+  float rank8_scale[kMaxGroupedP32Segments];
   int64_t output_offset[kMaxGroupedP32Segments];
   int64_t partial_offset[kMaxGroupedP32Segments];
 };
@@ -1661,6 +1665,41 @@ __global__ void reduce_split_kernel(
   output[index] = accumulator;
 }
 
+template <bool Rank8BFloat>
+__global__ void reduce_split_rank8_kernel(
+    const float* __restrict__ partial_output,
+    float* __restrict__ output,
+    const float* __restrict__ rank8_down,
+    const void* __restrict__ rank8_b,
+    int output_values,
+    int size_n,
+    int split_count,
+    int rank8_down_stride,
+    float rank8_scale) {
+  const int index = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= output_values) {
+    return;
+  }
+  float accumulator = 0.0f;
+#pragma unroll
+  for (int split = 0; split < split_count; ++split) {
+    accumulator += partial_output[static_cast<int64_t>(split) * output_values + index];
+  }
+  const int row = index / size_n;
+  const int column = index - row * size_n;
+  const float* rank8_b_float = static_cast<const float*>(rank8_b);
+  const half* rank8_b_half = static_cast<const half*>(rank8_b);
+  float correction = 0.0f;
+#pragma unroll
+  for (int rank = 0; rank < 8; ++rank) {
+    const float b_value = Rank8BFloat
+        ? rank8_b_float[rank * size_n + column]
+        : __half2float(rank8_b_half[rank * size_n + column]);
+    correction += rank8_down[row * rank8_down_stride + rank] * b_value;
+  }
+  output[index] = accumulator + rank8_scale * correction;
+}
+
 __global__ void reduce_grouped_split_kernel(
     const float* __restrict__ partial_output,
     float* __restrict__ output,
@@ -1702,6 +1741,65 @@ __global__ void reduce_grouped_split_kernel(
         local_index];
   }
   output[index] = accumulator;
+}
+
+template <bool Rank8BFloat>
+__global__ void reduce_grouped_split_rank8_kernel(
+    const float* __restrict__ partial_output,
+    float* __restrict__ output,
+    GroupedP32LaunchParams params,
+    int segment_count,
+    int size_m,
+    int total_n,
+    const float* __restrict__ rank8_down,
+    const void* __restrict__ rank8_b) {
+  const int index = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int output_values = size_m * total_n;
+  if (index >= output_values) {
+    return;
+  }
+  int segment = 0;
+  for (; segment < segment_count; ++segment) {
+    const int64_t start = params.output_offset[segment];
+    const int64_t count = static_cast<int64_t>(size_m) *
+        params.n_tiles[segment] * kTileColumns;
+    if (index >= start && index < start + count) {
+      break;
+    }
+  }
+  if (segment == segment_count) {
+    return;
+  }
+  const int segment_n = params.n_tiles[segment] * kTileColumns;
+  const int64_t local_index = index - params.output_offset[segment];
+  const int row = static_cast<int>(local_index / segment_n);
+  const int column = static_cast<int>(local_index -
+      static_cast<int64_t>(row) * segment_n);
+  const int global_column = params.n_tile_start[segment] * kTileColumns + column;
+  const int split_count = params.split_count[segment];
+  const int64_t split_stride = static_cast<int64_t>(size_m) * segment_n;
+  float accumulator = split_count == 1 ? output[index] : 0.0f;
+  if (split_count > 1) {
+    const float* segment_partials =
+        partial_output + params.partial_offset[segment];
+#pragma unroll 1
+    for (int split = 0; split < split_count; ++split) {
+      accumulator += segment_partials[
+          static_cast<int64_t>(split) * split_stride + local_index];
+    }
+  }
+  const float* rank8_b_float = static_cast<const float*>(rank8_b);
+  const half* rank8_b_half = static_cast<const half*>(rank8_b);
+  const int rank8_base = row * segment_count * 8 + params.rank8_offset[segment];
+  float correction = 0.0f;
+#pragma unroll
+  for (int rank = 0; rank < 8; ++rank) {
+    const float b_value = Rank8BFloat
+        ? rank8_b_float[rank * total_n + global_column]
+        : __half2float(rank8_b_half[rank * total_n + global_column]);
+    correction += rank8_down[rank8_base + rank] * b_value;
+  }
+  output[index] = accumulator + params.rank8_scale[segment] * correction;
 }
 
 template <int StaticSplitCount, int OutputsPerWarp = 4>
@@ -1748,7 +1846,11 @@ at::Tensor p32_window_ampere_impl(
     const at::Tensor& bank_ids,
     int64_t out_features,
     int64_t bank_alt_id,
-    int64_t split_count) {
+    int64_t split_count,
+    const c10::optional<at::Tensor>& rank8_a = c10::nullopt,
+    const c10::optional<at::Tensor>& rank8_b = c10::nullopt,
+    double rank8_scale = 1.0,
+    const c10::optional<at::Tensor>& rank8_down = c10::nullopt) {
   constexpr int kWordsPerTile = 4 * TransitionBits;
   TORCH_CHECK(input.is_cuda(), "QVQ P32 Ampere input must be CUDA");
   TORCH_CHECK(
@@ -1775,6 +1877,49 @@ at::Tensor p32_window_ampere_impl(
       "QVQ P32 Ampere N must be positive and divisible by 16");
   TORCH_CHECK(split_count >= 1 && split_count <= 128, "QVQ P32 Ampere split count must be in [1, 128]");
   TORCH_CHECK(bank_alt_id >= 0 && bank_alt_id <= 3, "QVQ P32 Ampere bank ID must be in [0, 3]");
+  TORCH_CHECK(std::isfinite(rank8_scale), "QVQ P32 Ampere rank8 scale must be finite");
+  TORCH_CHECK(
+      !rank8_down.has_value() || rank8_b.has_value(),
+      "rank8_down requires rank8_b");
+  TORCH_CHECK(
+      rank8_down.has_value() || rank8_a.has_value() == rank8_b.has_value(),
+      "rank8_a and rank8_b must be provided together");
+  TORCH_CHECK(
+      !(rank8_a.has_value() && rank8_down.has_value()),
+      "rank8_a and rank8_down are mutually exclusive");
+  if (rank8_a.has_value()) {
+    const at::Tensor& projection_a = *rank8_a;
+    const at::Tensor& projection_b = *rank8_b;
+    TORCH_CHECK(
+        projection_a.device() == input.device() &&
+            projection_b.device() == input.device(),
+        "QVQ P32 Ampere rank8 tensors must share the input CUDA device");
+    TORCH_CHECK(
+        projection_a.scalar_type() == at::kHalf &&
+            (projection_b.scalar_type() == at::kHalf ||
+             projection_b.scalar_type() == at::kFloat),
+        "QVQ P32 Ampere rank8_a must be float16 and rank8_b must be float16 or float32");
+    TORCH_CHECK(
+        projection_a.is_contiguous() && projection_b.is_contiguous(),
+        "QVQ P32 Ampere rank8 tensors must be contiguous");
+    TORCH_CHECK(
+        projection_a.dim() == 2 && projection_a.size(0) == input.size(1) &&
+            projection_a.size(1) == 8,
+        "QVQ P32 Ampere rank8_a must have shape [K, 8]");
+    TORCH_CHECK(
+        projection_b.dim() == 2 && projection_b.size(0) == 8 &&
+            projection_b.size(1) == out_features,
+        "QVQ P32 Ampere rank8_b must have shape [8, N]");
+  }
+  if (rank8_down.has_value()) {
+    TORCH_CHECK(
+        rank8_down->device() == input.device() &&
+            rank8_down->scalar_type() == at::kFloat &&
+            rank8_down->dim() == 2 && rank8_down->size(0) == input.size(0) &&
+            rank8_down->size(1) == 8 && rank8_down->stride(1) == 1 &&
+            rank8_down->stride(0) >= 8,
+        "QVQ P32 Ampere rank8_down must be FP32 [M, 8] with unit column stride");
+  }
 
   const c10::cuda::CUDAGuard device_guard(input.device());
   const int capability = cached_device_capability(input.get_device());
@@ -2755,6 +2900,45 @@ at::Tensor p32_window_ampere_impl(
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
 
+  if (rank8_a.has_value() || rank8_down.has_value()) {
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    // Compute the shared rank-8 activation once, then fold its B-side
+    // product into the existing output reducer. This removes the per-call
+    // FP16->FP32 B conversion and a second tiny GEMV launch while preserving
+    // the quantized split reduction's increasing-split FP32 order.
+    auto rank8_down_tensor = rank8_down.has_value()
+        ? *rank8_down
+        : at::mm(input, *rank8_a, at::kFloat);
+    constexpr int kReductionThreads = 256;
+    const int output_values = size_m * size_n;
+    const int blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
+    if (rank8_b->scalar_type() == at::kFloat) {
+      reduce_split_rank8_kernel<true><<<blocks, kReductionThreads, 0, stream>>>(
+          partial_output.data_ptr<float>(),
+          output.data_ptr<float>(),
+          rank8_down_tensor.data_ptr<float>(),
+          rank8_b->data_ptr(),
+          output_values,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(rank8_down_tensor.stride(0)),
+          static_cast<float>(rank8_scale));
+    } else {
+      reduce_split_rank8_kernel<false><<<blocks, kReductionThreads, 0, stream>>>(
+          partial_output.data_ptr<float>(),
+          output.data_ptr<float>(),
+          rank8_down_tensor.data_ptr<float>(),
+          rank8_b->data_ptr(),
+          output_values,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(rank8_down_tensor.stride(0)),
+          static_cast<float>(rank8_scale));
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+  }
+
   if (split_count > 1) {
     constexpr int kReductionThreads = 256;
     const int output_values = size_m * size_n;
@@ -3012,23 +3196,51 @@ at::Tensor p32_window_ampere(
     int64_t transition_bits,
     int64_t out_features,
     int64_t bank_alt_id,
-    int64_t split_count) {
+    int64_t split_count,
+    const c10::optional<at::Tensor>& rank8_a,
+    const c10::optional<at::Tensor>& rank8_b,
+    double rank8_scale,
+    const c10::optional<at::Tensor>& rank8_down) {
   switch (transition_bits) {
     case 4:
       return p32_window_ampere_impl<4>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
+          rank8_a, rank8_b, rank8_scale, rank8_down);
     case 5:
       return p32_window_ampere_impl<5>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
+          rank8_a, rank8_b, rank8_scale, rank8_down);
     case 6:
       return p32_window_ampere_impl<6>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
+          rank8_a, rank8_b, rank8_scale, rank8_down);
     case 7:
       return p32_window_ampere_impl<7>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
+          rank8_a, rank8_b, rank8_scale, rank8_down);
     default:
       TORCH_CHECK(false, "QVQ P32 Ampere transition bits must be in [4, 7]");
   }
+}
+
+at::Tensor p32_rank8_project(const at::Tensor& input, const at::Tensor& rank8_a) {
+  TORCH_CHECK(input.is_cuda() && rank8_a.is_cuda(),
+              "QVQ Ampere rank8 projection tensors must be CUDA tensors");
+  TORCH_CHECK(input.device() == rank8_a.device(),
+              "QVQ Ampere rank8 projection tensors must share a device");
+  TORCH_CHECK(input.scalar_type() == at::kHalf && rank8_a.scalar_type() == at::kHalf,
+              "QVQ Ampere rank8 projection requires FP16 input and A");
+  TORCH_CHECK(input.dim() == 2 && rank8_a.dim() == 2 &&
+                  rank8_a.size(0) == input.size(1) && rank8_a.size(1) % 8 == 0,
+              "QVQ Ampere grouped rank8 projection has invalid shapes");
+  TORCH_CHECK(input.is_contiguous() && rank8_a.is_contiguous(),
+              "QVQ Ampere rank8 projection tensors must be contiguous");
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const int capability = cached_device_capability(input.get_device());
+  TORCH_CHECK(
+      ampere_execution_capability_supported(capability),
+      "QVQ Ampere rank8 projection requires compute capability 8.0");
+  return at::mm(input, rank8_a, at::kFloat);
 }
 
 template <int TransitionBits>
@@ -3039,7 +3251,10 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     const at::Tensor& bank_ids,
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
-    at::IntArrayRef split_counts) {
+    at::IntArrayRef split_counts,
+    const c10::optional<at::Tensor>& rank8_a = c10::nullopt,
+    const c10::optional<at::Tensor>& rank8_b = c10::nullopt,
+    at::ArrayRef<double> rank8_scales = {}) {
   constexpr int kWordsPerTile = 4 * TransitionBits;
   const int64_t segment_count = static_cast<int64_t>(out_features.size());
   TORCH_CHECK(
@@ -3049,6 +3264,13 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
       static_cast<int64_t>(bank_alt_ids.size()) == segment_count &&
           static_cast<int64_t>(split_counts.size()) == segment_count,
       "QVQ P32 Ampere grouped segment metadata lengths must match");
+  TORCH_CHECK(
+      rank8_a.has_value() == rank8_b.has_value(),
+      "rank8_a and rank8_b must be provided together for grouped P32");
+  TORCH_CHECK(
+      rank8_scales.empty() ||
+          static_cast<int64_t>(rank8_scales.size()) == segment_count,
+      "grouped P32 rank8 scales must be empty or one value per segment");
   TORCH_CHECK(input.is_cuda(), "QVQ P32 Ampere input must be CUDA");
   TORCH_CHECK(
       trellis.device() == input.device() && levels.device() == input.device() &&
@@ -3110,6 +3332,10 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     params.n_tiles[segment] = n_tiles;
     params.bank_alt_id[segment] = bank_alt_id;
     params.split_count[segment] = split_count;
+    params.rank8_offset[segment] = segment * 8;
+    params.rank8_scale[segment] = rank8_scales.empty()
+        ? 1.0f
+        : static_cast<float>(rank8_scales[segment]);
     params.output_offset[segment] = output_values;
     params.partial_offset[segment] = partial_values;
     if (split_count > 1) {
@@ -3127,6 +3353,30 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
         (n_tiles + kTilesPerBlock - 1) / kTilesPerBlock);
   }
   const int total_n = total_n_tiles * kTileColumns;
+  if (rank8_a.has_value()) {
+    TORCH_CHECK(
+        rank8_a->device() == input.device() && rank8_b->device() == input.device(),
+        "grouped P32 rank8 tensors must share the input CUDA device");
+    TORCH_CHECK(
+        rank8_a->scalar_type() == at::kHalf &&
+            (rank8_b->scalar_type() == at::kHalf ||
+             rank8_b->scalar_type() == at::kFloat),
+        "grouped P32 rank8_a must be float16 and rank8_b float16 or float32");
+    TORCH_CHECK(
+        rank8_a->is_contiguous() && rank8_b->is_contiguous(),
+        "grouped P32 rank8 tensors must be contiguous");
+    TORCH_CHECK(
+        rank8_a->dim() == 2 && rank8_a->size(0) == size_k &&
+            rank8_a->size(1) == segment_count * 8,
+        "grouped P32 rank8_a must have shape [K, 8 * segment_count]");
+    TORCH_CHECK(
+        rank8_b->dim() == 2 && rank8_b->size(0) == 8 &&
+            rank8_b->size(1) == total_n,
+        "grouped P32 rank8_b must have shape [8, total_N]");
+    for (double scale : rank8_scales) {
+      TORCH_CHECK(std::isfinite(scale), "grouped P32 rank8 scales must be finite");
+    }
+  }
   const int64_t expected_tiles = static_cast<int64_t>(k_tiles) * total_n_tiles;
   TORCH_CHECK(
       trellis.numel() == expected_tiles * kWordsPerTile,
@@ -3213,7 +3463,35 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  if (needs_reduction) {
+  if (rank8_a.has_value()) {
+    auto rank8_down = at::mm(input, *rank8_a, at::kFloat);
+    constexpr int kReductionThreads = 256;
+    const int output_value_count = size_m * total_n;
+    const int blocks =
+        (output_value_count + kReductionThreads - 1) / kReductionThreads;
+    if (rank8_b->scalar_type() == at::kFloat) {
+      reduce_grouped_split_rank8_kernel<true><<<blocks, kReductionThreads, 0, stream>>>(
+          partial_output_ptr,
+          output_ptr,
+          params,
+          static_cast<int>(segment_count),
+          size_m,
+          total_n,
+          rank8_down.data_ptr<float>(),
+          rank8_b->data_ptr());
+    } else {
+      reduce_grouped_split_rank8_kernel<false><<<blocks, kReductionThreads, 0, stream>>>(
+          partial_output_ptr,
+          output_ptr,
+          params,
+          static_cast<int>(segment_count),
+          size_m,
+          total_n,
+          rank8_down.data_ptr<float>(),
+          rank8_b->data_ptr());
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  } else if (needs_reduction) {
     constexpr int kReductionThreads = 256;
     const int output_value_count = size_m * total_n;
     const int blocks =
@@ -3238,20 +3516,27 @@ at::Tensor p32_window_ampere_grouped_fused(
     int64_t transition_bits,
     at::IntArrayRef out_features,
     at::IntArrayRef bank_alt_ids,
-    at::IntArrayRef split_counts) {
+    at::IntArrayRef split_counts,
+    const c10::optional<at::Tensor>& rank8_a,
+    const c10::optional<at::Tensor>& rank8_b,
+    at::ArrayRef<double> rank8_scales) {
   switch (transition_bits) {
     case 4:
       return p32_window_ampere_grouped_fused_impl<4>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts,
+          rank8_a, rank8_b, rank8_scales);
     case 5:
       return p32_window_ampere_grouped_fused_impl<5>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts,
+          rank8_a, rank8_b, rank8_scales);
     case 6:
       return p32_window_ampere_grouped_fused_impl<6>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts,
+          rank8_a, rank8_b, rank8_scales);
     case 7:
       return p32_window_ampere_grouped_fused_impl<7>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts);
+          input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts,
+          rank8_a, rank8_b, rank8_scales);
     default:
       TORCH_CHECK(false, "QVQ P32 Ampere transition bits must be in [4, 7]");
   }
@@ -3325,13 +3610,15 @@ std::vector<at::Tensor> p32_window_ampere_grouped(
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_ampere, m) {
-  m.def("p32_window(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
+  m.def("p32_window(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1, Tensor? rank8_a=None, Tensor? rank8_b=None, float rank8_scale=1.0, Tensor? rank8_down=None) -> Tensor");
+  m.def("rank8_project(Tensor input, Tensor rank8_a) -> Tensor");
   m.def("p32_window_grouped(Tensor input, Tensor[] trellises, Tensor levels, Tensor[] bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor[]");
-  m.def("p32_window_grouped_fused(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
+  m.def("p32_window_grouped_fused(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts, Tensor? rank8_a=None, Tensor? rank8_b=None, float[] rank8_scales=[]) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_ampere, CUDA, m) {
   m.impl("p32_window", p32_window_ampere);
+  m.impl("rank8_project", p32_rank8_project);
   m.impl("p32_window_grouped", p32_window_ampere_grouped);
   m.impl("p32_window_grouped_fused", p32_window_ampere_grouped_fused);
 }

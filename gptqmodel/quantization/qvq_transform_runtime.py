@@ -370,6 +370,8 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
         # are prepared before capture; replay only reads these objects.
         self._ampere_payload = None
         self._ampere_levels: torch.Tensor | None = None
+        self._ampere_rank8_a: torch.Tensor | None = None
+        self._ampere_rank8_b: torch.Tensor | None = None
         from .qvq_rank8 import _base, _digest, _metadata
 
         for consumer_index, module in enumerate(self.linears):
@@ -458,6 +460,11 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
             )
         flat = transformed.reshape(-1, transformed.shape[-1]).contiguous()
         reference = self.linears[0]
+        ampere_rank8_fused = (
+            self._ampere_payload is not None
+            and all(self._rank8_enabled)
+            and (len(self.linears) != 3 or flat.shape[0] <= 4)
+        )
         if self._ampere_payload is not None:
             # The grouped SM80 decoder returns one FP32 inner result per child
             # while preserving each child's split wave and bank alternative.
@@ -469,9 +476,24 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
             levels = self._ampere_levels
             if levels is None:
                 raise RuntimeError("grouped Ampere levels were not prepared")
-            pieces = qvq_p32_window_ampere_grouped_packed(
-                flat, self._ampere_payload, levels
-            )
+            if ampere_rank8_fused:
+                # Decode-sized Q/K/V rank-8 factors share the same transformed
+                # activation. Produce all three 8-wide hidden states in one
+                # FP16-input, FP32-output GEMM, then let the grouped reducer
+                # add each child B product without three reference matmuls.
+                pieces = qvq_p32_window_ampere_grouped_packed(
+                    flat,
+                    self._ampere_payload,
+                    levels,
+                    rank8_as=tuple(module.rank8_A for module in self.linears),
+                    rank8_bs=tuple(module.rank8_B for module in self.linears),
+                    rank8_packed_a=self._ampere_rank8_a,
+                    rank8_packed_b=self._ampere_rank8_b,
+                )
+            else:
+                pieces = qvq_p32_window_ampere_grouped_packed(
+                    flat, self._ampere_payload, levels
+                )
         else:
             from gptqmodel.utils.qvq_cuda import qvq_cuda_gemv
 
@@ -493,7 +515,11 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
             pieces = grouped_inner.split(self.output_widths, dim=-1)
         self.grouped_gemv_invocations += 1
         leading_shape = transformed.shape[:-1]
-        flat_input = flat.float() if any(self._rank8_enabled) else None
+        flat_input = (
+            flat.float()
+            if any(self._rank8_enabled) and not ampere_rank8_fused
+            else None
+        )
         outputs = []
         for index, (module, piece) in enumerate(zip(self.linears, pieces, strict=True)):
             # The grouped decoder already returns an FP32 inner accumulator.
@@ -502,8 +528,9 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
             # never touch their factor buffers.
             if self._rank8_enabled[index]:
                 self.validate_rank8(index, module)
-                hidden = flat_input @ module.rank8_A.float()
-                piece = piece.float() + hidden @ module.rank8_B.float()
+                if not ampere_rank8_fused:
+                    hidden = flat_input @ module.rank8_A.float()
+                    piece = piece.float() + hidden @ module.rank8_B.float()
             outputs.append(
                 module.recover_output(
                     piece.contiguous().reshape(*leading_shape, module.out_features),
@@ -622,6 +649,8 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
         else:
             self._ampere_payload = None
             self._ampere_levels = None
+            self._ampere_rank8_a = None
+            self._ampere_rank8_b = None
 
     def _prepare_ampere_payload(self) -> None:
         """Prepare the grouped SM80 payload and operators before capture."""
@@ -637,6 +666,7 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
             qvq_pack_p32_window_ampere_group,
         )
         from gptqmodel.utils.qvq_cuda import _pgc16_levels
+
         from .qvq_rates import qvq_transition_bits
 
         if any(config is None for config in self._rank8_configs):
@@ -691,6 +721,17 @@ class QVQGroupedP32InputTransformState(torch.nn.Module):
         )
         self._ampere_levels = _pgc16_levels(
             self.linears[0].trellis.device, self.linears[0].codebook_version
+        )
+        rank8_enabled = getattr(self, "_rank8_enabled", [False] * len(self.linears))
+        self._ampere_rank8_a = (
+            torch.cat(tuple(module.rank8_A for module in self.linears), dim=1).contiguous()
+            if all(rank8_enabled)
+            else None
+        )
+        self._ampere_rank8_b = (
+            torch.cat(tuple(module.rank8_B for module in self.linears), dim=1).contiguous()
+            if all(rank8_enabled)
+            else None
         )
         prewarm_qvq_ampere_grouped()
 
