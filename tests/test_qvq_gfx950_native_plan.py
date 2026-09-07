@@ -54,6 +54,13 @@ class NativePlanHostTests(unittest.TestCase):
         )
         lib.qvq_gfx950_native_execute.argtypes = [c.c_void_p] * 7
         lib.qvq_gfx950_native_execute_capture.argtypes = [c.c_void_p] * 7
+        lib.qvq_gfx950_native_prepare_payload.argtypes = [
+            c.c_void_p,
+            c.c_void_p,
+            c.c_void_p,
+            c.c_void_p,
+            c.c_void_p,
+        ]
         lib.qvq_gfx950_native_prepare_runtime.argtypes = [
             c.POINTER(NativeConfig),
             c.c_void_p,
@@ -102,7 +109,7 @@ class NativePlanHostTests(unittest.TestCase):
             plan = c.c_void_p()
             graph = None
             with torch.cuda.stream(stream):
-                if bits >= 6:
+                if bits >= 6 or cache_policy == 1:
                     y.fill_(123)
                     self.assertEqual(
                         lib.qvq_gfx950_native_prepare_runtime(
@@ -126,26 +133,40 @@ class NativePlanHostTests(unittest.TestCase):
                     plan = c.c_void_p()
                 else:
                     prepared_runtime = None
-                self.assertEqual(
-                    lib.qvq_gfx950_native_prepare(
-                        c.byref(config),
-                        x.data_ptr(),
-                        words.data_ptr(),
-                        levels.data_ptr(),
-                        banks.data_ptr(),
-                        y.data_ptr(),
-                        scratch.data_ptr(),
-                        scratch.numel() * 2,
-                        workspace.data_ptr(),
-                        workspace.numel(),
-                        stream.cuda_stream,
-                        c.byref(plan),
-                    ),
-                    0,
-                )
-                if prepared_runtime is not None:
-                    self.assertEqual(lib.qvq_gfx950_native_destroy(plan), 0)
+                if prepared_runtime is None:
+                    self.assertEqual(
+                        lib.qvq_gfx950_native_prepare(
+                            c.byref(config),
+                            x.data_ptr(),
+                            words.data_ptr(),
+                            levels.data_ptr(),
+                            banks.data_ptr(),
+                            y.data_ptr(),
+                            scratch.data_ptr(),
+                            scratch.numel() * 2,
+                            workspace.data_ptr(),
+                            workspace.numel(),
+                            stream.cuda_stream,
+                            c.byref(plan),
+                        ),
+                        0,
+                    )
+                else:
                     plan = prepared_runtime
+                if cache_policy == 1:
+                    # Explicitly seed the real immutable payload before graph
+                    # capture. The resulting graph can contain GEMM only;
+                    # policy 0 deliberately has no such entry point.
+                    self.assertEqual(
+                        lib.qvq_gfx950_native_prepare_payload(
+                            plan,
+                            words.data_ptr(),
+                            levels.data_ptr(),
+                            banks.data_ptr(),
+                            stream.cuda_stream,
+                        ),
+                        0,
+                    )
                 try:
                     expected_config = bytes(config)
                     config.bank_alt_id = 3

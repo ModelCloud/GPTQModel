@@ -233,3 +233,35 @@ extern "C" int qvq_gfx950_native_prepare_owned(const qvq_gfx950_native_config* c
   static_cast<NativeWindowPlan*>(*result)->owned_workspace = workspace;
   return 0;
 }
+
+extern "C" int qvq_gfx950_native_prepare_payload(void* opaque,
+    const void* window, const void* levels, const void* banks, void* stream) {
+  auto* p = static_cast<NativeWindowPlan*>(opaque);
+  if (!p || p->config.cache_policy != 1 || !window || !levels || !banks ||
+      stream != p->stream)
+    return -int(hipErrorInvalidValue);
+  int device;
+  auto hs = hipGetDevice(&device);
+  if (hs != hipSuccess) return -int(hs);
+  if (device != p->device) return -int(hipErrorInvalidDevice);
+  auto hip_stream = static_cast<hipStream_t>(stream);
+  hipStreamCaptureStatus capture;
+  hs = hipStreamIsCapturing(hip_stream, &capture);
+  if (hs != hipSuccess) return -int(hs);
+  if (capture != hipStreamCaptureStatusNone)
+    return -int(hipErrorStreamCaptureUnsupported);
+  if (p->decoded_cache_valid && p->decoded_window == window &&
+      p->decoded_levels == levels && p->decoded_banks == banks)
+    return 0;
+  const auto& c = p->config;
+  const int status = qvq_gfx950_decode_window(window, levels, banks, p->scratch,
+      c.gemm.k, c.gemm.n, c.transition_bits, c.bank_alt_id, stream);
+  if (status) return -status;
+  hs = hipStreamSynchronize(hip_stream);
+  if (hs != hipSuccess) return -int(hs);
+  p->decoded_window = window;
+  p->decoded_levels = levels;
+  p->decoded_banks = banks;
+  p->decoded_cache_valid = true;
+  return 0;
+}

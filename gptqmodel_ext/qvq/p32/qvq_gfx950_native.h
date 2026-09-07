@@ -43,6 +43,13 @@ int qvq_gfx950_native_prepare_runtime(const qvq_gfx950_native_config*,
 // releases owned storage after the caller completes all uses/destroys graphs.
 int qvq_gfx950_native_prepare_owned(const qvq_gfx950_native_config*,
     size_t workspace_bytes, void* stream, void** result);
+// Populate the policy-1 decoded cache from the caller's real immutable
+// payloads before command-buffer capture. This function never launches GEMM,
+// rejects active capture, synchronizes the preparation stream, and is a
+// no-op when the same payload pointer tuple is already cached. It requires
+// cache_policy=1 and the plan's prepared stream/device.
+int qvq_gfx950_native_prepare_payload(void* plan, const void* window,
+    const void* levels, const void* banks, void* stream);
 // Execute on the prepared stream/device. No tuning, allocation, or sync.
 // With cache_policy=0, input/weight contents may change at stable addresses
 // between ordered calls. With cache_policy=1, X/Y may change but the window,

@@ -267,3 +267,15 @@ the Python SDK's `_rocm_sdk_core/lib` then `_rocm_sdk_libraries/lib` resolved it
 No global library changes were made. GPU tests use `QVQ_GFX950_NATIVE_GPU_TEST=1`
 and `QVQ_GFX950_NATIVE_LIBRARY` pointing to the consolidated prepared DSO.
 ZML's hermetic runtime/loading combination still requires its own test.
+
+## Explicit payload preparation for graph replay
+
+`qvq_gfx950_native_prepare_payload` is an additive policy-1 entry point for
+external runtimes that can expose the actual immutable device payload before
+capture. It decodes the window/LUT/bank tuple into persistent scratch,
+synchronizes once, and performs no GEMM. Repeating the same pointer tuple is a
+no-op; active capture, wrong stream/device, and policy 0 are rejected. ZML
+exposes this as `NativePlan.preparePayload` and provides the
+`forwardGraphCached` call form. That form is opt-in: callers must prepare the
+real payload first or decode work would be recorded into the graph. The
+default ZML policy-1 call remains eager for runtimes without this hook.
