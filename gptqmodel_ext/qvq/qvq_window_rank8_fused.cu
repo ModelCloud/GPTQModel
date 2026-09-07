@@ -31,7 +31,6 @@ __global__ void qvq_rank8_fused_no_hadamard_kernel(
   const int lane = static_cast<int>(threadIdx.x) & 31;
   const int warp = static_cast<int>(threadIdx.x) >> 5;
   const int row = static_cast<int>(blockIdx.y) * kRowsPerBlock + warp;
-  const int column = static_cast<int>(blockIdx.x) * 32 + lane;
   __shared__ float hidden[kRowsPerBlock * kRanks];
 
   if (row < m) {
@@ -52,18 +51,20 @@ __global__ void qvq_rank8_fused_no_hadamard_kernel(
   }
   __syncthreads();
 
-  if (row < m && column < n) {
-    float value = base[static_cast<int64_t>(row) * base_stride + column];
+  if (row < m) {
+    for (int column = lane; column < n; column += 32) {
+      float value = base[static_cast<int64_t>(row) * base_stride + column];
 #pragma unroll
-    for (int rank = 0; rank < kRanks; ++rank) {
-      value += hidden[warp * kRanks + rank] *
-          rank8_b[static_cast<int64_t>(rank) * n + column];
+      for (int rank = 0; rank < kRanks; ++rank) {
+        value += hidden[warp * kRanks + rank] *
+            rank8_b[static_cast<int64_t>(rank) * n + column];
+      }
+      value *= scale_v[column];
+      if (bias != nullptr) {
+        value += bias[column];
+      }
+      output[static_cast<int64_t>(row) * n + column] = __float2half_rn(value);
     }
-    value *= scale_v[column];
-    if (bias != nullptr) {
-      value += bias[column];
-    }
-    output[static_cast<int64_t>(row) * n + column] = __float2half_rn(value);
   }
 }
 
@@ -106,10 +107,10 @@ extern "C" void qvq_rank8_fused_no_hadamard(
   const int k = static_cast<int>(transformed.size(1));
   const int n = static_cast<int>(base.size(1));
   constexpr int kThreads = 128;
-  const dim3 grid(
-      static_cast<unsigned>((n + 31) / 32),
-      static_cast<unsigned>((m + 3) / 4),
-      1);
+  // Each block owns four rows and walks the full output width.  Keeping the
+  // column loop inside the block ensures X'A is evaluated once per row rather
+  // than once for every N tile.
+  const dim3 grid(1, static_cast<unsigned>((m + 3) / 4), 1);
   qvq_rank8_fused_no_hadamard_kernel<<<grid, kThreads, 0, stream>>>(
       reinterpret_cast<const at::Half*>(transformed.data_ptr<at::Half>()),
       transformed.stride(0), rank8_a.data_ptr<float>(), rank8_b.data_ptr<float>(),

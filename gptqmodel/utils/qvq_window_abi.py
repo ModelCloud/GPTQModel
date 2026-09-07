@@ -61,7 +61,16 @@ class WindowConfig(ctypes.Structure):
         "abi_version", "struct_bytes", "m", "k", "n", "transition_bits", "bank_alt_id",
         "algorithm", "block_m", "block_n", "block_k", "warp_groups", "pipeline_stages", "split_k",
         "min_m", "max_m", "input_hadamard", "output_hadamard", "rank8_enabled",
+        "recovery_kernel", "recovery_projection",
     )]
+
+    def __init__(self, *args, **kwargs):
+        # Keep source compatibility for callers that still construct the
+        # legacy 76-byte ABI positionally.  The native boundary accepts that
+        # shorter struct and defaults its optional policy fields to reference.
+        if len(args) == 19:
+            args = (*args, 0, 0)
+        super().__init__(*args, **kwargs)
 
 
 @lru_cache(maxsize=1)
@@ -105,9 +114,11 @@ def native_window_linear(layer, x, config):
 
     if (config.algorithm not in ("hopper_m16", "hopper_direct_decode_mma")
             or (config.algorithm == "hopper_direct_decode_mma" and not config.block_m)
-            or config.recovery_kernel != "separate_reference"
-            or config.recovery_projection != "separate_reference" or config.chunk_m):
-        raise ValueError("native ABI requires explicit Hopper geometry and reference rank8 kernels")
+            or config.recovery_kernel not in ("separate_reference", "fused_epilogue")
+            or config.recovery_projection != "separate_reference"
+            or (config.recovery_kernel == "fused_epilogue" and layer.output_hadamard)
+            or config.chunk_m):
+        raise ValueError("native ABI requires explicit Hopper geometry and a supported rank8 policy")
     # Window-only deployments intentionally release the planar trellis after
     # CPU repacking.  Validate against the live payload that this ABI will
     # actually consume, while keeping legacy planar layers supported.
@@ -138,12 +149,15 @@ def native_window_linear(layer, x, config):
         layer._cached_cast("bias", torch.float16),
         layer.rank8_A if enabled else None, layer.rank8_B if enabled else None, output,
     )
+    recovery_kernel = {"separate_reference": 0, "fused_epilogue": 1}[config.recovery_kernel]
+    recovery_projection = {"separate_reference": 0}[config.recovery_projection]
     native = WindowConfig(
         3, ctypes.sizeof(WindowConfig), x.shape[0], layer.in_features, layer.out_features,
         round(2 * layer.bits), alt_id, 1 if config.algorithm == "hopper_m16" else 2,
         config.block_m, config.block_n, config.block_k, config.warp_groups,
         config.pipeline_stages, config.split_k, config.min_m, config.max_m,
         int(layer.input_hadamard), int(layer.output_hadamard), int(enabled),
+        recovery_kernel, recovery_projection,
     )
     error = ctypes.create_string_buffer(4096)
     status = library.qvq_p32_window_linear(

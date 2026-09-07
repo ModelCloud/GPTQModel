@@ -18,6 +18,10 @@ typedef struct {
   uint32_t algorithm; // 1 = existing Hopper M16, 2 = existing tuned Hopper
   uint32_t block_m, block_n, block_k, warp_groups, pipeline_stages, split_k;
   uint32_t min_m, max_m, input_hadamard, output_hadamard, rank8_enabled;
+  // Optional extension fields (present when struct_bytes reaches the end of
+  // this struct): 0 = separate reference, 1 = fused epilogue; projection
+  // currently remains 0 = separate/reference for the native ABI.
+  uint32_t recovery_kernel, recovery_projection;
 } QvqP32WindowConfig;
 // Returns zero on successful asynchronous submission. Errors are copied into
 // caller-owned storage, never thrown across the C boundary. No Python runtime

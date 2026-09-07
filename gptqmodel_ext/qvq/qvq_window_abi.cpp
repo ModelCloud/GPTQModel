@@ -9,6 +9,7 @@
 #include <torch/library.h>
 #include <algorithm>
 #include <cstdio>
+#include <cstddef>
 #include <stdexcept>
 #include <memory>
 #include <mutex>
@@ -69,9 +70,17 @@ static int qvq_p32_window_linear_impl(
     char* error, uint64_t error_capacity, const at::Tensor& prepared_rank8_a,
     const at::Tensor& prepared_rank8_b) {
   try {
-    check(config && config->abi_version == 3 && config->struct_bytes == sizeof(*config),
+    check(config && config->abi_version == 3 &&
+              config->struct_bytes >= offsetof(QvqP32WindowConfig, recovery_kernel) &&
+              config->struct_bytes <= sizeof(*config),
           "unsupported window ABI version or configuration size");
     const auto& c = *config;
+    const bool has_recovery_policy =
+        c.struct_bytes >= offsetof(QvqP32WindowConfig, recovery_kernel) +
+            2 * sizeof(uint32_t);
+    const uint32_t recovery_kernel = has_recovery_policy ? c.recovery_kernel : 0;
+    const uint32_t recovery_projection =
+        has_recovery_policy ? c.recovery_projection : 0;
     // The WGMMA decoder consumes 256-wide K/N tiles.  Hadamard transforms
     // additionally require a power-of-two width, but the transform-free
     // composite path must admit production projections such as Qwen's
@@ -87,6 +96,10 @@ static int qvq_p32_window_linear_impl(
           "native reference ABI requires BK256, stages2, split1");
     check(c.input_hadamard <= 1 && c.output_hadamard <= 1 && c.rank8_enabled <= 1,
           "native window flags must be zero or one");
+    check(recovery_kernel <= 1 && recovery_projection == 0,
+          "native rank8 policy supports separate_reference or fused_epilogue with separate_reference projection");
+    check(recovery_kernel != 1 || !c.output_hadamard,
+          "native fused rank8 epilogue requires output_hadamard=false");
     check(!c.input_hadamard || power2(c.k),
           "native input Hadamard requires power-of-two K");
     check(!c.output_hadamard || power2(c.n),
@@ -178,7 +191,7 @@ static int qvq_p32_window_linear_impl(
           .view({padded_m, c.n}).slice(0, 0, c.m);
     }
     bool wrote_output = false;
-    if (c.rank8_enabled && !c.output_hadamard) {
+    if (c.rank8_enabled && recovery_kernel == 1 && !c.output_hadamard) {
       const auto& a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
       const auto& b_float = prepared_rank8_b.defined() ? prepared_rank8_b : b.to(at::kFloat);
       // The transform-free composite path uses one graph-safe CUDA epilogue:

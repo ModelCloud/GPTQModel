@@ -155,7 +155,11 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays():
         output_hadamard=False,
     )
     _kernel_rank8(layer)
-    config = P32WindowConfig(algorithm="hopper_m16", recovery_mode="on")
+    config = P32WindowConfig(
+        algorithm="hopper_m16",
+        recovery_mode="on",
+        recovery_kernel="fused_epilogue",
+    )
     x = torch.randn(33, 2048, device="cuda", dtype=torch.float16) * 0.01
     with torch.no_grad():
         expected = layer(x)

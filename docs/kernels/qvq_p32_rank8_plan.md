@@ -379,3 +379,10 @@ BM tiles and is selected inside the same native window call, so it removes the
 native rank8 `mm`/`addmm` pair and its correction output allocation for this
 shape class. Output-Hadamard modules retain the reference transform path until
 the corresponding fused transform kernel is certified.
+
+This native fused candidate is opt-in (`recovery_kernel="fused_epilogue"`) and
+is not promoted on performance alone. A H200 K=N=2048 BM64/BN64 sweep measured
+approximately +420%/+358%/+191% recovery overhead at M=128/2048/8192 versus
+the correction-off executable. The result confirms that large-M rank8 is not
+inherently free; ZML must retain the candidate as shape/device data and select
+it only after the complete off/on benchmark and quality gates pass.
