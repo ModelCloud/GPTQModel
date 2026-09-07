@@ -187,7 +187,8 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(projecti
         stream.synchronize()
     finally:
         library.qvq_p32_window_linear = original
-    assert recorded[10].recovery_projection == {
+    native_config = ctypes.cast(recorded[10], ctypes.POINTER(WindowConfig)).contents
+    assert native_config.recovery_projection == {
         "separate_reference": 0,
         "concurrent_reference": 1,
         "tensor_core": 2,
