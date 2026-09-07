@@ -434,3 +434,13 @@ the correction-off executable after moving projection to the captured FP32
 GEMM. This candidate remains far above the promotion budget, confirming that
 large-M rank8 is not inherently free; ZML must retain it as shape/device data
 and select it only after the complete off/on benchmark and quality gates pass.
+
+After PR #173 merged, the new native project-output fused candidate was rerun
+on the available H100 with both Hopper M16 and direct-decode families. The
+matched W3 K=N=2048 sweep measured 4.6--20.4% lower latency for M16 and
+7.0--30.1% lower latency for direct decode at M=1/16/128/512, with CUDA-graph
+replay and the local numerical gate passing in every row. M512 retained a
+maximum FP16 drift of 0.001953125. This is H100 operator evidence only: it
+does not promote the unverified arithmetic signature or establish a universal
+2x/full-model gain. The complete record is
+`results/p32_rank8_h100_project_output_fused.json`.
