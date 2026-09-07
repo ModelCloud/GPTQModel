@@ -19,6 +19,14 @@ def test_rank8_epilogue_warp_policy_is_explicit_and_validated():
         _rank8_num_warps(8192, 3)
 
 
+def test_composite_hadamard_width_policy_matches_factored_bases():
+    from gptqmodel.quantization.qvq_rank8 import _supported_composite_hadamard_width
+
+    assert _supported_composite_hadamard_width(5120)
+    assert _supported_composite_hadamard_width(12288)
+    assert not _supported_composite_hadamard_width(17408)
+
+
 def test_rank8_triton_rejects_cold_compile_during_graph_capture(monkeypatch):
     from gptqmodel.utils import qvq_rank8_triton
 
@@ -212,6 +220,38 @@ def test_rank8_fused_epilogue_supports_composite_folded_output_width():
     with torch.cuda.graph(graph):
         captured = rank8_output_epilogue(
             hidden, b, base, sv, bias, hadamard=False, output_dtype=torch.float16
+        )
+    for _ in range(3):
+        graph.replay()
+        torch.testing.assert_close(captured, actual, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rank8_fused_epilogue_supports_composite_hadamard_output_graph_replay():
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from gptqmodel.utils.qvq_rank8_triton import rank8_output_epilogue
+
+    torch.manual_seed(159)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    m, n = 17, 5120
+    hidden = torch.randn(m, 8, device="cuda", dtype=torch.float16)
+    b = torch.randn(8, n, device="cuda", dtype=torch.float16) * 0.02
+    base = torch.randn(m, n, device="cuda", dtype=torch.float32)
+    sv = torch.randn(n, device="cuda", dtype=torch.float32)
+    bias = torch.randn(n, device="cuda", dtype=torch.float32)
+    added = base + hidden.float() @ b.float()
+    expected = _qvq_hadamard_fused(
+        added, post_scale=sv, bias=bias, scale_mode=3
+    ).half()
+    actual = rank8_output_epilogue(
+        hidden, b, base, sv, bias, hadamard=True, output_dtype=torch.float16
+    )
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = rank8_output_epilogue(
+            hidden, b, base, sv, bias, hadamard=True, output_dtype=torch.float16
         )
     for _ in range(3):
         graph.replay()

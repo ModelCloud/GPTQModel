@@ -24,6 +24,18 @@ from .rotation.hadamard_utils import matmul_hadU
 CONTRACT = "p32-window-r8-v1:fp32-project,fp16-hidden,fp32-expand-add,existing-output-transform"
 RANK8_BUFFERS = ("rank8_A", "rank8_B", "rank8_metadata")
 RANK8_SWEEP_CANDIDATES = (2, 4, 6, 8, 12)
+_COMPOSITE_HADAMARD_BASES = (172, 156, 140, 108, 60, 52, 36, 28, 40, 20, 12)
+
+
+def _supported_composite_hadamard_width(width: int) -> bool:
+    """Return whether the existing factored Hadamard supports ``width``."""
+    for base in _COMPOSITE_HADAMARD_BASES:
+        if width % base:
+            continue
+        ratio = width // base
+        if ratio >= 2 and ratio & (ratio - 1) == 0:
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -2030,9 +2042,10 @@ def window_kernel_candidates(layer, *, m):
         not getattr(layer, "_p32_rank8_enabled", False)
         or layer._p32_window_config.quality_mode == "fast"
     )
-    if allow_unverified and layer.out_features <= 16384 and (
+    if allow_unverified and layer.out_features <= 17408 and (
         not layer.output_hadamard
         or not layer.out_features & (layer.out_features - 1)
+        or _supported_composite_hadamard_width(layer.out_features)
     ):
         candidates.extend(
             replace(

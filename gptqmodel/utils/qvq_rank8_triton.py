@@ -341,10 +341,19 @@ def rank8_output_epilogue(
     if base.ndim != 2 or (rank8_enabled and hidden.ndim != 2):
         raise ValueError("rank8 epilogue requires matrix inputs")
     m, n = base.shape
-    if n < 16 or n > 16384 or (hadamard and n & (n - 1)):
+    composite_hadamard = bool(hadamard and n & (n - 1))
+    if n < 16 or n > 17408:
         raise ValueError(
-            "rank8 fused epilogue requires N in [16,16384]; Hadamard mode requires power-of-two N"
+            "rank8 fused epilogue requires N in [16,17408]"
         )
+    if composite_hadamard:
+        try:
+            had_n, base_n = get_hadK(n)
+        except AssertionError as error:
+            raise ValueError("unsupported composite Hadamard output width") from error
+        power_two_width = n // base_n
+        if had_n is None or power_two_width < 2 or power_two_width & (power_two_width - 1):
+            raise ValueError("unsupported composite Hadamard output width")
     if base.device.type != "cuda" or torch.cuda.get_device_capability(base.device) != (
         9,
         0,
@@ -366,9 +375,6 @@ def rank8_output_epilogue(
         bias is not None and (bias.shape != (n,) or not bias.is_contiguous())
     ):
         raise ValueError("rank8 epilogue requires contiguous SV/bias vectors")
-    output = torch.empty((m, n), device=base.device, dtype=output_dtype)
-    if not m:
-        return output
     launch_warps = _rank8_num_warps(n, num_warps)
     key = _rank8_graph_key(
         base.device,
@@ -381,10 +387,40 @@ def rank8_output_epilogue(
         str(output_dtype),
         str(sv.dtype),
         None if bias is None else str(bias.dtype),
-        "masked" if not hadamard and n & (n - 1) else "butterfly",
+        "composite" if composite_hadamard else ("masked" if not hadamard and n & (n - 1) else "butterfly"),
         launch_warps,
     )
     _require_rank8_kernel_warm(key)
+    if composite_hadamard:
+        # Keep the same FP32 base/correction arithmetic, then delegate the
+        # existing factored Hadamard implementation for the composite width.
+        # This fallback is intentionally separate from the power-of-two fused
+        # kernel until a native composite output kernel is certified.
+        added = base
+        if rank8_enabled:
+            added = base + hidden.float() @ b.float()
+        narrowed = added.to(torch.float16)
+        historical = matmul_hadU_stable(narrowed)
+        if sv is not None:
+            historical = historical * sv.to(torch.float16)
+        if bias is not None:
+            historical = historical + bias.to(torch.float16)
+        historical_finite = torch.isfinite(historical).all()
+        if not torch.cuda.is_current_stream_capturing() and bool(historical_finite):
+            output = historical.to(output_dtype)
+        else:
+            rescue = matmul_hadU_stable(added)
+            if sv is not None:
+                rescue = rescue * sv
+            if bias is not None:
+                rescue = rescue + bias
+            output = torch.where(historical_finite, historical.to(added.dtype), rescue)
+            output = output.to(output_dtype)
+        _mark_rank8_kernel_warm(key)
+        return output
+    output = torch.empty((m, n), device=base.device, dtype=output_dtype)
+    if not m:
+        return output
     if not hadamard and n & (n - 1):
         block_n = 1 << (n - 1).bit_length()
         _rank8_output_epilogue_masked[(m,)](
