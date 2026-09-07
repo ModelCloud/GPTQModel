@@ -21,30 +21,22 @@
 
 ## Latest News 🗞️🚀
 
-* 09/07/2026 7.4.0-dev `main`: ✨ Added XHToken `ouro` and `spark2_5` quantization support.
-* 09/02/2026 7.4.0-dev `main`: ✨ Added `apertus1p5` and `apertus1p5_text` quantization.
-* 09/01/2026 7.4.0-dev `main`: ✨ Added `glm5_next` / GLM-5.3-Flash quantization support.
-* 08/31/2026 7.4.0-dev `main`: ✨ Added Qwen3.8-Flash-Next (`qwen4_exp`) quantization.
-* 08/26/2026 7.4.0-dev `main`: ✨ Added NVIDIA `LocateAnything-3B` quantization support.
-* 08/25/2026 7.4.0-dev `main`: ✨ Added Tencent `HunyuanOCR` quantization support.
-* 08/25/2026 7.4.0-dev `main`: ✨ Added `lm_head` and embedding quantization lifecycle.
-* 08/24/2026 7.4.0-dev `main`: ✨ Added Baidu `Unlimited-OCR` quantization support.
-* 08/20/2026 7.4.0-dev `main`: ✨ Added `deepseek_v32` / DeepSeek V3.2; `muse_glimmer` / Muse Glimmer multimodal; `mage_vl` / Mage-VL; Cohere `North Micro Vision` (`cohere_compass`); `axk2` (A.X-K2) model support.
-* 08/04/2026 7.4.0-dev `main`: 🚀🔥⚡ Added `Swordfish` Blackwell (>= sm100) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale): [Paper](https://blog.alpindale.net/posts/swordfish/).
-* 07/24/2026 7.3.1 `main`: ✨ Added `solar_open` and `solar_open2`; `Intern S2 PreView`; `inkling_mm_model`; Poolside `Laguna S 2.1` model support.
-* 07/14/2026 7.3.0-dev `main`: ✨ Added `nemotron_h_puzzle`; `deepseek_vl`; `deepseek_ocr2`; `deepseek_vl_v2` model support.
-* 06/30/2026 7.2.0-dev `main`: ✨ Added `lfm2` and `lfm2_vl`; `minimax_m3_vl` / MiniMax M3; `cohere2_moe` model support.
-* 05/25/2026 7.1.0-dev `main`: ✨ Added `hy_3` and `ministral3`; `hunyuan_v1_dense` and `hunyuan_v1_moe`; `nemotron_labs_diffusion`; `interns1`, `ovis2_5`, `ovis2_6_moe` and `ovis2_6_next`; `mimo_v2`; `minicpmv_4_6` and `DeepSeek V4`; `GLM-4.5V`, `GLM-4.6V`, `Zamba` and `Zamba2` model support.
-* 04/29/2026 7.1.0-dev `main`: ✨ Added PoolSideAI `Laguna` model support for fused Laguna MoE checkpoints. Added `ERNIE 4.5 VL MoE`, `Ling-2.6-flash` and NVIDIA `Nemotron 3 Nano Omni` model support.
-* 04/28/2026 [7.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.0.0): 🚀 Added Huawei Ascend NPU support through native torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3. Added `internvl_chat`, `gemma3n`, `GLM-OCR`, `GLM-ASR`, and `falcon_mamba` model support.
-* 04/16/2026 [6.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.1.0): 🚀🔥⚡ CUDA kernels are now fully JIT-compiled, shrinking the wheel by about 300x and building only what you use; Marlin now supports NVIDIA `Turing+` GPUs, Machete kernel validation now covers supported GPUs, `GLM 5/5.1` joins the lineup, and LazyTurtle plus AWQ / multi-GPU MoE fixes make large-model quantization easier, lighter, and smoother.
-* 04/03/2026 [6.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.0.3): 🎉 New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`, and `FOEM: First-Order Error Matters`. Added PrismML/Bonsai 1bit model quantization (inference only), faster ParoQuant/AWQ kernels, ParoQuant `optimization scope` control: `module` (Paro Lite) or `layer` (Paro reference), plus `Gemma4`, `MiniCPM-O`, `MiniCPM-V`, and `GLM4 MoE Lite` model support.
+* 09/07/2026 [7.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.4.0): 🎉 Added resumable quantization checkpoints, shared-input Hessian deduplication, `lm_head` and embedding requantization, and updated native GGUF support. Added GLM-5.3-Flash, Apertus 1.5, and XHToken `ouro` / `spark2_5` quantization support, plus quantization, JIT cache, and Triton compatibility fixes.
+* 08/31/2026 [7.3.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.6): ✨ Added HunyuanOCR, NVIDIA LocateAnything-3B, and Qwen3.8-Flash-Next quantization support. Added tile-misaligned GPTQ/AWQ Marlin support, reduced QQQ packing memory, and improved JIT extension cache reuse.
+* 08/25/2026 [7.3.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.5): ✨ Added `lm_head` and embedding quantization lifecycle support; Unlimited-OCR, DeepSeek V3.2, Mage-VL, Muse Glimmer, OLMo 3, and SmolLM3 model support.
+* 08/19/2026 [7.3.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.4): 🚀🔥⚡ Added the `Swordfish` Blackwell GPTQ/AWQ kernel, planar GPTQ checkpoint formats, native MPS quantization, and Cohere Compass / A.X-K2 model support, with quantization performance and reliability improvements.
+* 07/25/2026 [7.3.2](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.2): ✨ Added quantized embedding inference and Solar Open, Solar Open 2, Intern S2 Preview, Inkling, and Poolside Laguna S 2.1 model support.
+* 07/20/2026 [7.3.1](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.1): ✨ Added DeepSeek VL/VL2/OCR2 and Nemotron H Puzzle model support, Windows ExllamaV2 compatibility, and ModelOpt NVFP4 dequantization.
+* 07/03/2026 [7.2.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.2.0): ✨ Added LFM2/LFM2-VL, MiniMax M3 VL, Cohere2 MoE, Gemma4 Unified, and text-only multimodal model definitions.
+* 06/08/2026 [7.1.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.1.0): ✨ Added Laguna, ERNIE 4.5 VL MoE, Ling 2.6 Flash, Nemotron 3 Nano Omni, GLM4V MoE, Zamba/Zamba2, MiniCPM-V 4.6, DeepSeek V4, MiMo V2, Ovis 2.5/2.6, Intern S1, Nemotron Labs Diffusion, and Hunyuan V1 model support.
+* 04/28/2026 [7.0.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.0.0): 🚀 Added Huawei Ascend NPU support through native torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3. CUDA kernels are now JIT-compiled, reducing wheel size and building only the kernels in use; Marlin supports NVIDIA Turing+ GPUs, with new GLM 5/5.1, InternVL Chat, Gemma3n, GLM-OCR, GLM-ASR, and Falcon Mamba model support.
+* 04/02/2026 [6.0.3](https://github.com/ModelCloud/GPTQModel/releases/tag/v6.0.3): 🎉 New quantization methods: `ParoQuant`, `GGUF`, `FP8`, `EXL3`, and `FOEM: First-Order Error Matters`. Added PrismML/Bonsai 1bit model quantization (inference only), faster ParoQuant/AWQ kernels, ParoQuant `optimization scope` control: `module` (Paro Lite) or `layer` (Paro reference), plus `Gemma4`, `MiniCPM-O`, `MiniCPM-V`, and `GLM4 MoE Lite` model support.
 * 03/19/2026 [5.8.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.8.0): ✨HF Transformers 5.3.0 support with auto-defusing of `fused` models via pypi pkg: [Defuser](https://github.com/ModelCloud/Defuser). Qwen 3.5 family support added. New fast HF `cpu` kernels for GPTQ/AWQ added. Experimental INT8 `cpu` kernel added for GPTQ. 
 
 <details>
 
 <summary>Archived News</summary>
-* 02/09/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): ✨New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
+* 02/10/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): ✨New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
 `AWQ` `qcfg.zero_point` property has been merged with a unified `sym` symmetry property; `zero_point=True` is now `sym=False`.
 Fixed `AWQ` `sym=True` packing/inference and quantization compatibility with some Qwen3 models. Exaone 4.0 support.
 
@@ -257,26 +249,93 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 
 ## Model Support 🤖
 
-| Model | | Model | | Model | | Model | | Model | |
-|---|---|---|---|---|---|---|---|---|---|
-| Apertus 1/1.5 | ✅ | EXAONE 3/4 | ✅ | Dots1 | ✅ | Mistral3 / Ministral3 | ✅ | Qwen 2/3/3.5/3.8 (Next/MoE) | ✅ |
-| Baichuan | ✅ | Falcon (H1 / Mamba) | ✅ | InternLM 1/2/2.5 | ✅ | Mixtral | ✅ | Qwen 2/2.5/3 VL | ✅ |
-| Bloom | ✅ | FastVLM | ✅ | Kimi K2 | ✅ | MobileLLM | ✅ | Qwen 2.5/3 Omni | ✅ |
-| ChatGLM | ✅ | Gemma 1-4 / 3n | ✅ | Klear | ✅ | MOSS | ✅ | RefinedWeb | ✅ |
-| CodeGen | ✅ | GPTBigCode | ✅ | LING/RING | ✅ | MPT | ✅ | StableLM | ✅ |
-| Cohere 1-2 / 2 MoE | ✅ | GPT-Neo / NeoX | ✅ | Llama 1-3.3 | ✅ | Nemotron H / H Puzzle / Omni | ✅ | StarCoder2 | ✅ |
-| DBRX Converted | ✅ | GPT-2 | ✅ | Llama 3.2 VL | ✅ | Nemotron Ultra / Labs-Diffusion | ✅ | TeleChat2 | ✅ |
-| Deci | ✅ | GPT-J | ✅ | Llama 4 | ✅ | OPT | ✅ | Trinity | ✅ |
-| DeepSeek-V2/V3/V3.2/V4/R1 | ✅ | GPT-OSS | ✅ | LongCat Flash | ✅ | OLMo2/3 / LLaDA2 | ✅ | Yi | ✅ |
-| DeepSeek-V2 Lite / VL / VL2 / OCR2 | ✅ | Granite / Granite MoE | ✅ | LongLLaMA | ✅ | Ovis 1.6/2/2.5/2.6 MoE/2.6 Next | ✅ | Seed-OSS | ✅ |
-| Dream | ✅ | GRIN-MoE | ✅ | Instella | ✅ | Phi 1-4 | ✅ | Voxtral | ✅ |
-| ERNIE 4.5 / MoE / VL MoE | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/5.3/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V/V 4_6 | ✅ | PanGu-α | ✅ |
-| XVERSE | ✅ | Brumby | ✅ | Hymba | ✅ | Mistral | ✅ | Qwen 1/2/3/3.5 | ✅ |
-| MiniMax M2/M3 | ✅ | AfMoE | ✅ | Bailing-MoE | ✅ | LFM2 / LFM2-VL / LFM2-MoE | ✅ | Marin | ✅ |
-| InternVL Chat | ✅ | Laguna | ✅ | Mimo / Mimo V2 | ✅ | Zamba / Zamba2 | ✅ | Intern S1 / S2 Preview | ✅ |
-| HunYuan V1 Dense / MoE | ✅ | HY-V3 | ✅ | Inkling | ✅ | Solar Open / Open 2 | ✅ | North Micro Vision | ✅ |
-| Mage-VL | ✅ | Unlimited-OCR | ✅ | HunyuanOCR | ✅ | LocateAnything | ✅ | Muse Glimmer | ✅ |
-| Ouro | ✅ | Spark-X2.5 | ✅ | SmolLM3 | ✅ |  |  |  |  |
+The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MAP`, including text-model and backward-compatibility aliases. Qwen 3.5 registrations require Transformers 5.2.0 or newer.
+
+<!-- model-types:start -->
+| Model family | Registered Transformers `model_type` values |
+|---|---|
+| A.X-K2 | `axk2` |
+| AfMoE / Trinity | `afmoe` |
+| Apertus 1 / 1.5 | `apertus`, `apertus1p5`, `apertus1p5_text` |
+| Baichuan | `baichuan` |
+| Bailing MoE / Hybrid (LING / RING) | `bailing_moe`, `bailing_hybrid` |
+| Bloom | `bloom` |
+| Brumby | `brumby` |
+| ChatGLM | `chatglm` |
+| CodeGen | `codegen` |
+| Cohere 1 / 2 / 2 MoE / Compass (North Mini / Micro Vision) | `cohere`, `cohere2`, `cohere2_moe`, `cohere_compass` |
+| DBRX / DBRX Converted | `dbrx`, `dbrx_converted` |
+| DeciLM | `deci` |
+| DeepSeek V2 / V3 / V3.2 / V4 / VL / VL2 / OCR2 | `deepseek_v2`, `deepseek_v3`, `deepseek_v32`, `deepseek_v4`, `deepseek_vl`, `deepseek_vl_v2`, `deepseek_ocr2` |
+| Dots1 | `dots1` |
+| Dream | `dream` |
+| ERNIE 4.5 / MoE / VL MoE | `ernie4_5`, `ernie4_5_moe`, `ernie4_5_moe_vl`, `ernie4_5_vl_moe` |
+| EXAONE 3 / 4 | `exaone`, `exaone4` |
+| Falcon / Falcon H1 / Falcon Mamba | `falcon`, `falcon_h1`, `falcon_mamba` |
+| Gemma 1-4 / 3n / Unified | `gemma`, `gemma2`, `gemma3`, `gemma3_text`, `gemma3n`, `gemma3n_text`, `gemma4`, `gemma4_text`, `gemma4_unified`, `gemma4_unified_text` |
+| GLM / GLM4 / GLM4V / GLM5 / OCR / ASR | `glm`, `glm4`, `glm4_moe`, `glm4_moe_lite`, `glm4v`, `glm4v_moe`, `glm4v_moe_text`, `glm5_next`, `glm_moe_dsa`, `glm_ocr`, `glmasr` |
+| GPT-2 | `gpt2` |
+| GPT BigCode | `gpt_bigcode` |
+| GPT-Neo / GPT-NeoX | `gpt_neo`, `gpt_neox` |
+| GPT-OSS | `gpt_oss` |
+| GPT-J | `gptj` |
+| Granite / Granite MoE Hybrid | `granite`, `granitemoehybrid` |
+| GRIN-MoE | `grinmoe` |
+| HRM | `hrm_text` |
+| Hunyuan V1 / VL / OCR | `hunyuan_v1_dense`, `hunyuan_v1_moe`, `hunyuan_vl` |
+| HY-V3 | `hy_v3` |
+| Hymba | `hymba` |
+| Inkling | `inkling_mm_model` |
+| Instella | `instella` |
+| Intern S1 / S2 Preview | `interns1`, `intern_s2_preview` |
+| InternLM 1 / 2 / 2.5 | `internlm`, `internlm2` |
+| InternVL Chat | `internvl_chat` |
+| Kimi K2 / K2.5 | `kimi_k2`, `kimi_k25` |
+| Klear | `klear` |
+| Laguna | `laguna` |
+| LFM2 / LFM2 MoE / LFM2-VL | `lfm2`, `lfm2_moe`, `lfm2_vl` |
+| LLaDA2 MoE | `llada2_moe` |
+| Llama 1-4 / TinyLlama / Nemotron Ultra | `llama`, `llama4`, `llama4_text` |
+| Llama 3.2 VL | `mllama`, `mllama_text_model` |
+| FastVLM / LLaVA-Qwen2 | `llava_qwen2` |
+| LocateAnything | `locateanything` |
+| LongCat Flash | `longcat_flash` |
+| LongLLaMA | `longllama` |
+| Mage-VL | `mage_vl` |
+| Marin | `marin` |
+| MiMo / MiMo V2 | `mimo`, `mimo_v2` |
+| MiniCPM / MiniCPM3 / MiniCPM-O / MiniCPM-V | `minicpm`, `minicpm3`, `minicpmo`, `minicpmv`, `minicpmv4_6` |
+| MiniMax M2 / M3-VL | `minimax`, `minimax_m2`, `minimax_m3_vl` |
+| Mistral / Mistral3 / Ministral3 | `mistral`, `mistral3`, `ministral3` |
+| Mixtral | `mixtral` |
+| MobileLLM | `mobilellm` |
+| MOSS | `moss` |
+| MPT | `mpt` |
+| Muse Glimmer | `muse_glimmer` |
+| Nemotron NAS / H / H Puzzle / Omni / Labs Diffusion | `nemotron-nas`, `nemotron_h`, `nemotron_h_puzzle`, `nemotronh_nano_omni_reasoning_v3`, `nemotron_labs_diffusion` |
+| OLMo 2 / 3 | `olmo2`, `olmo3` |
+| OPT | `opt` |
+| Ouro | `ouro` |
+| Ovis 1.6 / 2 / 2.5 / 2.6 MoE / 2.6 Next | `ovis`, `ovis2`, `ovis2_5`, `ovis2_6_moe`, `ovis2_6_next` |
+| PanGu-α | `gpt_pangu` |
+| Phi 1-4 / Phi MoE | `phi`, `phi3`, `phi4mm`, `phimoe` |
+| Qwen 1-4 / 3.5 / 3.6 / 3.8 / MoE / Next | `qwen`, `qwen2`, `qwen2_moe`, `qwen3`, `qwen3_moe`, `qwen3_next`, `qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, `qwen3_5_moe_text`, `qwen4_exp` |
+| Qwen 2 / 2.5 / 3 VL | `qwen2_vl`, `qwen2_vl_text`, `qwen2_5_vl`, `qwen2_5_vl_text`, `qwen3_vl` |
+| Qwen 2.5 / 3 Omni | `qwen2_5_omni`, `qwen3_omni_moe` |
+| RefinedWeb | `refinedWeb`, `refinedWebModel` |
+| Seed-OSS | `seed_oss` |
+| SmolLM3 | `smollm3` |
+| Solar Open / Open 2 | `solar_open`, `solar_open2` |
+| Spark 2.5 | `spark2_5` |
+| StableLM | `stablelm`, `stablelm_epoch` |
+| StarCoder2 | `starcoder2` |
+| TeleChat2 | `telechat` |
+| Unlimited-OCR | `unlimited-ocr` |
+| Voxtral | `voxtral` |
+| XVERSE | `xverse` |
+| Yi | `yi` |
+| Zamba / Zamba2 | `zamba`, `zamba2` |
+<!-- model-types:end -->
 
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
