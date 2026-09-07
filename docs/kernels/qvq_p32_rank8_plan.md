@@ -167,11 +167,13 @@ selectable, and their H200 off/on sweep is recorded in
 validated BM choices with BN64 and fail closed for generic BN128.
 BM128/BN128 improves M2048 but loses at smaller M. The API retains every
 supported geometry rather than pruning it based on another shape. Next:
-connect the tuning runner to the native ZML executable and extend KV/TP graph
-ownership and backend/grouped candidate coverage; improve the producer's
-shared-memory exchange and factor reuse, then evaluate padded Tensor Core
-projection and integration with the WGMMA producer/consumer pipeline. The
-full phase requirements above remain open.
+the native ZML verifier now compiles, correctness-checks and times every
+enumerated BM/BN candidate before preparing the selected serving graph, with
+the same quality and recovery-budget gates. Remaining work is KV/TP graph
+ownership and broader backend/grouped candidate coverage; improve the
+producer's shared-memory exchange and factor reuse, then evaluate padded
+Tensor Core projection and integration with the WGMMA producer/consumer
+pipeline. The full phase requirements above remain open.
 
 Grouped execution now also enforces each child's prepared `min_m`/`max_m`
 range before selecting a backend. A grouped policy tuned for one M therefore
