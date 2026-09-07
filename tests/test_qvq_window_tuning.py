@@ -170,6 +170,8 @@ def test_grouped_tuner_selects_one_complete_child_tuple_and_caches_it(monkeypatc
     assert result.configs == alternate
     assert result.report["selected"] == [config.to_backend_config() for config in alternate]
     assert not result.cache_hit
+    assert len(result.report["identity"]["candidate_shape_scores"]) == 2
+    assert all("shape_score" in row for row in result.report["rows"])
 
     cached = tune_grouped_window_kernel(
         (first, second),
@@ -272,6 +274,10 @@ def test_window_tuner_can_attach_matched_rank8_overhead(tmp_path):
         measure_recovery=True,
     )
     assert result.report["recovery_overhead"]["overhead_percent"] == pytest.approx(5.0)
+    assert len(result.report["identity"]["candidate_shape_scores"]) == len(
+        result.report["rows"]
+    )
+    assert "shape_score" in result.report["rows"][0]
     cached = next(tmp_path.glob("*.json"))
     assert json.loads(cached.read_text())["recovery_overhead"]["overhead_percent"] == pytest.approx(5.0)
     assert layer._p32_window_config == result.config

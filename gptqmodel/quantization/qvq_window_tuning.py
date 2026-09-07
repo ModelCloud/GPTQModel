@@ -31,6 +31,7 @@ from .qvq_rank8 import (
     prepare_rank8,
     validate_rank8_state,
     window_kernel_candidates,
+    window_kernel_shape_score,
     window_tuning_key,
 )
 
@@ -337,6 +338,10 @@ def tune_window_kernel(
         "state_hash": state_hash,
         "factors_hash": _metadata(layer)["factors_hash"] if enabled else None,
         "candidates": [c.to_backend_config() for c in choices],
+        "candidate_shape_scores": [
+            window_kernel_shape_score(layer, candidate, m=m)
+            for candidate in choices
+        ],
         "gate": {"mae": 2e-3, "max": 0.046875, "version": 1},
         "measure_recovery_candidates": measure_recovery_candidates,
         "max_recovery_overhead_percent": (
@@ -460,6 +465,7 @@ def tune_window_kernel(
                     accepted = all(c["accepted"] for c in checks)
                     row = {
                         "config": config.to_backend_config(),
+                        "shape_score": window_kernel_shape_score(layer, config, m=m),
                         "checks": checks,
                         "accepted": accepted,
                     }
@@ -695,6 +701,10 @@ def tune_grouped_window_kernel(
         ],
         "enabled": list(enabled),
         "candidates": [backend_choice(choice) for choice in choices],
+        "candidate_shape_scores": [
+            grouped_window_kernel_shape_score(children, choice, m=m)
+            for choice in choices
+        ],
         "gate": {"mae": 2e-3, "max": 0.046875, "version": 1},
         "measure_recovery_candidates": measure_recovery_candidates,
         "max_recovery_overhead_percent": (
@@ -809,6 +819,9 @@ def tune_grouped_window_kernel(
                     ]
                     row = {
                         "config": backend_choice(choice),
+                        "shape_score": grouped_window_kernel_shape_score(
+                            children, choice, m=m
+                        ),
                         "checks": checks,
                         "accepted": all(
                             check[child_index]["accepted"]
