@@ -39,6 +39,7 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
     resolve_quant_format,
 )
+from ..nn_modules.qlinear import BaseQuantLinear
 from ..utils.backend import BACKEND
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
@@ -1008,7 +1009,12 @@ def ModelWriter(cls):
 
         # Due to shell/turtle state, we need to sync the modules from turtle to shell
         if not self.load_quantized_model:
-            alias_all_from_turtle_if_meta(shell_model=self.model, turtle_model=self.turtle_model)
+            # Packed buffers named "weight" (e.g. BNB) belong to offload
+            # storage, not to the original dense checkpoint at the same path.
+            alias_all_from_turtle_if_meta(
+                shell_model=self.model, turtle_model=self.turtle_model,
+                skip_module_types=(BaseQuantLinear,),
+            )
             materialized_layers = _materialize_meta_layers_from_turtle(self.model, self.turtle_model)
             if materialized_layers:
                 log.info("Model save: materialized %s meta layer modules from turtle source.", materialized_layers)

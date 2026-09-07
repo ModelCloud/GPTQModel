@@ -74,6 +74,27 @@ class EoraProcessor(LoopProcessor):
         self.eora_compute_lora = eora_compute_lora
         self.eora_process_input = eora_process_input
 
+    def continuation_state_dict(self):
+        state = super().continuation_state_dict()
+        # Explicit schema: never pickle adapter instances or runtime kernels.
+        state["results"] = {
+            name: {
+                "rank": adapter.rank,
+                "path": adapter.path,
+                "lora_A": adapter.lora_A,
+                "lora_B": adapter.lora_B,
+            }
+            for name, adapter in state["results"].items()
+        }
+        return state
+
+    def load_continuation_state_dict(self, state):
+        restored = dict(state)
+        restored["results"] = {
+            name: Lora(**spec) for name, spec in state["results"].items()
+        }
+        super().load_continuation_state_dict(restored)
+
     def set_calibration_dataset(self, calibration_dataset):
         """Stores the calibration dataset because EoRA depends on batch counts."""
 

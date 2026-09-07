@@ -3,6 +3,7 @@ numpy==2.2.6; python_version < "3.14"
 numpy>=2.3.0; python_version >= "3.14"
 torch>=2.8.0
 safetensors>=0.7.0
+filelock
 transformers>=5.14.0
 threadpoolctl>=3.6.0
 packaging>=24.2

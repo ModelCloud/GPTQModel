@@ -42,6 +42,12 @@ def test_quantize_config_dispatches_gptq_by_default():
     assert cfg.format == FORMAT.GPTQ
 
 
+@pytest.mark.parametrize("config_class,method", [(AWQConfig, METHOD.AWQ), (GPTQConfig, METHOD.GPTQ)])
+def test_bitblas_export_preserves_quantization_family(config_class, method):
+    config = config_class(format=FORMAT.BITBLAS)
+    assert config.export_quant_method() == method
+
+
 def test_quantize_config_dispatches_awq_constructor():
     cfg = QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, sym=False)
 

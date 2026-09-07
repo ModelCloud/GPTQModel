@@ -59,6 +59,29 @@ def get_temp_buffers(device, K: int):
     return temp_costs, temp_edges
 
 
+_workspace_registry_lock = threading.Lock()
+_workspace_gates = {}
+
+
+def _quantize_tiles_with_workspace(tiles, output, indices, K, mcg, mul1):
+    # The cached scratch tensors are writable. Order their use across streams,
+    # not just Python calls: releasing a mutex does not finish CUDA kernels.
+    key = (tiles.device, K)
+    with _workspace_registry_lock:
+        gate = _workspace_gates.setdefault(key, {"lock": threading.Lock(), "event": None})
+    stream = torch.cuda.current_stream(tiles.device)
+    with gate["lock"]:
+        if gate["event"] is not None:
+            stream.wait_event(gate["event"])
+        temp_costs, temp_edges = get_temp_buffers(tiles.device, K)
+        try:
+            ext.quantize_tiles(tiles, output, indices, temp_costs, temp_edges, K, mcg, mul1)
+        finally:
+            event = torch.cuda.Event()
+            event.record(stream)
+            gate["event"] = event
+
+
 def quantize_tiles(tiles, quant_args: dict):
     tiles = tiles.contiguous()
     assert tiles.shape[1] == 256
@@ -69,17 +92,7 @@ def quantize_tiles(tiles, quant_args: dict):
     mul1 = "mul1" in quant_args
     quantized_tiles = torch.zeros_like(tiles)
     quantized_idx = torch.zeros_like(tiles, dtype = torch.short)
-    temp_costs, temp_edges = get_temp_buffers(tiles.device, K)
-    ext.quantize_tiles(
-        tiles,
-        quantized_tiles,
-        quantized_idx,
-        temp_costs,
-        temp_edges,
-        K,
-        mcg,
-        mul1,
-    )
+    _quantize_tiles_with_workspace(tiles, quantized_tiles, quantized_idx, K, mcg, mul1)
     return quantized_tiles, quantized_idx
 
 
@@ -160,18 +173,7 @@ def quantize_tiles_multigpu(tiles, quant_args: dict):
                 K = quant_args["K"]
                 mcg = "mcg" in quant_args
                 mul1 = "mul1" in quant_args
-                temp_costs, temp_edges = get_temp_buffers(device, K)
-
-                ext.quantize_tiles(
-                    dev_tiles,
-                    dev_q_tiles,
-                    dev_q_idx,
-                    temp_costs,
-                    temp_edges,
-                    K,
-                    mcg,
-                    mul1
-                )
+                _quantize_tiles_with_workspace(dev_tiles, dev_q_tiles, dev_q_idx, K, mcg, mul1)
 
                 # Async copy back to pinned memory
                 pin_split_q_tiles[i].copy_(dev_q_tiles, non_blocking = True)
@@ -558,6 +560,18 @@ def fallback_quant(
 
 finalize_capture_H_mutex = threading.Lock()
 
+def _random_signs(size, *, device, seed=None, stream=0):
+    """Per-task randomness: never reseed a generator shared by GPU workers.
+
+    Separate input/output streams also make signs independent of whether a
+    shared Hessian was finalized by another module first.
+    """
+    generator = None
+    if seed is not None:
+        generator = torch.Generator(device=device).manual_seed(int(seed) + stream)
+    return (torch.randn(size, device=device, generator=generator).sign() + 1e-5).sign().float()
+
+
 def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
     with finalize_capture_H_mutex:
 
@@ -594,7 +608,7 @@ def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
 
         # Random sign flips for input channel, fixed for the first linear layer to quantize with this H
         k = H.shape[0]
-        su = (torch.randn(k, device = H.device).sign() + 1e-5).sign().to(torch.float).unsqueeze(1)
+        su = _random_signs(k, device=H.device, seed=quant_args.get("seed")).unsqueeze(1)
         H_data["su"] = su
 
         # Input had
@@ -912,9 +926,6 @@ def quantize_exl3(
         assert weight.dtype == torch.float
         tiles_k = weight.shape[0] // 16
 
-        if "seed" in quant_args:
-            torch.manual_seed(quant_args["seed"])
-
         devices = quant_args["devices"]
         if weight.device != torch.device(devices[0]):
             weight = weight.to(devices[0])
@@ -932,7 +943,7 @@ def quantize_exl3(
             su = su.to(device)
         if H_diag.is_cuda:
             H_diag = H_diag.to(device)
-        sv = (torch.randn(n, device = device).sign() + 1e-5).sign().to(torch.float).unsqueeze(0)
+        sv = _random_signs(n, device=device, seed=quant_args.get("seed"), stream=1).unsqueeze(0)
 
         # Move stored L to CPU (if not already), move working L to device
         if H_data["L"] is not None:

@@ -556,7 +556,10 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
         )
 
         if self.quant_config.with_zeros:
-            zeros_shape = (num_groups, out_features // self.quant_config.pack_factor)
+            # BitBLAS stores compressed zeros in storage_dtype (usually int8),
+            # not the int32 words described by GPTQ's pack_factor.
+            storage_bits = torch.iinfo(storage_dtype).bits
+            zeros_shape = (num_groups, out_features * self.bits // storage_bits)
             self.register_buffer(
                 "qzeros",
                 torch.empty(zeros_shape, dtype=storage_dtype),

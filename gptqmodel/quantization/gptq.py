@@ -65,6 +65,12 @@ def _device_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
     return dev.type, dev.index
 
 
+def _device_reduction_key(device: torch.device) -> Tuple[str, int]:
+    """Order reductions by device identity, never worker arrival order."""
+    dev = torch.device(device)
+    return dev.type, -1 if dev.index is None else dev.index
+
+
 def _workspace_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
     return _device_cache_key(device)
 
@@ -689,7 +695,8 @@ class GPTQ:
                         diag.mul_(float(previous_samples) / float(total_samples))
                     else:
                         diag.zero_()
-                    for counts in self._device_embedding_counts.values():
+                    for partial_device in sorted(self._device_embedding_counts, key=_device_reduction_key):
+                        counts = self._device_embedding_counts[partial_device]
                         diag.add_(counts.to(device=device, dtype=torch.float32), alpha=2.0 / float(total_samples))
 
                 self._H_diag = diag
@@ -737,7 +744,10 @@ class GPTQ:
                 self._device_sample_counts.clear()
                 return
 
-            for partial_device, partial in self._device_hessian_partials.items():
+            # GPU workers can finish in a different order after restart. A
+            # stable reduction order avoids changing floating-point rounding.
+            for partial_device in sorted(self._device_hessian_partials, key=_device_reduction_key):
+                partial = self._device_hessian_partials[partial_device]
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
                     # TODO FIXME multi-3090 using P2P is revaling an issue where result_accum and/or partial is not ready for consolidation on the main thread
                     # when parials are calculated on the individual

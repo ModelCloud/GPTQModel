@@ -79,6 +79,8 @@ def _packed_state_key_to_buffer_name(key: str) -> str:
 
 
 @lru_cache(maxsize=256)
+@torch.inference_mode(False)
+@torch.no_grad()
 def _buffer_spec_4bit(
     *,
     in_features: int,
@@ -91,22 +93,30 @@ def _buffer_spec_4bit(
 
     # Quantize a template once so the registered buffers match the exact
     # packed layout bitsandbytes expects during checkpoint load.
-    template = torch.zeros((out_features, in_features), dtype=torch.float16)
-    qweight, quant_state = bnb.functional.quantize_4bit(
-        template,
-        blocksize=block_size,
-        compress_statistics=compress_statistics,
-        quant_type=quant_type,
-        quant_storage=torch.uint8,
-    )
+    template = torch.zeros((out_features, in_features), dtype=torch.float16, device="cpu")
+    # Metadata construction also creates temporary tensors inside BNB. Do not
+    # inherit a caller's meta-device context when deriving the packed schema.
+    with torch.device("cpu"):
+        qweight, quant_state = bnb.functional.quantize_4bit(
+            template,
+            blocksize=block_size,
+            compress_statistics=compress_statistics,
+            quant_type=quant_type,
+            quant_storage=torch.uint8,
+        )
 
-    spec = [("weight", tuple(qweight.shape), qweight.dtype)]
-    for key, tensor in quant_state.as_dict(packed=True).items():
-        spec.append((_packed_state_key_to_buffer_name(key), tuple(tensor.shape), tensor.dtype))
+        spec = [("weight", tuple(qweight.shape), qweight.dtype)]
+        for key, tensor in quant_state.as_dict(packed=True).items():
+            spec.append((_packed_state_key_to_buffer_name(key), tuple(tensor.shape), tensor.dtype))
     return tuple(spec)
 
 
 class BitsAndBytesLinear(WeightOnlyQuantLinear):
+    @staticmethod
+    def _weight_to_matrix(linear: nn.Module) -> torch.Tensor:
+        """Expose the weight-only processor's reference-weight conversion hook."""
+        return _weight_to_matrix(linear)
+
     SUPPORTS_BACKENDS = [BACKEND.BITSANDBYTES]
     SUPPORTS_METHODS = [METHOD.BITSANDBYTES]
     SUPPORTS_FORMATS = {FORMAT.BITSANDBYTES: 40}
@@ -317,7 +327,8 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         del block_in, workers
         self.pack_original(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
 
-    @torch.inference_mode()
+    @torch.inference_mode(False)
+    @torch.no_grad()
     def pack_original(
         self,
         linear: nn.Module,
@@ -330,7 +341,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
 
         bnb = import_bitsandbytes()
         weight = _apply_optional_smoother(
-            _weight_to_matrix(linear).to(device="cpu"),
+            _weight_to_matrix(linear).to(device="cpu").clone(),
             smooth=smooth,
             group_size=self.smooth_block_size(),
         ).contiguous()

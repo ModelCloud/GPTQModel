@@ -293,6 +293,8 @@ import torch
 
 from . import extension
 from .models import GPTQModel, get_best_device
+from .looper.checkpoint_store import CheckpointConfig
+from .looper.checkpoint import CheckpointStopped
 from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import (
     AWQConfig,
@@ -305,6 +307,7 @@ from .quantization import (
     QuantizeEmbed,
     QuantizeEmbedConfig,
     RTNConfig,
+    TelemetryConfig,
     WeightOnlyConfig,
 )
 from .utils import BACKEND, PROFILE
