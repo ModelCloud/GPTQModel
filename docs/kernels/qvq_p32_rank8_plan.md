@@ -382,7 +382,8 @@ the corresponding fused transform kernel is certified.
 
 This native fused candidate is opt-in (`recovery_kernel="fused_epilogue"`) and
 is not promoted on performance alone. A H200 K=N=2048 BM64/BN64 sweep measured
-approximately +420%/+358%/+191% recovery overhead at M=128/2048/8192 versus
-the correction-off executable. The result confirms that large-M rank8 is not
-inherently free; ZML must retain the candidate as shape/device data and select
-it only after the complete off/on benchmark and quality gates pass.
+approximately +409%/+349%/+202% recovery overhead at M=128/2048/8192 versus
+the correction-off executable. The four-way projection reduction did not make
+this candidate competitive, confirming that large-M rank8 is not inherently
+free; ZML must retain it as shape/device data and select it only after the
+complete off/on benchmark and quality gates pass.

@@ -34,18 +34,22 @@ __global__ void qvq_rank8_fused_no_hadamard_kernel(
   __shared__ float hidden[kRowsPerBlock * kRanks];
 
   if (row < m) {
-    // Keep one deterministic FP32 accumulation order per rank.  Eight lanes
-    // perform the eight projections while the remaining lanes wait; this
-    // preserves the reference hidden rounding boundary and still exposes all
-    // 32 lanes to the expansion/store phase below.
-    if (lane < kRanks) {
-      const int rank = lane;
-      float partial = 0.0f;
-      for (int index = 0; index < k; ++index) {
-        partial += static_cast<float>(transformed[
-            static_cast<int64_t>(row) * transformed_stride + index]) *
-            rank8_a[static_cast<int64_t>(index) * kRanks + rank];
-      }
+    // Four lanes cooperate on each rank.  This keeps the projection work
+    // proportional to the available warp lanes instead of making one lane
+    // walk the complete K dimension.  The reduction order is intentionally
+    // part of the unverified fused arithmetic signature; the FP16 hidden
+    // boundary remains identical to the reference contract.
+    const int rank = lane >> 2;
+    const int chunk = lane & 3;
+    float partial = 0.0f;
+    for (int index = chunk; index < k; index += 4) {
+      partial += static_cast<float>(transformed[
+          static_cast<int64_t>(row) * transformed_stride + index]) *
+          rank8_a[static_cast<int64_t>(index) * kRanks + rank];
+    }
+    partial += __shfl_down_sync(0xffffffffu, partial, 2, 4);
+    partial += __shfl_down_sync(0xffffffffu, partial, 1, 4);
+    if (chunk == 0) {
       hidden[warp * kRanks + rank] = __half2float(__float2half_rn(partial));
     }
   }
