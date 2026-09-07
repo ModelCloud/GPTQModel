@@ -107,7 +107,9 @@ def native_window_linear(layer, x, config):
     This setup/reference helper is not a hot-path dispatcher. External hosts
     load/validate once, retain their buffers, and call the library directly.
     Initial ABI coverage is explicit Hopper geometry and reference correction;
-    unsupported policies fail rather than selecting an implicit substitute.
+    prepared graph handles additionally support the stream-overlapped
+    ``concurrent_reference`` producer. Unsupported policies fail rather than
+    selecting an implicit substitute.
     """
     from ..quantization.qvq_rank8 import prepare_rank8
     from .qvq_cuda import _pgc16_levels
