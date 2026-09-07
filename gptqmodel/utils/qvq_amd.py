@@ -45,7 +45,7 @@ _COMPOSITE_HADAMARD_CACHE: dict[
     torch.device, tuple[torch.Tensor, torch.Tensor, int, int]
 ] = {}
 _COMPOSITE_HADAMARD_CACHE_LOCK = threading.Lock()
-_AMD_AUTOTUNE_CACHE: dict[tuple[object, ...], "QVQAMDLaunchConfig"] = {}
+_AMD_AUTOTUNE_CACHE: dict[tuple[object, ...], QVQAMDLaunchConfig] = {}
 _AMD_AUTOTUNE_CACHE_LOCK = threading.Lock()
 
 
@@ -144,12 +144,12 @@ def select_qvq_p32_amd_kernel_candidate(
     if any(not isinstance(candidate, QVQAMDLaunchConfig) for candidate in candidates):
         raise TypeError("AMD P32 candidates must be QVQAMDLaunchConfig values")
     valid: list[tuple[float, int]] = []
-    for index, timing in enumerate(timings_ms):
+    for candidate_index, timing in enumerate(timings_ms):
         if not isinstance(timing, (int, float)) or not math.isfinite(float(timing)):
             continue
         if float(timing) <= 0:
             continue
-        valid.append((float(timing), index))
+        valid.append((float(timing), candidate_index))
     if not valid:
         raise RuntimeError("AMD P32 autotune produced no finite positive timings")
     # min() preserves candidate enumeration order for exact timing ties, so a
@@ -1418,10 +1418,10 @@ __all__ = [
     "qvq_p32_amd",
     "qvq_p32_amd_autotune",
     "qvq_p32_amd_folded",
-    "qvq_p32_amd_kernel_candidates",
-    "select_qvq_p32_amd_kernel_candidate",
     "qvq_p32_amd_folded_case_supported",
     "qvq_p32_amd_folded_prefers_fp32_output",
     "qvq_p32_amd_folded_shape_supported",
+    "qvq_p32_amd_kernel_candidates",
     "qvq_p32_amd_supported",
+    "select_qvq_p32_amd_kernel_candidate",
 ]
