@@ -234,13 +234,17 @@ extern "C" int qvq_gfx950_rocblas_autotune(void* opaque, const void* x,
       measured.median_us = median;
     }
   }
+  // Restore the caller's selection before any error return.  Autotuning is a
+  // preparation operation, but a failed sweep must not leave a plan pointing
+  // at the last candidate it happened to visit.
+  const int selected_solution = measured.solution_index;
+  plan->solution = previous_solution;
   const auto destroy_stop = hipEventDestroy(stop);
   const auto destroy_start = hipEventDestroy(start);
-  plan->solution = previous_solution;
   if (destroy_stop != hipSuccess) return -int(destroy_stop);
   if (destroy_start != hipSuccess) return -int(destroy_start);
   if (!measured.candidates_tested) return status ? status : -int(hipErrorNotFound);
-  plan->solution = measured.solution_index;
+  plan->solution = selected_solution;
   *result = measured;
   return 0;
 }
