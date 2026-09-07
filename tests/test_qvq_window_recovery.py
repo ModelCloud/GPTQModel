@@ -452,6 +452,13 @@ def test_grouped_hopper_candidates_keep_child_local_split_choices(monkeypatch):
         == ((64, 64), (64, 64), (64, 64))
         for candidate in candidates
     )
+    # Generic grouped BN128 remains deliberately ineligible.  The native
+    # wide consumer is validated for a single projection; a multi-segment
+    # launch must not infer that specialization from a shape-only speed hint.
+    assert all(
+        all(child.block_n != 128 for child in candidate)
+        for candidate in candidates
+    )
 
 
 def test_external_window_controls_roundtrip_and_cpu_candidates():
