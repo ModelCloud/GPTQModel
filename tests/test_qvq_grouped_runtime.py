@@ -682,8 +682,9 @@ def test_grouped_hopper_policy_accepts_split_tuple_and_rejects_unimplemented_geo
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-def test_grouped_concurrent_rank8_reuses_transform_and_replays_graph():
-    """Sibling concurrent producers must join the grouped decode safely."""
+@pytest.mark.parametrize("projection", ("concurrent_reference", "input_fused"))
+def test_grouped_rank8_reuses_transform_and_replays_graph(projection):
+    """Grouped rank8 producer policies must join the decode graph safely."""
 
     device = _h200_device() or _h100_device()
     if device is None:
@@ -705,7 +706,7 @@ def test_grouped_concurrent_rank8_reuses_transform_and_replays_graph():
     )
     config = P32WindowConfig(
         recovery_mode="on",
-        recovery_projection="concurrent_reference",
+        recovery_projection=projection,
     )
     for child in children:
         _kernel_rank8(child)
@@ -731,9 +732,10 @@ def test_grouped_concurrent_rank8_reuses_transform_and_replays_graph():
     for actual, replayed in zip(eager, captured, strict=True):
         assert torch.equal(replayed, actual)
         assert torch.isfinite(actual).all()
-    assert all(
-        len(child._qvq_rank8_concurrent_cache) >= 1 for child in children
-    )
+    if projection == "concurrent_reference":
+        assert all(
+            len(child._qvq_rank8_concurrent_cache) >= 1 for child in children
+        )
 
 
 def test_grouped_policy_rejects_m_outside_prepared_range_before_device_dispatch():
