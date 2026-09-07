@@ -171,6 +171,62 @@ def test_native_transform_free_qwen_width_rank8_fused_epilogue():
     assert error.mean() <= 2e-3 and error.max() <= 0.046875
 
 
+def test_native_fused_policy_off_does_not_touch_absent_rank8_factors(monkeypatch):
+    """Matched correction-off candidates may retain fused geometry metadata."""
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child(
+        "native_fused_policy_off",
+        in_features=2048,
+        out_features=256,
+        device="cuda",
+        input_hadamard=False,
+        output_hadamard=False,
+    ).eval()
+    config = P32WindowConfig(
+        algorithm="hopper_m16",
+        recovery_mode="off",
+        recovery_kernel="fused_epilogue",
+    )
+    x = torch.randn(3, 2048, device="cuda", dtype=torch.float16) * 0.01
+    library = native_window_library()
+    original = library.qvq_p32_window_linear
+    recorded = []
+
+    def record(*args):
+        recorded[:] = args
+        return original(*args)
+
+    monkeypatch.setattr(library, "qvq_p32_window_linear", record)
+    with torch.no_grad():
+        expected = layer(x)
+        actual = native_window_linear(layer, x, config)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    buffers = (WindowBuffer * 10)(*recorded[:10])
+    buffers[7] = WindowBuffer(1, 2**63)
+    buffers[8] = WindowBuffer(2, 2**63)
+    handle = ctypes.c_void_p()
+    error = ctypes.create_string_buffer(4096)
+    stream = torch.cuda.Stream()
+    status = library.qvq_p32_window_graph_create(
+        buffers, recorded[10], stream.cuda_stream, ctypes.byref(handle), error, len(error)
+    )
+    assert status == 0, error.value
+    try:
+        with torch.cuda.stream(stream), torch.no_grad():
+            expected_graph = layer(x)
+            status = library.qvq_p32_window_graph_run(
+                handle, stream.cuda_stream, error, len(error)
+            )
+        stream.synchronize()
+        assert status == 0, error.value
+        torch.testing.assert_close(actual, expected_graph, atol=0, rtol=0)
+    finally:
+        status = library.qvq_p32_window_graph_destroy(handle, error, len(error))
+        assert status == 0, error.value
+
+
 @pytest.mark.parametrize(
     "projection", ["separate_reference", "concurrent_reference", "tensor_core"]
 )
