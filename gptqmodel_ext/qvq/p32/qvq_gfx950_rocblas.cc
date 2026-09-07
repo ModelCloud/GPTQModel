@@ -129,19 +129,63 @@ extern "C" int qvq_gfx950_rocblas_solutions(void* opaque, const void* x,
   if (hs != hipSuccess) return -int(hs);
   if (capture != hipStreamCaptureStatusNone) return -int(hipErrorStreamCaptureUnsupported);
   const float alpha = 1, beta = 0;
+  // rocBLAS beta releases can report negative internal entries (for example
+  // -9) in the solution-index list. Those IDs cannot be passed back through
+  // the public explicit-config contract, which rejects negative values. Keep
+  // the exported candidate set closed under prepare_config/autotune instead
+  // of allowing an un-replayable winner.
+  const int32_t capacity = list ? *count : 0;
+  int32_t raw_count = 0;
   // The installed 5.6 library exports this beta API. Keep its use isolated;
   // solution IDs are library-build-specific, never portable tuning cache keys.
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-  const auto status = rocblas_gemm_ex_get_solutions(plan->handle,
+  auto status = rocblas_gemm_ex_get_solutions(plan->handle,
       rocblas_operation_transpose, rocblas_operation_none,
       plan->n, plan->m, plan->k, &alpha,
       weights, rocblas_datatype_f16_r, plan->k,
       x, rocblas_datatype_f16_r, plan->k, &beta,
       y, rocblas_datatype_f32_r, plan->n, y, rocblas_datatype_f32_r, plan->n,
-      rocblas_datatype_f32_r, rocblas_gemm_algo_solution_index, 0, list, count);
+      rocblas_datatype_f32_r, rocblas_gemm_algo_solution_index, 0, nullptr, &raw_count);
 #pragma GCC diagnostic pop
-  return int(status);
+  if (status != rocblas_status_success) return int(status);
+  if (raw_count <= 0) {
+    *count = 0;
+    return 0;
+  }
+  std::vector<int32_t> raw;
+  try {
+    raw.resize(static_cast<size_t>(raw_count));
+  } catch (const std::bad_alloc&) {
+    return -int(hipErrorOutOfMemory);
+  }
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+  status = rocblas_gemm_ex_get_solutions(plan->handle,
+      rocblas_operation_transpose, rocblas_operation_none,
+      plan->n, plan->m, plan->k, &alpha,
+      weights, rocblas_datatype_f16_r, plan->k,
+      x, rocblas_datatype_f16_r, plan->k, &beta,
+      y, rocblas_datatype_f32_r, plan->n, y, rocblas_datatype_f32_r, plan->n,
+      rocblas_datatype_f32_r, rocblas_gemm_algo_solution_index, 0, raw.data(), &raw_count);
+#pragma GCC diagnostic pop
+  if (status != rocblas_status_success) return int(status);
+  int32_t valid_count = 0;
+  for (const int32_t solution : raw) if (solution >= 0) ++valid_count;
+  if (!list) {
+    *count = valid_count;
+    return 0;
+  }
+  if (capacity < valid_count) {
+    *count = valid_count;
+    return int(rocblas_status_invalid_size);
+  }
+  int32_t index = 0;
+  for (const int32_t solution : raw) {
+    if (solution >= 0) list[index++] = solution;
+  }
+  *count = valid_count;
+  return 0;
 }
 
 extern "C" int qvq_gfx950_rocblas_autotune(void* opaque, const void* x,

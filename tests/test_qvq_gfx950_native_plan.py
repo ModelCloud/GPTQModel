@@ -360,7 +360,9 @@ class NativePlanHostTests(unittest.TestCase):
                     ),
                     0,
                 )
-                self.assertGreater(result.solution_index, 0)
+                # The standard rocBLAS algorithm (solution 0) is a valid
+                # measured winner; zero is not an autotune failure sentinel.
+                self.assertGreaterEqual(result.solution_index, 0)
                 self.assertGreater(result.candidates_tested, 0)
                 self.assertEqual(result.samples, result.candidates_tested)
                 self.assertTrue(result.median_us > 0)

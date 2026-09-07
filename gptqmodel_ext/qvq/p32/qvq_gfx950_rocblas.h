@@ -10,7 +10,7 @@ extern "C" {
 typedef struct qvq_gfx950_blas_config {
   uint32_t struct_size, version;
   int32_t m, k, n, e;
-  int32_t solution_index; // zero: library heuristic; positive: explicit solution
+  int32_t solution_index; // zero: standard/default; nonzero: explicit solution
   uint32_t reserved;     // must be zero
 } qvq_gfx950_blas_config;
 
@@ -40,7 +40,8 @@ int qvq_gfx950_rocblas_prepare(int m, int k, int n, void* stream,
 int qvq_gfx950_rocblas_solutions(void* plan, const void* x, const void* weights,
     void* y, int32_t* solutions, int32_t* count);
 // Enumerate and time complete GEMM candidates on the prepared stream. The
-// selected solution is retained in the plan and returned in result. This call
+// selected solution is retained in the plan and returned in result. Solution
+// zero is a valid measured standard-algorithm winner. This call
 // synchronizes only for measurement and rejects active stream capture; callers
 // must independently certify numerical accuracy before using the winner.
 int qvq_gfx950_rocblas_autotune(void* plan, const void* x, const void* weights,

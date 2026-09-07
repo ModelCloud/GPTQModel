@@ -20,11 +20,24 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--iterations", type=int, default=50)
     parser.add_argument("--solution-index", type=int, default=None)
+    parser.add_argument(
+        "--autotune",
+        action="store_true",
+        help="measure matching rocBLAS solutions before the timed run",
+    )
+    parser.add_argument("--autotune-warmup", type=int, default=0)
+    parser.add_argument("--autotune-iterations", type=int, default=1)
     parser.add_argument("--physical-gpu", type=int, default=0)
     parser.add_argument("--idle-memory-tolerance-mib", type=int, default=320)
     args = parser.parse_args()
     if args.output.exists() or args.iterations < 10:
         parser.error("output must be new and iterations >= 10")
+    if args.solution_index is not None and args.autotune:
+        parser.error("--solution-index and --autotune are mutually exclusive")
+    if args.autotune_warmup < 0 or args.autotune_warmup > 100:
+        parser.error("--autotune-warmup must be in the range 0..100")
+    if args.autotune_iterations < 1 or args.autotune_iterations > 100:
+        parser.error("--autotune-iterations must be in the range 1..100")
     args.idle_samples, args.idle_interval, args.allow_busy = 3, 1.0, False
     hardware, _ = _idle_preflight(args)
     os.environ["HIP_VISIBLE_DEVICES"] = str(args.physical_gpu)
@@ -89,6 +102,30 @@ def main():
     )
     blas.qvq_gfx950_rocblas_execute.argtypes = [c.c_void_p] * 5
     blas.qvq_gfx950_rocblas_destroy.argtypes = [c.c_void_p]
+    blas.qvq_gfx950_rocblas_autotune.argtypes = (
+        [c.c_void_p] * 4 + [c.c_void_p, c.c_void_p]
+    )
+
+    class TuningOptions(c.Structure):
+        _fields_ = [
+            ("struct_size", c.c_uint32),
+            ("version", c.c_uint32),
+            ("warmup_iterations", c.c_uint32),
+            ("benchmark_iterations", c.c_uint32),
+            ("reserved", c.c_uint32),
+        ]
+
+    class TuningResult(c.Structure):
+        _fields_ = [
+            ("struct_size", c.c_uint32),
+            ("version", c.c_uint32),
+            ("solution_index", c.c_int32),
+            ("candidates_tested", c.c_uint32),
+            ("candidates_failed", c.c_uint32),
+            ("samples", c.c_uint32),
+            ("median_us", c.c_float),
+            ("reserved", c.c_uint32),
+        ]
 
     def check(status):
         assert status == 0, f"native status {status}"
@@ -183,6 +220,46 @@ def main():
         assert bytes(resolved) == bytes(config), (
             "explicit selection changed during preparation"
         )
+
+    autotune_result = None
+    if args.autotune:
+        options = TuningOptions(
+            c.sizeof(TuningOptions),
+            1,
+            args.autotune_warmup,
+            args.autotune_iterations,
+            0,
+        )
+        measured = TuningResult(c.sizeof(TuningResult), 1)
+        check(
+            blas.qvq_gfx950_rocblas_autotune(
+                plan,
+                x.data_ptr(),
+                dense.data_ptr(),
+                y.data_ptr(),
+                c.byref(options),
+                c.byref(measured),
+            )
+        )
+        # Solution 0 is a valid measured rocBLAS candidate (the standard
+        # algorithm), not a sentinel for an unsuccessful sweep.
+        if measured.solution_index < 0 or measured.candidates_tested == 0:
+            raise RuntimeError(
+                "rocBLAS autotune produced no winner: "
+                f"solution={measured.solution_index} "
+                f"tested={measured.candidates_tested} "
+                f"failed={measured.candidates_failed} samples={measured.samples}"
+            )
+        autotune_result = {
+            "solution_index": measured.solution_index,
+            "candidates_tested": measured.candidates_tested,
+            "candidates_failed": measured.candidates_failed,
+            "samples": measured.samples,
+            "median_us": measured.median_us,
+            "warmup_iterations": args.autotune_warmup,
+            "benchmark_iterations": args.autotune_iterations,
+        }
+        print(f"autotune: {json.dumps(autotune_result)}", flush=True)
 
     def decode():
         check(
@@ -320,7 +397,12 @@ def main():
             "synthetic": True,
             "errors": errors,
             "graph_checks": graph_checks,
-            "solution_index": args.solution_index,
+            "solution_index": (
+                autotune_result["solution_index"]
+                if autotune_result is not None
+                else args.solution_index
+            ),
+            "autotune": autotune_result,
             "timings": timings,
             "dense_scratch_bytes": dense.numel() * 2,
             "blas_workspace_bytes": workspace.numel(),

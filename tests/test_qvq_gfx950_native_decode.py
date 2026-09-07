@@ -107,6 +107,7 @@ class NativeDecodeTest(unittest.TestCase):
                         ),
                         0,
                     )
+                    self.assertTrue(all(solution >= 0 for solution in solutions))
                     config = Config(
                         ctypes.sizeof(Config), 1, m, k, n, 1, solutions[0], 0
                     )
