@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 from collections.abc import Sequence
@@ -720,8 +721,16 @@ def qvq_p32_window_ampere(
     out_features: int,
     bank_alt_id: int = 3,
     split_count: int = 0,
+    rank8_a: torch.Tensor | None = None,
+    rank8_b: torch.Tensor | None = None,
+    rank8_scale: float = 1.0,
 ) -> torch.Tensor:
-    """Run exact continuous-window P32 with FP16 WMMA and FP32 accumulation."""
+    """Run exact continuous-window P32 with an optional additive rank-8 update.
+
+    The rank-8 epilogue computes ``Y += rank8_scale * (input @ rank8_a) @
+    rank8_b`` with FP32 accumulation. ``rank8_a`` is contiguous FP16 ``[K,
+    8]`` and ``rank8_b`` is contiguous FP16 or FP32 ``[8, N]``.
+    """
 
     try:
         transition_bits = None if isinstance(bits, bool) else _P32_TRANSITION_BITS[bits]
@@ -732,6 +741,70 @@ def qvq_p32_window_ampere(
     if transition_bits not in (4, 5, 6, 7):
         raise ValueError("QVQ P32 Ampere WMMA supports W2 through W3.5")
     _require_warm_operator_for_capture(_P32_WINDOW_OP, "window operator")
+    if (
+        split_count != 0
+        and input.is_cuda
+        and not torch.cuda.is_current_stream_capturing()
+    ):
+        # An explicit-split warm-up can be followed by a cold auto-tuned graph
+        # capture. Resolve this immutable device property while queries are
+        # legal so the capture path stays allocation- and query-free.
+        _device_sm_count(input.device)
+    if (rank8_a is None) != (rank8_b is None):
+        raise ValueError("rank8_a and rank8_b must be provided together")
+    if not math.isfinite(float(rank8_scale)):
+        raise ValueError("rank8_scale must be finite")
+    if rank8_a is not None:
+        if input.ndim != 2:
+            raise ValueError("QVQ P32 Ampere input must be rank 2")
+        if rank8_a.ndim != 2 or tuple(rank8_a.shape) != (input.shape[1], 8):
+            raise ValueError("rank8_a must have shape [K, 8]")
+        if (
+            rank8_b is None
+            or rank8_b.ndim != 2
+            or tuple(rank8_b.shape) != (8, out_features)
+        ):
+            raise ValueError("rank8_b must have shape [8, N]")
+        if rank8_a.dtype != torch.float16 or rank8_b.dtype not in (
+            torch.float16,
+            torch.float32,
+        ):
+            raise ValueError(
+                "rank8_a must be float16 and rank8_b must be float16 or float32"
+            )
+        if not rank8_a.is_contiguous() or not rank8_b.is_contiguous():
+            raise ValueError("rank8_a and rank8_b must be contiguous")
+        if rank8_a.device != input.device or rank8_b.device != input.device:
+            raise ValueError("rank8_a and rank8_b must share the input device")
+        if split_count == 0:
+            split_count = _static_split_count(
+                m=int(input.shape[0]),
+                k=int(input.shape[1]),
+                n=int(out_features),
+                transition_bits=transition_bits,
+            )
+            if split_count == 0:
+                split_count = _auto_split_count(
+                    in_features=int(input.shape[1]),
+                    out_features=int(out_features),
+                    k_tiles=int(input.shape[1]) // 16,
+                    sm_count=_device_sm_count(input.device),
+                )
+            if input.shape[0] > 16:
+                split_count = 1
+        return _p32_window_op()(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            split_count,
+            rank8_a,
+            rank8_b,
+            float(rank8_scale),
+        )
     if (
         split_count == 0
         and input.shape[0] == 1

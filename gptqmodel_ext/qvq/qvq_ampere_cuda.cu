@@ -4,6 +4,8 @@
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
+#include <ATen/ops/addmm.h>
+#include <ATen/ops/mm.h>
 #include <cuda_fp16.h>
 #include <cuda_pipeline.h>
 #include <cuda_runtime.h>
@@ -13,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <vector>
@@ -1748,7 +1751,10 @@ at::Tensor p32_window_ampere_impl(
     const at::Tensor& bank_ids,
     int64_t out_features,
     int64_t bank_alt_id,
-    int64_t split_count) {
+    int64_t split_count,
+    const c10::optional<at::Tensor>& rank8_a = c10::nullopt,
+    const c10::optional<at::Tensor>& rank8_b = c10::nullopt,
+    double rank8_scale = 1.0) {
   constexpr int kWordsPerTile = 4 * TransitionBits;
   TORCH_CHECK(input.is_cuda(), "QVQ P32 Ampere input must be CUDA");
   TORCH_CHECK(
@@ -1775,6 +1781,34 @@ at::Tensor p32_window_ampere_impl(
       "QVQ P32 Ampere N must be positive and divisible by 16");
   TORCH_CHECK(split_count >= 1 && split_count <= 128, "QVQ P32 Ampere split count must be in [1, 128]");
   TORCH_CHECK(bank_alt_id >= 0 && bank_alt_id <= 3, "QVQ P32 Ampere bank ID must be in [0, 3]");
+  TORCH_CHECK(std::isfinite(rank8_scale), "QVQ P32 Ampere rank8 scale must be finite");
+  TORCH_CHECK(
+      rank8_a.has_value() == rank8_b.has_value(),
+      "rank8_a and rank8_b must be provided together");
+  if (rank8_a.has_value()) {
+    const at::Tensor& projection_a = *rank8_a;
+    const at::Tensor& projection_b = *rank8_b;
+    TORCH_CHECK(
+        projection_a.device() == input.device() &&
+            projection_b.device() == input.device(),
+        "QVQ P32 Ampere rank8 tensors must share the input CUDA device");
+    TORCH_CHECK(
+        projection_a.scalar_type() == at::kHalf &&
+            (projection_b.scalar_type() == at::kHalf ||
+             projection_b.scalar_type() == at::kFloat),
+        "QVQ P32 Ampere rank8_a must be float16 and rank8_b must be float16 or float32");
+    TORCH_CHECK(
+        projection_a.is_contiguous() && projection_b.is_contiguous(),
+        "QVQ P32 Ampere rank8 tensors must be contiguous");
+    TORCH_CHECK(
+        projection_a.dim() == 2 && projection_a.size(0) == input.size(1) &&
+            projection_a.size(1) == 8,
+        "QVQ P32 Ampere rank8_a must have shape [K, 8]");
+    TORCH_CHECK(
+        projection_b.dim() == 2 && projection_b.size(0) == 8 &&
+            projection_b.size(1) == out_features,
+        "QVQ P32 Ampere rank8_b must have shape [8, N]");
+  }
 
   const c10::cuda::CUDAGuard device_guard(input.device());
   const int capability = cached_device_capability(input.get_device());
@@ -1802,6 +1836,25 @@ at::Tensor p32_window_ampere_impl(
   auto partial_output = split_count == 1
       ? output
       : at::empty({split_count, size_m, size_n}, input.options().dtype(at::kFloat));
+  auto finalize_output = [&]() -> at::Tensor {
+    if (rank8_a.has_value()) {
+      // Use the regular CUDA GEMM path for the tiny-rank update so Ampere can
+      // select tensor-core kernels.  Both products accumulate in FP32 and
+      // remain on the current stream, including during CUDA graph capture.
+      auto rank8_down = at::mm(input, *rank8_a, at::kFloat);
+      auto rank8_b_float = rank8_b->scalar_type() == at::kFloat
+          ? *rank8_b
+          : rank8_b->to(at::kFloat);
+      at::addmm_out(
+          output,
+          output,
+          rank8_down,
+          rank8_b_float,
+          at::Scalar(1.0),
+          at::Scalar(rank8_scale));
+    }
+    return output;
+  };
   // The scalar M<=4 route pays one decode loop per K16 row and reuses each
   // decoded pair across the live output rows. It wins for the common 5-6K K
   // projections; with the wider long-K wave and four-K16 scalar stage it also
@@ -2769,7 +2822,7 @@ at::Tensor p32_window_ampere_impl(
               output.data_ptr<float>(),
               output_values);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      return output;
+      return finalize_output();
     }
     if (size_m == 8 && size_n == 1024 && split_count == 48) {
       constexpr int kReductionWarps = kReductionThreads / 32;
@@ -2781,7 +2834,7 @@ at::Tensor p32_window_ampere_impl(
               output.data_ptr<float>(),
               output_values);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      return output;
+      return finalize_output();
     }
     if (size_m == 16 && size_n == 1024 && split_count == 32) {
       constexpr int kReductionWarps = kReductionThreads / 32;
@@ -2795,7 +2848,7 @@ at::Tensor p32_window_ampere_impl(
               output.data_ptr<float>(),
               output_values);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      return output;
+      return finalize_output();
     }
     const bool use_m1_warp_reducer =
         size_m == 1 &&
@@ -2837,7 +2890,7 @@ at::Tensor p32_window_ampere_impl(
       if (split_count == 24 || split_count == 40 || split_count == 48 ||
           split_count == 96 || split_count == 128) {
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        return output;
+        return finalize_output();
       }
     }
     if (size_m == 2 && size_k == 17408 && size_n == 5120 &&
@@ -2861,7 +2914,7 @@ at::Tensor p32_window_ampere_impl(
                 output_values);
       }
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      return output;
+      return finalize_output();
     }
     if constexpr (TransitionBits == 6) {
       if (size_m == 2 && size_k == 6144 && size_n == 5120 &&
@@ -2877,7 +2930,7 @@ at::Tensor p32_window_ampere_impl(
                 output.data_ptr<float>(),
                 output_values);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        return output;
+        return finalize_output();
       }
     }
     const bool use_m2_warp_reducer =
@@ -2916,7 +2969,7 @@ at::Tensor p32_window_ampere_impl(
       if (split_count == 24 || split_count == 40 || split_count == 48 ||
           split_count == 64) {
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        return output;
+        return finalize_output();
       }
     }
     if (size_m == 1 && size_k == 5120 && size_n == 1024 &&
@@ -2928,7 +2981,7 @@ at::Tensor p32_window_ampere_impl(
               output_values,
               56);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      return output;
+      return finalize_output();
     }
 #define QVQ_LAUNCH_STATIC_REDUCER(SPLITS)                                    \
   reduce_split_kernel<SPLITS><<<blocks, kReductionThreads, 0, stream>>>(     \
@@ -3001,7 +3054,7 @@ at::Tensor p32_window_ampere_impl(
 #undef QVQ_LAUNCH_STATIC_REDUCER
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
-  return output;
+  return finalize_output();
 }
 
 at::Tensor p32_window_ampere(
@@ -3012,20 +3065,27 @@ at::Tensor p32_window_ampere(
     int64_t transition_bits,
     int64_t out_features,
     int64_t bank_alt_id,
-    int64_t split_count) {
+    int64_t split_count,
+    const c10::optional<at::Tensor>& rank8_a,
+    const c10::optional<at::Tensor>& rank8_b,
+    double rank8_scale) {
   switch (transition_bits) {
     case 4:
       return p32_window_ampere_impl<4>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
+          rank8_a, rank8_b, rank8_scale);
     case 5:
       return p32_window_ampere_impl<5>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
+          rank8_a, rank8_b, rank8_scale);
     case 6:
       return p32_window_ampere_impl<6>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
+          rank8_a, rank8_b, rank8_scale);
     case 7:
       return p32_window_ampere_impl<7>(
-          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count);
+          input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
+          rank8_a, rank8_b, rank8_scale);
     default:
       TORCH_CHECK(false, "QVQ P32 Ampere transition bits must be in [4, 7]");
   }
@@ -3325,7 +3385,7 @@ std::vector<at::Tensor> p32_window_ampere_grouped(
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_ampere, m) {
-  m.def("p32_window(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
+  m.def("p32_window(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1, Tensor? rank8_a=None, Tensor? rank8_b=None, float rank8_scale=1.0) -> Tensor");
   m.def("p32_window_grouped(Tensor input, Tensor[] trellises, Tensor levels, Tensor[] bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor[]");
   m.def("p32_window_grouped_fused(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor");
 }
