@@ -78,12 +78,28 @@ class P32WindowGraphs:
                 raise RuntimeError("model already has a window graph owner; close it first")
             _OWNERS[model] = ref(self)
 
+    def __enter__(self):
+        """Return this request-owned graph manager as a context manager.
+
+        Graphs retain CUDA allocations and native handles until they are
+        explicitly closed.  The context-manager form makes that lifetime
+        boundary unambiguous for callers that capture short-lived request
+        graphs while preserving the existing explicit ``close`` API.
+        """
+        if self._closed:
+            raise RuntimeError("window graph owner is closed")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
+
     @contextmanager
-    def _exclusive(self):
+    def _exclusive(self, *, allow_closed=False):
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("a window graph request or capture is already active")
         try:
-            if self._closed:
+            if self._closed and not allow_closed:
                 raise RuntimeError("window graph owner is closed")
             yield
         finally:
@@ -257,11 +273,18 @@ class P32WindowGraphs:
 
     def close(self):
         """Finish queued requests and release exclusive graph ownership."""
-        with self._exclusive():
+        with self._exclusive(allow_closed=True):
+            if self._closed:
+                return
             if self._event is not None:
                 self._event.synchronize()
             self._graphs.clear()
             self._event = None
             self._closed = True
             with _OWNER_LOCK:
-                del _OWNERS[self.model]
+                # Weak-key cleanup or an earlier owner teardown may already
+                # have removed this entry.  Cleanup must remain idempotent so
+                # an exception path cannot strand captured graph resources.
+                owner = _OWNERS.get(self.model)
+                if owner is not None and owner() is self:
+                    del _OWNERS[self.model]
