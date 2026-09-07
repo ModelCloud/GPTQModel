@@ -152,10 +152,32 @@ def main():
         # buffers.  The standalone ZML verifier must not tune or replay rank8
         # factors whose audit/signature metadata was dropped during export.
         "recovery": artifact_package["recovery"],
-        "config": {"abi_version": 3, "struct_bytes": ctypes.sizeof(WindowConfig), "m": args.zml_m,
-                   "k": layer.in_features, "n": layer.out_features, "transition_bits": round(2 * layer.bits),
-                   "bank_alt_id": alt, "algorithm": 2, "block_m": 64, "block_n": 64,
-                   "input_hadamard": int(layer.input_hadamard), "output_hadamard": int(layer.output_hadamard)},
+        "config": {
+            "abi_version": 3,
+            "struct_bytes": ctypes.sizeof(WindowConfig),
+            "m": args.zml_m,
+            "k": layer.in_features,
+            "n": layer.out_features,
+            "transition_bits": round(2 * layer.bits),
+            "bank_alt_id": alt,
+            "algorithm": 2,
+            "block_m": 64,
+            "block_n": 64,
+            "block_k": 256,
+            "warp_groups": 0,
+            "pipeline_stages": 2,
+            "split_k": 1,
+            "min_m": 1,
+            "max_m": 8192,
+            "input_hadamard": int(layer.input_hadamard),
+            "output_hadamard": int(layer.output_hadamard),
+            "rank8_enabled": 0,
+            # The fixture starts from the certified reference policy; the
+            # ZML verifier enumerates and measures alternate implementations
+            # explicitly rather than inheriting an implicit native default.
+            "recovery_kernel": 0,
+            "recovery_projection": 0,
+        },
         "libraries": [next(path for path in torch.ops.loaded_libraries if Path(path).name == name)
                       for name in ("gptqmodel_qvq_cuda_ops.so", "gptqmodel_qvq_wgmma_ops.so")]
                      + [native_window_library()._name],
