@@ -663,6 +663,18 @@ def test_off_does_not_access_recovery():
     assert add_rank8_correction(Poison(), None, value) is value
 
 
+def test_off_fused_policy_does_not_enter_rank8_epilogue():
+    """Matched off-state geometry metadata must not require rank8 factors."""
+    layer, _, inputs, _ = fixture(hadamard=False)
+    layer._p32_window_config = P32WindowConfig(
+        recovery_mode="off", recovery_kernel="fused_epilogue"
+    )
+    layer._p32_rank8_enabled = False
+    with torch.no_grad():
+        output = layer(inputs)
+    assert output.shape == (inputs.shape[0], layer.out_features)
+
+
 def test_forward_pretransformed_propagates_requested_store_dtype():
     layer, _, train, _ = fixture(hadamard=False)
     seen = {}
