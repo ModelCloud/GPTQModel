@@ -68,6 +68,16 @@ QVQ_YAQA_SAMPLE_TILE_COUNTS = {
 }
 
 
+def _reject_qvq_quantization_capture(operation: str) -> None:
+    """Keep host-side quantization and kernel tuning outside CUDA Graph capture."""
+
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            f"QVQ {operation} cannot run during CUDA Graph capture; "
+            "finish quantization and tuning before capture"
+        )
+
+
 def _yaqa_sample_tile_indices(tile_count: int, sample_strategy: str) -> torch.Tensor:
     """Return deterministic, evenly spaced 16x16 tile indices for a sampled YAQA family screen."""
 
@@ -446,6 +456,11 @@ class QVQLinearQuantizationResult:
     yaqa_spectral_selector_churn: float | None = None
     yaqa_spectral_family_changed: bool | None = None
 
+    rank8_A: torch.Tensor | None = None
+    rank8_B: torch.Tensor | None = None
+    rank8_metadata: torch.Tensor | None = None
+    rank8_fit_report: dict | None = None
+
     def serialized_tensors(self) -> dict[str, torch.Tensor]:
         """Return checkpoint tensors, rejecting research-only codebooks."""
 
@@ -455,6 +470,11 @@ class QVQLinearQuantizationResult:
                 "are evaluation-only and cannot be serialized."
             )
         tensors = {"trellis": self.trellis, "SU": self.SU, "SV": self.SV}
+        for name in ("rank8_A", "rank8_B", "rank8_metadata"):
+            value = getattr(self, name)
+            if value is not None:
+                tensors[name] = value
+
         if self.bias is not None:
             tensors["bias"] = self.bias
         if self.bank_ids is not None:
@@ -7226,6 +7246,7 @@ def quantize_qvq_linear(
     # Exact Viterbi survivor-pruning policy (`QVQConfig.viterbi_pruning`).
     # `None` resolves to `auto`, which reproduces today's automatic behavior.
     viterbi_pruning: object | None = None,
+    rank8_calibration: object | None = None,
 ) -> QVQLinearQuantizationResult:
     """Run RHT, BlockLDLQ/YAQA, PGC16 TCQ, and planar packing for a linear.
 
@@ -7234,6 +7255,15 @@ def quantize_qvq_linear(
     not be serialized because QVQ checkpoints contain no custom-codebook
     metadata and the runtime decoder always uses the canonical mapping.
     """
+    _reject_qvq_quantization_capture("linear quantization")
+    rank8_original_weight = None
+    if rank8_calibration is not None:
+        from .qvq_rank8 import Rank8Calibration
+
+        if not isinstance(rank8_calibration, Rank8Calibration) or not v2b2_p32:
+            raise ValueError("rank8_calibration requires P32 and Rank8Calibration")
+        rank8_original_weight = weight.detach().clone()
+
 
     bits = normalize_qvq_rate(bits)
     if not isinstance(input_hadamard, bool) or not isinstance(output_hadamard, bool):
@@ -8755,7 +8785,7 @@ def quantize_qvq_linear(
         )
 
     telemetry_result = None if telemetry is None else telemetry.finalize()
-    return QVQLinearQuantizationResult(
+    result = QVQLinearQuantizationResult(
         trellis=trellis,
         SU=SU,
         SV=SV,
@@ -8855,6 +8885,15 @@ def quantize_qvq_linear(
             else bool(yaqa_bank_diagnostics["spectral_family_changed"])
         ),
     )
+
+    if rank8_calibration is not None:
+        from .qvq_rank8 import finish_rank8_quantization
+
+        result = finish_rank8_quantization(
+            result, rank8_original_weight, bias, rank8_calibration,
+            bits=bits, codebook_version=codebook_version,
+        )
+    return result
 
 
 def _validate_trellis_shape(*, bits: float, vector_size: int, trellis_window: int) -> int:

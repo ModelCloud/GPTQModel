@@ -201,3 +201,20 @@ git diff --check
 ```
 
 CUDA tests must state whether they ran, skipped, or only compiled. Model-affecting changes should include a small quantize/save/load/inference path and, when practical, an evaluation comparison against the dense baseline.
+
+## Required graph safety and compilation limits
+
+All kernel code and integration with QvQ or other kernel libraries must be made
+graph safe. This includes single/grouped operators, transforms, correction
+branches, dispatch, and compiler/FFI custom calls. Use
+[$graph-safe-kernels](.agents/skills/graph-safe-kernels/SKILL.md) for every such
+change. Preparation must occur outside capture; captured execution must retain
+its buffers/workspace and preserve device/stream ordering. Verify eager versus
+repeated graph execution through the actual public integration. A capture
+rejection or an untested compatibility flag is not completion of this requirement.
+
+Host compilation may use up to half the available CPU cores when it fits the
+memory budget without OOM or swap pressure. Respect CPU/cgroup limits, reserve
+memory for other work, account for per-job compiler memory and internal threads,
+and set/monitor explicit parallelism. Reduce concurrency when memory requires it;
+the previous fixed eight-worker guidance is not an unconditional ceiling.

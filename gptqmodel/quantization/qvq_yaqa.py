@@ -49,6 +49,22 @@ _YAQA_CHECKPOINT_RECOMPUTING: ContextVar[bool] = ContextVar(
 _MISSING_FORWARD = object()
 
 
+def _reject_yaqa_capture(operation: str) -> None:
+    """Keep host-side YAQA collection/materialization outside CUDA Graph capture.
+
+    Sketch-B owns Python hooks, host transfers, events, and scalar validation.
+    Those steps are preparation work for quantization and cannot be recorded as
+    part of an inference graph.  Fail before touching model state so callers get
+    an actionable boundary instead of a partially captured collector.
+    """
+
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            f"QVQ {operation} cannot run during CUDA Graph capture; "
+            "complete YAQA preparation before capture"
+        )
+
+
 @dataclass(frozen=True)
 class YaqaGramSketch:
     """Compact randomized factor with an exact diagonal, materialized on demand."""
@@ -119,6 +135,7 @@ class YaqaGramSketch:
     def materialize(self, *, device: torch.device) -> torch.Tensor:
         """Build the dense PSD factor only for the module being quantized."""
 
+        _reject_yaqa_capture("YAQA Gram materialization")
         source = self.source.to(device=device, non_blocking=True)
         diagonal = self.diagonal.to(device=device, non_blocking=True)
         assert self.source_diagonal is not None
@@ -497,6 +514,7 @@ def capture_yaqa_sketch_b(
 ]:
     """Collect exact or streaming-projected YAQA Sketch-B factors."""
 
+    _reject_yaqa_capture("YAQA Sketch-B collection")
     if model.training:
         raise ValueError("YAQA Sketch B requires the full model to be in eval mode")
     if not modules:

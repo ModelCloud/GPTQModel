@@ -88,6 +88,61 @@ from gptqmodel.utils.qvq_cuda import (
     qvq_cuda_viterbi_v2_segment_banked,
 )
 
+
+@pytest.mark.parametrize(
+    ("cache_name", "resolver", "label"),
+    (
+        ("_QVQ_CUDA_OP", qvq_cuda_utils._qvq_cuda_op, "gemv"),
+        ("_QVQ_CUDA_V4_OP", qvq_cuda_utils._qvq_cuda_v4_op, "gemv_v4"),
+        ("_QVQ_CUDA_HADAMARD_OP", qvq_cuda_utils._qvq_cuda_hadamard_op, "hadamard"),
+    ),
+)
+def test_qvq_cuda_resolvers_reject_cold_registration_during_graph_capture(
+    monkeypatch, cache_name, resolver, label
+):
+    monkeypatch.setattr(qvq_cuda_utils, cache_name, None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match=f"{label}.*before CUDA Graph capture"):
+        resolver()
+
+
+def test_qvq_cuda_level_cache_rejects_cold_allocation_during_graph_capture(monkeypatch):
+    monkeypatch.setattr(qvq_cuda_utils, "_PGC16_LEVELS", {})
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match="PGC16 level table.*before CUDA Graph capture"):
+        qvq_cuda_utils._pgc16_levels(torch.device("cuda", 0), PGC16_CODEBOOK_VERSION)
+
+
+def test_qvq_cuda_grouped_bank_validation_rejects_capture_sync(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    x = torch.empty((1, 256), device="cuda", dtype=torch.float16)
+    trellis = torch.empty((256, 24), device="cuda", dtype=torch.int32)
+    bank_ids = torch.empty((256,), device="cuda", dtype=torch.uint8)
+    bank_alt_ids = torch.ones((2,), device="cuda", dtype=torch.uint8)
+    with pytest.raises(RuntimeError, match="grouped bank selectors.*before CUDA Graph capture"):
+        qvq_cuda_utils.qvq_cuda_gemv(
+            x,
+            trellis,
+            3.0,
+            out_features=256,
+            bank_ids=bank_ids,
+            v2b2_p32=True,
+            bank_alt_ids=bank_alt_ids,
+            bank_alt_boundaries=(8,),
+            _bank_alt_ids_validated=False,
+        )
+
+
+def test_qvq_cuda_quantization_helpers_reject_graph_capture(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match="cannot run during CUDA Graph capture"):
+        qvq_cuda_utils._reject_qvq_cuda_capture("Viterbi quantization")
+    with pytest.raises(RuntimeError, match="extension prewarm.*CUDA Graph capture"):
+        qvq_cuda_utils.prewarm_qvq_cuda()
+
 pytestmark = [
     pytest.mark.cuda,
     pytest.mark.skipif(
@@ -3887,8 +3942,8 @@ def test_qvq_cuda_bfloat16_recovery_uses_completed_output_finiteness():
     layer = QVQLinear(bits=2, in_features=16, out_features=16, tensors=tensors).eval()
     calls = []
 
-    def fake_compute(inputs, compute_dtype):
-        calls.append((inputs.dtype, compute_dtype))
+    def fake_compute(inputs, compute_dtype, *, output_dtype=None):
+        calls.append((inputs.dtype, compute_dtype, output_dtype))
         return torch.full((inputs.shape[0], 16), float("inf"), device="cuda") if len(calls) == 1 else torch.ones(
             (inputs.shape[0], 16), device="cuda"
         )

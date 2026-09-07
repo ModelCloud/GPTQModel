@@ -1,0 +1,94 @@
+{
+  "scope": "synthetic H200 full P32 linear, graphs, K=N=2048 W3 FP16; no model claim",
+  "baseline_revision": "466973a3",
+  "fused_revision": "00a71f4b",
+  "hardware": {
+    "name": "NVIDIA H200",
+    "uuid": "0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "sm_count": 132,
+    "memory": 150101688320,
+    "capability": [
+      9,
+      0
+    ]
+  },
+  "software": {
+    "torch": "2.15.0.dev20260901+cu130",
+    "cuda": "13.0"
+  },
+  "rows": [
+    {
+      "m": 1,
+      "window_us": 33.11519920825958,
+      "reference_on_us": 47.5600004196167,
+      "fused_on_us": 41.80800020694733,
+      "speedup_vs_reference": 1.1375813285542786,
+      "overhead_vs_window_pct": 26.250184829084724,
+      "reference_mean_us": 47.585600117842354,
+      "fused_mean_us": 41.842933197816215,
+      "reference_p95_us": 47.60800004005432,
+      "fused_p95_us": 41.85920059680939
+    },
+    {
+      "m": 16,
+      "window_us": 31.585600972175598,
+      "reference_on_us": 50.39199888706207,
+      "fused_on_us": 43.880800902843475,
+      "speedup_vs_reference": 1.1483837544040056,
+      "overhead_vs_window_pct": 38.92659804541623,
+      "reference_mean_us": 50.42144060134888,
+      "fused_mean_us": 43.90608002742132,
+      "reference_p95_us": 50.432002544403076,
+      "fused_p95_us": 43.91680061817169
+    },
+    {
+      "m": 128,
+      "window_us": 35.019201040267944,
+      "reference_on_us": 56.571197509765625,
+      "fused_on_us": 48.42800050973892,
+      "speedup_vs_reference": 1.16815059292793,
+      "overhead_vs_window_pct": 38.28984977142238,
+      "reference_mean_us": 56.58879995346069,
+      "fused_mean_us": 48.453173538049064,
+      "reference_p95_us": 56.593602895736694,
+      "fused_p95_us": 48.48000109195709
+    },
+    {
+      "m": 512,
+      "window_us": 65.84319770336151,
+      "reference_on_us": 99.84720051288605,
+      "fused_on_us": 87.40400075912476,
+      "speedup_vs_reference": 1.14236418980469,
+      "overhead_vs_window_pct": 32.7456803554705,
+      "reference_mean_us": 99.86453314622243,
+      "fused_mean_us": 87.44917352994283,
+      "reference_p95_us": 99.95999932289124,
+      "fused_p95_us": 87.51519918441772
+    },
+    {
+      "m": 2048,
+      "window_us": 238.92239332199097,
+      "reference_on_us": 296.02880477905273,
+      "fused_on_us": 265.46239852905273,
+      "speedup_vs_reference": 1.1151440144418598,
+      "overhead_vs_window_pct": 11.108211682483171,
+      "reference_mean_us": 296.07386747996014,
+      "fused_mean_us": 265.5284269650777,
+      "reference_p95_us": 296.21119499206543,
+      "fused_p95_us": 265.74079990386963
+    }
+  ],
+  "tests": {
+    "passed": 87,
+    "skipped": 86
+  },
+  "ncu": {
+    "baseline_launches": 13,
+    "fused_launches": 9,
+    "baseline_executed_warp_instructions": 2977948,
+    "fused_executed_warp_instructions": 2486932,
+    "fused_epilogue_registers": 47,
+    "fused_epilogue_shared_bytes": 8192,
+    "fused_epilogue_spills": 0
+  }
+}

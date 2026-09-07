@@ -81,6 +81,13 @@ from gptqmodel.quantization.qvq_codecs import (
     pgc18_codebook_v4,
     pgc18_decode_states_v4,
 )
+
+
+def test_qvq_quantization_rejects_cuda_graph_capture(monkeypatch):
+    monkeypatch.setattr(qvq_module.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(qvq_module.torch.cuda, "is_current_stream_capturing", lambda: True)
+    with pytest.raises(RuntimeError, match="linear quantization.*CUDA Graph capture"):
+        quantize_qvq_linear(torch.ones((16, 16)), torch.eye(16), bits=2)
 from gptqmodel.quantization.qvq_codecs.hyb_reference import (
     canonical_hyb_lut,
     fit_hyb_lut,

@@ -1,0 +1,52 @@
+{
+  "scope": "Current native ABI and ZML regression after composite-shape widening",
+  "base_revision": "730ae6f1",
+  "device": {
+    "name": "NVIDIA H200",
+    "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "sm": "9.0"
+  },
+  "native_abi_build": "0699205d35a2a416",
+  "native_library_sha256": "13604c9c99144b179532ebf4d81f149d188b342ba6360a8b6f10dd52cf01aa39",
+  "source_sha256": {
+    "gptqmodel_ext/qvq/qvq_window_abi.cpp": "d2ccc5e925b4ff94a06be0ba83cfeed43176b3787365567c8179e0dda5039dcb",
+    "integrations/zml/qvq_window.zig": "abf27c410647639baee683c43cceea02e50a10a69edb349d90e5a9d36548dd54",
+    "integrations/zml/verify.zig": "a6f26ec2f346ca69500b0d36cc78b37f2172bffac21b6c528d9146a4f9b87412"
+  },
+  "composite_case": {
+    "m": 1,
+    "k": 5120,
+    "n": 17408,
+    "bits": 3,
+    "input_hadamard": false,
+    "output_hadamard": false,
+    "native_vs_qvq_reference": {
+      "bit_exact": true,
+      "mean_absolute_error": 0.0,
+      "max_absolute_error": 0.0
+    }
+  },
+  "abi_shape_guards": {
+    "transform_free_composite": "accepted through structural validation",
+    "non_power_of_two_hadamard": "rejected before buffer access"
+  },
+  "zml_external_verifier": {
+    "stablehlo": "1.19.0",
+    "rank8_off_bit_exact": true,
+    "rank8_on_bit_exact": true,
+    "shape": [33, 2048],
+    "fresh_native_library": true,
+    "command_buffer_compatible": true
+  },
+  "tests": {
+    "qvq_focused_and_native": "715 passed, 86 skipped",
+    "zml_bazel_test": "passed",
+    "zml_verify_build": "passed"
+  },
+  "remaining": [
+    "full Qwen3.8 model and TP scorecard",
+    "H100 validation",
+    "explicit nested user-owned ZML capture",
+    "rank8 overhead/promotion measurements"
+  ]
+}

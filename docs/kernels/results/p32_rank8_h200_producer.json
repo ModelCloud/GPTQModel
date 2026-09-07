@@ -1,0 +1,108 @@
+{
+  "scope": "synthetic kernel/performance, not model quality",
+  "revision": "0291756c422a2512b9a577d10c7f75c2e9dbbfee",
+  "sources": {
+    "gptqmodel/quantization/qvq_rank8.py": "4962ded4b9e91c46a23cd36f6b32a11815a861cab52bd67b2bc6fdcbb04c800f",
+    "gptqmodel/nn_modules/qlinear/qvq.py": "31ad23e37ac5473574c135e2f9edec0a3f0cee3faeede72640a8424c7e8cdd9b",
+    "gptqmodel/utils/qvq_rank8_triton.py": "aebae7c5185b613a8b6c7d944aaf9719bc2990edd6b095c22eb3dc52277f5d63",
+    "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu": "0a80a9e8aa7414d37ccf75d29e0dafe2e49e9635e7af0e5a8c656d173df32066"
+  },
+  "hardware": {
+    "name": "NVIDIA H200",
+    "uuid": "0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "sm_count": 132,
+    "memory": 150101688320,
+    "capability": [
+      9,
+      0
+    ]
+  },
+  "software": {
+    "torch": "2.15.0.dev20260901+cu130",
+    "cuda": "13.0"
+  },
+  "revision_note": "Uncommitted producer phase on the recorded merge revision; sources identify exact profiled device code.",
+  "shape": {
+    "k": 2048,
+    "n": 2048,
+    "bits": 3,
+    "dtype": "float16",
+    "timing": "CUDA Graph, 30 samples of 20 replays"
+  },
+  "tests": {
+    "passed": 116,
+    "skipped": 0,
+    "scope": "window recovery and fused rank8 tests after profiling"
+  },
+  "rows": [
+    {
+      "m": 1,
+      "window_us": 33.15439969301224,
+      "separate_projection_us": 41.88240021467209,
+      "shared_producer_us": 42.78080016374588,
+      "speedup": 0.9789999264708674,
+      "mae": 0.0,
+      "max": 0.0,
+      "producer_p95_us": 42.8384006023407,
+      "control_p95_us": 41.90559983253479
+    },
+    {
+      "m": 16,
+      "window_us": 31.677599251270294,
+      "separate_projection_us": 43.94719898700714,
+      "shared_producer_us": 41.29439890384674,
+      "speedup": 1.0642411599049402,
+      "mae": 0.0,
+      "max": 0.0,
+      "producer_p95_us": 41.329601407051086,
+      "control_p95_us": 43.99679899215698
+    },
+    {
+      "m": 128,
+      "window_us": 34.831200540065765,
+      "separate_projection_us": 48.396800458431244,
+      "shared_producer_us": 45.82400023937225,
+      "speedup": 1.0561452558838027,
+      "mae": 0.0,
+      "max": 0.0,
+      "producer_p95_us": 45.875200629234314,
+      "control_p95_us": 48.447999358177185
+    },
+    {
+      "m": 512,
+      "window_us": 65.67679941654205,
+      "separate_projection_us": 87.19200193881989,
+      "shared_producer_us": 99.39040243625641,
+      "speedup": 0.8772678226626569,
+      "mae": 1.0087387636303902e-07,
+      "max": 0.001953125,
+      "producer_p95_us": 99.59840178489685,
+      "control_p95_us": 87.25759983062744
+    },
+    {
+      "m": 2048,
+      "window_us": 239.20639753341675,
+      "separate_projection_us": 265.50480127334595,
+      "shared_producer_us": 358.07920694351196,
+      "speedup": 0.7414694741413178,
+      "mae": 0.0,
+      "max": 0.0,
+      "producer_p95_us": 358.4991931915283,
+      "control_p95_us": 265.61601161956787
+    }
+  ],
+  "ncu": {
+    "m": 16,
+    "baseline_launches": 9,
+    "producer_launches": 4,
+    "baseline_source_correlated_instructions": 2486932,
+    "producer_source_correlated_instructions": 1615856,
+    "producer_registers": 40,
+    "producer_shared_bytes": 8192,
+    "producer_spills": 0,
+    "producer_active_warp_pct": 6.244366,
+    "producer_eligible_warps_per_cycle": 0.066106,
+    "producer_shared_conflict_derived": 1392
+  },
+  "decision": "Explicit candidate only. No automatic selection or full-model quality claim. Slower at M1/512/2048; marginal overhead target not met."
+}

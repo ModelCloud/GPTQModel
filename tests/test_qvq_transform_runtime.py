@@ -23,6 +23,7 @@ from gptqmodel.quantization.qvq_transform_runtime import (
     QVQ_GROUPED_P32_PAYLOAD_LAYOUT,
     QVQ_GROUPED_P32_RUNTIME_META_KEY,
     QVQ_GROUPED_P32_RUNTIME_SCHEMA,
+    QVQGroupedP32InputTransformState,
     QVQGroupedP32Linear,
     QVQSharedInputLinear,
     install_qvq_checkpointed_p32_runtime,
@@ -35,6 +36,110 @@ from gptqmodel.quantization.qvq_transform_runtime import (
     set_qvq_grouped_p32_checkpoint_metadata,
 )
 from gptqmodel.utils.qvq_cuda import qvq_cuda_gemv
+
+
+def test_grouped_ampere_payload_is_prepared_once_from_released_window_storage(monkeypatch):
+    """Explicit SM80 child policies own a packed, capture-ready grouped payload."""
+
+    from gptqmodel.quantization.qvq_rank8 import P32WindowConfig
+    from gptqmodel.utils import qvq_ampere_cuda, qvq_cuda
+
+    widths = (64, 32)
+    k = 256
+    k_tiles = k // 16
+    words_per_tile = 24  # W3 / vector size 2
+    total_tiles = k_tiles * (sum(widths) // 16)
+    state = object.__new__(QVQGroupedP32InputTransformState)
+    state.linears = tuple(
+        SimpleNamespace(
+            bits=3,
+            in_features=k,
+            out_features=width,
+            codebook_version="V2",
+            trellis=torch.empty(0, words_per_tile, dtype=torch.int32),
+            bank_alt_id=torch.empty(0, dtype=torch.uint8),
+        )
+        for width in widths
+    )
+    state.trellis = torch.arange(
+        total_tiles * words_per_tile, dtype=torch.int32
+    ).reshape(-1, words_per_tile)
+    state.bank_ids = torch.arange(total_tiles, dtype=torch.uint8)
+    state.bank_alt_ids = torch.tensor((3, 1), dtype=torch.uint8)
+    state.out_features = sum(widths)
+    state._rank8_configs = tuple(
+        P32WindowConfig(algorithm="ampere_window", split_k=split)
+        for split in (4, 2)
+    )
+
+    warm_calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda,
+        "prewarm_qvq_ampere_grouped",
+        lambda: warm_calls.append(True),
+    )
+    monkeypatch.setattr(
+        qvq_cuda,
+        "_pgc16_levels",
+        lambda device, version: torch.empty(256, dtype=torch.float16, device=device),
+    )
+
+    state._prepare_ampere_payload()
+
+    assert warm_calls == [True]
+    assert state._ampere_levels.shape == (256,)
+    assert state._ampere_payload.trellis.numel() == state.trellis.numel()
+    assert state._ampere_payload.plan.out_features == sum(widths)
+    assert [segment.split_count for segment in state._ampere_payload.plan.segments] == [4, 2]
+    assert [segment.bank_alt_id for segment in state._ampere_payload.plan.segments] == [3, 1]
+
+
+def test_grouped_ampere_runtime_uses_prepared_payload_without_generic_decode(monkeypatch):
+    """A prepared Ampere group dispatches the segmented consumer directly."""
+
+    from gptqmodel.utils import qvq_ampere_cuda, qvq_cuda
+
+    widths = (64, 32)
+    state = object.__new__(QVQGroupedP32InputTransformState)
+
+    def recover(piece, *, output_dtype):
+        return piece.to(output_dtype)
+
+    state.linears = tuple(
+        SimpleNamespace(out_features=width, recover_output=recover)
+        for width in widths
+    )
+    state.output_widths = widths
+    state._rank8_enabled = [False, False]
+    state._ampere_payload = object()
+    state._ampere_levels = object()
+    state.grouped_gemv_invocations = 0
+    calls = []
+
+    def grouped(flat, payload, levels):
+        calls.append((flat, payload, levels))
+        return tuple(
+            torch.full((flat.shape[0], width), index, dtype=torch.float32)
+            for index, width in enumerate(widths)
+        )
+
+    monkeypatch.setattr(qvq_ampere_cuda, "qvq_p32_window_ampere_grouped_packed", grouped)
+
+    def generic_decode(*args, **kwargs):
+        raise AssertionError("generic grouped decode must not run for Ampere policy")
+
+    monkeypatch.setattr(qvq_cuda, "qvq_cuda_gemv", generic_decode)
+    outputs = state._grouped_outputs(
+        torch.zeros((3, 256), dtype=torch.float16), torch.float16
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1] is state._ampere_payload
+    assert calls[0][2] is state._ampere_levels
+    assert state.grouped_gemv_invocations == 1
+    assert [tuple(output.shape) for output in outputs] == [(3, 64), (3, 32)]
+    assert torch.equal(outputs[0], torch.zeros((3, 64), dtype=torch.float16))
+    assert torch.equal(outputs[1], torch.ones((3, 32), dtype=torch.float16))
 
 
 def _packed_layer(
@@ -489,6 +594,100 @@ def test_qvq_checkpointed_p32_runtime_roundtrips_canonical_payload_exactly():
         torch.testing.assert_close(
             reserialized[key], expected_tensor, rtol=0, atol=0
         )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 0),
+    reason="requires NVIDIA CUDA compute capability >= 8.0",
+)
+def test_qvq_checkpointed_grouped_runtime_applies_independent_rank8_before_output_recovery():
+    """Grouped P32 shares X' while keeping each child's correction and SV local."""
+
+    from gptqmodel.quantization.qvq_rank8 import (
+        CONTRACT,
+        P32WindowConfig,
+        _base,
+        _digest,
+        _encode,
+        prepare_rank8,
+    )
+
+    generator = torch.Generator().manual_seed(725)
+    su = torch.randint(0, 2, (32,), generator=generator).mul_(2).sub_(1).float()
+    root = torch.nn.Module()
+    root.first = _packed_layer(seed=726, su=su).half().cuda()
+    root.second = _packed_layer(seed=727, su=su).half().cuda()
+    for module, seed in ((root.first, 728), (root.second, 729)):
+        factor_generator = torch.Generator(device="cuda").manual_seed(seed)
+        a = torch.randn(
+            (module.in_features, 8), generator=factor_generator, device="cuda", dtype=torch.float16
+        ) * 0.01
+        b = torch.randn(
+            (8, module.out_features), generator=factor_generator, device="cuda", dtype=torch.float16
+        ) * 0.01
+        base_tensors, base_metadata = _base(module)
+        metadata = {
+            "fit_contract": CONTRACT,
+            "rank": 8,
+            "dtype": "float16",
+            "input_domain": "p32_transformed",
+            "base_hash": _digest(base_tensors, base_metadata),
+            "factors_hash": _digest({"A": a, "B": b}, {}),
+            "validated": True,
+            "selected": True,
+        }
+        module.rank8_A = a
+        module.rank8_B = b
+        module.rank8_metadata = _encode(metadata, module.trellis.device)
+
+    baseline = (copy.deepcopy(root.first), copy.deepcopy(root.second))
+    # A fast/off grouped install must not read optional factors.  Leave the
+    # second child's factors absent while its fit metadata remains present.
+    root.second.rank8_A = None
+    root.second.rank8_B = None
+    plan = _shared_plan("first", "second")
+    compiled = install_qvq_checkpointed_p32_runtime(
+        root, qvq_grouped_p32_checkpoint_metadata(plan)
+    )
+    state = compiled.grouped_states["test.shared.input"]
+    prepare_rank8(root.first, P32WindowConfig(recovery_mode="on"))
+    prepare_rank8(root.second, P32WindowConfig(recovery_mode="off"))
+
+    with torch.inference_mode():
+        x_generator = torch.Generator(device="cuda").manual_seed(730)
+        x = torch.randn((8, 32), generator=x_generator, device="cuda", dtype=torch.float16)
+        transformed = baseline[0].transform_input(x)
+        first_inner = baseline[0]._inner_forward(transformed)
+        first_expected = baseline[0].recover_output(
+            first_inner.float()
+            + (transformed.float() @ baseline[0].rank8_A.float())
+            @ baseline[0].rank8_B.float(),
+            output_dtype=x.dtype,
+        )
+        second_expected = baseline[1].recover_output(
+            baseline[1]._inner_forward(transformed), output_dtype=x.dtype
+        )
+        actual = (root.first(x), root.second(x))
+
+    torch.testing.assert_close(actual[0], first_expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual[1], second_expected, rtol=0, atol=0)
+    assert state._rank8_enabled == [True, False]
+
+    # The disabled child must not dereference its factors.  They were absent
+    # before grouped installation and remain absent during this call.
+    with torch.inference_mode():
+        actual_off = (root.first(x), root.second(x))
+    torch.testing.assert_close(actual_off[1], second_expected, rtol=0, atol=0)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_first = root.first(x)
+        captured_second = root.second(x)
+    for _ in range(3):
+        graph.replay()
+        torch.testing.assert_close(captured_first, first_expected, rtol=0, atol=0)
+        torch.testing.assert_close(captured_second, second_expected, rtol=0, atol=0)
 
 
 @pytest.mark.cuda

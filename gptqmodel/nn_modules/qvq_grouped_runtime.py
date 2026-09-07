@@ -29,7 +29,6 @@ from torch import nn
 
 from ..quantization.qvq import (
     pack_qvq_binary_bank_ids,
-    repack_p32_planar_to_window,
     unpack_qvq_binary_bank_ids,
 )
 from ..quantization.qvq_activation import quantize_qvq_fp8_activation
@@ -113,6 +112,21 @@ def _tensor_version(tensor: torch.Tensor) -> int | None:
         return None
 
 
+def _child_window_source(child: QVQLinear) -> torch.Tensor:
+    """Return the canonical live P32 source owned by a grouped child.
+
+    Window-only modules deliberately release ``trellis`` after the CPU-side
+    repack.  Grouped execution must therefore consume their window words
+    directly, while legacy planar children still use the normal preparation
+    cache.
+    """
+
+    source = child.window_words if getattr(child, "window_only", False) else child.trellis
+    if source is None:
+        raise _R0Fallback("child is missing its window or planar P32 payload")
+    return source
+
+
 def _same_tensor_bits(left: torch.Tensor, right: torch.Tensor) -> bool:
     return (
         left.dtype == right.dtype
@@ -125,7 +139,7 @@ def _same_tensor_bits(left: torch.Tensor, right: torch.Tensor) -> bool:
 def _source_key(children: Sequence[QVQLinear]) -> tuple[Any, ...]:
     key: list[Any] = []
     for child in children:
-        for name in ("trellis", "bank_ids", "bank_alt_id", "SU"):
+        for name in ("trellis", "window_words", "bank_ids", "bank_alt_id", "SU"):
             tensor = getattr(child, name, None)
             key.extend(
                 (id(tensor), None if tensor is None else _tensor_version(tensor))
@@ -200,7 +214,7 @@ def _validate_static_group(
         child.in_features != first.in_features
         or float(child.bits) != float(first.bits)
         or child.codebook_version != first.codebook_version
-        or child.trellis.device != first.trellis.device
+        or _child_window_source(child).device != _child_window_source(first).device
         for child in resolved[1:]
     ):
         raise _R0Fallback("children disagree on K, rate, codebook, or device")
@@ -209,11 +223,11 @@ def _validate_static_group(
     if any(child.out_features <= 0 or child.out_features % 256 for child in resolved):
         raise _R0Fallback("grouped Hopper requires every child N divisible by 256")
     if any(
-        child.trellis.device.type == "meta"
+        _child_window_source(child).device.type == "meta"
         or child.bank_ids is None
-        or child.bank_ids.device != child.trellis.device
+        or child.bank_ids.device != _child_window_source(child).device
         or child.bank_alt_id is None
-        or child.bank_alt_id.device != child.trellis.device
+        or child.bank_alt_id.device != _child_window_source(child).device
         for child in resolved
     ):
         raise _R0Fallback("grouped Hopper requires concrete co-located P32 payloads")
@@ -498,6 +512,13 @@ class QVQHopperGroupedRuntime:
         self.telemetry.plain_fallbacks += 1
         self.telemetry.last_fallback_reason = reason
         child = self._children()[member_index]
+        # Evaluated direct-window modules release their planar source.  A
+        # rejected grouped policy still uses the exact legacy child path, so
+        # materialize its explicit planar fallback before entering that path.
+        # The helper fails closed if this is attempted during CUDA Graph
+        # capture without an eager preparation.
+        if child.window_only:
+            child._prepare_planar_fallback()
         original = child._gptqmodel_qvq_grouped_original_forward
         return original(x)
 
@@ -518,22 +539,90 @@ class QVQHopperGroupedRuntime:
         self, x: torch.Tensor, *, maximum_rows: int | None = None
     ) -> str | None:
         children = self._children()
+        policies = tuple(getattr(child, "_p32_window_config", None) for child in children)
+        algorithms = tuple(getattr(policy, "algorithm", "auto") for policy in policies)
+        if any(algorithm == "ampere_window" for algorithm in algorithms):
+            return "Ampere child window policy requires the SM80 grouped dispatcher"
+        explicit_hopper = any(
+            algorithm in ("hopper_m16", "hopper_direct_decode_mma")
+            or getattr(policy, "split_k", 1) != 1
+            for algorithm, policy in zip(algorithms, policies, strict=True)
+        )
+        if explicit_hopper:
+            if not all(algorithm == "hopper_m16" for algorithm in algorithms):
+                return (
+                    "grouped Hopper tuning requires hopper_m16 for every child; "
+                    "direct BM/BN geometry is single-child only"
+                )
+            geometry = tuple(
+                (getattr(policy, "block_m", 0), getattr(policy, "block_n", 0), getattr(policy, "warp_groups", 0), getattr(policy, "chunk_m", 0))
+                for policy in policies
+            )
+            if any(value[3] for value in geometry):
+                return "grouped Hopper chunk_m control is not implemented"
+            if any(value != geometry[0] for value in geometry[1:]):
+                return "grouped Hopper BM/BN controls must match across children"
+            block_m, block_n, warp_groups, _ = geometry[0]
+            if block_m or block_n or warp_groups:
+                if block_m not in (32, 64, 128) or block_n not in (64, 128):
+                    return "grouped Hopper geometry requires BM32/64/128 and BN64/128"
+                if block_n == 128:
+                    return "grouped Hopper BN128 requires a single-segment specialization"
+                if warp_groups not in (0, block_n // 64):
+                    return "grouped Hopper warp_groups must match BN"
+                if any(getattr(policy, "split_k", 1) != 1 for policy in policies):
+                    return "grouped Hopper explicit BM/BN requires split_k=1"
+                rows = x.numel() // children[0].in_features if isinstance(x, torch.Tensor) and x.ndim >= 2 else 0
+                if rows and rows % block_m:
+                    return f"grouped Hopper explicit BM{block_m} requires rows divisible by BM"
+        if any(
+            getattr(child, "_p32_rank8_enabled", False)
+            and getattr(policy, "recovery_projection", "separate_reference")
+            not in (
+                "separate_reference",
+                "input_fused",
+                "concurrent_reference",
+                "project_output_fused",
+            )
+            for child, policy in zip(children, policies, strict=True)
+        ):
+            return (
+                "grouped rank8 projection supports separate_reference, "
+                "concurrent_reference, input_fused or project_output_fused only"
+            )
+
         if not isinstance(x, torch.Tensor):
             return "input is not a tensor"
+        if x.ndim < 2 or x.shape[-1] != children[0].in_features or x.numel() == 0:
+            return "input shape is unsupported"
+        rows = x.numel() // children[0].in_features
+        for index, policy in enumerate(policies):
+            if policy is not None and not policy.min_m <= rows <= policy.max_m:
+                return (
+                    f"grouped child {index} M={rows} is outside its prepared "
+                    f"policy range [{policy.min_m}, {policy.max_m}]"
+                )
+        if (
+            any(
+                getattr(child, "_p32_rank8_enabled", False)
+                and getattr(policy, "recovery_projection", "separate_reference")
+                == "concurrent_reference"
+                for child, policy in zip(children, policies, strict=True)
+            )
+            and x.dtype != torch.float16
+        ):
+            return "grouped concurrent rank8 projection requires FP16 activations"
         if x.requires_grad or any(child.training for child in children):
             return "autograd/training requires the original forward"
         if any(getattr(child, "adapter", None) is not None for child in children):
             return "an attached adapter requires the original forward"
         if x.device.type != "cuda" or x.dtype not in (torch.float16, torch.bfloat16):
             return "grouped Hopper requires FP16 or BF16 CUDA activations"
-        if x.shape[-1] != children[0].in_features or x.numel() == 0:
-            return "input shape is unsupported"
-        rows = x.numel() // children[0].in_features
         if rows < 1 or (maximum_rows is not None and rows > maximum_rows):
             if maximum_rows is None:
                 return "grouped Hopper execution requires at least one row"
             return f"grouped Hopper execution currently requires one through {maximum_rows} rows"
-        if any(child.trellis.device != x.device for child in children):
+        if any(_child_window_source(child).device != x.device for child in children):
             return "activation and grouped payload devices differ"
         properties = torch.cuda.get_device_properties(x.device)
         if (properties.major, properties.minor) != (9, 0):
@@ -546,7 +635,7 @@ class QVQHopperGroupedRuntime:
         tile_count = (child.in_features // 16) * (child.out_features // 16)
         return pack_qvq_binary_bank_ids(
             unpack_qvq_binary_bank_ids(child.bank_ids, tile_count * 8)
-        ).to(device=child.trellis.device)
+        ).to(device=_child_window_source(child).device)
 
     def _build_payload(
         self,
@@ -557,7 +646,7 @@ class QVQHopperGroupedRuntime:
         # equality check may synchronize and therefore never occurs in the
         # warmed CUDA-graph capture path.
         _validate_static_group(children, allow_installed=True)
-        device = children[0].trellis.device
+        device = _child_window_source(children[0]).device
         placeholder = torch.empty(
             (16, children[0].in_features), device=device, dtype=torch.float16
         )
@@ -615,10 +704,22 @@ class QVQHopperGroupedRuntime:
                 children[0].bits, vector_size=children[0].vector_size
             ),
         )
+        explicit_hopper = all(
+            getattr(getattr(child, "_p32_window_config", None), "algorithm", "auto")
+            == "hopper_m16"
+            for child in children
+        )
+        if explicit_hopper:
+            measured_splits = tuple(
+                int(child._p32_window_config.split_k) for child in children
+            )
 
+        child_windows = tuple(
+            child._prepare_hopper_p32_window(device) for child in children
+        )
         plan = qvq_p32_window_wgmma_group_plan(
             placeholder,
-            tuple(child.trellis for child in children),
+            child_windows,
             _pgc16_levels(device, children[0].codebook_version),
             selectors,
             children[0].bits,
@@ -637,14 +738,13 @@ class QVQHopperGroupedRuntime:
         words_per_tile = qvq_words_per_tile(
             children[0].bits, weight_count=256, vector_size=2
         )
-        planar = torch.cat(
+        grouped_window = torch.cat(
             tuple(
-                child.trellis.reshape(k_tiles, child.out_features // 16, words_per_tile)
-                for child in children
+                window.reshape(k_tiles, child.out_features // 16, words_per_tile)
+                for child, window in zip(children, child_windows, strict=True)
             ),
             dim=1,
-        ).reshape(-1, words_per_tile)
-        grouped_window = repack_p32_planar_to_window(planar, bits=children[0].bits)
+        ).reshape(-1, words_per_tile).contiguous()
         grouped_selectors = (
             torch.cat(
                 tuple(
@@ -656,7 +756,8 @@ class QVQHopperGroupedRuntime:
             .reshape(-1)
             .contiguous()
         )
-        if source_key != _source_key(children):
+        current_key = _source_key(children)
+        if source_key != current_key:
             raise RuntimeError("QVQ grouped canonical payload changed during repack")
         payload = QVQHopperGroupedP32Payload(
             trellis=grouped_window,
@@ -692,7 +793,8 @@ class QVQHopperGroupedRuntime:
             if cached is not None:
                 avoided += cached[3].numel() * cached[3].element_size()
             else:
-                avoided += child.trellis.numel() * child.trellis.element_size()
+                source = _child_window_source(child)
+                avoided += source.numel() * source.element_size()
             with child._qvq_cuda_bank_cache_lock:
                 child._qvq_cuda_window_cache = None
                 child._qvq_cuda_bank_cache = None
@@ -715,7 +817,7 @@ class QVQHopperGroupedRuntime:
         if self._payload is not None and source_key == self._payload_source_key:
             return self._payload
         if (
-            children[0].trellis.device.type == "cuda"
+            _child_window_source(children[0]).device.type == "cuda"
             and torch.cuda.is_current_stream_capturing()
         ):
             # R0 validation compares canonical tensors and payload construction
@@ -741,9 +843,18 @@ class QVQHopperGroupedRuntime:
         if return_ordered_partials and recover:
             raise ValueError("ordered partial execution cannot recover child outputs")
         children = self._children()
+        rank8_enabled = any(getattr(child, "_p32_rank8_enabled", False) for child in children)
+        if rank8_enabled:
+            from ..quantization.qvq_rank8 import validate_rank8_state
+
+            for child in children:
+                validate_rank8_state(child)
+        if rank8_enabled and return_ordered_partials:
+            raise _R0Fallback("rank8 correction requires completed FP32 inner outputs")
         rows = x.numel() // children[0].in_features
         if (
             recover
+            and not rank8_enabled
             and not return_ordered_partials
             and self._h100_fp8_ondemand_eligible(x, rows)
         ):
@@ -753,6 +864,7 @@ class QVQHopperGroupedRuntime:
                 return self._execute_h100_fp8_ondemand(x, scales)
         if (
             recover
+            and not rank8_enabled
             and not return_ordered_partials
             and self._h100_fp8_prefill_eligible(x, rows)
         ):
@@ -762,6 +874,7 @@ class QVQHopperGroupedRuntime:
                 return self._execute_h100_fp8_prefill(x, prefill_payload)
         if (
             recover
+            and not rank8_enabled
             and not return_ordered_partials
             and self._h100_fp16_prefill_eligible(x, rows)
         ):
@@ -819,7 +932,36 @@ class QVQHopperGroupedRuntime:
             # Decode-sized M1/M2/M4 retains the lower-latency staged path.
             and rows >= 8
         )
-        if use_qwen_composite_input:
+        rank8_hiddens = {}
+        producer_children = tuple(
+            child for child in children
+            if getattr(child, "_p32_rank8_enabled", False)
+            and child._p32_window_config.recovery_projection == "input_fused"
+        )
+        concurrent_children = tuple(
+            child for child in children
+            if getattr(child, "_p32_rank8_enabled", False)
+            and child._p32_window_config.recovery_projection == "concurrent_reference"
+        )
+        if producer_children and concurrent_children:
+            # Both implementations need the shared transformed activation but
+            # have different producer ownership/contracts. Mixing them would
+            # silently turn one child into a separate projection, so reject it
+            # before any grouped kernel launch.
+            raise _R0Fallback(
+                "grouped rank8 cannot mix input_fused and concurrent_reference projections"
+            )
+        if producer_children and x.dtype == torch.float16:
+            from ..utils.qvq_rank8_triton import rank8_input_producer
+
+            transformed, hiddens = rank8_input_producer(
+                x_2d.contiguous(), children[0]._cached_cast("SU", torch.float16),
+                tuple(child.rank8_A for child in producer_children),
+                hadamard=children[0].input_hadamard,
+            )
+            rank8_hiddens = {id(child): hidden for child, hidden in zip(producer_children, hiddens, strict=True)}
+            padded = torch.nn.functional.pad(transformed, (0, 0, 0, padded_rows - rows))
+        elif use_qwen_composite_input:
             from ..quantization.rotation.hadamard_utils import _get_hadK_on
             from ..utils.qvq_cuda import qvq_cuda_qwen_composite_input_fp16_padded
 
@@ -905,6 +1047,47 @@ class QVQHopperGroupedRuntime:
                     dtype=torch.float16,
                 )
                 padded[:rows].copy_(transformed)
+        concurrent_done_events = []
+        if concurrent_children and recover and x.dtype == torch.float16:
+            # Reuse the exact transformed activation already prepared for the
+            # grouped P32 consumer. Each child owns an independent producer
+            # stream and event pair, so sibling projections can overlap
+            # without sharing mutable readiness state.
+            current_stream = torch.cuda.current_stream(x.device)
+            device_key = int(
+                x.device.index
+                if x.device.index is not None
+                else torch.cuda.current_device()
+            )
+            transformed_for_rank8 = padded[:rows]
+            m, k = transformed_for_rank8.shape
+            capturing = torch.cuda.is_current_stream_capturing()
+            stream_key = int(current_stream.cuda_stream)
+            for child in concurrent_children:
+                warm_key = (device_key, stream_key, int(m), int(k))
+                if capturing and warm_key not in child._qvq_rank8_concurrent_warm:
+                    # PyTorch may choose an internal stream for capture. Do
+                    # not allocate auxiliary resources in that context; the
+                    # exact reference projection is capture-safe in-stream.
+                    rank8_hiddens[id(child)] = (
+                        transformed_for_rank8.float()
+                        @ child._cached_rank8_factor("A")
+                    ).half()
+                    continue
+                producer_stream, ready, done = child._rank8_concurrent_resources(
+                    x.device, current_stream
+                )
+                ready.record(current_stream)
+                with torch.cuda.stream(producer_stream):
+                    producer_stream.wait_event(ready)
+                    rank8_hiddens[id(child)] = (
+                        transformed_for_rank8.float()
+                        @ child._cached_rank8_factor("A")
+                    ).half()
+                    done.record(producer_stream)
+                concurrent_done_events.append(done)
+                if not capturing:
+                    child._qvq_rank8_concurrent_warm.add(warm_key)
         if payload is None:
             payload = self._ensure_payload()
         from ..utils.qvq_cuda import _pgc16_levels
@@ -923,7 +1106,11 @@ class QVQHopperGroupedRuntime:
             and tuple(child.out_features for child in children)
             == (17408, 17408)
         )
+        requested_block_m = getattr(getattr(children[0], "_p32_window_config", None), "block_m", 0)
+        requested_block_n = getattr(getattr(children[0], "_p32_window_config", None), "block_n", 0)
         use_h100_reuse11_gate_up = (
+            not requested_block_m
+            and
             rows in (512, 1024, 2048, 4096)
             and all(segment.split_count == 1 for segment in payload.plan.segments)
             and (
@@ -944,6 +1131,8 @@ class QVQHopperGroupedRuntime:
             reuse11_padded[:rows].copy_(padded[:rows])
             padded = reuse11_padded
         use_h100_reuse8_gate_up = (
+            not requested_block_m
+            and
             padded.shape[0] >= 128
             and padded.shape[0] % 128 == 0
             and all(segment.split_count == 1 for segment in payload.plan.segments)
@@ -956,7 +1145,13 @@ class QVQHopperGroupedRuntime:
                 or use_qwen_large_m_reuse
             )
         )
-        if use_h100_reuse11_gate_up:
+        if requested_block_m == 32:
+            grouped_inner = qvq_p32_window_wgmma_grouped_reuse2_packed
+        elif requested_block_m == 64:
+            grouped_inner = qvq_p32_window_wgmma_grouped_reuse4_packed
+        elif requested_block_m == 128:
+            grouped_inner = qvq_p32_window_wgmma_grouped_reuse8_packed
+        elif use_h100_reuse11_gate_up:
             grouped_inner = qvq_p32_window_wgmma_grouped_reuse11_packed
         elif use_h100_reuse8_gate_up:
             grouped_inner = qvq_p32_window_wgmma_grouped_reuse8_packed
@@ -970,11 +1165,19 @@ class QVQHopperGroupedRuntime:
                 if any(segment.split_count != 1 for segment in payload.plan.segments)
                 else qvq_p32_window_wgmma_grouped_packed
             )
-        inner_outputs = grouped_inner(
-            padded,
-            payload,
-            _pgc16_levels(x.device, children[0].codebook_version),
-        )
+        if requested_block_n:
+            inner_outputs = grouped_inner(
+                padded,
+                payload,
+                _pgc16_levels(x.device, children[0].codebook_version),
+                block_n=requested_block_n,
+            )
+        else:
+            inner_outputs = grouped_inner(
+                padded,
+                payload,
+                _pgc16_levels(x.device, children[0].codebook_version),
+            )
         if children[0].activation is not None:
             self.telemetry.grouped_a8_launches += 1
         if (
@@ -1020,8 +1223,51 @@ class QVQHopperGroupedRuntime:
                     children[0].bits, vector_size=children[0].vector_size
                 ) != 5:
                     self.telemetry.h100_qwen_linear_decode_prefetch_launches += 1
+        if concurrent_done_events:
+            # The grouped decoder runs on the caller stream while sibling
+            # rank8 projections run on their producer streams. Join each
+            # producer only after the base FP32 outputs are ready so decode
+            # and correction overlap without exposing incomplete hiddens.
+            for done in concurrent_done_events:
+                torch.cuda.current_stream(x.device).wait_event(done)
         if self._h100_w25_n128_gate_up_enabled:
             self.telemetry.h100_w25_n128_gate_up_launches += 1
+        if recover and any(
+            getattr(getattr(child, "_p32_window_config", None), "recovery_kernel", None)
+            in ("fused_epilogue", "fully_fused")
+            for child in children
+        ):
+            from ..quantization.qvq_rank8 import (
+                add_rank8_correction,
+                fused_rank8_output,
+            )
+
+            outputs = []
+            for child, inner in zip(children, inner_outputs, strict=True):
+                if getattr(getattr(child, "_p32_window_config", None), "recovery_kernel", None) in (
+                    "fused_epilogue",
+                    "fully_fused",
+                ):
+                    output = fused_rank8_output(
+                        child, padded[:rows], inner[:rows], torch.float16,
+                        hidden=rank8_hiddens.get(id(child)), output_dtype=x.dtype,
+                    )
+                else:
+                    corrected = add_rank8_correction(
+                        child, padded[:rows], inner[:rows], hidden=rank8_hiddens.get(id(child))
+                    )
+                    output = child._qvq_recover_inference_output(corrected, torch.float16)
+                outputs.append(output.reshape(*x.shape[:-1], child.out_features).to(x.dtype))
+            return tuple(outputs)
+        if rank8_enabled:
+            from ..quantization.qvq_rank8 import add_rank8_correction
+
+            # padded is the exact shared SU/H input consumed by grouped WGMMA.
+            # Each child retains independent factors and a static on/off flag.
+            inner_outputs = tuple(
+                add_rank8_correction(child, padded[:rows], inner[:rows], hidden=rank8_hiddens.get(id(child)))
+                for child, inner in zip(children, inner_outputs, strict=True)
+            )
         if not recover:
             return tuple(inner[:rows] for inner in inner_outputs)
 
@@ -1179,8 +1425,29 @@ class QVQHopperGroupedRuntime:
             return "fused MLP projection geometry changed"
         if down.training or getattr(down, "adapter", None) is not None:
             return "fused MLP down projection requires the original path"
-        if down.trellis.device != x.device:
+        if down.runtime_device() != x.device:
             return "fused MLP down payload and activation devices differ"
+        down_policy = getattr(down, "_p32_window_config", None)
+        if getattr(down, "_p32_rank8_enabled", False) and down_policy is not None:
+            if down_policy.recovery_projection in (
+                "input_fused",
+                "concurrent_reference",
+                "project_output_fused",
+            ):
+                return (
+                    "fused MLP down rank8 projection "
+                    f"{down_policy.recovery_projection} is unsupported; use "
+                    "separate_reference or tensor_core"
+                )
+            if down_policy.recovery_kernel not in (
+                "separate_reference",
+                "fused_epilogue",
+            ):
+                return (
+                    "fused MLP down rank8 kernel "
+                    f"{down_policy.recovery_kernel} is unsupported; use "
+                    "separate_reference or fused_epilogue"
+                )
         if not callable(self._mlp_act_fn):
             return "fused MLP activation is unavailable"
         return None
@@ -1406,7 +1673,9 @@ class QVQHopperGroupedRuntime:
 
         children = self._children()
         payload = self._ensure_payload()
-        levels = _pgc16_levels(children[0].trellis.device, children[0].codebook_version)
+        levels = _pgc16_levels(
+            _child_window_source(children[0]).device, children[0].codebook_version
+        )
         folded = qvq_p32_window_prepare_grouped_fp16_packed(
             payload,
             levels,
@@ -1853,6 +2122,7 @@ class QVQHopperGroupedRuntime:
         )
 
         rows = x.numel() // self._children()[0].in_features
+        rank8_down_enabled = bool(getattr(down, "_p32_rank8_enabled", False))
         if rows > 4096:
             chunk_rows = self._autotune_large_m_chunk_rows(
                 x, rows, scope="mlp"
@@ -1878,7 +2148,12 @@ class QVQHopperGroupedRuntime:
             return self._execute_mlp_chunked(x, 16)
         fp8_prefill = (
             self._ensure_h100_fp8_prefill_payload()
-            if self._h100_fp8_prefill_eligible(x, rows)
+            if not rank8_down_enabled
+            and not any(
+                getattr(child, "_p32_rank8_enabled", False)
+                for child in self._children()
+            )
+            and self._h100_fp8_prefill_eligible(x, rows)
             else None
         )
         if fp8_prefill is not None:
@@ -2140,6 +2415,7 @@ class QVQHopperGroupedRuntime:
             and self._h100_multiblock_intermediate_enabled
             and down.output_hadamard
             and (down.in_features, down.out_features) == (8192, 2048)
+            and not rank8_down_enabled
         )
         if fused_down_recovery:
             partials = down._inner_forward(
@@ -2170,6 +2446,7 @@ class QVQHopperGroupedRuntime:
             and down.output_hadamard
             and (down.in_features, down.out_features) == (17408, 5120)
             and qwen_transition_bits == 6
+            and not rank8_down_enabled
         )
         if use_qwen_ordered_composite_recovery:
             from ..quantization.rotation.hadamard_utils import _get_hadK_on
@@ -2204,6 +2481,32 @@ class QVQHopperGroupedRuntime:
             return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
 
         inner = down._inner_forward(transformed)
+        down_policy = getattr(down, "_p32_window_config", None)
+        if (
+            rank8_down_enabled
+            and down_policy is not None
+            and down_policy.recovery_kernel == "fused_epilogue"
+        ):
+            from ..quantization.qvq_rank8 import fused_rank8_output
+
+            recovered = fused_rank8_output(
+                down,
+                transformed,
+                inner,
+                torch.float16,
+                output_dtype=x.dtype,
+            )
+            return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
+        if rank8_down_enabled:
+            # ``transformed`` is the exact down input domain after SU and any
+            # input Hadamard.  The specialized down reductions above are
+            # disabled for this case because rank-8 needs the completed FP32
+            # inner output before expansion/addition.  Keep the correction in
+            # the same FP32 domain as the base accumulator and let the
+            # existing output transform/store finish the MLP epilogue.
+            from ..quantization.qvq_rank8 import add_rank8_correction
+
+            inner = add_rank8_correction(down, transformed, inner)
         use_large_m_multiblock_down_recovery = (
             rows > 16
             and self._h100_multiblock_intermediate_enabled
@@ -2378,10 +2681,10 @@ def _maybe_install_qvq_mlp_fusion(
         not isinstance(down, QVQLinear)
         or act_fn is None
         or not _is_safe_mlp_parent(parent, parent_name)
-        or children[0].trellis.device.type != "cuda"
+        or _child_window_source(children[0]).device.type != "cuda"
     ):
         return False
-    properties = torch.cuda.get_device_properties(children[0].trellis.device)
+    properties = torch.cuda.get_device_properties(_child_window_source(children[0]).device)
     if (properties.major, properties.minor) != (9, 0):
         return False
 
@@ -2390,7 +2693,7 @@ def _maybe_install_qvq_mlp_fusion(
         -0.01,
         0.01,
         children[0].in_features,
-        device=children[0].trellis.device,
+        device=_child_window_source(children[0]).device,
         dtype=torch.float16,
     ).reshape(1, -1)
     try:

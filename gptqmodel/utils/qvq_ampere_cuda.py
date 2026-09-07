@@ -150,6 +150,10 @@ def _device_sm_count(device: torch.device) -> int:
     key = (device.type, -1 if device.index is None else int(device.index))
     sm_count = _SM_COUNT_CACHE.get(key)
     if sm_count is None:
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "QVQ Ampere SM-count cache must be prepared before CUDA Graph capture"
+            )
         sm_count = int(torch.cuda.get_device_properties(device).multi_processor_count)
         _SM_COUNT_CACHE[key] = sm_count
     return sm_count
@@ -199,6 +203,40 @@ def _p32_window_op() -> object:
         op = _QVQ_AMPERE_EXTENSION.op("p32_window")
         _P32_WINDOW_OP = op
     return op
+
+
+def prewarm_qvq_ampere() -> None:
+    """Load the SM80 window operator before CUDA Graph capture.
+
+    This performs only registration/JIT preparation; candidate timing and
+    launch-plan selection remain separate preparation-time operations.
+    """
+    _p32_window_op()
+
+
+def prewarm_qvq_ampere_grouped() -> None:
+    """Load both grouped SM80 operators before CUDA Graph capture.
+
+    Grouped callers select and pack their child payloads during preparation;
+    replay must never trigger lazy TorchOp registration for either the
+    segmented fallback or the fused grouped dispatcher.
+    """
+
+    _p32_window_grouped_op()
+    _p32_window_grouped_fused_op()
+
+
+def _require_warm_operator_for_capture(operator: object | None, name: str) -> None:
+    """Reject lazy TorchOp registration from inside a CUDA graph capture."""
+
+    if (
+        operator is None
+        and torch.cuda.is_available()
+        and torch.cuda.is_current_stream_capturing()
+    ):
+        raise RuntimeError(
+            f"QVQ Ampere {name} must be loaded before CUDA Graph capture"
+        )
 
 
 def _p32_window_grouped_op() -> object:
@@ -379,6 +417,192 @@ def _resolve_transition_bits(bits: float) -> int:
     return transition_bits
 
 
+def _static_split_count(*, m: int, k: int, n: int, transition_bits: int) -> int:
+    """Return the measured shape policy before optional timing autotune.
+
+    This is deliberately a pure shape function.  It is shared by the runtime
+    dispatcher and the public candidate enumerator so external tuners (including
+    ZML) see the same Ampere baseline without importing a CUDA tensor or doing
+    work during graph capture.
+    """
+
+    if m > 16:
+        return 1
+    if m == 1 and k == 5120 and n in (1024, 12288):
+        return 56 if n == 1024 else 40
+    if m in (2, 4) and k == 5120 and n == 1024:
+        return 64
+    if n == 1024 and (m, k) == (8, 5120):
+        return 48
+    if n == 17408 and (m, k) in ((8, 5120), (16, 5120)):
+        return 10
+    if n == 12288 and (m, k) == (16, 5120):
+        return 9
+    if n == 10240 and (m, k) == (16, 5120):
+        return 10
+    if n == 1024 and (m, k) == (16, 5120):
+        return 32
+    if n == 5120 and (m, k) == (8, 17408):
+        return 40
+    if n == 5120 and (m, k) == (8, 6144):
+        return 24
+    if n == 6144 and (m, k) == (8, 5120):
+        return 40
+    if n == 10240 and (m, k) == (8, 5120):
+        return 16
+    if n == 12288 and (m, k) == (8, 5120):
+        return 14
+    if n == 5120 and (m, k) == (16, 17408):
+        return 24
+    if n == 5120 and (m, k) == (16, 6144):
+        return 12
+    if n == 6144 and (m, k) == (16, 5120):
+        return 10
+    if (m, k) == (1, 6144) and n == 5120:
+        return 48
+    if (m, k) == (2, 6144) and n == 5120:
+        return 64 if transition_bits == 7 else 48
+    if (m, k) == (4, 5120) and n == 6144:
+        return 40
+    return 0
+
+
+def qvq_p32_window_ampere_kernel_candidates(
+    input_shape: Sequence[int],
+    *,
+    out_features: int,
+    bits: float,
+    sm_count: int = 108,
+    max_candidates: int = 12,
+) -> tuple[int, ...]:
+    """Enumerate legal Ampere split waves for one exact ``(M, K, N, rate)``.
+
+    The result contains the measured shape policy first, followed by a bounded
+    probe set suitable for a kernel-level autotuner.  Enumeration performs no
+    CUDA allocation, event timing, or synchronization and is therefore safe to
+    call while constructing a graph plan.  Benchmark and cache the selected
+    ``split_count`` before capture, then pass it explicitly to
+    :func:`qvq_p32_window_ampere` during replay.
+    """
+
+    shape = tuple(int(value) for value in input_shape)
+    if len(shape) != 2 or shape[0] <= 0 or shape[1] <= 0:
+        raise ValueError("Ampere candidate shape must be a positive (M,K) pair")
+    if shape[1] % 16:
+        raise ValueError("Ampere P32 input width must be divisible by 16")
+    if type(out_features) is not int or out_features <= 0 or out_features % 16:
+        raise ValueError("Ampere P32 output width must be a positive multiple of 16")
+    if type(sm_count) is not int or sm_count <= 0:
+        raise ValueError("Ampere SM count must be positive")
+    if type(max_candidates) is not int or max_candidates < 1:
+        raise ValueError("max_candidates must be positive")
+    transition_bits = _resolve_transition_bits(bits)
+    k_tiles = shape[1] // 16
+    fallback = _static_split_count(
+        m=shape[0], k=shape[1], n=out_features, transition_bits=transition_bits
+    )
+    if fallback == 0:
+        fallback = _auto_split_count(
+            in_features=shape[1],
+            out_features=out_features,
+            k_tiles=k_tiles,
+            sm_count=sm_count,
+        )
+    fallback = min(max(1, fallback), k_tiles)
+    return tuple(
+        _autotune_candidates(
+            fallback=fallback,
+            k_tiles=k_tiles,
+            max_candidates=max_candidates,
+        )
+    )
+
+
+def qvq_p32_window_ampere_grouped_kernel_candidates(
+    input_shape: Sequence[int],
+    *,
+    out_features: Sequence[int],
+    bits: float,
+    sm_count: int = 108,
+    max_candidates: int = 12,
+) -> tuple[tuple[int, ...], ...]:
+    """Enumerate per-child split waves for one grouped SM80 projection.
+
+    Grouped QKV and gate/up launches contain children whose optimal split wave
+    can differ substantially with ``N``.  A synthetic sum of the child widths
+    is therefore not a valid tuning key.  This API publishes a bounded,
+    deterministic set of *tuples* in child order.  It performs only shape and
+    rate arithmetic, so callers may enumerate candidates while building a
+    graph plan; benchmark and select one tuple before capture, then pass it as
+    ``split_counts`` to :func:`qvq_p32_window_ampere_grouped`.
+    """
+
+    shape = tuple(int(value) for value in input_shape)
+    if len(shape) != 2 or shape[0] <= 0 or shape[1] <= 0:
+        raise ValueError("Ampere grouped candidate shape must be a positive (M,K) pair")
+    if shape[1] % 16:
+        raise ValueError("Ampere grouped P32 input width must be divisible by 16")
+    widths = tuple(int(value) for value in out_features)
+    if not widths or len(widths) > 3:
+        raise ValueError("Ampere grouped candidates support one through three children")
+    if any(width <= 0 or width % 16 for width in widths):
+        raise ValueError(
+            "Ampere grouped P32 output widths must be positive multiples of 16"
+        )
+    if type(sm_count) is not int or sm_count <= 0:
+        raise ValueError("Ampere SM count must be positive")
+    if type(max_candidates) is not int or max_candidates < 1:
+        raise ValueError("max_candidates must be positive")
+
+    # Resolve the rate once up front so invalid rates fail before any candidate
+    # is returned, matching the single-child public enumerator's contract.
+    _resolve_transition_bits(bits)
+    child_candidates = tuple(
+        qvq_p32_window_ampere_kernel_candidates(
+            shape,
+            out_features=width,
+            bits=bits,
+            sm_count=sm_count,
+            max_candidates=max_candidates,
+        )
+        for width in widths
+    )
+    baseline = tuple(candidates[0] for candidates in child_candidates)
+    candidates: list[tuple[int, ...]] = [baseline]
+    seen = {baseline}
+
+    # Walk the per-child alternatives in rounds.  This keeps the common tuning
+    # set small and makes it possible to isolate which grouped child benefits
+    # from a different wave.  The Cartesian product is added only while budget
+    # remains, in deterministic lexicographic order.
+    max_child_options = max(len(options) for options in child_candidates)
+    for option_index in range(1, max_child_options):
+        for child_index, child_options in enumerate(child_candidates):
+            if option_index >= len(child_options):
+                continue
+            candidate = list(baseline)
+            candidate[child_index] = child_options[option_index]
+            value = tuple(candidate)
+            if value not in seen:
+                seen.add(value)
+                candidates.append(value)
+            if len(candidates) >= max_candidates:
+                return tuple(candidates)
+
+    if len(candidates) < max_candidates and len(child_candidates) > 1:
+        import itertools
+
+        for value in itertools.product(*(options[1:] for options in child_candidates)):
+            candidate = tuple(value)
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            candidates.append(candidate)
+            if len(candidates) >= max_candidates:
+                break
+    return tuple(candidates)
+
+
 def _resolve_split_count(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -396,58 +620,14 @@ def _resolve_split_count(
         raise ValueError("QVQ P32 Ampere split_count must be non-negative")
     if split_count:
         return int(split_count)
-    # Prefill batches are tiled in 16-row WMMA CTAs by the native Ampere
-    # launcher.  Once there are more than one row tile, a single K wave keeps
-    # enough independent CTAs resident and avoids materializing a split-K
-    # partial tensor proportional to M.
-    if input.shape[0] > 16:
-        return 1
-    if (
-        input.shape[0] == 1
-        and input.shape[1] == 5120
-        and out_features in (1024, 12288)
-    ):
-        return 56 if out_features == 1024 else 40
-    if (
-        input.shape[0] in (2, 4)
-        and input.shape[1] == 5120
-        and out_features == 1024
-    ):
-        return 64
-    if out_features == 1024 and input.shape == (8, 5120):
-        return 48
-    if out_features == 17408 and input.shape == (8, 5120):
-        return 10
-    if out_features == 17408 and input.shape == (16, 5120):
-        return 10
-    if out_features == 12288 and input.shape == (16, 5120):
-        return 9
-    if out_features == 10240 and input.shape == (16, 5120):
-        return 10
-    if out_features == 1024 and input.shape == (16, 5120):
-        return 32
-    if out_features == 5120 and input.shape == (8, 17408):
-        return 40
-    if out_features == 5120 and input.shape == (8, 6144):
-        return 24
-    if out_features == 6144 and input.shape == (8, 5120):
-        return 40
-    if out_features == 10240 and input.shape == (8, 5120):
-        return 16
-    if out_features == 12288 and input.shape == (8, 5120):
-        return 14
-    if out_features == 5120 and input.shape == (16, 17408):
-        return 24
-    if out_features == 5120 and input.shape == (16, 6144):
-        return 12
-    if out_features == 6144 and input.shape == (16, 5120):
-        return 10
-    if input.shape == (1, 6144) and out_features == 5120:
-        return 48
-    if input.shape == (2, 6144) and out_features == 5120:
-        return 64 if transition_bits == 7 else 48
-    if input.shape == (4, 5120) and out_features == 6144:
-        return 40
+    static = _static_split_count(
+        m=int(input.shape[0]),
+        k=int(input.shape[1]),
+        n=int(out_features),
+        transition_bits=transition_bits,
+    )
+    if static:
+        return min(static, int(input.shape[1]) // 16)
 
     # Environment configuration is process-level. Reading ``os.environ`` on
     # every cached launch costs more than the cache lookup itself, so refresh
@@ -551,6 +731,7 @@ def qvq_p32_window_ampere(
         transition_bits = qvq_transition_bits(bits, vector_size=2)
     if transition_bits not in (4, 5, 6, 7):
         raise ValueError("QVQ P32 Ampere WMMA supports W2 through W3.5")
+    _require_warm_operator_for_capture(_P32_WINDOW_OP, "window operator")
     if (
         split_count == 0
         and input.shape[0] == 1
@@ -1019,6 +1200,11 @@ def qvq_pack_p32_window_ampere_group(
     group.  Repacking on every inference call would erase the launch savings.
     """
 
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "QVQ Ampere grouped payload must be packed before CUDA Graph capture"
+        )
+
     trellises = tuple(trellises)
     bank_ids = tuple(bank_ids)
     if len(trellises) != len(plan.segments) or len(bank_ids) != len(plan.segments):
@@ -1077,6 +1263,7 @@ def qvq_p32_window_ampere_grouped_packed(
         for segment in plan.segments
     )
     if len(plan.segments) > 3 or plan.in_features > 6144 or uses_warp_reducer:
+        _require_warm_operator_for_capture(_P32_WINDOW_GROUPED_OP, "grouped operator")
         k_tiles = plan.in_features // 16
         words_per_tile = 4 * plan.transition_bits
         total_n_tiles = plan.out_features // 16
@@ -1105,6 +1292,9 @@ def qvq_p32_window_ampere_grouped_packed(
                 split_counts,
             )
         )
+    _require_warm_operator_for_capture(
+        _P32_WINDOW_GROUPED_FUSED_OP, "grouped fused operator"
+    )
     grouped_output = _p32_window_grouped_fused_op()(
         input,
         payload.trellis,
@@ -1165,9 +1355,13 @@ __all__ = [
     "QVQAmpereGroupedP32Plan",
     "QVQAmpereP32SegmentPlan",
     "clear_qvq_ampere_autotune_cache",
+    "prewarm_qvq_ampere",
+    "prewarm_qvq_ampere_grouped",
     "qvq_p32_window_ampere",
     "qvq_p32_window_ampere_group_plan",
     "qvq_p32_window_ampere_grouped",
     "qvq_p32_window_ampere_grouped_packed",
+    "qvq_p32_window_ampere_kernel_candidates",
+    "qvq_p32_window_ampere_grouped_kernel_candidates",
     "qvq_pack_p32_window_ampere_group",
 ]

@@ -1,0 +1,556 @@
+{
+  "scope": "Native prepared window/rank8 graph ownership and child capture on one H200; actual ZML command-buffer integration remains open",
+  "base_revision": "90d55106",
+  "worktree_dirty": true,
+  "build": "ffe774ebad78a48a",
+  "sources": {
+    "gptqmodel_ext/qvq/qvq_window_abi.cpp": "c7484a53819307d80e03b743e6d7884f1f7831d9af295ca9a1497df520ebdc69",
+    "gptqmodel_ext/qvq/qvq_window_abi.h": "a24aa2efb9ee0d7c0fe662ec2263804ad3ea7e0bc56dc0ed0e71d2b06aa9f543",
+    "gptqmodel/utils/qvq_window_abi.py": "00ed10d1044edacb816930577ac6baef4c1b4a2abd59d97e03b334f25dc82430",
+    "tests/test_qvq_window_abi.py": "1d6a6cf90d3e14cb144eb82521333a80a9c9b085942940a421f60cd128812e45"
+  },
+  "native_contract": {
+    "fixed_buffer_addresses": true,
+    "caller_owns_artifact_io_stream_and_libraries": true,
+    "prepared_handle_owns_private_pool": true,
+    "one_stream_per_handle": true,
+    "parent_graphs_destroyed_before_handle": true,
+    "external_pointer_mutation_tracking": false,
+    "zml_command_buffer_compatible": false
+  },
+  "correctness": {
+    "passed": 350,
+    "skipped": 0,
+    "log": "/tmp/p32-window-native-graph-final-tests.log",
+    "graph_cases": 168,
+    "scope": "Prepared native graph: M1/33/128, four rates, M16 plus six BM/BN choices, off/on, repeated changed inputs, allocator pressure, same-stream nested ordering, rejected wrong-stream run and create/destroy during capture, disabled poisoned factor pointers; existing ABI, model graph and tuning regressions"
+  },
+  "instruction_audit": {
+    "baseline_build": "f562922c13c95b58",
+    "baseline_revision": "186e1644",
+    "baseline_report": "/tmp/p32-window-abi-native-ncu.ncu-rep",
+    "prepared_report": "/tmp/p32-window-native-graph-final-ncu.ncu-rep",
+    "source_csv": "/tmp/p32-window-native-graph-final-sass.csv",
+    "metrics_csv": "/tmp/p32-window-native-graph-final-metrics.csv",
+    "baseline_total": 5080407,
+    "prepared_total": 5080290,
+    "launch_count": 16,
+    "same_kernel_sequence": true,
+    "same_resources": true,
+    "kernels": [
+      {
+        "kernel": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)",
+        "baseline_instructions": 3312,
+        "prepared_instructions": 3312,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void <unnamed>::qvq_hadamard_kernel<__half, __half, (bool)0>(const T1 *, T2 *, const T1 *, const T1 *, const T1 *, int, int, int)",
+        "baseline_instructions": 921888,
+        "prepared_instructions": 921888,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<(int)8, at::native::FillFunctor<c10::Half>, std::array<char *, (unsigned long)1>, (bool)0>(int, T2, T3)",
+        "baseline_instructions": 10752,
+        "prepared_instructions": 10752,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void <unnamed>::qvq_p32_window_wgmma_m16_tma_kernel<(int)4, (bool)1, (bool)0, (bool)0, (bool)1, (int)1, (bool)0, (int)4, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<(int)16384>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)1>, cute::ScaledBasis<cute::C<(int)1>, (int)0>>, const cute::Layout<cute::tuple<cute::C<(int)64>, cute::C<(int)16>>, cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)1>, cute::ScaledBasis<cute::C<(int)1>, (int)0>>> &, const cute::Swizzle<(int)3, (int)4, (int)3> &>>, cutlass::half_t>, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<(int)32768>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)16>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>, const cute::Layout<cute::tuple<cute::tuple<cute::C<(int)16>, cute::C<(int)4>>, cute::C<(int)16>>, cute::tuple<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>, cute::ScaledBasis<cute::C<(int)1>, (int)2>>> &, const cute::Swizzle<(int)0, (int)4, (int)3> &>>, unsigned int>, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<(int)2048>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>, const cute::Layout<cute::tuple<cute::C<(int)16>, cute::C<(int)16>>, cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>> &, const cute::Swizzle<(int)0, (int)4, (int)3> &>>, unsigned char>, <unnamed>::HopperGroupedP32LaunchParams>(T9, T10, T11, const cutlass::half_t *, float *, T12, int, int, int, int, int)",
+        "baseline_instructions": 1624405,
+        "prepared_instructions": 1624288,
+        "opcode_delta": {
+          "SYNCS.PHASECHK.TRANS64.TRYWAIT": -17,
+          "BRA": -17,
+          "EXIT": -17,
+          "SYNCS.PHASECHK.TRANS64": -17,
+          "NANOSLEEP.SYNCS": -17,
+          "IMAD.U32": -32
+        }
+      },
+      {
+        "kernel": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)",
+        "baseline_instructions": 26496,
+        "prepared_instructions": 26496,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)",
+        "baseline_instructions": 109296,
+        "prepared_instructions": 109296,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(T1::Params)",
+        "baseline_instructions": 876544,
+        "prepared_instructions": 876544,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)",
+        "baseline_instructions": 5622,
+        "prepared_instructions": 5622,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<(int)8, at::native::float16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (bool)0>(int, T2, T3)",
+        "baseline_instructions": 475,
+        "prepared_instructions": 475,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)",
+        "baseline_instructions": 26496,
+        "prepared_instructions": 26496,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void at::native::unrolled_elementwise_kernel<at::native::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (int)4, TrivialOffsetCalculator<(int)1, unsigned int>, TrivialOffsetCalculator<(int)1, unsigned int>, at::native::memory::LoadWithCast<(int)1>, at::native::memory::StoreWithCast<(int)1>>(int, T1, T2, T4, T5, T6, T7)",
+        "baseline_instructions": 553,
+        "prepared_instructions": 553,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nn_align1>(T1::Params)",
+        "baseline_instructions": 290816,
+        "prepared_instructions": 290816,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void cublasLt::splitKreduce_kernel<(int)32, (int)16, int, float, float, float, float, (bool)0, float, float, float, (bool)1, (bool)0, (bool)0, (bool)0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)",
+        "baseline_instructions": 235200,
+        "prepared_instructions": 235200,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<(int)4, at::native::CUDAFunctor_add<float>, std::array<char *, (unsigned long)3>, (bool)0>(int, T2, T3)",
+        "baseline_instructions": 8976,
+        "prepared_instructions": 8976,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void <unnamed>::qvq_hadamard_kernel<float, float, (bool)0>(const T1 *, T2 *, const T1 *, const T1 *, const T1 *, int, int, int)",
+        "baseline_instructions": 933504,
+        "prepared_instructions": 933504,
+        "opcode_delta": {}
+      },
+      {
+        "kernel": "void at::native::vectorized_elementwise_kernel<(int)8, at::native::float16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, (unsigned long)2>, (bool)0>(int, T2, T3)",
+        "baseline_instructions": 6072,
+        "prepared_instructions": 6072,
+        "opcode_delta": {}
+      }
+    ],
+    "resources": [
+      {
+        "Kernel Name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "launch__registers_per_thread": "30",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "1.024000",
+        "launch__shared_mem_per_block_allocated": "1.024000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "0.000000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.00",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void <unnamed>::qvq_hadamard_kernel<__half, __half, 0>(const T1 *, T2 *, const T1 *, const T1 *, const T1 *, int, int, int)",
+        "launch__registers_per_thread": "25",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "5.248000",
+        "launch__shared_mem_per_block_allocated": "5.248000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "4.224000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.12",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void at::vectorized_elementwise_kernel<8, at::FillFunctor<c10::Half>, std::array<char *, 1>, 0>(int, T2, T3)",
+        "launch__registers_per_thread": "16",
+        "launch__registers_per_thread_allocated": "16.000000",
+        "launch__shared_mem_per_block": "1.024000",
+        "launch__shared_mem_per_block_allocated": "1.024000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "0.000000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.06",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void <unnamed>::qvq_p32_window_wgmma_m16_tma_kernel<4, 1, 0, 0, 1, 1, 0, 4, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<16384>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0>>, const cute::Layout<cute::tuple<cute::C<64>, cute::C<16>>, cute::tuple<cute::ScaledBasis<cute::C<1>, 1>, cute::ScaledBasis<cute::C<1>, 0>>> &, const cute::Swizzle<3, 4, 3> &>>, cutlass::half_t>, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<32768>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 0>, cute::ScaledBasis<cute::C<16>, 0>, cute::ScaledBasis<cute::C<1>, 1>>, const cute::Layout<cute::tuple<cute::tuple<cute::C<16>, cute::C<4>>, cute::C<16>>, cute::tuple<cute::tuple<cute::ScaledBasis<cute::C<1>, 0>, cute::ScaledBasis<cute::C<1>, 1>>, cute::ScaledBasis<cute::C<1>, 2>>> &, const cute::Swizzle<0, 4, 3> &>>, unsigned int>, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<2048>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<1>, 0>, cute::ScaledBasis<cute::C<1>, 1>>, const cute::Layout<cute::tuple<cute::C<16>, cute::C<16>>, cute::tuple<cute::ScaledBasis<cute::C<1>, 0>, cute::ScaledBasis<cute::C<1>, 1>>> &, const cute::Swizzle<0, 4, 3> &>>, unsigned char>, <unnamed>::HopperGroupedP32LaunchParams>(T9, T10, T11, const cutlass::half_t *, float *, T12, int, int, int, int, int)",
+        "launch__registers_per_thread": "87",
+        "launch__registers_per_thread_allocated": "88.000000",
+        "launch__shared_mem_per_block": "91.904000",
+        "launch__shared_mem_per_block_allocated": "91.904000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "90.880000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.12",
+        "memory_l2_theoretical_sectors_local": "21760",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "launch__registers_per_thread": "30",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "1.024000",
+        "launch__shared_mem_per_block_allocated": "1.024000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "0.000000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.02",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "launch__registers_per_thread": "30",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "1.024000",
+        "launch__shared_mem_per_block_allocated": "1.024000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "0.000000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.06",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void cutlass::Kernel2<cutlass_80_simt_sgemm_128x32_8x5_nn_align1>(T1::Params)",
+        "launch__registers_per_thread": "80",
+        "launch__registers_per_thread_allocated": "80.000000",
+        "launch__shared_mem_per_block": "26.624000",
+        "launch__shared_mem_per_block_allocated": "26.624000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "25.600000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.04",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, 0, float, float, float, 1, 0, 0, 0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)",
+        "launch__registers_per_thread": "32",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "1.024000",
+        "launch__shared_mem_per_block_allocated": "1.024000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "0.000000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.01",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void at::vectorized_elementwise_kernel<8, at::float16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>, 0>(int, T2, T3)",
+        "launch__registers_per_thread": "32",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "1.024000",
+        "launch__shared_mem_per_block_allocated": "1.024000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "0.000000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.00",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "launch__registers_per_thread": "30",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "1.024000",
+        "launch__shared_mem_per_block_allocated": "1.024000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "0.000000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.02",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void at::unrolled_elementwise_kernel<at::direct_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda() (instance 3)]::operator ()() const::[lambda() (instance 7)]::operator ()() const::[lambda(float) (instance 1)], std::array<char *, 2>, 4, TrivialOffsetCalculator<1, unsigned int>, TrivialOffsetCalculator<1, unsigned int>, memory::LoadWithCast<1>, memory::StoreWithCast<1>>(int, T1, T2, T4, T5, T6, T7)",
+        "launch__registers_per_thread": "30",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "1.024000",
+        "launch__shared_mem_per_block_allocated": "1.024000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "0.000000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.00",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void cutlass::Kernel2<cutlass_80_simt_sgemm_64x64_8x5_nn_align1>(T1::Params)",
+        "launch__registers_per_thread": "76",
+        "launch__registers_per_thread_allocated": "80.000000",
+        "launch__shared_mem_per_block": "21.504000",
+        "launch__shared_mem_per_block_allocated": "21.504000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "20.480000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.08",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void cublasLt::splitKreduce_kernel<32, 16, int, float, float, float, float, 0, float, float, float, 1, 0, 0, 0>(cublasLt::cublasSplitKParams<T6>, const T4 *, const T10 *, T9 *, T5 *, const T6 *, const T6 *, const T11 *, const T4 *, T11 *, void *, long, T6 *, int *, T6 *, T6 *, const T6 *, const T6 *, const T6 *, const T6 *, const T6 *)",
+        "launch__registers_per_thread": "32",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "1.024000",
+        "launch__shared_mem_per_block_allocated": "1.024000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "0.000000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.36",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void at::vectorized_elementwise_kernel<4, at::CUDAFunctor_add<float>, std::array<char *, 3>, 0>(int, T2, T3)",
+        "launch__registers_per_thread": "32",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "1.024000",
+        "launch__shared_mem_per_block_allocated": "1.024000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "0.000000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.03",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void <unnamed>::qvq_hadamard_kernel<float, float, 0>(const T1 *, T2 *, const T1 *, const T1 *, const T1 *, int, int, int)",
+        "launch__registers_per_thread": "27",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "9.472000",
+        "launch__shared_mem_per_block_allocated": "9.472000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "8.448000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.12",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      },
+      {
+        "Kernel Name": "void at::vectorized_elementwise_kernel<8, at::float16_copy_kernel_cuda(at::TensorIteratorBase &)::[lambda(float) (instance 1)], std::array<char *, 2>, 0>(int, T2, T3)",
+        "launch__registers_per_thread": "32",
+        "launch__registers_per_thread_allocated": "32.000000",
+        "launch__shared_mem_per_block": "1.024000",
+        "launch__shared_mem_per_block_allocated": "1.024000",
+        "launch__shared_mem_per_block_driver": "1.024000",
+        "launch__shared_mem_per_block_dynamic": "0.000000",
+        "launch__shared_mem_per_block_static": "0",
+        "launch__waves_per_multiprocessor": "0.03",
+        "memory_l2_theoretical_sectors_local": "0",
+        "sass__inst_executed_register_spilling_mem_local": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_read": "0",
+        "sass__inst_executed_register_spilling_mem_local_op_write": "0"
+      }
+    ],
+    "math_and_movement_review": "No device sources, specializations or numerical boundaries changed. Same transforms, casts, WGMMA, FP32 projection, FP16 hidden, FP32 expansion/add and final store. The 117-instruction difference is confined to WGMMA synchronization/control counts; no algebraic or memory-traffic reduction is claimed. Retaining the graph pool removes repeated host dispatch, not device kernels. Factor/scalar casts remain candidates for future immutable preparation with explicit invalidation."
+  },
+  "postprofile_timing": {
+    "scope": "Real Q M33 K=N2048 W2 BM64/BN64 rank8 on; fixed-buffer native ABI only, not ZML or model latency",
+    "preflight": {
+      "physical_id": 0,
+      "pci_bus_id": "00000000:1C:00.0",
+      "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+      "name": "NVIDIA H200",
+      "config": {
+        "sample_count": 3,
+        "sample_interval_seconds": 1.0,
+        "max_driver_memory_mib": 16
+      },
+      "samples": [
+        {
+          "physical_id": 0,
+          "pci_bus_id": "00000000:1C:00.0",
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+          "name": "NVIDIA H200",
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "compute_processes": []
+        },
+        {
+          "physical_id": 0,
+          "pci_bus_id": "00000000:1C:00.0",
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+          "name": "NVIDIA H200",
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "compute_processes": []
+        },
+        {
+          "physical_id": 0,
+          "pci_bus_id": "00000000:1C:00.0",
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+          "name": "NVIDIA H200",
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "compute_processes": []
+        }
+      ]
+    },
+    "exact": true,
+    "rows": {
+      "native_eager": {
+        "median_us": 81.42240047454834,
+        "samples_us": [
+          92.12480187416077,
+          81.57920241355896,
+          81.49759769439697,
+          81.82719945907593,
+          81.50560259819031,
+          81.42880201339722,
+          81.40640258789062,
+          81.48959875106812,
+          81.38560056686401,
+          81.43839836120605,
+          81.38239979743958,
+          81.49120211601257,
+          81.39359951019287,
+          81.49759769439697,
+          81.3103973865509,
+          81.33599758148193,
+          81.4079999923706,
+          81.46399855613708,
+          81.4303994178772,
+          81.55840039253235,
+          81.41279816627502,
+          81.34559988975525,
+          81.38560056686401,
+          81.523197889328,
+          81.3264012336731,
+          81.41599893569946,
+          81.34559988975525,
+          81.4624011516571,
+          81.3103973865509,
+          81.38560056686401
+        ]
+      },
+      "native_prepared_graph": {
+        "median_us": 66.38799905776978,
+        "samples_us": [
+          66.87359809875488,
+          66.38079881668091,
+          66.41280055046082,
+          66.31199717521667,
+          66.43840074539185,
+          66.40480160713196,
+          66.33440256118774,
+          66.39840006828308,
+          66.35839939117432,
+          66.4031982421875,
+          66.33279919624329,
+          66.35040044784546,
+          66.41280055046082,
+          66.32959842681885,
+          66.37439727783203,
+          66.34079813957214,
+          66.3856029510498,
+          66.44799709320068,
+          66.38879776000977,
+          66.40160083770752,
+          66.37279987335205,
+          66.39360189437866,
+          66.44480228424072,
+          66.34719967842102,
+          66.40480160713196,
+          66.33279919624329,
+          66.38720035552979,
+          66.43040180206299,
+          66.36959910392761,
+          66.39999747276306
+        ]
+      },
+      "enclosing_graph": {
+        "median_us": 66.66240096092224,
+        "samples_us": [
+          67.07680225372314,
+          66.69759750366211,
+          66.66560173034668,
+          66.64479970932007,
+          66.69279932975769,
+          66.62880182266235,
+          66.67839884757996,
+          66.66079759597778,
+          66.69759750366211,
+          66.65440201759338,
+          66.63039922714233,
+          66.64320230484009,
+          66.65120124816895,
+          66.66240096092224,
+          66.702401638031,
+          66.68800115585327,
+          66.6480004787445,
+          66.66399836540222,
+          66.67199730873108,
+          66.6592001914978,
+          66.65599942207336,
+          66.65599942207336,
+          66.63839817047119,
+          66.67680144309998,
+          66.69120192527771,
+          66.68480038642883,
+          66.6480004787445,
+          66.69759750366211,
+          66.66240096092224,
+          66.64320230484009
+        ]
+      }
+    }
+  },
+  "build_resources": {
+    "cpu_affinity_count": 96,
+    "configured_max_jobs": 48,
+    "nvcc_threads": 1,
+    "changed_compilation_units": 1,
+    "memory_available_gib_observed": 80,
+    "swap_bytes": 0,
+    "cgroup_oom_events_observed": 0,
+    "note": "Host-only one-source rebuild; ceiling48 does not imply48 concurrent compiler processes. No compiler peak-RSS claim."
+  },
+  "remaining": [
+    "Bind prepared ownership to actual ZML executable lifecycle and verify command buffers",
+    "Audit all QvQ kernel and integration graph paths including other backends",
+    "Managed external artifact invalidation/lifetimes, grouped/TP/KV integration",
+    "Complete original phased quality/performance/model validation"
+  ]
+}

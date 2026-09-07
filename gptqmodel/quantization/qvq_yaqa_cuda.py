@@ -3,6 +3,7 @@
 
 """Strict FP32 projection tiles for Hopper Sketch-B collection."""
 
+import threading
 from functools import cache
 
 import torch
@@ -12,6 +13,27 @@ try:
     import triton.language as tl
 except ImportError:
     triton = None
+
+
+_PROJECT_WARM_KEYS: set[tuple[object, ...]] = set()
+_PROJECT_WARM_KEYS_LOCK = threading.Lock()
+
+
+def _require_project_warm(key: tuple[object, ...]) -> None:
+    """Reject first Triton compilation from inside a CUDA Graph capture."""
+
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        with _PROJECT_WARM_KEYS_LOCK:
+            warm = key in _PROJECT_WARM_KEYS
+        if not warm:
+            raise RuntimeError(
+                "QVQ YAQA Triton projection must be warmed before CUDA Graph capture"
+            )
+
+
+def _mark_project_warm(key: tuple[object, ...]) -> None:
+    with _PROJECT_WARM_KEYS_LOCK:
+        _PROJECT_WARM_KEYS.add(key)
 
 
 if triton is not None:
@@ -75,10 +97,26 @@ def project(activation: torch.Tensor, projection: torch.Tensor) -> torch.Tensor:
     ):
         return torch.bmm(activation, projection)
     bm, bn = (16, 16) if batch <= 4 else (32, 64)
+    key = (
+        activation.device.type,
+        activation.device.index,
+        "project",
+        batch,
+        tokens,
+        channels,
+        bm,
+        bn,
+        activation.stride(0),
+        activation.stride(1),
+        projection.stride(0),
+        projection.stride(1),
+    )
+    _require_project_warm(key)
     output = torch.empty((batch, tokens, 256), dtype=torch.float32, device=activation.device)
     _project_kernel[(tokens // bm, 256 // bn, batch)](
         activation, projection, output, channels,
         activation.stride(0), activation.stride(1), projection.stride(0), projection.stride(1),
         bm, bn, num_warps=4,
     )
+    _mark_project_warm(key)
     return output

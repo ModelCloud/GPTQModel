@@ -721,6 +721,119 @@ def test_qvq_output_alignment_refines_groups_and_runs_after_every_projection_sub
     align.assert_called_once_with(3, finalize=False)
 
 
+def test_qvq_output_alignment_defers_rank8_until_final_aligned_payload(monkeypatch):
+    from gptqmodel.quantization.qvq_rank8 import Rank8Calibration
+
+    qcfg = QVQConfig(
+        bits=2,
+        rounding="block_ldlq",
+        output_alignment=OutputAlignConfig(),
+        device="cpu",
+        offload_to_disk=False,
+    )
+    processor = _processor(qcfg=qcfg)
+    root = torch.nn.Module()
+    root.proj = torch.nn.Linear(16, 16, bias=False)
+    named = NamedModule(root.proj, name="proj", full_name="proj", layer_index=3)
+    named.state.update(
+        {
+            "trellis": torch.zeros(1, dtype=torch.int32),
+            "SU": torch.ones(16),
+            "SV": torch.ones(16),
+            "_qvq_runtime_config": (
+                2, "pgc16-v1", 2, 2, 16, False, False, True, True, True, None
+            ),
+            "_qvq_original_weight": root.proj.weight.detach().clone(),
+        }
+    )
+    calibration = Rank8Calibration(
+        torch.ones(2, 16), torch.ones(2, 16) * 2, ("train",), ("heldout",)
+    )
+    processor._rank8_alignment_calibration["proj"] = calibration
+    captured = {}
+
+    def fake_fit(payload, original_weight, bias, received_calibration, **kwargs):
+        captured.update(
+            payload=payload,
+            original_weight=original_weight,
+            bias=bias,
+            calibration=received_calibration,
+            kwargs=kwargs,
+        )
+        return torch.ones(16, 8), torch.ones(8, 16), torch.ones(1), {
+            "validated": True,
+            "selected": True,
+            "objective": "output_l2",
+        }
+
+    monkeypatch.setattr(
+        "gptqmodel.quantization.qvq_rank8.fit_rank8_serialized_payload", fake_fit
+    )
+    attachment = processor._output_alignment
+    monkeypatch.setattr(attachment, "modules_are_fully_staged", lambda *args: True)
+    monkeypatch.setattr(attachment, "staged_modules", lambda *args: [named])
+    monkeypatch.setattr(
+        attachment, "align_layer", lambda *args, **kwargs: {"alignment_pass": 1.0}
+    )
+
+    processor.cleanup_subset({"proj": named}, subset_index=0, subset_total=1)
+
+    assert captured["calibration"] is calibration
+    torch.testing.assert_close(captured["payload"]["SU"], named.state["SU"])
+    torch.testing.assert_close(captured["payload"]["SV"], named.state["SV"])
+    torch.testing.assert_close(captured["original_weight"], named.state["_qvq_original_weight"])
+    assert captured["kwargs"]["bits"] == 2
+    assert named.state["rank8_A"].shape == (16, 8)
+    assert named.state["rank8_B"].shape == (8, 16)
+    assert named.state["rank8_metadata"].shape == (1,)
+    assert not processor._rank8_alignment_calibration
+
+
+def test_qvq_output_alignment_failure_discards_deferred_rank8_state(monkeypatch):
+    from gptqmodel.quantization.qvq_rank8 import Rank8Calibration
+
+    qcfg = QVQConfig(
+        bits=2,
+        rounding="block_ldlq",
+        output_alignment=OutputAlignConfig(),
+        device="cpu",
+        offload_to_disk=False,
+    )
+    processor = _processor(qcfg=qcfg)
+    root = torch.nn.Module()
+    root.proj = torch.nn.Linear(16, 16, bias=False)
+    named = NamedModule(root.proj, name="proj", full_name="proj", layer_index=3)
+    named.state.update(
+        {
+            "trellis": torch.zeros(1, dtype=torch.int32),
+            "SU": torch.ones(16),
+            "SV": torch.ones(16),
+            "_qvq_runtime_config": (
+                2, "pgc16-v1", 2, 2, 16, False, False, True, True, True, None
+            ),
+            "_qvq_original_weight": root.proj.weight.detach().clone(),
+        }
+    )
+    processor._rank8_alignment_calibration["proj"] = Rank8Calibration(
+        torch.ones(2, 16), torch.ones(2, 16) * 2, ("train",), ("heldout",)
+    )
+    attachment = processor._output_alignment
+    monkeypatch.setattr(attachment, "modules_are_fully_staged", lambda *args: True)
+    monkeypatch.setattr(attachment, "staged_modules", lambda *args: [named])
+    discarded = []
+    monkeypatch.setattr(attachment, "discard_layer", lambda layer_index: discarded.append(layer_index))
+
+    def fail_alignment(*args, **kwargs):
+        raise RuntimeError("alignment failed")
+
+    monkeypatch.setattr(attachment, "align_layer", fail_alignment)
+    with pytest.raises(RuntimeError, match="alignment failed"):
+        processor.cleanup_subset({"proj": named}, subset_index=0, subset_total=1)
+
+    assert discarded == [3]
+    assert not processor._rank8_alignment_calibration
+
+
 def test_qvq_output_alignment_rejects_moe_from_explicit_module_tree_tags_before_capture():
     qcfg = QVQConfig(
         bits=2,
@@ -1317,6 +1430,126 @@ def test_atomic_swiglu_propagates_selected_reconstructed_weights_before_finalize
         full_name = f"model.layers.0.{name}"
         expected = records[full_name]["candidates"][candidate_id]["weight"]
         torch.testing.assert_close(root.model.layers[0].mlp.__getattr__(role).weight, expected)
+
+
+def test_atomic_swiglu_fits_rank8_after_triplet_selection(monkeypatch):
+    """Rank8 must bind to the selected serialized arm, not candidate zero."""
+
+    from gptqmodel.quantization.qvq_rank8 import Rank8Calibration
+
+    qcfg = QVQConfig(
+        bits=2,
+        format="qvq_v2b2_p32",
+        rounding="yaqa",
+        yaqa={"v2b2_family_mode": "reselect", "minimum_sequences": 1},
+        module_granular_replay={
+            "strategy": "atomic_swiglu",
+            "subsets": ["mlp_gate_up_down"],
+            "search_folds": 2,
+        },
+        device="cpu",
+        offload_to_disk=False,
+    )
+    processor = _processor(qcfg=qcfg)
+    root = torch.nn.Module()
+    root.model = torch.nn.Module()
+    root.model.layers = torch.nn.ModuleList([torch.nn.Module()])
+    root.model.layers[0].mlp = torch.nn.Module()
+    for role in ("gate_proj", "up_proj", "down_proj"):
+        setattr(root.model.layers[0].mlp, role, torch.nn.Linear(4, 4, bias=False))
+    processor._module_replay_model = SimpleNamespace(model=root)
+    processor._atomic_swiglu_inputs["model.layers.0.mlp"] = torch.randn(4, 4)
+
+    subset = {}
+    records = {}
+    for role in ("gate_proj", "up_proj", "down_proj"):
+        relative_name = f"mlp.{role}"
+        full_name = f"model.layers.0.{relative_name}"
+        named = NamedModule(
+            getattr(root.model.layers[0].mlp, role),
+            name=relative_name,
+            full_name=full_name,
+            layer_index=0,
+        )
+        subset[relative_name] = named
+        dense_weight = named.module.weight.detach().clone()
+        candidates = {}
+        for candidate_id in (0, 1, 2, 3, 4):
+            weight = dense_weight + (candidate_id + 1) * 0.01
+            candidates[candidate_id] = {
+                "weight": weight,
+                "serialized_tensors": {"weight": weight},
+                "input_hadamard": True,
+                "output_hadamard": True,
+            }
+        records[full_name] = {
+            "dense_weight": dense_weight,
+            "candidates": candidates,
+            "module_qcfg": qcfg,
+        }
+    processor._atomic_swiglu_candidates.update(records)
+
+    calibration = Rank8Calibration(
+        torch.ones(2, 4), torch.ones(2, 4) * 2, ("train",), ("heldout",)
+    )
+    processor._rank8_atomic_calibration["model.layers.0.mlp.down_proj"] = calibration
+    selected_payload = {}
+    fit_calls = []
+
+    def fake_fit(payload, original_weight, bias, received_calibration, **kwargs):
+        fit_calls.append((payload, original_weight, bias, received_calibration, kwargs))
+        return torch.ones(4, 8), torch.ones(8, 4), torch.ones(1), {"validated": True}
+
+    monkeypatch.setattr(
+        "gptqmodel.quantization.qvq_rank8.fit_rank8_serialized_payload", fake_fit
+    )
+    monkeypatch.setattr(
+        "gptqmodel.looper.qvq_processor.select_swiglu_candidate_triplet",
+        lambda *args, **kwargs: {"beam": [{"gate_index": 1, "up_index": 2, "down_index": 3}]},
+    )
+    monkeypatch.setattr(
+        processor,
+        "_module_replay_metrics",
+        lambda *args, **kwargs: {
+            "kl_forward": 1.0,
+            "top1_agreement": 1.0,
+            "top5_overlap": 1.0,
+            "top10_overlap": 1.0,
+            "tokens": 1,
+        },
+    )
+    monkeypatch.setattr(processor, "_module_replay_score", lambda *args, **kwargs: 0.5)
+    monkeypatch.setattr(processor, "_module_replay_confirmation_passes", lambda *args, **kwargs: True)
+    monkeypatch.setattr(
+        processor,
+        "_module_replay_qlinear_from_tensors",
+        lambda original, name, module_qcfg, tensors, **kwargs: torch.nn.Linear(4, 4, bias=False),
+    )
+    monkeypatch.setattr(NamedModule, "stream_sync", lambda self: None)
+
+    def capture_payload(named, payload):
+        selected_payload[named.full_name] = payload
+
+    monkeypatch.setattr(NamedModule, "stream_state_payload_to_cpu", capture_payload)
+
+    processor._select_atomic_swiglu_subset(subset, subset_index=0, subset_total=1)
+
+    assert len(fit_calls) == 1
+    payload, original_weight, _, received_calibration, kwargs = fit_calls[0]
+    assert received_calibration is calibration
+    torch.testing.assert_close(
+        original_weight, records["model.layers.0.mlp.down_proj"]["dense_weight"]
+    )
+    torch.testing.assert_close(
+        payload["weight"],
+        records["model.layers.0.mlp.down_proj"]["candidates"][3]["serialized_tensors"]["weight"],
+    )
+    assert kwargs["bits"] == 2
+    assert "model.layers.0.mlp.down_proj" in selected_payload, selected_payload
+    assert set(selected_payload["model.layers.0.mlp.down_proj"]) >= {
+        "weight", "rank8_A", "rank8_B", "rank8_metadata"
+    }, selected_payload
+    assert not processor._rank8_atomic_calibration
 
 
 def test_atomic_swiglu_resolves_layer_relative_subset_keys_against_full_names():

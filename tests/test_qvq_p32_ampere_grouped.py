@@ -22,6 +22,7 @@ from gptqmodel.utils.qvq_ampere_cuda import (
     qvq_p32_window_ampere_group_plan,
     qvq_p32_window_ampere_grouped,
     qvq_p32_window_ampere_grouped_packed,
+    qvq_p32_window_ampere_grouped_kernel_candidates,
     qvq_pack_p32_window_ampere_group,
 )
 
@@ -77,6 +78,72 @@ def test_group_plan_resolves_each_child_width_independently(monkeypatch):
     assert calls == [64, 32, 48]
     assert [segment.split_count for segment in plan.segments] == [4, 2, 3]
     assert 144 not in calls
+
+
+def test_grouped_ampere_candidates_tune_children_independently_without_cuda_work():
+    candidates = qvq_p32_window_ampere_grouped_kernel_candidates(
+        (1, 5120),
+        out_features=(1024, 12288),
+        bits=3,
+        sm_count=108,
+        max_candidates=7,
+    )
+
+    # The first tuple is the shape-policy baseline for each child.  Subsequent
+    # tuples vary one child at a time, so a tuner never has to pretend that the
+    # synthetic N=13312 projection has one shared optimum.
+    assert candidates == (
+        (56, 40),
+        (28, 40),
+        (56, 20),
+        (112, 40),
+        (56, 80),
+        (8, 40),
+        (56, 8),
+    )
+    assert len(candidates) == len(set(candidates))
+
+
+def test_ampere_graph_capture_rejects_cold_sm_cache_and_group_pack(monkeypatch):
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+    qvq_ampere_cuda._SM_COUNT_CACHE.clear()
+    with pytest.raises(RuntimeError, match="SM-count cache.*before CUDA Graph capture"):
+        qvq_ampere_cuda._device_sm_count(torch.device("cuda", 0))
+
+    plan = qvq_p32_window_ampere_group_plan(
+        torch.empty((1, 256)),
+        (torch.empty(1),),
+        torch.empty(256),
+        (torch.empty(1),),
+        3,
+        out_features=(64,),
+        bank_alt_ids=(1,),
+        split_counts=(2,),
+    )
+    with pytest.raises(RuntimeError, match="grouped payload.*before CUDA Graph capture"):
+        qvq_pack_p32_window_ampere_group(
+            (torch.empty((64, 24), dtype=torch.int32),),
+            (torch.empty(64, dtype=torch.uint8),),
+            plan,
+        )
+
+
+@pytest.mark.parametrize(
+    ("shape", "widths", "bits", "message"),
+    (
+        ((1, 5119), (1024, 512), 3, "input width"),
+        ((1, 5120), (), 3, "one through three"),
+        ((1, 5120), (1024, 512, 256, 128), 3, "one through three"),
+        ((1, 5120), (1025, 512), 3, "output widths"),
+        ((1, 5120), (1024, 512), 1, "supports W2"),
+    ),
+)
+def test_grouped_ampere_candidates_reject_invalid_shapes(shape, widths, bits, message):
+    with pytest.raises(ValueError, match=message):
+        qvq_p32_window_ampere_grouped_kernel_candidates(
+            shape, out_features=widths, bits=bits
+        )
 
 
 def test_grouped_window_payload_is_lossless_and_storage_neutral():

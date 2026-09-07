@@ -33,6 +33,7 @@ QVQ_CUDA_BITS = QVQ_BITS
 _QVQ_CUDA_OPS_NAME = "gptqmodel_qvq_cuda_ops"
 _QVQ_CUDA_NAMESPACE = "gptqmodel_qvq"
 _QVQ_CUDA_OP: Callable | None = None
+_QVQ_CUDA_V4_OP: Callable | None = None
 _QVQ_CUDA_GROUPED_P32_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_TRUSTED_OP: Callable | None = None
@@ -89,6 +90,26 @@ _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP: Callable | None = None
 _QVQ_CUDA_OP_LOCK = threading.Lock()
 _PGC16_LEVELS: dict[tuple[torch.device, str], torch.Tensor] = {}
 _PGC16_LEVELS_LOCK = threading.Lock()
+
+
+def _require_qvq_cuda_op_warm(op: object | None, name: str) -> None:
+    """Reject lazy native-op registration from inside CUDA Graph capture."""
+
+    if (
+        op is None
+        and torch.cuda.is_available()
+        and torch.cuda.is_current_stream_capturing()
+    ):
+        raise RuntimeError(
+            f"QVQ CUDA {name} operator must be loaded before CUDA Graph capture"
+        )
+
+
+def _reject_qvq_cuda_capture(name: str) -> None:
+    """Reject host-validated quantization helpers during CUDA Graph capture."""
+
+    if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(f"QVQ CUDA {name} cannot run during CUDA Graph capture")
 
 
 def _qvq_cuda_root() -> Path:
@@ -178,6 +199,7 @@ def _extension_api():
 def qvq_cuda_norm_rank_telemetry_snapshot(device: torch.device | str | int) -> dict[str, int | float | bool | str]:
     """Return cumulative exact-pruning work counters for one CUDA device."""
 
+    _reject_qvq_cuda_capture("norm-rank telemetry")
     resolved = torch.device("cuda", device) if isinstance(device, int) else torch.device(device)
     with torch.cuda.device(resolved):
         values = _extension_api().op("qvq_cuda", "norm_rank_telemetry_snapshot")()
@@ -202,6 +224,7 @@ def _qvq_cuda_op() -> Callable:
     """Resolve the operator once without locking steady-state launches."""
 
     global _QVQ_CUDA_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_OP, "gemv")
     if _QVQ_CUDA_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_OP is None:
@@ -209,10 +232,23 @@ def _qvq_cuda_op() -> Callable:
     return _QVQ_CUDA_OP
 
 
+def _qvq_cuda_v4_op() -> Callable:
+    """Resolve the vector-size-four GEMV without lazy graph registration."""
+
+    global _QVQ_CUDA_V4_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_V4_OP, "gemv_v4")
+    if _QVQ_CUDA_V4_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_V4_OP is None:
+                _QVQ_CUDA_V4_OP = _extension_api().op("qvq_cuda", "gemv_v4")
+    return _QVQ_CUDA_V4_OP
+
+
 def _qvq_cuda_grouped_p32_op() -> Callable:
     """Resolve the grouped P32 GEMV with compact alternative-bank segments."""
 
     global _QVQ_CUDA_GROUPED_P32_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_GROUPED_P32_OP, "grouped_p32")
     if _QVQ_CUDA_GROUPED_P32_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_GROUPED_P32_OP is None:
@@ -226,6 +262,7 @@ def _qvq_cuda_viterbi_op() -> Callable:
     """Resolve the native Viterbi operator once without locking launches."""
 
     global _QVQ_CUDA_VITERBI_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_OP, "viterbi")
     if _QVQ_CUDA_VITERBI_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_OP is None:
@@ -237,6 +274,7 @@ def _qvq_cuda_viterbi_trusted_op() -> Callable:
     """Resolve YAQA's structurally checked, value-prevalidated V2 operator."""
 
     global _QVQ_CUDA_VITERBI_TRUSTED_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_TRUSTED_OP, "viterbi_trusted")
     if _QVQ_CUDA_VITERBI_TRUSTED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_TRUSTED_OP is None:
@@ -248,6 +286,7 @@ def _qvq_cuda_viterbi_tail_trusted_op() -> Callable:
     """Resolve YAQA's fused canonical two-pass V2 operator."""
 
     global _QVQ_CUDA_VITERBI_TAIL_TRUSTED_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_TAIL_TRUSTED_OP, "viterbi_tail_trusted")
     if _QVQ_CUDA_VITERBI_TAIL_TRUSTED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_TAIL_TRUSTED_OP is None:
@@ -261,6 +300,7 @@ def _qvq_cuda_hadamard_op() -> Callable:
     """Resolve the fused Hadamard operator once without locking steady-state launches."""
 
     global _QVQ_CUDA_HADAMARD_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_HADAMARD_OP, "hadamard")
     if _QVQ_CUDA_HADAMARD_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_HADAMARD_OP is None:
@@ -272,6 +312,7 @@ def _qvq_cuda_quantize_fp8_per_row_op() -> Callable:
     """Resolve the fused dynamic per-row E4M3 quantizer once."""
 
     global _QVQ_CUDA_QUANTIZE_FP8_PER_ROW_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_QUANTIZE_FP8_PER_ROW_OP, "quantize_fp8_per_row")
     if _QVQ_CUDA_QUANTIZE_FP8_PER_ROW_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_QUANTIZE_FP8_PER_ROW_OP is None:
@@ -285,6 +326,7 @@ def _qvq_cuda_hadamard_pair_op() -> Callable:
     """Resolve the paired output-recovery operator once."""
 
     global _QVQ_CUDA_HADAMARD_PAIR_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_HADAMARD_PAIR_OP, "hadamard_pair_fp32_to_fp16")
     if _QVQ_CUDA_HADAMARD_PAIR_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_HADAMARD_PAIR_OP is None:
@@ -298,6 +340,7 @@ def _qvq_cuda_hadamard_input_multiblock_op() -> Callable:
     """Resolve the experimental Hopper N=2048 multiblock input transform."""
 
     global _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP, "hadamard_input_fp16_padded_multiblock")
     if _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_HADAMARD_INPUT_MULTIBLOCK_OP is None:
@@ -311,6 +354,7 @@ def _qvq_cuda_hadamard_output_multiblock_op() -> Callable:
     """Resolve the Hopper N=2048 multiblock output-recovery operator once."""
 
     global _QVQ_CUDA_HADAMARD_OUTPUT_MULTIBLOCK_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_HADAMARD_OUTPUT_MULTIBLOCK_OP, "hadamard_fp32_to_fp16_multiblock")
     if _QVQ_CUDA_HADAMARD_OUTPUT_MULTIBLOCK_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_HADAMARD_OUTPUT_MULTIBLOCK_OP is None:
@@ -324,6 +368,7 @@ def _qvq_cuda_hadamard_ordered_split16_op() -> Callable:
     """Resolve the fused ordered split-16 down-recovery operator once."""
 
     global _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP, "hadamard_ordered_split16_fp32_to_fp16")
     if _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_HADAMARD_ORDERED_SPLIT16_OP is None:
@@ -337,6 +382,7 @@ def _qvq_cuda_hadamard_pair_multiblock_op() -> Callable:
     """Resolve the experimental Hopper N=8192 multiblock recovery operator."""
 
     global _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP, "hadamard_pair_fp32_to_fp16_multiblock")
     if _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_HADAMARD_PAIR_MULTIBLOCK_OP is None:
@@ -350,6 +396,7 @@ def _qvq_cuda_hadamard_pair_swiglu_precondition_multiblock_op() -> Callable:
     """Resolve the fused Hopper recovery-to-precondition experiment."""
 
     global _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP, "hadamard_pair_swiglu_precondition_multiblock")
     if _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_HADAMARD_PAIR_SWIGLU_PRECONDITION_MULTIBLOCK_OP is None:
@@ -365,6 +412,7 @@ def _qvq_cuda_folded_swiglu_precondition_fp32_op() -> Callable:
     """Resolve the Hopper folded-intermediate recovery/SwiGLU operator."""
 
     global _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP, "folded_swiglu_precondition_fp32")
     if _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_FP32_OP is None:
@@ -378,6 +426,7 @@ def _qvq_cuda_folded_swiglu_precondition_ordered_fp32_op() -> Callable:
     """Resolve the fused ordered-reduction folded-intermediate operator."""
 
     global _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_ORDERED_FP32_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_ORDERED_FP32_OP, "folded_swiglu_precondition_ordered_fp32")
     if _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_ORDERED_FP32_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_FOLDED_SWIGLU_PRECONDITION_ORDERED_FP32_OP is None:
@@ -393,6 +442,7 @@ def _qvq_cuda_qwen_composite_recovery_fp32_to_fp16_op() -> Callable:
     """Resolve the native Qwen 5120-wide composite recovery operator."""
 
     global _QVQ_CUDA_QWEN_COMPOSITE_RECOVERY_FP32_TO_FP16_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_QWEN_COMPOSITE_RECOVERY_FP32_TO_FP16_OP, "qwen_composite_recovery_fp32_to_fp16")
     if _QVQ_CUDA_QWEN_COMPOSITE_RECOVERY_FP32_TO_FP16_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_QWEN_COMPOSITE_RECOVERY_FP32_TO_FP16_OP is None:
@@ -408,6 +458,7 @@ def _qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16_op() -> Callable:
     """Resolve the ordered-partial Qwen composite recovery operator."""
 
     global _QVQ_CUDA_QWEN_COMPOSITE_ORDERED_RECOVERY_FP32_TO_FP16_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_QWEN_COMPOSITE_ORDERED_RECOVERY_FP32_TO_FP16_OP, "qwen_composite_ordered_recovery_fp32_to_fp16")
     if _QVQ_CUDA_QWEN_COMPOSITE_ORDERED_RECOVERY_FP32_TO_FP16_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_QWEN_COMPOSITE_ORDERED_RECOVERY_FP32_TO_FP16_OP is None:
@@ -424,6 +475,7 @@ def _qvq_cuda_qwen_composite_input_fp16_padded_op() -> Callable:
     """Resolve the native padded Qwen 5120-wide input transform."""
 
     global _QVQ_CUDA_QWEN_COMPOSITE_INPUT_FP16_PADDED_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_QWEN_COMPOSITE_INPUT_FP16_PADDED_OP, "qwen_composite_input_fp16_padded")
     if _QVQ_CUDA_QWEN_COMPOSITE_INPUT_FP16_PADDED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_QWEN_COMPOSITE_INPUT_FP16_PADDED_OP is None:
@@ -437,6 +489,7 @@ def _qvq_cuda_swiglu_precondition_op() -> Callable:
     """Resolve the fused SwiGLU-product/down-input-transform operator once."""
 
     global _QVQ_CUDA_SWIGLU_PRECONDITION_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_SWIGLU_PRECONDITION_OP, "swiglu_precondition")
     if _QVQ_CUDA_SWIGLU_PRECONDITION_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_SWIGLU_PRECONDITION_OP is None:
@@ -450,6 +503,7 @@ def _qvq_cuda_swiglu_precondition_multiblock_op() -> Callable:
     """Resolve the exact Hopper N=8192 multiblock precondition operator."""
 
     global _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP, "swiglu_precondition_multiblock")
     if _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP is None:
@@ -463,6 +517,7 @@ def _qvq_cuda_yaqa_feedback_op() -> Callable:
     """Resolve the fused factored-YAQA feedback operator once."""
 
     global _QVQ_CUDA_YAQA_FEEDBACK_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_YAQA_FEEDBACK_OP, "yaqa_feedback")
     if _QVQ_CUDA_YAQA_FEEDBACK_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_YAQA_FEEDBACK_OP is None:
@@ -474,6 +529,7 @@ def _qvq_cuda_yaqa_feedback_update_op() -> Callable:
     """Resolve the fused in-place factored-YAQA cache update operator once."""
 
     global _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP, "yaqa_feedback_update_")
     if _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP is None:
@@ -494,6 +550,7 @@ def qvq_cuda_swiglu_proxy_scales(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run fused CUDA Smooth-SwiGLU statistics and analytical group solve."""
     global _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_SWIGLU_PROXY_SCALES_OP, "swiglu_proxy_scales")
     if _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP is None:
@@ -509,6 +566,7 @@ def _qvq_cuda_viterbi_v4_op() -> Callable:
     """Resolve the native vector-size-four Viterbi operator once."""
 
     global _QVQ_CUDA_VITERBI_V4_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_V4_OP, "viterbi_v4")
     if _QVQ_CUDA_VITERBI_V4_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_V4_OP is None:
@@ -520,6 +578,7 @@ def _qvq_cuda_viterbi_banked_op() -> Callable:
     """Resolve the bank-batched native Viterbi operator once."""
 
     global _QVQ_CUDA_VITERBI_BANKED_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_BANKED_OP, "viterbi_banked")
     if _QVQ_CUDA_VITERBI_BANKED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_BANKED_OP is None:
@@ -531,6 +590,7 @@ def _qvq_cuda_viterbi_v2_segment_banked_op() -> Callable:
     """Resolve the coupled segmented-bank V2 operator once."""
 
     global _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP, "viterbi_v2_segment_banked")
     if _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_V2_SEGMENT_BANKED_OP is None:
@@ -544,6 +604,7 @@ def _qvq_cuda_viterbi_v2_segment_g_op() -> Callable:
     """Resolve the G-only segmented V2 operator once."""
 
     global _QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP, "viterbi_v2_segment_g")
     if _QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_V2_SEGMENT_G_OP is None:
@@ -557,6 +618,7 @@ def _qvq_cuda_viterbi_v2_segment_grid_op() -> Callable:
     """Resolve the grid-parallel G-only segmented V2 operator once."""
 
     global _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_OP, "viterbi_v2_segment_grid")
     if _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_OP is None:
@@ -570,6 +632,7 @@ def _qvq_cuda_viterbi_v2_segment_grid_trusted_op() -> Callable:
     """Resolve YAQA's prevalidated grid-parallel segmented V2 operator."""
 
     global _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_TRUSTED_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_TRUSTED_OP, "viterbi_v2_segment_grid_trusted")
     if _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_TRUSTED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_TRUSTED_OP is None:
@@ -583,6 +646,7 @@ def _qvq_cuda_viterbi_v2_segment_tail_trusted_op() -> Callable:
     """Resolve YAQA's fused two-pass segmented V2 operator."""
 
     global _QVQ_CUDA_VITERBI_V2_SEGMENT_TAIL_TRUSTED_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_V2_SEGMENT_TAIL_TRUSTED_OP, "viterbi_v2_segment_tail_trusted")
     if _QVQ_CUDA_VITERBI_V2_SEGMENT_TAIL_TRUSTED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_V2_SEGMENT_TAIL_TRUSTED_OP is None:
@@ -596,6 +660,7 @@ def _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op() -> Callable:
     """Resolve YAQA's midpoint-only provisional segmented V2 operator."""
 
     global _QVQ_CUDA_VITERBI_V2_SEGMENT_MIDPOINT_TRUSTED_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_V2_SEGMENT_MIDPOINT_TRUSTED_OP, "viterbi_v2_segment_midpoint_trusted")
     if _QVQ_CUDA_VITERBI_V2_SEGMENT_MIDPOINT_TRUSTED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_V2_SEGMENT_MIDPOINT_TRUSTED_OP is None:
@@ -609,6 +674,7 @@ def _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op() -> Callable:
     """Resolve the family-batched B2-P32 segmented V2 operator."""
 
     global _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP, "viterbi_v2_segment_family_grid_trusted")
     if _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP is None:
         with _QVQ_CUDA_OP_LOCK:
             if _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP is None:
@@ -628,6 +694,7 @@ def qvq_cuda_viterbi(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run the exact L16 Viterbi recurrence in one persistent block per sequence."""
 
+    _reject_qvq_cuda_capture("Viterbi quantization")
     bits = normalize_qvq_rate(bits)
     if vector_size not in (2, 4):
         raise ValueError("QVQ CUDA Viterbi vector_size must be 2 or 4")
@@ -688,6 +755,7 @@ def _qvq_cuda_viterbi_trusted(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run V2 after YAQA has deferred all dynamic value/range checks."""
 
+    _reject_qvq_cuda_capture("trusted Viterbi quantization")
     transition_bits = qvq_transition_bits(normalize_qvq_rate(bits), vector_size=2)
     return _qvq_cuda_viterbi_trusted_op()(sequences, codebook, transition_bits, overlap, step_weights)
 
@@ -706,6 +774,7 @@ def qvq_cuda_viterbi_banked(
     retained as a separately computed oracle.
     """
 
+    _reject_qvq_cuda_capture("banked Viterbi quantization")
     bits = normalize_qvq_rate(bits)
     transition_bits = qvq_transition_bits(bits, vector_size=4)
     if transition_bits not in (4, 6, 8, 10, 12, 14, 16):
@@ -774,6 +843,7 @@ def qvq_cuda_viterbi_v2_segment_banked(
     direct low-level callers keep the historical automatic behavior.
     """
 
+    _reject_qvq_cuda_capture("segmented Viterbi quantization")
     bits = normalize_qvq_rate(bits)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     if transition_bits not in (2, 3, 4, 5, 6, 7):
@@ -1717,7 +1787,22 @@ def qvq_cuda_error() -> str:
 
 
 def prewarm_qvq_cuda() -> bool:
-    return _extension_api().load(name="qvq_cuda")["qvq_cuda"]
+    """Load the extension and resolve the core inference handles eagerly.
+
+    Graph owners call this before capture because some shapes take the native
+    window path only after a policy change, while another shape may first use
+    the generic GEMV fallback.  Resolving both handles here keeps either path
+    free of first-use registration during capture.
+    """
+
+    _reject_qvq_cuda_capture("extension prewarm")
+    loaded = _extension_api().load(name="qvq_cuda")["qvq_cuda"]
+    if not loaded:
+        return False
+    _qvq_cuda_op()
+    _qvq_cuda_v4_op()
+    _qvq_cuda_hadamard_op()
+    return True
 
 
 def _integer_argument(name: str, value: int) -> int:
@@ -1743,6 +1828,7 @@ def _pgc16_levels(
     key = (device, str(codebook_version).strip().lower())
     levels = _PGC16_LEVELS.get(key)
     if levels is None:
+        _require_qvq_cuda_op_warm(levels, "PGC16 level table")
         with _PGC16_LEVELS_LOCK:
             levels = _PGC16_LEVELS.get(key)
             if levels is None:
@@ -1767,6 +1853,7 @@ def qvq_cuda_gemv(
     bank_alt_ids: torch.Tensor | None = None,
     bank_alt_boundaries: tuple[int, ...] | None = None,
     _bank_alt_ids_validated: bool = False,
+    _bank_ids_validated: bool = False,
 ) -> torch.Tensor:
     """Multiply transformed activations by planar QVQ tiles on the current CUDA stream.
 
@@ -1789,6 +1876,8 @@ def qvq_cuda_gemv(
     bank_alt_id = _integer_argument("bank_alt_id", bank_alt_id)
     if not isinstance(_bank_alt_ids_validated, bool):
         raise TypeError("_bank_alt_ids_validated must be boolean")
+    if not isinstance(_bank_ids_validated, bool):
+        raise TypeError("_bank_ids_validated must be boolean")
     if (bank_alt_ids is not None or bank_alt_boundaries is not None) and not v2b2_p32:
         raise ValueError("QVQ CUDA grouped alternative-bank metadata requires V2B2-P32")
     if (bank_alt_ids is None) != (bank_alt_boundaries is None):
@@ -1832,7 +1921,11 @@ def qvq_cuda_gemv(
         expected_selectors = expected[0] if (v2b4_p64 or v2b2_p32) else expected[0]
         if tuple(bank_ids.shape) != (expected_selectors,):
             raise ValueError(f"QVQ CUDA bank selectors must have shape {(expected_selectors,)}")
-        if vector_size == 4 and torch.any(bank_ids > 3):
+        if vector_size == 4 and not _bank_ids_validated and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "QVQ CUDA V4 bank selectors must be validated before CUDA Graph capture"
+            )
+        if vector_size == 4 and not _bank_ids_validated and torch.any(bank_ids > 3):
             raise ValueError("QVQ V4 bank selectors must be in [0, 3]")
     if bank_alt_ids is not None:
         if bank_alt_ids.device != x.device or bank_alt_ids.dtype != torch.uint8:
@@ -1845,6 +1938,10 @@ def qvq_cuda_gemv(
         if bank_alt_ids.ndim != 1 or group_count not in (2, 3):
             raise ValueError(
                 "QVQ CUDA grouped alternative-bank IDs must have shape (2,) or (3,)"
+            )
+        if not _bank_alt_ids_validated and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "QVQ CUDA grouped bank selectors must be validated before CUDA Graph capture"
             )
         if not _bank_alt_ids_validated and torch.any(
             (bank_alt_ids < 1) | (bank_alt_ids > 3)
@@ -1890,11 +1987,11 @@ def qvq_cuda_gemv(
             boundaries[0],
             boundaries[1] if len(boundaries) == 2 else n // 16,
         )
-    op = _qvq_cuda_op()
     if vector_size == 4:
-        return torch.ops.gptqmodel_qvq.gemv_v4(
+        return _qvq_cuda_v4_op()(
             x, trellis, levels, transition_bits, n, output_fp32, bank_ids
         )
+    op = _qvq_cuda_op()
     bank_mode = 2 if v2b4_p64 else 3 if v2b2_p32 else 0
     return op(x, trellis, levels, transition_bits, n, output_fp32, bank_ids, bank_mode, bank_alt_id)
 

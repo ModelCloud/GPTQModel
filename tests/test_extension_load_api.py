@@ -30,7 +30,9 @@ import gptqmodel.utils.marlin_moe as marlin_moe_utils
 import gptqmodel.utils.pangolin as pangolin_utils
 import gptqmodel.utils.paroquant as paroquant_utils
 import gptqmodel.utils.qqq as qqq_utils
+import gptqmodel.utils.qvq_cpu as qvq_cpu_utils
 import gptqmodel.utils.qvq_cuda as qvq_cuda_utils
+import gptqmodel.utils.qvq_window_abi as qvq_window_abi_utils
 import gptqmodel.utils.swordfish as swordfish_utils
 import gptqmodel.utils.trilin as trilin_utils
 import gptqmodel_ext.planar as planar_api
@@ -82,6 +84,8 @@ def _install_fake_extensions(monkeypatch):
         "pack_block_cpu": _FakeExtension("pack_block_cpu"),
         "gptq_block": _FakeExtension("GPTQ CUDA block quantization"),
         "qvq_cuda": _FakeExtension("QVQ planar CUDA GEMV"),
+        "qvq_cpu": _FakeExtension("QVQ CPU"),
+        "qvq_window_abi": _FakeExtension("P32 window native ABI"),
         "floatx_cpu": _FakeExtension("floatx_cpu"),
         "diagnostic_metrics_cpu": _FakeExtension("diagnostic_metrics_cpu"),
         "diagnostic_metrics_cuda": _FakeExtension("diagnostic_metrics_cuda"),
@@ -124,6 +128,10 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(gptq_block_utils, "gptq_block_cuda_supported", lambda: True)
     monkeypatch.setattr(qvq_cuda_utils, "_QVQ_CUDA_TORCH_OPS_EXTENSION", fakes["qvq_cuda"])
     monkeypatch.setattr(qvq_cuda_utils, "qvq_cuda_supported", lambda: True)
+    monkeypatch.setattr(qvq_cpu_utils, "_QVQ_CPU_TORCH_OPS_EXTENSION", fakes["qvq_cpu"])
+    monkeypatch.setattr(qvq_cpu_utils, "qvq_cpu_supported", lambda: True)
+    monkeypatch.setattr(qvq_window_abi_utils, "_EXTENSION", fakes["qvq_window_abi"])
+    monkeypatch.setattr(qvq_window_abi_utils, "native_window_abi_supported", lambda: True)
     monkeypatch.setattr(cpp_utils, "_floatx_cpu_extension", lambda: fakes["floatx_cpu"])
     monkeypatch.setattr(
         diagnostic_metrics_utils,
@@ -250,6 +258,8 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "pack_block_cpu": True,
         "gptq_block": True,
         "qvq_cuda": True,
+        "qvq_cpu": True,
+        "qvq_window_abi": True,
         "floatx_cpu": True,
         "diagnostic_metrics_cpu": True,
         "diagnostic_metrics_cuda": True,
@@ -380,6 +390,19 @@ def test_op_routes_through_extension_api(monkeypatch):
     op = extension_api.op("awq", "test_op")
 
     assert op is awq_utils._AWQ_TORCH_OPS_EXTENSION._ops["test_op"]
+
+
+def test_qvq_cuda_op_rejects_cold_jit_load_during_graph_capture(monkeypatch):
+    fakes = _install_fake_extensions(monkeypatch)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: True)
+
+    with pytest.raises(RuntimeError, match="loaded before CUDA Graph capture"):
+        extension_api.op("qvq_cuda", "test_op")
+    assert fakes["qvq_cuda"].load_calls == 0
+
+    fakes["qvq_cuda"].already_loaded = True
+    assert extension_api.op("qvq_cuda", "test_op") is fakes["qvq_cuda"]._ops["test_op"]
+    assert fakes["qvq_cuda"].load_calls == 1
 
 
 def test_load_serializes_same_extension_across_threads(monkeypatch):

@@ -1,0 +1,57 @@
+{
+  "scope": "Original dense Llama teacher activation capture only; no quantization quality claim.",
+  "model": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "source": "/root/qvq-data/calibration-fisher-scaling-v2/yaqa182_nm128.parquet",
+  "source_sha256": "d773835b52f8b5988e53ff778d591ee0f51a1da3ea1aaf2177587f83a98c20ff",
+  "gpu": "_CudaDeviceProperties(name='NVIDIA H200', major=9, minor=0, total_memory=143148MB, multi_processor_count=132, uuid=0c667065-5c47-38ce-0b0a-d211392ce9ea, pci_bus_id=28, pci_device_id=0, pci_domain_id=0, L2_cache_size=60MB)",
+  "modules": {
+    "model.layers.0.self_attn.q_proj": {
+      "train_shape": [
+        64,
+        2048
+      ],
+      "heldout_shape": [
+        64,
+        2048
+      ],
+      "dtype": "torch.float16",
+      "train_ids": [
+        "02e78cfbdf9742721d589be8ab574666cbcd8bb9d81843ac805c0f7b818102d0",
+        "034fb2a03c6a4864a5774ad8ac7c0b2d95c4f449a4a62893222cb40ea7f3690a"
+      ],
+      "heldout_ids": [
+        "8d4e3c1a569ef253413a9819136cb79ebc0c3e994594d23fd1e363dcebccb257",
+        "a383282bfa98ef6d6a96ce98989e3725700d1e85ce008edf57830500331ab7fe"
+      ],
+      "activation_hash": "32ef63ef38607bbd3e0eec47b6290bbef3c2594d26ba7190bc0068a41f9dfb62",
+      "teacher_hash": "015b9537caecf9a7eee20df605d38a8b5fd81594898e2b6a4069a446e1f4a643"
+    },
+    "model.layers.0.mlp.gate_proj": {
+      "train_shape": [
+        64,
+        2048
+      ],
+      "heldout_shape": [
+        64,
+        2048
+      ],
+      "dtype": "torch.float16",
+      "train_ids": [
+        "02e78cfbdf9742721d589be8ab574666cbcd8bb9d81843ac805c0f7b818102d0",
+        "034fb2a03c6a4864a5774ad8ac7c0b2d95c4f449a4a62893222cb40ea7f3690a"
+      ],
+      "heldout_ids": [
+        "8d4e3c1a569ef253413a9819136cb79ebc0c3e994594d23fd1e363dcebccb257",
+        "a383282bfa98ef6d6a96ce98989e3725700d1e85ce008edf57830500331ab7fe"
+      ],
+      "activation_hash": "a097057b8317e532029dfa7f4da36149d9aec281077ae7b9cb1c3fa8149d4d1f",
+      "teacher_hash": "b30f975c3168ca8948172d5086625e59dad882c3e4b86131a5fdb71fc2674925"
+    }
+  },
+  "validation": {
+    "public_quantize_save_reload": "tests/test_qvq_rank8_capture.py::test_public_quantize_captures_and_fits_in_one_job",
+    "regression_passed": 75,
+    "deselected": 272,
+    "log": "/tmp/qvq-rank8-public-regression.log"
+  }
+}

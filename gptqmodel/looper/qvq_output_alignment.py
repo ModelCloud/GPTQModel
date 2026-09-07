@@ -572,6 +572,25 @@ class QVQOutputAlignmentAttachment:
         with self._lock:
             self._layers.pop(layer_index, None)
 
+    def staged_modules(self, layer_index: int) -> list[NamedModule]:
+        """Return the layer's registered modules while alignment state is live.
+
+        The processor uses this only after the final alignment pass to attach
+        deferred rank8 factors. Keeping the lookup here preserves the
+        attachment's layer lock and avoids reaching into its private state.
+        """
+
+        with self._lock:
+            state = self._layers.get(layer_index)
+        if state is None:
+            return []
+        with state.lock:
+            return [
+                module
+                for module in state.modules.values()
+                if {"trellis", "SU", "SV", "_qvq_runtime_config"}.issubset(module.state)
+            ]
+
     def _align_layer_impl(self, layer_index: int, *, finalize: bool) -> Optional[dict[str, float]]:
         started = time.perf_counter()
         with self._lock:

@@ -1,0 +1,842 @@
+{
+  "scope": "synthetic kernel/performance, not model quality",
+  "baseline_revision": "ee782021cc6366bd5aba55bd8e0ca7eadfa8c5f0",
+  "candidate_parent_revision": "0291756c422a2512b9a577d10c7f75c2e9dbbfee",
+  "candidate_sources": {
+    "gptqmodel/quantization/qvq_rank8.py": "e633bfe7fda7ed2286d43227d8bcbbf4ea3ee8acee5e0f0be39f7fb476aa096f",
+    "gptqmodel/nn_modules/qlinear/qvq.py": "31ad23e37ac5473574c135e2f9edec0a3f0cee3faeede72640a8424c7e8cdd9b",
+    "gptqmodel/nn_modules/qvq_grouped_runtime.py": "184937e93901f1eb0b2a132bfa8bb4294c181bc83799eece6f16f417d14af81c",
+    "gptqmodel/utils/qvq_rank8_triton.py": "aebae7c5185b613a8b6c7d944aaf9719bc2990edd6b095c22eb3dc52277f5d63",
+    "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu": "873595ce146e2b1e3bdb9ec79f77f9300dccb657fbc09df10e7a16c56ead2715"
+  },
+  "hardware": {
+    "name": "NVIDIA H200",
+    "uuid": "0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "sm_count": 132,
+    "memory": 150101688320,
+    "capability": [
+      9,
+      0
+    ]
+  },
+  "software": {
+    "torch": "2.15.0.dev20260901+cu130",
+    "cuda": "13.0"
+  },
+  "tests": {
+    "passed": 331,
+    "skipped": 86
+  },
+  "benchmark": {
+    "k": 2048,
+    "n": 2048,
+    "bits": 3,
+    "dtype": "float16",
+    "samples": 30,
+    "graph_replays_per_sample": 20
+  },
+  "geometry_sweep": [
+    {
+      "bm": 0,
+      "bn": 0,
+      "rows": [
+        {
+          "m": 1,
+          "mode": "off",
+          "median_us": 34.07839983701706,
+          "p95_us": 34.164801239967346,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 1,
+          "mode": "on",
+          "median_us": 42.819198966026306,
+          "p95_us": 42.85440146923065,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "off",
+          "median_us": 33.984799683094025,
+          "p95_us": 33.99839997291565,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "on",
+          "median_us": 46.46000117063522,
+          "p95_us": 46.47679924964905,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "off",
+          "median_us": 36.57119870185852,
+          "p95_us": 36.59040033817291,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "on",
+          "median_us": 50.123199820518494,
+          "p95_us": 50.15680193901062,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "off",
+          "median_us": 67.93919801712036,
+          "p95_us": 68.0351972579956,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "on",
+          "median_us": 89.4815981388092,
+          "p95_us": 89.53120112419128,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "off",
+          "median_us": 243.41440200805664,
+          "p95_us": 243.63679885864258,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "on",
+          "median_us": 273.39760065078735,
+          "p95_us": 273.60479831695557,
+          "mae": 0.0,
+          "max": 0.0
+        }
+      ]
+    },
+    {
+      "bm": 32,
+      "bn": 64,
+      "rows": [
+        {
+          "m": 1,
+          "mode": "off",
+          "median_us": 39.57040011882782,
+          "p95_us": 39.63040113449097,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 1,
+          "mode": "on",
+          "median_us": 48.14639985561371,
+          "p95_us": 48.17759990692139,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "off",
+          "median_us": 40.118399262428284,
+          "p95_us": 40.163201093673706,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "on",
+          "median_us": 52.39519774913788,
+          "p95_us": 52.454400062561035,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "off",
+          "median_us": 40.55119901895523,
+          "p95_us": 40.57759940624237,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "on",
+          "median_us": 53.805601596832275,
+          "p95_us": 53.85919809341431,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "off",
+          "median_us": 98.03920090198517,
+          "p95_us": 98.78079891204834,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "on",
+          "median_us": 121.18560075759888,
+          "p95_us": 121.52320146560669,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "off",
+          "median_us": 326.1792063713074,
+          "p95_us": 326.3391971588135,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "on",
+          "median_us": 356.14320039749146,
+          "p95_us": 356.34400844573975,
+          "mae": 0.0,
+          "max": 0.0
+        }
+      ]
+    },
+    {
+      "bm": 32,
+      "bn": 128,
+      "rows": [
+        {
+          "m": 1,
+          "mode": "off",
+          "median_us": 40.28880000114441,
+          "p95_us": 40.33119976520538,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 1,
+          "mode": "on",
+          "median_us": 48.71679991483688,
+          "p95_us": 48.791998624801636,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "off",
+          "median_us": 40.94559997320175,
+          "p95_us": 40.97599983215332,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "on",
+          "median_us": 52.96719968318939,
+          "p95_us": 53.014397621154785,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "off",
+          "median_us": 41.176800429821014,
+          "p95_us": 41.21919870376587,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "on",
+          "median_us": 54.287999868392944,
+          "p95_us": 54.35199737548828,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "off",
+          "median_us": 81.45360052585602,
+          "p95_us": 81.50879740715027,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "on",
+          "median_us": 103.08079719543457,
+          "p95_us": 103.16319465637207,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "off",
+          "median_us": 293.2719945907593,
+          "p95_us": 293.61119270324707,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "on",
+          "median_us": 323.60159158706665,
+          "p95_us": 324.23040866851807,
+          "mae": 0.0,
+          "max": 0.0
+        }
+      ]
+    },
+    {
+      "bm": 64,
+      "bn": 64,
+      "rows": [
+        {
+          "m": 1,
+          "mode": "off",
+          "median_us": 35.94079911708832,
+          "p95_us": 36.01759970188141,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 1,
+          "mode": "on",
+          "median_us": 44.491998851299286,
+          "p95_us": 44.521600008010864,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "off",
+          "median_us": 36.580801010131836,
+          "p95_us": 36.606401205062866,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "on",
+          "median_us": 48.897600173950195,
+          "p95_us": 48.93760085105896,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "off",
+          "median_us": 36.47119998931885,
+          "p95_us": 36.51039898395538,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "on",
+          "median_us": 49.89360123872757,
+          "p95_us": 49.935999512672424,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "off",
+          "median_us": 69.48320269584656,
+          "p95_us": 69.52800154685974,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "on",
+          "median_us": 91.20000004768372,
+          "p95_us": 91.31360054016113,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "off",
+          "median_us": 250.54080486297607,
+          "p95_us": 250.7040023803711,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "on",
+          "median_us": 280.94000816345215,
+          "p95_us": 281.33599758148193,
+          "mae": 0.0,
+          "max": 0.0
+        }
+      ]
+    },
+    {
+      "bm": 64,
+      "bn": 128,
+      "rows": [
+        {
+          "m": 1,
+          "mode": "off",
+          "median_us": 45.33519893884659,
+          "p95_us": 45.38399875164032,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 1,
+          "mode": "on",
+          "median_us": 53.80399823188782,
+          "p95_us": 53.84960174560547,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "off",
+          "median_us": 46.05040103197098,
+          "p95_us": 46.10719978809357,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "on",
+          "median_us": 58.19680094718933,
+          "p95_us": 58.23519825935364,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "off",
+          "median_us": 45.976001024246216,
+          "p95_us": 46.030399203300476,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "on",
+          "median_us": 59.46719944477081,
+          "p95_us": 59.52799916267395,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "off",
+          "median_us": 71.80320024490356,
+          "p95_us": 71.93120121955872,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "on",
+          "median_us": 93.28400194644928,
+          "p95_us": 93.367999792099,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "off",
+          "median_us": 238.69760036468506,
+          "p95_us": 238.87999057769775,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "on",
+          "median_us": 269.15520429611206,
+          "p95_us": 269.54400539398193,
+          "mae": 0.0,
+          "max": 0.0
+        }
+      ]
+    },
+    {
+      "bm": 128,
+      "bn": 64,
+      "rows": [
+        {
+          "m": 1,
+          "mode": "off",
+          "median_us": 42.43120104074478,
+          "p95_us": 42.46880114078522,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 1,
+          "mode": "on",
+          "median_us": 50.946399569511414,
+          "p95_us": 50.992000102996826,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "off",
+          "median_us": 43.02079975605011,
+          "p95_us": 43.04960072040558,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "on",
+          "median_us": 55.35679757595062,
+          "p95_us": 55.431997776031494,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "off",
+          "median_us": 42.65040010213852,
+          "p95_us": 42.68159866333008,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "on",
+          "median_us": 56.13679885864258,
+          "p95_us": 56.1631977558136,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "off",
+          "median_us": 67.70000159740448,
+          "p95_us": 67.740797996521,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "on",
+          "median_us": 89.35680091381073,
+          "p95_us": 89.45279717445374,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "off",
+          "median_us": 243.51840019226074,
+          "p95_us": 243.65599155426025,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "on",
+          "median_us": 273.52319955825806,
+          "p95_us": 273.95360469818115,
+          "mae": 0.0,
+          "max": 0.0
+        }
+      ]
+    },
+    {
+      "bm": 128,
+      "bn": 128,
+      "rows": [
+        {
+          "m": 1,
+          "mode": "off",
+          "median_us": 52.38320231437683,
+          "p95_us": 52.48640179634094,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 1,
+          "mode": "on",
+          "median_us": 60.83759963512421,
+          "p95_us": 60.91039776802063,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "off",
+          "median_us": 52.89760231971741,
+          "p95_us": 52.99360156059265,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 16,
+          "mode": "on",
+          "median_us": 65.09279906749725,
+          "p95_us": 65.21120071411133,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "off",
+          "median_us": 52.618399262428284,
+          "p95_us": 52.6960015296936,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 128,
+          "mode": "on",
+          "median_us": 66.20720028877258,
+          "p95_us": 66.30560159683228,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "off",
+          "median_us": 77.6144027709961,
+          "p95_us": 77.66079902648926,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 512,
+          "mode": "on",
+          "median_us": 99.1456001996994,
+          "p95_us": 99.27520155906677,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "off",
+          "median_us": 219.50639486312866,
+          "p95_us": 219.82080936431885,
+          "mae": 0.0,
+          "max": 0.0
+        },
+        {
+          "m": 2048,
+          "mode": "on",
+          "median_us": 249.46160316467285,
+          "p95_us": 249.7312068939209,
+          "mae": 0.0,
+          "max": 0.0
+        }
+      ]
+    }
+  ],
+  "postprofile_comparison": [
+    {
+      "m": 512,
+      "mode": "off",
+      "baseline_us": 67.3880010843277,
+      "candidate_us": 77.28559970855713,
+      "speedup": 0.8719347632475761,
+      "baseline_p95_us": 67.467200756073,
+      "candidate_p95_us": 77.3743987083435,
+      "mae": 0.0,
+      "max": 0.0
+    },
+    {
+      "m": 512,
+      "mode": "on",
+      "baseline_us": 89.17440176010132,
+      "candidate_us": 98.92559945583344,
+      "speedup": 0.9014289754181812,
+      "baseline_p95_us": 89.23839926719666,
+      "candidate_p95_us": 99.00000095367432,
+      "mae": 0.0,
+      "max": 0.0
+    },
+    {
+      "m": 2048,
+      "mode": "off",
+      "baseline_us": 243.9568042755127,
+      "candidate_us": 219.4775938987732,
+      "speedup": 1.111533983683226,
+      "baseline_p95_us": 244.19519901275635,
+      "candidate_p95_us": 219.60160732269287,
+      "mae": 0.0,
+      "max": 0.0
+    },
+    {
+      "m": 2048,
+      "mode": "on",
+      "baseline_us": 273.46320152282715,
+      "candidate_us": 249.03199672698975,
+      "speedup": 1.0981046817956528,
+      "baseline_p95_us": 273.61600399017334,
+      "candidate_p95_us": 249.47519302368164,
+      "mae": 0.0,
+      "max": 0.0
+    }
+  ],
+  "instruction_audit": {
+    "baseline": {
+      "metrics": {
+        "smsp__inst_executed.sum": "33105920.000000",
+        "launch__registers_per_thread": "147",
+        "launch__shared_mem_per_block_dynamic": "160.512000",
+        "launch__block_size": "160",
+        "derived__local_spilling_requests": "0",
+        "derived__memory_l1_conflicts_shared_nway": "545",
+        "sm__warps_active.avg.pct_of_peak_sustained_active": "7.713604",
+        "smsp__warps_eligible.avg.per_cycle_active": "0.386934"
+      },
+      "kernel": {
+        "name": "void <unnamed>::qvq_p32_window_wgmma_m16_tma_kernel<(int)6, (bool)1, (bool)0, (bool)0, (bool)1, (int)1, (bool)0, (int)8, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<(int)16384>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)1>, cute::ScaledBasis<cute::C<(int)1>, (int)0>>, const cute::Layout<cute::tuple<cute::C<(int)64>, cute::C<(int)16>>, cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)1>, cute::ScaledBasis<cute::C<(int)1>, (int)0>>> &, const cute::Swizzle<(int)3, (int)4, (int)3> &>>, cutlass::half_t>, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<(int)49152>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)24>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>, const cute::Layout<cute::tuple<cute::tuple<cute::C<(int)24>, cute::C<(int)4>>, cute::C<(int)16>>, cute::tuple<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>, cute::ScaledBasis<cute::C<(int)1>, (int)2>>> &, const cute::Swizzle<(int)0, (int)4, (int)3> &>>, unsigned int>, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<(int)2048>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>, const cute::Layout<cute::tuple<cute::C<(int)16>, cute::C<(int)16>>, cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>> &, const cute::Swizzle<(int)0, (int)4, (int)3> &>>, unsigned char>, <unnamed>::HopperGroupedP32LaunchParams>(T9, T10, T11, const cutlass::half_t *, float *, T12, int, int, int, int, int)",
+        "executed": 33148332,
+        "opcodes": {
+          "LDC": 46080,
+          "VIADD": 2276352,
+          "ISETP": 126464,
+          "STL": 35840,
+          "EXIT": 8324,
+          "IABS": 15360,
+          "S2R": 9216,
+          "I2F": 5120,
+          "MUFU": 5120,
+          "F2I": 5120,
+          "IMAD": 7887112,
+          "LOP3": 2840064,
+          "LDL": 12800,
+          "S2UR": 11776,
+          "USHF": 18432,
+          "R2UR": 4399616,
+          "SHF": 2892288,
+          "UISETP": 19968,
+          "LEA": 329728,
+          "UIADD3": 223744,
+          "UIMAD": 9728,
+          "UMOV": 310272,
+          "ULOP3": 6144,
+          "SHFL": 2560,
+          "USEL": 14336,
+          "ULEA": 32256,
+          "BRA": 258824,
+          "FENCE": 512,
+          "SYNCS": 60432,
+          "NOP": 3072,
+          "ULDC": 12800,
+          "BSSY": 70656,
+          "SEL": 59904,
+          "VIMNMX": 2560,
+          "IADD3": 158208,
+          "LDG": 32768,
+          "PRMT": 3178496,
+          "STS": 16384,
+          "BSYNC": 70656,
+          "BAR": 2560,
+          "CS2R": 67584,
+          "PLOP3": 20992,
+          "MOV": 133120,
+          "BPT": 0,
+          "WARPSYNC": 16896,
+          "LDS": 4456448,
+          "VOTEU": 131072,
+          "WARPGROUP": 475136,
+          "HGMMA": 2097152,
+          "STG": 131072,
+          "REDG": 0,
+          "ELECT": 512,
+          "UTMALDG": 139264,
+          "NANOSLEEP": 7432
+        }
+      },
+      "all_kernels_executed": 121469556
+    },
+    "bn128": {
+      "metrics": {
+        "smsp__inst_executed.sum": "32473710.000000",
+        "launch__registers_per_thread": "153",
+        "launch__shared_mem_per_block_dynamic": "172.800000",
+        "launch__block_size": "288",
+        "derived__local_spilling_requests": "0",
+        "derived__memory_l1_conflicts_shared_nway": "545",
+        "sm__warps_active.avg.pct_of_peak_sustained_active": "13.856058",
+        "smsp__warps_eligible.avg.per_cycle_active": "0.723180"
+      },
+      "kernel": {
+        "name": "void <unnamed>::qvq_p32_window_wgmma_m16_tma_kernel<(int)6, (bool)1, (bool)0, (bool)0, (bool)1, (int)2, (bool)0, (int)8, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<(int)16384>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)1>, cute::ScaledBasis<cute::C<(int)1>, (int)0>>, const cute::Layout<cute::tuple<cute::C<(int)64>, cute::C<(int)16>>, cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)1>, cute::ScaledBasis<cute::C<(int)1>, (int)0>>> &, const cute::Swizzle<(int)3, (int)4, (int)3> &>>, cutlass::half_t>, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<(int)98304>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)24>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>, const cute::Layout<cute::tuple<cute::tuple<cute::C<(int)24>, cute::C<(int)8>>, cute::C<(int)16>>, cute::tuple<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>, cute::ScaledBasis<cute::C<(int)1>, (int)2>>> &, const cute::Swizzle<(int)0, (int)4, (int)3> &>>, unsigned int>, cute::Copy_Atom<cute::Copy_Traits<cute::SM90_TMA_LOAD, cute::C<(int)2048>, cute::AuxTmaParams<cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>, const cute::Layout<cute::tuple<cute::C<(int)16>, cute::C<(int)16>>, cute::tuple<cute::ScaledBasis<cute::C<(int)1>, (int)0>, cute::ScaledBasis<cute::C<(int)1>, (int)1>>> &, const cute::Swizzle<(int)0, (int)4, (int)3> &>>, unsigned char>, <unnamed>::HopperGroupedP32LaunchParams>(T9, T10, T11, const cutlass::half_t *, float *, T12, int, int, int, int, int)",
+        "executed": 32501490,
+        "opcodes": {
+          "LDC": 39168,
+          "VIADD": 2252032,
+          "ISETP": 121344,
+          "STL": 32256,
+          "EXIT": 7256,
+          "IABS": 13824,
+          "S2R": 11008,
+          "I2F": 4608,
+          "LOP3": 2830080,
+          "MUFU": 4608,
+          "F2I": 4608,
+          "IMAD": 7840340,
+          "SEL": 66560,
+          "LDL": 11520,
+          "S2UR": 5376,
+          "SHF": 2879488,
+          "LEA": 333568,
+          "R2UR": 4338944,
+          "UISETP": 16128,
+          "SHFL": 2304,
+          "USHF": 8960,
+          "UIADD3": 125184,
+          "UIMAD": 6912,
+          "ULOP3": 3072,
+          "USEL": 9216,
+          "ULEA": 14336,
+          "BRA": 244048,
+          "UMOV": 153600,
+          "FENCE": 256,
+          "SYNCS": 49572,
+          "NOP": 2560,
+          "ULDC": 8448,
+          "BSSY": 70144,
+          "VIMNMX": 2304,
+          "IADD3": 157952,
+          "LDG": 16384,
+          "PRMT": 3170304,
+          "STS": 8192,
+          "BSYNC": 70144,
+          "BAR": 2304,
+          "WARPSYNC": 16640,
+          "ELECT": 256,
+          "PLOP3": 20736,
+          "MOV": 92160,
+          "UTMALDG": 69632,
+          "BPT": 0,
+          "NANOSLEEP": 4690,
+          "CS2R": 67584,
+          "LDS": 4456448,
+          "VOTEU": 131072,
+          "WARPGROUP": 475136,
+          "HGMMA": 2097152,
+          "STG": 131072,
+          "REDG": 0
+        }
+      },
+      "all_kernels_executed": 120822714
+    }
+  },
+  "promotion": "Explicit controls only. No automatic shape choice, H100 result or full-model quality claim.",
+  "device_specializations": {
+    "baseline": 155,
+    "candidate": 155,
+    "demangled_sets_equal": true
+  }
+}

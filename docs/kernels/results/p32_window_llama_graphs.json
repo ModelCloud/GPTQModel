@@ -1,0 +1,485 @@
+{
+  "scope": "Whole-model propagation with fixed fitted corrections; C4 validation subset, first requested documents, per-document BOS and capped tokens, no chat template. Not full C4 validation.",
+  "source": "/root/.cache/huggingface/hub/datasets--allenai--c4/snapshots/1588ec454efa1a09f29cd18ddd04fe05fc8653a2/en/c4-validation.00000-of-00008.json.gz",
+  "checkpoint": "/root/qvq-results/f6-reproduction-h200/checkpoint",
+  "teacher": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "modules": [
+    "model.layers.0.self_attn.q_proj",
+    "model.layers.0.mlp.gate_proj"
+  ],
+  "preflight": {
+    "physical_id": 0,
+    "pci_bus_id": "00000000:1C:00.0",
+    "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "name": "NVIDIA H200",
+    "config": {
+      "sample_count": 3,
+      "sample_interval_seconds": 1.0,
+      "max_driver_memory_mib": 16
+    },
+    "samples": [
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      },
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      },
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      }
+    ]
+  },
+  "dataset_revision": "1588ec454efa1a09f29cd18ddd04fe05fc8653a2",
+  "documents_requested": 4,
+  "max_tokens": 128,
+  "correction_implementation": "separate_reference",
+  "source_sha256": "1f25b6af12da84115301d4ee93ea5246c8fea5bb4a2008472794d95b917cc97f",
+  "rows": [
+    {
+      "document_id": "88a764087a4e0146907d546cea4b5e4a952a09982cc7fbf3e45f2ebd17dfcc96",
+      "input_hash": "82ca12b9f3812553329955f7923c4d93ba0f865e47e5145573d08da5c431ce76",
+      "teacher": {
+        "tokens": 127,
+        "nll_sum": 345.6487731933594
+      },
+      "graph_logits_exact": {
+        "fast": true,
+        "balanced": true,
+        "quality": true
+      },
+      "fast": {
+        "tokens": 127,
+        "nll_sum": 357.61773681640625,
+        "kl_sum": 13.788405418395996,
+        "top1_matches": 110
+      },
+      "balanced": {
+        "tokens": 127,
+        "nll_sum": 357.62164306640625,
+        "kl_sum": 13.820222854614258,
+        "top1_matches": 110
+      },
+      "quality": {
+        "tokens": 127,
+        "nll_sum": 357.62164306640625,
+        "kl_sum": 13.820222854614258,
+        "top1_matches": 110
+      }
+    },
+    {
+      "document_id": "061b9a4ce6aad4e41325dd2cd73e2a567cfa2018e7c0dddb29dfb07956ef5177",
+      "input_hash": "ade72f3d0b08992bd0a6164aaa1a455a5aafe0ea8dfcb9c2eb584b52aaa83baa",
+      "teacher": {
+        "tokens": 127,
+        "nll_sum": 455.5653076171875
+      },
+      "graph_logits_exact": {
+        "fast": true,
+        "balanced": true,
+        "quality": true
+      },
+      "fast": {
+        "tokens": 127,
+        "nll_sum": 462.5582580566406,
+        "kl_sum": 8.12167739868164,
+        "top1_matches": 107
+      },
+      "balanced": {
+        "tokens": 127,
+        "nll_sum": 462.5407409667969,
+        "kl_sum": 8.1065092086792,
+        "top1_matches": 107
+      },
+      "quality": {
+        "tokens": 127,
+        "nll_sum": 462.5407409667969,
+        "kl_sum": 8.1065092086792,
+        "top1_matches": 107
+      }
+    },
+    {
+      "document_id": "286399b04c32b08774966c32ef990fdecbd7f7be70bfd89935240f81db5404ca",
+      "input_hash": "2c4d5f50abea75056a654f99c90e12f59477fcf7a3cbf64828a083e79650ea3c",
+      "teacher": {
+        "tokens": 127,
+        "nll_sum": 294.47979736328125
+      },
+      "graph_logits_exact": {
+        "fast": true,
+        "balanced": true,
+        "quality": true
+      },
+      "fast": {
+        "tokens": 127,
+        "nll_sum": 303.994873046875,
+        "kl_sum": 15.362348556518555,
+        "top1_matches": 106
+      },
+      "balanced": {
+        "tokens": 127,
+        "nll_sum": 304.28900146484375,
+        "kl_sum": 15.432273864746094,
+        "top1_matches": 106
+      },
+      "quality": {
+        "tokens": 127,
+        "nll_sum": 304.28900146484375,
+        "kl_sum": 15.432273864746094,
+        "top1_matches": 106
+      }
+    },
+    {
+      "document_id": "c4ba243bba085ea6a65501c00d4a698a6e420f672ee04d24bea2b216dcb57434",
+      "input_hash": "d31b4c85971f34949c4a02e02b8fe2aef261dbd9bffc3848fc3b0c36918e0f64",
+      "teacher": {
+        "tokens": 127,
+        "nll_sum": 473.3711242675781
+      },
+      "graph_logits_exact": {
+        "fast": true,
+        "balanced": true,
+        "quality": true
+      },
+      "fast": {
+        "tokens": 127,
+        "nll_sum": 479.755615234375,
+        "kl_sum": 9.251958847045898,
+        "top1_matches": 106
+      },
+      "balanced": {
+        "tokens": 127,
+        "nll_sum": 479.67205810546875,
+        "kl_sum": 9.206517219543457,
+        "top1_matches": 105
+      },
+      "quality": {
+        "tokens": 127,
+        "nll_sum": 479.67205810546875,
+        "kl_sum": 9.206517219543457,
+        "top1_matches": 105
+      }
+    }
+  ],
+  "summary": {
+    "documents": 4,
+    "tokens": 508,
+    "modes": {
+      "teacher": {
+        "nll_per_token": 3.0887106347271778,
+        "perplexity": 21.948759754811874
+      },
+      "fast": {
+        "nll_per_token": 3.157335596760427,
+        "perplexity": 23.50787794701647,
+        "kl_per_token": 0.09158344531622459,
+        "top1_agreement": 0.844488188976378
+      },
+      "quality": {
+        "nll_per_token": 3.157723314180149,
+        "perplexity": 23.516994127934094,
+        "kl_per_token": 0.09166441564484844,
+        "top1_agreement": 0.84251968503937
+      }
+    },
+    "bootstrap": {
+      "samples": 10000,
+      "seed": 137,
+      "unit": "document"
+    },
+    "quality_minus_fast": {
+      "nll_sum": {
+        "per_token": 0.0003877174197219488,
+        "ci95": [
+          -0.00048575814314714565,
+          0.001702496385949803
+        ],
+        "positive_documents": 2
+      },
+      "kl_sum": {
+        "per_token": 8.097032862385426e-05,
+        "ci95": [
+          -0.00023862132875938116,
+          0.0004005619860070897
+        ],
+        "positive_documents": 2
+      },
+      "top1_matches": {
+        "per_token": -0.001968503937007874,
+        "ci95": [
+          -0.005905511811023622,
+          0.0
+        ],
+        "positive_documents": 0
+      }
+    }
+  },
+  "verification_scope": "Graph/eager execution equivalence on four C4 documents, not quality promotion or serving latency.",
+  "graph_input_contract": "input_ids plus explicit FP16 additive causal attention_mask; use_cache=False, return_dict=False; eager reference retains its ordinary mask builder.",
+  "base_revision": "5241bc1e",
+  "worktree_dirty": true,
+  "fused_epilogue_verification": {
+    "scope": "Whole-model propagation with fixed fitted corrections; C4 validation subset, first requested documents, per-document BOS and capped tokens, no chat template. Not full C4 validation.",
+    "source": "/root/.cache/huggingface/hub/datasets--allenai--c4/snapshots/1588ec454efa1a09f29cd18ddd04fe05fc8653a2/en/c4-validation.00000-of-00008.json.gz",
+    "checkpoint": "/root/qvq-results/f6-reproduction-h200/checkpoint",
+    "teacher": "/monster/data/model/Llama-3.2-1B-Instruct",
+    "modules": [
+      "model.layers.0.self_attn.q_proj",
+      "model.layers.0.mlp.gate_proj"
+    ],
+    "preflight": {
+      "physical_id": 0,
+      "pci_bus_id": "00000000:1C:00.0",
+      "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+      "name": "NVIDIA H200",
+      "config": {
+        "sample_count": 3,
+        "sample_interval_seconds": 1.0,
+        "max_driver_memory_mib": 16
+      },
+      "samples": [
+        {
+          "physical_id": 0,
+          "pci_bus_id": "00000000:1C:00.0",
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+          "name": "NVIDIA H200",
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "compute_processes": []
+        },
+        {
+          "physical_id": 0,
+          "pci_bus_id": "00000000:1C:00.0",
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+          "name": "NVIDIA H200",
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "compute_processes": []
+        },
+        {
+          "physical_id": 0,
+          "pci_bus_id": "00000000:1C:00.0",
+          "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+          "name": "NVIDIA H200",
+          "memory_used_mib": 0,
+          "utilization_pct": 0,
+          "compute_processes": []
+        }
+      ]
+    },
+    "dataset_revision": "1588ec454efa1a09f29cd18ddd04fe05fc8653a2",
+    "documents_requested": 4,
+    "max_tokens": 128,
+    "correction_implementation": "separate_reference/fused_epilogue",
+    "source_sha256": "1f25b6af12da84115301d4ee93ea5246c8fea5bb4a2008472794d95b917cc97f",
+    "rows": [
+      {
+        "document_id": "88a764087a4e0146907d546cea4b5e4a952a09982cc7fbf3e45f2ebd17dfcc96",
+        "input_hash": "82ca12b9f3812553329955f7923c4d93ba0f865e47e5145573d08da5c431ce76",
+        "teacher": {
+          "tokens": 127,
+          "nll_sum": 345.6487731933594
+        },
+        "graph_logits_exact": {
+          "fast": true,
+          "balanced": true,
+          "quality": true
+        },
+        "fast": {
+          "tokens": 127,
+          "nll_sum": 357.61773681640625,
+          "kl_sum": 13.788405418395996,
+          "top1_matches": 110
+        },
+        "balanced": {
+          "tokens": 127,
+          "nll_sum": 357.62164306640625,
+          "kl_sum": 13.820222854614258,
+          "top1_matches": 110
+        },
+        "quality": {
+          "tokens": 127,
+          "nll_sum": 357.62164306640625,
+          "kl_sum": 13.820222854614258,
+          "top1_matches": 110
+        }
+      },
+      {
+        "document_id": "061b9a4ce6aad4e41325dd2cd73e2a567cfa2018e7c0dddb29dfb07956ef5177",
+        "input_hash": "ade72f3d0b08992bd0a6164aaa1a455a5aafe0ea8dfcb9c2eb584b52aaa83baa",
+        "teacher": {
+          "tokens": 127,
+          "nll_sum": 455.5653076171875
+        },
+        "graph_logits_exact": {
+          "fast": true,
+          "balanced": true,
+          "quality": true
+        },
+        "fast": {
+          "tokens": 127,
+          "nll_sum": 462.5582580566406,
+          "kl_sum": 8.12167739868164,
+          "top1_matches": 107
+        },
+        "balanced": {
+          "tokens": 127,
+          "nll_sum": 462.5407409667969,
+          "kl_sum": 8.1065092086792,
+          "top1_matches": 107
+        },
+        "quality": {
+          "tokens": 127,
+          "nll_sum": 462.5407409667969,
+          "kl_sum": 8.1065092086792,
+          "top1_matches": 107
+        }
+      },
+      {
+        "document_id": "286399b04c32b08774966c32ef990fdecbd7f7be70bfd89935240f81db5404ca",
+        "input_hash": "2c4d5f50abea75056a654f99c90e12f59477fcf7a3cbf64828a083e79650ea3c",
+        "teacher": {
+          "tokens": 127,
+          "nll_sum": 294.47979736328125
+        },
+        "graph_logits_exact": {
+          "fast": true,
+          "balanced": true,
+          "quality": true
+        },
+        "fast": {
+          "tokens": 127,
+          "nll_sum": 303.994873046875,
+          "kl_sum": 15.362348556518555,
+          "top1_matches": 106
+        },
+        "balanced": {
+          "tokens": 127,
+          "nll_sum": 304.28900146484375,
+          "kl_sum": 15.432273864746094,
+          "top1_matches": 106
+        },
+        "quality": {
+          "tokens": 127,
+          "nll_sum": 304.28900146484375,
+          "kl_sum": 15.432273864746094,
+          "top1_matches": 106
+        }
+      },
+      {
+        "document_id": "c4ba243bba085ea6a65501c00d4a698a6e420f672ee04d24bea2b216dcb57434",
+        "input_hash": "d31b4c85971f34949c4a02e02b8fe2aef261dbd9bffc3848fc3b0c36918e0f64",
+        "teacher": {
+          "tokens": 127,
+          "nll_sum": 473.3711242675781
+        },
+        "graph_logits_exact": {
+          "fast": true,
+          "balanced": true,
+          "quality": true
+        },
+        "fast": {
+          "tokens": 127,
+          "nll_sum": 479.755615234375,
+          "kl_sum": 9.251958847045898,
+          "top1_matches": 106
+        },
+        "balanced": {
+          "tokens": 127,
+          "nll_sum": 479.67205810546875,
+          "kl_sum": 9.206517219543457,
+          "top1_matches": 105
+        },
+        "quality": {
+          "tokens": 127,
+          "nll_sum": 479.67205810546875,
+          "kl_sum": 9.206517219543457,
+          "top1_matches": 105
+        }
+      }
+    ],
+    "summary": {
+      "documents": 4,
+      "tokens": 508,
+      "modes": {
+        "teacher": {
+          "nll_per_token": 3.0887106347271778,
+          "perplexity": 21.948759754811874
+        },
+        "fast": {
+          "nll_per_token": 3.157335596760427,
+          "perplexity": 23.50787794701647,
+          "kl_per_token": 0.09158344531622459,
+          "top1_agreement": 0.844488188976378
+        },
+        "quality": {
+          "nll_per_token": 3.157723314180149,
+          "perplexity": 23.516994127934094,
+          "kl_per_token": 0.09166441564484844,
+          "top1_agreement": 0.84251968503937
+        }
+      },
+      "bootstrap": {
+        "samples": 10000,
+        "seed": 137,
+        "unit": "document"
+      },
+      "quality_minus_fast": {
+        "nll_sum": {
+          "per_token": 0.0003877174197219488,
+          "ci95": [
+            -0.00048575814314714565,
+            0.001702496385949803
+          ],
+          "positive_documents": 2
+        },
+        "kl_sum": {
+          "per_token": 8.097032862385426e-05,
+          "ci95": [
+            -0.00023862132875938116,
+            0.0004005619860070897
+          ],
+          "positive_documents": 2
+        },
+        "top1_matches": {
+          "per_token": -0.001968503937007874,
+          "ci95": [
+            -0.005905511811023622,
+            0.0
+          ],
+          "positive_documents": 0
+        }
+      }
+    }
+  },
+  "tests": {
+    "passed": 398,
+    "skipped": 0,
+    "log": "/tmp/p32-window-graphs-final-tests.log",
+    "paths": [
+      "tests/test_qvq_window_graphs.py",
+      "tests/test_qvq_window_recovery.py",
+      "tests/test_qvq_rank8_fused.py",
+      "tests/test_qvq_rank8_propagation_summary.py",
+      "tests/test_qvq_window_tuning.py"
+    ]
+  },
+  "device_code": "Existing window/rank8 kernels unchanged; host capture, ownership, state checks and request ordering only. No kernel or serving latency claim."
+}

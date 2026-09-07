@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import copy
+from dataclasses import replace
 from types import MethodType
 from typing import ClassVar
 
@@ -14,14 +16,23 @@ from gptqmodel.models.base import BaseQModel, _qvq_quantization_group_candidates
 from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
 from gptqmodel.nn_modules.qvq_grouped_runtime import (
     QVQHopperGroupedRuntime,
+    _child_window_source,
     _is_exact_silu_activation,
+    _source_key,
+    _validate_static_group,
     install_qvq_hopper_groups,
     qvq_grouped_runtime_telemetry,
     uninstall_qvq_hopper_groups,
 )
 from gptqmodel.quantization.qvq import (
     pack_qvq_binary_bank_ids,
+    repack_p32_planar_to_window,
     unpack_qvq_binary_bank_ids,
+)
+from gptqmodel.quantization.qvq_rank8 import (
+    P32WindowConfig,
+    prepare_rank8,
+    window_kernel_candidates,
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
 from gptqmodel.utils.qvq_wgmma_cuda import (
@@ -119,6 +130,196 @@ def test_exact_silu_activation_recognition_is_narrow():
     assert not _is_exact_silu_activation(nn.SiLU(inplace=True))
     assert not _is_exact_silu_activation(nn.GELU())
     assert not _is_exact_silu_activation(lambda value: torch.nn.functional.silu(value))
+
+
+def test_group_validation_uses_window_only_child_storage():
+    shared = torch.ones(256)
+    children = tuple(
+        _child(name, su=shared, seed=91 + index)
+        for index, name in enumerate(("q_proj", "k_proj"))
+    )
+    for child in children:
+        planar = child.trellis
+        child.window_words = repack_p32_planar_to_window(planar, bits=child.bits)
+        child.window_only = True
+        child.trellis = None
+
+    resolved = _validate_static_group(children)
+    assert resolved == children
+    assert all(_child_window_source(child) is child.window_words for child in children)
+    key_before = _source_key(children)
+    children[0].window_words.add_(1)
+    assert _source_key(children) != key_before
+
+
+def test_window_only_dense_reference_reconstructs_planar_temporarily():
+    child = _child("q_proj", seed=93)
+    expected = child.get_inner_weight_tensor()
+    x = torch.randn(2, 256)
+    expected_output = child(x).clone()
+    child.window_words = repack_p32_planar_to_window(child.trellis, bits=child.bits)
+    child.window_only = True
+    child.trellis = None
+
+    actual = child.get_inner_weight_tensor()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    torch.testing.assert_close(child(x), expected_output, rtol=0, atol=0)
+
+
+def test_window_planar_fallback_cache_is_transient_across_copy():
+    child = _child("q_proj", device="cpu", seed=96)
+    child.window_words = repack_p32_planar_to_window(child.trellis, bits=child.bits)
+    child.window_only = True
+    child.trellis = None
+    fallback = child._prepare_planar_fallback()
+    assert fallback.shape == child.window_words.shape
+    assert child._qvq_planar_fallback_cache is not None
+    cloned = copy.deepcopy(child)
+    assert cloned._qvq_planar_fallback_cache is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_h200_window_prepare_releases_planar_source_in_inference():
+    device = _h200_device()
+    if device is None:
+        pytest.skip("H200 required")
+    child = _child("q_proj", device=device, seed=97)
+    assert not child.window_only and child.trellis is not None
+    with torch.inference_mode():
+        window = child._prepare_hopper_p32_window(device)
+    assert child.window_only
+    assert child.trellis is None
+    assert child.window_words is window
+    # A second preparation reuses the inference tensor by identity without
+    # trying to read its unavailable version counter.
+    assert child._prepare_hopper_p32_window(device) is window
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_h200_grouped_window_only_payload_is_exact_and_graph_safe():
+    device = _h200_device()
+    if device is None:
+        pytest.skip("H200 required")
+    children = tuple(
+        _child(name, device=device, seed=101 + index)
+        for index, name in enumerate(("q_proj", "k_proj"))
+    )
+    for child in children[1:]:
+        child.SU.copy_(children[0].SU)
+    x = torch.randn(16, 256, device=device, dtype=torch.float16) * 0.01
+    with torch.inference_mode():
+        references = tuple(child(x).clone() for child in children)
+        for child in children:
+            # Direct inference now transfers planar ownership to the lossless
+            # window cache before this explicit window-only check.
+            if not child.window_only:
+                child.window_words = repack_p32_planar_to_window(
+                    child.trellis, bits=child.bits
+                )
+                child.window_only = True
+                child.trellis = None
+                child.post_init()
+        parent = nn.Module()
+        parent.gate_proj, parent.up_proj = children
+        assert install_qvq_hopper_groups(parent, qkv=False, gate_up=True)["gate_up"] == 1
+        outputs = (parent.gate_proj(x), parent.up_proj(x))
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = (parent.gate_proj(x), parent.up_proj(x))
+        for _ in range(3):
+            graph.replay()
+            for output, reference in zip(captured, references, strict=True):
+                torch.testing.assert_close(output, reference, rtol=0, atol=0)
+    for output, reference in zip(outputs, references, strict=True):
+        torch.testing.assert_close(output, reference, rtol=0, atol=0)
+    runtime = children[0]._gptqmodel_qvq_grouped_runtime
+    assert runtime.telemetry.payload_builds == 1
+    assert runtime.telemetry.grouped_launches >= 2
+    assert children[0].trellis is None and children[1].trellis is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_h200_grouped_explicit_bm_bn_policy_is_graph_safe():
+    """Grouped launches must honor one explicit BM/BN geometry for every child."""
+    device = _h200_device()
+    if device is None:
+        pytest.skip("H200 required")
+    children = tuple(
+        _child(name, device=device, seed=121 + index)
+        for index, name in enumerate(("gate_proj", "up_proj"))
+    )
+    for child in children[1:]:
+        child.SU.copy_(children[0].SU)
+    config = P32WindowConfig(
+        algorithm="hopper_m16",
+        block_m=64,
+        block_n=64,
+        block_k=256,
+        warp_groups=1,
+        split_k=1,
+        recovery_mode="off",
+    )
+    x = torch.randn(64, 256, device=device, dtype=torch.float16) * 0.01
+    with torch.inference_mode():
+        references = tuple(child(x).clone() for child in children)
+        for child in children:
+            prepare_rank8(child, config)
+        parent = nn.Module()
+        parent.gate_proj, parent.up_proj = children
+        assert install_qvq_hopper_groups(parent, qkv=False, gate_up=True)["gate_up"] == 1
+        outputs = (parent.gate_proj(x), parent.up_proj(x))
+        for output, reference in zip(outputs, references, strict=True):
+            torch.testing.assert_close(output, reference, rtol=0, atol=0)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = (parent.gate_proj(x), parent.up_proj(x))
+        for _ in range(3):
+            graph.replay()
+            for output, reference in zip(captured, outputs, strict=True):
+                torch.testing.assert_close(output, reference, rtol=0, atol=0)
+    runtime = children[0]._gptqmodel_qvq_grouped_runtime
+    assert runtime.telemetry.grouped_launches >= 2
+    assert runtime.telemetry.plain_fallbacks == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_h200_window_only_rank8_capture_matches_planar_reference():
+    device = _h200_device()
+    if device is None:
+        pytest.skip("H200 required")
+    from test_qvq_window_recovery import _kernel_rank8
+
+    child = _child("q_proj", device=device, seed=111)
+    _kernel_rank8(child)
+    config = P32WindowConfig(recovery_mode="on")
+    x = torch.randn(16, 256, device=device, dtype=torch.float16) * 0.01
+    with torch.inference_mode():
+        prepare_rank8(child, config)
+        expected = child(x).clone()
+        if not child.window_only:
+            child.window_words = repack_p32_planar_to_window(
+                child.trellis, bits=child.bits
+            )
+            child.window_only = True
+            child.trellis = None
+            child.post_init()
+        prepare_rank8(child, config)
+        candidates = window_kernel_candidates(child, m=16)
+        assert candidates[0].algorithm == "hopper_m16"
+        assert all(
+            candidate.algorithm != "production_window" for candidate in candidates
+        )
+        actual = child(x)
+        torch.cuda.synchronize(device)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = child(x)
+        for _ in range(3):
+            graph.replay()
+            torch.testing.assert_close(captured, expected, rtol=0, atol=0)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert child.trellis is None
 
 
 def test_quantization_uses_the_same_role_groups_as_runtime_fusion():
@@ -418,6 +619,155 @@ def test_sibling_lifecycle_fires_once_and_never_returns_stale_output(monkeypatch
     assert runtime.telemetry.plain_fallbacks == 2
 
 
+def test_grouped_hopper_policy_accepts_split_tuple_and_rejects_unimplemented_geometry():
+    shared = torch.randn(256)
+    children = tuple(
+        _child(name, su=shared, seed=71 + index)
+        for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+    )
+    attention = _Attention(children)
+    assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
+    runtime = attention.q_proj._gptqmodel_qvq_grouped_runtime
+    base = P32WindowConfig()
+    for child in children:
+        child._p32_window_config = base
+    direct = replace(
+        base,
+        algorithm="hopper_direct_decode_mma",
+        block_m=64,
+        block_n=64,
+        warp_groups=1,
+    )
+    for child in children:
+        child._p32_window_config = direct
+    reason = runtime._runtime_eligible(torch.randn(1, 256))
+    assert reason == "grouped Hopper tuning requires hopper_m16 for every child; direct BM/BN geometry is single-child only"
+
+    grouped_geometry = replace(
+        base,
+        algorithm="hopper_m16",
+        block_m=64,
+        block_n=128,
+        warp_groups=2,
+    )
+    for child in children:
+        child._p32_window_config = grouped_geometry
+    reason = runtime._runtime_eligible(torch.randn(64, 256))
+    assert reason == "grouped Hopper BN128 requires a single-segment specialization"
+
+    split_policy = replace(direct, algorithm="hopper_m16", block_m=0, block_n=0, warp_groups=0)
+    for child in children:
+        child._p32_window_config = split_policy
+    reason = runtime._runtime_eligible(torch.randn(1, 256))
+    assert reason == "grouped Hopper requires FP16 or BF16 CUDA activations"
+
+    unsupported_projection = replace(
+        split_policy, recovery_projection="tensor_core"
+    )
+    for child in children:
+        child._p32_rank8_enabled = True
+        child._p32_window_config = unsupported_projection
+    reason = runtime._runtime_eligible(torch.randn(1, 256))
+    assert reason == (
+        "grouped rank8 projection supports separate_reference, "
+        "concurrent_reference, input_fused or project_output_fused only"
+    )
+    concurrent_policy = replace(split_policy, recovery_projection="concurrent_reference")
+    for child in children:
+        child._p32_window_config = concurrent_policy
+    reason = runtime._runtime_eligible(torch.randn(1, 256, dtype=torch.bfloat16))
+    # The concurrent producer has an FP16 projection contract; BF16 must not
+    # silently degrade to the separate child projection.
+    assert reason == "grouped concurrent rank8 projection requires FP16 activations"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize(
+    ("projection", "recovery_kernel"),
+    (
+        ("concurrent_reference", "separate_reference"),
+        ("input_fused", "separate_reference"),
+        ("project_output_fused", "fused_epilogue"),
+    ),
+)
+def test_grouped_rank8_reuses_transform_and_replays_graph(
+    projection, recovery_kernel
+):
+    """Grouped rank8 producer policies must join the decode graph safely."""
+
+    device = _h200_device() or _h100_device()
+    if device is None:
+        pytest.skip("requires an H100 or H200 SM90 validation device")
+    from test_qvq_window_recovery import _kernel_rank8
+    from gptqmodel.quantization.qvq_rank8 import P32WindowConfig, prepare_rank8
+
+    torch.backends.cuda.matmul.allow_tf32 = False
+    shared = torch.ones(256, device=device)
+    children = tuple(
+        _child(
+            name,
+            su=shared,
+            alt_id=index + 1,
+            seed=20261040 + index,
+            device=device,
+        )
+        for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+    )
+    config = P32WindowConfig(
+        recovery_mode="on",
+        recovery_projection=projection,
+        recovery_kernel=recovery_kernel,
+    )
+    for child in children:
+        _kernel_rank8(child)
+        prepare_rank8(child, config)
+    attention = _Attention(children)
+    assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
+    x = torch.randn((64, 256), device=device, dtype=torch.float16) * 0.02
+
+    with torch.inference_mode():
+        eager = tuple(
+            getattr(attention, name)(x).clone()
+            for name in ("q_proj", "k_proj", "v_proj")
+        )
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = tuple(
+                getattr(attention, name)(x)
+                for name in ("q_proj", "k_proj", "v_proj")
+            )
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    for actual, replayed in zip(eager, captured, strict=True):
+        assert torch.equal(replayed, actual)
+        assert torch.isfinite(actual).all()
+    if projection == "concurrent_reference":
+        assert all(
+            len(child._qvq_rank8_concurrent_cache) >= 1 for child in children
+        )
+
+
+def test_grouped_policy_rejects_m_outside_prepared_range_before_device_dispatch():
+    """A shape-tuned grouped policy cannot silently run at another M."""
+    shared = torch.randn(256)
+    children = tuple(
+        _child(name, su=shared, seed=141 + index)
+        for index, name in enumerate(("gate_proj", "up_proj"))
+    )
+    mlp = _MLP(children)
+    assert install_qvq_hopper_groups(mlp, qkv=False, gate_up=True) == {"gate_up": 1}
+    policy = replace(
+        P32WindowConfig(algorithm="hopper_m16", recovery_mode="off"),
+        min_m=64,
+        max_m=64,
+    )
+    for child in children:
+        child._p32_window_config = policy
+    runtime = children[0]._gptqmodel_qvq_grouped_runtime
+    reason = runtime._runtime_eligible(torch.randn(32, 256))
+    assert reason == "grouped child 0 M=32 is outside its prepared policy range [64, 64]"
+
 def test_base_fuse_uses_architecture_roles_and_preserves_qvq_checkpoint_buffers():
     shared = torch.ones(256)
 
@@ -480,7 +830,7 @@ def test_base_fuse_honors_qvq_only_architecture_group_declarations():
             self.linear_attn.gate = _child("gate", su=shared, seed=76)
 
     class QModel(BaseQModel):
-        qvq_grouped_p32_candidates = {
+        qvq_grouped_p32_candidates: ClassVar[dict[str, tuple[tuple[str, ...], ...]]] = {
             "qkv": (("packed", "gate"),),
         }
 
@@ -630,7 +980,9 @@ def test_production_group_is_exact_and_storage_neutral_at_llama32_1b_shapes(
     telemetry = qvq_grouped_runtime_telemetry(model)
     assert len(telemetry) == 1
     expected_window_bytes = sum(
-        child.trellis.numel() * child.trellis.element_size() for child in children
+        (child.window_words if child.window_only else child.trellis).numel()
+        * (child.window_words if child.window_only else child.trellis).element_size()
+        for child in children
     )
     assert telemetry[0]["grouped_launches"] == 1
     assert telemetry[0]["payload_builds"] == 1
@@ -946,6 +1298,150 @@ def test_qwen38_folded_mlp_is_fused_and_cuda_graph_safe(bits):
     assert telemetry["h100_qwen_composite_input_launches"] == 2
     assert telemetry["plain_fallbacks"] == 0
     assert telemetry["fused_mlp_fallbacks"] == 0
+
+
+@pytest.mark.parametrize("recovery_kernel", ["separate_reference", "fused_epilogue"])
+def test_rank8_grouped_mlp_includes_down_correction_and_graph_replay(
+    recovery_kernel,
+):
+    """Gate/up and down rank-8 corrections share one captured MLP path."""
+
+    device = _h100_device() or _h200_device()
+    if device is None:
+        pytest.skip("requires an H100 or H200 SM90 validation device")
+
+    from test_qvq_window_recovery import _kernel_rank8
+
+    from gptqmodel.quantization.qvq_rank8 import P32WindowConfig, prepare_rank8
+
+    class Rank8MLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            shared = torch.ones(256, device=device)
+            self.gate_proj = _child(
+                "gate_proj",
+                in_features=256,
+                out_features=256,
+                bits=3,
+                su=shared,
+                seed=20260930,
+                device=device,
+                output_hadamard=False,
+            )
+            self.up_proj = _child(
+                "up_proj",
+                in_features=256,
+                out_features=256,
+                bits=3,
+                su=shared,
+                seed=20260931,
+                device=device,
+                output_hadamard=False,
+            )
+            self.down_proj = _child(
+                "down_proj",
+                in_features=256,
+                out_features=256,
+                bits=3,
+                su=torch.ones(256, device=device),
+                seed=20260932,
+                device=device,
+                input_hadamard=False,
+            )
+            with torch.no_grad():
+                for child in (self.gate_proj, self.up_proj, self.down_proj):
+                    child.SV.fill_(0.002)
+                    child.bias.zero_()
+            for child in (self.gate_proj, self.up_proj, self.down_proj):
+                _kernel_rank8(child)
+                prepare_rank8(
+                    child,
+                    P32WindowConfig(
+                        recovery_mode="on", recovery_kernel=recovery_kernel
+                    ),
+                )
+            self.act_fn = nn.SiLU()
+
+        def forward(self, x):
+            return self.down_proj(
+                self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+            )
+
+    mlp = Rank8MLP().eval()
+    static_input = torch.randn(
+        (2, 256), device=device, dtype=torch.float16
+    ) * 0.02
+    with torch.inference_mode():
+        reference = mlp(static_input).clone()
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+    assert hasattr(mlp, "_gptqmodel_qvq_fused_mlp_runtime")
+
+    with torch.inference_mode():
+        eager = mlp(static_input).clone()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = mlp(static_input)
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    torch.testing.assert_close(eager, reference, rtol=0, atol=2e-3)
+    assert torch.equal(captured, eager)
+    for _ in range(4):
+        graph.replay()
+        torch.cuda.synchronize(device)
+        assert torch.equal(captured, eager)
+    telemetry = qvq_grouped_runtime_telemetry(mlp)[0]
+    assert telemetry["fused_mlp_launches"] == 2
+    assert telemetry["fused_mlp_fallbacks"] == 0
+    assert telemetry["independent_recovery_children"] >= 4
+
+
+@pytest.mark.parametrize(
+    "projection", ("input_fused", "concurrent_reference", "project_output_fused")
+)
+def test_fused_mlp_rejects_unsupported_down_rank8_projection(projection):
+    """Unsupported down policies fail before grouped dispatch."""
+
+    device = _h100_device() or _h200_device()
+    if device is None:
+        pytest.skip("requires an H100 or H200 SM90 validation device")
+
+    from test_qvq_window_recovery import _kernel_rank8
+    from gptqmodel.quantization.qvq_rank8 import P32WindowConfig, prepare_rank8
+
+    class MLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            shared = torch.ones(256, device=device)
+            self.gate_proj = _child(
+                "gate_proj", in_features=256, out_features=256, su=shared,
+                seed=20261120, device=device, output_hadamard=False,
+            )
+            self.up_proj = _child(
+                "up_proj", in_features=256, out_features=256, su=shared,
+                seed=20261121, device=device, output_hadamard=False,
+            )
+            self.down_proj = _child(
+                "down_proj", in_features=256, out_features=256,
+                seed=20261122, device=device, input_hadamard=False,
+            )
+            _kernel_rank8(self.down_proj)
+            prepare_rank8(
+                self.down_proj,
+                P32WindowConfig(recovery_mode="on", recovery_projection=projection),
+            )
+            self.act_fn = nn.SiLU()
+
+    mlp = MLP().eval()
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+    x = torch.randn((2, 256), device=device, dtype=torch.float16)
+    runtime = mlp.gate_proj._gptqmodel_qvq_grouped_runtime
+    runtime._configure_mlp_fusion(mlp, mlp.down_proj, mlp.act_fn)
+    reason = runtime._mlp_rejection(x)
+    assert reason == (
+        f"fused MLP down rank8 projection {projection} is unsupported; use "
+        "separate_reference or tensor_core"
+    )
 
 
 @pytest.mark.parametrize("bits, expected_fused_tiles", [(2.0, 0), (3.0, 2)])

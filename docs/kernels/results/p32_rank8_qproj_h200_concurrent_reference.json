@@ -1,0 +1,228 @@
+{
+  "scope": "accepted-factor Q projection replay with experimental concurrent reference rank8 producer; graph-safe stream/event overlap candidate; not full-model quality",
+  "revision": "6d2ec2c5c1007c8ac0687f49a4ebe1c97a063fd7",
+  "worktree_dirty": false,
+  "sources": {
+    "gptqmodel/quantization/qvq_rank8.py": "bc01671a3f4f3723226f3842f5ad1dfb1c943494ec44e4795adc103dac0db9fc",
+    "gptqmodel/nn_modules/qlinear/qvq.py": "345476592554e9bb0240fe596d98d2dcc744fdf959a4401d7f8d7801031cbd38",
+    "gptqmodel/nn_modules/qvq_grouped_runtime.py": "32f2cb18868c6d79afb5dcdb7f0c379c10521b9b21a585ca43ca5a8640e071fd",
+    "gptqmodel/utils/qvq_rank8_triton.py": "c54088e365a3c1e38feb87964efa01c399cd47be725b10c4e5e38dd49f84349f",
+    "gptqmodel/utils/qvq_wgmma_cuda.py": "3051316ac9ff31df0e126b3670773ccdfd9263c7b5c4fa98e74f203eba5c92be",
+    "gptqmodel/quantization/qvq_window_tuning.py": "409a4a5cdf0a085e2693e03ada41ae07e24a9ff3b46125a96bc3199f93dca51e",
+    "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu": "b6d3fecf48829a6bb1642e16bbe8fecc8c9b17136ddd131be3b904628058f156"
+  },
+  "hardware": {
+    "name": "NVIDIA H200",
+    "uuid": "0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "sm_count": 132,
+    "memory": 150101688320,
+    "capability": [
+      9,
+      0
+    ]
+  },
+  "software": {
+    "torch": "2.15.0.dev20260901+cu130",
+    "cuda": "13.0"
+  },
+  "build_identity": {
+    "qvq": "93bf5ed612db632a",
+    "wgmma": "0468d173c8fdfcdd",
+    "triton": "3.8.0",
+    "driver": "610.57.04"
+  },
+  "preflight": null,
+  "rows": [
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "concurrent_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 31.77631974220276,
+      "median_us": 31.697601079940796,
+      "p95_us": 31.727999448776245,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        32.150399684906006,
+        31.727999448776245,
+        31.697601079940796,
+        31.66559934616089,
+        31.63999915122986
+      ],
+      "allocated_bytes": 4850688,
+      "peak_allocated_bytes": 6423552
+    },
+    {
+      "m": 128,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "concurrent_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 58.33696007728577,
+      "median_us": 58.240002393722534,
+      "p95_us": 58.30399990081787,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        58.71359705924988,
+        58.30399990081787,
+        58.240002393722534,
+        58.23519825935364,
+        58.19200277328491
+      ],
+      "allocated_bytes": 105513984,
+      "peak_allocated_bytes": 107682816
+    },
+    {
+      "m": 2048,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "concurrent_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 214.2246389389038,
+      "median_us": 214.13118839263916,
+      "p95_us": 214.2064094543457,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        214.69919681549072,
+        214.2064094543457,
+        213.99519443511963,
+        214.09120559692383,
+        214.13118839263916
+      ],
+      "allocated_bytes": 127009792,
+      "peak_allocated_bytes": 153224192
+    },
+    {
+      "m": 2048,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "concurrent_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 302.5964832305908,
+      "median_us": 302.5696039199829,
+      "p95_us": 302.79200077056885,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        302.80799865722656,
+        302.37441062927246,
+        302.79200077056885,
+        302.5696039199829,
+        302.4384021759033
+      ],
+      "allocated_bytes": 160564224,
+      "peak_allocated_bytes": 194282496
+    },
+    {
+      "m": 8192,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "concurrent_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 814.4735908508301,
+      "median_us": 814.4224166870117,
+      "p95_us": 814.6512031555176,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        815.0959968566895,
+        814.6512031555176,
+        814.4224166870117,
+        814.2895698547363,
+        813.9087677001953
+      ],
+      "allocated_bytes": 303170560,
+      "peak_allocated_bytes": 420611072
+    },
+    {
+      "m": 8192,
+      "k": 2048,
+      "n": 2048,
+      "bits": 2,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "concurrent_reference",
+      "algorithm": "auto",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 1106.5926361083984,
+      "median_us": 1106.6368103027344,
+      "p95_us": 1106.710433959961,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        1107.1215629577637,
+        1106.710433959961,
+        1106.6368103027344,
+        1106.3023567199707,
+        1106.1920166015625
+      ],
+      "allocated_bytes": 336724992,
+      "peak_allocated_bytes": 471401472
+    }
+  ],
+  "activation_source": {
+    "path": "/root/qvq-results/current-qproj-fit/model.layers.0.self_attn.q_proj.activations.pt",
+    "sha256": "39fd8a245eb0bfbada06206abbdd7497967a1ca4e4c7651e35c87339b23594a3",
+    "rows": [
+      128,
+      128
+    ],
+    "expansion": "cyclic row replay to requested M; not a full-model prefill"
+  },
+  "candidate": "concurrent_reference",
+  "comparison": {
+    "128": {
+      "window_off_us": 31.697601079940796,
+      "concurrent_reference_on_us": 58.240002393722534,
+      "overhead_percent": 83.73630940348535
+    },
+    "2048": {
+      "window_off_us": 214.13118839263916,
+      "concurrent_reference_on_us": 302.5696039199829,
+      "overhead_percent": 41.30104362246366
+    },
+    "8192": {
+      "window_off_us": 814.4224166870117,
+      "concurrent_reference_on_us": 1106.6368103027344,
+      "overhead_percent": 35.87995463145788
+    }
+  },
+  "interpretation": "The prepared auxiliary stream preserves reference arithmetic and graph replay correctness, but this H200 Q fixture shows no useful overlap: the candidate is slower than the established fused-epilogue reference at M128/2048/8192. It remains exposed to shape-level tuning and is not promoted by default.",
+  "command": "benchmark_qvq_window_rank8.py --package current-qproj-fit --activation-file current-qproj-fit/...activations.pt --kernel fused_epilogue --projection concurrent_reference --m 128 2048 8192 --samples 5 --replays 20"
+}

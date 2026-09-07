@@ -8,6 +8,10 @@ description: Build, port, optimize, review, benchmark, or debug GPT-QModel CUDA,
 For QVQ optimization, first read [qvq-kernel-accuracy](../qvq-kernel-accuracy/SKILL.md) for accuracy-preserving math
 and the locked numerical contract; apply it before selecting lower precision or ranking performance candidates.
 
+All kernel code and kernel-library integration must satisfy
+[graph-safe-kernels](../graph-safe-kernels/SKILL.md), including native and external
+capture ownership. Read that skill before changing the runtime path.
+
 Start from a numerical reference and select the smallest kernel path that can express the operation. Keep correctness tests separate from performance benchmarks.
 
 Read [references/kernel-workflow.md](references/kernel-workflow.md). For crashes or silent corruption, also read [references/cuda-debugging.md](references/cuda-debugging.md).
@@ -72,21 +76,27 @@ dead compiler work even when runtime validation prevents those kernels from laun
 Use the Ninja binary from the active local environment and an extension-specific build
 root. Do not share a build directory between agents or manually kill unrelated
 `ninja`, `nvcc`, or `cicc` processes. Before a CUDA compile, set explicit parallelism
-limits through the environment:
+limits through the environment. Start from half of the currently available CPU
+quota, then lower it when the available-memory budget or observed compiler peak
+requires it:
 
 ```bash
 export PATH=/root/vm314-codex-one/bin:$PATH
-export MAX_JOBS=8
-export NINJAFLAGS=-j8
-export CMAKE_BUILD_PARALLEL_LEVEL=8
+BUILD_CORES="$(nproc)"
+BUILD_JOBS="$((BUILD_CORES / 2))"
+if [ "$BUILD_JOBS" -lt 1 ]; then BUILD_JOBS=1; fi
+export MAX_JOBS="$BUILD_JOBS"
+export NINJAFLAGS="-j$BUILD_JOBS"
+export CMAKE_BUILD_PARALLEL_LEVEL="$BUILD_JOBS"
 export NVCC_THREADS=2
 ```
 
-`MAX_JOBS`, `NINJAFLAGS`, and `CMAKE_BUILD_PARALLEL_LEVEL` cap Ninja/build-system
-workers at eight; `NVCC_THREADS=2` keeps the aggregate compiler thread budget at
- sixteen per build. Verify `command -v ninja` and `ninja --version` before starting,
-and use a local build root such as `/tmp/qvq-jit-current/<fingerprint>` so concurrent
-extensions do not contend for generated objects or locks.
+The computed value is a ceiling, not a target. Apply the memory-aware
+compilation policy in [graph-safe-kernels](../graph-safe-kernels/SKILL.md),
+account for `NVCC_THREADS` and concurrent builds rather than multiplying worker
+counts without a budget, and reduce `BUILD_JOBS` before swap pressure or OOM.
+Verify `command -v ninja` and `ninja --version` before starting, and use an
+extension-specific build root so builds do not contend for objects or locks.
 
 ## Validate correctness
 

@@ -1543,6 +1543,10 @@ def ModelLoader(cls):
                     dtype=dtype,
                     is_sharded=is_sharded,
                 )
+                if qcfg.method == METHOD.QVQ:
+                    from ..quantization.qvq_rank8_checkpoint import prepare_rank8_checkpoint_buffers
+
+                    prepare_rank8_checkpoint_buffers(model, model_save_name, checkpoint_keys)
 
         if isinstance(requested_device_map, str) and requested_device_map not in [
                 "auto",

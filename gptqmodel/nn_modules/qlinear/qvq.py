@@ -21,6 +21,7 @@ from ...quantization.qvq import (
     pack_qvq_binary_bank_ids,
     reconstruct_qvq_inner_weight,
     repack_p32_planar_to_window,
+    repack_p32_window_to_planar,
     unpack_qvq_bank_ids,
     unpack_qvq_binary_bank_ids,
 )
@@ -40,7 +41,11 @@ from ...utils.qvq_cuda import (
 )
 from . import BaseQuantLinear, FormatSupport
 
-_QVQ_BUFFER_NAMES = ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id")
+_QVQ_BUFFER_NAMES = (
+    "trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id",
+    "window_words",
+    "rank8_A", "rank8_B", "rank8_metadata",
+)
 # The real Llama/Qwen transforms that exposed delayed-normalization overflow
 # start at this width. Preserve the original, slightly more accurate FP16
 # operation ordering for narrow transforms; the finite-output retry below
@@ -48,6 +53,17 @@ _QVQ_BUFFER_NAMES = ("trellis", "SU", "SV", "bias", "bank_ids", "bank_alt_id")
 _FP16_STABLE_HADAMARD_MIN_WIDTH = 2048
 _QVQ_HADAMARD_MAX_WIDTH = 16384
 _QVQ_FP16_SAFE_MAGNITUDE = torch.finfo(torch.float16).max / 2
+
+
+def _qvq_buffer_version(tensor: torch.Tensor) -> int:
+    """Return a stable cache version for normal and inference tensors."""
+    try:
+        return tensor._version
+    except RuntimeError:
+        # Tensors created under inference_mode intentionally omit version
+        # counters. Their object identity still changes whenever ownership is
+        # replaced, which is sufficient for the window cache key.
+        return -1
 
 
 def _qvq_fp16_emulated_hadamard_fallback(
@@ -313,6 +329,7 @@ class QVQLinear(BaseQuantLinear):
         activation: QVQActivationConfig | dict | bool | None = None,
         input_hadamard: bool = True,
         output_hadamard: bool = True,
+        window_only: bool = False,
         **kwargs,
     ):
         del kwargs
@@ -418,6 +435,9 @@ class QVQLinear(BaseQuantLinear):
             raise TypeError("QVQ transform-axis flags must be bools")
         self.input_hadamard = input_hadamard
         self.output_hadamard = output_hadamard
+        if not isinstance(window_only, bool):
+            raise TypeError("QVQ window_only must be a bool")
+        self.window_only = window_only
         if (
             isinstance(bank_count, bool)
             or not isinstance(bank_count, int)
@@ -481,6 +501,9 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_cuda_window_cache: (
             tuple[torch.Tensor, int, torch.device, torch.Tensor] | None
         ) = None
+        self._qvq_planar_fallback_cache: (
+            tuple[torch.Tensor, int, torch.Tensor] | None
+        ) = None
         self._qvq_fp8_levels_cache: tuple[torch.device, torch.Tensor, float] | None = None
         self._qvq_fp8_telemetry_lock = threading.Lock()
         self._qvq_fp8_telemetry = {
@@ -493,9 +516,24 @@ class QVQLinear(BaseQuantLinear):
             "rejection_reasons": {},
         }
         self._qvq_amd_folded_hot_cache: tuple | None = None
+        self._qvq_p32_amd_warm_key: tuple | None = None
+        # Per-device auxiliary resources for the optional rank8 producer. They
+        # are created during preparation, never lazily during graph replay.
+        # The enclosing graph owner serializes a module's captured execution;
+        # each caller stream gets an independent producer/event pair so eager
+        # requests cannot overwrite another stream's readiness dependency.
+        self._qvq_rank8_concurrent_cache: dict[
+            tuple[int, int], tuple[torch.cuda.Stream, torch.cuda.Event, torch.cuda.Event]
+        ] = {}
+        self._qvq_rank8_concurrent_cache_lock = threading.Lock()
+        self._qvq_rank8_concurrent_warm: set[tuple[int, int, int, int]] = set()
+        self._qvq_rank8_factor_cache: dict[str, tuple[torch.Tensor, int, int, torch.device]] = {}
         pgc16_levels_for_version(self.codebook_version)
 
-        missing = {"trellis", "SU", "SV"} - set(tensors) if tensors else set()
+        required_tensors = {"SU", "SV"}
+        if not window_only:
+            required_tensors.add("trellis")
+        missing = required_tensors - set(tensors) if tensors else set()
         if tensors and missing:
             raise ValueError(
                 f"QVQ module `{self.name}` is missing tensors: {sorted(missing)}"
@@ -512,7 +550,7 @@ class QVQLinear(BaseQuantLinear):
 
         storage_dtype = dtype or torch.float16
         defaults = {
-            "trellis": torch.zeros(
+            "trellis": None if window_only else torch.zeros(
                 (
                     (in_features // 16) * (out_features // 16),
                     qvq_words_per_tile(bits, vector_size=vector_size),
@@ -541,28 +579,42 @@ class QVQLinear(BaseQuantLinear):
                 else None
             ),
             "bank_alt_id": torch.ones(1, dtype=torch.uint8) if v2b2_p32 else None,
+            "window_words": None,
+            "rank8_A": None,
+            "rank8_B": None,
+            "rank8_metadata": None,
         }
         for buffer_name in _QVQ_BUFFER_NAMES:
             tensor = tensors.get(
                 buffer_name, defaults[buffer_name] if register_buffers else None
             )
-            if tensor is None:
+            if tensor is None and not buffer_name.startswith("rank8_"):
                 setattr(self, buffer_name, None)
             else:
                 self.register_buffer(buffer_name, tensor)
         if tensors or register_buffers:
             self._validate_tensors()
 
+        # Optional recovery belongs to this operator, never an adapter wrapper.
+        # None buffers keep legacy checkpoints and recovery-off storage unchanged.
+        self._p32_rank8_enabled = False
+
     def __getstate__(self):
         """Exclude transient selector state from deepcopy/pickle."""
         state = super().__getstate__()
         state.pop("_qvq_cuda_bank_cache_lock", None)
         state.pop("_qvq_fp8_telemetry_lock", None)
+        state.pop("_qvq_rank8_concurrent_cache_lock", None)
         state.pop("_qvq_grouped_p32_delegate", None)
         state["_qvq_cuda_bank_cache"] = None
         state["_qvq_cuda_window_cache"] = None
+        state["_qvq_planar_fallback_cache"] = None
         state["_qvq_fp8_levels_cache"] = None
         state["_qvq_amd_folded_hot_cache"] = None
+        state["_qvq_p32_amd_warm_key"] = None
+        state["_qvq_rank8_concurrent_cache"] = {}
+        state["_qvq_rank8_concurrent_warm"] = set()
+        state["_qvq_rank8_factor_cache"] = {}
         return state
 
     def __setstate__(self, state):
@@ -571,6 +623,7 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_fp8_telemetry_lock = threading.Lock()
         self._qvq_cuda_bank_cache = None
         self._qvq_cuda_window_cache = None
+        self._qvq_planar_fallback_cache = None
         self._qvq_fp8_levels_cache = None
         if "_qvq_fp8_telemetry" not in self.__dict__:
             self._qvq_fp8_telemetry = {
@@ -587,6 +640,11 @@ class QVQLinear(BaseQuantLinear):
             self._qvq_fp8_telemetry.setdefault("fallback_reasons", {})
             self._qvq_fp8_telemetry.setdefault("rejection_reasons", {})
         self._qvq_amd_folded_hot_cache = None
+        self._qvq_p32_amd_warm_key = None
+        self._qvq_rank8_concurrent_cache = {}
+        self._qvq_rank8_concurrent_cache_lock = threading.Lock()
+        self._qvq_rank8_concurrent_warm = set()
+        self._qvq_rank8_factor_cache = {}
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         super()._save_to_state_dict(destination, prefix, keep_vars)
@@ -607,6 +665,15 @@ class QVQLinear(BaseQuantLinear):
         unexpected_keys,
         error_msgs,
     ):
+        from ...quantization.qvq_rank8 import RANK8_BUFFERS
+
+        for name in RANK8_BUFFERS:
+            value = state_dict.get(f"{prefix}{name}")
+            if value is not None:
+                setattr(self, name, torch.empty_like(value, device=self.runtime_device()))
+        # A newly loaded payload must be validated before enabling recovery.
+        self._p32_rank8_enabled = False
+        self._qvq_p32_amd_warm_key = None
         selector_key = f"{prefix}bank_ids"
         if self.bank_count in (2, 4) and selector_key not in state_dict:
             self._bank_ids_loaded = False
@@ -625,6 +692,140 @@ class QVQLinear(BaseQuantLinear):
     def _dtype_cache_clear(self) -> None:
         """Drop cached dtype conversions (call if SU/SV/bias are replaced)."""
         self._dtype_cache = {}
+        self._qvq_cuda_aux_cache_signature = None
+        self._qvq_rank8_factor_cache = {}
+        self._qvq_planar_fallback_cache = None
+
+    def _prepare_planar_fallback(self) -> torch.Tensor:
+        """Prepare a legacy planar payload only for an explicit fallback.
+
+        Normal direct-window inference releases planar ownership. Unsupported
+        arithmetic or backend policies may still request the reference child
+        path; this cache is then prepared eagerly and remains stable for graph
+        replay instead of allocating during capture.
+        """
+        if not self.window_only:
+            if self.trellis is None:
+                raise RuntimeError("QVQ planar fallback payload is unavailable")
+            return self.trellis
+        source = self.window_words
+        if source is None:
+            raise RuntimeError("QVQ window-only module is missing window_words")
+        source_version = _qvq_buffer_version(source)
+        cached = self._qvq_planar_fallback_cache
+        if (
+            cached is not None
+            and cached[0] is source
+            and cached[1] == source_version
+        ):
+            return cached[2]
+        self._require_prepared_outside_capture(source.device, "planar fallback")
+        # ``retain_planar=True`` is an explicit legacy/debug request.  Reuse
+        # the retained canonical planar payload instead of rebuilding an
+        # equivalent copy from the window.  The transfer is prepared before
+        # capture and cached for replay; production window-only loads have no
+        # ``trellis`` and continue to take the one-time lossless repack path.
+        retained = self.trellis
+        if retained is not None:
+            planar = retained.to(device=source.device).contiguous()
+        else:
+            planar = repack_p32_window_to_planar(source, bits=self.bits).contiguous()
+        self._qvq_planar_fallback_cache = (source, source_version, planar)
+        return planar
+
+    def _cached_rank8_factor(self, name: str) -> torch.Tensor:
+        """Return a prepared contiguous FP32 rank8 factor without replay casts."""
+        if name not in ("A", "B"):
+            raise ValueError("rank8 factor name must be A or B")
+        source = getattr(self, "rank8_" + name, None)
+        if source is None:
+            raise RuntimeError(f"rank8 factor {name} is unavailable")
+        key = (id(source), source._version, source.device)
+        cached = self._qvq_rank8_factor_cache.get(name)
+        if cached is not None and cached[1:] == key:
+            return cached[0]
+        self._require_prepared_outside_capture(source.device, "rank8 FP32 factors")
+        value = source.detach().to(dtype=torch.float32).contiguous()
+        self._qvq_rank8_factor_cache[name] = (value, *key)
+        return value
+
+    def _prepare_cuda_graph_auxiliary_caches(self) -> None:
+        """Materialize constant dtype variants used by graph-safe fallback paths.
+
+        The normal FP16 forward only needs the FP16 transform constants during
+        warmup.  A CUDA graph must also be able to take the BF16 overflow-rescue
+        path without allocating a new cast buffer while capture is active.
+        Keep this preparation explicit and outside capture; the forward path
+        remains free of host synchronization and cache mutation.
+        """
+        if self.runtime_device().type != "cuda":
+            return
+        self._require_prepared_outside_capture(
+            self.runtime_device(), "auxiliary dtype caches"
+        )
+        # The BF16 overflow-rescue branch uses the legacy GEMV consumer while
+        # the native P32 WGMMA path is FP16-only.  A window-owned module has
+        # released its planar source, so materialize the transient fallback
+        # before capture as part of graph preparation.  The fallback is a
+        # cache owned by the graph warmup and is never serialized or restored
+        # as production planar storage.
+        if self.window_only:
+            self._prepare_planar_fallback()
+        signature = tuple(
+            (name, id(tensor), tensor._version, tensor.device)
+            for name in ("SU", "SV", "bias")
+            if (tensor := getattr(self, name)) is not None
+        )
+        if getattr(self, "_qvq_cuda_aux_cache_signature", None) == signature:
+            return
+        for compute_dtype in (torch.float16, torch.bfloat16):
+            self._cached_cast("SU", compute_dtype)
+            for output_dtype in (torch.float16, torch.bfloat16, torch.float32):
+                self._cached_cast("SV", compute_dtype, output_dtype)
+                self._cached_cast("bias", compute_dtype, output_dtype)
+        self._qvq_cuda_aux_cache_signature = signature
+
+    def _rank8_concurrent_resources(
+        self,
+        device: torch.device,
+        caller_stream: torch.cuda.Stream | None = None,
+    ):
+        """Return prepared stream/event resources for concurrent rank8 projection.
+
+        A producer stream and its events are paired with the caller stream
+        that submits the operation. Resources are keyed by both device and
+        caller stream: reusing one event pair across independent request
+        streams would let concurrent calls overwrite each other's readiness
+        dependency. Graph capture never allocates a missing pair; the caller
+        falls back to an in-stream reference projection for that capture.
+        """
+        if device.type != "cuda":
+            raise RuntimeError("concurrent rank8 projection requires CUDA")
+        if caller_stream is None:
+            caller_stream = torch.cuda.current_stream(device)
+        device_key = int(device.index if device.index is not None else torch.cuda.current_device())
+        stream_key = int(caller_stream.cuda_stream)
+        cache_key = (device_key, stream_key)
+        with self._qvq_rank8_concurrent_cache_lock:
+            cached = self._qvq_rank8_concurrent_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            self._require_prepared_outside_capture(device, "rank8 concurrent producer")
+            resources = (
+                torch.cuda.Stream(device=device),
+                torch.cuda.Event(enable_timing=False, blocking=False),
+                torch.cuda.Event(enable_timing=False, blocking=False),
+            )
+            self._qvq_rank8_concurrent_cache[cache_key] = resources
+            return resources
+
+    @staticmethod
+    def _require_prepared_outside_capture(device: torch.device, what: str) -> None:
+        """Fail closed when a cold cache would allocate or synchronize in capture."""
+        if device.type == "cuda" and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                f"QVQ {what} must be prepared before CUDA Graph capture"
+            )
 
     def _prepare_hopper_p32_window(
         self,
@@ -637,8 +838,10 @@ class QVQLinear(BaseQuantLinear):
         per module after the weights reach the accelerator and reuse the result.
         """
 
-        source = self.trellis
-        source_version = source._version
+        source = self.window_words if self.window_only else self.trellis
+        if source is None:
+            raise RuntimeError("QVQ window-only module is missing window_words")
+        source_version = _qvq_buffer_version(source)
         cached = self._qvq_cuda_window_cache
         if (
             cached is not None
@@ -647,13 +850,31 @@ class QVQLinear(BaseQuantLinear):
             and cached[2] == device
         ):
             return cached[3]
-        window = repack_p32_planar_to_window(source.contiguous(), bits=self.bits).to(
-            device=device
-        )
-        if self.trellis is not source or source._version != source_version:
+        self._require_prepared_outside_capture(device, "window payload")
+        if self.window_only:
+            if source.device != device:
+                raise RuntimeError("QVQ window_words must reside on the execution device")
+            window = source.contiguous()
+        else:
+            window = repack_p32_planar_to_window(source.contiguous(), bits=self.bits).to(
+                device=device
+            )
+        current_source = self.window_words if self.window_only else self.trellis
+        if current_source is not source or _qvq_buffer_version(source) != source_version:
             raise RuntimeError(
                 "QVQ P32 trellis changed while preparing the window payload"
             )
+        # Direct window inference owns the lossless window payload after the
+        # one-time repack. Release the planar source for evaluated modules so
+        # live device storage does not retain two equivalent representations.
+        # Training modules keep planar ownership for the differentiable path;
+        # explicit preparation is itself the boundary for eval modules.
+        if not self.window_only and not self.training:
+            self.window_words = window
+            self.trellis = None
+            self.window_only = True
+            source = self.window_words
+            source_version = _qvq_buffer_version(source)
         self._qvq_cuda_window_cache = (source, source_version, device, window)
         return window
 
@@ -663,6 +884,7 @@ class QVQLinear(BaseQuantLinear):
         cached = self._qvq_fp8_levels_cache
         if cached is not None and cached[0] == device:
             return cached[1], cached[2]
+        self._require_prepared_outside_capture(device, "FP8 level table")
         fp8_dtype = torch.float8_e4m3fn
         fp8_max = float(torch.finfo(fp8_dtype).max)
         canonical = pgc16_levels_for_version(self.codebook_version).to(torch.float32)
@@ -734,6 +956,7 @@ class QVQLinear(BaseQuantLinear):
                 packed = cached[5]
                 bank_alt_id = cached[6]
             else:
+                self._require_prepared_outside_capture(device, "bank selector payload")
                 snapshot = None
                 snapshot_version = -1
                 for _ in range(3):
@@ -807,9 +1030,14 @@ class QVQLinear(BaseQuantLinear):
         cached = self._qvq_amd_folded_hot_cache
         # Resolve registered tensors once. nn.Module buffer lookup is not a plain
         # attribute read, and repeated resolution was material in decode forwards.
+        # Window-only deployment releases planar trellis after the CPU repack;
+        # the prepared window is the canonical source for cache identity then.
         buffers = self._buffers if type(self) is QVQLinear else {}
-        # dict.get(default) would eagerly perform the attribute lookup we avoid.
-        trellis = buffers["trellis"] if "trellis" in buffers else self.trellis  # noqa: SIM401
+        source = self.window_words if self.window_only else (
+            buffers["trellis"] if "trellis" in buffers else self.trellis  # noqa: SIM401
+        )
+        if source is None:
+            return None
         bank_ids_source = buffers["bank_ids"] if "bank_ids" in buffers else self.bank_ids  # noqa: SIM401
         bank_alt_source = buffers["bank_alt_id"] if "bank_alt_id" in buffers else self.bank_alt_id  # noqa: SIM401
         su_source = buffers["SU"] if "SU" in buffers else self.SU  # noqa: SIM401
@@ -818,8 +1046,8 @@ class QVQLinear(BaseQuantLinear):
         if (
             cached is not None
             and len(cached) == 27
-            and cached[0] is trellis
-            and cached[1] == trellis._version
+            and cached[0] is source
+            and cached[1] == source._version
             and cached[2] is bank_ids_source
             and cached[3] == bank_ids_source._version
             and cached[4] is bank_alt_source
@@ -885,8 +1113,8 @@ class QVQLinear(BaseQuantLinear):
             window._qvq_p32_amd_folded_cache
         )
         self._qvq_amd_folded_hot_cache = (
-            self.trellis,
-            self.trellis._version,
+            source,
+            source._version,
             self.bank_ids,
             self.bank_ids._version,
             self.bank_alt_id,
@@ -927,6 +1155,7 @@ class QVQLinear(BaseQuantLinear):
         key = (name, dtypes)
         cached = self._dtype_cache.get(key)
         if cached is None or cached[0] is not tensor or cached[1] != tensor._version:
+            self._require_prepared_outside_capture(tensor.device, "auxiliary dtype cache")
             converted = tensor
             for dtype in dtypes:
                 converted = converted.to(dtype)
@@ -1025,6 +1254,10 @@ class QVQLinear(BaseQuantLinear):
         }
         for name, (shape, dtype) in expected.items():
             tensor = getattr(self, name)
+            if tensor is None:
+                if name == "trellis" and self.window_only:
+                    continue
+                raise ValueError(f"QVQ `{name}` is missing from the module")
             if tuple(tensor.shape) != shape:
                 raise ValueError(
                     f"QVQ `{name}` must have shape {shape}, got {tuple(tensor.shape)}"
@@ -1033,6 +1266,15 @@ class QVQLinear(BaseQuantLinear):
                 raise TypeError(f"QVQ `{name}` must use {dtype}, got {tensor.dtype}")
             if name != "trellis" and not tensor.is_floating_point():
                 raise TypeError(f"QVQ `{name}` must use a floating-point dtype")
+        if self.window_only:
+            if self.window_words is None:
+                raise ValueError("window_only QVQ modules require window_words")
+            if tuple(self.window_words.shape) != expected_trellis:
+                raise ValueError(
+                    f"QVQ `window_words` must have shape {expected_trellis}, got {tuple(self.window_words.shape)}"
+                )
+            if self.window_words.dtype != torch.int32:
+                raise TypeError("QVQ `window_words` must use torch.int32")
         if self.bank_ids is not None:
             if self.bank_count not in (2, 4) or (
                 self.vector_size != 4 and not self.v2b4_p64 and not self.v2b2_p32
@@ -1097,7 +1339,14 @@ class QVQLinear(BaseQuantLinear):
                 )
             if not self.bias.is_floating_point():
                 raise TypeError("QVQ `bias` must use a floating-point dtype")
-        devices = {getattr(self, name).device for name in ("trellis", "SU", "SV")}
+        active_device = (
+            self.window_words.device
+            if self.window_only and self.window_words is not None
+            else self.trellis.device
+        )
+        devices = {active_device, self.SU.device, self.SV.device}
+        if not self.window_only:
+            devices.add(self.trellis.device)
         if self.bank_ids is not None:
             devices.add(self.bank_ids.device)
         if self.bank_alt_id is not None:
@@ -1105,7 +1354,9 @@ class QVQLinear(BaseQuantLinear):
         if self.bias is not None:
             devices.add(self.bias.device)
         if len(devices) != 1:
-            raise ValueError("QVQ module tensors must share one device")
+            raise ValueError(
+                "QVQ module tensors must share one device (or window_only may keep planar trellis on CPU)"
+            )
         floating_tensors = (
             (self.SU, self.SV) if self.bias is None else (self.SU, self.SV, self.bias)
         )
@@ -1118,6 +1369,8 @@ class QVQLinear(BaseQuantLinear):
             )
 
     def runtime_device(self) -> torch.device | None:
+        if self.window_only and self.window_words is not None:
+            return self.window_words.device
         return None if self.trellis is None else self.trellis.device
 
     def post_init(self) -> None:
@@ -1141,19 +1394,23 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_mps_compander = None
         self._qvq_mps_bank_ids = None
         self._qvq_mps_bank_ids_cache = None
+        self._dtype_cache_clear()
         with self._qvq_cuda_bank_cache_lock:
             self._qvq_cuda_bank_cache = None
             self._qvq_cuda_window_cache = None
             self._qvq_amd_folded_hot_cache = None
-        if self.trellis.device.type == "mps":
+            self._qvq_p32_amd_warm_key = None
+        if self.runtime_device().type == "mps":
             from ...utils.qvq_mps import _prepare_qvq_mps_compander
 
             self._qvq_mps_compander = _prepare_qvq_mps_compander(
-                self.trellis.device,
+                self.runtime_device(),
                 self.codebook_version,
             )
             if self.bank_ids is not None:
-                self._qvq_mps_bank_ids = self._prepare_mps_bank_ids(self.trellis.device)
+                self._qvq_mps_bank_ids = self._prepare_mps_bank_ids(
+                    self.runtime_device()
+                )
 
     def _apply(self, fn):
         grouped_runtime = getattr(self, "_gptqmodel_qvq_grouped_runtime", None)
@@ -1170,6 +1427,7 @@ class QVQLinear(BaseQuantLinear):
             self._qvq_cuda_bank_cache = None
             self._qvq_cuda_window_cache = None
             self._qvq_amd_folded_hot_cache = None
+            self._qvq_p32_amd_warm_key = None
         # ModuleLooper performs device handoffs from inference-mode workers.
         # Letting Module._apply inherit that mode would recreate all cache-keyed
         # buffers without mutation counters immediately after post_init made
@@ -1239,8 +1497,22 @@ class QVQLinear(BaseQuantLinear):
     ) -> torch.Tensor:
         """Materialize the dense inner weight, in FP32 unless explicitly requested otherwise."""
 
+        trellis = self.trellis
+        if self.window_only:
+            if self.window_words is None:
+                raise RuntimeError("window-only QVQ module is missing window_words")
+            # This is an explicit legacy/reference request. Do not create a
+            # temporary planar tensor during graph capture; callers that need
+            # that path in a graph must load with retain_planar=True.
+            self._require_prepared_outside_capture(
+                self.window_words.device, "planar reconstruction"
+            )
+            trellis = repack_p32_window_to_planar(
+                self.window_words, bits=self.bits
+            )
+
         return reconstruct_qvq_inner_weight(
-            self.trellis,
+            trellis,
             bits=self.bits,
             vector_size=self.vector_size,
             trellis_window=self.trellis_window,
@@ -1284,6 +1556,16 @@ class QVQLinear(BaseQuantLinear):
         return_ordered_partials: bool = False,
         ordered_split_count: int | None = None,
     ) -> torch.Tensor:
+        window_config = getattr(self, "_p32_window_config", None)
+        if (window_config is not None and (
+                window_config.algorithm.startswith("hopper_")
+                or window_config.algorithm in ("ampere_window", "amd_gfx950")
+            ) and x.dtype in (torch.float16, torch.bfloat16)):
+            if return_ordered_partials or ordered_split_count is not None:
+                raise ValueError("explicit window policy requires complete inner output")
+            from ...quantization.qvq_rank8 import explicit_window_inner
+
+            return explicit_window_inner(self, x, window_config)
         if ordered_split_count is not None and not return_ordered_partials:
             raise ValueError("an explicit ordered split requires partial output")
         if return_ordered_partials:
@@ -1429,6 +1711,9 @@ class QVQLinear(BaseQuantLinear):
                         cuda_bank_alt_id = cached[6]
                         cached = None
                     if cuda_bank_ids is None:
+                        self._require_prepared_outside_capture(
+                            x.device, "CUDA bank selector payload"
+                        )
                         # Clone between two version reads. If a free-threaded
                         # writer mutates during the clone, retry rather than
                         # publishing a snapshot under the wrong version.
@@ -1527,7 +1812,11 @@ class QVQLinear(BaseQuantLinear):
                 self.v2b2_p32
                 and self.vector_size == 2
                 and x.dtype == torch.float16
-                and 0 < x.shape[0] <= 4096
+                # The window-owned Hopper large-M path supports the full
+                # public M range through 8192.  Keeping the old 4096 guard
+                # here silently fell through to the planar CUDA fallback,
+                # which is unavailable after a production window-only load.
+                and 0 < x.shape[0] <= 8192
                 and self.in_features % 256 == 0
                 and self.out_features % 256 == 0
                 and qvq_transition_bits(self.bits, vector_size=2) in (4, 5, 6, 7)
@@ -1630,6 +1919,25 @@ class QVQLinear(BaseQuantLinear):
                     )
                     return output if return_ordered_partials else output[: x.shape[0]]
 
+            if self.window_only:
+                # Unsupported optional policies may deliberately fall back to
+                # the legacy child reference. The planar payload must have been
+                # prepared by the eager fallback before graph capture.
+                planar = self._prepare_planar_fallback()
+                return qvq_cuda_gemv(
+                    x.contiguous(),
+                    planar,
+                    self.bits,
+                    out_features=self.out_features,
+                    codebook_version=self.codebook_version,
+                    output_fp32=x.dtype in (torch.float16, torch.bfloat16),
+                    vector_size=self.vector_size,
+                    bank_ids=cuda_bank_ids,
+                    v2b4_p64=self.v2b4_p64,
+                    v2b2_p32=self.v2b2_p32,
+                    bank_alt_id=cuda_bank_alt_id,
+                    _bank_ids_validated=True,
+                )
             return qvq_cuda_gemv(
                 x.contiguous(),
                 self.trellis.contiguous(),
@@ -1642,6 +1950,7 @@ class QVQLinear(BaseQuantLinear):
                 v2b4_p64=self.v2b4_p64,
                 v2b2_p32=self.v2b2_p32,
                 bank_alt_id=cuda_bank_alt_id,
+                _bank_ids_validated=True,
             )
         if x.device.type == "cpu":
             from ...utils.qvq_cpu import qvq_cpu_gemv, qvq_cpu_supported
@@ -1650,6 +1959,7 @@ class QVQLinear(BaseQuantLinear):
                 self.trellis_window != 16
                 or self.vector_size != 2
                 or self.dual_v2
+                or self.window_only
                 or not qvq_cpu_supported()
             ):
                 return self._reference_inner_forward(x)
@@ -1700,6 +2010,13 @@ class QVQLinear(BaseQuantLinear):
                 cuda_bank_ids = cached[5]
                 bank_alt_id = cached[6]
             else:
+                # FP8 WGMMA snapshots and packs mutable bank metadata on a
+                # cache miss.  This is preparation work and must never occur
+                # during CUDA Graph capture, where the clone/device transfer
+                # would allocate and the alternative-bank read would sync.
+                self._require_prepared_outside_capture(
+                    input.device, "FP8 bank selector payload"
+                )
                 cuda_bank_ids = pack_qvq_binary_bank_ids(
                     unpack_qvq_binary_bank_ids(source.detach().clone(), selector_count)
                 ).to(device=input.device)
@@ -1820,6 +2137,8 @@ class QVQLinear(BaseQuantLinear):
             )
         if x.numel() == 0:
             return x.new_empty((*x.shape[:-1], self.out_features))
+        if getattr(self, "_p32_rank8_enabled", False) and self.training:
+            raise RuntimeError("window recovery is inference-only")
         delegate = getattr(self, "_qvq_grouped_p32_delegate", None)
         if delegate is not None:
             state, consumer_index, module_name = delegate
@@ -1828,11 +2147,36 @@ class QVQLinear(BaseQuantLinear):
         compute_dtype = _qvq_compute_dtype(input_dtype, x.device.type)
         x_2d = x.reshape(-1, self.in_features)
 
+        # Composite-width and BF16 forwards may execute the capture-safe
+        # overflow-rescue branch even when ordinary warmup data is finite.
+        # Materialize its constant dtype variants during eager warmup so a raw
+        # torch.cuda.graph caller receives the same no-allocation guarantee as
+        # P32WindowGraphs.capture.
+        rescue_possible = input_dtype == torch.bfloat16 or (
+            input_dtype == torch.float16
+            and (
+                self.in_features < _FP16_STABLE_HADAMARD_MIN_WIDTH
+                or self.in_features > _QVQ_HADAMARD_MAX_WIDTH
+                or self.in_features & (self.in_features - 1)
+                or self.out_features > _QVQ_HADAMARD_MAX_WIDTH
+                or self.out_features & (self.out_features - 1)
+            )
+        )
+        if (
+            rescue_possible
+            and x.device.type == "cuda"
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            self._prepare_cuda_graph_auxiliary_caches()
+
         # The folded gfx950 path has no low-precision butterfly intermediate,
         # so it cannot trigger the transform-overflow rescue below. Return at
         # this boundary to avoid an otherwise redundant device-wide finite
         # reduction and host synchronization on every Qwen projection.
-        amd_folded = self._qvq_amd_folded_forward(x_2d, compute_dtype)
+        amd_folded = (
+            None if getattr(self, "_p32_rank8_enabled", False)
+            else self._qvq_amd_folded_forward(x_2d, compute_dtype)
+        )
         if amd_folded is not None:
             return amd_folded.reshape(*x.shape[:-1], self.out_features).to(input_dtype)
 
@@ -1961,6 +2305,7 @@ class QVQLinear(BaseQuantLinear):
         output = self._forward_pretransformed_compute_dtype(
             transformed_2d,
             compute_dtype,
+            output_dtype=output_dtype,
         )
         return output.reshape(*transformed.shape[:-1], self.out_features).to(
             target_dtype
@@ -2083,7 +2428,7 @@ class QVQLinear(BaseQuantLinear):
     ) -> torch.Tensor:
         if self.training:
             compute_dtype = self._qvq_operand_compute_dtype(x_2d, compute_dtype)
-            x_2d, input_scale, input_rounding_mode = self._prepare_activation_input(
+            x_2d, _input_scale, _input_rounding_mode = self._prepare_activation_input(
                 x_2d,
                 compute_dtype,
                 straight_through=True,
@@ -2133,9 +2478,23 @@ class QVQLinear(BaseQuantLinear):
                 output = output + self.bias.to(compute_dtype)
         else:
             compute_dtype = self._qvq_operand_compute_dtype(x_2d, compute_dtype)
-            transformed = self._qvq_prepare_inference_input(x_2d, compute_dtype)
+            hidden = None
+            if (getattr(self, "_p32_rank8_enabled", False)
+                    and self._p32_window_config.recovery_projection == "input_fused"
+                    and compute_dtype == torch.float16):
+                from ...quantization.qvq_rank8 import validate_rank8_state
+                from ...utils.qvq_rank8_triton import rank8_input_producer
+
+                validate_rank8_state(self)
+                transformed, hiddens = rank8_input_producer(
+                    x_2d.to(compute_dtype).contiguous(), self._cached_cast("SU", compute_dtype),
+                    self.rank8_A, hadamard=self.input_hadamard,
+                )
+                hidden = hiddens[0]
+            else:
+                transformed = self._qvq_prepare_inference_input(x_2d, compute_dtype)
             return self._forward_pretransformed_compute_dtype(
-                transformed, compute_dtype, output_dtype=output_dtype
+                transformed, compute_dtype, output_dtype=output_dtype, rank8_hidden=hidden
             )
         return output
 
@@ -2145,7 +2504,12 @@ class QVQLinear(BaseQuantLinear):
         compute_dtype: torch.dtype,
         *,
         output_dtype: torch.dtype | None = None,
+        rank8_hidden: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if getattr(self, "_p32_rank8_enabled", False):
+            from ...quantization.qvq_rank8 import validate_rank8_state
+
+            validate_rank8_state(self)
         config = self.activation
         if config is not None and config.target == "p32_operand":
             quantized, scale = quantize_qvq_fp8_activation(
@@ -2186,8 +2550,78 @@ class QVQLinear(BaseQuantLinear):
             return self._recover_output_compute_dtype(
                 output, torch.float32, target_dtype=output_dtype
             )
+        concurrent_done = None
+        concurrent_stream = None
+        concurrent = (
+            getattr(self, "_p32_rank8_enabled", False)
+            and rank8_hidden is None
+            and getattr(self._p32_window_config, "recovery_projection", None)
+            == "concurrent_reference"
+            and compute_dtype == torch.float16
+            and transformed.device.type == "cuda"
+            and transformed.is_contiguous()
+        )
+        if concurrent:
+            # Launch the numerically reference FP32->FP16 projection on a
+            # prepared auxiliary stream while the current stream decodes the
+            # P32 window.  Events are captured as dependencies, so replay has
+            # no host synchronization or stream allocation.
+            current_stream = torch.cuda.current_stream(transformed.device)
+            device_key = int(
+                transformed.device.index
+                if transformed.device.index is not None
+                else torch.cuda.current_device()
+            )
+            m, k = transformed.shape
+            stream_key = int(current_stream.cuda_stream)
+            warm_key = (device_key, stream_key, int(m), int(k))
+            capturing = torch.cuda.is_current_stream_capturing()
+            if capturing and warm_key not in self._qvq_rank8_concurrent_warm:
+                # A capture may use an internal stream distinct from the
+                # caller stream that performed eager warmup.  Do not allocate
+                # a new producer stream/event pair inside capture; execute the
+                # reference projection on the capture stream instead.  This
+                # keeps graph replay deterministic and preserves the exact
+                # arithmetic contract, at the cost of overlap for this cold
+                # capture stream only.
+                rank8_hidden = (
+                    transformed.float() @ self._cached_rank8_factor("A")
+                ).half()
+            else:
+                concurrent_stream, ready, done = self._rank8_concurrent_resources(
+                    transformed.device, current_stream
+                )
+                ready.record(current_stream)
+                with torch.cuda.stream(concurrent_stream):
+                    concurrent_stream.wait_event(ready)
+                    rank8_hidden = (
+                        transformed.float() @ self._cached_rank8_factor("A")
+                    ).half()
+                    done.record(concurrent_stream)
+                concurrent_done = done
+                if not capturing:
+                    self._qvq_rank8_concurrent_warm.add(warm_key)
         output = self._inner_forward(transformed)
-        return self._recover_output_compute_dtype(output, compute_dtype)
+        if concurrent_done is not None:
+            # Queue the dependency after the window decoder so both branches
+            # overlap and the correction cannot observe a stale hidden value.
+            torch.cuda.current_stream(transformed.device).wait_event(concurrent_done)
+        if getattr(getattr(self, "_p32_window_config", None), "recovery_kernel", None) in (
+            "fused_epilogue",
+            "fully_fused",
+        ):
+            from ...quantization.qvq_rank8 import fused_rank8_output
+
+            return fused_rank8_output(
+                self, transformed, output, compute_dtype, hidden=rank8_hidden, output_dtype=output_dtype
+            )
+        if getattr(self, "_p32_rank8_enabled", False):
+            from ...quantization.qvq_rank8 import add_rank8_correction
+
+            output = add_rank8_correction(self, transformed, output, hidden=rank8_hidden)
+        return self._recover_output_compute_dtype(
+            output, compute_dtype, target_dtype=output_dtype
+        )
 
     def _recover_output_compute_dtype(
         self,
@@ -2353,8 +2787,18 @@ def qvq_dense_oracle_forward(
     inner = None
     try:
         with torch.inference_mode():
+            source = layer.window_words if layer.window_only else layer.trellis
+            if source is None:
+                raise RuntimeError(
+                    "QVQ oracle requires a window or planar P32 payload"
+                )
+            if layer.window_only:
+                layer._require_prepared_outside_capture(
+                    source.device, "oracle planar reconstruction"
+                )
+                source = repack_p32_window_to_planar(source, bits=layer.bits)
             inner = reconstruct_qvq_inner_weight(
-                layer.trellis.to(device=compute_device),
+                source.to(device=compute_device),
                 bits=layer.bits,
                 vector_size=layer.vector_size,
                 trellis_window=layer.trellis_window,
