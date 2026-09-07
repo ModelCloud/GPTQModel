@@ -662,13 +662,71 @@ def test_grouped_hopper_policy_accepts_split_tuple_and_rejects_unimplemented_geo
     assert reason == "grouped Hopper requires FP16 or BF16 CUDA activations"
 
     unsupported_projection = replace(
-        split_policy, recovery_projection="concurrent_reference"
+        split_policy, recovery_projection="tensor_core"
     )
     for child in children:
         child._p32_rank8_enabled = True
         child._p32_window_config = unsupported_projection
     reason = runtime._runtime_eligible(torch.randn(1, 256))
-    assert reason == "grouped rank8 projection supports separate_reference or input_fused only"
+    assert reason == (
+        "grouped rank8 projection supports separate_reference, "
+        "concurrent_reference or input_fused only"
+    )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_grouped_concurrent_rank8_reuses_transform_and_replays_graph():
+    """Sibling concurrent producers must join the grouped decode safely."""
+
+    device = _h200_device() or _h100_device()
+    if device is None:
+        pytest.skip("requires an H100 or H200 SM90 validation device")
+    from test_qvq_window_recovery import _kernel_rank8
+    from gptqmodel.quantization.qvq_rank8 import P32WindowConfig, prepare_rank8
+
+    torch.backends.cuda.matmul.allow_tf32 = False
+    shared = torch.ones(256, device=device)
+    children = tuple(
+        _child(
+            name,
+            su=shared,
+            alt_id=index + 1,
+            seed=20261040 + index,
+            device=device,
+        )
+        for index, name in enumerate(("q_proj", "k_proj", "v_proj"))
+    )
+    config = P32WindowConfig(
+        recovery_mode="on",
+        recovery_projection="concurrent_reference",
+    )
+    for child in children:
+        _kernel_rank8(child)
+        prepare_rank8(child, config)
+    attention = _Attention(children)
+    assert install_qvq_hopper_groups(attention, gate_up=False) == {"qkv": 1}
+    x = torch.randn((64, 256), device=device, dtype=torch.float16) * 0.02
+
+    with torch.inference_mode():
+        eager = tuple(
+            getattr(attention, name)(x).clone()
+            for name in ("q_proj", "k_proj", "v_proj")
+        )
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = tuple(
+                getattr(attention, name)(x)
+                for name in ("q_proj", "k_proj", "v_proj")
+            )
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    for actual, replayed in zip(eager, captured, strict=True):
+        assert torch.equal(replayed, actual)
+        assert torch.isfinite(actual).all()
+    assert all(
+        len(child._qvq_rank8_concurrent_cache) >= 1 for child in children
+    )
 
 
 def test_grouped_policy_rejects_m_outside_prepared_range_before_device_dispatch():

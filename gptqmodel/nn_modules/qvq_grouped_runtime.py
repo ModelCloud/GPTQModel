@@ -578,12 +578,12 @@ class QVQHopperGroupedRuntime:
         if any(
             getattr(child, "_p32_rank8_enabled", False)
             and getattr(policy, "recovery_projection", "separate_reference")
-            not in ("separate_reference", "input_fused")
+            not in ("separate_reference", "input_fused", "concurrent_reference")
             for child, policy in zip(children, policies, strict=True)
         ):
             return (
-                "grouped rank8 projection supports separate_reference or "
-                "input_fused only"
+                "grouped rank8 projection supports separate_reference, "
+                "concurrent_reference or input_fused only"
             )
 
         if not isinstance(x, torch.Tensor):
@@ -923,6 +923,19 @@ class QVQHopperGroupedRuntime:
             if getattr(child, "_p32_rank8_enabled", False)
             and child._p32_window_config.recovery_projection == "input_fused"
         )
+        concurrent_children = tuple(
+            child for child in children
+            if getattr(child, "_p32_rank8_enabled", False)
+            and child._p32_window_config.recovery_projection == "concurrent_reference"
+        )
+        if producer_children and concurrent_children:
+            # Both implementations need the shared transformed activation but
+            # have different producer ownership/contracts. Mixing them would
+            # silently turn one child into a separate projection, so reject it
+            # before any grouped kernel launch.
+            raise _R0Fallback(
+                "grouped rank8 cannot mix input_fused and concurrent_reference projections"
+            )
         if producer_children and x.dtype == torch.float16:
             from ..utils.qvq_rank8_triton import rank8_input_producer
 
@@ -1019,6 +1032,47 @@ class QVQHopperGroupedRuntime:
                     dtype=torch.float16,
                 )
                 padded[:rows].copy_(transformed)
+        concurrent_done_events = []
+        if concurrent_children and recover and x.dtype == torch.float16:
+            # Reuse the exact transformed activation already prepared for the
+            # grouped P32 consumer. Each child owns an independent producer
+            # stream and event pair, so sibling projections can overlap
+            # without sharing mutable readiness state.
+            current_stream = torch.cuda.current_stream(x.device)
+            device_key = int(
+                x.device.index
+                if x.device.index is not None
+                else torch.cuda.current_device()
+            )
+            transformed_for_rank8 = padded[:rows]
+            m, k = transformed_for_rank8.shape
+            capturing = torch.cuda.is_current_stream_capturing()
+            stream_key = int(current_stream.cuda_stream)
+            for child in concurrent_children:
+                warm_key = (device_key, stream_key, int(m), int(k))
+                if capturing and warm_key not in child._qvq_rank8_concurrent_warm:
+                    # PyTorch may choose an internal stream for capture. Do
+                    # not allocate auxiliary resources in that context; the
+                    # exact reference projection is capture-safe in-stream.
+                    rank8_hiddens[id(child)] = (
+                        transformed_for_rank8.float()
+                        @ child._cached_rank8_factor("A")
+                    ).half()
+                    continue
+                producer_stream, ready, done = child._rank8_concurrent_resources(
+                    x.device, current_stream
+                )
+                ready.record(current_stream)
+                with torch.cuda.stream(producer_stream):
+                    producer_stream.wait_event(ready)
+                    rank8_hiddens[id(child)] = (
+                        transformed_for_rank8.float()
+                        @ child._cached_rank8_factor("A")
+                    ).half()
+                    done.record(producer_stream)
+                concurrent_done_events.append(done)
+                if not capturing:
+                    child._qvq_rank8_concurrent_warm.add(warm_key)
         if payload is None:
             payload = self._ensure_payload()
         from ..utils.qvq_cuda import _pgc16_levels
@@ -1154,6 +1208,13 @@ class QVQHopperGroupedRuntime:
                     children[0].bits, vector_size=children[0].vector_size
                 ) != 5:
                     self.telemetry.h100_qwen_linear_decode_prefetch_launches += 1
+        if concurrent_done_events:
+            # The grouped decoder runs on the caller stream while sibling
+            # rank8 projections run on their producer streams. Join each
+            # producer only after the base FP32 outputs are ready so decode
+            # and correction overlap without exposing incomplete hiddens.
+            for done in concurrent_done_events:
+                torch.cuda.current_stream(x.device).wait_event(done)
         if self._h100_w25_n128_gate_up_enabled:
             self.telemetry.h100_w25_n128_gate_up_launches += 1
         if recover and any(

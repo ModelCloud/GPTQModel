@@ -144,6 +144,14 @@ CUDA graph uses an internal capture stream that was not eagerly warmed, capture
 does not allocate auxiliary resources; it records the same reference
 projection in-stream, preserving graph safety and arithmetic ordering.
 
+Grouped QKV execution now accepts `concurrent_reference` for independently
+enabled children. The shared transformed activation feeds one prepared
+producer stream per child, and the grouped WGMMA output joins those events
+before each child correction epilogue. A real SM90 grouped graph replay covers
+the path; mixing `input_fused` and `concurrent_reference` children is rejected
+explicitly until one shared producer can preserve both implementation
+contracts.
+
 The Ampere continuous-window operator now participates in the same
 `P32WindowConfig` and `window_kernel_candidates` policy. On SM80, the
 shape-specific split-wave enumerator publishes explicit `ampere_window`
