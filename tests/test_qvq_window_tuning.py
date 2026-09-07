@@ -62,6 +62,7 @@ def test_shape_ordering_keeps_every_single_projection_candidate(monkeypatch):
 
     layer = type("Layer", (), {"out_features": 2048})()
     candidates = (
+        P32WindowConfig(algorithm="production_window"),
         P32WindowConfig(
             algorithm="hopper_direct_decode_mma",
             block_m=128,
@@ -76,7 +77,7 @@ def test_shape_ordering_keeps_every_single_projection_candidate(monkeypatch):
         lambda ignored, *, m: candidates,
     )
     ordered = window_kernel_candidates_for_shape(layer, m=96)
-    assert ordered == (candidates[1], candidates[0])
+    assert ordered == (candidates[0], candidates[2], candidates[1])
     assert set(ordered) == set(candidates)
 
 

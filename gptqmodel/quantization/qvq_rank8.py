@@ -2303,11 +2303,17 @@ def window_kernel_candidates_for_shape(layer, *, m):
     candidates = window_kernel_candidates(layer, m=m)
     if len(candidates) < 2:
         return candidates
+    baseline = candidates[0]
     return tuple(
-        choice
-        for _, choice in sorted(
-            enumerate(candidates),
-            key=lambda item: (window_kernel_shape_score(layer, item[1], m=m), item[0]),
+        (baseline,)
+        + tuple(
+            choice
+            for _, choice in sorted(
+                enumerate(candidates[1:], start=1),
+                key=lambda item: (
+                    window_kernel_shape_score(layer, item[1], m=m), item[0]
+                ),
+            )
         )
     )
 
