@@ -15,7 +15,10 @@ The initial native reference bridge supports:
 - P32 W2/W2.5/W3/W3.5, the existing unpacked per-tile bank selectors;
 - existing M16 or direct BM32/64/128, BN64/128, BK256, stages2, split1;
 - optional input/output Hadamard and bias;
-- rank8 off, or FP32 projection → FP16 hidden → FP32 expansion/addition.
+- rank8 off, or FP32 projection → FP16 hidden → FP32 expansion/addition. The
+  prepared graph ABI also exposes `concurrent_reference` and an explicitly
+  unverified Tensor Core producer on owned auxiliary streams; both join before
+  the epilogue.
 
 `Config` exposes the geometry, M range, transform flags and correction flag
 as individual compiler attributes. Resolve the correction flag from validated
@@ -30,22 +33,98 @@ and is revalidated by the Python package/artifact loaders. It is advisory only:
 ZML must still enumerate and benchmark candidates for its own device, shape,
 rate, M bucket, TP layout and correction state rather than applying a cached
 choice from another environment.
+
+Automatic candidate selection is intentionally distinct from enabling rank8 by
+default. Once a module is prepared with rank8 enabled in `fast` mode, ZML
+selects the fastest locally accepted candidate, including an unverified Tensor
+Core producer, even when its measured overhead is above the 3--5% scorecard
+target unless an explicit overhead cap is supplied. The package default keeps
+correction off because factors are optional and the Tensor Core arithmetic
+signature is not yet certified; enabling it globally would alter the existing
+window output. The selected policy is resolved and captured outside graph
+capture for the exact device/shape/M bucket, then replayed without a dynamic
+branch. Balanced and quality modes retain their stricter audit and arithmetic
+requirements.
 `enumerateCandidates` exposes the M16 and all six direct BM/BN candidates as
 ordinary Zig data, so a ZML autotune pass can compile the exact same `linear`
-call for each geometry and retain the winner in its shape/device cache. The
-list is deliberately not pruned globally: a geometry that wins one M or
-projection shape remains available to the tuner for other shapes. Use
+call for each geometry and retain the winner in its shape/device cache. It
+also emits `recovery_projection=0` (separate reference),
+`recovery_projection=1` (concurrent reference), and
+`recovery_projection=2` (concurrent Tensor Core, unverified/fast-only) for
+every geometry. For
+transform-free output modules each projection is paired with
+`recovery_kernel=0` (separate epilogue) and `recovery_kernel=1` (fused
+epilogue), yielding 42 candidates for transform-free and power-of-two
+output-Hadamard modules; composite output-Hadamard modules yield 21. The
+off-state enumeration retains the same indices while ignoring A/B, so every
+on-state projection has a matched correction-off baseline. The list is
+deliberately not pruned globally: a geometry that wins one M or projection
+shape remains available to the tuner for other shapes. Use
 `enumerateCandidatesForShape` when a shape-aware pass should measure tile
 compatible candidates first; it preserves the complete candidate set and is
 only an ordering hint. After each candidate has been warmed and measured
 outside capture, pass its correctness and median timings to `selectFastest`;
 the selector applies the same MAE/max error gate as the Python tuner and uses
 stable enumeration order for ties.
+The companion `candidateShapeScoreForShape` API exposes the deterministic
+ordering score for telemetry and cache records; it does not change eligibility.
+
+For transform-free outputs, the native ABI uses the fused FP32-add/FP16-store
+epilogue for both separate-reference and concurrent rank8 projections. The
+same graph-safe epilogue now folds the power-of-two output Hadamard path;
+composite output widths retain the reference epilogue until a native fused
+transform is certified. The Tensor Core projection remains an explicitly
+unverified candidate. ZML enumerates the fused output-Hadamard candidate only
+when its native power-of-two contract is valid.
+
+Grouped P32 tuning follows the same contract through
+`p32GroupedCandidateSetForShape`: child split tuples matching the exact
+`(M,K,{N_i},transition_bits)` policy are measured first, while alternate
+per-child split and launch candidates remain available to the selector.
+`p32GroupedShapeScoreForShape` exposes the corresponding score for grouped
+telemetry without requiring callers to duplicate the split policy.
+
+The Tensor Core producer remains unverified and is excluded from balanced and
+quality selection. An H200 K=N=2048 BM64/BN64 spot sweep measured its matched
+correction overhead at 35.86% / 18.64% / 16.61% for M=128 / 2048 / 8192;
+these results improve on the reference concurrent producer. The 3--5% value is
+a scorecard target, not an automatic discard criterion; only an explicitly
+requested recovery budget rejects a candidate for overhead.
 `benchmarkExecutable` provides the common warmup/result-readiness timing loop
 for an already-compiled candidate. Compile the serving executable only after
 selection, then warm its prepared native graph before any enclosing ZML/CUDA
 graph capture.
 
+For recovery-aware tuning, compile matching correction-off and correction-on
+executables for each eligible geometry and call `benchmarkRecoveryPair`. It
+returns both complete-executable medians and the signed marginal overhead;
+`RecoveryPairMeasurement.meetsTarget` is a reporting predicate, while
+`selectFastestWithRecoveryGate` can enforce an explicit nonnegative budget on
+every candidate. A supplied budget rejects candidates without a measured pair
+or above the limit; omitting it preserves report-only tuning. The
+quantizer's audit and arithmetic-signature gates still decide whether recovery
+is eligible for `balanced` or `quality`, and the pair result is keyed with the
+same device, shape, rate, TP and artifact identity as the geometry winner.
+The checked-in H200 reports include unbudgeted winners above 5%; the ZML test
+suite keeps those rows selectable and verifies that only the explicitly
+budgeted run removes them from winner selection while retaining them in the
+report.
+
+Use `selectFastestWithPolicy` when the serving graph has an explicit quality
+mode. `quality` admits only `reference_fp32_v1`, `balanced` admits that
+signature plus `certified_tensor_core_v1`, and `fast` is the permissive
+correction-off policy. Alternative signatures must be certified by the
+producer before they can enter a balanced graph.
+The verifier's version-2 tuning report records the selected policy for each
+correction state and the arithmetic signature on every candidate row.
+Its correction-on policy comes from the fixture's `quality_mode` by default;
+pass `--quality-mode fast|balanced|quality` to override it for an explicit
+experiment. The chosen mode is written back to the report so the tuning
+decision is reproducible.
+
+The fused epilogue is an explicit tuning candidate and is not promoted by
+default: initial H200 measurements for K=N=2048 showed substantial marginal
+cost, so rank8 overhead must be measured per M/shape/device before selection.
 The bridge links LibTorch and the existing QVQ CUDA/WGMMA operator libraries,
 but execution does not require Python. `loadArtifact` is the standalone native
 handoff: it validates the versioned manifest, the descriptor-level
@@ -104,16 +183,16 @@ of capture and connects native handle lifetime to the ZML runtime owner.
 
 ## Build and verify
 
-Tested against ZML `567434be798db31ad888c586293eecedff10b526`, Zig 0.16,
+Tested against QvQ `6df72173` and ZML-Ultra `4d8ce52`, Zig 0.16,
 Bazel 9.1.1, Torch 2.15.0.dev20260901+cu130 and an H200. Copy this directory
 into a ZML checkout as `integrations/qvq_window`; the included Bazel targets
 use that checkout's `//zml` dependency. No changes to ZML itself are required.
 
-The source distribution includes this adapter directory. The Python wheel
-includes the native ABI and existing CUDA sources needed for JIT compilation;
-copy the Zig adapter from the source distribution or repository. Both package
-builds were checked against the source files byte for byte; artifact hashes are
-recorded in `docs/kernels/results/p32_window_native_zml.json`.
+This adapter is shipped as the `//integrations/qvq_window` target in ZML-Ultra.
+The Python wheel includes the native ABI and existing CUDA sources needed for
+JIT compilation; the Zig target supplies the graph-safe StableHLO/PJRT bridge.
+Artifact hashes are recorded in QvQ's
+`docs/kernels/results/p32_window_native_zml.json`.
 
 From QvQ, create the native libraries and a disposable correctness fixture from
 an already-bound real window package and its disjoint captured audit activations:
@@ -130,8 +209,19 @@ python scripts/verify_qvq_window_abi.py \
 ```
 
 Keep `CUDA_DEVICE_ORDER=PCI_BUS_ID` and restrict `CUDA_VISIBLE_DEVICES` to the
-verified target UUID. Set the documented compiler limits (`MAX_JOBS=8`,
-`NINJAFLAGS=-j8`, `CMAKE_BUILD_PARALLEL_LEVEL=8`, `NVCC_THREADS=2`) for JIT builds.
+verified target UUID. Set bounded compiler parallelism from the host quota for
+JIT builds. A safe default is half the available CPU cores (with at least one
+worker), reduced further if memory or swap pressure increases:
+
+```bash
+BUILD_CORES="$(nproc)"
+BUILD_JOBS="$((BUILD_CORES / 2))"
+if [ "$BUILD_JOBS" -lt 1 ]; then BUILD_JOBS=1; fi
+export MAX_JOBS="$BUILD_JOBS"
+export NINJAFLAGS="-j$BUILD_JOBS"
+export CMAKE_BUILD_PARALLEL_LEVEL="$BUILD_JOBS"
+export NVCC_THREADS=2
+```
 The script runs an idle-device preflight, validates native/reference outputs,
 and saves hashes for each fixture buffer. These binary files are test fixtures,
 not an alternative deployment format.
@@ -139,11 +229,29 @@ not an alternative deployment format.
 From the ZML checkout:
 
 ```bash
-bazel test //integrations/qvq_window:test --jobs=8
-bazel build //integrations/qvq_window:verify --jobs=8 --@zml//platforms:cuda=true
-bazel run //integrations/qvq_window:verify --jobs=8 --@zml//platforms:cuda=true -- \
-  --fixture=/tmp/p32-window-zml-fixture
+bazel test //integrations/qvq_window:test --jobs="$BUILD_JOBS"
+bazel build //integrations/qvq_window:verify --jobs="$BUILD_JOBS" --@zml//platforms:cuda=true
+bazel run //integrations/qvq_window:verify --jobs="$BUILD_JOBS" --@zml//platforms:cuda=true -- \
+  --fixture=/tmp/p32-window-zml-fixture \
+  --max-recovery-overhead-percent=5 \
+  --tuning-output=/tmp/p32-window-zml-tuning.json
 ```
+
+The fixture exporter can add a hard recovery budget with
+`--max-recovery-overhead-percent=5`. The verifier accepts the same option as a direct override (otherwise it uses the manifest value), then pairs each correction-on
+candidate with its correction-off measurement and rejects any geometry above
+that budget before selecting the serving executable. Without the option, the
+paired overhead is retained as tuning telemetry and selection remains
+correctness-gated only.
+
+`--tuning-output` writes the complete off/on candidate sweep, correctness gates,
+matched recovery overheads, and selected candidate indices as versioned JSON.
+When the fixture manifest carries one, it also records the exact
+`artifact_payload_sha256` binding.
+The report is produced after tuning and before the executable is handed to an
+enclosing graph capture; it is a cache/audit artifact and is never read during
+captured execution. Persistent consumers must still key any cache by device,
+shape, artifact identity, correction state and configuration.
 
 Set `LD_LIBRARY_PATH` to the matching Torch library directory and CUDA dependency
 directory before running the executable. The manifest records the three exact

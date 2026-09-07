@@ -23,7 +23,40 @@ pub const Config = extern struct {
     input_hadamard: u32 = 1,
     output_hadamard: u32 = 1,
     rank8_enabled: u32 = 0,
+    // Optional rank8 implementation policy passed through the native ABI:
+    // recovery_kernel 0 = separate reference, 1 = fused epilogue;
+    // recovery_projection 0 = separate reference, 1 = concurrent reference,
+    // 2 = concurrent Tensor Core projection (unverified/fast-only).
+    // Unsupported combinations fail closed in the native consumer rather than
+    // silently degrading.
+    recovery_kernel: u32 = 0,
+    recovery_projection: u32 = 0,
 };
+
+/// Quality policy is deliberately separate from launch geometry.  A latency
+/// winner cannot silently change the arithmetic contract of a quality graph.
+pub const QualityMode = enum {
+    fast,
+    balanced,
+    quality,
+};
+
+/// Arithmetic signatures are assigned by the producer after numerical
+/// certification.  Unknown signatures remain visible and are only eligible
+/// for the explicitly permissive fast mode.
+pub const ArithmeticSignature = enum(u8) {
+    reference_fp32_v1 = 1,
+    certified_tensor_core_v1 = 2,
+    unverified = 255,
+};
+
+fn arithmeticAllowed(mode: QualityMode, signature: ArithmeticSignature) bool {
+    return switch (mode) {
+        .fast => true,
+        .balanced => signature == .reference_fp32_v1 or signature == .certified_tensor_core_v1,
+        .quality => signature == .reference_fp32_v1,
+    };
+}
 const NativeBuffer = extern struct { data: ?*anyopaque, bytes: u64 };
 const NativeGraphCreate = *const fn (
     [*]const NativeBuffer,
@@ -176,25 +209,31 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Runtime) void {
+        // Detach entries while holding the map lock, then destroy native
+        // graphs after unlocking. Native destruction synchronizes an owning
+        // CUDA stream and must never block unrelated registry operations.
+        var detached: [max_graph_handles]?*GraphEntry = @splat(null);
+        var detached_count: usize = 0;
         graph_mutex.lock();
         if (graph_handles) |*handles| {
             var iterator = handles.iterator();
-            var message: [4096]u8 = @splat(0);
             while (iterator.next()) |entry| {
-                entry.value_ptr.*.run_lock.lock();
-                _ = native_graph_destroy.?(
-                    entry.value_ptr.*.handle,
-                    &message,
-                    message.len,
-                );
-                entry.value_ptr.*.run_lock.unlock();
-                std.heap.c_allocator.destroy(entry.value_ptr.*);
+                if (detached_count < detached.len) {
+                    detached[detached_count] = entry.value_ptr.*;
+                    detached_count += 1;
+                }
             }
             handles.deinit();
             graph_handles = null;
         }
         graph_use_counter = 0;
         graph_mutex.unlock();
+        for (detached[0..detached_count]) |entry| {
+            entry.?.run_lock.lock();
+            destroyNativeGraph(entry.?.handle);
+            entry.?.run_lock.unlock();
+            std.heap.c_allocator.destroy(entry.?);
+        }
         native_graph_create = null;
         native_graph_run = null;
         native_graph_destroy = null;
@@ -595,6 +634,36 @@ fn artifactTensor(
     );
 }
 
+/// Validate the recovery portion of a disposable execution fixture before
+/// any ZML candidate is compiled. Raw rank8 buffers without the independent
+/// audit, base/factor hashes, and certified arithmetic signature are rejected
+/// so fixture tuning cannot bypass the unified artifact contract.
+pub fn validateFixtureRecoveryManifest(root: std.json.ObjectMap) !void {
+    const files = try artifactObject(root.get("files") orelse return error.InvalidFixtureRecovery);
+    var factor_bytes: u32 = 0;
+    for ([_][]const u8{ "rank8_a", "rank8_b" }) |name| {
+        const entry = try artifactObject(files.get(name) orelse return error.InvalidFixtureRecovery);
+        factor_bytes += try artifactU32(try artifactField(entry, "bytes"));
+    }
+    if (factor_bytes == 0) return;
+    const recovery = try artifactObject(root.get("recovery") orelse return error.InvalidFixtureRecovery);
+    if (try artifactU32(try artifactField(recovery, "rank")) != 8 or
+        !std.mem.eql(u8, try artifactString(try artifactField(recovery, "dtype")), "float16") or
+        !std.mem.eql(u8, try artifactString(try artifactField(recovery, "input_domain")), "p32_transformed") or
+        !try artifactBool(try artifactField(recovery, "validated")) or
+        !try artifactBool(try artifactField(recovery, "audit_validated")))
+        return error.InvalidFixtureRecovery;
+    const acceptance = try artifactObject(try artifactField(recovery, "audit_acceptance"));
+    if (!try artifactBool(try artifactField(acceptance, "accepted")))
+        return error.InvalidFixtureRecovery;
+    if (recovery.get("arithmetic_signature")) |signature| {
+        if (!std.mem.eql(u8, try artifactString(signature), "reference_fp32_v1"))
+            return error.InvalidFixtureRecovery;
+    }
+    _ = try artifactString(try artifactField(recovery, "base_hash"));
+    _ = try artifactString(try artifactField(recovery, "factors_hash"));
+}
+
 fn emptyArtifactTensor(io: std.Io, platform: *const zml.Platform) !zml.Buffer {
     return zml.Buffer.fromBytes(io, platform, zml.Shape.init(.{0}, .f16), .replicated, &.{});
 }
@@ -750,6 +819,14 @@ pub fn loadArtifact(
     const recovery = root.get("recovery") orelse .null;
     if (recovery != .null) {
         const recovery_object = try artifactObject(recovery);
+        // The native ABI currently implements the certified reference
+        // arithmetic.  Older manifests may omit this advisory field, but a
+        // producer that supplies an alternative signature must not silently
+        // route it through the reference graph.
+        if (recovery_object.get("arithmetic_signature")) |signature_value| {
+            if (!std.mem.eql(u8, try artifactString(signature_value), "reference_fp32_v1"))
+                return error.InvalidWindowArtifactRecovery;
+        }
         if (try artifactU32(try artifactField(recovery_object, "rank")) != 8)
             return error.UnsupportedWindowArtifactRank;
         if (!std.mem.eql(u8, try artifactString(try artifactField(recovery_object, "dtype")), "float16") or
@@ -779,34 +856,10 @@ pub fn loadArtifact(
 }
 
 /// Native Hopper configurations that ZML may compile and benchmark for one
-/// shape. The list intentionally retains every supported BM/BN choice: the
-/// winning geometry is shape-, device- and correction-state dependent.
-pub const max_candidate_count: usize = 7;
-
-/// Quality policy is deliberately separate from launch geometry. A latency
-/// winner cannot silently change the arithmetic contract of a quality graph.
-pub const QualityMode = enum {
-    fast,
-    balanced,
-    quality,
-};
-
-/// Arithmetic signatures are assigned by the producer after numerical
-/// certification. Unknown signatures remain visible and are only eligible
-/// for explicitly permissive fast mode.
-pub const ArithmeticSignature = enum(u8) {
-    reference_fp32_v1 = 1,
-    certified_tensor_core_v1 = 2,
-    unverified = 255,
-};
-
-fn arithmeticAllowed(mode: QualityMode, signature: ArithmeticSignature) bool {
-    return switch (mode) {
-        .fast => true,
-        .balanced => signature == .reference_fp32_v1 or signature == .certified_tensor_core_v1,
-        .quality => signature == .reference_fp32_v1,
-    };
-}
+/// shape. The list intentionally retains every supported BM/BN choice and
+/// each producer placement: the winning geometry is shape-, device-, and
+/// correction-state dependent.
+pub const max_candidate_count: usize = 42;
 
 /// Result of one correctness-gated ZML candidate measurement. The executable
 /// and timing loop belong to the caller so it can use its own PJRT client and
@@ -821,7 +874,7 @@ pub const CandidateMeasurement = struct {
     /// The producer must set this from its arithmetic certification record;
     /// reference is the safe default for the existing native ABI.
     arithmetic_signature: ArithmeticSignature = .reference_fp32_v1,
-    /// Matched complete-operator correction-off/on timing. This is optional
+    /// Matched complete-operator correction-off/on timing.  This is optional
     /// for report-only tuning; an explicit recovery budget requires it.
     recovery_pair: ?RecoveryPairMeasurement = null,
 };
@@ -838,9 +891,9 @@ pub const BenchmarkOptions = struct {
 };
 
 /// Matched correction-off/on timing for one otherwise identical executable
-/// configuration. The two executables must have been compiled from the same
+/// configuration.  The two executables must have been compiled from the same
 /// shape, device, artifact and launch geometry; only the validated rank8
-/// state may differ. ZML keeps this result as tuning telemetry rather than
+/// state may differ.  ZML keeps this result as tuning telemetry rather than
 /// allowing latency to override the quantizer's quality decision.
 pub const RecoveryPairMeasurement = struct {
     off_median_ns: u64,
@@ -857,7 +910,7 @@ pub const RecoveryPairMeasurement = struct {
 };
 
 /// Build a correction-off/on result from already measured complete-executable
-/// medians. Keeping this pure makes cache/report code testable without a CUDA
+/// medians.  Keeping this pure makes cache/report code testable without a CUDA
 /// runtime and rejects the invalid zero-off baseline explicitly.
 pub fn recoveryPairFromMedians(off_median_ns: u64, on_median_ns: u64) !RecoveryPairMeasurement {
     if (off_median_ns == 0 or on_median_ns == 0) return error.InvalidRecoveryBaseline;
@@ -872,10 +925,10 @@ pub fn recoveryPairFromMedians(off_median_ns: u64, on_median_ns: u64) !RecoveryP
 }
 
 /// Measure the same complete ZML executable twice, once with correction off
-/// and once with validated rank8 correction on. Compilation and graph capture
-/// are intentionally outside this helper; both executables must be prepared
-/// before calling it, and this function must never run from a captured custom
-/// call handler.
+/// and once with validated rank8 correction on.  Compilation and graph
+/// capture are intentionally outside this helper; both executables must be
+/// prepared before calling it, and this function must never run from a
+/// captured custom-call handler.
 pub fn benchmarkRecoveryPair(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -954,9 +1007,11 @@ pub fn selectFastest(
 }
 
 /// Select the fastest locally correct candidate, optionally requiring a
-/// measured correction-off/on pair at or below `maximum_percent`. The default
-/// selector remains report-only for compatibility, while promotion callers
-/// use this gate after benchmarking every candidate outside capture.
+/// measured correction-off/on pair at or below `maximum_percent`.  The
+/// default selector remains report-only for compatibility, while promotion
+/// callers use this gate after benchmarking every candidate outside capture.
+/// A missing pair is rejected when a budget is supplied; latency alone never
+/// makes an unmeasured recovery candidate eligible.
 pub fn selectFastestWithRecoveryGate(
     candidates: []const Config,
     measurements: []const CandidateMeasurement,
@@ -966,8 +1021,10 @@ pub fn selectFastestWithRecoveryGate(
 }
 
 /// Select the fastest candidate under an explicit arithmetic and recovery
-/// policy.  This is preparation-time tuning only; it must run before graph
-/// capture and cannot mutate a captured executable.
+/// policy.  All measurements must already have been collected outside graph
+/// capture.  `quality` admits only the reference FP32 signature; `balanced`
+/// admits reference plus certified Tensor Core arithmetic; `fast` admits any
+/// finite locally-correct candidate and is intended for correction-off graphs.
 pub fn selectFastestWithPolicy(
     candidates: []const Config,
     measurements: []const CandidateMeasurement,
@@ -981,15 +1038,27 @@ pub fn selectFastestWithPolicy(
     }
     var selected: ?TuningResult = null;
     for (candidates, measurements, 0..) |candidate, measurement, index| {
+        // A correction-off graph does not execute the rank8 producer, so its
+        // arithmetic signature cannot change the output contract.  Keep every
+        // locally-correct launch candidate eligible in that state, including
+        // unverified producer variants.  Once rank8 is enabled, the requested
+        // quality policy remains authoritative.
+        const arithmetic_allowed = candidate.rank8_enabled == 0 or
+            arithmeticAllowed(quality_mode, measurement.arithmetic_signature);
         if (!measurement.accepted or measurement.median_ns == 0 or
-            !arithmeticAllowed(quality_mode, measurement.arithmetic_signature) or
+            !arithmetic_allowed or
             !std.math.isFinite(measurement.mean_absolute_error) or
             !std.math.isFinite(measurement.max_absolute_error) or
             measurement.mean_absolute_error > 2e-3 or
             measurement.max_absolute_error > 3.0 / 64.0) continue;
         if (maximum_percent) |limit| {
-            const pair = measurement.recovery_pair orelse continue;
-            if (!pair.meetsTarget(limit)) continue;
+            // Recovery overhead is undefined for an off graph.  An explicit
+            // budget constrains enabled correction only; off-state tuning must
+            // still be able to select the fastest valid geometry.
+            if (candidate.rank8_enabled != 0) {
+                const pair = measurement.recovery_pair orelse continue;
+                if (!pair.meetsTarget(limit)) continue;
+            }
         }
         if (selected == null or measurement.median_ns < selected.?.median_ns) {
             selected = .{
@@ -1003,26 +1072,51 @@ pub fn selectFastestWithPolicy(
 }
 
 pub fn enumerateCandidates(base: Config, output: []Config) usize {
-    if (output.len < max_candidate_count) return 0;
+    // The native fused epilogue now supports the power-of-two output
+    // Hadamard path. Composite output widths retain the reference epilogue
+    // until a matching arithmetic signature is certified.
+    const output_hadamard_fusable = base.output_hadamard == 0 or
+        (base.n >= 16 and (base.n & (base.n - 1)) == 0);
+    const kernel_count: usize = if (output_hadamard_fusable) 2 else 1;
+    // Keep the projection dimension present for correction-off candidates as
+    // well. This preserves identical indices between the off and on sweeps,
+    // allowing each concurrent producer candidate to receive a matched
+    // correction-off baseline without making the off graph touch A/B.
+    const required_count = 7 * kernel_count * 2;
+    if (output.len < required_count) return 0;
     var count: usize = 0;
-    var m16 = base;
-    m16.algorithm = 1;
-    m16.block_m = 0;
-    m16.block_n = 0;
-    m16.warp_groups = 0;
-    output[count] = m16;
-    count += 1;
-    for ([_]u32{ 32, 64, 128 }) |block_m| {
-        for ([_]u32{ 64, 128 }) |block_n| {
-            var candidate = base;
-            candidate.algorithm = 2;
-            candidate.block_m = block_m;
-            candidate.block_n = block_n;
-            // Zero lets the native launcher select its normal warp-group
-            // policy; callers may override it when their tuner supports it.
-            candidate.warp_groups = 0;
-            output[count] = candidate;
+    // Transform-free outputs can select the native fused rank8 epilogue. Keep
+    // both implementation dimensions paired across correction-off and
+    // correction-on sweeps so recovery overhead is measured against the same
+    // candidate index. The off executable ignores both policies while
+    // retaining the geometry, which gives the verifier a matched baseline.
+    for ([_]u32{ 0, 1, 2 }) |recovery_projection| {
+        for (0..kernel_count) |kernel_index| {
+            const recovery_kernel: u32 = if (kernel_count == 2) @intCast(kernel_index) else 0;
+            var m16 = base;
+            m16.algorithm = 1;
+            m16.block_m = 0;
+            m16.block_n = 0;
+            m16.warp_groups = 0;
+            m16.recovery_kernel = recovery_kernel;
+            m16.recovery_projection = recovery_projection;
+            output[count] = m16;
             count += 1;
+            for ([_]u32{ 32, 64, 128 }) |block_m| {
+                for ([_]u32{ 64, 128 }) |block_n| {
+                    var candidate = base;
+                    candidate.algorithm = 2;
+                    candidate.block_m = block_m;
+                    candidate.block_n = block_n;
+                    // Zero lets the native launcher select its normal warp-group
+                    // policy; callers may override it when their tuner supports it.
+                    candidate.warp_groups = 0;
+                    candidate.recovery_kernel = recovery_kernel;
+                    candidate.recovery_projection = recovery_projection;
+                    output[count] = candidate;
+                    count += 1;
+                }
+            }
         }
     }
     return count;
@@ -1038,9 +1132,9 @@ pub fn enumerateCandidatesForShape(base: Config, output: []Config) usize {
     var index: usize = 1;
     while (index < count) : (index += 1) {
         const value = output[index];
-        const value_score = candidateShapeScore(base, value);
+        const value_score = candidateShapeScoreForShape(base, value);
         var insert = index;
-        while (insert > 0 and candidateShapeScore(base, output[insert - 1]) > value_score) {
+        while (insert > 0 and candidateShapeScoreForShape(base, output[insert - 1]) > value_score) {
             output[insert] = output[insert - 1];
             insert -= 1;
         }
@@ -1049,7 +1143,11 @@ pub fn enumerateCandidatesForShape(base: Config, output: []Config) usize {
     return count;
 }
 
-fn candidateShapeScore(base: Config, candidate: Config) i32 {
+/// Return the deterministic shape-priority score used by
+/// `enumerateCandidatesForShape`. External ZML autotuners can record this
+/// score alongside measured latency without duplicating the compatibility
+/// policy. The score only orders candidates; it never removes one.
+pub fn candidateShapeScoreForShape(base: Config, candidate: Config) i32 {
     // M16 is the safe small-M fallback. For larger batches direct tiles are
     // measured first, while all candidates remain in the returned set.
     var score: i32 = if (candidate.algorithm == 1)
@@ -1265,7 +1363,7 @@ fn handler(frame: *zml.pjrt.ffi.CallFrame) callconv(.c) ?*zml.pjrt.ffi.Error {
     }
     var message: [4096]u8 = @splat(0);
     const status = native_graph_run.?(
-        run_entry.*.handle,
+        handle,
         stream,
         &message,
         message.len,
@@ -1276,16 +1374,26 @@ fn handler(frame: *zml.pjrt.ffi.CallFrame) callconv(.c) ?*zml.pjrt.ffi.Error {
 }
 
 test "native window ABI layout" {
-    try std.testing.expectEqual(@as(usize, 76), @sizeOf(Config));
+    try std.testing.expectEqual(@as(usize, 84), @sizeOf(Config));
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(NativeBuffer));
     var candidates: [max_candidate_count]Config = undefined;
-    const count = enumerateCandidates(.{ .m = 33, .k = 2048, .n = 2048, .transition_bits = 4, .bank_alt_id = 2, .algorithm = 2 }, &candidates);
-    try std.testing.expectEqual(max_candidate_count, count);
+    const count = enumerateCandidates(.{ .m = 33, .k = 2048, .n = 2048, .transition_bits = 4, .bank_alt_id = 2, .algorithm = 2, .output_hadamard = 1, .rank8_enabled = 1 }, &candidates);
+    try std.testing.expectEqual(@as(usize, 42), count);
+    var hadamard_only: [42]Config = undefined;
+    try std.testing.expectEqual(@as(usize, 42), enumerateCandidates(.{
+        .m = 33,
+        .k = 2048,
+        .n = 2048,
+        .transition_bits = 4,
+        .bank_alt_id = 2,
+        .algorithm = 2,
+        .output_hadamard = 1,
+    }, &hadamard_only));
     try std.testing.expectEqual(@as(u32, 1), candidates[0].algorithm);
     try std.testing.expectEqual(@as(u32, 2), candidates[1].algorithm);
     try std.testing.expectEqual(@as(u32, 32), candidates[1].block_m);
     try std.testing.expectEqual(@as(u32, 64), candidates[1].block_n);
-    var measurements: [max_candidate_count]CandidateMeasurement = @splat(.{
+    var measurements: [42]CandidateMeasurement = @splat(.{
         .median_ns = 100,
         .mean_absolute_error = 0,
         .max_absolute_error = 0,
@@ -1295,32 +1403,6 @@ test "native window ABI layout" {
     const winner = try selectFastest(candidates[0..count], &measurements);
     try std.testing.expectEqual(@as(usize, 3), winner.candidate_index);
     try std.testing.expectEqual(@as(u64, 20), winner.median_ns);
-
-    // A faster locally passing arithmetic variant is not eligible for a
-    // balanced or quality graph until its reduction has been certified.
-    measurements[1].arithmetic_signature = .unverified;
-    measurements[1].median_ns = 50;
-    measurements[2].accepted = false;
-    measurements[3].accepted = false;
-    const balanced = try selectFastest(candidates[0..count], &measurements);
-    try std.testing.expectEqual(@as(usize, 0), balanced.candidate_index);
-    const fast = try selectFastestWithPolicy(
-        candidates[0..count],
-        &measurements,
-        null,
-        .fast,
-    );
-    try std.testing.expectEqual(@as(usize, 1), fast.candidate_index);
-    const quality = try selectFastestWithPolicy(
-        candidates[0..count],
-        &measurements,
-        null,
-        .quality,
-    );
-    try std.testing.expectEqual(@as(usize, 0), quality.candidate_index);
-    measurements[1].arithmetic_signature = .reference_fp32_v1;
-    measurements[1].median_ns = 100;
-    measurements[2].accepted = true;
     measurements[3].accepted = false;
     const fallback = try selectFastest(candidates[0..count], &measurements);
     try std.testing.expectEqual(@as(usize, 0), fallback.candidate_index);
@@ -1358,12 +1440,88 @@ test "native window ABI layout" {
     measurements[3].recovery_pair = try recoveryPairFromMedians(100, 120);
     const gated = try selectFastestWithRecoveryGate(candidates[0..count], &measurements, 5);
     try std.testing.expectEqual(@as(usize, 0), gated.candidate_index);
+    measurements[1].median_ns = 1;
+    measurements[1].arithmetic_signature = .certified_tensor_core_v1;
+    measurements[3].arithmetic_signature = .certified_tensor_core_v1;
+    const balanced = try selectFastestWithPolicy(candidates[0..count], &measurements, null, .balanced);
+    try std.testing.expectEqual(@as(usize, 1), balanced.candidate_index);
+    const quality = try selectFastestWithPolicy(candidates[0..count], &measurements, null, .quality);
+    try std.testing.expectEqual(@as(usize, 0), quality.candidate_index);
+    measurements[1].arithmetic_signature = .unverified;
+    // A paired recovery cost is diagnostic unless the caller supplies an
+    // explicit budget.  Keep a valid improvement selectable even at 20%
+    // overhead; the 3--6% scorecard target is not an implicit rejection gate.
+    measurements[1].recovery_pair = try recoveryPairFromMedians(100, 120);
+    const fast = try selectFastestWithPolicy(candidates[0..count], &measurements, null, .fast);
+    try std.testing.expectEqual(@as(usize, 1), fast.candidate_index);
+    const capped = try selectFastestWithRecoveryGate(candidates[0..count], &measurements, 5);
+    try std.testing.expectEqual(@as(usize, 0), capped.candidate_index);
     try std.testing.expectError(
         error.InvalidRecoveryBudget,
         selectFastestWithRecoveryGate(candidates[0..count], &measurements, -1),
     );
     try std.testing.expectError(error.InvalidRecoveryBaseline, recoveryPairFromMedians(0, 1));
+
+    // Correction-off tuning may inspect unverified producer rows because the
+    // producer is unreachable in this graph.  A budget is likewise irrelevant
+    // until rank8 is enabled; the fastest valid off candidate remains eligible
+    // even without a paired on-state measurement.
+    var off_candidates = candidates;
+    off_candidates[1].rank8_enabled = 0;
+    measurements[1].accepted = true;
+    measurements[1].median_ns = 1;
+    measurements[1].arithmetic_signature = .unverified;
+    measurements[1].recovery_pair = null;
+    const off_balanced = try selectFastestWithPolicy(
+        off_candidates[0..count],
+        &measurements,
+        null,
+        .balanced,
+    );
+    try std.testing.expectEqual(@as(usize, 1), off_balanced.candidate_index);
+    const off_budgeted = try selectFastestWithRecoveryGate(
+        off_candidates[0..count],
+        &measurements,
+        5,
+    );
+    try std.testing.expectEqual(@as(usize, 1), off_budgeted.candidate_index);
+
+    // The same unverified row is still rejected when the graph actually
+    // enables rank8 and asks for a balanced arithmetic contract.
+    off_candidates[1].rank8_enabled = 1;
+    try std.testing.expectEqual(
+        @as(usize, 3),
+        (try selectFastestWithPolicy(
+            off_candidates[0..count],
+            &measurements,
+            null,
+            .balanced,
+        )).candidate_index,
+    );
     std.testing.refAllDecls(@This());
+}
+
+test "transform-free candidate enumeration exposes fused rank8 policy" {
+    var candidates: [max_candidate_count]Config = undefined;
+    const count = enumerateCandidates(.{
+        .m = 33,
+        .k = 2048,
+        .n = 2048,
+        .transition_bits = 4,
+        .bank_alt_id = 2,
+        .algorithm = 2,
+        .output_hadamard = 0,
+        .rank8_enabled = 1,
+    }, &candidates);
+    try std.testing.expectEqual(@as(usize, 42), count);
+    try std.testing.expectEqual(@as(u32, 0), candidates[0].recovery_kernel);
+    try std.testing.expectEqual(@as(u32, 1), candidates[7].recovery_kernel);
+    try std.testing.expectEqual(@as(u32, 1), candidates[14].recovery_projection);
+    try std.testing.expectEqual(@as(u32, 2), candidates[28].recovery_projection);
+    try std.testing.expectEqual(candidates[0].block_m, candidates[7].block_m);
+    try std.testing.expectEqual(candidates[6].block_n, candidates[13].block_n);
+    try std.testing.expectEqual(candidates[0].block_m, candidates[14].block_m);
+    try std.testing.expectEqual(candidates[6].block_n, candidates[20].block_n);
 }
 
 test "native window shape policy admits composite transform-free Qwen tiles" {
@@ -1383,10 +1541,14 @@ test "shape-aware candidate ordering keeps every geometry" {
         .transition_bits = 4,
         .bank_alt_id = 2,
         .algorithm = 2,
+        .output_hadamard = 1,
     }, &candidates);
-    try std.testing.expectEqual(max_candidate_count, count);
+    try std.testing.expectEqual(@as(usize, 42), count);
     try std.testing.expectEqual(@as(u32, 1), candidates[0].algorithm);
     try std.testing.expectEqual(@as(u32, 32), candidates[1].block_m);
+    const base = candidates[0];
+    try std.testing.expectEqual(@as(i32, 0), candidateShapeScoreForShape(base, candidates[0]));
+    try std.testing.expect(candidateShapeScoreForShape(base, candidates[1]) >= 0);
     var saw_bm64 = false;
     var saw_bm128 = false;
     for (candidates[0..count]) |candidate| {
@@ -1433,7 +1595,7 @@ test "graph registry replay locks the retained entry" {
     try handles.put(key, entry);
     const retained = handles.getPtr(key) orelse return error.TestUnexpectedResult;
     // `getPtr` returns the map's retained pointer value. Replay must lock
-    // this object rather than copying GraphEntry (and therefore its mutex).
+    // this object, rather than copying GraphEntry (and therefore its mutex).
     try std.testing.expectEqual(@intFromPtr(entry), @intFromPtr(retained.*));
     _ = handles.fetchRemove(key);
     std.testing.allocator.destroy(entry);
