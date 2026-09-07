@@ -14,6 +14,16 @@
 #include <memory>
 #include <mutex>
 
+// Keep the native ABI layout synchronized with the Python ctypes bridge and
+// the ZML StableHLO custom-call Config.  A silent size/offset change would
+// reinterpret recovery policy fields during graph capture.
+static_assert(offsetof(QvqP32WindowConfig, recovery_kernel) == 76,
+              "QvQ window ABI recovery_kernel offset changed");
+static_assert(offsetof(QvqP32WindowConfig, recovery_projection) == 80,
+              "QvQ window ABI recovery_projection offset changed");
+static_assert(sizeof(QvqP32WindowConfig) == 84,
+              "QvQ window ABI size changed; update all bridges together");
+
 extern "C" void qvq_rank8_epilogue_no_hadamard(
     const at::Tensor& hidden,
     const at::Tensor& rank8_b,
