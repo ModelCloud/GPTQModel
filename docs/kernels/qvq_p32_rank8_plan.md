@@ -354,3 +354,10 @@ supported down choices are explicit (`separate_reference` and `tensor_core`,
 with `separate_reference` or `fused_epilogue` output kernels); the rejection
 matrix is covered by grouped runtime tests. This prevents a requested
 projection from silently degrading to a separate implementation.
+
+The gfx950 preparation autotuner now warms the selected launch configuration
+after timing, including a cache hit. The last measured candidate is not
+necessarily the winner, so this final outside-capture launch establishes the
+window-local warm marker for the returned policy. A caller can therefore pass
+the selected immutable config directly into a subsequent graph capture without
+an undocumented cold launch or capture-time setup.

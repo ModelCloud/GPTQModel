@@ -221,6 +221,17 @@ def qvq_p32_amd_autotune(
         with _AMD_AUTOTUNE_CACHE_LOCK:
             cached = _AMD_AUTOTUNE_CACHE.get(key)
         if cached is not None:
+            # A geometry winner is reusable across immutable payloads, but
+            # the per-window warm marker is deliberately payload-local.  Warm
+            # the cached winner here so callers may enter CUDA Graph capture
+            # immediately after preparation without a hidden cold launch.
+            output = qvq_p32_amd(
+                x, window, levels, bank_ids, bits,
+                out_features=out_features, bank_alt_id=bank_alt_id,
+                output_fp32=output_fp32, cache_weight=False,
+                launch_config=cached,
+            )
+            del output
             return cached
 
     stream = torch.cuda.current_stream(x.device)
@@ -256,6 +267,16 @@ def qvq_p32_amd_autotune(
             # an unavailable launch is represented by an invalid timing.
             timings.append(float("nan"))
     selected = select_qvq_p32_amd_kernel_candidate(candidates, timings)
+    # The final loop iteration is not guaranteed to be the winner.  Establish
+    # the selected candidate's capture readiness before returning so the
+    # preparation API has a complete outside-capture contract.
+    output = qvq_p32_amd(
+        x, window, levels, bank_ids, bits,
+        out_features=out_features, bank_alt_id=bank_alt_id,
+        output_fp32=output_fp32, cache_weight=False,
+        launch_config=selected,
+    )
+    del output
     if use_cache:
         with _AMD_AUTOTUNE_CACHE_LOCK:
             _AMD_AUTOTUNE_CACHE[key] = selected
