@@ -298,6 +298,66 @@ def test_native_concurrent_rank8_output_hadamard_graph_matches_reference(monkeyp
         assert status == 0, error.value
 
 
+def test_native_graph_accepts_legacy_76_byte_config(monkeypatch):
+    """Older hosts must default trailing rank8 policies to reference mode."""
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child(
+        "native_legacy_abi",
+        in_features=2048,
+        out_features=256,
+        device="cuda",
+        input_hadamard=False,
+        output_hadamard=False,
+    ).eval()
+    config = P32WindowConfig(algorithm="hopper_m16", recovery_mode="off")
+    x = torch.randn(1, 2048, device="cuda", dtype=torch.float16) * 0.01
+    library = native_window_library()
+    original = library.qvq_p32_window_linear
+    recorded = []
+
+    def record(*args):
+        recorded[:] = args
+        return original(*args)
+
+    monkeypatch.setattr(library, "qvq_p32_window_linear", record)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        native_window_linear(layer, x, config)
+    stream.synchronize()
+
+    class LegacyWindowConfig(ctypes.Structure):
+        _fields_ = WindowConfig._fields_[:-2]
+
+    full = ctypes.cast(recorded[10], ctypes.POINTER(WindowConfig)).contents
+    legacy = LegacyWindowConfig()
+    for name, _ctype in LegacyWindowConfig._fields_:
+        setattr(legacy, name, getattr(full, name))
+    legacy.struct_bytes = ctypes.sizeof(LegacyWindowConfig)
+    buffers = (WindowBuffer * 10)(*recorded[:10])
+    handle = ctypes.c_void_p()
+    error = ctypes.create_string_buffer(4096)
+    status = library.qvq_p32_window_graph_create(
+        buffers,
+        ctypes.cast(ctypes.byref(legacy), ctypes.POINTER(WindowConfig)),
+        stream.cuda_stream,
+        ctypes.byref(handle),
+        error,
+        len(error),
+    )
+    assert status == 0, error.value
+    try:
+        status = library.qvq_p32_window_graph_run(
+            handle, stream.cuda_stream, error, len(error)
+        )
+        assert status == 0, error.value
+        stream.synchronize()
+    finally:
+        status = library.qvq_p32_window_graph_destroy(handle, error, len(error))
+        assert status == 0, error.value
+
+
 def test_native_disabled_pointers_and_external_capture_rejection(monkeypatch):
     from test_qvq_grouped_runtime import _child
 
