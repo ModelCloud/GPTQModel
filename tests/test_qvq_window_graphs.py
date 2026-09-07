@@ -116,9 +116,15 @@ def test_request_guard_and_config_validation(model):
     with pytest.raises(ValueError, match="eval"):
         owner.capture("x", {"x": x})
     owner.close()
+    # Cleanup is idempotent and can be scoped with a context manager without
+    # leaving the model registered after an exception path.
+    owner.close()
     with pytest.raises(RuntimeError, match="closed"):
         owner.capture("x", {"x": x})
-    P32WindowGraphs(model).close()
+    with P32WindowGraphs(model) as scoped:
+        assert scoped is not None
+    with pytest.raises(RuntimeError, match="closed"):
+        scoped.capture("x", {"x": x})
 
 
 def test_full_tiny_llama_graphs(model):
