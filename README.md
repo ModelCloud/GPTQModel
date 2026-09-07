@@ -249,26 +249,93 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 
 ## Model Support 🤖
 
-| Model | | Model | | Model | | Model | | Model | |
-|---|---|---|---|---|---|---|---|---|---|
-| Apertus 1/1.5 | ✅ | EXAONE 3/4 | ✅ | Dots1 | ✅ | Mistral3 / Ministral3 | ✅ | Qwen 2/3/3.5/3.8 (Next/MoE) | ✅ |
-| Baichuan | ✅ | Falcon (H1 / Mamba) | ✅ | InternLM 1/2/2.5 | ✅ | Mixtral | ✅ | Qwen 2/2.5/3 VL | ✅ |
-| Bloom | ✅ | FastVLM | ✅ | Kimi K2 | ✅ | MobileLLM | ✅ | Qwen 2.5/3 Omni | ✅ |
-| ChatGLM | ✅ | Gemma 1-4 / 3n | ✅ | Klear | ✅ | MOSS | ✅ | RefinedWeb | ✅ |
-| CodeGen | ✅ | GPTBigCode | ✅ | LING/RING | ✅ | MPT | ✅ | StableLM | ✅ |
-| Cohere 1-2 / 2 MoE | ✅ | GPT-Neo / NeoX | ✅ | Llama 1-3.3 | ✅ | Nemotron H / H Puzzle / Omni | ✅ | StarCoder2 | ✅ |
-| DBRX Converted | ✅ | GPT-2 | ✅ | Llama 3.2 VL | ✅ | Nemotron Ultra / Labs-Diffusion | ✅ | TeleChat2 | ✅ |
-| Deci | ✅ | GPT-J | ✅ | Llama 4 | ✅ | OPT | ✅ | Trinity | ✅ |
-| DeepSeek-V2/V3/V3.2/V4/R1 | ✅ | GPT-OSS | ✅ | LongCat Flash | ✅ | OLMo2/3 / LLaDA2 | ✅ | Yi | ✅ |
-| DeepSeek-V2 Lite / VL / VL2 / OCR2 | ✅ | Granite / Granite MoE | ✅ | LongLLaMA | ✅ | Ovis 1.6/2/2.5/2.6 MoE/2.6 Next | ✅ | Seed-OSS | ✅ |
-| Dream | ✅ | GRIN-MoE | ✅ | Instella | ✅ | Phi 1-4 | ✅ | Voxtral | ✅ |
-| ERNIE 4.5 / MoE / VL MoE | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/5.3/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V/V 4_6 | ✅ | PanGu-α | ✅ |
-| XVERSE | ✅ | Brumby | ✅ | Hymba | ✅ | Mistral | ✅ | Qwen 1/2/3/3.5 | ✅ |
-| MiniMax M2/M3 | ✅ | AfMoE | ✅ | Bailing-MoE | ✅ | LFM2 / LFM2-VL / LFM2-MoE | ✅ | Marin | ✅ |
-| InternVL Chat | ✅ | Laguna | ✅ | Mimo / Mimo V2 | ✅ | Zamba / Zamba2 | ✅ | Intern S1 / S2 Preview | ✅ |
-| HunYuan V1 Dense / MoE | ✅ | HY-V3 | ✅ | Inkling | ✅ | Solar Open / Open 2 | ✅ | North Micro Vision | ✅ |
-| Mage-VL | ✅ | Unlimited-OCR | ✅ | HunyuanOCR | ✅ | LocateAnything | ✅ | Muse Glimmer | ✅ |
-| Ouro | ✅ | Spark-X2.5 | ✅ | SmolLM3 | ✅ |  |  |  |  |
+The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MAP`, including text-model and backward-compatibility aliases. Qwen 3.5 registrations require Transformers 5.2.0 or newer.
+
+<!-- model-types:start -->
+| Model family | Registered Transformers `model_type` values |
+|---|---|
+| A.X-K2 | `axk2` |
+| AfMoE / Trinity | `afmoe` |
+| Apertus 1 / 1.5 | `apertus`, `apertus1p5`, `apertus1p5_text` |
+| Baichuan | `baichuan` |
+| Bailing MoE / Hybrid (LING / RING) | `bailing_moe`, `bailing_hybrid` |
+| Bloom | `bloom` |
+| Brumby | `brumby` |
+| ChatGLM | `chatglm` |
+| CodeGen | `codegen` |
+| Cohere 1 / 2 / 2 MoE / Compass (North Mini / Micro Vision) | `cohere`, `cohere2`, `cohere2_moe`, `cohere_compass` |
+| DBRX / DBRX Converted | `dbrx`, `dbrx_converted` |
+| DeciLM | `deci` |
+| DeepSeek V2 / V3 / V3.2 / V4 / VL / VL2 / OCR2 | `deepseek_v2`, `deepseek_v3`, `deepseek_v32`, `deepseek_v4`, `deepseek_vl`, `deepseek_vl_v2`, `deepseek_ocr2` |
+| Dots1 | `dots1` |
+| Dream | `dream` |
+| ERNIE 4.5 / MoE / VL MoE | `ernie4_5`, `ernie4_5_moe`, `ernie4_5_moe_vl`, `ernie4_5_vl_moe` |
+| EXAONE 3 / 4 | `exaone`, `exaone4` |
+| Falcon / Falcon H1 / Falcon Mamba | `falcon`, `falcon_h1`, `falcon_mamba` |
+| Gemma 1-4 / 3n / Unified | `gemma`, `gemma2`, `gemma3`, `gemma3_text`, `gemma3n`, `gemma3n_text`, `gemma4`, `gemma4_text`, `gemma4_unified`, `gemma4_unified_text` |
+| GLM / GLM4 / GLM4V / GLM5 / OCR / ASR | `glm`, `glm4`, `glm4_moe`, `glm4_moe_lite`, `glm4v`, `glm4v_moe`, `glm4v_moe_text`, `glm5_next`, `glm_moe_dsa`, `glm_ocr`, `glmasr` |
+| GPT-2 | `gpt2` |
+| GPT BigCode | `gpt_bigcode` |
+| GPT-Neo / GPT-NeoX | `gpt_neo`, `gpt_neox` |
+| GPT-OSS | `gpt_oss` |
+| GPT-J | `gptj` |
+| Granite / Granite MoE Hybrid | `granite`, `granitemoehybrid` |
+| GRIN-MoE | `grinmoe` |
+| HRM | `hrm_text` |
+| Hunyuan V1 / VL / OCR | `hunyuan_v1_dense`, `hunyuan_v1_moe`, `hunyuan_vl` |
+| HY-V3 | `hy_v3` |
+| Hymba | `hymba` |
+| Inkling | `inkling_mm_model` |
+| Instella | `instella` |
+| Intern S1 / S2 Preview | `interns1`, `intern_s2_preview` |
+| InternLM 1 / 2 / 2.5 | `internlm`, `internlm2` |
+| InternVL Chat | `internvl_chat` |
+| Kimi K2 / K2.5 | `kimi_k2`, `kimi_k25` |
+| Klear | `klear` |
+| Laguna | `laguna` |
+| LFM2 / LFM2 MoE / LFM2-VL | `lfm2`, `lfm2_moe`, `lfm2_vl` |
+| LLaDA2 MoE | `llada2_moe` |
+| Llama 1-4 / TinyLlama / Nemotron Ultra | `llama`, `llama4`, `llama4_text` |
+| Llama 3.2 VL | `mllama`, `mllama_text_model` |
+| FastVLM / LLaVA-Qwen2 | `llava_qwen2` |
+| LocateAnything | `locateanything` |
+| LongCat Flash | `longcat_flash` |
+| LongLLaMA | `longllama` |
+| Mage-VL | `mage_vl` |
+| Marin | `marin` |
+| MiMo / MiMo V2 | `mimo`, `mimo_v2` |
+| MiniCPM / MiniCPM3 / MiniCPM-O / MiniCPM-V | `minicpm`, `minicpm3`, `minicpmo`, `minicpmv`, `minicpmv4_6` |
+| MiniMax M2 / M3-VL | `minimax`, `minimax_m2`, `minimax_m3_vl` |
+| Mistral / Mistral3 / Ministral3 | `mistral`, `mistral3`, `ministral3` |
+| Mixtral | `mixtral` |
+| MobileLLM | `mobilellm` |
+| MOSS | `moss` |
+| MPT | `mpt` |
+| Muse Glimmer | `muse_glimmer` |
+| Nemotron NAS / H / H Puzzle / Omni / Labs Diffusion | `nemotron-nas`, `nemotron_h`, `nemotron_h_puzzle`, `nemotronh_nano_omni_reasoning_v3`, `nemotron_labs_diffusion` |
+| OLMo 2 / 3 | `olmo2`, `olmo3` |
+| OPT | `opt` |
+| Ouro | `ouro` |
+| Ovis 1.6 / 2 / 2.5 / 2.6 MoE / 2.6 Next | `ovis`, `ovis2`, `ovis2_5`, `ovis2_6_moe`, `ovis2_6_next` |
+| PanGu-α | `gpt_pangu` |
+| Phi 1-4 / Phi MoE | `phi`, `phi3`, `phi4mm`, `phimoe` |
+| Qwen 1-4 / 3.5 / 3.6 / 3.8 / MoE / Next | `qwen`, `qwen2`, `qwen2_moe`, `qwen3`, `qwen3_moe`, `qwen3_next`, `qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, `qwen3_5_moe_text`, `qwen4_exp` |
+| Qwen 2 / 2.5 / 3 VL | `qwen2_vl`, `qwen2_vl_text`, `qwen2_5_vl`, `qwen2_5_vl_text`, `qwen3_vl` |
+| Qwen 2.5 / 3 Omni | `qwen2_5_omni`, `qwen3_omni_moe` |
+| RefinedWeb | `refinedWeb`, `refinedWebModel` |
+| Seed-OSS | `seed_oss` |
+| SmolLM3 | `smollm3` |
+| Solar Open / Open 2 | `solar_open`, `solar_open2` |
+| Spark 2.5 | `spark2_5` |
+| StableLM | `stablelm`, `stablelm_epoch` |
+| StarCoder2 | `starcoder2` |
+| TeleChat2 | `telechat` |
+| Unlimited-OCR | `unlimited-ocr` |
+| Voxtral | `voxtral` |
+| XVERSE | `xverse` |
+| Yi | `yi` |
+| Zamba / Zamba2 | `zamba`, `zamba2` |
+<!-- model-types:end -->
 
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
