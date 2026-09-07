@@ -51,7 +51,19 @@ to different stages of compilation.
 | XLA | [XLA](xla.md) | Graph optimization, backend lowering and tuning boundaries |
 | StableHLO | [StableHLO](stablehlo.md) | Operation semantics and compiler portability |
 | SSA / SASS | [Analysis and folding](ssa-sass.md) | IR simplification versus emitted GPU instructions |
+| Deployable static-analysis tools | [Open-source tool assessment](cuda-static-analysis-tools.md) | Priorities, licenses, source snapshots and CUDA coverage limits |
+| LLVM CUDA inspection | [Clang/LLVM analysis](llvm-cuda-analysis.md) | Device IR, analysis passes and an untested starting recipe |
+| Exact rewrite checking | [Alive2, Z3 and Souper](rewrite-verification.md) | Refinement, bit-vector proofs and integer rewrite search |
+| Numerical analysis | [Daisy, FPTaylor and Herbie](floating-point-analysis-tools.md) | Error bounds versus candidate generation |
+| Structural algebra | [MLIR, Polygeist, Polly and symbolic tools](mlir-algebraic-analysis.md) | Graph/loop analysis and rewrite exploration |
+| Concurrency verification | [GPUVerify](gpuverify.md) | Race and barrier-divergence checks; modern CUDA coverage unverified |
 | Nsight | [Profiling workflow](nsight-profiling.md) | System timeline, kernel counters and replay limits |
+| LUT costs | [CUDA lookup tradeoffs](cuda-lut-tradeoffs.md) | Bank conflicts, dependency latency, footprint and existing QVQ evidence |
+| Metric interpretation | [Metrics versus performance](cuda-metrics-and-performance.md) | No single counter is a sufficient speedup criterion |
+| Pipeline throughput | [Useful work and overlap](cuda-pipeline-throughput.md) | Resource bottlenecks, stage ownership and critical waits |
+| Efficient LUT quantization | [FLUTE](flute.md) | Bank-aware/vectorized lookup design |
+| Layout and write-back | [QUICK](quick.md) | Quantization-aware interleaving to avoid shared write-back |
+| LUT-based computation | [LUT-GEMM](lut-gemm.md) | Algorithm-level lookup reuse; distinct from a P32 decoder LUT |
 | CUDA execution | [SMs, Tensor Cores, TMA, async and barriers](cuda-execution.md) | Architecture capabilities and pipeline correctness |
 | SSA foundations | [Cytron et al.](ssa-paper.md) | Program representations for optimization |
 | Equality saturation | [egg](egg.md) | Exploring equivalent expressions with valid rewrite rules |
@@ -64,6 +76,12 @@ and QVQ's P32 ABI at merged main
 [`263ed4b`](https://github.com/ModelCloud/QvQ/tree/263ed4baf7be5e9547b4e731c9031bef5f48cf69).
 They distinguish proposed integration from implemented behavior; no new compiler,
 GPU profiling or model-quality experiments were run for these notes.
+
+The static-analysis tool survey and LUT/metric/pipeline follow-up use main
+[`66565c2`](https://github.com/ModelCloud/QvQ/tree/66565c27ed8a42639c0c2bbe55fdb4a8e677dca0).
+The tool survey records source-reviewed candidates, not installed integrations.
+The LUT note links existing experiment results and preserves their unresolved
+causal attribution; no new analyzer run or GPU measurement is claimed.
 
 ## How the pieces relate
 
