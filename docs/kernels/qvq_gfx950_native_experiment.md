@@ -18,8 +18,10 @@ not requantization, a single-bank substitution, or an FP16-output GEMM.
 
 Hopper/Ampere source inspired paired extraction at pair offsets 0/64. A second
 prototype uses a 2D launch grid to eliminate runtime tile division/remainder.
-It has four rate specializations (transition bits 4..7); ordinary W4 is pending.
-The experimental entrypoints are not wired into the existing exported ABI.
+It has five rate specializations (transition bits 4..8). W4 uses the published
+P32 contract's zero alternate-bank mask (`bank_alt_id=0`); the other rates retain
+their bank-mask selection. The entrypoints remain experimental and are not
+wired into the existing exported ABI.
 
 The installed AITER revision `7440ef72503e1c3fadc5be85a5c74eb7c9c34841`
 rejects FP32 output in its public FlyDSL HGEMM wrapper. The checked upstream main
@@ -212,6 +214,11 @@ runs, not an autotune winner; solution enumeration alone does not rank candidate
   tuning during execution, cache invalidation and changed-input graph replay
   through the actual ZML integration before claiming this contract complete.
 
+The native plan suite now validates all five decoder rates, including W4, with
+changed payload/input graph replays and the existing mean <= 0.003 / max <=
+0.006 numerical gates. The W4 DSO artifact is
+`/home/ubuntu/qvq-gfx950-runtime/w4-native/libqvq_gfx950_native-w4.so`.
+
 Repeat correctness and uninstrumented timing after profiling. Run the complete requested M and
 model-geometry sweep, actual-weight/activation checks and combined graph tests.
 Implement validated native prepared ABI integration in QVQ, with ZML only owning
@@ -230,7 +237,8 @@ does not allocate or tune and verifies device/stream. Caller-owned scratch and
 BLAS workspace must outlive plans and graphs.
 
 `tests/test_qvq_gfx950_native_plan.py` passes host descriptor checks and combined
-GPU replay at M=8,K=32,N=48 for all four P32 rates. Three random payload, bank
+GPU replay at M=8,K=32,N=48 for all five P32 rates. W4 uses bank_alt_id=0 and a
+zero alternate-bank mask; the other rates retain their selected bank mask. Three random payload, bank
 and activation changes per rate preserve exact decoded weights and pass the
 localized FP64-reference gates. Mutating the caller configuration after prepare
 does not change the plan; wrong-stream execution is rejected. This is bounded

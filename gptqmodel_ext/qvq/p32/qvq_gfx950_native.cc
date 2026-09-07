@@ -25,7 +25,8 @@ extern "C" int qvq_gfx950_native_scratch_bytes(const qvq_gfx950_native_config* c
       c->gemm.m <= 0 || c->gemm.k <= 0 || c->gemm.n <= 0 || c->gemm.e != 1 ||
       c->gemm.k % 16 || c->gemm.n % 16 || c->gemm.k / 16 > 65535 ||
       c->gemm.solution_index < 0 || c->gemm.reserved ||
-      c->transition_bits < 4 || c->transition_bits > 7 || c->bank_alt_id > 3 ||
+      c->transition_bits < 4 || c->transition_bits > 8 ||
+      (c->transition_bits == 8 ? c->bank_alt_id != 0 : c->bank_alt_id > 3) ||
       c->decode_threads != 256 || c->cache_policy != 0)
     return -int(hipErrorInvalidValue);
   const uint64_t required = uint64_t(c->gemm.k) * c->gemm.n * 2;
