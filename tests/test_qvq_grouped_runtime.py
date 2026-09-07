@@ -672,6 +672,13 @@ def test_grouped_hopper_policy_accepts_split_tuple_and_rejects_unimplemented_geo
         "grouped rank8 projection supports separate_reference, "
         "concurrent_reference or input_fused only"
     )
+    concurrent_policy = replace(split_policy, recovery_projection="concurrent_reference")
+    for child in children:
+        child._p32_window_config = concurrent_policy
+    reason = runtime._runtime_eligible(torch.randn(1, 256, dtype=torch.bfloat16))
+    # The concurrent producer has an FP16 projection contract; BF16 must not
+    # silently degrade to the separate child projection.
+    assert reason == "grouped concurrent rank8 projection requires FP16 activations"
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

@@ -597,6 +597,16 @@ class QVQHopperGroupedRuntime:
                     f"grouped child {index} M={rows} is outside its prepared "
                     f"policy range [{policy.min_m}, {policy.max_m}]"
                 )
+        if (
+            any(
+                getattr(child, "_p32_rank8_enabled", False)
+                and getattr(policy, "recovery_projection", "separate_reference")
+                == "concurrent_reference"
+                for child, policy in zip(children, policies, strict=True)
+            )
+            and x.dtype != torch.float16
+        ):
+            return "grouped concurrent rank8 projection requires FP16 activations"
         if x.requires_grad or any(child.training for child in children):
             return "autograd/training requires the original forward"
         if any(getattr(child, "adapter", None) is not None for child in children):
