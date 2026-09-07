@@ -305,8 +305,16 @@ class P32WindowGraphs:
 
     def _retire_for_insert(self, key):
         """Synchronize and retire least-recent graphs before installing one."""
-        if key in self._graphs:
+        replacing = key in self._graphs
+        if replacing:
             self._graphs.pop(key)
+            # Replacing a key releases the old executable even when the cache
+            # is below capacity.  Its last replay may still be running on a
+            # non-default stream, so protect that release with the same event
+            # ordering used by LRU eviction.
+            if self._event is not None:
+                self._event.synchronize()
+                self._event = None
         while len(self._graphs) >= self.max_graphs:
             # A replay may have submitted work on the current stream.  The
             # event records the latest request and must complete before its

@@ -32,6 +32,14 @@ def test_graph_owner_lru_retirement_synchronizes_before_eviction():
     assert list(owner._graphs) == ["recent"]
     assert owner._event is None
 
+    owner._graphs = OrderedDict((("active", object()),))
+    replacement_event = Event()
+    owner._event = replacement_event
+    owner._retire_for_insert("active")
+    assert owner._graphs == OrderedDict()
+    assert owner._event is None
+    assert replacement_event.synchronizations == 1
+
 
 
 class Pair(torch.nn.Module):
