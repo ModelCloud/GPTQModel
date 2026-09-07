@@ -1888,6 +1888,17 @@ class TensorParallelPadderConfig(BasePreProcessorConfig):
     code: ClassVar[str] = PreProcessorCode.TENSOR_PARALLEL_PADDER.value
 
 
+@dataclass(frozen=True)
+class TelemetryConfig:
+    """Diagnostic controls; never part of quantization/resume algorithm identity."""
+
+    device: bool = False
+
+    def __post_init__(self):
+        if type(self.device) is not bool:
+            raise ValueError("TelemetryConfig.device must be a boolean")
+
+
 @dataclass
 class AnalysisConfig(BasePreProcessorConfig):
     """Configure granular pre-quantization error analysis for the active quant config."""
@@ -4003,6 +4014,8 @@ def _normalize_bitsandbytes_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional[METHOD] = None) -> METHOD:
+    if format_value == FORMAT.BITBLAS and fallback_method == METHOD.AWQ:
+        return METHOD.AWQ
     if format_value == FORMAT.MARLIN:
         if fallback_method is None:
             raise ValueError("QuantizeConfig: FORMAT.MARLIN requires an explicit quantization method family.")
@@ -4249,6 +4262,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         default=4.0,
         metadata={"help": "Maximum host-pinned checkpoint shard memory (GB) for LazyTurtle. None or <=0 = unlimited."},
     )
+    telemetry: Union[TelemetryConfig, Dict[str, Any]] = field(default_factory=TelemetryConfig)
 
     # gptq was originally designed to pack quantized weights inside INT32 dtypes
     # allowing using different dtypes used for packing quantized weights
@@ -4533,6 +4547,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         self.fused_forward = _normalize_fused_forward_config(self.fused_forward)
         self.adapter = normalize_adapter(self.adapter)
+        if isinstance(self.telemetry, dict):
+            self.telemetry = TelemetryConfig(**self.telemetry)
+        elif not isinstance(self.telemetry, TelemetryConfig):
+            raise ValueError("telemetry must be a TelemetryConfig or dictionary")
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
@@ -4845,6 +4863,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         meta_payload = normalized.get(META_FIELD)
         meta_field_map = {
+            "telemetry": "telemetry",
             "fallback": "fallback",
             "hessian": "hessian",
             "gptaq": "gptaq",
@@ -5015,6 +5034,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             }
 
         meta_payload["offload_to_disk"] = self.offload_to_disk
+        meta_payload["telemetry"] = asdict(self.telemetry)
         meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
         meta_payload["pack_impl"] = self.pack_impl
         meta_payload["gc_mode"] = self.gc_mode.value if isinstance(self.gc_mode, GcMode) else self.gc_mode

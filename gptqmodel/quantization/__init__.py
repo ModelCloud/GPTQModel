@@ -65,6 +65,7 @@ from .config import (
                      SmoothPercentileAsymmetric,
                      SmoothRowCol,
                      SmoothSoftNorm,
+                     TelemetryConfig,
                      TensorParallelPadderConfig,
                      ViterbiPruningConfig,
                      WeightOnlyConfig,

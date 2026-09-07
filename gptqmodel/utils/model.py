@@ -811,6 +811,11 @@ def create_quant_module(
 
     # when loading a quantized model, device is the target passed through the GPT-QModel load path
     # check in_features and out_features validate
+    validation_device = device
+    if isinstance(device, torch.device):
+        validation_device = DEVICE(device.type)
+    elif isinstance(device, str):
+        validation_device = DEVICE(device.split(":", 1)[0])
     _, err = linear_cls.validate(
         bits=validate_bits,
         group_size=tmp_group_size,
@@ -820,9 +825,9 @@ def create_quant_module(
         dtype=dtype,
         in_features=in_features,
         out_features=out_features,
-        device=DEVICE(device) if isinstance(device, str) else device,
-        adapter=adapter, # TODO FIX ME..need to pass Lora if loaded
         format=tmp_format,
+        device=validation_device,
+        adapter=adapter, # TODO FIX ME..need to pass Eora if loaded
     )
     if err is not None:
         raise err

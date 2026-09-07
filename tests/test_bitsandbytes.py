@@ -74,6 +74,24 @@ def test_bitsandbytes_kernel_selection():
         assert selected is BitsAndBytesLinear
 
 
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+def test_bitsandbytes_packing_and_schema_support_inference_and_meta_contexts():
+    from gptqmodel.nn_modules.qlinear.bitsandbytes import _buffer_spec_4bit
+
+    _buffer_spec_4bit.cache_clear()
+    kwargs = dict(bits=4, group_size=32, desc_act=False, sym=True,
+                  in_features=64, out_features=128, dtype=torch.float32)
+    with torch.inference_mode(), torch.device("meta"):
+        shell = BitsAndBytesLinear(**kwargs)
+    assert all(value.device.type == "meta" for value in shell.state_dict().values())
+    kernel = BitsAndBytesLinear(**kwargs)
+    with torch.inference_mode():
+        source = torch.nn.Linear(64, 128, bias=False)
+        kernel.pack_original(source, None, None)
+    assert kernel.dequantize_weight().shape == source.weight.shape
+    assert torch.equal(kernel._weight_to_matrix(source), source.weight)
+
+
 def test_create_quant_module_uses_dynamic_bits_for_bitsandbytes_format_normalization():
     seen = {}
 
