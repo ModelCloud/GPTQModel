@@ -85,6 +85,130 @@ def test_patched_autotuner_constructor_owns_cache_lock(monkeypatch):
     assert autotuner._cache_futures == {}
 
 
+def test_patched_autotuner_lazily_initializes_preexisting_instance(monkeypatch):
+    triton_autotuner = pytest.importorskip("triton.runtime.autotuner")
+    existing_cache_value = object()
+
+    class _FakeAutotuner:
+        def __init__(self):
+            self.cache = {"existing": existing_cache_value}
+
+    autotuner = _FakeAutotuner()
+
+    monkeypatch.setattr(triton_autotuner, "Autotuner", _FakeAutotuner)
+    monkeypatch.setattr(triton_autotuner, "CacheFuture", None, raising=False)
+    monkeypatch.setattr(nogil_patcher, "version", lambda _package_name: "3.7.0")
+
+    nogil_patcher.patch_triton_autotuner()
+    cached, used_cached_result, bench_time = autotuner._get_config_for_key("existing", (), {})
+
+    assert cached is existing_cache_value
+    assert used_cached_result is True
+    assert bench_time is None
+    assert isinstance(autotuner._cache_lock, type(threading.RLock()))
+    assert autotuner.cache is autotuner._cache
+    assert autotuner._cache_futures == {}
+
+
+def test_patched_autotuner_lazily_initializes_single_config_run(monkeypatch):
+    triton_autotuner = pytest.importorskip("triton.runtime.autotuner")
+
+    class _FakeConfig:
+        pre_hook = None
+
+        def all_kwargs(self):
+            return {"BLOCK_SIZE": 16}
+
+    class _FakeFn:
+        def run(self, *args, **kwargs):
+            return args, kwargs
+
+    class _FakeAutotuner:
+        def __init__(self):
+            self.arg_names = ["value"]
+            self.base_fn = _FakeFn.run
+            self.cache = {}
+            self.configs = [_FakeConfig()]
+            self.fn = _FakeFn()
+
+    autotuner = _FakeAutotuner()
+
+    monkeypatch.setattr(triton_autotuner, "Autotuner", _FakeAutotuner)
+    monkeypatch.setattr(triton_autotuner, "CacheFuture", None, raising=False)
+    monkeypatch.setattr(nogil_patcher, "version", lambda _package_name: "3.7.0")
+
+    nogil_patcher.patch_triton_autotuner()
+    result = autotuner.run("input")
+
+    assert result == (("input",), {"BLOCK_SIZE": 16})
+    assert autotuner.best_config is autotuner.configs[0]
+    assert isinstance(autotuner._cache_lock, type(threading.RLock()))
+    assert autotuner.cache is autotuner._cache
+    assert autotuner._cache_futures == {}
+
+
+def test_patched_autotuner_lazily_initializes_concurrent_first_lookup(monkeypatch):
+    triton_autotuner = pytest.importorskip("triton.runtime.autotuner")
+    benchmark_count = 0
+    benchmark_count_lock = threading.Lock()
+
+    class _FakeConfig:
+        def all_kwargs(self):
+            return {}
+
+    config = _FakeConfig()
+
+    class _FakeAutotuner:
+        def __init__(self):
+            self.cache = {}
+            self.cache_results = False
+            self.nargs = {}
+
+        def prune_configs(self, _kwargs):
+            return [config]
+
+        def _bench(self, *args, config, **kwargs):
+            nonlocal benchmark_count
+            with benchmark_count_lock:
+                benchmark_count += 1
+            time.sleep(0.01)
+            return 1.0
+
+        def pre_hook(self, _nargs, reset_only):
+            assert reset_only is True
+
+    autotuner = _FakeAutotuner()
+
+    monkeypatch.setattr(triton_autotuner, "Autotuner", _FakeAutotuner)
+    monkeypatch.setattr(triton_autotuner, "CacheFuture", None, raising=False)
+    monkeypatch.setattr(nogil_patcher, "version", lambda _package_name: "3.7.0")
+
+    nogil_patcher.patch_triton_autotuner()
+    barrier = threading.Barrier(16)
+    results = [None] * barrier.parties
+    errors = []
+
+    def lookup(index):
+        try:
+            barrier.wait()
+            results[index] = autotuner._get_config_for_key("new", (), {})
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=lookup, args=(index,)) for index in range(barrier.parties)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert benchmark_count == 1
+    assert all(result[0] is config for result in results)
+    assert all(result[1] is False for result in results)
+    assert autotuner._cache == {"new": config}
+    assert autotuner._cache_futures == {}
+
+
 def test_package_init_uses_triton_patch_api():
     init_py = Path(__file__).resolve().parents[1] / "gptqmodel" / "__init__.py"
     tree = ast.parse(init_py.read_text(encoding="utf-8"))
