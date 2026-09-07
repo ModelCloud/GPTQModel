@@ -165,7 +165,9 @@ autotune itself when an explicit configuration is absent. This is a required
 next-ABI feature. The experimental BLAS sub-API now implements versioned MKNE
 metadata, matching-solution enumeration, explicit solution preparation and
 configuration readback. Combined P32 preparation now exists as described below;
-standalone autotuning and ZML integration are **not yet implemented**.
+standalone autotuning is now implemented as an additive rocBLAS sub-ABI;
+ZML-side candidate ownership remains separate and can continue to pass an
+explicit solution through `qvq_gfx950_rocblas_prepare_config`.
 Do not change the layout of the published version-1 struct in place.
 
 `qvq_gfx950_rocblas.h` declares this additive experimental sub-API. Tests found
@@ -188,6 +190,14 @@ This explicit solution measured 34.840 us eager / 33.980 us graph for the comple
 operation, versus 89.442 / 92.022 us baseline. It is slower than earlier heuristic
 runs, not an autotune winner; solution enumeration alone does not rank candidates.
 
+`qvq_gfx950_rocblas_autotune` now provides the standalone path: it enumerates
+the same matching solutions, measures complete GEMM dispatches with bounded
+warmup/sample counts outside stream capture, and returns the selected solution,
+median time, tested/failed counts and sample count. The winning solution is
+frozen in the plan for subsequent execution; no tuning or synchronization occurs
+during replay. The new native-plan test exercises this contract at M=1,K=256,N=256
+and independently checks the FP32 result against the FP64 reference.
+
 - Describe logical M (activation rows), K (reduction), N (output columns), and
   E (experts/groups). Current dense support is E=1; reject E>1 until grouped
   layouts, routing and per-expert row counts are explicitly implemented.
@@ -203,7 +213,7 @@ runs, not an autotune winner; solution enumeration alone does not rank candidate
 - Let ZML benchmark complete operations and choose an explicit candidate during
   compilation/preparation. QVQ validates and freezes that choice; it must not
   silently autotune, swap backends or alter precision at execution time.
-- A standalone preparation entrypoint may enumerate, validate and autotune when
+  - A standalone preparation entrypoint may enumerate, validate and autotune when
   no configuration is supplied. Return the resolved configuration so tuning is
   reproducible and observable. It must use the same eligibility/accuracy rules
   as external tuning, rather than a second weaker candidate set.

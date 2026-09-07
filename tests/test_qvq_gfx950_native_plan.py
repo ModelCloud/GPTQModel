@@ -286,6 +286,102 @@ class NativePlanHostTests(unittest.TestCase):
         self.assertNotEqual(query(None, c.byref(size)), 0)
         self.assertNotEqual(query(c.byref(config), None), 0)
 
+    @unittest.skipUnless(
+        os.environ.get("QVQ_GFX950_NATIVE_GPU_TEST"), "opt in to gfx950 GPU tests"
+    )
+    def test_standalone_rocblas_autotune_returns_frozen_solution(self):
+        import torch
+
+        lib = c.CDLL(os.environ["QVQ_GFX950_NATIVE_LIBRARY"])
+        lib.qvq_gfx950_rocblas_prepare.argtypes = (
+            [c.c_int] * 3
+            + [c.c_void_p] * 2
+            + [c.c_size_t, c.POINTER(c.c_void_p)]
+        )
+        lib.qvq_gfx950_rocblas_execute.argtypes = [c.c_void_p] * 5
+        lib.qvq_gfx950_rocblas_destroy.argtypes = [c.c_void_p]
+
+        class Options(c.Structure):
+            _fields_ = [
+                ("struct_size", c.c_uint32),
+                ("version", c.c_uint32),
+                ("warmup_iterations", c.c_uint32),
+                ("benchmark_iterations", c.c_uint32),
+                ("reserved", c.c_uint32),
+            ]
+
+        class Result(c.Structure):
+            _fields_ = [
+                ("struct_size", c.c_uint32),
+                ("version", c.c_uint32),
+                ("solution_index", c.c_int32),
+                ("candidates_tested", c.c_uint32),
+                ("candidates_failed", c.c_uint32),
+                ("samples", c.c_uint32),
+                ("median_us", c.c_float),
+                ("reserved", c.c_uint32),
+            ]
+
+        lib.qvq_gfx950_rocblas_autotune.argtypes = (
+            [c.c_void_p] * 4 + [c.POINTER(Options), c.POINTER(Result)]
+        )
+        m, k, n = 1, 256, 256
+        gen = torch.Generator(device="cuda").manual_seed(952)
+        x = torch.randn((m, k), generator=gen, device="cuda", dtype=torch.float16)
+        weights = torch.randn((n, k), generator=gen, device="cuda", dtype=torch.float16)
+        y = torch.empty((m, n), device="cuda", dtype=torch.float32)
+        workspace = torch.empty(32 * 1024 * 1024, device="cuda", dtype=torch.uint8)
+        stream = torch.cuda.Stream()
+        plan = c.c_void_p()
+        with torch.cuda.stream(stream):
+            self.assertEqual(
+                lib.qvq_gfx950_rocblas_prepare(
+                    m,
+                    k,
+                    n,
+                    stream.cuda_stream,
+                    workspace.data_ptr(),
+                    workspace.numel(),
+                    c.byref(plan),
+                ),
+                0,
+            )
+            try:
+                options = Options(c.sizeof(Options), 1, 0, 1, 0)
+                result = Result(c.sizeof(Result), 1)
+                self.assertEqual(
+                    lib.qvq_gfx950_rocblas_autotune(
+                        plan,
+                        x.data_ptr(),
+                        weights.data_ptr(),
+                        y.data_ptr(),
+                        c.byref(options),
+                        c.byref(result),
+                    ),
+                    0,
+                )
+                self.assertGreater(result.solution_index, 0)
+                self.assertGreater(result.candidates_tested, 0)
+                self.assertEqual(result.samples, result.candidates_tested)
+                self.assertTrue(result.median_us > 0)
+                self.assertEqual(
+                    lib.qvq_gfx950_rocblas_execute(
+                        plan,
+                        x.data_ptr(),
+                        weights.data_ptr(),
+                        y.data_ptr(),
+                        stream.cuda_stream,
+                    ),
+                    0,
+                )
+                stream.synchronize()
+                error = (y.double() - x.double() @ weights.double().T).abs()
+                self.assertLessEqual(error.mean().item(), 0.003)
+                self.assertLessEqual(error.max().item(), 0.006)
+            finally:
+                stream.synchronize()
+                self.assertEqual(lib.qvq_gfx950_rocblas_destroy(plan), 0)
+
 
 if __name__ == "__main__":
     unittest.main()
