@@ -24,9 +24,11 @@ pub const Config = extern struct {
     output_hadamard: u32 = 1,
     rank8_enabled: u32 = 0,
     // Optional rank8 implementation policy passed through the native ABI:
-    // recovery_kernel 0 = separate reference, 1 = fused epilogue;
+    // recovery_kernel 0 = separate reference, 1 = fused epilogue,
+    // 2 = fully fused project-output epilogue;
     // recovery_projection 0 = separate reference, 1 = concurrent reference,
-    // 2 = concurrent Tensor Core projection (unverified/fast-only).
+    // 2 = concurrent Tensor Core, 3 = input-fused producer,
+    // 4 = project-output fused producer (2..4 are unverified/fast-only).
     // Unsupported combinations fail closed in the native consumer rather than
     // silently degrading.
     recovery_kernel: u32 = 0,
@@ -72,8 +74,20 @@ pub fn configValid(config: Config) bool {
         config.block_k != 256 or config.pipeline_stages != 2 or
         config.split_k != 1 or config.input_hadamard > 1 or
         config.output_hadamard > 1 or config.rank8_enabled > 1 or
-        config.recovery_kernel > 1 or config.recovery_projection > 2)
+        config.recovery_kernel > 2 or config.recovery_projection > 4)
         return false;
+    if (config.rank8_enabled != 0) {
+        if (config.recovery_kernel != 0 and config.output_hadamard != 0 and
+            (config.n < 16 or (config.n & (config.n - 1)) != 0))
+            return false;
+        if (config.recovery_projection == 4 and
+            (config.recovery_kernel == 0 or config.n > 16384 or
+             (config.output_hadamard != 0 and
+              (config.n < 16 or (config.n & (config.n - 1)) != 0))))
+            return false;
+        if (config.recovery_kernel == 2 and config.recovery_projection != 4)
+            return false;
+    }
     if (config.algorithm == 1) {
         if (config.block_m != 0 or config.block_n != 0 or config.warp_groups != 0)
             return false;
@@ -209,7 +223,12 @@ pub const Runtime = struct {
     // Keep this runtime alive until every executable and captured graph using
     // it has finished. Prepared handles own a native allocator pool and are
     // released by deinit after the owning stream is synchronized.
-    pub fn init(paths: [3][]const u8, platform: *const zml.Platform) !Runtime {
+    //
+    // Loading is intentionally separate from FFI registration. LibTorch and
+    // ZML both carry CUDA 13 shared objects; loading the QVQ libraries before
+    // PJRT initializes its CUDA runtime prevents the dynamic loader from
+    // binding LibTorch against PJRT's private CUDA copy.
+    pub fn load(paths: [3][]const u8) !Runtime {
         if (native_graph_create != null) return error.AlreadyInitialized;
         var libraries: [3]std.DynLib = undefined;
         var loaded: usize = 0;
@@ -229,6 +248,15 @@ pub const Runtime = struct {
             native_graph_run = null;
             native_graph_destroy = null;
         }
+        graph_mutex.lock();
+        graph_handles = GraphMap.init(std.heap.c_allocator);
+        graph_use_counter = 0;
+        graph_mutex.unlock();
+        return .{ .libraries = libraries };
+    }
+
+    pub fn register(self: *Runtime, platform: *const zml.Platform) !void {
+        _ = self;
         try platform.registerFfi(.{
             .name = "qvq_p32_window_linear",
             .handler = handler,
@@ -237,11 +265,6 @@ pub const Runtime = struct {
             // retained graph or inserts it as a child node.
             .traits = .{ .command_buffer_compatible = true },
         });
-        graph_mutex.lock();
-        graph_handles = GraphMap.init(std.heap.c_allocator);
-        graph_use_counter = 0;
-        graph_mutex.unlock();
-        return .{ .libraries = libraries };
     }
 
     pub fn deinit(self: *Runtime) void {
@@ -895,7 +918,11 @@ pub fn loadArtifact(
 /// shape. The list intentionally retains every supported BM/BN choice and
 /// each producer placement: the winning geometry is shape-, device-, and
 /// correction-state dependent.
-pub const max_candidate_count: usize = 42;
+// Seven Hopper geometries x (four producer modes with two kernel variants,
+// plus project-output with fused and fully-fused variants).  Composite or
+// N>16384 outputs omit the last two candidates, but retain this fixed bound
+// for stack allocation and ABI-stable reports.
+pub const max_candidate_count: usize = 70;
 
 /// Result of one correctness-gated ZML candidate measurement. The executable
 /// and timing loop belong to the caller so it can use its own PJRT client and
@@ -1018,14 +1045,15 @@ pub fn benchmarkExecutable(
     const samples = try allocator.alloc(u64, options.iterations);
     defer allocator.free(samples);
     for (samples) |*sample| {
-        const start = zml.benchmark.monotonicNow(io);
+        const start: std.Io.Timestamp = .now(io, .awake);
         executable.call(arguments, results);
         var output = results.get(zml.Buffer);
         try output.await(io);
-        sample.* = zml.benchmark.elapsedNanoseconds(io, start);
+        sample.* = @intCast(start.untilNow(io, .awake).toNanoseconds());
         output.deinit();
     }
-    return zml.benchmark.HostTimingStats.init(samples).median_ns;
+    std.sort.heap(u64, samples, {}, std.sort.asc(u64));
+    return samples[samples.len / 2];
 }
 
 /// Select the fastest locally correct candidate in stable enumeration order.
@@ -1117,17 +1145,22 @@ pub fn enumerateCandidates(base: Config, output: []Config) usize {
     var shape_base = base;
     shape_base.min_m = base.m;
     shape_base.max_m = base.m;
-    // The native fused epilogue now supports the power-of-two output
-    // Hadamard path. Composite output widths retain the reference epilogue
-    // until a matching arithmetic signature is certified.
+    // The native fused epilogue supports power-of-two output Hadamard. The
+    // project-output kernel additionally requires N <= 16384; larger
+    // transform-free outputs retain fused epilogue candidates only.
     const output_hadamard_fusable = base.output_hadamard == 0 or
         (base.n >= 16 and (base.n & (base.n - 1)) == 0);
-    const kernel_count: usize = if (output_hadamard_fusable) 2 else 1;
+    const project_output_fusable = output_hadamard_fusable and base.n <= 16384;
+    var policy_count: usize = 4;
+    if (output_hadamard_fusable) {
+        policy_count = 8;
+        if (project_output_fusable) policy_count += 2;
+    }
     // Keep the projection dimension present for correction-off candidates as
     // well. This preserves identical indices between the off and on sweeps,
     // allowing each concurrent producer candidate to receive a matched
     // correction-off baseline without making the off graph touch A/B.
-    const required_count = 7 * kernel_count * 2;
+    const required_count = 7 * policy_count;
     if (output.len < required_count) return 0;
     var count: usize = 0;
     // Transform-free outputs can select the native fused rank8 epilogue. Keep
@@ -1135,7 +1168,8 @@ pub fn enumerateCandidates(base: Config, output: []Config) usize {
     // correction-on sweeps so recovery overhead is measured against the same
     // candidate index. The off executable ignores both policies while
     // retaining the geometry, which gives the verifier a matched baseline.
-    for ([_]u32{ 0, 1, 2 }) |recovery_projection| {
+    for ([_]u32{ 0, 1, 2, 3 }) |recovery_projection| {
+        const kernel_count: usize = if (output_hadamard_fusable) 2 else 1;
         for (0..kernel_count) |kernel_index| {
             const recovery_kernel: u32 = if (kernel_count == 2) @intCast(kernel_index) else 0;
             var m16 = shape_base;
@@ -1158,6 +1192,32 @@ pub fn enumerateCandidates(base: Config, output: []Config) usize {
                     candidate.warp_groups = 0;
                     candidate.recovery_kernel = recovery_kernel;
                     candidate.recovery_projection = recovery_projection;
+                    output[count] = candidate;
+                    count += 1;
+                }
+            }
+        }
+    }
+    if (project_output_fusable) {
+        for ([_]u32{ 1, 2 }) |recovery_kernel| {
+            var m16 = shape_base;
+            m16.algorithm = 1;
+            m16.block_m = 0;
+            m16.block_n = 0;
+            m16.warp_groups = 0;
+            m16.recovery_kernel = recovery_kernel;
+            m16.recovery_projection = 4;
+            output[count] = m16;
+            count += 1;
+            for ([_]u32{ 32, 64, 128 }) |block_m| {
+                for ([_]u32{ 64, 128 }) |block_n| {
+                    var candidate = shape_base;
+                    candidate.algorithm = 2;
+                    candidate.block_m = block_m;
+                    candidate.block_n = block_n;
+                    candidate.warp_groups = 0;
+                    candidate.recovery_kernel = recovery_kernel;
+                    candidate.recovery_projection = 4;
                     output[count] = candidate;
                     count += 1;
                 }
@@ -1425,9 +1485,9 @@ test "native window ABI layout" {
     try std.testing.expectEqual(@as(usize, 16), @sizeOf(NativeBuffer));
     var candidates: [max_candidate_count]Config = undefined;
     const count = enumerateCandidates(.{ .m = 33, .k = 2048, .n = 2048, .transition_bits = 4, .bank_alt_id = 2, .algorithm = 2, .output_hadamard = 1, .rank8_enabled = 1 }, &candidates);
-    try std.testing.expectEqual(@as(usize, 42), count);
-    var hadamard_only: [42]Config = undefined;
-    try std.testing.expectEqual(@as(usize, 42), enumerateCandidates(.{
+    try std.testing.expectEqual(@as(usize, 70), count);
+    var hadamard_only: [max_candidate_count]Config = undefined;
+    try std.testing.expectEqual(@as(usize, 70), enumerateCandidates(.{
         .m = 33,
         .k = 2048,
         .n = 2048,
@@ -1440,7 +1500,7 @@ test "native window ABI layout" {
     try std.testing.expectEqual(@as(u32, 2), candidates[1].algorithm);
     try std.testing.expectEqual(@as(u32, 32), candidates[1].block_m);
     try std.testing.expectEqual(@as(u32, 64), candidates[1].block_n);
-    var measurements: [42]CandidateMeasurement = @splat(.{
+    var measurements: [max_candidate_count]CandidateMeasurement = @splat(.{
         .median_ns = 100,
         .mean_absolute_error = 0,
         .max_absolute_error = 0,
@@ -1568,8 +1628,18 @@ test "window configuration validation rejects unsafe external policies" {
     wrong_geometry.block_n = 32;
     try std.testing.expect(!configValid(wrong_geometry));
     var wrong_recovery = valid;
-    wrong_recovery.recovery_projection = 3;
+    wrong_recovery.recovery_projection = 5;
     try std.testing.expect(!configValid(wrong_recovery));
+    var invalid_fully_fused = valid;
+    invalid_fully_fused.rank8_enabled = 1;
+    invalid_fully_fused.recovery_kernel = 2;
+    invalid_fully_fused.recovery_projection = 3;
+    try std.testing.expect(!configValid(invalid_fully_fused));
+    var valid_project_output = valid;
+    valid_project_output.rank8_enabled = 1;
+    valid_project_output.recovery_kernel = 2;
+    valid_project_output.recovery_projection = 4;
+    try std.testing.expect(configValid(valid_project_output));
     var wrong_algorithm = valid;
     wrong_algorithm.algorithm = 0;
     try std.testing.expect(!configValid(wrong_algorithm));
@@ -1587,7 +1657,7 @@ test "transform-free candidate enumeration exposes fused rank8 policy" {
         .output_hadamard = 0,
         .rank8_enabled = 1,
     }, &candidates);
-    try std.testing.expectEqual(@as(usize, 42), count);
+    try std.testing.expectEqual(@as(usize, 70), count);
     try std.testing.expectEqual(@as(u32, 0), candidates[0].recovery_kernel);
     try std.testing.expectEqual(@as(u32, 1), candidates[7].recovery_kernel);
     try std.testing.expectEqual(@as(u32, 1), candidates[14].recovery_projection);
@@ -1606,6 +1676,24 @@ test "native window shape policy admits composite transform-free Qwen tiles" {
     try std.testing.expect(!nativeWindowShapeSupported(2048, 17920, false, false));
 }
 
+test "candidate enumeration omits project-output for unsupported widths" {
+    var candidates: [max_candidate_count]Config = undefined;
+    const count = enumerateCandidates(.{
+        .m = 33,
+        .k = 5120,
+        .n = 17408,
+        .transition_bits = 4,
+        .bank_alt_id = 2,
+        .algorithm = 2,
+        .output_hadamard = 0,
+        .rank8_enabled = 1,
+    }, &candidates);
+    try std.testing.expectEqual(@as(usize, 56), count);
+    for (candidates[0..count]) |candidate| {
+        try std.testing.expect(candidate.recovery_projection != 4);
+    }
+}
+
 test "shape-aware candidate ordering keeps every geometry" {
     var candidates: [max_candidate_count]Config = undefined;
     const count = enumerateCandidatesForShape(.{
@@ -1617,7 +1705,7 @@ test "shape-aware candidate ordering keeps every geometry" {
         .algorithm = 2,
         .output_hadamard = 1,
     }, &candidates);
-    try std.testing.expectEqual(@as(usize, 42), count);
+    try std.testing.expectEqual(@as(usize, 70), count);
     try std.testing.expectEqual(@as(u32, 1), candidates[0].algorithm);
     try std.testing.expectEqual(@as(u32, 32), candidates[1].block_m);
     const base = candidates[0];

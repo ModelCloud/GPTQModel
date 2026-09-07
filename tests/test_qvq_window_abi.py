@@ -228,10 +228,20 @@ def test_native_fused_policy_off_does_not_touch_absent_rank8_factors(monkeypatch
 
 
 @pytest.mark.parametrize(
-    "projection", ["separate_reference", "concurrent_reference", "tensor_core"]
+    "recovery_kernel, projection",
+    [
+        ("fused_epilogue", "separate_reference"),
+        ("fused_epilogue", "input_fused"),
+        ("fused_epilogue", "concurrent_reference"),
+        ("fused_epilogue", "tensor_core"),
+        ("fused_epilogue", "project_output_fused"),
+        ("fully_fused", "project_output_fused"),
+    ],
 )
-def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(projection):
-    """The native composite path uses one graph-safe fused rank8 epilogue."""
+def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(
+    recovery_kernel, projection
+):
+    """All native fused rank8 policies match and remain graph replayable."""
     from test_qvq_grouped_runtime import _child
     from test_qvq_window_recovery import _kernel_rank8
 
@@ -247,8 +257,13 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(projecti
     config = P32WindowConfig(
         algorithm="hopper_m16",
         recovery_mode="on",
-        recovery_kernel="fused_epilogue",
+        recovery_kernel=recovery_kernel,
         recovery_projection=projection,
+        arithmetic_signature=(
+            "unverified_project_output_fused"
+            if projection == "project_output_fused"
+            else "reference_fp32_v1"
+        ),
     )
     x = torch.randn(33, 2048, device="cuda", dtype=torch.float16) * 0.01
     with torch.no_grad():
@@ -274,13 +289,19 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(projecti
     finally:
         library.qvq_p32_window_linear = original
     native_config = ctypes.cast(recorded[10], ctypes.POINTER(WindowConfig)).contents
+    assert native_config.recovery_kernel == {
+        "fused_epilogue": 1,
+        "fully_fused": 2,
+    }[recovery_kernel]
     assert native_config.recovery_projection == {
         "separate_reference": 0,
+        "input_fused": 3,
         "concurrent_reference": 1,
         "tensor_core": 2,
+        "project_output_fused": 4,
     }[projection]
     error = (actual.float() - expected.float()).abs()
-    if projection == "tensor_core":
+    if projection in ("tensor_core", "project_output_fused"):
         # Tensor Core projection is deliberately unverified/fast-only. Keep
         # the finite/max safety bound while leaving strict reference MAE
         # certification to the correctness-gated tuner.
@@ -322,9 +343,19 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(projecti
         assert status == 0, error.value
 
 
-@pytest.mark.parametrize("projection", ["separate_reference", "concurrent_reference"])
-def test_native_power_two_output_hadamard_rank8_fused_epilogue(monkeypatch, projection):
-    """Power-of-two output transforms use the graph-safe fused epilogue."""
+@pytest.mark.parametrize(
+    "recovery_kernel, projection",
+    [
+        ("fused_epilogue", "separate_reference"),
+        ("fused_epilogue", "concurrent_reference"),
+        ("fused_epilogue", "project_output_fused"),
+        ("fully_fused", "project_output_fused"),
+    ],
+)
+def test_native_power_two_output_hadamard_rank8_fused_epilogue(
+    monkeypatch, recovery_kernel, projection
+):
+    """Power-of-two output transforms use graph-safe native rank8 epilogues."""
     from test_qvq_grouped_runtime import _child
     from test_qvq_window_recovery import _kernel_rank8
 
@@ -340,8 +371,13 @@ def test_native_power_two_output_hadamard_rank8_fused_epilogue(monkeypatch, proj
     config = P32WindowConfig(
         algorithm="hopper_m16",
         recovery_mode="on",
-        recovery_kernel="fused_epilogue",
+        recovery_kernel=recovery_kernel,
         recovery_projection=projection,
+        arithmetic_signature=(
+            "unverified_project_output_fused"
+            if projection == "project_output_fused"
+            else "reference_fp32_v1"
+        ),
     )
     x = torch.randn(33, 2048, device="cuda", dtype=torch.float16) * 0.01
     prepare_rank8(layer, config)

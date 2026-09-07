@@ -196,15 +196,18 @@ used instead.
 ## Remaining work and promotion boundary
 
 The reference/fused output epilogues, shared input producer, padded Tensor Core
-projection, request-owned model graphs, typed native artifact loading and
-initial native/ZML reference bridge are implemented. Allocation-free ZML
-candidate selection and direct executable timing hooks are also available for
-pre-capture tuning. Concurrent WGMMA input projection, complete native pipeline
-fusion, FP8 factors, BN32/additional stages, explicit external user capture,
-KV/TP graph ownership, the full real-model scorecard and H100/H200 promotion
-remain open.
+projection, native project-output epilogue, request-owned model graphs, typed
+native artifact loading and typed StableHLO/XLA custom-call bridge are
+implemented. Allocation-free ZML candidate selection and direct executable
+timing hooks are available for pre-capture tuning, including the full native
+rank8 policy matrix. Concurrent WGMMA input projection, complete native
+WGMMA/epilogue pipeline fusion, FP8 factors, BN32/additional stages, explicit
+external user capture, KV/TP graph ownership, the full real-model scorecard
+and H100/H200 promotion remain open.
 `fused_epilogue` runs expansion/add/Hadamard/SV/bias in one kernel.
-`fully_fused` remains unsupported; it does not alias the partial fusion.
+`fully_fused` now selects the native project-output fused epilogue; it is not
+yet a single WGMMA producer/consumer kernel and remains fast-only pending
+arithmetic certification.
 No <=3–5% overhead or model speed/quality claim follows from these tests.
 
 ## Validation of this WIP
@@ -392,9 +395,11 @@ including geometries that lost at other shapes. The enumeration does not
 change correction eligibility or choose a winner. Non-Hopper devices retain
 the production candidate until their backend exposes additional controls.
 `config.to_backend_config()` and `P32WindowConfig.from_backend_config(...)`
-provide strict versioned dictionaries for external tuning, including ZML;
-they do not implement a StableHLO/XLA FFI lowering. The shared tuner below
-consumes these controls and persists measured choices.
+provide strict versioned dictionaries for external tuning, including ZML.
+The ZML adapter lowers every Config field as a typed StableHLO/XLA backend
+attribute, and its verifier compiles, correctness-gates and measures the
+complete candidate sweep before graph capture. The shared tuner below consumes
+these controls and persists measured choices.
 
 The benchmark accepts `--block-m` and `--block-n`, measures the full operator
 with correction off and on, and retains source hashes, geometry, local drift,
