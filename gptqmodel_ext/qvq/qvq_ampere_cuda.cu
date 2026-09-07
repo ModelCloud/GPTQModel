@@ -4,7 +4,6 @@
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
-#include <ATen/ops/addmm.h>
 #include <ATen/ops/mm.h>
 #include <cuda_fp16.h>
 #include <cuda_pipeline.h>
@@ -1664,6 +1663,40 @@ __global__ void reduce_split_kernel(
   output[index] = accumulator;
 }
 
+template <bool Rank8BFloat>
+__global__ void reduce_split_rank8_kernel(
+    const float* __restrict__ partial_output,
+    float* __restrict__ output,
+    const float* __restrict__ rank8_down,
+    const void* __restrict__ rank8_b,
+    int output_values,
+    int size_n,
+    int split_count,
+    float rank8_scale) {
+  const int index = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= output_values) {
+    return;
+  }
+  float accumulator = 0.0f;
+#pragma unroll
+  for (int split = 0; split < split_count; ++split) {
+    accumulator += partial_output[static_cast<int64_t>(split) * output_values + index];
+  }
+  const int row = index / size_n;
+  const int column = index - row * size_n;
+  const float* rank8_b_float = static_cast<const float*>(rank8_b);
+  const half* rank8_b_half = static_cast<const half*>(rank8_b);
+  float correction = 0.0f;
+#pragma unroll
+  for (int rank = 0; rank < 8; ++rank) {
+    const float b_value = Rank8BFloat
+        ? rank8_b_float[rank * size_n + column]
+        : __half2float(rank8_b_half[rank * size_n + column]);
+    correction += rank8_down[row * 8 + rank] * b_value;
+  }
+  output[index] = accumulator + rank8_scale * correction;
+}
+
 __global__ void reduce_grouped_split_kernel(
     const float* __restrict__ partial_output,
     float* __restrict__ output,
@@ -1836,25 +1869,6 @@ at::Tensor p32_window_ampere_impl(
   auto partial_output = split_count == 1
       ? output
       : at::empty({split_count, size_m, size_n}, input.options().dtype(at::kFloat));
-  auto finalize_output = [&]() -> at::Tensor {
-    if (rank8_a.has_value()) {
-      // Use the regular CUDA GEMM path for the tiny-rank update so Ampere can
-      // select tensor-core kernels.  Both products accumulate in FP32 and
-      // remain on the current stream, including during CUDA graph capture.
-      auto rank8_down = at::mm(input, *rank8_a, at::kFloat);
-      auto rank8_b_float = rank8_b->scalar_type() == at::kFloat
-          ? *rank8_b
-          : rank8_b->to(at::kFloat);
-      at::addmm_out(
-          output,
-          output,
-          rank8_down,
-          rank8_b_float,
-          at::Scalar(1.0),
-          at::Scalar(rank8_scale));
-    }
-    return output;
-  };
   // The scalar M<=4 route pays one decode loop per K16 row and reuses each
   // decoded pair across the live output rows. It wins for the common 5-6K K
   // projections; with the wider long-K wave and four-K16 scalar stage it also
@@ -2808,6 +2822,41 @@ at::Tensor p32_window_ampere_impl(
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
 
+  if (rank8_a.has_value()) {
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    // Compute the shared rank-8 activation once, then fold its B-side
+    // product into the existing output reducer. This removes the per-call
+    // FP16->FP32 B conversion and a second tiny GEMV launch while preserving
+    // the quantized split reduction's increasing-split FP32 order.
+    auto rank8_down = at::mm(input, *rank8_a, at::kFloat);
+    constexpr int kReductionThreads = 256;
+    const int output_values = size_m * size_n;
+    const int blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
+    if (rank8_b->scalar_type() == at::kFloat) {
+      reduce_split_rank8_kernel<true><<<blocks, kReductionThreads, 0, stream>>>(
+          partial_output.data_ptr<float>(),
+          output.data_ptr<float>(),
+          rank8_down.data_ptr<float>(),
+          rank8_b->data_ptr(),
+          output_values,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<float>(rank8_scale));
+    } else {
+      reduce_split_rank8_kernel<false><<<blocks, kReductionThreads, 0, stream>>>(
+          partial_output.data_ptr<float>(),
+          output.data_ptr<float>(),
+          rank8_down.data_ptr<float>(),
+          rank8_b->data_ptr(),
+          output_values,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<float>(rank8_scale));
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+  }
+
   if (split_count > 1) {
     constexpr int kReductionThreads = 256;
     const int output_values = size_m * size_n;
@@ -2822,7 +2871,7 @@ at::Tensor p32_window_ampere_impl(
               output.data_ptr<float>(),
               output_values);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      return finalize_output();
+      return output;
     }
     if (size_m == 8 && size_n == 1024 && split_count == 48) {
       constexpr int kReductionWarps = kReductionThreads / 32;
@@ -2834,7 +2883,7 @@ at::Tensor p32_window_ampere_impl(
               output.data_ptr<float>(),
               output_values);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      return finalize_output();
+      return output;
     }
     if (size_m == 16 && size_n == 1024 && split_count == 32) {
       constexpr int kReductionWarps = kReductionThreads / 32;
@@ -2848,7 +2897,7 @@ at::Tensor p32_window_ampere_impl(
               output.data_ptr<float>(),
               output_values);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      return finalize_output();
+      return output;
     }
     const bool use_m1_warp_reducer =
         size_m == 1 &&
@@ -2890,7 +2939,7 @@ at::Tensor p32_window_ampere_impl(
       if (split_count == 24 || split_count == 40 || split_count == 48 ||
           split_count == 96 || split_count == 128) {
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        return finalize_output();
+        return output;
       }
     }
     if (size_m == 2 && size_k == 17408 && size_n == 5120 &&
@@ -2914,7 +2963,7 @@ at::Tensor p32_window_ampere_impl(
                 output_values);
       }
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      return finalize_output();
+      return output;
     }
     if constexpr (TransitionBits == 6) {
       if (size_m == 2 && size_k == 6144 && size_n == 5120 &&
@@ -2930,7 +2979,7 @@ at::Tensor p32_window_ampere_impl(
                 output.data_ptr<float>(),
                 output_values);
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        return finalize_output();
+        return output;
       }
     }
     const bool use_m2_warp_reducer =
@@ -2969,7 +3018,7 @@ at::Tensor p32_window_ampere_impl(
       if (split_count == 24 || split_count == 40 || split_count == 48 ||
           split_count == 64) {
         C10_CUDA_KERNEL_LAUNCH_CHECK();
-        return finalize_output();
+        return output;
       }
     }
     if (size_m == 1 && size_k == 5120 && size_n == 1024 &&
@@ -2981,7 +3030,7 @@ at::Tensor p32_window_ampere_impl(
               output_values,
               56);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
-      return finalize_output();
+      return output;
     }
 #define QVQ_LAUNCH_STATIC_REDUCER(SPLITS)                                    \
   reduce_split_kernel<SPLITS><<<blocks, kReductionThreads, 0, stream>>>(     \
@@ -3054,7 +3103,7 @@ at::Tensor p32_window_ampere_impl(
 #undef QVQ_LAUNCH_STATIC_REDUCER
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
-  return finalize_output();
+  return output;
 }
 
 at::Tensor p32_window_ampere(
