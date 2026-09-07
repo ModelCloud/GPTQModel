@@ -669,6 +669,12 @@ metric record without changing the fitting or package inputs. The
 uses 16 additional calibration documents excluded from fitting, selection,
 and the earlier module audit.
 
+When `--verify-graphs` is enabled, `--max-graph-resident N` bounds the number
+of captured input signatures retained during the run. The evaluator records
+per-document and final `graph_residency` snapshots, including the configured
+bound and retired-key count, so graph memory behavior is visible alongside the
+quality metrics.
+
 The [C4 reference-correction subset](results/p32_rank8_llama_c4_subset.json)
 uses `allenai/c4` revision `1588ec454efa1a09f29cd18ddd04fe05fc8653a2`, English
 validation shard 0, first 128 documents, BOS/default tokenizer special tokens,
