@@ -491,7 +491,7 @@ def prepare_rank8(layer, config):
     if config.recovery_kernel in ("fused_epilogue", "fully_fused") and (
         runtime_device.type != "cuda"
         or torch.cuda.get_device_capability(runtime_device) != (9, 0)
-        or layer.out_features > 16384
+        or layer.out_features > 17408
         or (
             layer.output_hadamard
             and layer.out_features & (layer.out_features - 1)
@@ -502,7 +502,7 @@ def prepare_rank8(layer, config):
         )
     ):
         raise ValueError(
-            "rank8 fused epilogue requires SM90 and N <= 16384; project-output fusion requires power-of-two N"
+            "rank8 fused epilogue requires SM90 and N <= 17408; project-output fusion requires N <= 16384 and power-of-two Hadamard widths"
         )
     if (
         enabled
@@ -2103,7 +2103,7 @@ def window_kernel_candidates(layer, *, m):
         project_output_supported = (
             not layer.output_hadamard
             or not layer.out_features & (layer.out_features - 1)
-        )
+        ) and layer.out_features <= 16384
         if layer.in_features <= 16384 and project_output_supported:
             candidates.extend(
                 replace(

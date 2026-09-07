@@ -503,6 +503,41 @@ def test_composite_hadamard_policy_admits_fused_epilogue_and_rejects_project_out
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_transform_free_qwen_width_admits_fused_epilogue_candidate():
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from test_qvq_grouped_runtime import _child
+    from test_qvq_window_recovery import _kernel_rank8
+
+    from gptqmodel.quantization.qvq_rank8 import (
+        P32WindowConfig,
+        prepare_rank8,
+        window_kernel_candidates,
+    )
+
+    layer = _child(
+        "gate_proj",
+        in_features=5120,
+        out_features=17408,
+        device="cuda",
+        input_hadamard=False,
+        output_hadamard=False,
+    )
+    _kernel_rank8(layer)
+    prepare_rank8(layer, P32WindowConfig(recovery_mode="on"))
+    candidates = window_kernel_candidates(layer, m=17)
+    fused = [
+        candidate
+        for candidate in candidates
+        if candidate.recovery_kernel == "fused_epilogue"
+        and candidate.recovery_projection == "separate_reference"
+    ]
+    assert fused
+    prepare_rank8(layer, fused[0])
+    assert layer._p32_rank8_enabled
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fully_fused_policy_routes_project_output_epilogue_and_graph():
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 required")
