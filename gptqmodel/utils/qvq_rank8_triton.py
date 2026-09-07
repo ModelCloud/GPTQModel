@@ -18,6 +18,8 @@ import torch
 import triton
 import triton.language as tl
 
+from gptqmodel.quantization.rotation.hadamard_utils import get_hadK, matmul_hadU_stable
+
 _GRAPH_WARM_KEYS: set[tuple[object, ...]] = set()
 _GRAPH_WARM_KEYS_LOCK = threading.Lock()
 
@@ -615,6 +617,7 @@ def _rank8_input_producer_masked(
     BLOCK_K: tl.constexpr,
     X_STRIDE: tl.constexpr,
     GROUPS: tl.constexpr,
+    APPLY_SU: tl.constexpr,
 ):
     """Composite-width producer for projections whose input Hadamard is folded."""
 
@@ -622,7 +625,8 @@ def _rank8_input_producer_masked(
     column = tl.arange(0, BLOCK_K)
     mask = column < K
     value = tl.load(X + row * X_STRIDE + column, mask=mask, other=0).to(tl.float32)
-    value = value * tl.load(SU + column, mask=mask, other=0).to(tl.float32)
+    if APPLY_SU:
+        value = value * tl.load(SU + column, mask=mask, other=0).to(tl.float32)
     value = value.to(tl.float16).to(tl.float32)
     tl.store(Transformed + row * K + column, value, mask=mask)
     for group in tl.static_range(GROUPS):
@@ -646,10 +650,19 @@ def rank8_input_producer(x, su, factors, *, hadamard=True):
     if x.ndim != 2 or x.device.type != "cuda" or x.dtype != torch.float16:
         raise ValueError("rank8 input producer requires FP16 CUDA [M,K]")
     m, k = x.shape
-    if k < 16 or k > 16384 or (hadamard and k & (k - 1)) or torch.cuda.get_device_capability(x.device) != (9, 0):
+    if k < 16 or k > 17408 or torch.cuda.get_device_capability(x.device) != (9, 0):
         raise ValueError(
-            "rank8 input producer requires SM90 and K in [16,16384]; Hadamard mode requires power-of-two K"
+            "rank8 input producer requires SM90 and K in [16,17408]"
         )
+    composite_hadamard = bool(hadamard and k & (k - 1))
+    if composite_hadamard:
+        try:
+            had_k, base_k = get_hadK(k)
+        except AssertionError as error:
+            raise ValueError("unsupported composite Hadamard input width") from error
+        power_two_width = k // base_k
+        if had_k is None or power_two_width < 2 or power_two_width & (power_two_width - 1):
+            raise ValueError("unsupported composite Hadamard input width")
     if not 1 <= len(factors) <= 3:
         raise ValueError("rank8 input producer requires one to three enabled children")
     if (
@@ -680,10 +693,33 @@ def rank8_input_producer(x, su, factors, *, hadamard=True):
         k,
         len(factors),
         bool(hadamard),
-        "masked" if not hadamard and k & (k - 1) else "butterfly",
+        "composite" if composite_hadamard else ("masked" if not hadamard and k & (k - 1) else "butterfly"),
     )
     _require_rank8_kernel_warm(key)
-    if m and not hadamard and k & (k - 1):
+    if m and composite_hadamard:
+        # Composite Hadamards are factored as the existing stable transform:
+        # SU is applied once, the power-of-two stages use the established CUDA
+        # path, and the small base transform remains in the same FP16 domain.
+        # The masked producer then publishes X' and projects all children
+        # without reapplying SU. The transform/cache must be warmed eagerly.
+        transformed_input = matmul_hadU_stable(x.mul(su))
+        block_k = 1 << (k - 1).bit_length()
+        _rank8_input_producer_masked[(m,)](
+            transformed_input,
+            su,
+            factors,
+            transformed,
+            hidden,
+            m,
+            k,
+            block_k,
+            transformed_input.stride(0),
+            len(factors),
+            APPLY_SU=False,
+            num_warps=4 if k <= 4096 else 8,
+            enable_fp_fusion=False,
+        )
+    elif m and not hadamard and k & (k - 1):
         block_k = 1 << (k - 1).bit_length()
         _rank8_input_producer_masked[(m,)](
             x,
@@ -696,6 +732,7 @@ def rank8_input_producer(x, su, factors, *, hadamard=True):
             block_k,
             x.stride(0),
             len(factors),
+            APPLY_SU=True,
             num_warps=4 if k <= 4096 else 8,
             enable_fp_fusion=False,
         )

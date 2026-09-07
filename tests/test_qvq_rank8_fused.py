@@ -359,6 +359,39 @@ def test_rank8_input_producer_supports_composite_folded_width_graph_replay():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rank8_input_producer_supports_composite_hadamard_width_graph_replay():
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from gptqmodel.utils.qvq_rank8_triton import rank8_input_producer
+
+    torch.manual_seed(158)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    k = 5120
+    x = torch.randn(17, k, device="cuda", dtype=torch.float16) * 0.1
+    su = torch.randn(k, device="cuda", dtype=torch.float16)
+    factors = tuple(
+        torch.randn(k, 8, device="cuda", dtype=torch.float16) * 0.02
+        for _ in range(2)
+    )
+    reference = _qvq_hadamard_fused(x, pre_scale=su, scale_mode=2)
+    actual, hidden = rank8_input_producer(x, su, factors, hadamard=True)
+    assert torch.equal(actual, reference)
+    for factor, projected in zip(factors, hidden):
+        expected = (reference.float() @ factor.float()).half()
+        error = (projected.float() - expected.float()).abs()
+        assert error.mean() <= 2e-3 and error.max() <= 0.046875
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured_x, captured_hidden = rank8_input_producer(
+            x, su, factors, hadamard=True
+        )
+    for _ in range(3):
+        graph.replay()
+        assert torch.equal(captured_x, actual)
+        assert all(torch.equal(a, b) for a, b in zip(captured_hidden, hidden))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_input_fused_policy_admits_composite_width_without_input_hadamard():
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 required")
