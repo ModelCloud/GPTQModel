@@ -57,6 +57,42 @@ fn arithmeticAllowed(mode: QualityMode, signature: ArithmeticSignature) bool {
         .quality => signature == .reference_fp32_v1,
     };
 }
+
+/// Validate the complete external ABI policy before lowering or replay.
+/// Keeping this pure lets ZML candidate generation and host-side tests reject
+/// unsupported geometry without allocating device state.  The native bridge
+/// repeats the checks at its own boundary.
+pub fn configValid(config: Config) bool {
+    if (config.abi_version != 3 or config.struct_bytes != @sizeOf(Config) or
+        config.m == 0 or config.m > 8192 or config.k == 0 or config.n == 0 or
+        config.transition_bits < 4 or config.transition_bits > 7 or
+        config.bank_alt_id < 1 or config.bank_alt_id > 3 or
+        config.min_m == 0 or config.min_m > config.m or
+        config.max_m < config.m or config.max_m > 8192 or
+        config.block_k != 256 or config.pipeline_stages != 2 or
+        config.split_k != 1 or config.input_hadamard > 1 or
+        config.output_hadamard > 1 or config.rank8_enabled > 1 or
+        config.recovery_kernel > 1 or config.recovery_projection > 2)
+        return false;
+    if (config.algorithm == 1) {
+        if (config.block_m != 0 or config.block_n != 0 or config.warp_groups != 0)
+            return false;
+    } else if (config.algorithm == 2) {
+        if (config.block_m != 0 and (config.block_m != 32 and config.block_m != 64 and config.block_m != 128))
+            return false;
+        if (config.block_n != 0 and (config.block_n != 64 and config.block_n != 128))
+            return false;
+        if (config.warp_groups != 0 and
+            (config.block_n == 0 or config.warp_groups != config.block_n / 64))
+            return false;
+        if (config.block_m == 0 or config.block_n == 0) {
+            if (config.warp_groups != 0) return false;
+        }
+    } else {
+        return false;
+    }
+    return true;
+}
 const NativeBuffer = extern struct { data: ?*anyopaque, bytes: u64 };
 const NativeGraphCreate = *const fn (
     [*]const NativeBuffer,
@@ -1077,7 +1113,7 @@ pub fn enumerateCandidates(base: Config, output: []Config) usize {
     // BM/BN configuration cannot be reused accidentally for another request
     // shape through its broader caller-supplied range.  The Python tuner
     // applies the same min_m=max_m contract before timing.
-    if (base.m == 0) return 0;
+    if (!configValid(base)) return 0;
     var shape_base = base;
     shape_base.min_m = base.m;
     shape_base.max_m = base.m;
@@ -1175,7 +1211,7 @@ pub fn candidateShapeScoreForShape(base: Config, candidate: Config) i32 {
 // candidates before lowering. rank8_enabled is resolved by quantizer metadata
 // and requested quality mode, not chosen merely by latency.
 pub fn linear(input: Input, config: Config) zml.Tensor {
-    std.debug.assert(config.abi_version == 3 and config.struct_bytes == @sizeOf(Config));
+    std.debug.assert(configValid(config));
     std.debug.assert(input.x.rank() == 2);
     std.debug.assert(input.x.dim(0) == config.m and input.x.dim(1) == config.k);
     inline for (@typeInfo(Input).@"struct".fields) |field| {
@@ -1226,6 +1262,8 @@ fn handler(frame: *zml.pjrt.ffi.CallFrame) callconv(.c) ?*zml.pjrt.ffi.Error {
         const bytes = buffer.shape.byteSize();
         buffers[i] = .{ .data = if (bytes == 0) null else buffer.ptr, .bytes = bytes };
     }
+    if (!configValid(config))
+        return zml.pjrt.ffi.Error.create(frame.api, .invalid_argument, "invalid window configuration");
     const output = zml.pjrtx.CustomCallBuffer.fromPjrt(outputs[0]);
     buffers[9] = .{ .data = output.ptr, .bytes = output.shape.byteSize() };
     const device_ordinal: usize = @intCast(frame.ctx.getDeviceOrdinal(frame.api) catch {
@@ -1508,6 +1546,33 @@ test "native window ABI layout" {
         )).candidate_index,
     );
     std.testing.refAllDecls(@This());
+}
+
+test "window configuration validation rejects unsafe external policies" {
+    const valid = Config{
+        .m = 96,
+        .k = 2048,
+        .n = 2048,
+        .transition_bits = 4,
+        .bank_alt_id = 2,
+        .algorithm = 2,
+        .block_m = 64,
+        .block_n = 64,
+        .warp_groups = 1,
+    };
+    try std.testing.expect(configValid(valid));
+    var wrong_range = valid;
+    wrong_range.min_m = 97;
+    try std.testing.expect(!configValid(wrong_range));
+    var wrong_geometry = valid;
+    wrong_geometry.block_n = 32;
+    try std.testing.expect(!configValid(wrong_geometry));
+    var wrong_recovery = valid;
+    wrong_recovery.recovery_projection = 3;
+    try std.testing.expect(!configValid(wrong_recovery));
+    var wrong_algorithm = valid;
+    wrong_algorithm.algorithm = 0;
+    try std.testing.expect(!configValid(wrong_algorithm));
 }
 
 test "transform-free candidate enumeration exposes fused rank8 policy" {
