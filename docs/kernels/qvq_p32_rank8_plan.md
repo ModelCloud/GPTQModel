@@ -319,3 +319,11 @@ free at large M. The complete graph-replay records are in
 `results/p32_rank8_h200_grouped_concurrent_reference.json` and
 `results/p32_rank8_h200_grouped_input_fused.json`; neither policy is promoted
 on this evidence, and true WGMMA-integrated rank8 fusion remains open.
+
+Fused MLP down projection policy validation now fails closed for projection
+choices that the down path cannot execute with their declared contract
+(`input_fused`, `concurrent_reference`, and `project_output_fused`). The
+supported down choices are explicit (`separate_reference` and `tensor_core`,
+with `separate_reference` or `fused_epilogue` output kernels); the rejection
+matrix is covered by grouped runtime tests. This prevents a requested
+projection from silently degrading to a separate implementation.
