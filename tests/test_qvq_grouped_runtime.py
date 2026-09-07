@@ -670,7 +670,7 @@ def test_grouped_hopper_policy_accepts_split_tuple_and_rejects_unimplemented_geo
     reason = runtime._runtime_eligible(torch.randn(1, 256))
     assert reason == (
         "grouped rank8 projection supports separate_reference, "
-        "concurrent_reference or input_fused only"
+        "concurrent_reference, input_fused or project_output_fused only"
     )
     concurrent_policy = replace(split_policy, recovery_projection="concurrent_reference")
     for child in children:
@@ -682,8 +682,17 @@ def test_grouped_hopper_policy_accepts_split_tuple_and_rejects_unimplemented_geo
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("projection", ("concurrent_reference", "input_fused"))
-def test_grouped_rank8_reuses_transform_and_replays_graph(projection):
+@pytest.mark.parametrize(
+    ("projection", "recovery_kernel"),
+    (
+        ("concurrent_reference", "separate_reference"),
+        ("input_fused", "separate_reference"),
+        ("project_output_fused", "fused_epilogue"),
+    ),
+)
+def test_grouped_rank8_reuses_transform_and_replays_graph(
+    projection, recovery_kernel
+):
     """Grouped rank8 producer policies must join the decode graph safely."""
 
     device = _h200_device() or _h100_device()
@@ -707,6 +716,7 @@ def test_grouped_rank8_reuses_transform_and_replays_graph(projection):
     config = P32WindowConfig(
         recovery_mode="on",
         recovery_projection=projection,
+        recovery_kernel=recovery_kernel,
     )
     for child in children:
         _kernel_rank8(child)

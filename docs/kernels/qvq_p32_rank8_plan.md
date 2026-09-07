@@ -333,6 +333,13 @@ faster at large M but remains above the recovery budget and is not eligible
 for balanced/quality selection until its arithmetic signature is certified.
 The raw replay record is `results/p32_rank8_h200_grouped_project_output_fused.json`.
 
+Grouped runtime eligibility now includes `project_output_fused` for single
+grouped projections, so its warmed Triton epilogue executes inside the grouped
+CUDA Graph instead of falling back to the child forward during capture. The
+graph matrix covers `concurrent_reference`, `input_fused`, and
+`project_output_fused`; fused MLP down keeps the stricter rejection above
+because its dataflow differs.
+
 Fused MLP down projection policy validation now fails closed for projection
 choices that the down path cannot execute with their declared contract
 (`input_fused`, `concurrent_reference`, and `project_output_fused`). The

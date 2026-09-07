@@ -578,12 +578,17 @@ class QVQHopperGroupedRuntime:
         if any(
             getattr(child, "_p32_rank8_enabled", False)
             and getattr(policy, "recovery_projection", "separate_reference")
-            not in ("separate_reference", "input_fused", "concurrent_reference")
+            not in (
+                "separate_reference",
+                "input_fused",
+                "concurrent_reference",
+                "project_output_fused",
+            )
             for child, policy in zip(children, policies, strict=True)
         ):
             return (
                 "grouped rank8 projection supports separate_reference, "
-                "concurrent_reference or input_fused only"
+                "concurrent_reference, input_fused or project_output_fused only"
             )
 
         if not isinstance(x, torch.Tensor):
