@@ -1,6 +1,6 @@
 ---
 name: qvq-multi-agent-git-sync
-description: Synchronize commits safely on shared ModelCloud/QvQ branches where multiple agents work concurrently. Use in this QvQ repository before every push, after another agent updates the active branch, when pull/rebase reports conflicts, or when confirming that local and remote branch tips match.
+description: Create fresh remote-based branches and pull requests and synchronize shared ModelCloud/QvQ branches. Use before branch or PR creation, every push, after PR lifecycle or remote updates, and when resolving Git synchronization conflicts.
 ---
 
 # QvQ multi-agent Git synchronization
@@ -45,6 +45,18 @@ If selected commits from an earlier branch must carry forward, first create the 
 new branch point. Re-fetch again before the first push because `origin/main` may have advanced during setup.
 
 ## Synchronize before every push
+
+Before opening a PR, fetch `origin` again, inspect `HEAD..origin/main`, and
+integrate relevant incoming changes safely within the task scope before rerunning
+affected checks. Set the PR base explicitly to `main`; record the branch's
+original remote base SHA and any later integration SHA. Never reuse a merged PR
+branch for a follow-up PR. A fetch updates remote-tracking refs, not the current
+working branch: report that distinction accurately.
+
+For a first push when the feature branch does not yet exist remotely, skip the
+pull/rebase of that nonexistent branch, inspect fresh `origin/main`, and push
+the explicit feature branch with `--set-upstream`. Otherwise follow the shared
+branch synchronization below. Do not force-push or discard dirty work.
 
 1. Inspect `git status --short`, the active branch, its upstream, and `git remote -v`.
 2. Finish and verify the intended local work before publishing it.

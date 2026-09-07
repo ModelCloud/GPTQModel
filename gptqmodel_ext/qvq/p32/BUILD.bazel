@@ -8,6 +8,8 @@ cc_library(
     name = "abi",
     hdrs = [
         "qvq_gfx950_abi.h",
+        "qvq_gfx950_native.h",
+        "qvq_gfx950_rocblas.h",
         "qvq_p32_abi.h",
         "qvq_p32_hadamard.h",
     ],

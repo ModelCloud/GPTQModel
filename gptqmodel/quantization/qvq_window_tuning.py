@@ -30,7 +30,7 @@ from .qvq_rank8 import (
     grouped_window_kernel_shape_score,
     prepare_rank8,
     validate_rank8_state,
-    window_kernel_candidates,
+    window_kernel_candidates_for_shape,
     window_kernel_shape_score,
     window_tuning_key,
 )
@@ -57,7 +57,6 @@ def _grouped_window_candidates_for_shape(layers, *, m):
     candidates = grouped_window_kernel_candidates(layers, m=m)
     if len(candidates) < 2:
         return candidates
-
     return tuple(
         choice
         for _, choice in sorted(
@@ -299,7 +298,7 @@ def tune_window_kernel(
             "an overhead promotion gate requires measure_recovery_candidates=True"
         )
     m = first.numel() // layer.in_features
-    eligible = window_kernel_candidates(layer, m=m)
+    eligible = window_kernel_candidates_for_shape(layer, m=m)
     choices = eligible if candidates is None else tuple(candidates)
     if not choices or any(c not in eligible for c in choices):
         raise ValueError(

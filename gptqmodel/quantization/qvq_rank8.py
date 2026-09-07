@@ -918,12 +918,39 @@ def _rank8_output_fit(
     projected_sketch = design @ torch.linalg.lstsq(
         design, response_sketch, driver="gelsd", rcond=rcond
     ).solution
-    q_z, _ = torch.linalg.qr(projected_sketch, mode="reduced")
-    # SVD of Q_Z^T R is only sketch_rank x N.  It selects the best deployed
-    # rank output directions inside the predictable range without materializing
-    # the dense predicted rows x N matrix.
+    # QR's reduced Q includes arbitrary orthogonal columns when the projected
+    # sketch is rank deficient.  Those columns would re-introduce raw residual
+    # directions into the output SVD, defeating the predictable-range contract.
+    # Use an SVD here only to determine the numerical range, then discard the
+    # null columns before selecting output directions.
+    q_z, singular_values, _ = torch.linalg.svd(
+        projected_sketch, full_matrices=False
+    )
+    if singular_values.numel() == 0 or singular_values[0] == 0:
+        return (
+            torch.zeros((k, 0), dtype=design.dtype),
+            torch.zeros((0, n), dtype=response.dtype),
+            "randomized_output_range",
+        )
+    tolerance = max(
+        float(singular_values[0]) * rcond,
+        torch.finfo(projected_sketch.dtype).eps
+        * max(projected_sketch.shape),
+    )
+    predictable_rank = int((singular_values > tolerance).sum().item())
+    if predictable_rank == 0:
+        return (
+            torch.zeros((k, 0), dtype=design.dtype),
+            torch.zeros((0, n), dtype=response.dtype),
+            "randomized_output_range",
+        )
+    q_z = q_z[:, :predictable_rank]
+    # SVD of Q_Z^T R is only predictable_rank x N.  It selects the best
+    # deployed rank output directions inside the predictable range without
+    # materializing the dense predicted rows x N matrix.
     _, _, vh = torch.linalg.svd(q_z.T @ response, full_matrices=False)
-    output_basis = vh[:rank].T.contiguous()
+    output_rank = min(rank, predictable_rank, vh.shape[0])
+    output_basis = vh[:output_rank].T.contiguous()
     a = torch.linalg.lstsq(
         design, response @ output_basis, driver="gelsd", rcond=rcond
     ).solution
@@ -2290,6 +2317,31 @@ def grouped_window_kernel_candidates(layers, *, m):
             for child, split in zip(children, split_counts, strict=True)
         )
         for split_counts in split_tuples
+    )
+
+
+def window_kernel_candidates_for_shape(layer, *, m):
+    """Order the complete single-projection candidate set for one shape.
+
+    The score is only a preparation-time priority hint.  Every candidate from
+    :func:`window_kernel_candidates` remains present so an outlier geometry
+    can still win the correctness-gated latency measurement.
+    """
+    candidates = window_kernel_candidates(layer, m=m)
+    if len(candidates) < 2:
+        return candidates
+    baseline = candidates[0]
+    return tuple(
+        (baseline,)
+        + tuple(
+            choice
+            for _, choice in sorted(
+                enumerate(candidates[1:], start=1),
+                key=lambda item: (
+                    window_kernel_shape_score(layer, item[1], m=m), item[0]
+                ),
+            )
+        )
     )
 
 

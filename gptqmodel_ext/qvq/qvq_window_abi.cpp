@@ -22,6 +22,14 @@ extern "C" void qvq_rank8_epilogue_no_hadamard(
     const at::Tensor& bias,
     at::Tensor& output,
     cudaStream_t stream);
+extern "C" void qvq_rank8_epilogue_hadamard(
+    const at::Tensor& hidden,
+    const at::Tensor& rank8_b,
+    const at::Tensor& base,
+    const at::Tensor& scale_v,
+    const at::Tensor& bias,
+    at::Tensor& output,
+    cudaStream_t stream);
 
 namespace {
 thread_local bool owned_capture = false;
@@ -98,8 +106,8 @@ static int qvq_p32_window_linear_impl(
           "native window flags must be zero or one");
     check(recovery_kernel <= 1 && recovery_projection <= 2,
           "native rank8 policy supports separate_reference or fused_epilogue with separate_reference, concurrent_reference, or tensor_core projection");
-    check(recovery_kernel != 1 || !c.output_hadamard,
-          "native fused rank8 epilogue requires output_hadamard=false");
+    check(recovery_kernel != 1 || !c.output_hadamard || power2(c.n),
+          "native fused rank8 epilogue requires power-of-two output Hadamard");
     check(!c.input_hadamard || power2(c.k),
           "native input Hadamard requires power-of-two K");
     check(!c.output_hadamard || power2(c.n),
@@ -233,17 +241,24 @@ static int qvq_p32_window_linear_impl(
     // Candidate enumeration keeps recovery geometry paired between the
     // correction-off and correction-on sweeps.  The off graph may therefore
     // carry recovery_kernel=1 while rank8_enabled is false; never dereference
-    // absent A/B buffers in that state.
-    if (c.rank8_enabled && recovery_kernel == 1 && !c.output_hadamard) {
+    // absent A/B buffers in that state.  When enabled, use the matching fused
+    // epilogue for either output-transform contract.
+    if (c.rank8_enabled && recovery_kernel == 1) {
       at::Tensor hidden = consume_hidden();
-      // The transform-free path uses one graph-safe CUDA epilogue for every
-      // projection placement.  `consume_hidden` either joins the prepared
+      // Both transform-free and power-of-two output-Hadamard paths use a
+      // graph-safe CUDA epilogue. `consume_hidden` either joins the prepared
       // auxiliary producer or computes the reference projection on the
       // caller stream; both preserve the explicit FP16 hidden boundary before
-      // FP32 expansion/addition and the final FP16 store.
-      qvq_rank8_epilogue_no_hadamard(
-          hidden, b, inner, scale_v, output_bias, output,
-          static_cast<cudaStream_t>(cuda_stream));
+      // FP32 expansion/addition.
+      if (c.output_hadamard) {
+        qvq_rank8_epilogue_hadamard(
+            hidden, b, inner, scale_v, output_bias, output,
+            static_cast<cudaStream_t>(cuda_stream));
+      } else {
+        qvq_rank8_epilogue_no_hadamard(
+            hidden, b, inner, scale_v, output_bias, output,
+            static_cast<cudaStream_t>(cuda_stream));
+      }
       wrote_output = true;
     } else if (c.rank8_enabled) {
       const auto& b_float = prepared_rank8_b.defined() ? prepared_rank8_b : b.to(at::kFloat);
