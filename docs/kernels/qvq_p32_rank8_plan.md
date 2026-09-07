@@ -369,3 +369,13 @@ the existing project-output Triton candidate. It requires
 graphs continue to reject that signature until independent arithmetic
 certification. This makes the requested mode visible without silently treating
 the current candidate as the final WGMMA-integrated implementation.
+
+The native ABI now has a graph-safe fused epilogue for transform-free output
+modules (`output_hadamard=false`). It computes the eight hidden projections
+cooperatively per output row, rounds at the declared FP16 hidden boundary,
+expands and adds in FP32, applies SV/bias, and stores directly to the caller's
+FP16 buffer. The implementation accepts strided WGMMA base output from padded
+BM tiles and is selected inside the same native window call, so it removes the
+native rank8 `mm`/`addmm` pair and its correction output allocation for this
+shape class. Output-Hadamard modules retain the reference transform path until
+the corresponding fused transform kernel is certified.

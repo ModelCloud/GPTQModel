@@ -19,7 +19,10 @@ _EXTENSION = TorchOpsJitExtension(
     name=_NAME,
     namespace="gptqmodel_qvq_window_abi",
     required_ops=("version",),
-    sources=[str(_ROOT / "qvq_window_abi.cpp")],
+    sources=[
+        str(_ROOT / "qvq_window_abi.cpp"),
+        str(_ROOT / "qvq_window_rank8_fused.cu"),
+    ],
     build_root_env="GPTQMODEL_QVQ_WINDOW_ABI_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root(_NAME),
     display_name="P32 window native ABI",

@@ -13,6 +13,16 @@
 #include <memory>
 #include <mutex>
 
+extern "C" void qvq_rank8_fused_no_hadamard(
+    const at::Tensor& transformed,
+    const at::Tensor& rank8_a,
+    const at::Tensor& rank8_b,
+    const at::Tensor& base,
+    const at::Tensor& scale_v,
+    const at::Tensor& bias,
+    at::Tensor& output,
+    cudaStream_t stream);
+
 namespace {
 thread_local bool owned_capture = false;
 void check(bool condition, const char* message) {
@@ -167,24 +177,36 @@ static int qvq_p32_window_linear_impl(
            int64_t(c.bank_alt_id), int64_t(c.block_m), int64_t(c.block_n)})
           .view({padded_m, c.n}).slice(0, 0, c.m);
     }
-    if (c.rank8_enabled) {
+    bool wrote_output = false;
+    if (c.rank8_enabled && !c.output_hadamard) {
+      const auto& a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
+      const auto& b_float = prepared_rank8_b.defined() ? prepared_rank8_b : b.to(at::kFloat);
+      // The transform-free composite path uses one graph-safe CUDA epilogue:
+      // it computes X'A cooperatively per row, applies the explicit FP16
+      // hidden boundary, expands in FP32, adds the decoded base, and stores
+      // the final FP16 result directly into the caller-owned output buffer.
+      qvq_rank8_fused_no_hadamard(
+          transformed, a_float, b_float, inner, scale_v, output_bias, output,
+          static_cast<cudaStream_t>(cuda_stream));
+      wrote_output = true;
+    } else if (c.rank8_enabled) {
       const auto& a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
       const auto& b_float = prepared_rank8_b.defined() ? prepared_rank8_b : b.to(at::kFloat);
       auto hidden = at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
       // Preserve the explicit FP16 hidden boundary while combining the FP32
       // rank expansion with the decoded base in one BLAS epilogue.  ``addmm``
-      // retains FP32 inputs/accumulation and avoids a separate correction
-      // output allocation and add launch on the native prepared-graph path.
+      // retains FP32 inputs/accumulation for the output-Hadamard reference
+      // path, whose transform still owns the final store.
       inner = at::addmm(inner, hidden.to(at::kFloat), b_float);
     }
-    if (c.output_hadamard) {
+    if (!wrote_output && c.output_hadamard) {
       inner = hadamard(inner.contiguous(), c10::IValue(), scale_v,
                       output_bias.defined() ? c10::IValue(output_bias) : c10::IValue(), c.n >= 2048 ? 3 : 4);
-    } else {
+    } else if (!wrote_output) {
       inner = inner * scale_v;
       if (output_bias.defined()) inner = inner + output_bias;
     }
-    output.copy_(inner);
+    if (!wrote_output) output.copy_(inner);
     if (error && error_capacity) error[0] = '\0';
     return 0;
   } catch (const std::exception& exception) {
