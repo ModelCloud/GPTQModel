@@ -168,7 +168,7 @@ def test_grouped_tuner_selects_one_complete_child_tuple_and_caches_it(monkeypatc
     )
     monkeypatch.setattr(
         qvq_window_tuning,
-        "grouped_window_kernel_candidates",
+        "grouped_window_kernel_candidates_for_shape",
         lambda layers, *, m: (production, alternate),
     )
 
