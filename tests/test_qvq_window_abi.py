@@ -141,7 +141,9 @@ def test_native_composite_qwen_shape_matches_window_reference():
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("projection", ["separate_reference", "concurrent_reference"])
+@pytest.mark.parametrize(
+    "projection", ["separate_reference", "concurrent_reference", "tensor_core"]
+)
 def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(projection):
     """The native composite path uses one graph-safe fused rank8 epilogue."""
     from test_qvq_grouped_runtime import _child
@@ -185,6 +187,11 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(projecti
         stream.synchronize()
     finally:
         library.qvq_p32_window_linear = original
+    assert recorded[10].recovery_projection == {
+        "separate_reference": 0,
+        "concurrent_reference": 1,
+        "tensor_core": 2,
+    }[projection]
     error = (actual.float() - expected.float()).abs()
     assert error.mean() <= 2e-3 and error.max() <= 0.046875
 
@@ -222,13 +229,16 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(projecti
         assert status == 0, error.value
 
 
-def test_native_concurrent_rank8_output_hadamard_graph_matches_reference(monkeypatch):
-    """Concurrent projection also composes with the output-Hadamard path."""
+@pytest.mark.parametrize("projection", ["concurrent_reference", "tensor_core"])
+def test_native_concurrent_rank8_output_hadamard_graph_matches_reference(
+    monkeypatch, projection
+):
+    """Concurrent rank8 producers compose with output-Hadamard graph replay."""
     from test_qvq_grouped_runtime import _child
     from test_qvq_window_recovery import _kernel_rank8
 
     layer = _child(
-        "native_rank8_concurrent_hadamard",
+        f"native_rank8_{projection}_hadamard",
         in_features=2048,
         out_features=2048,
         device="cuda",
@@ -237,7 +247,7 @@ def test_native_concurrent_rank8_output_hadamard_graph_matches_reference(monkeyp
     config = P32WindowConfig(
         algorithm="hopper_m16",
         recovery_mode="on",
-        recovery_projection="concurrent_reference",
+        recovery_projection=projection,
     )
     x = torch.randn(33, 2048, device="cuda", dtype=torch.float16) * 0.01
     prepare_rank8(layer, config)
@@ -258,7 +268,11 @@ def test_native_concurrent_rank8_output_hadamard_graph_matches_reference(monkeyp
     with torch.cuda.stream(stream):
         actual = native_window_linear(layer, x, config)
     stream.synchronize()
-    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    if projection == "tensor_core":
+        error_values = (actual.float() - expected.float()).abs()
+        assert error_values.mean() <= 2e-3 and error_values.max() <= 0.046875
+    else:
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
     buffers = (WindowBuffer * 10)(*recorded[:10])
     handle = ctypes.c_void_p()
@@ -281,7 +295,11 @@ def test_native_concurrent_rank8_output_hadamard_graph_matches_reference(monkeyp
             )
             assert status == 0, error.value
         stream.synchronize()
-        torch.testing.assert_close(actual, expected_replay, atol=0, rtol=0)
+        if projection == "tensor_core":
+            error_values = (actual.float() - expected_replay.float()).abs()
+            assert error_values.mean() <= 2e-3 and error_values.max() <= 0.046875
+        else:
+            torch.testing.assert_close(actual, expected_replay, atol=0, rtol=0)
 
         parent = torch.cuda.CUDAGraph()
         with torch.cuda.graph(parent, stream=stream):
@@ -291,7 +309,11 @@ def test_native_concurrent_rank8_output_hadamard_graph_matches_reference(monkeyp
         assert status == 0, error.value
         parent.replay()
         stream.synchronize()
-        torch.testing.assert_close(actual, expected_replay, atol=0, rtol=0)
+        if projection == "tensor_core":
+            error_values = (actual.float() - expected_replay.float()).abs()
+            assert error_values.mean() <= 2e-3 and error_values.max() <= 0.046875
+        else:
+            torch.testing.assert_close(actual, expected_replay, atol=0, rtol=0)
         parent.reset()
     finally:
         status = library.qvq_p32_window_graph_destroy(handle, error, len(error))

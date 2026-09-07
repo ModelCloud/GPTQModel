@@ -893,3 +893,15 @@ no stream/event allocation. The H200 K=N=2048 BM64/BN64 spot sweep measured
 52.42%, 35.60%, and 34.76% marginal overhead at M=128, 2048, and 8192,
 respectively. These measurements keep the policy opt-in and below no default
 promotion budget; large-M rank8 remains shape- and kernel-dependent.
+
+The native ABI also exposes `recovery_projection=2` as the concurrent FP16
+Tensor Core producer. It is tagged `unverified_tensor_core` and is available
+only to fast-mode tuning until every shape passes the local MAE/max-error
+contract and independent model-quality confirmation. The reference projection
+modes and correction-off path are unchanged.
+
+An H200 graph-replay spot sweep for K=N=2048, BM64/BN64 measured the
+Tensor Core producer's marginal overhead at 35.86% (M=128), 18.64% (M=2048),
+and 16.61% (M=8192). This is an improvement over the reference concurrent
+producer but remains above the 3--5% promotion target, so the candidate stays
+fast-only and requires wider shape/device validation.

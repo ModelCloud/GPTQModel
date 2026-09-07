@@ -107,9 +107,10 @@ def native_window_linear(layer, x, config):
     This setup/reference helper is not a hot-path dispatcher. External hosts
     load/validate once, retain their buffers, and call the library directly.
     Initial ABI coverage is explicit Hopper geometry and reference correction;
-    prepared graph handles additionally support the stream-overlapped
-    ``concurrent_reference`` producer. Unsupported policies fail rather than
-    selecting an implicit substitute.
+    prepared graph handles additionally support stream-overlapped
+    ``concurrent_reference`` and explicitly unverified ``tensor_core``
+    producers. Unsupported policies fail rather than selecting an implicit
+    substitute.
     """
     from ..quantization.qvq_rank8 import prepare_rank8
     from .qvq_cuda import _pgc16_levels
@@ -117,7 +118,9 @@ def native_window_linear(layer, x, config):
     if (config.algorithm not in ("hopper_m16", "hopper_direct_decode_mma")
             or (config.algorithm == "hopper_direct_decode_mma" and not config.block_m)
             or config.recovery_kernel not in ("separate_reference", "fused_epilogue")
-            or config.recovery_projection not in ("separate_reference", "concurrent_reference")
+            or config.recovery_projection not in (
+                "separate_reference", "concurrent_reference", "tensor_core"
+            )
             or (config.recovery_kernel == "fused_epilogue" and layer.output_hadamard)
             or config.chunk_m):
         raise ValueError("native ABI requires explicit Hopper geometry and a supported rank8 policy")
@@ -155,6 +158,7 @@ def native_window_linear(layer, x, config):
     recovery_projection = {
         "separate_reference": 0,
         "concurrent_reference": 1,
+        "tensor_core": 2,
     }[config.recovery_projection]
     native = WindowConfig(
         3, ctypes.sizeof(WindowConfig), x.shape[0], layer.in_features, layer.out_features,
