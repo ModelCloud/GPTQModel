@@ -57,7 +57,6 @@ def _grouped_window_candidates_for_shape(layers, *, m):
     candidates = grouped_window_kernel_candidates(layers, m=m)
     if len(candidates) < 2:
         return candidates
-
     return tuple(
         choice
         for _, choice in sorted(
