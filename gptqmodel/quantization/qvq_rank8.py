@@ -2267,6 +2267,38 @@ def grouped_window_kernel_candidates(layers, *, m):
     )
 
 
+def grouped_window_kernel_candidates_for_shape(layers, *, m):
+    """Order the complete grouped candidate set by tile compatibility.
+
+    Candidate enumeration remains exhaustive so a shape-specific outlier can
+    still win measurement. Compatible BM/BN tiles are measured first, which
+    gives direct ZML and Python autotuners a deterministic shape hint without
+    turning the heuristic into an eligibility gate.
+    """
+    candidates = grouped_window_kernel_candidates(layers, m=m)
+    if len(candidates) < 2:
+        return candidates
+
+    def score(choice):
+        value = 0
+        for child, config in zip(layers, choice, strict=True):
+            if config.block_m:
+                if m < config.block_m:
+                    value += 50
+                if m % config.block_m:
+                    value += 100
+            if config.block_n and child.out_features % config.block_n:
+                value += 10
+        return value
+
+    return tuple(
+        choice
+        for _, choice in sorted(
+            enumerate(candidates), key=lambda item: (score(item[1]), item[0])
+        )
+    )
+
+
 def window_tuning_key(layer, *, m, quality_mode, tp_world_size=1, tp_rank=0, build_id):
     """External tuner key; quality eligibility is resolved before latency tuning."""
     if not 0 <= tp_rank < tp_world_size or quality_mode not in (

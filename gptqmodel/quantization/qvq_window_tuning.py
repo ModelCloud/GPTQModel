@@ -50,6 +50,29 @@ class GroupedWindowTuningResult:
     cache_hit: bool
 
 
+def _grouped_window_candidates_for_shape(layers, *, m):
+    """Keep all grouped candidates while measuring tile-compatible choices first."""
+    candidates = grouped_window_kernel_candidates(layers, m=m)
+    if len(candidates) < 2:
+        return candidates
+
+    def score(choice):
+        value = 0
+        for child, config in zip(layers, choice, strict=True):
+            if config.block_m:
+                value += (50 if m < config.block_m else 0) + (100 if m % config.block_m else 0)
+            if config.block_n and child.out_features % config.block_n:
+                value += 10
+        return value
+
+    return tuple(
+        choice
+        for _, choice in sorted(
+            enumerate(candidates), key=lambda item: (score(item[1]), item[0])
+        )
+    )
+
+
 def measure_rank8_overhead(
     layer,
     inputs,
@@ -624,7 +647,7 @@ def tune_grouped_window_kernel(
         )
 
     m = first.numel() // reference.in_features
-    eligible = grouped_window_kernel_candidates(children, m=m)
+    eligible = _grouped_window_candidates_for_shape(children, m=m)
     choices = eligible if candidates is None else tuple(candidates)
     if not choices:
         raise ValueError("grouped candidate enumeration returned no policies")
