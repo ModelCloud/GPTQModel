@@ -882,6 +882,10 @@ def _rank8_output_fit(
 ):
     """Fit a rank-8 output correction without an unbounded KxN workspace.
 
+    ``weights`` are multiplicative square-root objective weights.  Scaling
+    both the design and response by the same value therefore minimizes
+    ``sum_i weights[i]**2 * ||R_i - (X_i A) B||²`` in either solver path.
+
     Small modules retain the original deterministic least-squares/SVD reference
     path. For large K/N, a fixed-seed randomized output range produces an
     equivalent rank-8 factorization while keeping solver work proportional to
@@ -942,6 +946,10 @@ def fit_rank_candidates(
     seed=0x51564,
 ):
     """Fit preparation-time rank candidates with one output-aware contract.
+
+    If supplied, ``weights`` use the same square-root convention as
+    :func:`_rank8_output_fit`; callers that have ordinary loss weights should
+    pass their square roots.
 
     This is intentionally a solver/reporting API.  It returns FP64 CPU factors
     for each requested rank so a quantization job can compare 2/4/6/8/12 on
