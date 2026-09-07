@@ -1232,7 +1232,7 @@ class QVQHopperGroupedRuntime:
                 torch.cuda.current_stream(x.device).wait_event(done)
         if self._h100_w25_n128_gate_up_enabled:
             self.telemetry.h100_w25_n128_gate_up_launches += 1
-        if recover and any(
+        if recover and rank8_enabled and any(
             getattr(getattr(child, "_p32_window_config", None), "recovery_kernel", None)
             in ("fused_epilogue", "fully_fused")
             for child in children
