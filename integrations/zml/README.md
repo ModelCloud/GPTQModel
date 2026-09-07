@@ -183,7 +183,7 @@ of capture and connects native handle lifetime to the ZML runtime owner.
 
 ## Build and verify
 
-Tested against QvQ `6df72173` and ZML-Ultra `4d8ce52`, Zig 0.16,
+Tested against QvQ `b5fb3b20` and ZML-Ultra `fb6e311`, Zig 0.16,
 Bazel 9.1.1, Torch 2.15.0.dev20260901+cu130 and an H200. Copy this directory
 into a ZML checkout as `integrations/qvq_window`; the included Bazel targets
 use that checkout's `//zml` dependency. No changes to ZML itself are required.
