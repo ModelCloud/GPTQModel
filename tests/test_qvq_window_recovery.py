@@ -200,6 +200,31 @@ def test_rank8_large_output_uses_bounded_randomized_solver():
     torch.testing.assert_close(b, again_b, rtol=0, atol=0)
 
 
+def test_bounded_solver_selects_only_predictable_residual_directions():
+    """The bounded range finder must project R through the activation span."""
+    torch.manual_seed(31)
+    x = torch.randn(20, 4, dtype=torch.float64)
+    target = torch.randn(1, 48, dtype=torch.float64)
+    predictable = x[:, :1] @ target
+    noise = torch.randn_like(predictable)
+    # Make the large residual component exactly orthogonal to X.  A solver
+    # that ranges raw R would spend its only rank on this un-deployable noise.
+    noise = noise - x @ torch.linalg.lstsq(x, noise).solution
+    residual = predictable + 50.0 * noise
+    _, basis, mode = _rank8_output_fit(
+        x,
+        residual,
+        torch.ones((x.shape[0], 1), dtype=torch.float64),
+        rank=1,
+        max_solver_bytes=1,
+        rcond=1e-5,
+        seed=19,
+    )
+    assert mode == "randomized_output_range"
+    cosine = torch.nn.functional.cosine_similarity(basis, target, dim=1).abs()
+    assert cosine.item() > 0.99
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_rank8_fp32_factor_cache_is_prepared_and_versioned():
     from test_qvq_grouped_runtime import _child
