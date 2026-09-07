@@ -48,6 +48,17 @@ _IDENTITY_EXCLUDED_CONFIG_FIELDS = {
     "_offload_temp_dir",
     "telemetry",
 }
+_LORA_IDENTITY_FIELDS = (
+    "rank",
+    "path",
+    "eora_cholesky",
+    "eora_config",
+    "lora_weight_format",
+    "lora_weight_bits",
+    "lora_weight_group_size",
+    "lora_weight_scale_dtype",
+    "lora_dequant_mode",
+)
 
 
 def _checkpoint_identity_value(value):
@@ -71,8 +82,11 @@ def _checkpoint_identity_value(value):
     if isinstance(value, Lora):
         return {
             "type": f"{type(value).__module__}.{type(value).__qualname__}",
-            "rank": value.rank,
-            "path": value.path,
+            "fields": {
+                name: _checkpoint_identity_value(getattr(value, name))
+                for name in _LORA_IDENTITY_FIELDS
+                if hasattr(value, name)
+            },
         }
     if isinstance(value, torch.Tensor):
         tensor = value.detach().to(device="cpu").contiguous()

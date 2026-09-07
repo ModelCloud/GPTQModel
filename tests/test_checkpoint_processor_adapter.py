@@ -119,6 +119,41 @@ def test_checkpoint_identity_includes_method_specific_settings():
             setattr(config, name, original)
 
 
+def test_checkpoint_identity_includes_complete_lora_configuration():
+    config = GPTQConfig(
+        offload_to_disk=False,
+        adapter=Lora(
+            rank=4,
+            path="adapter-source",
+            eora_cholesky=True,
+            eora_config={"algo": "lowrank"},
+            lora_weight_format="int4_grouped",
+            lora_weight_bits=4,
+            lora_weight_group_size=64,
+            lora_weight_scale_dtype="float16",
+            lora_dequant_mode="forward",
+        ),
+    )
+    baseline = gptq_checkpoint._checkpoint_quantization_identity(config)
+    adapter = config.adapter
+    mutations = {
+        "eora_cholesky": False,
+        "eora_config": {"algo": "exact"},
+        "lora_weight_format": "int8_grouped",
+        "lora_weight_bits": 8,
+        "lora_weight_group_size": 128,
+        "lora_weight_scale_dtype": "bfloat16",
+        "lora_dequant_mode": "load",
+    }
+    for name, value in mutations.items():
+        original = getattr(adapter, name)
+        setattr(adapter, name, value)
+        try:
+            assert gptq_checkpoint._checkpoint_quantization_identity(config) != baseline, name
+        finally:
+            setattr(adapter, name, original)
+
+
 def test_checkpoint_resume_rejects_changed_method_settings(tmp_path):
     config = GPTQConfig(
         offload_to_disk=False,
