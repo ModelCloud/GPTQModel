@@ -346,7 +346,11 @@ extern "C" int qvq_p32_window_graph_create(
       prepared->rank8_b_float = tensor(
           buffers[8], {8, config->n}, at::kHalf, prepared->device).to(at::kFloat);
     }
-    if (config->rank8_enabled && config->recovery_projection == 1) {
+    const bool has_recovery_policy =
+        config->struct_bytes >= offsetof(QvqP32WindowConfig, recovery_kernel) +
+            2 * sizeof(uint32_t);
+    if (config->rank8_enabled && has_recovery_policy &&
+        config->recovery_projection == 1) {
       // The auxiliary producer is owned by the prepared graph.  Creating it
       // here, before capture, keeps replay free of stream/event allocation.
       C10_CUDA_CHECK(cudaStreamCreateWithFlags(
