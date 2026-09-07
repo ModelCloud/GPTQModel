@@ -10,7 +10,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from threading import get_ident
 from uuid import uuid4
@@ -33,6 +33,9 @@ class CheckpointConfig:
     interval: str = "layer:1"
     keep_last: int = 2
     strict_device_check: bool = True
+    _resolved_path: str | Path | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def __post_init__(self):
         if type(self.strict_device_check) is not bool:
@@ -40,7 +43,9 @@ class CheckpointConfig:
         if self.resume not in {"auto", "required", "never"}:
             raise ValueError("resume must be auto, required, or never")
         if not isinstance(self.interval, str):
-            raise ValueError("interval must be a string such as 'layer:1'")
+            raise ValueError(  # noqa: TRY004 - preserve config validation API
+                "interval must be a string such as 'layer:1'"
+            )
         match = re.fullmatch(r"layer:(\d+)", self.interval.strip())
         if match is None or int(match.group(1)) < 1:
             raise ValueError(
@@ -55,6 +60,18 @@ class CheckpointConfig:
     def interval_layers(self) -> int:
         """Return the layer interval encoded by ``interval``."""
         return int(self.interval.split(":", 1)[1])
+
+    def resolve_path(self, offload_path: str | Path) -> str | Path:
+        """Resolve ``auto`` once and retain the checkpoint root across retries."""
+        if self.path != "auto":
+            return self.path
+        if self._resolved_path is None:
+            if offload_path is None or not str(offload_path):
+                raise ValueError(
+                    "checkpoint path='auto' requires quantize_config.offload_to_disk_path"
+                )
+            object.__setattr__(self, "_resolved_path", offload_path)
+        return self._resolved_path
 
 
 def _json(value):

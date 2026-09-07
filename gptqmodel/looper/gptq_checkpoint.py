@@ -2,13 +2,17 @@
 """Quantization continuation composed from processor and packed-module state."""
 
 import hashlib
+import inspect
 import json
+import math
 import random
 import signal
 import tempfile
 import threading
+from collections.abc import Mapping
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import fields, is_dataclass, replace
+from enum import Enum
 from pathlib import Path
 
 import numpy as np
@@ -38,6 +42,106 @@ from .paroquant_processor import ParoQuantProcessor
 from .qqq_processor import QQQProcessor
 from .weight_only_processor import WeightOnlyProcessor
 
+_CHECKPOINT_IDENTITY_VERSION = 2
+_IDENTITY_EXCLUDED_CONFIG_FIELDS = {
+    "offload_to_disk_path",
+    "_offload_temp_dir",
+    "telemetry",
+}
+
+
+def _checkpoint_identity_value(value):
+    """Convert a quantization setting into a deterministic JSON value.
+
+    QuantizeConfig.to_dict() is an export format and intentionally omits
+    runtime-only and method-specific fields. Checkpoint identity needs the
+    complete algorithm configuration instead, including nested dataclasses
+    and adapter settings.
+    """
+    if value is None or type(value) in (bool, int, str):
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise CheckpointError("checkpoint identity cannot contain non-finite floats")
+        return value
+    if isinstance(value, Enum):
+        return _checkpoint_identity_value(value.value)
+    if isinstance(value, (Path, torch.device, torch.dtype)):
+        return str(value)
+    if isinstance(value, Lora):
+        return {
+            "type": f"{type(value).__module__}.{type(value).__qualname__}",
+            "rank": value.rank,
+            "path": value.path,
+        }
+    if isinstance(value, torch.Tensor):
+        tensor = value.detach().to(device="cpu").contiguous()
+        raw = tensor.view(torch.uint8).numpy().tobytes()
+        return {
+            "dtype": str(tensor.dtype),
+            "shape": list(tensor.shape),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+    if isinstance(value, Mapping):
+        return {
+            str(key): _checkpoint_identity_value(item)
+            for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_checkpoint_identity_value(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        normalized = [_checkpoint_identity_value(item) for item in value]
+        return sorted(normalized, key=lambda item: json.dumps(item, sort_keys=True))
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            "type": f"{type(value).__module__}.{type(value).__qualname__}",
+            "fields": {
+                field.name: _checkpoint_identity_value(getattr(value, field.name))
+                for field in fields(value)
+            },
+        }
+    if callable(value):
+        code = getattr(value, "__code__", None)
+        code_digest = None
+        if code is not None:
+            code_digest = hashlib.sha256(
+                code.co_code
+                + repr(code.co_consts).encode()
+                + repr(code.co_names).encode()
+            ).hexdigest()
+        source = None
+        try:
+            source = inspect.getsource(value)
+        except (OSError, TypeError):
+            pass
+        return {
+            "type": f"{type(value).__module__}.{type(value).__qualname__}",
+            "module": getattr(value, "__module__", None),
+            "qualname": getattr(value, "__qualname__", None),
+            "code_sha256": code_digest,
+            "source_sha256": hashlib.sha256(source.encode()).hexdigest()
+            if source is not None
+            else None,
+        }
+    raise CheckpointError(
+        f"unsupported value in checkpoint quantization identity: {type(value).__name__}"
+    )
+
+
+def _checkpoint_quantization_identity(config):
+    """Return the complete algorithm identity for a quantization config."""
+    identity = {"version": _CHECKPOINT_IDENTITY_VERSION}
+    for field in fields(config):
+        if field.name in _IDENTITY_EXCLUDED_CONFIG_FIELDS:
+            continue
+        value = getattr(config, field.name)
+        if field.name == "meta" and isinstance(value, Mapping):
+            value = dict(value)
+            value.pop("offload_to_disk_path", None)
+            value.pop("telemetry", None)
+        identity[field.name] = _checkpoint_identity_value(value)
+    return identity
+
 
 @contextmanager
 def checkpoint_session(config, model):
@@ -49,16 +153,12 @@ def checkpoint_session(config, model):
         )
     if not model.quantize_config.offload_to_disk:
         raise ValueError("checkpoint requires quantize_config.offload_to_disk=True")
+    checkpoint_root = config.resolve_path(model.quantize_config.offload_to_disk_path)
     if config.path == "auto":
-        offload_path = model.quantize_config.offload_to_disk_path
-        if not offload_path:
-            raise ValueError(
-                "checkpoint path='auto' requires quantize_config.offload_to_disk_path"
-            )
         # The automatic checkpoint location follows the existing disk-offload
         # root. An explicit path remains independent and can be durable across
         # separately loaded model/config objects.
-        config = replace(config, path=offload_path)
+        config = replace(config, path=checkpoint_root)
     with CheckpointExtension(config, QuantizationCheckpointAdapter()) as extension:
         attempt = tempfile.mkdtemp(prefix="attempt-", dir=extension.store.root)
         # Checkpointed quantization deliberately uses the same disk-offload
@@ -161,11 +261,7 @@ class QuantizationCheckpointAdapter:
         self.shared_state = context.shared_state
         self.offload = Path(self.model.quantize_config.offload_to_disk_path)
         self._artifacts = {}
-        config = self.model.quantize_config.to_dict()
-        # Location is not an algorithm setting. Keep every other serialized
-        # setting conservatively, including device/packing execution policy.
-        config.get("meta", {}).pop("offload_to_disk_path", None)
-        config.get("meta", {}).pop("telemetry", None)
+        config = _checkpoint_quantization_identity(self.model.quantize_config)
         return {
             "adapter_version": self.VERSION,
             "device_topology": checkpoint_device_topology(

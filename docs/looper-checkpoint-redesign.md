@@ -45,7 +45,9 @@ offload directory under the checkpoint path, and those durable offload bundles
 are the artifacts used by resume and final model saving.
 The default `path="auto"` uses `QuantizeConfig.offload_to_disk_path`; provide an
 explicit path when the checkpoint must survive recreation of an automatically
-managed offload directory.
+managed offload directory. The resolved checkpoint root is retained separately
+from each attempt's private offload directory, so rerunning with the same
+`CheckpointConfig` continues to use the original `CURRENT` file.
 
 ## Responsibilities
 
@@ -104,6 +106,9 @@ Identity covers the execution plan, exact source config/shard contents,
 complete prepared calibration cache, serialized quantization settings
 (excluding disposable offload location and telemetry), processor chain, selected
 packed kernel, GPU topology, and Torch/Transformers versions.
+Quantization identity is built from the complete quantization-config dataclass,
+including method-specific damping, static-group and adapter settings; the
+export-oriented `QuantizeConfig.to_dict()` is not used as the resume identity.
 Mismatch reports differing top-level fields and never triggers replay.
 
 GPU topology is strict by default: the GPU count, physical GPU UUIDs and available
