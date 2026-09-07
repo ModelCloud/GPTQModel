@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Request-owned CUDA graphs for the existing unified P32 window operator."""
 
+from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import fields, is_dataclass, replace
 from threading import Lock
@@ -54,13 +55,19 @@ class P32WindowGraphs:
     graph. Returned tensors own their storage, so later requests cannot replace
     an earlier result. One owner must have exclusive use of the model while
     capturing/replaying. Parameter/buffer mutation invalidates captured graphs;
-    untracked writes through .data or external pointers are unsupported.
+    untracked writes through .data or external pointers are unsupported. The
+    ``max_graphs`` limit bounds retained executable/pool resources; least
+    recently used graphs are synchronized and retired before a new capture is
+    installed.
     """
 
-    def __init__(self, model):
+    def __init__(self, model, *, max_graphs=8):
         from ..nn_modules.qlinear.qvq import QVQLinear
 
+        if type(max_graphs) is not int or max_graphs < 1:
+            raise ValueError("max_graphs must be a positive integer")
         self.model = model
+        self.max_graphs = max_graphs
         self.layers = {
             name: child for name, child in model.named_modules()
             if isinstance(child, QVQLinear) and child.v2b2_p32
@@ -68,7 +75,11 @@ class P32WindowGraphs:
         if not self.layers:
             raise ValueError("model has no P32 window modules")
         self._lock = Lock()
-        self._graphs = {}
+        # Ordered by most-recent capture/replay.  Graphs retain CUDA pools and
+        # native payloads, so a request owner must have a finite residency
+        # bound instead of accumulating one executable per shape forever.
+        self._graphs = OrderedDict()
+        self._retired_graphs = 0
         self._event = None
         self._device = None
         self._closed = False
@@ -228,6 +239,7 @@ class P32WindowGraphs:
                             else:
                                 setattr(child, attr, value)
                 states = {mode: self._state(mode) for mode in _MODES}
+                self._retire_for_insert(key)
                 self._graphs[key] = (pending, states)
                 self._device = device
 
@@ -237,6 +249,9 @@ class P32WindowGraphs:
             if mode not in _MODES:
                 raise ValueError("unknown quality mode")
             graphs, states = self._graphs[key]
+            # Replay is a use of the executable and therefore refreshes its
+            # residency without changing any captured policy or buffers.
+            self._graphs.move_to_end(key)
             self._idle_groups()
             if self._state(mode) != states[mode]:
                 raise RuntimeError("model state changed; invalidate and recapture window graphs")
@@ -263,6 +278,21 @@ class P32WindowGraphs:
                 self._event.record(stream)
                 return result
 
+    def residency_stats(self):
+        """Return an idle snapshot of retained graph keys and retirements.
+
+        The snapshot is intentionally taken under the same exclusive guard as
+        capture/replay.  Callers can use it for graph-residency scorecards
+        without racing a capture or observing a half-installed executable.
+        """
+        with self._exclusive():
+            return {
+                "max_graphs": self.max_graphs,
+                "resident_count": len(self._graphs),
+                "resident_keys": tuple(self._graphs),
+                "retired_graphs": self._retired_graphs,
+            }
+
     def invalidate(self):
         """Retire graphs after all submitted requests finish; weights are retained."""
         with self._exclusive():
@@ -288,3 +318,26 @@ class P32WindowGraphs:
                 owner = _OWNERS.get(self.model)
                 if owner is not None and owner() is self:
                     del _OWNERS[self.model]
+
+    def _retire_for_insert(self, key):
+        """Synchronize and retire least-recent graphs before installing one."""
+        replacing = key in self._graphs
+        if replacing:
+            self._graphs.pop(key)
+            # Replacing a key releases the old executable even when the cache
+            # is below capacity.  Its last replay may still be running on a
+            # non-default stream, so protect that release with the same event
+            # ordering used by LRU eviction.
+            if self._event is not None:
+                self._event.synchronize()
+                self._event = None
+            self._retired_graphs += 1
+        while len(self._graphs) >= self.max_graphs:
+            # A replay may have submitted work on the current stream.  The
+            # event records the latest request and must complete before its
+            # graph/pool references are released.
+            if self._event is not None:
+                self._event.synchronize()
+                self._event = None
+            self._graphs.popitem(last=False)
+            self._retired_graphs += 1

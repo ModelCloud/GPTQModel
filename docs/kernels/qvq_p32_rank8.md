@@ -158,6 +158,10 @@ layout or build. ZML and other external consumers must enumerate and benchmark
 their own eligible executables, then cache the result under the full
 device/shape/rate/M/TP/correction key.
 
+The ZML candidate enumerator binds each returned launch policy to the exact
+measured `M` (`min_m=max_m=M`). A BM/BN winner therefore cannot be reused for a
+different request shape without a fresh enumeration and measurement.
+
 The non-Hopper SM80 consumer exposes the same rule through
 `qvq_p32_window_ampere_kernel_candidates((M, K), out_features=N, bits=...)`.
 It returns the measured shape-specific split first, followed by a bounded
@@ -669,6 +673,12 @@ metric record without changing the fitting or package inputs. The
 uses 16 additional calibration documents excluded from fitting, selection,
 and the earlier module audit.
 
+When `--verify-graphs` is enabled, `--max-graph-resident N` bounds the number
+of captured input signatures retained during the run. The evaluator records
+per-document and final `graph_residency` snapshots, including the configured
+bound and retired-key count, so graph memory behavior is visible alongside the
+quality metrics.
+
 The [C4 reference-correction subset](results/p32_rank8_llama_c4_subset.json)
 uses `allenai/c4` revision `1588ec454efa1a09f29cd18ddd04fe05fc8653a2`, English
 validation shard 0, first 128 documents, BOS/default tokenizer special tokens,
@@ -791,7 +801,7 @@ device-side validation synchronizations cannot enter a graph.
 ```python
 from gptqmodel.quantization.qvq_window_graphs import P32WindowGraphs
 
-owner = P32WindowGraphs(model.eval())
+owner = P32WindowGraphs(model.eval(), max_graphs=8)
 try:
     owner.capture(
         "prefill128",
@@ -806,6 +816,12 @@ try:
 finally:
     owner.close()
 ```
+
+`max_graphs` bounds retained input signatures; each resident signature owns up
+to one graph for each quality mode. Least-recently-used retirement synchronizes
+the latest replay event before releasing its CUDA graph/pool references. Use
+`owner.residency_stats()` while idle to record resident keys and retirements in
+the graph scorecard.
 
 Input tensors must have the captured shape, dtype and CUDA device. Static
 keywords are immutable scalar values; outputs are tensor pytrees. This API

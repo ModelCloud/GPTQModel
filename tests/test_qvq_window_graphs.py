@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real CUDA graph ownership tests; synthetic factors test runtime algebra only."""
 
+from collections import OrderedDict
+from threading import Lock
+
 import pytest
 import torch
 
@@ -12,6 +15,40 @@ from gptqmodel.quantization.qvq_rank8 import (
     prepare_rank8,
 )
 from gptqmodel.quantization.qvq_window_graphs import P32WindowGraphs
+
+
+def test_graph_owner_lru_retirement_synchronizes_before_eviction():
+    class Event:
+        def __init__(self):
+            self.synchronizations = 0
+
+        def synchronize(self):
+            self.synchronizations += 1
+
+    owner = object.__new__(P32WindowGraphs)
+    owner.max_graphs = 2
+    owner._retired_graphs = 0
+    owner._graphs = OrderedDict((key, object()) for key in ("old", "recent"))
+    owner._event = Event()
+    owner._retire_for_insert("new")
+    assert list(owner._graphs) == ["recent"]
+    assert owner._event is None
+
+    owner._graphs = OrderedDict((("active", object()),))
+    replacement_event = Event()
+    owner._event = replacement_event
+    owner._retire_for_insert("active")
+    assert owner._graphs == OrderedDict()
+    assert owner._event is None
+    assert replacement_event.synchronizations == 1
+
+    owner._lock = Lock()
+    owner._closed = False
+    stats = owner.residency_stats()
+    assert stats["max_graphs"] == 2
+    assert stats["resident_count"] == 0
+    assert stats["retired_graphs"] == 2
+
 
 
 class Pair(torch.nn.Module):
@@ -104,6 +141,8 @@ def test_mutation_signature_and_atomic_failed_capture(model):
 
 
 def test_request_guard_and_config_validation(model):
+    with pytest.raises(ValueError, match="max_graphs"):
+        P32WindowGraphs(model, max_graphs=0)
     owner = P32WindowGraphs(model)
     x = torch.randn(1, 256, device="cuda", dtype=torch.float16)
     with pytest.raises(RuntimeError, match="already has"):

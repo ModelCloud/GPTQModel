@@ -68,6 +68,9 @@ the selector applies the same MAE/max error gate as the Python tuner and uses
 stable enumeration order for ties.
 The companion `candidateShapeScoreForShape` API exposes the deterministic
 ordering score for telemetry and cache records; it does not change eligibility.
+Each enumerated candidate is bound to the exact measured `M` by setting
+`min_m=max_m=M`, so a selected BM/BN policy cannot be reused for another shape
+without a fresh enumeration and measurement.
 
 For transform-free outputs, the native ABI uses the fused FP32-add/FP16-store
 epilogue for both separate-reference and concurrent rank8 projections. The

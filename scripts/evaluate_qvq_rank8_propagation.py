@@ -148,11 +148,19 @@ def main():
     parser.add_argument("--projection", choices=["separate_reference", "tensor_core"], default="tensor_core")
     parser.add_argument("--verify-off", action="store_true", help="Require fused-off logits to equal original-off logits")
     parser.add_argument("--verify-graphs", action="store_true", help="Check separate quality graphs against eager logits")
+    parser.add_argument(
+        "--max-graph-resident",
+        type=int,
+        default=8,
+        help="maximum captured input signatures retained while verifying graphs",
+    )
     args = parser.parse_args()
     if args.verify_off and not args.fused:
         parser.error("--verify-off requires --fused")
     if args.documents < 1 or args.max_tokens < 2:
         parser.error("positive documents and at least two tokens required")
+    if args.max_graph_resident < 1:
+        parser.error("--max-graph-resident must be positive")
     import hashlib
     import json
 
@@ -199,7 +207,11 @@ def main():
     ).model.eval()
     from gptqmodel.quantization.qvq_window_graphs import P32WindowGraphs
 
-    graph_owner = P32WindowGraphs(quantized) if args.verify_graphs else None
+    graph_owner = (
+        P32WindowGraphs(quantized, max_graphs=args.max_graph_resident)
+        if args.verify_graphs
+        else None
+    )
     children = []
     for name in fitted["modules"]:
         loaded = load_window_package(
@@ -229,6 +241,10 @@ def main():
         "documents_requested": args.documents,
         "max_tokens": args.max_tokens,
         "correction_implementation": f"{args.projection}/fused_epilogue" if args.fused else "separate_reference",
+        "graph_residency_policy": {
+            "max_graph_resident": args.max_graph_resident,
+            "retirement": "synchronize_latest_replay_event_before_lru_release",
+        } if graph_owner is not None else None,
         "source_sha256": source_hash,
         "rows": [],
     }
@@ -298,11 +314,12 @@ def main():
                         raise ValueError(f"{mode} captured logits differ from eager logits")
                 entry[mode] = logit_metrics(logits, x, reference)
             if graph_owner is not None:
-                graph_owner.invalidate()
+                entry["graph_residency"] = graph_owner.residency_stats()
             report["rows"].append(entry)
             args.output.write_text(json.dumps(report, indent=2) + "\n")
             print(index, entry, flush=True)
     if graph_owner is not None:
+        report["graph_residency"] = graph_owner.residency_stats()
         graph_owner.close()
     report["summary"] = paired_summary(report["rows"])
     args.output.write_text(json.dumps(report, indent=2) + "\n")
