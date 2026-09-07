@@ -121,7 +121,11 @@ def native_window_linear(layer, x, config):
             or config.recovery_projection not in (
                 "separate_reference", "concurrent_reference", "tensor_core"
             )
-            or (config.recovery_kernel == "fused_epilogue" and layer.output_hadamard)
+            or (
+                config.recovery_kernel == "fused_epilogue"
+                and layer.output_hadamard
+                and layer.out_features & (layer.out_features - 1)
+            )
             or config.chunk_m):
         raise ValueError("native ABI requires explicit Hopper geometry and a supported rank8 policy")
     # Window-only deployments intentionally release the planar trellis after
