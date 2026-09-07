@@ -27,6 +27,7 @@ from .qvq_rank8 import (
     _digest,
     _metadata,
     grouped_window_kernel_candidates,
+    grouped_window_kernel_shape_score,
     prepare_rank8,
     validate_rank8_state,
     window_kernel_candidates,
@@ -56,19 +57,14 @@ def _grouped_window_candidates_for_shape(layers, *, m):
     if len(candidates) < 2:
         return candidates
 
-    def score(choice):
-        value = 0
-        for child, config in zip(layers, choice, strict=True):
-            if config.block_m:
-                value += (50 if m < config.block_m else 0) + (100 if m % config.block_m else 0)
-            if config.block_n and child.out_features % config.block_n:
-                value += 10
-        return value
-
     return tuple(
         choice
         for _, choice in sorted(
-            enumerate(candidates), key=lambda item: (score(item[1]), item[0])
+            enumerate(candidates),
+            key=lambda item: (
+                grouped_window_kernel_shape_score(layers, item[1], m=m),
+                item[0],
+            ),
         )
     )
 
