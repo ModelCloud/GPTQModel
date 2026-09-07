@@ -1033,11 +1033,6 @@ class WeightOnlyLooper(DeviceAssignmentState):
                 layer_count=layer_count,
                 pb=pb,
             )
-            self._quantize_embedding_targets(
-                embedding_targets,
-                layer_count=layer_count,
-                pb=pb,
-            )
             if embed_only:
                 total_log = {self.processor.name(): self.processor.log}
                 self.gptq_model.quant_log = self.processor.log

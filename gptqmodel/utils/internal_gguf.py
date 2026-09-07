@@ -183,7 +183,6 @@ _QWEN3_LINEAR_TENSOR_RE = pcre.compile(
 )
 _GGUF_BITS_ALIAS_BY_QTYPE: dict[GGMLQuantizationType, str] = {
     GGMLQuantizationType.Q1_0: "q1_0",
-    GGMLQuantizationType.Q1_0_g128: "q1_0_g128",
     GGMLQuantizationType.Q2_0: "q2_0",
     GGMLQuantizationType.PQ2_0: "q2_0",
     GGMLQuantizationType.Q4_0: "q4_0",

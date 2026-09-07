@@ -17,6 +17,12 @@ import sysconfig
 import threading
 import time
 import traceback
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX hosts fall back to process-local locking
+    fcntl = None
+
 from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
@@ -76,6 +82,12 @@ _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 _TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
 _CUDA_BUILD_SCHEDULING_FLAGS_WITH_VALUE = frozenset(("--threads", "--split-compile"))
 _CUDA_BUILD_SCHEDULING_FLAG_PREFIXES = ("--threads=", "--split-compile=")
+# Cross-process JIT build lock tuning. The lock itself is a kernel-released
+# flock, so a killed holder can never leave the cache permanently locked; the
+# timeout only bounds how long a process waits for another's in-flight build.
+_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV = "GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT"
+_TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS = 600.0
+_TORCH_OPS_FILE_LOCK_POLL_SECONDS = 0.1
 
 
 def _python_abi_tag() -> str:
@@ -441,6 +453,50 @@ def default_torch_ops_build_root(subdir: str) -> Path:
     if override_root:
         return Path(override_root).expanduser() / subdir
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
+
+
+def _torch_ops_file_lock_timeout_seconds() -> float:
+    """Resolve how long one process waits on another's in-flight JIT build."""
+
+    raw_timeout = os.getenv(_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV)
+    if raw_timeout is None:
+        return _TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS
+    try:
+        return max(0.0, float(raw_timeout))
+    except ValueError:
+        return _TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS
+
+
+@contextmanager
+def _cross_process_build_lock(lock_path: Path, *, timeout_seconds: float):
+    """Serialize on-disk JIT cache mutation across OS processes."""
+
+    if fcntl is None:
+        yield True
+        return
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    acquired = False
+    try:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(_TORCH_OPS_FILE_LOCK_POLL_SECONDS)
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:  # pragma: no cover - closing the fd still releases the lock
+                pass
+        os.close(lock_fd)
 
 
 def _dedupe_path_strings(paths: Sequence[str]) -> list[str]:
@@ -958,6 +1014,37 @@ class TorchOpsJitExtension:
             return Path(override).expanduser()
         return self._resolve_path(self.default_build_root)
 
+    def _build_lock_timeout_seconds(self) -> float:
+        """Resolve the cross-process build lock wait, honoring the env override."""
+
+        if os.getenv(_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV) is not None:
+            return _torch_ops_file_lock_timeout_seconds()
+        baseline_seconds = self.compile_baseline_seconds or 0.0
+        return max(_TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS, 5.0 * baseline_seconds)
+
+    def _cross_process_lock_path(self) -> Path:
+        """Return the flock path, kept outside the directory cache clears delete."""
+
+        base_build_root = self.base_build_root()
+        return base_build_root.parent / f"{base_build_root.name}.lock"
+
+    def _remove_stale_torch_build_lock(self, build_root: Path) -> None:
+        """Drop a leftover torch FileBaton lock while holding the process lock."""
+
+        baton_path = build_root / "lock"
+        if not baton_path.exists():
+            return
+        log.warning(
+            "%s: removing stale torch JIT build lock left by a dead process: pid=%s path=%s",
+            self.display_name,
+            os.getpid(),
+            baton_path,
+        )
+        try:
+            baton_path.unlink()
+        except FileNotFoundError:  # pragma: no cover - already gone
+            pass
+
     def _source_cache_fingerprint_payload(self, source: str, include_paths: Sequence[str]) -> list[str]:
         """Hash one source file plus recursively discovered local includes."""
 
@@ -1308,11 +1395,23 @@ class TorchOpsJitExtension:
             self._op_cache = {}
             build_root = self.base_build_root()
             if build_root.exists():
-                _log_cache_clear_callsite(
-                    reason=f"{self.display_name}.clear_cache",
-                    target_path=build_root,
-                )
-                shutil.rmtree(build_root, ignore_errors=True)
+                lock_timeout_seconds = self._build_lock_timeout_seconds()
+                with _cross_process_build_lock(
+                    self._cross_process_lock_path(), timeout_seconds=lock_timeout_seconds
+                ) as build_lock_acquired:
+                    if not build_lock_acquired:
+                        log.warning(
+                            "%s: skipping on-disk cache clear; timed out after %.0fs waiting for the "
+                            "cross-process JIT build lock (another process may be building here).",
+                            self.display_name,
+                            lock_timeout_seconds,
+                        )
+                        return
+                    _log_cache_clear_callsite(
+                        reason=f"{self.display_name}.clear_cache",
+                        target_path=build_root,
+                    )
+                    shutil.rmtree(build_root, ignore_errors=True)
 
     def last_error_message(self) -> str:
         """Return the most recent human-readable load failure."""
@@ -1340,6 +1439,26 @@ class TorchOpsJitExtension:
         return ""
 
     def load(self) -> bool:
+        """Load the extension while serializing cache mutation across processes."""
+
+        lock_timeout_seconds = self._build_lock_timeout_seconds()
+        with _cross_process_build_lock(
+            self._cross_process_lock_path(), timeout_seconds=lock_timeout_seconds
+        ) as build_lock_acquired:
+            if not build_lock_acquired:
+                self._load_attempted = True
+                self._load_result = False
+                self._last_error = (
+                    f"{self.display_name}: timed out after {lock_timeout_seconds:.0f}s waiting for the "
+                    f"cross-process JIT build lock `{self._cross_process_lock_path()}`; another process "
+                    f"may be stuck building this extension. Adjust via `{_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV}`."
+                )
+                log.warning("%s", self._last_error)
+                setup_logger().info(f"{self.display_name}: JIT build lock wait timed out; using fallback path.")
+                return False
+            return self._load_unlocked()
+
+    def _load_unlocked(self) -> bool:
         """Load the extension from cache or JIT-compile it on first use."""
 
         stable_abi_error = self._stable_abi_runtime_error()
@@ -1417,6 +1536,8 @@ class TorchOpsJitExtension:
                 self._load_result = True
                 self._last_error = ""
                 return True
+
+            self._remove_stale_torch_build_lock(build_root)
 
             logger = setup_logger()
             logger.info(f"{self.display_name}: compiling torch.ops JIT extension in `{build_root}`.")

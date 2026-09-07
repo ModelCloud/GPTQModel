@@ -1115,7 +1115,15 @@ class LoopProcessor:
     def receive_input_cache(self, input_cache: Any):
         """Injects the shared input cache for the current processor stage."""
 
-        with self._cache_lock:
+        # Keep compatibility with processors constructed by older callers that
+        # used the pre-checkpoint `_input_cache_lock` name.
+        cache_lock = getattr(self, "_cache_lock", None)
+        if cache_lock is None:
+            cache_lock = getattr(self, "_input_cache_lock", None)
+        if cache_lock is None:
+            cache_lock = threading.RLock()
+        object.__setattr__(self, "_cache_lock", cache_lock)
+        with cache_lock:
             current = getattr(self, "inputs_cache", None)
             if isinstance(current, _ThreadSafeInputCache):
                 current.set_cache(input_cache)
