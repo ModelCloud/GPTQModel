@@ -520,12 +520,13 @@ class QVQLinear(BaseQuantLinear):
         # Per-device auxiliary resources for the optional rank8 producer. They
         # are created during preparation, never lazily during graph replay.
         # The enclosing graph owner serializes a module's captured execution;
-        # one producer stream/event pair is therefore stable across eager and
-        # PyTorch's internal CUDA capture stream.
+        # each caller stream gets an independent producer/event pair so eager
+        # requests cannot overwrite another stream's readiness dependency.
         self._qvq_rank8_concurrent_cache: dict[
-            int, tuple[torch.cuda.Stream, torch.cuda.Event, torch.cuda.Event]
+            tuple[int, int], tuple[torch.cuda.Stream, torch.cuda.Event, torch.cuda.Event]
         ] = {}
-        self._qvq_rank8_concurrent_warm: set[tuple[int, int, int]] = set()
+        self._qvq_rank8_concurrent_cache_lock = threading.Lock()
+        self._qvq_rank8_concurrent_warm: set[tuple[int, int, int, int]] = set()
         self._qvq_rank8_factor_cache: dict[str, tuple[torch.Tensor, int, int, torch.device]] = {}
         pgc16_levels_for_version(self.codebook_version)
 
@@ -603,6 +604,7 @@ class QVQLinear(BaseQuantLinear):
         state = super().__getstate__()
         state.pop("_qvq_cuda_bank_cache_lock", None)
         state.pop("_qvq_fp8_telemetry_lock", None)
+        state.pop("_qvq_rank8_concurrent_cache_lock", None)
         state.pop("_qvq_grouped_p32_delegate", None)
         state["_qvq_cuda_bank_cache"] = None
         state["_qvq_cuda_window_cache"] = None
@@ -640,6 +642,7 @@ class QVQLinear(BaseQuantLinear):
         self._qvq_amd_folded_hot_cache = None
         self._qvq_p32_amd_warm_key = None
         self._qvq_rank8_concurrent_cache = {}
+        self._qvq_rank8_concurrent_cache_lock = threading.Lock()
         self._qvq_rank8_concurrent_warm = set()
         self._qvq_rank8_factor_cache = {}
 
@@ -782,29 +785,39 @@ class QVQLinear(BaseQuantLinear):
                 self._cached_cast("bias", compute_dtype, output_dtype)
         self._qvq_cuda_aux_cache_signature = signature
 
-    def _rank8_concurrent_resources(self, device: torch.device):
+    def _rank8_concurrent_resources(
+        self,
+        device: torch.device,
+        caller_stream: torch.cuda.Stream | None = None,
+    ):
         """Return prepared stream/event resources for concurrent rank8 projection.
 
-        A producer stream is paired with whichever caller stream submits the
-        operation. Missing resources during capture are rejected so graph
-        replay never creates a stream or event. The resource is keyed by CUDA
-        device rather than caller stream because PyTorch uses an internal
-        stream for CUDA-graph capture.
+        A producer stream and its events are paired with the caller stream
+        that submits the operation. Resources are keyed by both device and
+        caller stream: reusing one event pair across independent request
+        streams would let concurrent calls overwrite each other's readiness
+        dependency. Graph capture never allocates a missing pair; the caller
+        falls back to an in-stream reference projection for that capture.
         """
         if device.type != "cuda":
             raise RuntimeError("concurrent rank8 projection requires CUDA")
+        if caller_stream is None:
+            caller_stream = torch.cuda.current_stream(device)
         device_key = int(device.index if device.index is not None else torch.cuda.current_device())
-        cached = self._qvq_rank8_concurrent_cache.get(device_key)
-        if cached is not None:
-            return cached
-        self._require_prepared_outside_capture(device, "rank8 concurrent producer")
-        resources = (
-            torch.cuda.Stream(device=device),
-            torch.cuda.Event(enable_timing=False, blocking=False),
-            torch.cuda.Event(enable_timing=False, blocking=False),
-        )
-        self._qvq_rank8_concurrent_cache[device_key] = resources
-        return resources
+        stream_key = int(caller_stream.cuda_stream)
+        cache_key = (device_key, stream_key)
+        with self._qvq_rank8_concurrent_cache_lock:
+            cached = self._qvq_rank8_concurrent_cache.get(cache_key)
+            if cached is not None:
+                return cached
+            self._require_prepared_outside_capture(device, "rank8 concurrent producer")
+            resources = (
+                torch.cuda.Stream(device=device),
+                torch.cuda.Event(enable_timing=False, blocking=False),
+                torch.cuda.Event(enable_timing=False, blocking=False),
+            )
+            self._qvq_rank8_concurrent_cache[cache_key] = resources
+            return resources
 
     @staticmethod
     def _require_prepared_outside_capture(device: torch.device, what: str) -> None:
@@ -2560,23 +2573,34 @@ class QVQLinear(BaseQuantLinear):
                 else torch.cuda.current_device()
             )
             m, k = transformed.shape
-            warm_key = (device_key, int(m), int(k))
+            stream_key = int(current_stream.cuda_stream)
+            warm_key = (device_key, stream_key, int(m), int(k))
             capturing = torch.cuda.is_current_stream_capturing()
             if capturing and warm_key not in self._qvq_rank8_concurrent_warm:
-                raise RuntimeError(
-                    "QVQ concurrent rank8 projection must be warmed before CUDA Graph capture"
-                )
-            concurrent_stream, ready, done = self._rank8_concurrent_resources(transformed.device)
-            ready.record(current_stream)
-            with torch.cuda.stream(concurrent_stream):
-                concurrent_stream.wait_event(ready)
+                # A capture may use an internal stream distinct from the
+                # caller stream that performed eager warmup.  Do not allocate
+                # a new producer stream/event pair inside capture; execute the
+                # reference projection on the capture stream instead.  This
+                # keeps graph replay deterministic and preserves the exact
+                # arithmetic contract, at the cost of overlap for this cold
+                # capture stream only.
                 rank8_hidden = (
                     transformed.float() @ self._cached_rank8_factor("A")
                 ).half()
-                done.record(concurrent_stream)
-            concurrent_done = done
-            if not capturing:
-                self._qvq_rank8_concurrent_warm.add(warm_key)
+            else:
+                concurrent_stream, ready, done = self._rank8_concurrent_resources(
+                    transformed.device, current_stream
+                )
+                ready.record(current_stream)
+                with torch.cuda.stream(concurrent_stream):
+                    concurrent_stream.wait_event(ready)
+                    rank8_hidden = (
+                        transformed.float() @ self._cached_rank8_factor("A")
+                    ).half()
+                    done.record(concurrent_stream)
+                concurrent_done = done
+                if not capturing:
+                    self._qvq_rank8_concurrent_warm.add(warm_key)
         output = self._inner_forward(transformed)
         if concurrent_done is not None:
             # Queue the dependency after the window decoder so both branches
