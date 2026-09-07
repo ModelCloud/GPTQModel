@@ -19,6 +19,7 @@ from gptqmodel.quantization.qvq_rank8 import (
     prepare_rank8,
     save_window_artifact,
     window_kernel_candidates,
+    window_kernel_candidates_for_shape,
     window_kernel_shape_score,
 )
 from gptqmodel.quantization.qvq_window_tuning import (
@@ -53,6 +54,31 @@ def test_shape_scores_are_public_ordering_hints_only():
     assert grouped_window_kernel_shape_score(
         (layer, layer), (direct_bm32, direct_bm32), m=96
     ) == 0
+
+
+def test_shape_ordering_keeps_every_single_projection_candidate(monkeypatch):
+    """The public shape helper orders candidates without filtering winners."""
+    import gptqmodel.quantization.qvq_rank8 as rank8
+
+    layer = type("Layer", (), {"out_features": 2048})()
+    candidates = (
+        P32WindowConfig(algorithm="production_window"),
+        P32WindowConfig(
+            algorithm="hopper_direct_decode_mma",
+            block_m=128,
+            block_n=128,
+            warp_groups=2,
+        ),
+        P32WindowConfig(algorithm="hopper_m16"),
+    )
+    monkeypatch.setattr(
+        rank8,
+        "window_kernel_candidates",
+        lambda ignored, *, m: candidates,
+    )
+    ordered = window_kernel_candidates_for_shape(layer, m=96)
+    assert ordered == (candidates[0], candidates[2], candidates[1])
+    assert set(ordered) == set(candidates)
 
 
 def test_recorded_overhead_audit_keeps_uncapped_improvements_visible():

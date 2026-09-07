@@ -2293,6 +2293,31 @@ def grouped_window_kernel_candidates(layers, *, m):
     )
 
 
+def window_kernel_candidates_for_shape(layer, *, m):
+    """Order the complete single-projection candidate set for one shape.
+
+    The score is only a preparation-time priority hint.  Every candidate from
+    :func:`window_kernel_candidates` remains present so an outlier geometry
+    can still win the correctness-gated latency measurement.
+    """
+    candidates = window_kernel_candidates(layer, m=m)
+    if len(candidates) < 2:
+        return candidates
+    baseline = candidates[0]
+    return tuple(
+        (baseline,)
+        + tuple(
+            choice
+            for _, choice in sorted(
+                enumerate(candidates[1:], start=1),
+                key=lambda item: (
+                    window_kernel_shape_score(layer, item[1], m=m), item[0]
+                ),
+            )
+        )
+    )
+
+
 def grouped_window_kernel_candidates_for_shape(layers, *, m):
     """Order the complete grouped candidate set by tile compatibility.
 
