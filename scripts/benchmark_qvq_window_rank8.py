@@ -161,6 +161,9 @@ def main():
         "gptqmodel/utils/qvq_wgmma_cuda.py",
         "gptqmodel/quantization/qvq_window_tuning.py",
         "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu",
+        "gptqmodel_ext/qvq/qvq_window_abi.cpp",
+        "gptqmodel_ext/qvq/qvq_window_rank8_fused.cu",
+        "gptqmodel/utils/qvq_window_abi.py",
     ]
     report = {
         "scope": (

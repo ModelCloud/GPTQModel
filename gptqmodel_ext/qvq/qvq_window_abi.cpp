@@ -9,9 +9,19 @@
 #include <torch/library.h>
 #include <algorithm>
 #include <cstdio>
+#include <cstddef>
 #include <stdexcept>
 #include <memory>
 #include <mutex>
+
+extern "C" void qvq_rank8_epilogue_no_hadamard(
+    const at::Tensor& hidden,
+    const at::Tensor& rank8_b,
+    const at::Tensor& base,
+    const at::Tensor& scale_v,
+    const at::Tensor& bias,
+    at::Tensor& output,
+    cudaStream_t stream);
 
 namespace {
 thread_local bool owned_capture = false;
@@ -59,9 +69,17 @@ static int qvq_p32_window_linear_impl(
     char* error, uint64_t error_capacity, const at::Tensor& prepared_rank8_a,
     const at::Tensor& prepared_rank8_b) {
   try {
-    check(config && config->abi_version == 3 && config->struct_bytes == sizeof(*config),
+    check(config && config->abi_version == 3 &&
+              config->struct_bytes >= offsetof(QvqP32WindowConfig, recovery_kernel) &&
+              config->struct_bytes <= sizeof(*config),
           "unsupported window ABI version or configuration size");
     const auto& c = *config;
+    const bool has_recovery_policy =
+        c.struct_bytes >= offsetof(QvqP32WindowConfig, recovery_kernel) +
+            2 * sizeof(uint32_t);
+    const uint32_t recovery_kernel = has_recovery_policy ? c.recovery_kernel : 0;
+    const uint32_t recovery_projection =
+        has_recovery_policy ? c.recovery_projection : 0;
     // The WGMMA decoder consumes 256-wide K/N tiles.  Hadamard transforms
     // additionally require a power-of-two width, but the transform-free
     // composite path must admit production projections such as Qwen's
@@ -77,6 +95,10 @@ static int qvq_p32_window_linear_impl(
           "native reference ABI requires BK256, stages2, split1");
     check(c.input_hadamard <= 1 && c.output_hadamard <= 1 && c.rank8_enabled <= 1,
           "native window flags must be zero or one");
+    check(recovery_kernel <= 1 && recovery_projection == 0,
+          "native rank8 policy supports separate_reference or fused_epilogue with separate_reference projection");
+    check(recovery_kernel != 1 || !c.output_hadamard,
+          "native fused rank8 epilogue requires output_hadamard=false");
     check(!c.input_hadamard || power2(c.k),
           "native input Hadamard requires power-of-two K");
     check(!c.output_hadamard || power2(c.n),
@@ -167,24 +189,39 @@ static int qvq_p32_window_linear_impl(
            int64_t(c.bank_alt_id), int64_t(c.block_m), int64_t(c.block_n)})
           .view({padded_m, c.n}).slice(0, 0, c.m);
     }
-    if (c.rank8_enabled) {
+    bool wrote_output = false;
+    if (c.rank8_enabled && recovery_kernel == 1 && !c.output_hadamard) {
+      const auto& a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
+      // Keep projection on the existing captured FP32 GEMM path, then use a
+      // direct-store epilogue. This avoids the uncompetitive serial custom
+      // projection while preserving the explicit FP16 hidden boundary.
+      auto hidden = at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
+      // The transform-free composite path uses one graph-safe CUDA epilogue:
+      // it consumes X'A at the explicit FP16 hidden boundary, expands in
+      // FP32, adds the decoded base, and stores the final FP16 result directly
+      // into the caller-owned output buffer.
+      qvq_rank8_epilogue_no_hadamard(
+          hidden, b, inner, scale_v, output_bias, output,
+          static_cast<cudaStream_t>(cuda_stream));
+      wrote_output = true;
+    } else if (c.rank8_enabled) {
       const auto& a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
       const auto& b_float = prepared_rank8_b.defined() ? prepared_rank8_b : b.to(at::kFloat);
       auto hidden = at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
       // Preserve the explicit FP16 hidden boundary while combining the FP32
       // rank expansion with the decoded base in one BLAS epilogue.  ``addmm``
-      // retains FP32 inputs/accumulation and avoids a separate correction
-      // output allocation and add launch on the native prepared-graph path.
+      // retains FP32 inputs/accumulation for the output-Hadamard reference
+      // path, whose transform still owns the final store.
       inner = at::addmm(inner, hidden.to(at::kFloat), b_float);
     }
-    if (c.output_hadamard) {
+    if (!wrote_output && c.output_hadamard) {
       inner = hadamard(inner.contiguous(), c10::IValue(), scale_v,
                       output_bias.defined() ? c10::IValue(output_bias) : c10::IValue(), c.n >= 2048 ? 3 : 4);
-    } else {
+    } else if (!wrote_output) {
       inner = inner * scale_v;
       if (output_bias.defined()) inner = inner + output_bias;
     }
-    output.copy_(inner);
+    if (!wrote_output) output.copy_(inner);
     if (error && error_capacity) error[0] = '\0';
     return 0;
   } catch (const std::exception& exception) {
