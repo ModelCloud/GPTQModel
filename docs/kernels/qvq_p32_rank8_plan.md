@@ -314,6 +314,15 @@ the fresh-library H200 rerun is recorded in
 K5120/N17408 decoder compared with the QvQ reference, plus the updated
 StableHLO rank8-off/on replay.
 
+The benchmark fixture now accepts explicit transform switches, which enabled
+a graph-captured synthetic K5120/N17408 transform-free sweep on the H200. The
+fused separate-reference epilogue measured 11.48% overhead at M=128, 5.88% at
+M=2048, and 5.21% at M=8192. This is useful shape-specific evidence: the
+large-M correction cost is close to, but still above, 5% for this wide module;
+it is not treated as a universal threshold or used to discard the kernel.
+The complete report, including build identity and effective transform flags,
+is `results/p32_rank8_qwen_n17408_h200_transform_free.json`.
+
 Atomic SwiGLU selection now defers rank8 fitting until the complete
 gate/up/down candidate triplet has been selected. The fit consumes the
 selected serialized payload and immutable dense teacher snapshot, then adds

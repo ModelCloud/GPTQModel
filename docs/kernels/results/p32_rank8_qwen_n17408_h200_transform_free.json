@@ -1,0 +1,255 @@
+{
+  "scope": "synthetic kernel/performance, not model quality",
+  "revision": "f455fc24abff463300313bb1ba4a4bfde2f6d44b",
+  "worktree_dirty": false,
+  "sources": {
+    "gptqmodel/quantization/qvq_rank8.py": "4638e3210799a70bad7745271743a28b48a2fab2bca1d4b13bc55204f5d9aeb9",
+    "gptqmodel/nn_modules/qlinear/qvq.py": "882c3cb0872dd25cd4c749b365bc86d8aad81e7fb675f85b39c363f389df270d",
+    "gptqmodel/nn_modules/qvq_grouped_runtime.py": "3c6876692f89de7b25b45b1ebdf8715e73f4615561b2a877467a6a38e3a8f0d5",
+    "gptqmodel/utils/qvq_rank8_triton.py": "84dfcca7799451fc2bcb344739aab703ff2d25d4efbc0cfeb5367c991ae33ceb",
+    "gptqmodel/utils/qvq_wgmma_cuda.py": "bc2b618a818510243e7ad7fb6b6deba7128513e2b47605dcfa63e7cbed601a2b",
+    "gptqmodel/quantization/qvq_window_tuning.py": "6fc4d022326877c8b093a941247020394a360ab6f260e4c090340aa27ad37787",
+    "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu": "2164c8bf24c2e852bee6a75d577afad1c5eaffe018dd71748521294861d7ccfd",
+    "gptqmodel_ext/qvq/qvq_window_abi.cpp": "161b81b657c09e43f5f5ede373c8def387573a853329599df82c45a6ebf35c83",
+    "gptqmodel_ext/qvq/qvq_window_rank8_fused.cu": "7b521eb0cad2658451d51b36ee230ca8aa6df2b84d28ec62b6f1c48c7fc184dc",
+    "gptqmodel/utils/qvq_window_abi.py": "abcd8f36c202f9d92f7a4d314858d2d7bd059aa22f6784ce332bbb3cb6ad4351"
+  },
+  "hardware": {
+    "name": "NVIDIA H200",
+    "uuid": "0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "sm_count": 132,
+    "memory": 150101688320,
+    "capability": [
+      9,
+      0
+    ]
+  },
+  "software": {
+    "torch": "2.15.0.dev20260901+cu130",
+    "cuda": "13.0"
+  },
+  "build_identity": {
+    "qvq": "c6a863833abf0910",
+    "wgmma": "efbc03e644765dfc",
+    "triton": "3.8.0",
+    "driver": "610.57.04"
+  },
+  "preflight": {
+    "physical_id": 0,
+    "pci_bus_id": "00000000:1C:00.0",
+    "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+    "name": "NVIDIA H200",
+    "config": {
+      "sample_count": 3,
+      "sample_interval_seconds": 1.0,
+      "max_driver_memory_mib": 16
+    },
+    "samples": [
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      },
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      },
+      {
+        "physical_id": 0,
+        "pci_bus_id": "00000000:1C:00.0",
+        "uuid": "GPU-0c667065-5c47-38ce-0b0a-d211392ce9ea",
+        "name": "NVIDIA H200",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": []
+      }
+    ]
+  },
+  "tuning_policy": {
+    "autotune": false,
+    "quality_mode": "fast",
+    "measure_recovery_candidates": false,
+    "max_recovery_overhead_percent": null
+  },
+  "transform": {
+    "input_hadamard": false,
+    "output_hadamard": false,
+    "source": "synthetic_cli_or_default"
+  },
+  "rows": [
+    {
+      "m": 128,
+      "k": 5120,
+      "n": 17408,
+      "bits": 3,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "hopper_direct_decode_mma",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 384.3891191482544,
+      "median_us": 383.7951898574829,
+      "p95_us": 383.9423894882202,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        387.0784044265747,
+        383.48801136016846,
+        383.9423894882202,
+        383.6416006088257,
+        383.7951898574829
+      ],
+      "allocated_bytes": 125703680,
+      "peak_allocated_bytes": 2342623232
+    },
+    {
+      "m": 128,
+      "k": 5120,
+      "n": 17408,
+      "bits": 3,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "hopper_direct_decode_mma",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 428.52352142333984,
+      "median_us": 427.839994430542,
+      "p95_us": 428.31358909606934,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        431.38561248779297,
+        427.70562171936035,
+        427.37278938293457,
+        427.839994430542,
+        428.31358909606934
+      ],
+      "allocated_bytes": 193533440,
+      "peak_allocated_bytes": 2342623232,
+      "paired_overhead_percent": 11.476122092466689
+    },
+    {
+      "m": 2048,
+      "k": 5120,
+      "n": 17408,
+      "bits": 3,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "hopper_direct_decode_mma",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 4252.940902709961,
+      "median_us": 4254.278564453125,
+      "p95_us": 4254.3487548828125,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        4251.48811340332,
+        4249.824142456055,
+        4254.764938354492,
+        4254.3487548828125,
+        4254.278564453125
+      ],
+      "allocated_bytes": 513873408,
+      "peak_allocated_bytes": 2342623232
+    },
+    {
+      "m": 2048,
+      "k": 5120,
+      "n": 17408,
+      "bits": 3,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "hopper_direct_decode_mma",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 4503.98078918457,
+      "median_us": 4504.313659667969,
+      "p95_us": 4505.408096313477,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        4502.0416259765625,
+        4500.678253173828,
+        4504.313659667969,
+        4507.462310791016,
+        4505.408096313477
+      ],
+      "allocated_bytes": 547427840,
+      "peak_allocated_bytes": 2342623232,
+      "paired_overhead_percent": 5.877261947631429
+    },
+    {
+      "m": 8192,
+      "k": 5120,
+      "n": 17408,
+      "bits": 3,
+      "mode": "off",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "hopper_direct_decode_mma",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 16810.56640625,
+      "median_us": 16807.411193847656,
+      "p95_us": 16820.249938964844,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        16822.09930419922,
+        16802.931213378906,
+        16800.140380859375,
+        16807.411193847656,
+        16820.249938964844
+      ],
+      "allocated_bytes": 1646335488,
+      "peak_allocated_bytes": 3500217856
+    },
+    {
+      "m": 8192,
+      "k": 5120,
+      "n": 17408,
+      "bits": 3,
+      "mode": "on",
+      "kernel": "fused_epilogue",
+      "projection": "separate_reference",
+      "algorithm": "hopper_direct_decode_mma",
+      "block_m": 0,
+      "block_n": 0,
+      "chunk_m": 0,
+      "mean_us": 17689.256591796875,
+      "median_us": 17682.45086669922,
+      "p95_us": 17701.49688720703,
+      "mae": 0.0,
+      "max": 0.0,
+      "samples_us": [
+        17707.94219970703,
+        17676.185607910156,
+        17678.207397460938,
+        17701.49688720703,
+        17682.45086669922
+      ],
+      "allocated_bytes": 1679889920,
+      "peak_allocated_bytes": 3533772288,
+      "paired_overhead_percent": 5.206272773119691
+    }
+  ]
+}
