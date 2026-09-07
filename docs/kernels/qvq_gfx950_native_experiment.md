@@ -75,7 +75,10 @@ This comparison uses the pinned production AOT artifact, source revision
 `66565c27ed8a42639c0c2bbe55fdb4a8e677dca0`, not the older retained AMD commit
 `58c3d72a`. No improvement against that older baseline or full model is asserted.
 Scratch for this shape is 10 MiB decoded weights plus 32 MiB caller-owned BLAS
-workspace. A persistent full-model decoded cache has not been deployed.
+workspace. The additive native ABI now provides an opt-in pointer-stable
+decoded cache (`cache_policy=1`); policy 0 remains the default used by the
+measurements above. See `qvq_gfx950_decoded_cache_20260907.md` for the replay
+profile and immutable-payload contract.
 
 Artifacts under `/home/ubuntu/qvq-gfx950-runtime/`:
 
@@ -243,10 +246,12 @@ full-model speedup has not been reached or claimed.
 `qvq_gfx950_native.h` provides an additive combined-operation ABI: configuration,
 scratch sizing, prepare, get-config, execute and destroy. It exposes MKNE,
 transition bits, bank ID and BLAS solution. The implemented decoder uses 256
-threads and decodes every call; unsupported thread counts, cache policies and
-E>1 are rejected. Preparation warms and synchronizes its stream. Execution
-does not allocate or tune and verifies device/stream. Caller-owned scratch and
-BLAS workspace must outlive plans and graphs.
+threads. Cache policy 0 decodes every call; policy 1 reuses decoded scratch for
+an immutable pointer-stable payload tuple and invalidates on pointer changes.
+Unsupported thread counts, cache policies and E>1 are rejected. Preparation
+warms and synchronizes its stream. Execution does not allocate or tune and
+verifies device/stream. Caller-owned scratch and BLAS workspace must outlive
+plans and graphs.
 
 `tests/test_qvq_gfx950_native_plan.py` passes host descriptor checks and combined
 GPU replay at M=8,K=32,N=48 for all five P32 rates. W4 uses bank_alt_id=0 and a

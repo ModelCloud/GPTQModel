@@ -70,6 +70,8 @@ class NativePlanHostTests(unittest.TestCase):
         lib.qvq_gfx950_native_destroy.argtypes = [c.c_void_p]
         m, k, n = 8, 32, 48
         tiles = k * n // 256
+        cache_policy = int(os.environ.get("QVQ_GFX950_CACHE_POLICY", "0"))
+        self.assertIn(cache_policy, (0, 1))
         generator = torch.Generator().manual_seed(951)
         levels_cpu = (torch.arange(256, dtype=torch.float16) - 128) / 256
         for bits, alternate, bank_alt_id in (
@@ -86,7 +88,7 @@ class NativePlanHostTests(unittest.TestCase):
                 bits,
                 bank_alt_id,
                 256,
-                0,
+                cache_policy,
             )
             x = torch.zeros((m, k), device="cuda", dtype=torch.float16)
             words = torch.zeros((tiles, 4 * bits), device="cuda", dtype=torch.int32)
@@ -179,19 +181,41 @@ class NativePlanHostTests(unittest.TestCase):
                         self.assertEqual(
                             capture_call(*args, capture_stream.cuda_stream), 0
                         )
-                    for _ in range(3):
-                        cpu_words = torch.randint(
-                            0,
-                            2**32,
-                            (tiles, 4 * bits),
-                            generator=generator,
-                            dtype=torch.int64,
+                    for replay in range(3):
+                        if cache_policy == 1 and replay:
+                            # Policy 1 promises immutable payload pointers;
+                            # replaying unchanged buffers must reuse scratch
+                            # without launching the decoder again.
+                            graph.replay()
+                            stream.synchronize()
+                            self.assertTrue(torch.equal(scratch.cpu().double(), expected_w))
+                            error = (y.cpu().double() - cpu_x.double() @ expected_w.T).abs()
+                            self.assertTrue(torch.isfinite(error).all())
+                            self.assertLessEqual(error.mean().item(), 0.003)
+                            self.assertLessEqual(error.max().item(), 0.006)
+                            continue
+                        cpu_words = (
+                            torch.zeros((tiles, 4 * bits), dtype=torch.int64)
+                            if cache_policy == 1
+                            else torch.randint(
+                                0,
+                                2**32,
+                                (tiles, 4 * bits),
+                                generator=generator,
+                                dtype=torch.int64,
+                            )
                         )
-                        cpu_banks = torch.randint(
-                            0, 256, (tiles,), generator=generator, dtype=torch.uint8
+                        cpu_banks = (
+                            torch.zeros(tiles, dtype=torch.uint8)
+                            if cache_policy == 1
+                            else torch.randint(
+                                0, 256, (tiles,), generator=generator, dtype=torch.uint8
+                            )
                         )
                         cpu_x = (
-                            torch.randn(
+                            torch.zeros((m, k), dtype=torch.float16)
+                            if cache_policy == 1
+                            else torch.randn(
                                 (m, k), generator=generator, dtype=torch.float16
                             )
                             * 0.1
@@ -254,12 +278,16 @@ class NativePlanHostTests(unittest.TestCase):
         size = c.c_size_t()
         self.assertEqual(query(c.byref(config), c.byref(size)), 0)
         self.assertEqual(size.value, 5120 * 1024 * 2)
+        cached = NativeConfig.from_buffer_copy(config)
+        cached.cache_policy = 1
+        self.assertEqual(query(c.byref(cached), c.byref(size)), 0)
+        self.assertEqual(size.value, 5120 * 1024 * 2)
         for field, value in (
             ("version", 2),
             ("struct_size", 0),
             ("bank_alt_id", 4),
             ("decode_threads", 128),
-            ("cache_policy", 1),
+            ("cache_policy", 2),
         ):
             invalid = NativeConfig.from_buffer_copy(config)
             setattr(invalid, field, value)
