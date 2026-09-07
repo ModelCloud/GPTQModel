@@ -3,6 +3,7 @@
 """Real CUDA graph ownership tests; synthetic factors test runtime algebra only."""
 
 from collections import OrderedDict
+from threading import Lock
 
 import pytest
 import torch
@@ -26,6 +27,7 @@ def test_graph_owner_lru_retirement_synchronizes_before_eviction():
 
     owner = object.__new__(P32WindowGraphs)
     owner.max_graphs = 2
+    owner._retired_graphs = 0
     owner._graphs = OrderedDict((key, object()) for key in ("old", "recent"))
     owner._event = Event()
     owner._retire_for_insert("new")
@@ -39,6 +41,13 @@ def test_graph_owner_lru_retirement_synchronizes_before_eviction():
     assert owner._graphs == OrderedDict()
     assert owner._event is None
     assert replacement_event.synchronizations == 1
+
+    owner._lock = Lock()
+    owner._closed = False
+    stats = owner.residency_stats()
+    assert stats["max_graphs"] == 2
+    assert stats["resident_count"] == 0
+    assert stats["retired_graphs"] == 2
 
 
 

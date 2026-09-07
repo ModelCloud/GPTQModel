@@ -79,6 +79,7 @@ class P32WindowGraphs:
         # native payloads, so a request owner must have a finite residency
         # bound instead of accumulating one executable per shape forever.
         self._graphs = OrderedDict()
+        self._retired_graphs = 0
         self._event = None
         self._device = None
         self._closed = False
@@ -277,6 +278,21 @@ class P32WindowGraphs:
                 self._event.record(stream)
                 return result
 
+    def residency_stats(self):
+        """Return an idle snapshot of retained graph keys and retirements.
+
+        The snapshot is intentionally taken under the same exclusive guard as
+        capture/replay.  Callers can use it for graph-residency scorecards
+        without racing a capture or observing a half-installed executable.
+        """
+        with self._exclusive():
+            return {
+                "max_graphs": self.max_graphs,
+                "resident_count": len(self._graphs),
+                "resident_keys": tuple(self._graphs),
+                "retired_graphs": self._retired_graphs,
+            }
+
     def invalidate(self):
         """Retire graphs after all submitted requests finish; weights are retained."""
         with self._exclusive():
@@ -315,6 +331,7 @@ class P32WindowGraphs:
             if self._event is not None:
                 self._event.synchronize()
                 self._event = None
+            self._retired_graphs += 1
         while len(self._graphs) >= self.max_graphs:
             # A replay may have submitted work on the current stream.  The
             # event records the latest request and must complete before its
@@ -323,3 +340,4 @@ class P32WindowGraphs:
                 self._event.synchronize()
                 self._event = None
             self._graphs.popitem(last=False)
+            self._retired_graphs += 1
