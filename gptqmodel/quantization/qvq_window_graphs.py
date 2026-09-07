@@ -95,11 +95,11 @@ class P32WindowGraphs:
         return False
 
     @contextmanager
-    def _exclusive(self):
+    def _exclusive(self, *, allow_closed=False):
         if not self._lock.acquire(blocking=False):
             raise RuntimeError("a window graph request or capture is already active")
         try:
-            if self._closed:
+            if self._closed and not allow_closed:
                 raise RuntimeError("window graph owner is closed")
             yield
         finally:
@@ -273,7 +273,7 @@ class P32WindowGraphs:
 
     def close(self):
         """Finish queued requests and release exclusive graph ownership."""
-        with self._exclusive():
+        with self._exclusive(allow_closed=True):
             if self._closed:
                 return
             if self._event is not None:
