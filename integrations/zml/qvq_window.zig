@@ -1072,6 +1072,15 @@ pub fn selectFastestWithPolicy(
 }
 
 pub fn enumerateCandidates(base: Config, output: []Config) usize {
+    // Candidate enumeration is a shape-specific preparation operation.  Bind
+    // every returned policy to the exact M that was measured so a selected
+    // BM/BN configuration cannot be reused accidentally for another request
+    // shape through its broader caller-supplied range.  The Python tuner
+    // applies the same min_m=max_m contract before timing.
+    if (base.m == 0) return 0;
+    var shape_base = base;
+    shape_base.min_m = base.m;
+    shape_base.max_m = base.m;
     // The native fused epilogue now supports the power-of-two output
     // Hadamard path. Composite output widths retain the reference epilogue
     // until a matching arithmetic signature is certified.
@@ -1093,7 +1102,7 @@ pub fn enumerateCandidates(base: Config, output: []Config) usize {
     for ([_]u32{ 0, 1, 2 }) |recovery_projection| {
         for (0..kernel_count) |kernel_index| {
             const recovery_kernel: u32 = if (kernel_count == 2) @intCast(kernel_index) else 0;
-            var m16 = base;
+            var m16 = shape_base;
             m16.algorithm = 1;
             m16.block_m = 0;
             m16.block_n = 0;
@@ -1104,7 +1113,7 @@ pub fn enumerateCandidates(base: Config, output: []Config) usize {
             count += 1;
             for ([_]u32{ 32, 64, 128 }) |block_m| {
                 for ([_]u32{ 64, 128 }) |block_n| {
-                    var candidate = base;
+                    var candidate = shape_base;
                     candidate.algorithm = 2;
                     candidate.block_m = block_m;
                     candidate.block_n = block_n;
@@ -1554,8 +1563,22 @@ test "shape-aware candidate ordering keeps every geometry" {
     for (candidates[0..count]) |candidate| {
         saw_bm64 = saw_bm64 or candidate.block_m == 64;
         saw_bm128 = saw_bm128 or candidate.block_m == 128;
+        try std.testing.expectEqual(@as(u32, 96), candidate.min_m);
+        try std.testing.expectEqual(@as(u32, 96), candidate.max_m);
     }
     try std.testing.expect(saw_bm64 and saw_bm128);
+}
+
+test "candidate enumeration rejects an unbound M shape" {
+    var candidates: [max_candidate_count]Config = undefined;
+    try std.testing.expectEqual(@as(usize, 0), enumerateCandidates(.{
+        .m = 0,
+        .k = 2048,
+        .n = 2048,
+        .transition_bits = 4,
+        .bank_alt_id = 2,
+        .algorithm = 2,
+    }, &candidates));
 }
 
 test "graph identity includes buffer layout and element dtype" {
