@@ -137,6 +137,13 @@ evidence that large-M correction can fall inside the 3--5% budget for a square
 projection, while small-M remains outside the target; it is still a separate
 producer/consumer candidate rather than the final WGMMA-integrated pipeline.
 
+Concurrent producer resources are now isolated by `(device, caller CUDA
+stream)` and initialized under a per-module lock. This prevents readiness-event
+overwrites when independent eager requests run on different streams. If a
+CUDA graph uses an internal capture stream that was not eagerly warmed, capture
+does not allocate auxiliary resources; it records the same reference
+projection in-stream, preserving graph safety and arithmetic ordering.
+
 The Ampere continuous-window operator now participates in the same
 `P32WindowConfig` and `window_kernel_candidates` policy. On SM80, the
 shape-specific split-wave enumerator publishes explicit `ampere_window`
