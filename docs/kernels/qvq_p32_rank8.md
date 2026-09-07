@@ -158,6 +158,10 @@ layout or build. ZML and other external consumers must enumerate and benchmark
 their own eligible executables, then cache the result under the full
 device/shape/rate/M/TP/correction key.
 
+The ZML candidate enumerator binds each returned launch policy to the exact
+measured `M` (`min_m=max_m=M`). A BM/BN winner therefore cannot be reused for a
+different request shape without a fresh enumeration and measurement.
+
 The non-Hopper SM80 consumer exposes the same rule through
 `qvq_p32_window_ampere_kernel_candidates((M, K), out_features=N, bits=...)`.
 It returns the measured shape-specific split first, followed by a bounded
