@@ -503,8 +503,9 @@ def prepare_rank8(layer, config):
         ):
             raise ValueError("concurrent rank8 projection requires SM90")
         # Stream/event allocation is preparation work and must complete before
-        # a caller starts CUDA graph capture.  The actual matrix multiply is
-        # warmed per (caller stream, M, K) on its first eager invocation.
+        # a caller starts CUDA graph capture. Eager calls warm the exact
+        # (caller stream, M, K) overlap path; a cold internal capture stream
+        # uses the graph-safe in-stream reference fallback instead.
         layer._rank8_concurrent_resources(runtime_device)
     grouped = getattr(layer, "_gptqmodel_qvq_grouped_runtime", None)
     if grouped is not None:
