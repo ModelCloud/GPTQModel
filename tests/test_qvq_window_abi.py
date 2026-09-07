@@ -222,6 +222,82 @@ def test_native_transform_free_rank8_fused_epilogue_matches_and_replays(projecti
         assert status == 0, error.value
 
 
+def test_native_concurrent_rank8_output_hadamard_graph_matches_reference(monkeypatch):
+    """Concurrent projection also composes with the output-Hadamard path."""
+    from test_qvq_grouped_runtime import _child
+    from test_qvq_window_recovery import _kernel_rank8
+
+    layer = _child(
+        "native_rank8_concurrent_hadamard",
+        in_features=2048,
+        out_features=2048,
+        device="cuda",
+    ).eval()
+    _kernel_rank8(layer)
+    config = P32WindowConfig(
+        algorithm="hopper_m16",
+        recovery_mode="on",
+        recovery_projection="concurrent_reference",
+    )
+    x = torch.randn(33, 2048, device="cuda", dtype=torch.float16) * 0.01
+    prepare_rank8(layer, config)
+    with torch.no_grad():
+        expected = layer(x)
+
+    library = native_window_library()
+    original = library.qvq_p32_window_linear
+    recorded = []
+
+    def record(*args):
+        recorded[:] = args
+        return original(*args)
+
+    monkeypatch.setattr(library, "qvq_p32_window_linear", record)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        actual = native_window_linear(layer, x, config)
+    stream.synchronize()
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    buffers = (WindowBuffer * 10)(*recorded[:10])
+    handle = ctypes.c_void_p()
+    error = ctypes.create_string_buffer(4096)
+    status = library.qvq_p32_window_graph_create(
+        buffers,
+        recorded[10],
+        stream.cuda_stream,
+        ctypes.byref(handle),
+        error,
+        len(error),
+    )
+    assert status == 0, error.value
+    try:
+        with torch.cuda.stream(stream), torch.no_grad():
+            x.mul_(2)
+            expected_replay = layer(x)
+            status = library.qvq_p32_window_graph_run(
+                handle, stream.cuda_stream, error, len(error)
+            )
+            assert status == 0, error.value
+        stream.synchronize()
+        torch.testing.assert_close(actual, expected_replay, atol=0, rtol=0)
+
+        parent = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(parent, stream=stream):
+            status = library.qvq_p32_window_graph_run(
+                handle, stream.cuda_stream, error, len(error)
+            )
+        assert status == 0, error.value
+        parent.replay()
+        stream.synchronize()
+        torch.testing.assert_close(actual, expected_replay, atol=0, rtol=0)
+        parent.reset()
+    finally:
+        status = library.qvq_p32_window_graph_destroy(handle, error, len(error))
+        assert status == 0, error.value
+
+
 def test_native_disabled_pointers_and_external_capture_rejection(monkeypatch):
     from test_qvq_grouped_runtime import _child
 
