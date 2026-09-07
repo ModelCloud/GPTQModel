@@ -133,8 +133,19 @@ class P32WindowConfig:
             "project_output_fused",
         ):
             raise ValueError("unsupported rank8 projection implementation")
-        if self.recovery_kernel not in ("separate_reference", "fused_epilogue"):
-            raise ValueError("fused recovery kernels are not implemented")
+        if self.recovery_kernel not in (
+            "separate_reference",
+            "fused_epilogue",
+            "fully_fused",
+        ):
+            raise ValueError("unsupported rank8 recovery kernel")
+        if self.recovery_kernel == "fully_fused" and (
+            self.recovery_projection != "project_output_fused"
+            or self.arithmetic_signature != "unverified_project_output_fused"
+        ):
+            raise ValueError(
+                "fully_fused rank8 requires project_output_fused with its unverified arithmetic signature"
+            )
         if self.arithmetic_signature not in (
             "reference_fp32_v1",
             "unverified_fused_epilogue",
@@ -466,7 +477,7 @@ def prepare_rank8(layer, config):
     ):
         raise ValueError("rank8 FP32 reference requires CUDA matmul TF32 disabled")
     if (
-        config.recovery_kernel == "fused_epilogue"
+        config.recovery_kernel in ("fused_epilogue", "fully_fused")
         and (
             runtime_device.type != "cuda"
             or torch.cuda.get_device_capability(runtime_device) != (9, 0)
@@ -499,7 +510,11 @@ def prepare_rank8(layer, config):
         if (
             runtime_device.type != "cuda"
             or torch.cuda.get_device_capability(runtime_device) != (9, 0)
-            or config.recovery_kernel not in ("separate_reference", "fused_epilogue")
+            or config.recovery_kernel not in (
+                "separate_reference",
+                "fused_epilogue",
+                "fully_fused",
+            )
         ):
             raise ValueError("concurrent rank8 projection requires SM90")
         # Stream/event allocation is preparation work and must complete before
@@ -2061,6 +2076,15 @@ def window_kernel_candidates(layer, *, m):
                 replace(
                     c,
                     recovery_kernel="fused_epilogue",
+                    recovery_projection="project_output_fused",
+                    arithmetic_signature="unverified_project_output_fused",
+                )
+                for c in separate_candidates
+            )
+            candidates.extend(
+                replace(
+                    c,
+                    recovery_kernel="fully_fused",
                     recovery_projection="project_output_fused",
                     arithmetic_signature="unverified_project_output_fused",
                 )

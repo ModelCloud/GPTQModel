@@ -287,6 +287,18 @@ def test_unverified_rank8_arithmetic_rejects_balanced_and_quality_modes():
                 )
 
 
+def test_fully_fused_rank8_mode_requires_its_project_output_contract():
+    with pytest.raises(ValueError, match="fully_fused rank8 requires"):
+        P32WindowConfig(recovery_kernel="fully_fused")
+    config = P32WindowConfig(
+        recovery_mode="on",
+        recovery_kernel="fully_fused",
+        recovery_projection="project_output_fused",
+        arithmetic_signature="unverified_project_output_fused",
+    )
+    assert P32WindowConfig.from_backend_config(config.to_backend_config()) == config
+
+
 def test_ampere_window_candidates_are_explicit_and_shape_specific(monkeypatch):
     layer, _, _, _ = fixture(hadamard=False)
     prepare_rank8(layer, P32WindowConfig())

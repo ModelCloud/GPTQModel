@@ -2606,7 +2606,10 @@ class QVQLinear(BaseQuantLinear):
             # Queue the dependency after the window decoder so both branches
             # overlap and the correction cannot observe a stale hidden value.
             torch.cuda.current_stream(transformed.device).wait_event(concurrent_done)
-        if getattr(getattr(self, "_p32_window_config", None), "recovery_kernel", None) == "fused_epilogue":
+        if getattr(getattr(self, "_p32_window_config", None), "recovery_kernel", None) in (
+            "fused_epilogue",
+            "fully_fused",
+        ):
             from ...quantization.qvq_rank8 import fused_rank8_output
 
             return fused_rank8_output(

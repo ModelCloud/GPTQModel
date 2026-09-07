@@ -361,3 +361,11 @@ necessarily the winner, so this final outside-capture launch establishes the
 window-local warm marker for the returned policy. A caller can therefore pass
 the selected immutable config directly into a subsequent graph capture without
 an undocumented cold launch or capture-time setup.
+
+The public Python policy now also exposes `recovery_kernel="fully_fused"` for
+the existing project-output Triton candidate. It requires
+`recovery_projection="project_output_fused"` and the explicit
+`unverified_project_output_fused` arithmetic signature; balanced and quality
+graphs continue to reject that signature until independent arithmetic
+certification. This makes the requested mode visible without silently treating
+the current candidate as the final WGMMA-integrated implementation.
