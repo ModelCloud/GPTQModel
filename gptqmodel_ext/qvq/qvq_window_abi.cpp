@@ -230,7 +230,11 @@ static int qvq_p32_window_linear_impl(
       }
       return project_rank8();
     };
-    if (recovery_kernel == 1 && !c.output_hadamard) {
+    // Candidate enumeration keeps recovery geometry paired between the
+    // correction-off and correction-on sweeps.  The off graph may therefore
+    // carry recovery_kernel=1 while rank8_enabled is false; never dereference
+    // absent A/B buffers in that state.
+    if (c.rank8_enabled && recovery_kernel == 1 && !c.output_hadamard) {
       at::Tensor hidden = consume_hidden();
       // The transform-free path uses one graph-safe CUDA epilogue for every
       // projection placement.  `consume_hidden` either joins the prepared

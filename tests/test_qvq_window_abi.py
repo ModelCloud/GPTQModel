@@ -171,6 +171,30 @@ def test_native_transform_free_qwen_width_rank8_fused_epilogue():
     assert error.mean() <= 2e-3 and error.max() <= 0.046875
 
 
+def test_native_fused_policy_off_does_not_touch_absent_rank8_factors():
+    """Matched correction-off candidates may retain fused geometry metadata."""
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child(
+        "native_fused_policy_off",
+        in_features=2048,
+        out_features=256,
+        device="cuda",
+        input_hadamard=False,
+        output_hadamard=False,
+    ).eval()
+    config = P32WindowConfig(
+        algorithm="hopper_m16",
+        recovery_mode="off",
+        recovery_kernel="fused_epilogue",
+    )
+    x = torch.randn(3, 2048, device="cuda", dtype=torch.float16) * 0.01
+    with torch.no_grad():
+        expected = layer(x)
+        actual = native_window_linear(layer, x, config)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize(
     "projection", ["separate_reference", "concurrent_reference", "tensor_core"]
 )
