@@ -4,6 +4,7 @@
 
 import json
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 import torch
@@ -23,6 +24,60 @@ from gptqmodel.quantization.qvq_window_tuning import (
     tune_grouped_window_kernel,
     tune_window_kernel,
 )
+
+
+def _recorded_zml_reports():
+    """Yield committed ZML reports used to audit the historical budget gate."""
+    results = Path(__file__).parents[1] / "docs/kernels/results"
+    addmm = json.loads((results / "p32_window_native_zml_addmm.json").read_text())
+    yield "addmm-unbudgeted", addmm["verifier_report"]
+    policy = json.loads(
+        (results / "p32_window_native_zml_m8192_policy.json").read_text()
+    )
+    yield "m8192-unbudgeted", policy["reports"]["unbudgeted"]
+    yield "m8192-budget5", policy["reports"]["budget5"]
+
+
+def test_recorded_overhead_audit_keeps_uncapped_improvements_visible():
+    """Historical >5% rows stay eligible unless a caller requested a cap."""
+    reports = dict(_recorded_zml_reports())
+
+    for name in ("addmm-unbudgeted", "m8192-unbudgeted"):
+        report = reports[name]
+        rows = [
+            row
+            for row in report["entries"]
+            if row.get("rank8_enabled") and row.get("accepted")
+        ]
+        assert rows
+        over_target = [
+            row
+            for row in rows
+            if row["recovery_pair"]["overhead_percent"] > 5.0
+        ]
+        assert over_target, name
+        # With no explicit budget, selection is latency based after numerical
+        # and arithmetic eligibility; the aspirational 3--6% target cannot
+        # remove an otherwise valid row.
+        fastest = min(rows, key=lambda row: row["median_ns"])
+        assert report["selected_on"] == fastest["candidate_index"]
+
+    budgeted = reports["m8192-budget5"]
+    assert budgeted["max_recovery_overhead_percent"] == 5
+    # The budgeted run intentionally excludes over-budget rows from the
+    # winner while retaining them in the report for review.
+    assert any(
+        row["recovery_pair"]["overhead_percent"] > 5.0
+        for row in budgeted["entries"]
+        if row.get("rank8_enabled")
+    )
+    selected = next(
+        row
+        for row in budgeted["entries"]
+        if row.get("rank8_enabled")
+        and row["candidate_index"] == budgeted["selected_on"]
+    )
+    assert selected["recovery_pair"]["overhead_percent"] <= 5.0
 
 
 def test_cpu_cache_revalidates_and_binds_inputs(tmp_path):
