@@ -40,6 +40,7 @@ _AUTOTUNE_CACHE: dict[_AutotuneCacheKey, int] = {}
 _AUTOTUNE_CACHE_LOCK = threading.RLock()
 _P32_TRANSITION_BITS = {2: 4, 2.5: 5, 3: 6, 3.5: 7}
 _P32_WINDOW_OP: object | None = None
+_P32_RANK8_PROJECT_OP: object | None = None
 _P32_WINDOW_GROUPED_OP: object | None = None
 _P32_WINDOW_GROUPED_FUSED_OP: object | None = None
 
@@ -75,6 +76,8 @@ class QVQAmpereGroupedP32Payload:
     trellis: torch.Tensor
     bank_ids: torch.Tensor
     plan: QVQAmpereGroupedP32Plan
+    child_trellises: tuple[torch.Tensor, ...]
+    child_bank_ids: tuple[torch.Tensor, ...]
 
 
 def _project_root() -> Path:
@@ -109,7 +112,12 @@ def _cuda_flags() -> list[str]:
 _QVQ_AMPERE_EXTENSION = TorchOpsJitExtension(
     name=_QVQ_AMPERE_NAME,
     namespace=_QVQ_AMPERE_NAMESPACE,
-    required_ops=("p32_window", "p32_window_grouped", "p32_window_grouped_fused"),
+    required_ops=(
+        "p32_window",
+        "rank8_project",
+        "p32_window_grouped",
+        "p32_window_grouped_fused",
+    ),
     sources=_source,
     build_root_env="GPTQMODEL_QVQ_AMPERE_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("qvq_ampere"),
@@ -206,6 +214,17 @@ def _p32_window_op() -> object:
     return op
 
 
+def _p32_rank8_project_op() -> object:
+    """Resolve the batched rank-8 producer once for grouped Q/K/V calls."""
+
+    global _P32_RANK8_PROJECT_OP
+    op = _P32_RANK8_PROJECT_OP
+    if op is None:
+        op = _QVQ_AMPERE_EXTENSION.op("rank8_project")
+        _P32_RANK8_PROJECT_OP = op
+    return op
+
+
 def prewarm_qvq_ampere() -> None:
     """Load the SM80 window operator before CUDA Graph capture.
 
@@ -213,6 +232,7 @@ def prewarm_qvq_ampere() -> None:
     launch-plan selection remain separate preparation-time operations.
     """
     _p32_window_op()
+    _p32_rank8_project_op()
 
 
 def prewarm_qvq_ampere_grouped() -> None:
@@ -223,6 +243,7 @@ def prewarm_qvq_ampere_grouped() -> None:
     segmented fallback or the fused grouped dispatcher.
     """
 
+    _p32_rank8_project_op()
     _p32_window_grouped_op()
     _p32_window_grouped_fused_op()
 
@@ -711,6 +732,28 @@ def _resolve_split_count(
     return int(split_count)
 
 
+def qvq_p32_rank8_project(
+    input: torch.Tensor,
+    rank8_a: torch.Tensor,
+) -> torch.Tensor:
+    """Project several rank-8 factors in one SM80 FP32-output GEMM."""
+
+    if input.ndim != 2 or rank8_a.ndim != 2:
+        raise ValueError("rank8 projection inputs must be rank 2")
+    if input.dtype != torch.float16 or rank8_a.dtype != torch.float16:
+        raise ValueError("rank8 projection inputs must be float16")
+    if tuple(rank8_a.shape[:1]) != (input.shape[1],) or rank8_a.shape[1] % 8:
+        raise ValueError("rank8_a must have shape [K, 8 * segments]")
+    if (
+        not input.is_contiguous()
+        or not rank8_a.is_contiguous()
+        or input.device != rank8_a.device
+    ):
+        raise ValueError("rank8 projection inputs must be contiguous on one device")
+    _require_warm_operator_for_capture(_P32_RANK8_PROJECT_OP, "rank8 project operator")
+    return _p32_rank8_project_op()(input, rank8_a)
+
+
 def qvq_p32_window_ampere(
     input: torch.Tensor,
     trellis: torch.Tensor,
@@ -724,6 +767,7 @@ def qvq_p32_window_ampere(
     rank8_a: torch.Tensor | None = None,
     rank8_b: torch.Tensor | None = None,
     rank8_scale: float = 1.0,
+    rank8_down: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Run exact continuous-window P32 with an optional additive rank-8 update.
 
@@ -750,31 +794,52 @@ def qvq_p32_window_ampere(
         # capture. Resolve this immutable device property while queries are
         # legal so the capture path stays allocation- and query-free.
         _device_sm_count(input.device)
-    if (rank8_a is None) != (rank8_b is None):
+    if rank8_down is not None and rank8_a is not None:
+        raise ValueError("rank8_a and rank8_down are mutually exclusive")
+    if rank8_down is not None and rank8_b is None:
+        raise ValueError("rank8_down requires rank8_b")
+    if rank8_down is None and (rank8_a is None) != (rank8_b is None):
         raise ValueError("rank8_a and rank8_b must be provided together")
     if not math.isfinite(float(rank8_scale)):
         raise ValueError("rank8_scale must be finite")
-    if rank8_a is not None:
+    if rank8_a is not None or rank8_down is not None:
         if input.ndim != 2:
             raise ValueError("QVQ P32 Ampere input must be rank 2")
-        if rank8_a.ndim != 2 or tuple(rank8_a.shape) != (input.shape[1], 8):
+        if rank8_a is not None and (
+            rank8_a.ndim != 2 or tuple(rank8_a.shape) != (input.shape[1], 8)
+        ):
             raise ValueError("rank8_a must have shape [K, 8]")
+        if rank8_down is not None and (
+            rank8_down.ndim != 2 or tuple(rank8_down.shape) != (input.shape[0], 8)
+            or rank8_down.dtype != torch.float32
+            or rank8_down.stride(1) != 1
+            or rank8_down.stride(0) < 8
+        ):
+            raise ValueError("rank8_down must be FP32 [M, 8] with unit column stride")
         if (
             rank8_b is None
             or rank8_b.ndim != 2
             or tuple(rank8_b.shape) != (8, out_features)
         ):
             raise ValueError("rank8_b must have shape [8, N]")
-        if rank8_a.dtype != torch.float16 or rank8_b.dtype not in (
+        if rank8_a is not None and rank8_a.dtype != torch.float16:
+            raise ValueError("rank8_a must be float16")
+        if rank8_b.dtype not in (
             torch.float16,
             torch.float32,
         ):
             raise ValueError(
                 "rank8_a must be float16 and rank8_b must be float16 or float32"
             )
-        if not rank8_a.is_contiguous() or not rank8_b.is_contiguous():
+        if rank8_a is not None and not rank8_a.is_contiguous():
+            raise ValueError("rank8_a must be contiguous")
+        if not rank8_b.is_contiguous():
             raise ValueError("rank8_a and rank8_b must be contiguous")
-        if rank8_a.device != input.device or rank8_b.device != input.device:
+        if (
+            rank8_b.device != input.device
+            or (rank8_a is not None and rank8_a.device != input.device)
+            or (rank8_down is not None and rank8_down.device != input.device)
+        ):
             raise ValueError("rank8_a and rank8_b must share the input device")
         if split_count == 0:
             split_count = _static_split_count(
@@ -804,6 +869,7 @@ def qvq_p32_window_ampere(
             rank8_a,
             rank8_b,
             float(rank8_scale),
+            rank8_down,
         )
     if (
         split_count == 0
@@ -1286,6 +1352,8 @@ def qvq_pack_p32_window_ampere_group(
     words_per_tile = 4 * plan.transition_bits
     trellis_parts = []
     bank_parts = []
+    child_trellises = []
+    child_bank_ids = []
     for trellis, selectors, segment in zip(
         trellises, bank_ids, plan.segments, strict=True
     ):
@@ -1296,10 +1364,14 @@ def qvq_pack_p32_window_ampere_group(
             raise ValueError("QVQ P32 Ampere grouped bank ids have the wrong dtype or length")
         if trellis.device != trellises[0].device or selectors.device != trellises[0].device:
             raise ValueError("QVQ P32 Ampere grouped payloads must share one device")
-        trellis_parts.append(
-            trellis.reshape(k_tiles, segment.output_tile_count, words_per_tile)
-        )
-        bank_parts.append(selectors.reshape(k_tiles, segment.output_tile_count))
+        child_trellis = trellis.reshape(
+            k_tiles, segment.output_tile_count, words_per_tile
+        ).contiguous()
+        child_banks = selectors.reshape(k_tiles, segment.output_tile_count).contiguous()
+        child_trellises.append(child_trellis.reshape(-1, words_per_tile))
+        child_bank_ids.append(child_banks.reshape(-1))
+        trellis_parts.append(child_trellis)
+        bank_parts.append(child_banks)
     grouped_trellis = torch.cat(trellis_parts, dim=1).reshape(
         -1, words_per_tile
     ).contiguous()
@@ -1308,6 +1380,8 @@ def qvq_pack_p32_window_ampere_group(
         trellis=grouped_trellis,
         bank_ids=grouped_bank_ids,
         plan=plan,
+        child_trellises=tuple(child_trellises),
+        child_bank_ids=tuple(child_bank_ids),
     )
 
 
@@ -1315,8 +1389,19 @@ def qvq_p32_window_ampere_grouped_packed(
     input: torch.Tensor,
     payload: QVQAmpereGroupedP32Payload,
     levels: torch.Tensor,
+    *,
+    rank8_as: Sequence[torch.Tensor] | None = None,
+    rank8_bs: Sequence[torch.Tensor] | None = None,
+    rank8_scales: Sequence[float] | None = None,
+    rank8_packed_a: torch.Tensor | None = None,
+    rank8_packed_b: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, ...]:
-    """Execute a cached grouped payload with one segmented main launch."""
+    """Execute a cached grouped payload with one segmented main launch.
+
+    ``rank8_as``/``rank8_bs`` are the child-local factors.  The A factors are
+    concatenated for one shared producer, while each B remains child-local so
+    no per-call transpose or slice copy is needed in the reducers.
+    """
 
     plan = payload.plan
     if int(input.shape[1]) != plan.in_features:
@@ -1336,6 +1421,10 @@ def qvq_p32_window_ampere_grouped_packed(
         for segment in plan.segments
     )
     if len(plan.segments) > 3 or plan.in_features > 6144 or uses_warp_reducer:
+        if rank8_as is not None or rank8_bs is not None:
+            raise ValueError(
+                "grouped Ampere rank8 requires supported child window shapes"
+            )
         _require_warm_operator_for_capture(_P32_WINDOW_GROUPED_OP, "grouped operator")
         k_tiles = plan.in_features // 16
         words_per_tile = 4 * plan.transition_bits
@@ -1365,6 +1454,90 @@ def qvq_p32_window_ampere_grouped_packed(
                 split_counts,
             )
         )
+    if (rank8_as is None) != (rank8_bs is None):
+        raise ValueError("rank8_as and rank8_bs must be provided together")
+    if rank8_as is not None:
+        if len(rank8_as) != len(plan.segments) or len(rank8_bs) != len(plan.segments):
+            raise ValueError("grouped Ampere rank8 factor lists must match segments")
+        if rank8_scales is None:
+            scales = [1.0] * len(plan.segments)
+        else:
+            scales = [float(scale) for scale in rank8_scales]
+            if len(scales) != len(plan.segments):
+                raise ValueError("grouped Ampere rank8 scales must match segment count")
+        transition_rate = {
+            4: 2.0,
+            5: 2.5,
+            6: 3.0,
+            7: 3.5,
+        }[plan.transition_bits]
+        if (
+            len(plan.segments) == 3
+            and input.shape[0] <= 4
+            and plan.in_features <= 6144
+        ):
+            packed_a = (
+                torch.cat(tuple(rank8_as), dim=1).contiguous()
+                if rank8_packed_a is None
+                else rank8_packed_a
+            )
+            packed_b = (
+                torch.cat(tuple(rank8_bs), dim=1).contiguous()
+                if rank8_packed_b is None
+                else rank8_packed_b
+            )
+            _require_warm_operator_for_capture(
+                _P32_WINDOW_GROUPED_FUSED_OP, "grouped fused operator"
+            )
+            grouped_output = _p32_window_grouped_fused_op()(
+                input,
+                payload.trellis,
+                levels,
+                payload.bank_ids,
+                plan.transition_bits,
+                widths,
+                alt_ids,
+                split_counts,
+                packed_a,
+                packed_b,
+                scales,
+            )
+            row_count = int(input.shape[0])
+            return tuple(
+                child.reshape(row_count, width)
+                for child, width in zip(
+                    torch.split(
+                        grouped_output,
+                        [row_count * width for width in widths],
+                    ),
+                    widths,
+                    strict=True,
+                )
+            )
+        packed_a = (
+            torch.cat(tuple(rank8_as), dim=1).contiguous()
+            if rank8_packed_a is None
+            else rank8_packed_a
+        )
+        rank8_down = qvq_p32_rank8_project(input, packed_a)
+        outputs = []
+        for segment, (rank8_b, scale) in enumerate(zip(rank8_bs, scales, strict=True)):
+            outputs.append(
+                qvq_p32_window_ampere(
+                    input,
+                    payload.child_trellises[segment],
+                    levels,
+                    payload.child_bank_ids[segment],
+                    transition_rate,
+                    out_features=plan.segments[segment].out_features,
+                    bank_alt_id=plan.segments[segment].bank_alt_id,
+                    split_count=plan.segments[segment].split_count,
+                    rank8_b=rank8_b,
+                    rank8_scale=scale,
+                    rank8_down=rank8_down[:, segment * 8:(segment + 1) * 8],
+                )
+            )
+        return tuple(outputs)
     _require_warm_operator_for_capture(
         _P32_WINDOW_GROUPED_FUSED_OP, "grouped fused operator"
     )
@@ -1399,6 +1572,9 @@ def qvq_p32_window_ampere_grouped(
     out_features: Sequence[int],
     bank_alt_ids: Sequence[int],
     split_counts: Sequence[int] | None = None,
+    rank8_as: Sequence[torch.Tensor] | None = None,
+    rank8_bs: Sequence[torch.Tensor] | None = None,
+    rank8_scales: Sequence[float] | None = None,
 ) -> tuple[torch.Tensor, ...]:
     """Run legal P32 siblings from one shared transformed activation.
 
@@ -1420,7 +1596,20 @@ def qvq_p32_window_ampere_grouped(
         split_counts=split_counts,
     )
     payload = qvq_pack_p32_window_ampere_group(trellises, bank_ids, plan)
-    return qvq_p32_window_ampere_grouped_packed(input, payload, levels)
+    if (rank8_as is None) != (rank8_bs is None):
+        raise ValueError("rank8_as and rank8_bs must be provided together")
+    if rank8_as is None:
+        return qvq_p32_window_ampere_grouped_packed(input, payload, levels)
+    if len(rank8_as) != len(plan.segments) or len(rank8_bs) != len(plan.segments):
+        raise ValueError("grouped Ampere rank8 factor lists must match segments")
+    return qvq_p32_window_ampere_grouped_packed(
+        input,
+        payload,
+        levels,
+        rank8_as=tuple(rank8_as),
+        rank8_bs=tuple(rank8_bs),
+        rank8_scales=rank8_scales,
+    )
 
 
 __all__ = [
@@ -1430,11 +1619,12 @@ __all__ = [
     "clear_qvq_ampere_autotune_cache",
     "prewarm_qvq_ampere",
     "prewarm_qvq_ampere_grouped",
+    "qvq_p32_rank8_project",
     "qvq_p32_window_ampere",
     "qvq_p32_window_ampere_group_plan",
     "qvq_p32_window_ampere_grouped",
+    "qvq_p32_window_ampere_grouped_kernel_candidates",
     "qvq_p32_window_ampere_grouped_packed",
     "qvq_p32_window_ampere_kernel_candidates",
-    "qvq_p32_window_ampere_grouped_kernel_candidates",
     "qvq_pack_p32_window_ampere_group",
 ]

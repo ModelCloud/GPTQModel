@@ -21,6 +21,7 @@ from gptqmodel.utils.qvq_ampere_cuda import (
     _auto_split_count,
     _autotune_candidates,
     _autotune_enabled,
+    qvq_p32_rank8_project,
     qvq_p32_window_ampere,
     qvq_p32_window_ampere_kernel_candidates,
 )
@@ -754,6 +755,25 @@ def test_p32_window_ampere_optional_rank8_projection(projection_b_dtype):
     )
 
     torch.testing.assert_close(actual, expected, atol=3e-3, rtol=0.0)
+
+    # The grouped Q/K/V path supplies a strided 8-column view into one
+    # shared FP32 projection.  It must preserve the same correction as the
+    # child-local producer path.
+    packed_a = torch.cat((rank8_a, torch.randn_like(rank8_a)), dim=1).contiguous()
+    shared_down = qvq_p32_rank8_project(input, packed_a)
+    precomputed = qvq_p32_window_ampere(
+        input,
+        window,
+        levels,
+        bank_ids,
+        bits,
+        out_features=out_features,
+        split_count=2,
+        rank8_b=rank8_b,
+        rank8_scale=rank8_scale,
+        rank8_down=shared_down[:, :8],
+    )
+    torch.testing.assert_close(precomputed, actual, rtol=0.0, atol=0.0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
