@@ -2305,23 +2305,49 @@ def grouped_window_kernel_candidates_for_shape(layers, *, m):
     if len(candidates) < 2:
         return candidates
 
-    def score(choice):
-        value = 0
-        for child, config in zip(layers, choice, strict=True):
-            if config.block_m:
-                if m < config.block_m:
-                    value += 50
-                if m % config.block_m:
-                    value += 100
-            if config.block_n and child.out_features % config.block_n:
-                value += 10
-        return value
-
     return tuple(
         choice
         for _, choice in sorted(
-            enumerate(candidates), key=lambda item: (score(item[1]), item[0])
+            enumerate(candidates),
+            key=lambda item: (
+                grouped_window_kernel_shape_score(layers, item[1], m=m),
+                item[0],
+            ),
         )
+    )
+
+
+def window_kernel_shape_score(layer, config, *, m):
+    """Return the deterministic priority score for one window candidate.
+
+    This is an ordering hint for direct Python/ZML autotuners. It intentionally
+    never filters a candidate: a shape-specific outlier must remain measurable
+    and eligible for the normal correctness and quality gates.
+    """
+    if type(m) is not int or not 1 <= m <= 8192:
+        raise ValueError("window candidate scoring requires M in [1,8192]")
+    score = 0
+    if config.algorithm == "hopper_m16" and m >= 512:
+        score += 200
+    if config.block_m:
+        if m < config.block_m:
+            score += 50
+        if m % config.block_m:
+            score += 100
+    if config.block_n and layer.out_features % config.block_n:
+        score += 10
+    return score
+
+
+def grouped_window_kernel_shape_score(layers, choice, *, m):
+    """Return the grouped shape-priority score used by the ordering helper."""
+    if type(m) is not int or not 1 <= m <= 8192:
+        raise ValueError("grouped candidate scoring requires M in [1,8192]")
+    if len(layers) != len(choice):
+        raise ValueError("grouped score requires one candidate per layer")
+    return sum(
+        window_kernel_shape_score(layer, config, m=m)
+        for layer, config in zip(layers, choice, strict=True)
     )
 
 

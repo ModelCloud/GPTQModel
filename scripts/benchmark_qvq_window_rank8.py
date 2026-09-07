@@ -32,6 +32,18 @@ def main():
     parser.add_argument("--n", type=int, default=2048)
     parser.add_argument("--m", type=int, nargs="+", default=[1, 16, 128, 512, 2048])
     parser.add_argument("--bits", type=float, default=3)
+    parser.add_argument(
+        "--input-hadamard",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="synthetic fixture input transform (package metadata wins when --package is used)",
+    )
+    parser.add_argument(
+        "--output-hadamard",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="synthetic fixture output transform (package metadata wins when --package is used)",
+    )
     parser.add_argument("--kernel", default="separate_reference")
     parser.add_argument("--projection", default="separate_reference")
     parser.add_argument("--algorithm", default="auto")
@@ -106,6 +118,8 @@ def main():
             torch.load(args.package, weights_only=True), device="cuda"
         )
     else:
+        input_hadamard = True if args.input_hadamard is None else args.input_hadamard
+        output_hadamard = True if args.output_hadamard is None else args.output_hadamard
         layer = (
             QVQLinear(
                 bits=args.bits,
@@ -113,6 +127,8 @@ def main():
                 out_features=args.n,
                 bank_count=2,
                 v2b2_p32=True,
+                input_hadamard=input_hadamard,
+                output_hadamard=output_hadamard,
             )
             .eval()
             .cuda()
@@ -198,6 +214,11 @@ def main():
             "quality_mode": args.quality_mode,
             "measure_recovery_candidates": args.measure_recovery_candidates,
             "max_recovery_overhead_percent": args.max_recovery_overhead_percent,
+        },
+        "transform": {
+            "input_hadamard": bool(layer.input_hadamard),
+            "output_hadamard": bool(layer.output_hadamard),
+            "source": "package" if args.package else "synthetic_cli_or_default",
         },
         "rows": [],
     }

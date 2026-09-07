@@ -13,11 +13,13 @@ from test_qvq_window_recovery import _kernel_rank8, fixture
 from gptqmodel.quantization.qvq_rank8 import (
     P32WindowConfig,
     export_window_package,
+    grouped_window_kernel_shape_score,
     load_window_artifact,
     load_window_package,
     prepare_rank8,
     save_window_artifact,
     window_kernel_candidates,
+    window_kernel_shape_score,
 )
 from gptqmodel.quantization.qvq_window_tuning import (
     measure_rank8_overhead,
@@ -36,6 +38,21 @@ def _recorded_zml_reports():
     )
     yield "m8192-unbudgeted", policy["reports"]["unbudgeted"]
     yield "m8192-budget5", policy["reports"]["budget5"]
+
+
+def test_shape_scores_are_public_ordering_hints_only():
+    layer = type("Layer", (), {"out_features": 2048})()
+    small_m16 = P32WindowConfig(algorithm="hopper_m16")
+    direct_bm32 = P32WindowConfig(
+        algorithm="hopper_direct_decode_mma", block_m=32, block_n=64, warp_groups=1
+    )
+    large_m16 = window_kernel_shape_score(layer, small_m16, m=512)
+    assert window_kernel_shape_score(layer, small_m16, m=96) == 0
+    assert window_kernel_shape_score(layer, direct_bm32, m=96) == 0
+    assert large_m16 == 200
+    assert grouped_window_kernel_shape_score(
+        (layer, layer), (direct_bm32, direct_bm32), m=96
+    ) == 0
 
 
 def test_recorded_overhead_audit_keeps_uncapped_improvements_visible():
@@ -153,6 +170,8 @@ def test_grouped_tuner_selects_one_complete_child_tuple_and_caches_it(monkeypatc
     assert result.configs == alternate
     assert result.report["selected"] == [config.to_backend_config() for config in alternate]
     assert not result.cache_hit
+    assert len(result.report["identity"]["candidate_shape_scores"]) == 2
+    assert all("shape_score" in row for row in result.report["rows"])
 
     cached = tune_grouped_window_kernel(
         (first, second),
@@ -255,6 +274,10 @@ def test_window_tuner_can_attach_matched_rank8_overhead(tmp_path):
         measure_recovery=True,
     )
     assert result.report["recovery_overhead"]["overhead_percent"] == pytest.approx(5.0)
+    assert len(result.report["identity"]["candidate_shape_scores"]) == len(
+        result.report["rows"]
+    )
+    assert "shape_score" in result.report["rows"][0]
     cached = next(tmp_path.glob("*.json"))
     assert json.loads(cached.read_text())["recovery_overhead"]["overhead_percent"] == pytest.approx(5.0)
     assert layer._p32_window_config == result.config
