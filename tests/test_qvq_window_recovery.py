@@ -200,6 +200,32 @@ def test_rank8_large_output_uses_bounded_randomized_solver():
     torch.testing.assert_close(b, again_b, rtol=0, atol=0)
 
 
+def test_rank_candidate_weights_are_square_root_objective_weights():
+    """Nonuniform row weighting follows the documented least-squares contract."""
+    torch.manual_seed(32)
+    x = torch.randn(12, 5, dtype=torch.float64)
+    residual = torch.randn(12, 9, dtype=torch.float64)
+    weights = torch.linspace(0.5, 2.0, x.shape[0], dtype=torch.float64).reshape(-1, 1)
+    candidate = fit_rank_candidates(
+        x,
+        residual,
+        ranks=(2,),
+        weights=weights,
+        max_solver_bytes=1,
+        seed=23,
+    )[2]
+    weighted_error = (
+        residual * weights
+        - (x * weights) @ candidate["A"] @ candidate["B"]
+    )
+    torch.testing.assert_close(
+        candidate["weighted_fit"]["mse"],
+        float(weighted_error.square().mean()),
+        rtol=0,
+        atol=1e-12,
+    )
+
+
 def test_bounded_solver_selects_only_predictable_residual_directions():
     """The bounded range finder must project R through the activation span."""
     torch.manual_seed(31)
