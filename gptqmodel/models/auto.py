@@ -190,6 +190,7 @@ from .definitions.qwen4_exp import Qwen4ExpQModel  # noqa: E402
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.solar_open import SolarOpenQModel  # noqa: E402
 from .definitions.solar_open2 import SolarOpen2QModel  # noqa: E402
+from .definitions.spark2_5 import Spark2_5QModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.unlimited_ocr import UnlimitedOCRQModel  # noqa: E402
@@ -361,6 +362,7 @@ MODEL_MAP = {
     "seed_oss": LlamaQModel, # 100% llama clone
     "solar_open": SolarOpenQModel,
     "solar_open2": SolarOpen2QModel,
+    "spark2_5": Spark2_5QModel,
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
     "locateanything": LocateAnythingQModel,

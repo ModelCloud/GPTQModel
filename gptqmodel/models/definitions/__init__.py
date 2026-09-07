@@ -102,6 +102,7 @@ from .qwen4_exp import Qwen4ExpQModel
 from .rw import RwgQModel
 from .solar_open import SolarOpenQModel
 from .solar_open2 import SolarOpen2QModel
+from .spark2_5 import Spark2_5QModel
 from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel
 from .unlimited_ocr import UnlimitedOCRQModel

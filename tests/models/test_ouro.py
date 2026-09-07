@@ -7,7 +7,7 @@ from model_test import ModelTest
 
 
 class TestOuro(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Ouro-1.4B"
+    NATIVE_MODEL_ID = "/monster/data/model/Ouro-1.4B" # ByteDance/Ouro-1.4B
     TRUST_REMOTE_CODE = True
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 32
