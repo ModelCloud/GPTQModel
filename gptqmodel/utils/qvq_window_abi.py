@@ -106,23 +106,43 @@ def native_window_linear(layer, x, config):
 
     This setup/reference helper is not a hot-path dispatcher. External hosts
     load/validate once, retain their buffers, and call the library directly.
-    Initial ABI coverage is explicit Hopper geometry and reference correction;
-    prepared graph handles additionally support stream-overlapped
-    ``concurrent_reference`` and explicitly unverified ``tensor_core``
-    producers. Unsupported policies fail rather than selecting an implicit
-    substitute.
+    The ABI covers the unified Hopper rank8 policy set. Prepared graph handles
+    retain stream-overlapped producer support, while project-output fusion is
+    executed directly in the native rank8 epilogue. Unsupported shape/policy
+    combinations fail rather than selecting an implicit substitute.
     """
     from ..quantization.qvq_rank8 import prepare_rank8
     from .qvq_cuda import _pgc16_levels
 
     if (config.algorithm not in ("hopper_m16", "hopper_direct_decode_mma")
             or (config.algorithm == "hopper_direct_decode_mma" and not config.block_m)
-            or config.recovery_kernel not in ("separate_reference", "fused_epilogue")
+            or config.recovery_kernel not in (
+                "separate_reference", "fused_epilogue", "fully_fused"
+            )
             or config.recovery_projection not in (
-                "separate_reference", "concurrent_reference", "tensor_core"
+                "separate_reference",
+                "input_fused",
+                "concurrent_reference",
+                "tensor_core",
+                "project_output_fused",
             )
             or (
-                config.recovery_kernel == "fused_epilogue"
+                config.recovery_kernel == "fully_fused"
+                and config.recovery_projection != "project_output_fused"
+            )
+            or (
+                config.recovery_projection == "project_output_fused"
+                and (
+                    config.recovery_kernel == "separate_reference"
+                    or layer.out_features > 16384
+                    or (
+                        layer.output_hadamard
+                        and layer.out_features & (layer.out_features - 1)
+                    )
+                )
+            )
+            or (
+                config.recovery_kernel in ("fused_epilogue", "fully_fused")
                 and layer.output_hadamard
                 and layer.out_features & (layer.out_features - 1)
             )
@@ -158,11 +178,17 @@ def native_window_linear(layer, x, config):
         layer._cached_cast("bias", torch.float16),
         layer.rank8_A if enabled else None, layer.rank8_B if enabled else None, output,
     )
-    recovery_kernel = {"separate_reference": 0, "fused_epilogue": 1}[config.recovery_kernel]
+    recovery_kernel = {
+        "separate_reference": 0,
+        "fused_epilogue": 1,
+        "fully_fused": 2,
+    }[config.recovery_kernel]
     recovery_projection = {
         "separate_reference": 0,
         "concurrent_reference": 1,
         "tensor_core": 2,
+        "input_fused": 3,
+        "project_output_fused": 4,
     }[config.recovery_projection]
     native = WindowConfig(
         3, ctypes.sizeof(WindowConfig), x.shape[0], layer.in_features, layer.out_features,

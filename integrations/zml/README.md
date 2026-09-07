@@ -5,7 +5,7 @@ and invokes `qvq_p32_window_linear` on the PJRT-provided CUDA stream. It uses th
 existing lossless window payload and Hopper operators. Rank8 is optional input
 state of the same call. It does not introduce another checkpoint format.
 
-The initial native reference bridge supports:
+The native reference bridge supports:
 
 - SM90, contiguous FP16 activation/scales/levels/factors/output;
 - M=1..8192, 256-wide K=2048..16384 and N=256..17408. Input/output
@@ -16,9 +16,10 @@ The initial native reference bridge supports:
 - existing M16 or direct BM32/64/128, BN64/128, BK256, stages2, split1;
 - optional input/output Hadamard and bias;
 - rank8 off, or FP32 projection → FP16 hidden → FP32 expansion/addition. The
-  prepared graph ABI also exposes `concurrent_reference` and an explicitly
-  unverified Tensor Core producer on owned auxiliary streams; both join before
-  the epilogue.
+  prepared graph ABI also exposes `concurrent_reference`, `input_fused`,
+  Tensor Core, and project-output producers. Tensor Core, input-fused, and
+  project-output rows are explicitly unverified fast candidates; concurrent
+  reference remains the numerically reference producer.
 
 `Config` exposes the geometry, M range, transform flags and correction flag
 as individual compiler attributes. Resolve the correction flag from validated
@@ -49,13 +50,17 @@ requirements.
 ordinary Zig data, so a ZML autotune pass can compile the exact same `linear`
 call for each geometry and retain the winner in its shape/device cache. It
 also emits `recovery_projection=0` (separate reference),
-`recovery_projection=1` (concurrent reference), and
-`recovery_projection=2` (concurrent Tensor Core, unverified/fast-only) for
-every geometry. For
-transform-free output modules each projection is paired with
+`recovery_projection=1` (concurrent reference),
+`recovery_projection=2` (concurrent Tensor Core),
+`recovery_projection=3` (input-fused), and
+`recovery_projection=4` (project-output fused). For transform-free and
+power-of-two output-Hadamard modules, projections 0..3 are paired with
 `recovery_kernel=0` (separate epilogue) and `recovery_kernel=1` (fused
-epilogue), yielding 42 candidates for transform-free and power-of-two
-output-Hadamard modules; composite output-Hadamard modules yield 21. The
+epilogue), while projection 4 is paired with kernel 1 and
+`recovery_kernel=2` (fully-fused project-output), yielding 70 candidates.
+Transform-free N>16384 modules omit projection 4 and yield 56; composite
+output-Hadamard modules retain only the four reference-kernel projections and
+yield 28. The
 off-state enumeration retains the same indices while ignoring A/B, so every
 on-state projection has a matched correction-off baseline. The list is
 deliberately not pruned globally: a geometry that wins one M or projection
@@ -73,12 +78,13 @@ Each enumerated candidate is bound to the exact measured `M` by setting
 without a fresh enumeration and measurement.
 
 For transform-free outputs, the native ABI uses the fused FP32-add/FP16-store
-epilogue for both separate-reference and concurrent rank8 projections. The
-same graph-safe epilogue now folds the power-of-two output Hadamard path;
-composite output widths retain the reference epilogue until a native fused
-transform is certified. The Tensor Core projection remains an explicitly
-unverified candidate. ZML enumerates the fused output-Hadamard candidate only
-when its native power-of-two contract is valid.
+epilogue for reference/concurrent producers. Projection 4 instead fuses the
+rank-8 projection with expansion, post-scale/bias, and (when applicable) the
+power-of-two output Hadamard in one SM90 CTA-owned epilogue; it avoids the
+temporary Mx8 hidden tensor. Kernel 2 is the explicit fully-fused policy for
+that project-output path. These changed reduction/store orderings remain
+unverified and are eligible only for fast mode until a target-model arithmetic
+audit certifies them. Composite output widths retain the reference epilogue.
 
 Grouped P32 tuning follows the same contract through
 `p32GroupedCandidateSetForShape`: child split tuples matching the exact

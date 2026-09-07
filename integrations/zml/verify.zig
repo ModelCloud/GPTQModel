@@ -80,7 +80,14 @@ fn measureCandidate(
         .mean_absolute_error = stats.mean,
         .max_absolute_error = stats.max,
         .accepted = stats.accepted,
-        .arithmetic_signature = if (candidate.recovery_kernel == 1 or candidate.recovery_projection == 2)
+        // Every fused producer/epilogue changes the reduction or store
+        // ordering relative to the certified FP32 reference. Keep those
+        // rows visible to fast tuning, but never promote them into balanced
+        // or quality mode without an explicit arithmetic audit.
+        .arithmetic_signature = if (candidate.recovery_kernel != 0 or
+            candidate.recovery_projection == 2 or
+            candidate.recovery_projection == 3 or
+            candidate.recovery_projection == 4)
             .unverified
         else
             .reference_fp32_v1,
@@ -184,15 +191,18 @@ pub fn main(init: std.process.Init) !void {
         }
     else
         null;
+    const paths = manifest.value.object.get("libraries").?.array.items;
+    // Load the LibTorch/QVQ DSOs before PJRT initializes its bundled CUDA
+    // runtime. Registration itself still happens after platform creation.
+    var runtime = try window.Runtime.load(.{ paths[0].string, paths[1].string, paths[2].string });
+    defer runtime.deinit();
     const platform: *zml.Platform = try .auto(allocator, io, .{
         .xla_gpu = .{ .allocator = .{ .bfc = .{ .preallocate = false, .memory_fraction = 0.5 } } },
     });
     defer platform.deinit(allocator, io);
     if (platform.target != .cuda) return error.CudaPlatformRequired;
     std.log.info("window verification platform: {f}", .{platform.fmtVerbose()});
-    const paths = manifest.value.object.get("libraries").?.array.items;
-    var runtime = try window.Runtime.init(.{ paths[0].string, paths[1].string, paths[2].string }, platform);
-    defer runtime.deinit();
+    try runtime.register(platform);
     var tensors: window.Input = undefined;
     var buffers: zml.Bufferized(window.Input) = undefined;
     inline for (@typeInfo(window.Input).@"struct".fields) |field| {

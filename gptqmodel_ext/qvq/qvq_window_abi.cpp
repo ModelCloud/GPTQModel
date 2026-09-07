@@ -40,6 +40,24 @@ extern "C" void qvq_rank8_epilogue_hadamard(
     const at::Tensor& bias,
     at::Tensor& output,
     cudaStream_t stream);
+extern "C" void qvq_rank8_project_output_no_hadamard(
+    const at::Tensor& transformed,
+    const at::Tensor& rank8_a,
+    const at::Tensor& rank8_b,
+    const at::Tensor& base,
+    const at::Tensor& scale_v,
+    const at::Tensor& bias,
+    at::Tensor& output,
+    cudaStream_t stream);
+extern "C" void qvq_rank8_project_output_hadamard(
+    const at::Tensor& transformed,
+    const at::Tensor& rank8_a,
+    const at::Tensor& rank8_b,
+    const at::Tensor& base,
+    const at::Tensor& scale_v,
+    const at::Tensor& bias,
+    at::Tensor& output,
+    cudaStream_t stream);
 
 namespace {
 thread_local bool owned_capture = false;
@@ -114,10 +132,18 @@ static int qvq_p32_window_linear_impl(
           "native reference ABI requires BK256, stages2, split1");
     check(c.input_hadamard <= 1 && c.output_hadamard <= 1 && c.rank8_enabled <= 1,
           "native window flags must be zero or one");
-    check(recovery_kernel <= 1 && recovery_projection <= 2,
-          "native rank8 policy supports separate_reference or fused_epilogue with separate_reference, concurrent_reference, or tensor_core projection");
-    check(recovery_kernel != 1 || !c.output_hadamard || power2(c.n),
+    check(recovery_kernel <= 2 && recovery_projection <= 4,
+          "native rank8 policy has invalid recovery kernel or projection");
+    if (c.rank8_enabled) {
+      check(recovery_projection != 4 || recovery_kernel != 0,
+            "project-output recovery requires a fused recovery kernel");
+      check(recovery_kernel != 2 || recovery_projection == 4,
+            "fully-fused recovery requires project-output projection");
+    }
+    check(!c.rank8_enabled || recovery_kernel == 0 || !c.output_hadamard || power2(c.n),
           "native fused rank8 epilogue requires power-of-two output Hadamard");
+    check(!c.rank8_enabled || recovery_projection != 4 || c.n <= 16384,
+          "native project-output recovery requires N <= 16384");
     check(!c.input_hadamard || power2(c.k),
           "native input Hadamard requires power-of-two K");
     check(!c.output_hadamard || power2(c.n),
@@ -188,8 +214,11 @@ static int qvq_p32_window_linear_impl(
     auto transformed = c.input_hadamard
         ? hadamard(input, scale_u, c10::IValue(), c10::IValue(), 2)
         : input * scale_u;
-    const bool concurrent_projection = c.rank8_enabled && recovery_projection != 0;
+    const bool project_output_projection = c.rank8_enabled && recovery_projection == 4;
+    const bool concurrent_projection = c.rank8_enabled && recovery_projection != 0 &&
+        !project_output_projection;
     const bool tensorcore_projection = recovery_projection == 2;
+    const bool use_recovery_stream = recovery_stream != nullptr && !owned_capture;
     at::Tensor rank8_a_float;
     if (c.rank8_enabled && !tensorcore_projection) {
       rank8_a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
@@ -205,7 +234,7 @@ static int qvq_p32_window_linear_impl(
     if (concurrent_projection) {
       // Start the rank8 producer as soon as X' is ready. The base WGMMA is
       // queued on the caller stream below and can overlap this projection.
-      if (recovery_stream != nullptr) {
+      if (use_recovery_stream) {
         C10_CUDA_CHECK(cudaEventRecord(recovery_ready, static_cast<cudaStream_t>(cuda_stream)));
         C10_CUDA_CHECK(cudaStreamWaitEvent(recovery_stream, recovery_ready, 0));
         {
@@ -241,19 +270,34 @@ static int qvq_p32_window_linear_impl(
     bool wrote_output = false;
     const auto consume_hidden = [&]() {
       if (concurrent_projection) {
-        if (recovery_stream != nullptr) {
+        if (use_recovery_stream) {
           C10_CUDA_CHECK(cudaStreamWaitEvent(static_cast<cudaStream_t>(cuda_stream), recovery_done, 0));
         }
         return pending_hidden;
       }
       return project_rank8();
     };
+    if (project_output_projection) {
+      // Consume transformed input directly in the fused native epilogue.
+      // This avoids the temporary Mx8 producer and remains an unverified fast
+      // candidate until the target-model arithmetic audit is complete.
+      if (c.output_hadamard) {
+        qvq_rank8_project_output_hadamard(
+            transformed, a, b, inner, scale_v, output_bias, output,
+            static_cast<cudaStream_t>(cuda_stream));
+      } else {
+        qvq_rank8_project_output_no_hadamard(
+            transformed, a, b, inner, scale_v, output_bias, output,
+            static_cast<cudaStream_t>(cuda_stream));
+      }
+      wrote_output = true;
+    }
     // Candidate enumeration keeps recovery geometry paired between the
     // correction-off and correction-on sweeps.  The off graph may therefore
     // carry recovery_kernel=1 while rank8_enabled is false; never dereference
     // absent A/B buffers in that state.  When enabled, use the matching fused
     // epilogue for either output-transform contract.
-    if (c.rank8_enabled && recovery_kernel == 1) {
+    if (!wrote_output && c.rank8_enabled && recovery_kernel >= 1) {
       at::Tensor hidden = consume_hidden();
       // Both transform-free and power-of-two output-Hadamard paths use a
       // graph-safe CUDA epilogue. `consume_hidden` either joins the prepared
@@ -382,7 +426,7 @@ extern "C" int qvq_p32_window_graph_create(
         config->struct_bytes >= offsetof(QvqP32WindowConfig, recovery_kernel) +
             2 * sizeof(uint32_t);
     if (config->rank8_enabled && has_recovery_policy &&
-        config->recovery_projection != 0) {
+        config->recovery_projection != 0 && config->recovery_projection != 4) {
       // The auxiliary producer is owned by the prepared graph.  Creating it
       // here, before capture, keeps replay free of stream/event allocation.
       C10_CUDA_CHECK(cudaStreamCreateWithFlags(
