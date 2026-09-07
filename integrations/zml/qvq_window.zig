@@ -1028,6 +1028,42 @@ pub fn enumerateCandidates(base: Config, output: []Config) usize {
     return count;
 }
 
+/// Enumerate the same executable candidate set with deterministic
+/// shape-aware priority. Every supported BM/BN choice remains present so the
+/// tuner can discover wins that do not match this heuristic; compatible tiles
+/// are simply measured first. This is preparation-time ordering only.
+pub fn enumerateCandidatesForShape(base: Config, output: []Config) usize {
+    const count = enumerateCandidates(base, output);
+    if (count < 2) return count;
+    var index: usize = 1;
+    while (index < count) : (index += 1) {
+        const value = output[index];
+        const value_score = candidateShapeScore(base, value);
+        var insert = index;
+        while (insert > 0 and candidateShapeScore(base, output[insert - 1]) > value_score) {
+            output[insert] = output[insert - 1];
+            insert -= 1;
+        }
+        output[insert] = value;
+    }
+    return count;
+}
+
+fn candidateShapeScore(base: Config, candidate: Config) i32 {
+    // M16 is the safe small-M fallback. For larger batches direct tiles are
+    // measured first, while all candidates remain in the returned set.
+    var score: i32 = if (candidate.algorithm == 1)
+        (if (base.m < 512) 0 else 200)
+    else
+        0;
+    if (candidate.block_m != 0) {
+        if (base.m < candidate.block_m) score += 50;
+        if (base.m % candidate.block_m != 0) score += 100;
+    }
+    if (candidate.block_n != 0 and base.n % candidate.block_n != 0) score += 10;
+    return score;
+}
+
 // Config is explicit compiler data: ZML may enumerate supported BM/BN/M
 // candidates before lowering. rank8_enabled is resolved by quantizer metadata
 // and requested quality mode, not chosen merely by latency.
@@ -1336,6 +1372,28 @@ test "native window shape policy admits composite transform-free Qwen tiles" {
     try std.testing.expect(!nativeWindowShapeSupported(5120, 17408, false, true));
     try std.testing.expect(nativeWindowShapeSupported(2048, 2048, true, true));
     try std.testing.expect(!nativeWindowShapeSupported(2048, 17920, false, false));
+}
+
+test "shape-aware candidate ordering keeps every geometry" {
+    var candidates: [max_candidate_count]Config = undefined;
+    const count = enumerateCandidatesForShape(.{
+        .m = 96,
+        .k = 2048,
+        .n = 2048,
+        .transition_bits = 4,
+        .bank_alt_id = 2,
+        .algorithm = 2,
+    }, &candidates);
+    try std.testing.expectEqual(max_candidate_count, count);
+    try std.testing.expectEqual(@as(u32, 1), candidates[0].algorithm);
+    try std.testing.expectEqual(@as(u32, 32), candidates[1].block_m);
+    var saw_bm64 = false;
+    var saw_bm128 = false;
+    for (candidates[0..count]) |candidate| {
+        saw_bm64 = saw_bm64 or candidate.block_m == 64;
+        saw_bm128 = saw_bm128 or candidate.block_m == 128;
+    }
+    try std.testing.expect(saw_bm64 and saw_bm128);
 }
 
 test "graph identity includes buffer layout and element dtype" {

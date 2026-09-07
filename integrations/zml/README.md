@@ -34,10 +34,13 @@ choice from another environment.
 ordinary Zig data, so a ZML autotune pass can compile the exact same `linear`
 call for each geometry and retain the winner in its shape/device cache. The
 list is deliberately not pruned globally: a geometry that wins one M or
-projection shape remains available to the tuner for other shapes. After each
-candidate has been warmed and measured outside capture, pass its correctness
-and median timings to `selectFastest`; the selector applies the same MAE/max
-error gate as the Python tuner and uses stable enumeration order for ties.
+projection shape remains available to the tuner for other shapes. Use
+`enumerateCandidatesForShape` when a shape-aware pass should measure tile
+compatible candidates first; it preserves the complete candidate set and is
+only an ordering hint. After each candidate has been warmed and measured
+outside capture, pass its correctness and median timings to `selectFastest`;
+the selector applies the same MAE/max error gate as the Python tuner and uses
+stable enumeration order for ties.
 `benchmarkExecutable` provides the common warmup/result-readiness timing loop
 for an already-compiled candidate. Compile the serving executable only after
 selection, then warm its prepared native graph before any enclosing ZML/CUDA

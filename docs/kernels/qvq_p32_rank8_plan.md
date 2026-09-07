@@ -74,6 +74,10 @@ default tuning policy. Current Python coverage also asserts that a locally
 accepted improvement with 20% measured overhead remains selectable when no cap
 is supplied. Failed numerical rows remain in the report for review; only an
 explicit overhead cap can remove an otherwise accepted timing row.
+The committed report fixtures are regression-tested as well: every unbudgeted
+row above 5% remains present and the unbudgeted winner is the fastest eligible
+row, while the budgeted fixture retains over-limit rows for review and excludes
+them only from winner selection.
 
 The matched benchmark CLI exposes the same policy for reproducible scorecards:
 `scripts/benchmark_qvq_window_rank8.py --autotune
