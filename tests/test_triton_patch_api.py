@@ -85,6 +85,31 @@ def test_patched_autotuner_constructor_owns_cache_lock(monkeypatch):
     assert autotuner._cache_futures == {}
 
 
+def test_patched_autotuner_lazily_initializes_preexisting_instance(monkeypatch):
+    triton_autotuner = pytest.importorskip("triton.runtime.autotuner")
+    existing_cache_value = object()
+
+    class _FakeAutotuner:
+        def __init__(self):
+            self.cache = {"existing": existing_cache_value}
+
+    autotuner = _FakeAutotuner()
+
+    monkeypatch.setattr(triton_autotuner, "Autotuner", _FakeAutotuner)
+    monkeypatch.setattr(triton_autotuner, "CacheFuture", None, raising=False)
+    monkeypatch.setattr(nogil_patcher, "version", lambda _package_name: "3.7.0")
+
+    nogil_patcher.patch_triton_autotuner()
+    cached, used_cached_result, bench_time = autotuner._get_config_for_key("existing", (), {})
+
+    assert cached is existing_cache_value
+    assert used_cached_result is True
+    assert bench_time is None
+    assert isinstance(autotuner._cache_lock, type(threading.RLock()))
+    assert autotuner.cache is autotuner._cache
+    assert autotuner._cache_futures == {}
+
+
 def test_package_init_uses_triton_patch_api():
     init_py = Path(__file__).resolve().parents[1] / "gptqmodel" / "__init__.py"
     tree = ast.parse(init_py.read_text(encoding="utf-8"))
