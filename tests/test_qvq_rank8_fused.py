@@ -387,3 +387,38 @@ def test_input_fused_policy_admits_composite_width_without_input_hadamard():
         next(candidate for candidate in candidates if candidate.recovery_projection == "input_fused"),
     )
     assert layer._p32_rank8_enabled
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_fully_fused_policy_routes_project_output_epilogue_and_graph():
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from test_qvq_grouped_runtime import _child
+    from test_qvq_window_recovery import _kernel_rank8
+    from gptqmodel.quantization.qvq_rank8 import P32WindowConfig, prepare_rank8
+
+    torch.backends.cuda.matmul.allow_tf32 = False
+    layer = _child(
+        "q_proj",
+        in_features=256,
+        out_features=256,
+        su=torch.ones(256, device="cuda"),
+        output_hadamard=False,
+        device="cuda",
+    ).eval()
+    _kernel_rank8(layer)
+    config = P32WindowConfig(
+        recovery_mode="on",
+        recovery_kernel="fully_fused",
+        recovery_projection="project_output_fused",
+        arithmetic_signature="unverified_project_output_fused",
+    )
+    prepare_rank8(layer, config)
+    x = torch.randn(17, 256, device="cuda", dtype=torch.float16) * 0.01
+    eager = layer(x)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = layer(x)
+    for _ in range(3):
+        graph.replay()
+        torch.testing.assert_close(captured, eager, atol=0, rtol=0)

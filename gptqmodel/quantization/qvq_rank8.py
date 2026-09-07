@@ -608,14 +608,21 @@ def fused_rank8_output(layer, transformed, base, compute_dtype, *, hidden=None, 
     if (
         enabled
         and hidden is None
-        and transformed.dtype == torch.float16
         and getattr(layer._p32_window_config, "recovery_projection", None)
         == "project_output_fused"
     ):
         from ..utils.qvq_rank8_triton import rank8_project_output_epilogue
 
+        # The project-output Triton kernel deliberately has a narrow FP16
+        # operand contract.  Composite-width CUDA forwards can enter the
+        # BF16 retry path while a graph is being captured; explicitly round
+        # that already-transformed activation to the kernel boundary instead
+        # of falling through to a first-use cuBLAS GEMM during capture.
+        fused_transformed = transformed
+        if fused_transformed.dtype != torch.float16:
+            fused_transformed = fused_transformed.to(torch.float16)
         return rank8_project_output_epilogue(
-            transformed,
+            fused_transformed,
             layer.rank8_A,
             layer.rank8_B,
             base,
