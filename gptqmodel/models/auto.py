@@ -165,6 +165,7 @@ from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
 from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
 from .definitions.olmo3 import Olmo3QModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
+from .definitions.ouro import OuroQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
 from .definitions.ovis2 import Ovis2QModel  # noqa: E402
 from .definitions.ovis2_5 import Ovis2_5QModel  # noqa: E402
@@ -189,6 +190,7 @@ from .definitions.qwen4_exp import Qwen4ExpQModel  # noqa: E402
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.solar_open import SolarOpenQModel  # noqa: E402
 from .definitions.solar_open2 import SolarOpen2QModel  # noqa: E402
+from .definitions.spark2_5 import Spark2_5QModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.unlimited_ocr import UnlimitedOCRQModel  # noqa: E402
@@ -338,6 +340,7 @@ MODEL_MAP = {
     "hymba": HymbaQModel,
     "olmo2": LlamaQModel, # 100% llama clone
     "olmo3": Olmo3QModel,
+    "ouro": OuroQModel,
     "ovis": OvisQModel,
     "ovis2": Ovis2QModel,
     "ovis2_5": Ovis2_5QModel,
@@ -359,6 +362,7 @@ MODEL_MAP = {
     "seed_oss": LlamaQModel, # 100% llama clone
     "solar_open": SolarOpenQModel,
     "solar_open2": SolarOpen2QModel,
+    "spark2_5": Spark2_5QModel,
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
     "locateanything": LocateAnythingQModel,
