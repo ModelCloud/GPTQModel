@@ -9,10 +9,13 @@ addresses while policy 1 is enabled; policy 0 retains the original decode on
 every execution and is the safe default for mutable payloads.
 
 The cache is populated by the first execution using each payload-pointer
-tuple.  This is intentional for external runtimes: `prepare_owned` warms with
-private buffers, then the first real graph capture binds the model payload
-tuple.  Replays of that graph reuse the decoded scratch without recording a
-new decoder launch.
+tuple. Eager calls with a stable model tuple then reuse decoded scratch. For
+graph capture, the decision is made while recording: if the captured tuple was
+already prewarmed with the same pointers, the graph contains only the GEMM;
+otherwise the first capture records a decode and every replay repeats that
+recorded decode. ZML's current `prepare_owned` path warms private buffers, so
+its model graph needs a future payload-preparation hook to realize the full
+graph-replay benefit.
 
 ## Validation and profile
 
@@ -37,8 +40,9 @@ dispatches across the five rates:
 | 8 | 8 | 5 |
 
 The remaining policy-1 launches are the distinct preparation/capture payload
-tuples, not graph replays.  This removes repeated decode work from steady-state
-evaluation without changing the decoder kernel or its generated ISA.  Static
-gfx950 ISA inspection therefore reports the same 109/114/114/114 instruction
-counts for the decoder rates as the prior merged build; only host-side cache
-eligibility changes in this revision.
+tuples. This profile uses a direct ABI plan prewarmed with the model pointers,
+so it demonstrates the best-case graph result; ZML's private-buffer warmup is
+the conservative case described above. The cache changes host-side decode
+eligibility only and does not change the decoder kernel or generated ISA.
+Static gfx950 ISA inspection therefore reports the same
+109/114/114/114/109 instruction counts as the prior merged build.
