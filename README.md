@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 09/07/2026 7.4.0-dev `main`: ✨ Added XHToken `ouro` and `spark2_5` quantization support.
 * 09/03/2026 7.4.0-dev `main`: ✨ Added GLM-5 Next MoE quantization support.
 * 08/19/2026 7.4.0 `main`: ✨ Added `mage_vl`, `muse_glimmer`, `olmo3` and `smollm3` model support
 * 08/18/2026 7.4.0 `main`: ✨ Added Cohere `North Micro Vision` (`cohere_compass`) model support
@@ -507,7 +508,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | MiniMax M2/M3                 | ✅ | AfMoE                           | ✅ | Bailing-MoE | ✅ | LFM2 / LFM2-VL / LFM2-MoE       | ✅ | Marin                  | ✅ |
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2 | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview | ✅ |
 | HunYuan V1 Dense / MoE        | ✅ | HunYuanOCR / HY-V3              | ✅ | LocateAnything | ✅ | North Micro Vision              | ✅ |  Mage-VL                      | ✅ |
-| Muse Glimmer        | ✅ |   SmolLM3                         | ✅ |    |  |               |  |                        |  |
+| Muse Glimmer        | ✅ |   SmolLM3                         | ✅ | Ouro | ✅ | Spark-X2.5 | ✅ |                        |  |
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. For ternary checkpoints, canonical 128-value-block `Q2_0` and its identical `PQ2_0` payload are supported; the incompatible `Q2_0_g64` layout is rejected. Prism model quantization is not included.
 
