@@ -141,6 +141,36 @@ def test_native_composite_qwen_shape_matches_window_reference():
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
+def test_native_transform_free_qwen_width_rank8_fused_epilogue():
+    """The native fused epilogue accepts the 17,408-wide transform-free path."""
+    from test_qvq_grouped_runtime import _child
+    from test_qvq_window_recovery import _kernel_rank8
+
+    layer = _child(
+        "qwen_composite_rank8",
+        in_features=5120,
+        out_features=17408,
+        bits=3.0,
+        device="cuda",
+        input_hadamard=False,
+        output_hadamard=False,
+    ).eval()
+    _kernel_rank8(layer)
+    config = P32WindowConfig(
+        algorithm="hopper_m16",
+        recovery_mode="on",
+        recovery_kernel="fused_epilogue",
+        recovery_projection="separate_reference",
+    )
+    x = torch.randn(1, 5120, device="cuda", dtype=torch.float16) * 0.01
+    prepare_rank8(layer, config)
+    with torch.no_grad():
+        expected = layer(x)
+        actual = native_window_linear(layer, x, config)
+    error = (actual.float() - expected.float()).abs()
+    assert error.mean() <= 2e-3 and error.max() <= 0.046875
+
+
 @pytest.mark.parametrize(
     "projection", ["separate_reference", "concurrent_reference", "tensor_core"]
 )

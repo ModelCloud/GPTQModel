@@ -230,12 +230,13 @@ static int qvq_p32_window_linear_impl(
       }
       return project_rank8();
     };
-    if (concurrent_projection && recovery_kernel == 1 && !c.output_hadamard) {
+    if (recovery_kernel == 1 && !c.output_hadamard) {
       at::Tensor hidden = consume_hidden();
-      // The transform-free composite path uses one graph-safe CUDA epilogue:
-      // it consumes X'A at the explicit FP16 hidden boundary, expands in
-      // FP32, adds the decoded base, and stores the final FP16 result directly
-      // into the caller-owned output buffer.
+      // The transform-free path uses one graph-safe CUDA epilogue for every
+      // projection placement.  `consume_hidden` either joins the prepared
+      // auxiliary producer or computes the reference projection on the
+      // caller stream; both preserve the explicit FP16 hidden boundary before
+      // FP32 expansion/addition and the final FP16 store.
       qvq_rank8_epilogue_no_hadamard(
           hidden, b, inner, scale_v, output_bias, output,
           static_cast<cudaStream_t>(cuda_stream));

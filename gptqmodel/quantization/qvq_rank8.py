@@ -24,6 +24,18 @@ from .rotation.hadamard_utils import matmul_hadU
 CONTRACT = "p32-window-r8-v1:fp32-project,fp16-hidden,fp32-expand-add,existing-output-transform"
 RANK8_BUFFERS = ("rank8_A", "rank8_B", "rank8_metadata")
 RANK8_SWEEP_CANDIDATES = (2, 4, 6, 8, 12)
+_COMPOSITE_HADAMARD_BASES = (172, 156, 140, 108, 60, 52, 36, 28, 40, 20, 12)
+
+
+def _supported_composite_hadamard_width(width: int) -> bool:
+    """Return whether the existing factored Hadamard supports ``width``."""
+    for base in _COMPOSITE_HADAMARD_BASES:
+        if width % base:
+            continue
+        ratio = width // base
+        if ratio >= 2 and ratio & (ratio - 1) == 0:
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -476,17 +488,21 @@ def prepare_rank8(layer, config):
         and torch.backends.cuda.matmul.allow_tf32
     ):
         raise ValueError("rank8 FP32 reference requires CUDA matmul TF32 disabled")
-    if (
-        config.recovery_kernel in ("fused_epilogue", "fully_fused")
-        and (
-            runtime_device.type != "cuda"
-            or torch.cuda.get_device_capability(runtime_device) != (9, 0)
-            or layer.out_features > 16384
-            or (layer.output_hadamard and layer.out_features & (layer.out_features - 1))
+    if config.recovery_kernel in ("fused_epilogue", "fully_fused") and (
+        runtime_device.type != "cuda"
+        or torch.cuda.get_device_capability(runtime_device) != (9, 0)
+        or layer.out_features > 17408
+        or (
+            layer.output_hadamard
+            and layer.out_features & (layer.out_features - 1)
+            and (
+                config.recovery_projection == "project_output_fused"
+                or not _supported_composite_hadamard_width(layer.out_features)
+            )
         )
     ):
         raise ValueError(
-            "rank8 fused epilogue requires SM90 and N <= 16384; output Hadamard mode requires power-of-two N"
+            "rank8 fused epilogue requires SM90 and N <= 17408; project-output fusion requires N <= 16384 and power-of-two Hadamard widths"
         )
     if (
         enabled
@@ -495,7 +511,11 @@ def prepare_rank8(layer, config):
             runtime_device.type != "cuda"
             or torch.cuda.get_device_capability(runtime_device) != (9, 0)
             or layer.in_features > 16384
-            or (layer.input_hadamard and layer.in_features & (layer.in_features - 1))
+            or (
+                layer.input_hadamard
+                and layer.in_features & (layer.in_features - 1)
+                and not _supported_composite_hadamard_width(layer.in_features)
+            )
         )
     ):
         raise ValueError(
@@ -2030,9 +2050,10 @@ def window_kernel_candidates(layer, *, m):
         not getattr(layer, "_p32_rank8_enabled", False)
         or layer._p32_window_config.quality_mode == "fast"
     )
-    if allow_unverified and layer.out_features <= 16384 and (
+    if allow_unverified and layer.out_features <= 17408 and (
         not layer.output_hadamard
         or not layer.out_features & (layer.out_features - 1)
+        or _supported_composite_hadamard_width(layer.out_features)
     ):
         candidates.extend(
             replace(
@@ -2069,6 +2090,7 @@ def window_kernel_candidates(layer, *, m):
         if layer.in_features <= 16384 and (
             not layer.input_hadamard
             or not layer.in_features & (layer.in_features - 1)
+            or _supported_composite_hadamard_width(layer.in_features)
         ):
             candidates.extend(
                 replace(
@@ -2078,7 +2100,11 @@ def window_kernel_candidates(layer, *, m):
                 )
                 for c in separate_candidates
             )
-        if layer.in_features <= 16384:
+        project_output_supported = (
+            not layer.output_hadamard
+            or not layer.out_features & (layer.out_features - 1)
+        ) and layer.out_features <= 16384
+        if layer.in_features <= 16384 and project_output_supported:
             candidates.extend(
                 replace(
                     c,
@@ -2264,6 +2290,38 @@ def grouped_window_kernel_candidates(layers, *, m):
             for child, split in zip(children, split_counts, strict=True)
         )
         for split_counts in split_tuples
+    )
+
+
+def grouped_window_kernel_candidates_for_shape(layers, *, m):
+    """Order the complete grouped candidate set by tile compatibility.
+
+    Candidate enumeration remains exhaustive so a shape-specific outlier can
+    still win measurement. Compatible BM/BN tiles are measured first, which
+    gives direct ZML and Python autotuners a deterministic shape hint without
+    turning the heuristic into an eligibility gate.
+    """
+    candidates = grouped_window_kernel_candidates(layers, m=m)
+    if len(candidates) < 2:
+        return candidates
+
+    def score(choice):
+        value = 0
+        for child, config in zip(layers, choice, strict=True):
+            if config.block_m:
+                if m < config.block_m:
+                    value += 50
+                if m % config.block_m:
+                    value += 100
+            if config.block_n and child.out_features % config.block_n:
+                value += 10
+        return value
+
+    return tuple(
+        choice
+        for _, choice in sorted(
+            enumerate(candidates), key=lambda item: (score(item[1]), item[0])
+        )
     )
 
 
