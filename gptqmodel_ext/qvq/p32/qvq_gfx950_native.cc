@@ -14,6 +14,10 @@ struct NativeWindowPlan {
   void* stream;
   int device;
   void* owned_workspace = nullptr;
+  const void* decoded_window = nullptr;
+  const void* decoded_levels = nullptr;
+  const void* decoded_banks = nullptr;
+  bool decoded_cache_valid = false;
 };
 
 extern "C" int qvq_gfx950_native_scratch_bytes(const qvq_gfx950_native_config* c,
@@ -27,7 +31,7 @@ extern "C" int qvq_gfx950_native_scratch_bytes(const qvq_gfx950_native_config* c
       c->gemm.solution_index < 0 || c->gemm.reserved ||
       c->transition_bits < 4 || c->transition_bits > 8 ||
       (c->transition_bits == 8 ? c->bank_alt_id != 0 : c->bank_alt_id > 3) ||
-      c->decode_threads != 256 || c->cache_policy != 0)
+      c->decode_threads != 256 || c->cache_policy > 1)
     return -int(hipErrorInvalidValue);
   const uint64_t required = uint64_t(c->gemm.k) * c->gemm.n * 2;
   if (required > SIZE_MAX) return -int(hipErrorInvalidValue);
@@ -52,9 +56,20 @@ static int execute_window(void* opaque, const void* x,
     if (capture != hipStreamCaptureStatusActive) return -int(hipErrorStreamCaptureUnsupported);
   }
   const auto& c = p->config;
-  const int decode_status = qvq_gfx950_decode_window(window, levels, banks, p->scratch,
-      c.gemm.k, c.gemm.n, c.transition_bits, c.bank_alt_id, stream);
-  if (decode_status) return -decode_status;
+  const bool reuse_decoded = c.cache_policy == 1 && p->decoded_cache_valid &&
+      p->decoded_window == window && p->decoded_levels == levels &&
+      p->decoded_banks == banks;
+  if (!reuse_decoded) {
+    const int decode_status = qvq_gfx950_decode_window(window, levels, banks,
+        p->scratch, c.gemm.k, c.gemm.n, c.transition_bits, c.bank_alt_id, stream);
+    if (decode_status) return -decode_status;
+    if (c.cache_policy == 1) {
+      p->decoded_window = window;
+      p->decoded_levels = levels;
+      p->decoded_banks = banks;
+      p->decoded_cache_valid = true;
+    }
+  }
   return capture_only ? qvq_gfx950_rocblas_execute_capture(p->blas, x, p->scratch, y, stream)
                       : qvq_gfx950_rocblas_execute(p->blas, x, p->scratch, y, stream);
 }

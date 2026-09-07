@@ -11,11 +11,13 @@ typedef struct qvq_gfx950_native_config {
   qvq_gfx950_blas_config gemm;
   uint32_t transition_bits, bank_alt_id;
   uint32_t decode_threads; // currently exactly 256
-  uint32_t cache_policy;   // currently 0: decode each execution
+  uint32_t cache_policy;   // 0: decode each execution; 1: cache by input pointers
 } qvq_gfx950_native_config;
 
 // No device initialization: query caller-owned scratch requirements. No hidden
-// immutable weight cache. E=1, FP16 X/LUT/decoded W, FP32 Y, contiguous layouts.
+// immutable weight cache is selected by policy 0. Policy 1 reuses decoded W
+// while window/levels/banks pointers remain unchanged. E=1, FP16 X/LUT/decoded
+// W, FP32 Y, contiguous layouts.
 int qvq_gfx950_native_scratch_bytes(const qvq_gfx950_native_config*, size_t* bytes);
 
 // Caller supplies writable sample Y, scratch[N,K] FP16 and BLAS workspace.
@@ -42,7 +44,10 @@ int qvq_gfx950_native_prepare_runtime(const qvq_gfx950_native_config*,
 int qvq_gfx950_native_prepare_owned(const qvq_gfx950_native_config*,
     size_t workspace_bytes, void* stream, void** result);
 // Execute on the prepared stream/device. No tuning, allocation, or sync.
-// Input/weight contents may change at stable addresses between ordered calls.
+// With cache_policy=0, input/weight contents may change at stable addresses
+// between ordered calls. With cache_policy=1, X/Y may change but the window,
+// levels and banks pointers must remain stable and their contents immutable;
+// changing any of those pointers invalidates and rebuilds the decoded cache.
 // Do not overlap executions sharing this plan's scratch/workspace.
 int qvq_gfx950_native_execute(void* plan, const void* x, const void* window,
     const void* levels, const void* banks, void* y, void* stream);
