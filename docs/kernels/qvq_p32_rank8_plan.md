@@ -308,3 +308,14 @@ reported separately. W4 output projections and the W4 up projections in
 layers 6 and 8 are outside the P32/A16 contract and were intentionally
 omitted. This is fit provenance, not a full-model perplexity/task or promotion
 scorecard.
+
+Grouped QKV graph replay was also measured on an H200 for a K=2048,
+N=(2048,512,512) fixture. Both the `concurrent_reference` producer and the
+existing `input_fused` producer remain well above the 3--5% marginal-cost gate:
+the concurrent path measured 114.73%/163.77%/102.11% at M=128/2048/8192,
+while the input-fused run measured 115.00%/164.86%/102.28%. These are
+shape-specific implementation results, not a claim that rank8 is generally
+free at large M. The complete graph-replay records are in
+`results/p32_rank8_h200_grouped_concurrent_reference.json` and
+`results/p32_rank8_h200_grouped_input_fused.json`; neither policy is promoted
+on this evidence, and true WGMMA-integrated rank8 fusion remains open.
