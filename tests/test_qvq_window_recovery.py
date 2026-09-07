@@ -925,6 +925,56 @@ def test_hopper_rank8_eager_graph(algorithm, m, recovery_kernel, projection):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("m", [128, 8192])
+def test_hopper_rank8_concurrent_producer_is_graph_safe_on_nondefault_stream(m):
+    """The shared X' producer must be warmed on the serving stream before capture.
+
+    This exercises the stream/event path used by ``concurrent_reference``
+    directly.  A graph captured on the default stream can hide accidental
+    stream ownership assumptions, so the contract is checked on a dedicated
+    stream and replayed after changing the static input buffer.
+    """
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("SM90 required")
+    from test_qvq_grouped_runtime import _child
+
+    layer = _child("q_proj", device="cuda").eval()
+    _kernel_rank8(layer)
+    config = P32WindowConfig(
+        algorithm="hopper_direct_decode_mma",
+        block_m=64,
+        block_n=64,
+        warp_groups=1,
+        recovery_mode="on",
+        recovery_projection="concurrent_reference",
+    )
+    stream = torch.cuda.Stream()
+    x = torch.randn(m, layer.in_features, device="cuda", dtype=torch.float16) * 0.01
+    x_next = torch.randn_like(x)
+    with torch.cuda.stream(stream):
+        prepare_rank8(layer, config)
+        eager = layer(x)
+        stream.synchronize()
+        device_index = int(x.device.index if x.device.index is not None else 0)
+        stream_key = int(stream.cuda_stream)
+        assert (device_index, stream_key, m, layer.in_features) in layer._qvq_rank8_concurrent_warm
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            captured = layer(x)
+        graph.replay()
+        stream.synchronize()
+        assert torch.equal(captured, eager)
+
+        x.copy_(x_next)
+        expected = layer(x)
+        stream.synchronize()
+        graph.replay()
+        stream.synchronize()
+        assert torch.equal(captured, expected)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize(
     "roles", [("q_proj", "k_proj", "v_proj"), ("gate_proj", "up_proj")]
 )
