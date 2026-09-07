@@ -776,7 +776,7 @@ class QVQLinear(BaseQuantLinear):
         if self.window_only:
             self._prepare_planar_fallback()
         signature = tuple(
-            (name, id(tensor), tensor._version, tensor.device)
+            (name, id(tensor), _qvq_buffer_version(tensor), tensor.device)
             for name in ("SU", "SV", "bias")
             if (tensor := getattr(self, name)) is not None
         )
@@ -942,8 +942,8 @@ class QVQLinear(BaseQuantLinear):
             alternative = self.bank_alt_id
             if source is None or alternative is None:
                 raise RuntimeError("AMD folded P32 requires bank selectors and alternative-bank metadata")
-            current_version = source._version
-            alternative_version = alternative._version
+            current_version = _qvq_buffer_version(source)
+            alternative_version = _qvq_buffer_version(alternative)
             cached = self._qvq_cuda_bank_cache
             if (
                 cached is not None
@@ -953,9 +953,9 @@ class QVQLinear(BaseQuantLinear):
                 and cached[3] is alternative
                 and cached[4] == alternative_version
                 and self.bank_ids is source
-                and source._version == current_version
+                and _qvq_buffer_version(source) == current_version
                 and self.bank_alt_id is alternative
-                and alternative._version == alternative_version
+                and _qvq_buffer_version(alternative) == alternative_version
             ):
                 packed = cached[5]
                 bank_alt_id = cached[6]
@@ -966,9 +966,9 @@ class QVQLinear(BaseQuantLinear):
                 for _ in range(3):
                     if self.bank_ids is not source:
                         break
-                    before = source._version
+                    before = _qvq_buffer_version(source)
                     candidate = source.detach().clone()
-                    after = source._version
+                    after = _qvq_buffer_version(source)
                     if before == after and self.bank_ids is source:
                         snapshot = candidate
                         snapshot_version = after
@@ -979,11 +979,11 @@ class QVQLinear(BaseQuantLinear):
                 packed = pack_qvq_binary_bank_ids(
                     unpack_qvq_binary_bank_ids(snapshot, tile_count * 8)
                 ).to(device=device)
-                alternative_version = alternative._version
+                alternative_version = _qvq_buffer_version(alternative)
                 bank_alt_id = int(alternative.detach().item())
                 if (
                     self.bank_alt_id is not alternative
-                    or alternative._version != alternative_version
+                    or _qvq_buffer_version(alternative) != alternative_version
                     or not 1 <= bank_alt_id <= 3
                 ):
                     raise RuntimeError("QVQ CUDA alternative-bank metadata changed during snapshot")
@@ -1051,17 +1051,17 @@ class QVQLinear(BaseQuantLinear):
             cached is not None
             and len(cached) == 27
             and cached[0] is source
-            and cached[1] == source._version
+            and cached[1] == _qvq_buffer_version(source)
             and cached[2] is bank_ids_source
-            and cached[3] == bank_ids_source._version
+            and cached[3] == _qvq_buffer_version(bank_ids_source)
             and cached[4] is bank_alt_source
-            and cached[5] == bank_alt_source._version
+            and cached[5] == _qvq_buffer_version(bank_alt_source)
             and cached[6] is su_source
-            and cached[7] == su_source._version
+            and cached[7] == _qvq_buffer_version(su_source)
             and cached[8] is sv_source
-            and cached[9] == sv_source._version
+            and cached[9] == _qvq_buffer_version(sv_source)
             and cached[10] is bias_source
-            and cached[11] == (-1 if bias_source is None else bias_source._version)
+            and cached[11] == (-1 if bias_source is None else _qvq_buffer_version(bias_source))
             and cached[12] == x_2d.device
             and cached[13] == self.bits
             and cached[14] == self.input_hadamard
@@ -1118,17 +1118,17 @@ class QVQLinear(BaseQuantLinear):
         )
         self._qvq_amd_folded_hot_cache = (
             source,
-            source._version,
+            _qvq_buffer_version(source),
             self.bank_ids,
-            self.bank_ids._version,
+            _qvq_buffer_version(self.bank_ids),
             self.bank_alt_id,
-            self.bank_alt_id._version,
+            _qvq_buffer_version(self.bank_alt_id),
             self.SU,
-            self.SU._version,
+            _qvq_buffer_version(self.SU),
             self.SV,
-            self.SV._version,
+            _qvq_buffer_version(self.SV),
             self.bias,
-            -1 if self.bias is None else self.bias._version,
+            -1 if self.bias is None else _qvq_buffer_version(self.bias),
             x_2d.device,
             self.bits,
             self.input_hadamard,
@@ -1158,12 +1158,12 @@ class QVQLinear(BaseQuantLinear):
             return None
         key = (name, dtypes)
         cached = self._dtype_cache.get(key)
-        if cached is None or cached[0] is not tensor or cached[1] != tensor._version:
+        if cached is None or cached[0] is not tensor or cached[1] != _qvq_buffer_version(tensor):
             self._require_prepared_outside_capture(tensor.device, "auxiliary dtype cache")
             converted = tensor
             for dtype in dtypes:
                 converted = converted.to(dtype)
-            self._dtype_cache[key] = (tensor, tensor._version, converted)
+            self._dtype_cache[key] = (tensor, _qvq_buffer_version(tensor), converted)
             return converted
         return cached[2]
 
@@ -1389,9 +1389,7 @@ class QVQLinear(BaseQuantLinear):
             tensor = getattr(self, buffer_name)
             if tensor is None or tensor.device.type == "meta":
                 continue
-            try:
-                _ = tensor._version
-            except RuntimeError:
+            if _qvq_buffer_version(tensor) < 0:
                 with torch.inference_mode(False):
                     setattr(self, buffer_name, tensor.detach().clone())
         self._validate_tensors()
@@ -1459,7 +1457,7 @@ class QVQLinear(BaseQuantLinear):
         if (
             cached is not None
             and cached[0] is source
-            and cached[1] == source._version
+            and cached[1] == _qvq_buffer_version(source)
             and cached[2] == device
             and self.bank_ids is source
         ):
@@ -1479,7 +1477,7 @@ class QVQLinear(BaseQuantLinear):
                 self._qvq_mps_bank_ids_cache = None
                 self._qvq_mps_bank_ids = None
                 return None
-            source_version = source._version
+            source_version = _qvq_buffer_version(source)
             snapshot = source.detach().clone()
             packed = (
                 pack_qvq_binary_bank_ids(
@@ -1488,7 +1486,7 @@ class QVQLinear(BaseQuantLinear):
                 if self.v2b2_p32
                 else pack_qvq_bank_ids(unpack_qvq_bank_ids(snapshot, selector_count))
             ).to(device=device)
-            if source is self.bank_ids and source_version == source._version:
+            if source is self.bank_ids and source_version == _qvq_buffer_version(source):
                 self._qvq_mps_bank_ids_cache = (source, source_version, device, packed)
                 self._qvq_mps_bank_ids = packed
                 return packed
@@ -1693,7 +1691,7 @@ class QVQLinear(BaseQuantLinear):
                     if source_object is None:
                         pass
                     else:
-                        current_version = source_object._version
+                        current_version = _qvq_buffer_version(source_object)
                     cached = self._qvq_cuda_bank_cache
                     if (
                         source_object is not None
@@ -1706,10 +1704,10 @@ class QVQLinear(BaseQuantLinear):
                         == (
                             -1
                             if alt_source_object is None
-                            else alt_source_object._version
+                            else _qvq_buffer_version(alt_source_object)
                         )
                         and self.bank_ids is source_object
-                        and source_object._version == current_version
+                        and _qvq_buffer_version(source_object) == current_version
                     ):
                         cuda_bank_ids = cached[5]
                         cuda_bank_alt_id = cached[6]
@@ -1726,9 +1724,9 @@ class QVQLinear(BaseQuantLinear):
                         for _ in range(3):
                             if self.bank_ids is not source_object:
                                 break
-                            before = source_object._version
+                            before = _qvq_buffer_version(source_object)
                             candidate = source_object.detach().clone()
-                            after = source_object._version
+                            after = _qvq_buffer_version(source_object)
                             if before == after and self.bank_ids is source_object:
                                 source_version = after
                                 source = candidate
@@ -1756,11 +1754,11 @@ class QVQLinear(BaseQuantLinear):
                             )
                         alt_version = -1
                         if alt_source_object is not None:
-                            alt_version = alt_source_object._version
+                            alt_version = _qvq_buffer_version(alt_source_object)
                             cuda_bank_alt_id = int(alt_source_object.detach().item())
                             if (
                                 alt_source_object is not self.bank_alt_id
-                                or alt_version != alt_source_object._version
+                                or alt_version != _qvq_buffer_version(alt_source_object)
                                 or not 1 <= cuda_bank_alt_id <= 3
                             ):
                                 raise RuntimeError(
@@ -1999,9 +1997,9 @@ class QVQLinear(BaseQuantLinear):
         selector_count = tile_count * 8
         with self._qvq_cuda_bank_cache_lock:
             source = self.bank_ids
-            source_version = source._version
+            source_version = _qvq_buffer_version(source)
             alt_source = self.bank_alt_id
-            alt_version = alt_source._version
+            alt_version = _qvq_buffer_version(alt_source)
             cached = self._qvq_cuda_bank_cache
             if (
                 cached is not None
@@ -2027,9 +2025,9 @@ class QVQLinear(BaseQuantLinear):
                 bank_alt_id = int(alt_source.detach().item())
                 if (
                     self.bank_ids is not source
-                    or source._version != source_version
+                    or _qvq_buffer_version(source) != source_version
                     or self.bank_alt_id is not alt_source
-                    or alt_source._version != alt_version
+                    or _qvq_buffer_version(alt_source) != alt_version
                     or not 1 <= bank_alt_id <= 3
                 ):
                     raise RuntimeError("QVQ P32 FP8 bank metadata changed during snapshot")
