@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "qvq_p32_abi.h"
+#include "qvq_gfx950_native.h"
 
 #include <type_traits>
 
@@ -37,6 +38,8 @@ static_assert(std::is_standard_layout_v<qvq_p32_launch_descriptor>);
 static_assert(std::is_standard_layout_v<qvq_p32_launch_plan>);
 static_assert(QVQ_P32_LAUNCH_ARG_DEVICE_POINTER == 1);
 static_assert(QVQ_P32_LAUNCH_ARG_HOST_VALUE == 2);
+static_assert(std::is_standard_layout_v<qvq_gfx950_native_config>);
+static_assert(sizeof(qvq_gfx950_native_config) == 56);
 
 int main() {
   const qvq_p32_config config = {

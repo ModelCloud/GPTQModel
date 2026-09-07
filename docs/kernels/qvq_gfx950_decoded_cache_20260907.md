@@ -17,6 +17,16 @@ recorded decode. ZML's current `prepare_owned` path warms private buffers, so
 its model graph needs a future payload-preparation hook to realize the full
 graph-replay benefit.
 
+The additive `qvq_gfx950_native_prepare_payload` entry point provides that
+hook for integrations that own the real device-buffer lifecycle. After a plan
+is prepared, the caller passes the immutable window/LUT/bank pointers on the
+plan stream. QVQ decodes once, synchronizes that stream, and marks the pointer
+tuple ready without running GEMM. The caller can then construct the graph form
+(`zml_qvq_gfx950_native_owned_graph_cached`) and capture only the GEMM. The
+entry point rejects active capture, allocation, and stream/device mismatches;
+repeated calls with the same tuple are no-ops. The existing eager policy-1
+path remains the safe default for runtimes that cannot provide this hook.
+
 ## Validation and profile
 
 On MI355X (gfx950), the combined native GPU test passed with both policies:

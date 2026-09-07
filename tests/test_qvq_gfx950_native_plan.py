@@ -54,6 +54,13 @@ class NativePlanHostTests(unittest.TestCase):
         )
         lib.qvq_gfx950_native_execute.argtypes = [c.c_void_p] * 7
         lib.qvq_gfx950_native_execute_capture.argtypes = [c.c_void_p] * 7
+        lib.qvq_gfx950_native_prepare_payload.argtypes = [
+            c.c_void_p,
+            c.c_void_p,
+            c.c_void_p,
+            c.c_void_p,
+            c.c_void_p,
+        ]
         lib.qvq_gfx950_native_prepare_runtime.argtypes = [
             c.POINTER(NativeConfig),
             c.c_void_p,
@@ -146,6 +153,20 @@ class NativePlanHostTests(unittest.TestCase):
                 if prepared_runtime is not None:
                     self.assertEqual(lib.qvq_gfx950_native_destroy(plan), 0)
                     plan = prepared_runtime
+                if cache_policy == 1:
+                    # Explicitly seed the real immutable payload before graph
+                    # capture. The resulting graph can contain GEMM only;
+                    # policy 0 deliberately has no such entry point.
+                    self.assertEqual(
+                        lib.qvq_gfx950_native_prepare_payload(
+                            plan,
+                            words.data_ptr(),
+                            levels.data_ptr(),
+                            banks.data_ptr(),
+                            stream.cuda_stream,
+                        ),
+                        0,
+                    )
                 try:
                     expected_config = bytes(config)
                     config.bank_alt_id = 3
