@@ -26,7 +26,7 @@ from .qvq_rank8 import (
     _base,
     _digest,
     _metadata,
-    grouped_window_kernel_candidates,
+    grouped_window_kernel_candidates_for_shape,
     grouped_window_kernel_shape_score,
     prepare_rank8,
     validate_rank8_state,
@@ -50,23 +50,6 @@ class GroupedWindowTuningResult:
     configs: tuple[P32WindowConfig, ...]
     report: dict
     cache_hit: bool
-
-
-def _grouped_window_candidates_for_shape(layers, *, m):
-    """Keep all grouped candidates while measuring tile-compatible choices first."""
-    candidates = grouped_window_kernel_candidates(layers, m=m)
-    if len(candidates) < 2:
-        return candidates
-    return tuple(
-        choice
-        for _, choice in sorted(
-            enumerate(candidates),
-            key=lambda item: (
-                grouped_window_kernel_shape_score(layers, item[1], m=m),
-                item[0],
-            ),
-        )
-    )
 
 
 def measure_rank8_overhead(
@@ -648,7 +631,7 @@ def tune_grouped_window_kernel(
         )
 
     m = first.numel() // reference.in_features
-    eligible = _grouped_window_candidates_for_shape(children, m=m)
+    eligible = grouped_window_kernel_candidates_for_shape(children, m=m)
     choices = eligible if candidates is None else tuple(candidates)
     if not choices:
         raise ValueError("grouped candidate enumeration returned no policies")
