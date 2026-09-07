@@ -83,6 +83,7 @@ from .nemotron_labs_diffusion import NemotronLabsDiffusionQModel
 from .nemotron_h_puzzle import NemotronHPuzzleQModel
 from .olmo3 import Olmo3QModel
 from .opt import OptQModel
+from .ouro import OuroQModel
 from .ovis import OvisQModel
 from .ovis2_5 import Ovis2_5QModel
 from .ovis2_6_moe import Ovis2_6_MoeQModel

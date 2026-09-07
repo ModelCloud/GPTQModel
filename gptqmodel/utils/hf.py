@@ -1318,6 +1318,14 @@ def _normalize_remote_code_config_compat(config: Any) -> None:
                 if rope_theta is not None:
                     text_config.rope_theta = rope_theta
 
+    if model_type_lower == "ouro" and not hasattr(config, "pad_token_id"):
+        # Ouro's custom config does not pass pad_token_id to PretrainedConfig,
+        # while its model implementation accesses config.pad_token_id during
+        # construction. Use the model's EOS token as the conventional causal-LM
+        # padding fallback; this is a config compatibility fix, not a tokenizer
+        # model-name workaround.
+        config.pad_token_id = getattr(config, "eos_token_id", None)
+
     if model_type_lower == "hymba":
         # hymba uses Flex by default;
         # however, `modeling_hymba` has not yet been adapted to support the latest version of PyTorch Flex.
