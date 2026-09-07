@@ -904,4 +904,13 @@ An H200 graph-replay spot sweep for K=N=2048, BM64/BN64 measured the
 Tensor Core producer's marginal overhead at 35.86% (M=128), 18.64% (M=2048),
 and 16.61% (M=8192). This is an improvement over the reference concurrent
 producer but remains above the 3--5% promotion target, so the candidate stays
-fast-only and requires wider shape/device validation.
+fast-only and requires wider shape/device validation. The target is a scorecard
+goal rather than an automatic discard criterion; explicit overhead budgets may
+still reject a candidate when requested.
+
+The concurrent producer now launches immediately after `X'` and before the
+base WGMMA, with the existing event join retained before expansion. A sequential
+H200 spot rerun at K=N=2048, BM64/BN64 measured reference-concurrent overhead of
+30.06% at M=8192 and Tensor Core overhead of 15.89% at M=8192. These are
+measured improvements and remain available to explicit tuning; the 3--5% value
+is a target, not an automatic discard gate.

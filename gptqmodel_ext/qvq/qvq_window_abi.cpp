@@ -170,6 +170,36 @@ static int qvq_p32_window_linear_impl(
     auto transformed = c.input_hadamard
         ? hadamard(input, scale_u, c10::IValue(), c10::IValue(), 2)
         : input * scale_u;
+    const bool concurrent_projection = c.rank8_enabled && recovery_projection != 0;
+    const bool tensorcore_projection = recovery_projection == 2;
+    at::Tensor rank8_a_float;
+    if (c.rank8_enabled && !tensorcore_projection) {
+      rank8_a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
+    }
+    const auto project_rank8 = [&]() {
+      // Tensor Core projection is an explicitly unverified fast candidate;
+      // the FP32 path remains the balanced/quality contract.
+      return tensorcore_projection
+          ? at::mm(transformed, a)
+          : at::mm(transformed.to(at::kFloat), rank8_a_float).to(at::kHalf);
+    };
+    at::Tensor pending_hidden;
+    if (concurrent_projection) {
+      // Start the rank8 producer as soon as X' is ready. The base WGMMA is
+      // queued on the caller stream below and can overlap this projection.
+      if (recovery_stream != nullptr) {
+        C10_CUDA_CHECK(cudaEventRecord(recovery_ready, static_cast<cudaStream_t>(cuda_stream)));
+        C10_CUDA_CHECK(cudaStreamWaitEvent(recovery_stream, recovery_ready, 0));
+        {
+          c10::cuda::CUDAStreamGuard recovery_guard(c10::cuda::getStreamFromExternal(
+              recovery_stream, device));
+          pending_hidden = project_rank8();
+          C10_CUDA_CHECK(cudaEventRecord(recovery_done, recovery_stream));
+        }
+      } else {
+        pending_hidden = project_rank8();
+      }
+    }
     at::Tensor inner;
     if (c.algorithm == 1) {
       std::vector<at::Tensor> rows;
@@ -191,37 +221,17 @@ static int qvq_p32_window_linear_impl(
           .view({padded_m, c.n}).slice(0, 0, c.m);
     }
     bool wrote_output = false;
-    const bool concurrent_projection = c.rank8_enabled && recovery_projection != 0;
-    const bool tensorcore_projection = recovery_projection == 2;
+    const auto consume_hidden = [&]() {
+      if (concurrent_projection) {
+        if (recovery_stream != nullptr) {
+          C10_CUDA_CHECK(cudaStreamWaitEvent(static_cast<cudaStream_t>(cuda_stream), recovery_done, 0));
+        }
+        return pending_hidden;
+      }
+      return project_rank8();
+    };
     if (concurrent_projection && recovery_kernel == 1 && !c.output_hadamard) {
-      // Prepared graph execution supplies a dedicated stream and event pair.
-      // Raw linear calls intentionally leave these null and execute the same
-      // reference projection on the caller stream.
-      if (recovery_stream != nullptr) {
-        C10_CUDA_CHECK(cudaEventRecord(recovery_ready, static_cast<cudaStream_t>(cuda_stream)));
-        C10_CUDA_CHECK(cudaStreamWaitEvent(recovery_stream, recovery_ready, 0));
-      }
-      const auto& a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
-      // Keep projection on the existing captured GEMM path, then use a
-      // direct-store epilogue. Tensor Core projection is an explicitly
-      // unverified fast candidate; the FP32 path remains the quality contract.
-      const auto project = [&]() {
-        return tensorcore_projection
-            ? at::mm(transformed, a)
-            : at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
-      };
-      at::Tensor hidden;
-      if (recovery_stream != nullptr) {
-        c10::cuda::CUDAStreamGuard recovery_guard(c10::cuda::getStreamFromExternal(
-            recovery_stream, device));
-        hidden = project();
-        C10_CUDA_CHECK(cudaEventRecord(recovery_done, recovery_stream));
-      } else {
-        hidden = project();
-      }
-      if (recovery_stream != nullptr) {
-        C10_CUDA_CHECK(cudaStreamWaitEvent(static_cast<cudaStream_t>(cuda_stream), recovery_done, 0));
-      }
+      at::Tensor hidden = consume_hidden();
       // The transform-free composite path uses one graph-safe CUDA epilogue:
       // it consumes X'A at the explicit FP16 hidden boundary, expands in
       // FP32, adds the decoded base, and stores the final FP16 result directly
@@ -231,27 +241,8 @@ static int qvq_p32_window_linear_impl(
           static_cast<cudaStream_t>(cuda_stream));
       wrote_output = true;
     } else if (c.rank8_enabled) {
-      const auto& a_float = prepared_rank8_a.defined() ? prepared_rank8_a : a.to(at::kFloat);
       const auto& b_float = prepared_rank8_b.defined() ? prepared_rank8_b : b.to(at::kFloat);
-      const auto project = [&]() {
-        return tensorcore_projection
-            ? at::mm(transformed, a)
-            : at::mm(transformed.to(at::kFloat), a_float).to(at::kHalf);
-      };
-      at::Tensor hidden;
-      if (concurrent_projection && recovery_stream != nullptr) {
-        C10_CUDA_CHECK(cudaEventRecord(recovery_ready, static_cast<cudaStream_t>(cuda_stream)));
-        C10_CUDA_CHECK(cudaStreamWaitEvent(recovery_stream, recovery_ready, 0));
-        {
-          c10::cuda::CUDAStreamGuard recovery_guard(c10::cuda::getStreamFromExternal(
-              recovery_stream, device));
-          hidden = project();
-          C10_CUDA_CHECK(cudaEventRecord(recovery_done, recovery_stream));
-        }
-        C10_CUDA_CHECK(cudaStreamWaitEvent(static_cast<cudaStream_t>(cuda_stream), recovery_done, 0));
-      } else {
-        hidden = project();
-      }
+      at::Tensor hidden = consume_hidden();
       // Preserve the explicit FP16 hidden boundary while combining the FP32
       // rank expansion with the decoded base in one BLAS epilogue.  ``addmm``
       // retains FP32 inputs/accumulation for the output-Hadamard reference
