@@ -150,7 +150,8 @@ producer stream per child, and the grouped WGMMA output joins those events
 before each child correction epilogue. A real SM90 grouped graph replay covers
 the path; mixing `input_fused` and `concurrent_reference` children is rejected
 explicitly until one shared producer can preserve both implementation
-contracts.
+contracts. BF16 activations are also rejected for this projection mode rather
+than silently degrading to a separate projection.
 
 The Ampere continuous-window operator now participates in the same
 `P32WindowConfig` and `window_kernel_candidates` policy. On SM80, the
