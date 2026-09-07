@@ -327,6 +327,12 @@ is not promoted. The result is retained in
 `results/p32_rank8_h200_grouped_input_fused_epilogue.json` as a negative tuning
 candidate.
 
+For completeness, the unverified `project_output_fused` candidate on the same
+grouped fixture measured 173.85%/107.74%/37.51% at M=128/2048/8192. It is
+faster at large M but remains above the recovery budget and is not eligible
+for balanced/quality selection until its arithmetic signature is certified.
+The raw replay record is `results/p32_rank8_h200_grouped_project_output_fused.json`.
+
 Fused MLP down projection policy validation now fails closed for projection
 choices that the down path cannot execute with their declared contract
 (`input_fused`, `concurrent_reference`, and `project_output_fused`). The
