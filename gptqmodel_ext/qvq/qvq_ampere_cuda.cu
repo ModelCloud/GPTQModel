@@ -1758,6 +1758,7 @@ inline bool launch_static_n_scalar_kernel(
     return true
   switch (size_n) {
     QVQ_LAUNCH_STATIC_N(1024);
+    QVQ_LAUNCH_STATIC_N(2560);
     QVQ_LAUNCH_STATIC_N(5120);
     QVQ_LAUNCH_STATIC_N(6144);
     QVQ_LAUNCH_STATIC_N(10240);
@@ -2256,6 +2257,21 @@ at::Tensor p32_window_ampere_impl(
                  static_cast<int>(bank_alt_id),
                  grid,
                  stream)) {
+  } else if (size_m == 1 && size_k == 640 && size_n == 2560 &&
+             split_count == 24) {
+    p32_window_ampere_m1_kernel<
+        TransitionBits, 1, kM1Threads, kM1TilesPerBlock, kStageKTiles,
+        2560, 24, 640><<<grid, kM1Threads, 0, stream>>>(
+        input_ptr,
+        trellis_ptr,
+        levels_ptr,
+        bank_ids_ptr,
+        partial_output_ptr,
+        output_ptr,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
   } else if (size_m == 1 && use_small_m_scalar && use_four_tile_scalar_stage) {
     p32_window_ampere_m1_kernel<
         TransitionBits, 1, kM1Threads, kM1TilesPerBlock, kScalarLongStageKTiles>
@@ -2335,6 +2351,21 @@ at::Tensor p32_window_ampere_impl(
                  static_cast<int>(bank_alt_id),
                  grid,
                  stream)) {
+  } else if (size_m == 2 && size_k == 640 && size_n == 2560 &&
+             split_count == 40) {
+    p32_window_ampere_m1_kernel<
+        TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
+        kScalarTripleStageKTiles, 2560, 40, 640><<<grid, kM1Threads, 0, stream>>>(
+        input_ptr,
+        trellis_ptr,
+        levels_ptr,
+        bank_ids_ptr,
+        partial_output_ptr,
+        output_ptr,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
   } else if (size_m == 2 && use_small_m_scalar && use_four_tile_scalar_stage &&
              launch_static_n_scalar_kernel<
                  TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
@@ -2470,6 +2501,21 @@ at::Tensor p32_window_ampere_impl(
                  static_cast<int>(bank_alt_id),
                  grid,
                  stream)) {
+  } else if (size_m == 4 && size_k == 640 && size_n == 2560 &&
+             split_count == 40) {
+    p32_window_ampere_m1_kernel<
+        TransitionBits, 4, kM1Threads, kM1TilesPerBlock,
+        kM4StageKTiles, 2560, 40, 640><<<grid, kM1Threads, 0, stream>>>(
+        input_ptr,
+        trellis_ptr,
+        levels_ptr,
+        bank_ids_ptr,
+        partial_output_ptr,
+        output_ptr,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
   } else if (size_m == 4 && use_small_m_scalar && use_four_tile_scalar_stage &&
              launch_static_n_scalar_kernel<TransitionBits, 4, kM1Threads, kM1TilesPerBlock, kM4StageKTiles>(
                  input_ptr,

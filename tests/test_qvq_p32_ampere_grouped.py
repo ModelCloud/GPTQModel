@@ -97,6 +97,23 @@ def test_flash_next_qkv_group_uses_compact_static_wave_policy():
     assert [segment.split_count for segment in plan.segments] == [16, 16, 16]
 
 
+def test_flash_next_gate_up_group_uses_full_scalar_wave_policy():
+    input = torch.empty((8, 2560))
+    payloads = [torch.empty(1), torch.empty(1)]
+
+    plan = qvq_p32_window_ampere_group_plan(
+        input,
+        payloads,
+        torch.empty(256),
+        payloads,
+        3,
+        out_features=(640, 640),
+        bank_alt_ids=(3, 1),
+    )
+
+    assert [segment.split_count for segment in plan.segments] == [40, 40]
+
+
 def test_grouped_ampere_candidates_tune_children_independently_without_cuda_work():
     candidates = qvq_p32_window_ampere_grouped_kernel_candidates(
         (1, 5120),
