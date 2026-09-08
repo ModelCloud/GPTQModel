@@ -1791,6 +1791,147 @@ void p32_window_ampere_grouped_flash_next_gate_up_compact_scalar_kernel(
       partial_offset);
 }
 
+// QKV has one 12288-column child and two 512-column children.  The generic
+// grouped WMMA route must rediscover the child geometry for every CTA and
+// keeps N-tail predicates in the hot loop.  Flash-Next fixes all three widths,
+// so dispatch each child through a static-N body while retaining the packed
+// grouped payload and the exact per-child split layout.
+template <
+    int TransitionBits,
+    int Rows,
+    int StageKTiles,
+    int StaticSplitCount,
+    int StaticN,
+    bool FullRows,
+    bool WideNTiles>
+__device__ __forceinline__ void
+p32_window_ampere_grouped_flash_next_qkv_segment(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    const GroupedP32LaunchParams& params,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int size_m,
+    int n_block,
+    int split,
+    int segment,
+    int payload_n_tile_offset,
+    int output_n_offset,
+    int64_t partial_segment_offset) {
+  constexpr int kQTiles = 768;
+  constexpr int kKVTiles = 32;
+  constexpr int kBlockTiles =
+      (kM1Warps * (WideNTiles ? 2 : 1));
+  constexpr int kStaticTiles = StaticN / kTileColumns;
+  static_assert(StaticN == 12288 || StaticN == 512);
+  static_assert(kStaticTiles == kQTiles || kStaticTiles == kKVTiles);
+  static_assert(kStaticTiles % kBlockTiles == 0);
+  p32_window_ampere_kernel_body<
+      TransitionBits,
+      FullRows,
+      FullRows ? 0 : Rows,
+      StaticN,
+      true,
+      false,
+      2560,
+      true,
+      false,
+      WideNTiles,
+      false,
+      StageKTiles,
+      StaticSplitCount>(
+      input,
+      trellis,
+      levels,
+      bank_ids,
+      partial_output,
+      output,
+      size_m,
+      2560,
+      StaticN,
+      StaticSplitCount,
+      params.bank_alt_id[segment],
+      n_block,
+      split,
+      kQTiles + 2 * kKVTiles,
+      payload_n_tile_offset,
+      output_n_offset,
+      StaticN,
+      partial_segment_offset);
+}
+
+template <
+    int TransitionBits,
+    int Rows,
+    int StageKTiles,
+    int StaticSplitCount,
+    bool FullRows,
+    bool WideNTiles>
+__global__ __launch_bounds__(kThreads)
+void p32_window_ampere_grouped_flash_next_qkv_static_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    const __grid_constant__ GroupedP32LaunchParams params,
+    float* __restrict__ partial_output,
+    float* __restrict__ output) {
+  constexpr int kQTiles = 768;
+  constexpr int kKVTiles = 32;
+  constexpr int kBlockTiles =
+      (kM1Warps * (WideNTiles ? 2 : 1));
+  constexpr int kQBlocks = kQTiles / kBlockTiles;
+  constexpr int kKVBlocks = kKVTiles / kBlockTiles;
+  constexpr int kQBlocksTotal = kQBlocks * StaticSplitCount;
+  constexpr int kKVBlocksTotal = kKVBlocks * StaticSplitCount;
+  const int block = static_cast<int>(blockIdx.x);
+  int segment;
+  int n_block;
+  int split;
+  int payload_n_tile_offset;
+  int output_n_offset;
+  int64_t partial_segment_offset;
+  if (block < kQBlocksTotal) {
+      segment = 0;
+    split = block / kQBlocks;
+    n_block = block - split * kQBlocks;
+    payload_n_tile_offset = 0;
+    output_n_offset = 0;
+    partial_segment_offset = params.partial_offset[0];
+  } else if (block < kQBlocksTotal + kKVBlocksTotal) {
+    segment = 1;
+    const int local_block = block - kQBlocksTotal;
+    split = local_block / kKVBlocks;
+    n_block = local_block - split * kKVBlocks;
+    payload_n_tile_offset = kQTiles;
+    output_n_offset = static_cast<int>(params.output_offset[1]);
+    partial_segment_offset = params.partial_offset[1];
+  } else {
+    segment = 2;
+    const int local_block = block - kQBlocksTotal - kKVBlocksTotal;
+    split = local_block / kKVBlocks;
+    n_block = local_block - split * kKVBlocks;
+    payload_n_tile_offset = kQTiles + kKVTiles;
+    output_n_offset = static_cast<int>(params.output_offset[2]);
+    partial_segment_offset = params.partial_offset[2];
+  }
+  if (segment == 0) {
+    p32_window_ampere_grouped_flash_next_qkv_segment<
+        TransitionBits, Rows, StageKTiles, StaticSplitCount, 12288, FullRows,
+        WideNTiles>(input, trellis, levels, bank_ids, params, partial_output,
+                    output, Rows, n_block, split, segment, payload_n_tile_offset,
+                    output_n_offset, partial_segment_offset);
+  } else {
+    p32_window_ampere_grouped_flash_next_qkv_segment<
+        TransitionBits, Rows, StageKTiles, StaticSplitCount, 512, FullRows,
+        WideNTiles>(input, trellis, levels, bank_ids, params, partial_output,
+                    output, Rows, n_block, split, segment, payload_n_tile_offset,
+                    output_n_offset, partial_segment_offset);
+  }
+}
+
 template <
     int TransitionBits,
     bool FullRows,
@@ -4183,6 +4324,22 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   const bool use_flash_next_qkv_wmma_split4_shape =
       use_flash_next_qkv_shape && params.split_count[0] == 4 &&
       params.split_count[1] == 4 && params.split_count[2] == 4;
+  const bool use_flash_next_qkv_wide_m16 =
+      use_flash_next_qkv_wmma_split4_shape && size_m == kRows;
+  const bool use_flash_next_qkv_static_shape =
+      (use_flash_next_qkv_wmma_shape || use_flash_next_qkv_wmma_split4_shape) &&
+      (size_m == 8 || size_m == kRows);
+  if (use_flash_next_qkv_wide_m16) {
+    // M=16 QKV is the only Flash-Next QKV case with the measured four-way
+    // K split. Two N16 tiles per warp halves the CTA count without changing
+    // the per-tile decode or the increasing-split reduction order.
+    active_wmma_blocks = 0;
+    for (int segment = 0; segment < segment_count; ++segment) {
+      active_wmma_blocks +=
+          ((params.n_tiles[segment] + 2 * kTilesPerBlock - 1) /
+           (2 * kTilesPerBlock)) * params.split_count[segment];
+    }
+  }
   const bool use_flash_next_gate_up_shape =
       TransitionBits == 6 && segment_count == 2 &&
       params.n_tiles[0] == 40 && params.n_tiles[1] == 40;
@@ -4338,7 +4495,17 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     }
   } else {
     const dim3 grid(static_cast<unsigned>(active_wmma_blocks), 1, 1);
-    if (use_flash_next_qkv_wmma_split4_shape && size_m == kRows) {
+    if (use_flash_next_qkv_static_shape && size_m == kRows) {
+      p32_window_ampere_grouped_flash_next_qkv_static_kernel<
+          TransitionBits, 16, 5, 4, true, true><<<grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+          partial_output_ptr, output_ptr);
+    } else if (use_flash_next_qkv_static_shape && size_m == 8) {
+      p32_window_ampere_grouped_flash_next_qkv_static_kernel<
+          TransitionBits, 8, 5, 16, false, false><<<grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+          partial_output_ptr, output_ptr);
+    } else if (use_flash_next_qkv_wmma_split4_shape && size_m == kRows) {
       p32_window_ampere_grouped_wmma_kernel<
           TransitionBits, true, 0, 0, true, false, 2560, true, false, false,
           false, 3, 4><<<grid, kThreads, 0, stream>>>(
@@ -4348,14 +4515,14 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     } else if (use_flash_next_qkv_wmma_shape && size_m == kRows) {
       p32_window_ampere_grouped_wmma_kernel<
           TransitionBits, true, 0, 0, true, false, 2560, true, false, false,
-          false, 3, 16><<<grid, kThreads, 0, stream>>>(
+          false, 5, 16><<<grid, kThreads, 0, stream>>>(
           input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
           partial_output_ptr, output_ptr, static_cast<int>(segment_count),
           size_m, size_k, total_n_tiles);
     } else if (use_flash_next_qkv_wmma_shape && size_m == 8) {
       p32_window_ampere_grouped_wmma_kernel<
           TransitionBits, false, 8, 0, true, false, 2560, true, false, false,
-          false, 3, 16><<<grid, kThreads, 0, stream>>>(
+          false, 5, 16><<<grid, kThreads, 0, stream>>>(
           input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
           partial_output_ptr, output_ptr, static_cast<int>(segment_count),
           size_m, size_k, total_n_tiles);
