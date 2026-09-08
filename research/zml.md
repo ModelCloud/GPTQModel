@@ -25,6 +25,20 @@ semantics can be expressed. Use a registered native call for packed P32
 operations that require the existing kernel. Specify layouts, shapes, buffer
 lifetimes and stream ownership explicitly.
 
+External tuning is part of that call contract. ZML must be able to select the
+P32 shape, N16 group boundaries, split wave, stage count, static-N policy,
+threads/warps, and N tiles per block through the version-3 `qvq_p32` ABI. The
+`*_tuned` entry points accept this policy and the launch-plan entry point
+returns the exact graph-visible launches. A zero tuning field means native
+QvQ policy; a nonzero field is validated and rejected if the loaded binary has
+no matching specialization. In the current binary, N tiles per block is tied
+to the selected warp count (`4 * warps` for scalar M1–4 and `warps` for block
+M5–16), so ZML can tune the available warp/thread choices and pass the derived
+N-tile value, but cannot request an unsupported independent tile count. This
+prevents a bridge from silently measuring a different geometry. Calls through
+the legacy entry points leave tuning policy with QvQ, including its local
+autotuning.
+
 The compiler cannot inspect arbitrary CUDA kernel internals through a call
 name. Partial outputs can expose a subsequent reduction, but do not expose
 packed decoding inside the product kernel. Preserve the ABI's ordered FP32

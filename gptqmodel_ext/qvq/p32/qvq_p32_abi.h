@@ -11,7 +11,7 @@ extern "C" {
 // the ABI version describes this C surface; the kernel version invalidates
 // launch-autotune entries when implementation details change.
 #define QVQ_P32_OPERATION_VERSION 1
-#define QVQ_P32_ABI_VERSION 2
+#define QVQ_P32_ABI_VERSION 3
 #define QVQ_P32_KERNEL_VERSION 11
 #define QVQ_P32_COMPILED_SM 80
 
@@ -29,6 +29,10 @@ extern "C" {
 #define QVQ_P32_ROW_GROUPS_AUTO 0
 #define QVQ_P32_ROW_GROUPS_MIN 1
 #define QVQ_P32_ROW_GROUPS_MAX 16
+#define QVQ_P32_TUNING_AUTO 0
+#define QVQ_P32_TUNING_EXTERNAL 1
+#define QVQ_P32_N_TILES_AUTO 0
+#define QVQ_P32_WARPS_AUTO 0
 #define QVQ_P32_LAUNCH_PLAN_MAX_LAUNCHES 5
 #define QVQ_P32_LAUNCH_PLAN_MAX_ARGS 16
 #define QVQ_P32_LAUNCH_PLAN_HOST_STORAGE_WORDS 128
@@ -57,6 +61,14 @@ struct qvq_p32_config {
   int stage_k_tiles;
   int static_n;
   int reduction_mode;
+  // External bridges set tuning_mode=EXTERNAL and may provide the derived
+  // N-tile and warp choices explicitly. Zero selects the native policy for
+  // that axis. The runtime rejects a non-native geometry until a matching
+  // compiled specialization is available; it never silently ignores a
+  // requested tuning value.
+  int tuning_mode;
+  int n_tiles_per_block;
+  int n_warps;
 };
 
 // Framework-neutral CUDA launch metadata for compiler-owned command buffers.
@@ -167,6 +179,22 @@ int qvq_p32_window_with_row_groups(
     int row_groups,
     void* stream);
 
+int qvq_p32_window_tuned(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const void* bank_alt_id,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int transition_bits,
+    int row_groups,
+    const struct qvq_p32_config* config,
+    void* stream);
+
 // Native grouped V2B2-P32 entry point. `bank_alt_ids` has one uint8 selector
 // per group (two or three groups, with selectors in [1, 3]). M=1..4 uses the
 // scalar kernel and M=5..16 uses the block kernel. The final output is row-major
@@ -204,6 +232,33 @@ int qvq_p32_grouped_window(
     int n_tile_end_1,
     void* stream);
 
+// Versioned configuration entry point for external compiler bridges. The
+// legacy grouped function above remains source-compatible and uses native
+// tuning policy. This entry point lets ZML/XLA supply the full launch policy
+// in one object, including N-tile and warp choices, without depending on
+// private CUDA templates.
+int qvq_p32_grouped_window_tuned(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const void* bank_alt_ids,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int transition_bits,
+    int split_count,
+    int split_count_0,
+    int split_count_1,
+    int split_count_2,
+    int group_count,
+    int n_tile_end_0,
+    int n_tile_end_1,
+    const struct qvq_p32_config* config,
+    void* stream);
+
 // Build the exact launch sequence used by qvq_p32_grouped_window without
 // issuing work. ZML uses this to create/update native nodes in an XLA command
 // buffer after autotuning has selected a fixed configuration. Other framework
@@ -233,6 +288,28 @@ int qvq_p32_grouped_launch_plan(
     int group_count,
     int n_tile_end_0,
     int n_tile_end_1,
+    struct qvq_p32_launch_plan* plan);
+
+int qvq_p32_grouped_launch_plan_tuned(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const void* bank_alt_ids,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int transition_bits,
+    int split_count,
+    int split_count_0,
+    int split_count_1,
+    int split_count_2,
+    int group_count,
+    int n_tile_end_0,
+    int n_tile_end_1,
+    const struct qvq_p32_config* config,
     struct qvq_p32_launch_plan* plan);
 
 #ifdef __cplusplus

@@ -12,6 +12,29 @@ All kernel code and kernel-library integration must satisfy
 [graph-safe-kernels](../graph-safe-kernels/SKILL.md), including native and external
 capture ownership. Read that skill before changing the runtime path.
 
+## QVQ external tuning ABI rule
+
+Any QVQ kernel optimization that changes launch geometry or N-side work must be
+available through the versioned external bridge ABI used by ZML and other
+embedding runtimes. Expose the complete honored policy, not just a kernel name:
+logical M/K/N (and E where applicable), group-N16 boundaries, split-K wave,
+kernel variant, N tiles per CTA/warp, warp and thread count, row/CTA grouping,
+pipeline stage count, static-N selection, vectorization/layout choices, shared
+memory or workspace requirements, and the implementation/build identity used by
+the autotune cache. The bridge must be able to enumerate candidates, benchmark
+them outside graph capture, select one explicitly, and pass that frozen choice
+to the launch or launch-plan entry point.
+
+External tuning is authoritative: a requested value must be honored by a
+matching compiled specialization or rejected with an actionable error. Never
+silently replace it with a native default, hidden retune, or different backend.
+If a geometry is derived or currently fixed by a specialization, expose that
+invariant in the ABI and reject non-native values until a matching specialization
+is implemented. Legacy/non-ZML entry points may retain QVQ-owned autotuning,
+but it must happen during preparation and never during execution or graph
+capture/replay. Add a header contract test and a correctness test for the
+external path whenever this surface changes.
+
 Start from a numerical reference and select the smallest kernel path that can express the operation. Keep correctness tests separate from performance benchmarks.
 
 Read [references/kernel-workflow.md](references/kernel-workflow.md). For crashes or silent corruption, also read [references/cuda-debugging.md](references/cuda-debugging.md).

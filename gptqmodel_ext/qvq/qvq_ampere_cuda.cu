@@ -532,7 +532,8 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
         if (k_tile < k_tiles) {
           copy_async_ca_8(
               destination_ids,
-              bank_ids + static_cast<int64_t>(k_tile) * n_tiles + n_tile_base);
+              bank_ids + static_cast<int64_t>(k_tile) * payload_n_tiles +
+                  payload_n_tile_offset + n_tile_base);
         } else {
           destination_ids[0] = 0u;
           destination_ids[1] = 0u;
@@ -549,7 +550,8 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
           copy_async_ca_4(
               destination_ids + word,
               reinterpret_cast<const uint32_t*>(
-                  bank_ids + static_cast<int64_t>(k_tile) * n_tiles + n_tile_base) + word);
+                  bank_ids + static_cast<int64_t>(k_tile) * payload_n_tiles +
+                      payload_n_tile_offset + n_tile_base) + word);
         } else {
           destination_ids[word] = 0u;
         }
@@ -1683,7 +1685,20 @@ __global__ __launch_bounds__(kM1Threads) void p32_window_ampere_grouped_scalar_k
       params.partial_offset[segment]);
 }
 
-template <int TransitionBits, bool FullRows, int ActiveRows = 0>
+template <
+    int TransitionBits,
+    bool FullRows,
+    int ActiveRows = 0,
+    int StaticN = 0,
+    bool HoistBankMasks = false,
+    bool UpperRowsOnly = false,
+    int StaticK = 0,
+    bool UsePairWrapPredicate = false,
+    bool UsePowerOfTwoWrap = false,
+    bool WideNTiles = false,
+    bool UseWideBankIdCopy = false,
+    int StageKTiles = kStageKTiles,
+    int StaticSplitCount = 0>
 __global__ __launch_bounds__(kThreads) void p32_window_ampere_grouped_wmma_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -1699,7 +1714,7 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_grouped_wmma_kerne
   int segment = 0;
   int n_block = 0;
   int split = 0;
-  if (!grouped_block_coordinates<kTilesPerBlock>(
+  if (!grouped_block_coordinates<WideNTiles ? 2 * kTilesPerBlock : kTilesPerBlock>(
           params, std::min(segment_count, params.segment_count),
           static_cast<int>(blockIdx.x), segment, n_block, split)) {
     return;
@@ -1707,7 +1722,10 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_grouped_wmma_kerne
   const int n_tile_start = params.n_tile_start[segment];
   const int n_tiles = params.n_tiles[segment];
   const int split_count = params.split_count[segment];
-  p32_window_ampere_kernel_body<TransitionBits, FullRows, ActiveRows>(
+  p32_window_ampere_kernel_body<
+      TransitionBits, FullRows, ActiveRows, StaticN, HoistBankMasks,
+      UpperRowsOnly, StaticK, UsePairWrapPredicate, UsePowerOfTwoWrap,
+      WideNTiles, UseWideBankIdCopy, StageKTiles, StaticSplitCount>(
       input,
       trellis,
       levels,
@@ -3490,6 +3508,8 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   int64_t output_values = 0;
   int64_t partial_values = 0;
   bool needs_reduction = false;
+  bool use_flash_next_gate_up_wide =
+      TransitionBits == 6 && size_k == 2560 && segment_count == 2;
   for (int segment = 0; segment < segment_count; ++segment) {
     const int size_n = static_cast<int>(out_features[segment]);
     const int split_count = static_cast<int>(split_counts[segment]);
@@ -3509,6 +3529,9 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
       uniform_splits = false;
     }
     const int n_tiles = size_n / kTileColumns;
+    if (size_n != 640 || split_count != 40) {
+      use_flash_next_gate_up_wide = false;
+    }
     params.n_tile_start[segment] = total_n_tiles;
     params.n_tiles[segment] = n_tiles;
     params.bank_alt_id[segment] = bank_alt_id;
@@ -3529,6 +3552,16 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
         ((n_tiles + kM1TilesPerBlock - 1) / kM1TilesPerBlock) * split_count;
     active_wmma_blocks +=
         ((n_tiles + kTilesPerBlock - 1) / kTilesPerBlock) * split_count;
+  }
+  if (use_flash_next_gate_up_wide) {
+    // Flash-Next gate/up has two aligned 640-column children.  Let each warp
+    // consume both N16 tiles so one CTA covers eight tiles instead of four.
+    active_wmma_blocks = 0;
+    for (int segment = 0; segment < segment_count; ++segment) {
+      active_wmma_blocks +=
+          ((params.n_tiles[segment] + 2 * kTilesPerBlock - 1) /
+           (2 * kTilesPerBlock)) * params.split_count[segment];
+    }
   }
   const int total_n = total_n_tiles * kTileColumns;
   if (rank8_a.has_value()) {
@@ -3654,7 +3687,21 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     }
   } else {
     const dim3 grid(static_cast<unsigned>(active_wmma_blocks), 1, 1);
-    if (size_m == kRows) {
+    if (use_flash_next_gate_up_wide && size_m == kRows) {
+      p32_window_ampere_grouped_wmma_kernel<
+          TransitionBits, true, 0, 640, true, false, 2560, false, false,
+          true, true, 4, 40><<<grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+          partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+          size_m, size_k, total_n_tiles);
+    } else if (use_flash_next_gate_up_wide && size_m == 8) {
+      p32_window_ampere_grouped_wmma_kernel<
+          TransitionBits, false, 8, 640, true, false, 2560, false, false,
+          true, true, 4, 40><<<grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+          partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+          size_m, size_k, total_n_tiles);
+    } else if (size_m == kRows) {
       p32_window_ampere_grouped_wmma_kernel<TransitionBits, true>
           <<<grid, kThreads, 0, stream>>>(
               input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
@@ -3727,6 +3774,30 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
             rank8_b->data_ptr());
       } else {
         reduce_grouped_split_rank8_kernel<false, 16><<<
+            reduction_grid, kReductionThreads, 0, stream>>>(
+            partial_output_ptr,
+            output_ptr,
+            params,
+            static_cast<int>(segment_count),
+            size_m,
+            total_n,
+            rank8_down.data_ptr<float>(),
+            rank8_b->data_ptr());
+      }
+    } else if (uniform_splits && uniform_split_count == 40) {
+      if (rank8_b->scalar_type() == at::kFloat) {
+        reduce_grouped_split_rank8_kernel<true, 40><<<
+            reduction_grid, kReductionThreads, 0, stream>>>(
+            partial_output_ptr,
+            output_ptr,
+            params,
+            static_cast<int>(segment_count),
+            size_m,
+            total_n,
+            rank8_down.data_ptr<float>(),
+            rank8_b->data_ptr());
+      } else {
+        reduce_grouped_split_rank8_kernel<false, 40><<<
             reduction_grid, kReductionThreads, 0, stream>>>(
             partial_output_ptr,
             output_ptr,
