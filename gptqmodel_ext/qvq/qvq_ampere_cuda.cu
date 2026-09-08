@@ -1869,7 +1869,7 @@ __global__ void reduce_split_kernel(
   output[index] = accumulator;
 }
 
-template <bool Rank8BFloat>
+template <bool Rank8BFloat, int StaticSplitCount = 0, int StaticN = 0>
 __global__ void reduce_split_rank8_kernel(
     const float* __restrict__ partial_output,
     float* __restrict__ output,
@@ -1886,11 +1886,14 @@ __global__ void reduce_split_rank8_kernel(
   }
   float accumulator = 0.0f;
 #pragma unroll
-  for (int split = 0; split < split_count; ++split) {
+  for (int split = 0;
+       split < (StaticSplitCount > 0 ? StaticSplitCount : split_count);
+       ++split) {
     accumulator += partial_output[static_cast<int64_t>(split) * output_values + index];
   }
-  const int row = index / size_n;
-  const int column = index - row * size_n;
+  const int effective_size_n = StaticN > 0 ? StaticN : size_n;
+  const int row = index / effective_size_n;
+  const int column = index - row * effective_size_n;
   const float* rank8_b_float = static_cast<const float*>(rank8_b);
   const half* rank8_b_half = static_cast<const half*>(rank8_b);
   float correction = 0.0f;
@@ -3511,8 +3514,26 @@ at::Tensor p32_window_ampere_impl(
     constexpr int kReductionThreads = 256;
     const int output_values = size_m * size_n;
     const int blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
+    const bool use_flash_next_direct_rank8_reducer =
+        TransitionBits == 6 && size_k == 2560 && size_n == 640 &&
+        split_count == 32 &&
+        (size_m == 1 || size_m == 2 || size_m == 4 || size_m == 8 ||
+         size_m == 16);
     if (rank8_b->scalar_type() == at::kFloat) {
-      reduce_split_rank8_kernel<true><<<blocks, kReductionThreads, 0, stream>>>(
+      if (use_flash_next_direct_rank8_reducer) {
+        reduce_split_rank8_kernel<true, 32, 640>
+            <<<blocks, kReductionThreads, 0, stream>>>(
+            partial_output.data_ptr<float>(),
+            output.data_ptr<float>(),
+            rank8_down_tensor.data_ptr<float>(),
+            rank8_b->data_ptr(),
+            output_values,
+            size_n,
+            static_cast<int>(split_count),
+            static_cast<int>(rank8_down_tensor.stride(0)),
+            static_cast<float>(rank8_scale));
+      } else {
+        reduce_split_rank8_kernel<true><<<blocks, kReductionThreads, 0, stream>>>(
           partial_output.data_ptr<float>(),
           output.data_ptr<float>(),
           rank8_down_tensor.data_ptr<float>(),
@@ -3522,8 +3543,22 @@ at::Tensor p32_window_ampere_impl(
           static_cast<int>(split_count),
           static_cast<int>(rank8_down_tensor.stride(0)),
           static_cast<float>(rank8_scale));
+      }
     } else {
-      reduce_split_rank8_kernel<false><<<blocks, kReductionThreads, 0, stream>>>(
+      if (use_flash_next_direct_rank8_reducer) {
+        reduce_split_rank8_kernel<false, 32, 640>
+            <<<blocks, kReductionThreads, 0, stream>>>(
+            partial_output.data_ptr<float>(),
+            output.data_ptr<float>(),
+            rank8_down_tensor.data_ptr<float>(),
+            rank8_b->data_ptr(),
+            output_values,
+            size_n,
+            static_cast<int>(split_count),
+            static_cast<int>(rank8_down_tensor.stride(0)),
+            static_cast<float>(rank8_scale));
+      } else {
+        reduce_split_rank8_kernel<false><<<blocks, kReductionThreads, 0, stream>>>(
           partial_output.data_ptr<float>(),
           output.data_ptr<float>(),
           rank8_down_tensor.data_ptr<float>(),
@@ -3533,6 +3568,7 @@ at::Tensor p32_window_ampere_impl(
           static_cast<int>(split_count),
           static_cast<int>(rank8_down_tensor.stride(0)),
           static_cast<float>(rank8_scale));
+      }
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return output;
