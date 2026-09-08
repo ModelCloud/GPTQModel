@@ -74,7 +74,7 @@ def test_eora_handoff_preserves_independent_reconstruction(method):
     assert module.state["wq"].device.type == "cpu"
 
 
-def test_qqq_packs_uncorrected_weight_after_eora() -> None:
+def test_qqq_packs_uncorrected_weight_after_eora():
     processor = object.__new__(QQQProcessor)
     processor.lock = threading.Lock()
     processor.calculate_w_wq_diff = True
