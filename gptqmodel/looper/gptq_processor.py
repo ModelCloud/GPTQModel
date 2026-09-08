@@ -29,7 +29,7 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FOEM, GPTAQ, GPTQ
-from ..quantization.config import METHOD, FOEMConfig, GPTAQConfig, HessianConfig, QuantizeConfig, resolve_quant_format
+from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
