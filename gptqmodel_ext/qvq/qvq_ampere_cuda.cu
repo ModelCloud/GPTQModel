@@ -3579,21 +3579,48 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   // common short-K scalar route for M<=4.  Long-K grouped shapes deliberately
   // remain on the ordinary exact dispatcher until a matching route exists.
   const bool use_small_m_scalar = size_m <= 4 && size_k <= 6144;
+  const bool use_flash_next_qkv_shape =
+      TransitionBits == 6 && segment_count == 3 &&
+      params.n_tiles[0] == 768 && params.n_tiles[1] == 32 &&
+      params.n_tiles[2] == 32;
+  const bool use_flash_next_gate_up_shape =
+      TransitionBits == 6 && segment_count == 2 &&
+      params.n_tiles[0] == 40 && params.n_tiles[1] == 40;
+  const bool use_flash_next_shape =
+      use_flash_next_qkv_shape || use_flash_next_gate_up_shape;
   if (use_small_m_scalar) {
     const dim3 grid(static_cast<unsigned>(active_scalar_blocks), 1, 1);
     if (size_m == 1) {
-      p32_window_ampere_grouped_scalar_kernel<TransitionBits, 1>
-          <<<grid, kM1Threads, 0, stream>>>(
-              input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
-              partial_output_ptr, output_ptr, static_cast<int>(segment_count),
-              size_k, total_n_tiles);
+      if (use_flash_next_shape) {
+        p32_window_ampere_grouped_scalar_kernel<
+            TransitionBits, 1, kStageKTiles, true>
+            <<<grid, kM1Threads, 0, stream>>>(
+                input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+                partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+                size_k, total_n_tiles);
+      } else {
+        p32_window_ampere_grouped_scalar_kernel<TransitionBits, 1>
+            <<<grid, kM1Threads, 0, stream>>>(
+                input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+                partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+                size_k, total_n_tiles);
+      }
     } else if (size_m == 2) {
-      p32_window_ampere_grouped_scalar_kernel<
-          TransitionBits, 2, kScalarTripleStageKTiles>
-          <<<grid, kM1Threads, 0, stream>>>(
-              input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
-              partial_output_ptr, output_ptr, static_cast<int>(segment_count),
-              size_k, total_n_tiles);
+      if (use_flash_next_shape) {
+        p32_window_ampere_grouped_scalar_kernel<
+            TransitionBits, 2, kScalarTripleStageKTiles, true>
+            <<<grid, kM1Threads, 0, stream>>>(
+                input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+                partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+                size_k, total_n_tiles);
+      } else {
+        p32_window_ampere_grouped_scalar_kernel<
+            TransitionBits, 2, kScalarTripleStageKTiles>
+            <<<grid, kM1Threads, 0, stream>>>(
+                input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+                partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+                size_k, total_n_tiles);
+      }
     } else if (size_m == 3) {
       p32_window_ampere_grouped_scalar_kernel<TransitionBits, 3>
           <<<grid, kM1Threads, 0, stream>>>(
@@ -3607,11 +3634,7 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
       // shared-memory footprint enough to reduce residency.  Gate/up keeps
       // the two-stage default because its smaller N does not amortize the
       // larger stage footprint.
-      const bool use_flash_next_qkv_m4_pipeline =
-          TransitionBits == 6 && segment_count == 3 &&
-          params.n_tiles[0] == 768 && params.n_tiles[1] == 32 &&
-          params.n_tiles[2] == 32;
-      if (use_flash_next_qkv_m4_pipeline) {
+      if (use_flash_next_qkv_shape) {
         p32_window_ampere_grouped_scalar_kernel<TransitionBits, 4, 4, true>
             <<<grid, kM1Threads, 0, stream>>>(
                 input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
