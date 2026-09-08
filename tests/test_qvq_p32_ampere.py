@@ -87,6 +87,12 @@ def test_p32_ampere_public_candidates_share_shape_policy_without_cuda_work():
         (16, 2560), out_features=12288, bits=3, max_candidates=1
     ) == (16,)
     assert qvq_p32_window_ampere_kernel_candidates(
+        (1, 2560), out_features=12288, bits=3, max_candidates=1
+    ) == (40,)
+    assert qvq_p32_window_ampere_kernel_candidates(
+        (8, 2560), out_features=12288, bits=3, max_candidates=1
+    ) == (16,)
+    assert qvq_p32_window_ampere_kernel_candidates(
         (8, 2560), out_features=640, bits=3, max_candidates=1
     ) == (32,)
 
@@ -195,12 +201,17 @@ def test_p32_ampere_dispatches_flash_next_o_shape_policy(
     assert calls[-1][-1] == 7
 
 
-def test_p32_ampere_dispatches_flash_next_q_m16_shape_policy(monkeypatch):
+@pytest.mark.parametrize(
+    ("size_m", "expected_split"), ((1, 40), (2, 40), (4, 40), (8, 16), (16, 16))
+)
+def test_p32_ampere_dispatches_flash_next_q_shape_policy(
+    monkeypatch, size_m, expected_split
+):
     calls = []
     monkeypatch.setattr(
         qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
     )
-    input = torch.empty((16, 2560))
+    input = torch.empty((size_m, 2560))
 
     qvq_ampere_cuda.qvq_p32_window_ampere(
         input,
@@ -212,7 +223,7 @@ def test_p32_ampere_dispatches_flash_next_q_m16_shape_policy(monkeypatch):
         bank_alt_id=2,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == 16
+    assert calls[0][-1] == expected_split
 
     qvq_ampere_cuda.qvq_p32_window_ampere(
         input,
@@ -1024,13 +1035,13 @@ def test_p32_window_ampere_flash_next_o_wide_dispatch_matches_exact(size_m):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
-def test_p32_window_ampere_flash_next_q_m16_wide_dispatch_matches_exact():
+@pytest.mark.parametrize("size_m", (1, 2, 4, 8, 16))
+def test_p32_window_ampere_flash_next_q_wide_dispatch_matches_exact(size_m):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (8, 0):
         pytest.skip("P32 Ampere WMMA requires SM80")
 
     bits = 3.0
-    size_m = 16
     in_features = 2560
     out_features = 12288
     tile_count = (in_features // 16) * (out_features // 16)
