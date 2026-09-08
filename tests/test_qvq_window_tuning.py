@@ -101,6 +101,77 @@ def test_hopper_auto_policy_selects_direct_consumer_with_small_m_cutover(monkeyp
     assert _HOPPER_LARGE_M_THRESHOLD == 32
 
 
+def test_hopper_qwen_down_fast_policy_selects_tensor_core_projection(monkeypatch):
+    """SM90 fast auto policy uses the measured Qwen-down recovery path."""
+
+    class Layer:
+        v2b2_p32 = True
+        training = False
+        window_only = True
+        activation = None
+        bits = 3
+        in_features = 17408
+        out_features = 5120
+        input_hadamard = False
+        output_hadamard = False
+        rank8_metadata = None
+
+        @staticmethod
+        def runtime_device():
+            return torch.device("cuda")
+
+        @staticmethod
+        def _prepare_amd_p32_metadata(_device):
+            return None
+
+        @staticmethod
+        def _prepare_hopper_p32_window(_device):
+            return None
+
+    monkeypatch.setattr(torch.version, "hip", None, raising=False)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: type(
+            "Properties", (), {"major": 9, "minor": 0, "name": "NVIDIA H100"}
+        )(),
+    )
+    monkeypatch.setattr(
+        "gptqmodel.utils.qvq_cuda.prewarm_qvq_cuda", lambda: None
+    )
+
+    layer = Layer()
+    prepare_rank8(
+        layer,
+        P32WindowConfig(
+            recovery_mode="auto",
+            recovery_kernel="fully_fused",
+            recovery_projection="project_output_fused",
+            arithmetic_signature="unverified_project_output_fused",
+        ),
+    )
+
+    assert layer._p32_window_config.algorithm == "hopper_direct_decode_mma"
+    assert layer._p32_window_config.recovery_kernel == "fused_epilogue"
+    assert layer._p32_window_config.recovery_projection == "tensor_core"
+    assert layer._p32_window_config.arithmetic_signature == "unverified_tensor_core"
+
+    balanced = Layer()
+    prepare_rank8(
+        balanced,
+        P32WindowConfig(
+            recovery_mode="auto",
+            recovery_kernel="fully_fused",
+            recovery_projection="project_output_fused",
+            arithmetic_signature="unverified_project_output_fused",
+            quality_mode="balanced",
+        ),
+    )
+    assert balanced._p32_window_config.recovery_kernel == "fully_fused"
+    assert balanced._p32_window_config.recovery_projection == "project_output_fused"
+
+
 def test_shape_ordering_keeps_every_single_projection_candidate(monkeypatch):
     """The public shape helper orders candidates without filtering winners."""
     import gptqmodel.quantization.qvq_rank8 as rank8
