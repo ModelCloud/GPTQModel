@@ -2136,8 +2136,16 @@ __global__ void reduce_flash_next_qkv_rank8_kernel(
   if (local_index >= segment_values) {
     return;
   }
-  const int row = static_cast<int>(local_index / segment_columns);
-  const int column = static_cast<int>(local_index) - row * segment_columns;
+  int row = 0;
+  int column = 0;
+  if constexpr (StaticRows == 1) {
+    // All M=1 output elements belong to row zero.  Avoid generating the
+    // runtime segment-width divide in this fixed-shape reducer.
+    column = static_cast<int>(local_index);
+  } else {
+    row = static_cast<int>(local_index / segment_columns);
+    column = static_cast<int>(local_index) - row * segment_columns;
+  }
   const int global_column = global_column_start + column;
   const int64_t split_stride = segment_values;
   const float* segment_partials = partial_output + partial_offset;
