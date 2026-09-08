@@ -579,7 +579,11 @@ def test_grouped_ampere_rank8_shares_projection_and_matches_child_paths(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 0),
     reason="requires NVIDIA CUDA compute capability >= 8.0",
 )
-@pytest.mark.parametrize("size_m", (8, 16), ids=("m8", "m16"))
+@pytest.mark.parametrize(
+    "size_m",
+    (1, 2, 4, 8, 16),
+    ids=("m1", "m2", "m4", "m8", "m16"),
+)
 def test_flash_next_gate_up_rank8_wide_group_matches_child_paths(size_m, monkeypatch):
     device = _native_validation_device()
     if device is None:
