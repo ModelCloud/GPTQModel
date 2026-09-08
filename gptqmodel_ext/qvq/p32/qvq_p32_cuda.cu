@@ -3506,6 +3506,38 @@ int launch_p32_large_m(
   return status;
 }
 
+template <int RankCount>
+__global__ __launch_bounds__(128) void p32_rank8_epilogue_kernel(
+    const float* base_output,
+    const half* __restrict__ hidden,
+    const float* __restrict__ rank8_b,
+    float* output,
+    int size_m,
+    int size_n) {
+  static_assert(RankCount == 8 || RankCount == 16 || RankCount == 24);
+  const int row = static_cast<int>(blockIdx.y);
+  if (row >= size_m) return;
+
+  __shared__ half hidden_row[RankCount];
+  for (int rank = static_cast<int>(threadIdx.x); rank < RankCount;
+       rank += blockDim.x) {
+    hidden_row[rank] = hidden[static_cast<int64_t>(row) * RankCount + rank];
+  }
+  __syncthreads();
+
+  const int column = static_cast<int>(blockIdx.x) * blockDim.x +
+      static_cast<int>(threadIdx.x);
+  if (column >= size_n) return;
+  const int64_t index = static_cast<int64_t>(row) * size_n + column;
+  float correction = 0.0f;
+#pragma unroll
+  for (int rank = 0; rank < RankCount; ++rank) {
+    correction += __half2float(hidden_row[rank]) *
+        rank8_b[static_cast<int64_t>(rank) * size_n + column];
+  }
+  output[index] = base_output[index] + correction;
+}
+
 }  // namespace
 
 extern "C" int qvq_p32_abi_version(void) {
@@ -3550,6 +3582,55 @@ extern "C" int qvq_device_is_supported(int device) {
 
 extern "C" const char* qvq_last_error(void) {
   return last_error;
+}
+
+extern "C" int qvq_p32_rank8_epilogue(
+    const float* base_output,
+    const void* hidden,
+    const void* rank8_b,
+    float* output,
+    int size_m,
+    int size_n,
+    int rank_count,
+    void* stream) {
+  if (base_output == nullptr || hidden == nullptr || rank8_b == nullptr ||
+      output == nullptr || stream == nullptr) {
+    set_last_error("QVQ P32 rank8 epilogue received a null device pointer");
+    return -1;
+  }
+  if (size_m < 1 || size_n < 1 || rank_count != 8 && rank_count != 16 &&
+      rank_count != QVQ_P32_RANK8_MAX_COUNT) {
+    set_last_error("QVQ P32 rank8 epilogue requires M >= 1 and rank_count in {8,16,24}");
+    return -1;
+  }
+  const dim3 grid(
+      static_cast<unsigned>((size_n + 127) / 128),
+      static_cast<unsigned>(size_m),
+      1);
+  const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+  switch (rank_count) {
+    case 8:
+      p32_rank8_epilogue_kernel<8><<<grid, 128, 0, cuda_stream>>>(
+          base_output, reinterpret_cast<const half*>(hidden),
+          reinterpret_cast<const float*>(rank8_b), output, size_m, size_n);
+      break;
+    case 16:
+      p32_rank8_epilogue_kernel<16><<<grid, 128, 0, cuda_stream>>>(
+          base_output, reinterpret_cast<const half*>(hidden),
+          reinterpret_cast<const float*>(rank8_b), output, size_m, size_n);
+      break;
+    case 24:
+      p32_rank8_epilogue_kernel<24><<<grid, 128, 0, cuda_stream>>>(
+          base_output, reinterpret_cast<const half*>(hidden),
+          reinterpret_cast<const float*>(rank8_b), output, size_m, size_n);
+      break;
+  }
+  const cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    set_last_error(cudaGetErrorString(error));
+    return static_cast<int>(error);
+  }
+  return 0;
 }
 
 static int qvq_p32_window_impl(

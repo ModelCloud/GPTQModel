@@ -8,7 +8,7 @@
 
 static_assert(QVQ_P32_OPERATION_VERSION == 1);
 static_assert(QVQ_P32_ABI_VERSION == 3);
-static_assert(QVQ_P32_KERNEL_VERSION == 11);
+static_assert(QVQ_P32_KERNEL_VERSION == 13);
 static_assert(QVQ_P32_COMPILED_SM == 80);
 static_assert(QVQ_P32_TILE_SIZE == 16);
 static_assert(QVQ_P32_LEVEL_COUNT == 256);
@@ -19,6 +19,7 @@ static_assert(QVQ_P32_STAGE_K_TILES_MIN == 1);
 static_assert(QVQ_P32_STAGE_K_TILES_MAX == 4);
 static_assert(QVQ_P32_SCALAR_M_MAX == 4);
 static_assert(QVQ_P32_GROUPED_M_MAX == 16);
+static_assert(QVQ_P32_RANK8_MAX_COUNT == 24);
 static_assert(QVQ_P32_GROUP_COUNT_MIN == 2);
 static_assert(QVQ_P32_GROUP_COUNT_MAX == 3);
 static_assert(QVQ_P32_ROW_GROUPS_AUTO == 0);

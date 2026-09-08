@@ -12,7 +12,7 @@ extern "C" {
 // launch-autotune entries when implementation details change.
 #define QVQ_P32_OPERATION_VERSION 1
 #define QVQ_P32_ABI_VERSION 3
-#define QVQ_P32_KERNEL_VERSION 12
+#define QVQ_P32_KERNEL_VERSION 13
 #define QVQ_P32_COMPILED_SM 80
 
 #define QVQ_P32_TILE_SIZE 16
@@ -24,6 +24,7 @@ extern "C" {
 #define QVQ_P32_STAGE_K_TILES_MAX 4
 #define QVQ_P32_SCALAR_M_MAX 4
 #define QVQ_P32_GROUPED_M_MAX 16
+#define QVQ_P32_RANK8_MAX_COUNT 24
 #define QVQ_P32_GROUP_COUNT_MIN 2
 #define QVQ_P32_GROUP_COUNT_MAX 3
 #define QVQ_P32_ROW_GROUPS_AUTO 0
@@ -193,6 +194,22 @@ int qvq_p32_window_tuned(
     int transition_bits,
     int row_groups,
     const struct qvq_p32_config* config,
+    void* stream);
+
+// Add a rank-8 (or packed rank-8) correction to an existing FP32 P32 output.
+// `hidden` is row-major FP16 [M, rank_count], `rank8_b` is row-major FP32
+// [rank_count, N], and `output` may alias `base_output`. rank_count is 8, 16,
+// or 24 so grouped ZML projections can share one epilogue. The kernel keeps
+// the QvQ/ZML arithmetic boundary: hidden is already rounded to FP16 and the
+// correction is accumulated in FP32 before being added to the base output.
+int qvq_p32_rank8_epilogue(
+    const float* base_output,
+    const void* hidden,
+    const void* rank8_b,
+    float* output,
+    int size_m,
+    int size_n,
+    int rank_count,
     void* stream);
 
 // Native grouped V2B2-P32 entry point. `bank_alt_ids` has one uint8 selector
