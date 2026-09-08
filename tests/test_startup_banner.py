@@ -2,16 +2,87 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "gptqmodel" / "_banner.py"
-MODULE_SPEC = importlib.util.spec_from_file_location("gptqmodel_banner_test_module", MODULE_PATH)
+MODULE_SPEC = importlib.util.spec_from_file_location(
+    "gptqmodel_banner_test_module", MODULE_PATH
+)
 assert MODULE_SPEC is not None
 assert MODULE_SPEC.loader is not None
 
 banner_module = importlib.util.module_from_spec(MODULE_SPEC)
 MODULE_SPEC.loader.exec_module(banner_module)
+
+
+def _init_repository(path: Path) -> str:
+    path.mkdir()
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            path.name,
+        ],
+        check=True,
+    )
+    return subprocess.check_output(
+        ["git", "-C", str(path), "rev-parse", "--short", "HEAD"], text=True
+    ).strip()
+
+
+@pytest.mark.parametrize("installation", ["wheel", "checkout", "worktree"])
+def test_git_hash_uses_package_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, installation: str
+) -> None:
+    foreign = tmp_path / "foreign"
+    foreign_commit = _init_repository(foreign)
+    source = tmp_path / "source"
+    source_commit = _init_repository(source)
+    assert source_commit != foreign_commit
+
+    package_root = source
+    if installation == "wheel":
+        package_root = tmp_path / "site-packages"
+    elif installation == "worktree":
+        package_root = tmp_path / "worktree"
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(source),
+                "worktree",
+                "add",
+                "--detach",
+                str(package_root),
+                "HEAD",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        assert (package_root / ".git").is_file()
+
+    monkeypatch.setattr(
+        banner_module, "__file__", str(package_root / "gptqmodel" / "_banner.py")
+    )
+    monkeypatch.chdir(foreign)
+    expected = "" if installation == "wheel" else f"+{source_commit}"
+    assert banner_module._get_git_commit() == expected
 
 
 def test_build_startup_banner_aligns_versions():
@@ -67,4 +138,7 @@ def test_get_startup_banner_resolves_optional_versions(monkeypatch):
         torch_version="2.10.0+cu130",
     )
 
-    assert any(line.startswith("Triton") and line.endswith("3.6.0") for line in banner.splitlines())
+    assert any(
+        line.startswith("Triton") and line.endswith("3.6.0")
+        for line in banner.splitlines()
+    )

@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, version as package_version
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
+from pathlib import Path
 from typing import Iterable
+
 
 TRITON_PACKAGE_CANDIDATES = (
     "triton",
@@ -52,15 +55,23 @@ def build_startup_banner(
     return "\n".join([ascii_logo.rstrip("\n"), *formatted_rows])
 
 
-def _get_git_commit():
+def _get_git_commit() -> str:
+    """Read the package checkout's commit independently of the caller's directory."""
     import subprocess
+
     try:
-        hash = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"]
-        ).decode().strip()
-        return f"+{hash}"
+        repo_root = Path(__file__).resolve().parent.parent
+        if not (repo_root / ".git").exists():
+            return ""
+        commit = subprocess.check_output(
+            ["git", "-C", str(repo_root), "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return f"+{commit}"
     except Exception:
         return ""
+
 
 def get_startup_banner(
     ascii_logo: str,
