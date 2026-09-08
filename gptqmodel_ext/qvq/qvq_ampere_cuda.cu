@@ -247,7 +247,7 @@ __device__ __forceinline__ uint32_t selected_bank_mask(
       alt_mask;
 }
 
-template <int TransitionBits>
+template <int TransitionBits, bool UseSharedLevels = false>
 __device__ __forceinline__ uint32_t decode_pair_bits(
     int pair,
     uint32_t state,
@@ -261,11 +261,17 @@ __device__ __forceinline__ uint32_t decode_pair_bits(
     uint32_t bits;
     half2 values;
   } decoded;
-  decoded.values = __halves2half2(
-      __ldg(levels + (mixed >> 8)), __ldg(levels + (mixed & 0xffu)));
+  const half first_level = UseSharedLevels
+      ? levels[mixed >> 8]
+      : __ldg(levels + (mixed >> 8));
+  const half second_level = UseSharedLevels
+      ? levels[mixed & 0xffu]
+      : __ldg(levels + (mixed & 0xffu));
+  decoded.values = __halves2half2(first_level, second_level);
   return decoded.bits;
 }
 
+template <bool UseSharedLevels = false>
 __device__ __forceinline__ uint32_t decode_state_bits(
     uint32_t state,
     uint32_t bank_mask,
@@ -275,14 +281,20 @@ __device__ __forceinline__ uint32_t decode_state_bits(
     uint32_t bits;
     half2 values;
   } decoded;
-  // The codebook is only 512 bytes and is read randomly by every lane.  On
-  // Ampere, keeping it in the read-only path avoids a per-CTA shared-memory
-  // copy and the bank conflicts that copy creates for the decode gathers.
-  decoded.values = __halves2half2(
-      __ldg(levels + (mixed >> 8)), __ldg(levels + (mixed & 0xffu)));
+  // The default path keeps this 512-byte codebook in the read-only cache.
+  // The exact grouped Flash-Next path opts into a per-CTA shared copy because
+  // its repeated decode gathers otherwise generate excessive global sectors.
+  const half first_level = UseSharedLevels
+      ? levels[mixed >> 8]
+      : __ldg(levels + (mixed >> 8));
+  const half second_level = UseSharedLevels
+      ? levels[mixed & 0xffu]
+      : __ldg(levels + (mixed & 0xffu));
+  decoded.values = __halves2half2(first_level, second_level);
   return decoded.bits;
 }
 
+template <bool UseSharedLevels = false>
 __device__ __forceinline__ void decode_state_pair_bits(
     uint32_t first_state,
     uint32_t second_state,
@@ -303,12 +315,20 @@ __device__ __forceinline__ void decode_state_pair_bits(
     uint32_t bits;
     half2 values;
   } first, second;
-  first.values = __halves2half2(
-      __ldg(levels + ((mixed >> 8) & 0xffu)),
-      __ldg(levels + (mixed & 0xffu)));
-  second.values = __halves2half2(
-      __ldg(levels + (mixed >> 24)),
-      __ldg(levels + ((mixed >> 16) & 0xffu)));
+  const half first_level_0 = UseSharedLevels
+      ? levels[(mixed >> 8) & 0xffu]
+      : __ldg(levels + ((mixed >> 8) & 0xffu));
+  const half first_level_1 = UseSharedLevels
+      ? levels[mixed & 0xffu]
+      : __ldg(levels + (mixed & 0xffu));
+  const half second_level_0 = UseSharedLevels
+      ? levels[mixed >> 24]
+      : __ldg(levels + (mixed >> 24));
+  const half second_level_1 = UseSharedLevels
+      ? levels[(mixed >> 16) & 0xffu]
+      : __ldg(levels + ((mixed >> 16) & 0xffu));
+  first.values = __halves2half2(first_level_0, first_level_1);
+  second.values = __halves2half2(second_level_0, second_level_1);
   first_decoded = first.bits;
   second_decoded = second.bits;
 }
@@ -935,7 +955,8 @@ template <
     int StageKTiles = kStageKTiles,
     int StaticN = 0,
     int StaticSplitCount = 0,
-    int StaticK = 0>
+    int StaticK = 0,
+    bool UseSharedLevels = false>
 __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -961,6 +982,7 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
   __shared__ __align__(16) uint32_t packed_words[
       2][StageKTiles][TilesPerBlock][kWordsPerTile];
   __shared__ __align__(16) uint8_t packed_bank_ids[2][StageKTiles][TilesPerBlock];
+  __shared__ __align__(16) half shared_levels[256];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
@@ -978,6 +1000,14 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
   const int k_tile_begin = (k_tiles * split) / effective_split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / effective_split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(bank_alt_id);
+  const half* decode_levels = levels;
+  if constexpr (UseSharedLevels) {
+    for (int level = thread; level < 256; level += Threads) {
+      shared_levels[level] = levels[level];
+    }
+    __syncthreads();
+    decode_levels = shared_levels;
+  }
   constexpr bool kUsePairWrapPredicate =
       (Rows == 2 &&
        ((StaticN == 1024 && TransitionBits == 6) ||
@@ -1198,11 +1228,11 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
               }
               uint32_t decoded_0[2];
               uint32_t decoded_8[2];
-              decode_state_pair_bits(
-                  state_0[0], state_0[1], bank_mask_0, levels,
+              decode_state_pair_bits<UseSharedLevels>(
+                  state_0[0], state_0[1], bank_mask_0, decode_levels,
                   decoded_0[0], decoded_0[1]);
-              decode_state_pair_bits(
-                  state_8[0], state_8[1], bank_mask_8, levels,
+              decode_state_pair_bits<UseSharedLevels>(
+                  state_8[0], state_8[1], bank_mask_8, decode_levels,
                   decoded_8[0], decoded_8[1]);
 #pragma unroll
               for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
@@ -1256,11 +1286,11 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
               }
               uint32_t decoded_0[2];
               uint32_t decoded_8[2];
-              decode_state_pair_bits(
-                  state_0[0], state_0[1], bank_mask_0, levels,
+              decode_state_pair_bits<UseSharedLevels>(
+                  state_0[0], state_0[1], bank_mask_0, decode_levels,
                   decoded_0[0], decoded_0[1]);
-              decode_state_pair_bits(
-                  state_8[0], state_8[1], bank_mask_8, levels,
+              decode_state_pair_bits<UseSharedLevels>(
+                  state_8[0], state_8[1], bank_mask_8, decode_levels,
                   decoded_8[0], decoded_8[1]);
 #pragma unroll
               for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
@@ -1297,10 +1327,12 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
               window_state_pair64<
                   TransitionBits, kUsePairWrapPredicate, kUsePowerOfTwoWrap>(
                   words, pair, state_0, state_8);
-              const uint32_t decoded_0 = decode_pair_bits<TransitionBits>(
-                  pair, state_0, packed_bank_id, alt_mask, levels);
-              const uint32_t decoded_8 = decode_pair_bits<TransitionBits>(
-                  pair + 64, state_8, packed_bank_id, alt_mask, levels);
+              const uint32_t decoded_0 = decode_pair_bits<
+                  TransitionBits, UseSharedLevels>(
+                  pair, state_0, packed_bank_id, alt_mask, decode_levels);
+              const uint32_t decoded_8 = decode_pair_bits<
+                  TransitionBits, UseSharedLevels>(
+                  pair + 64, state_8, packed_bank_id, alt_mask, decode_levels);
               union {
                 uint32_t bits;
                 half2 values;
@@ -1362,11 +1394,11 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
             }
             uint32_t decoded_0[2];
             uint32_t decoded_8[2];
-            decode_state_pair_bits(
-                state_0[0], state_0[1], bank_mask_0, levels,
+            decode_state_pair_bits<UseSharedLevels>(
+                state_0[0], state_0[1], bank_mask_0, decode_levels,
                 decoded_0[0], decoded_0[1]);
-            decode_state_pair_bits(
-                state_8[0], state_8[1], bank_mask_8, levels,
+            decode_state_pair_bits<UseSharedLevels>(
+                state_8[0], state_8[1], bank_mask_8, decode_levels,
                 decoded_8[0], decoded_8[1]);
 #pragma unroll
             for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
@@ -1417,9 +1449,11 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
                   TransitionBits, kUsePairWrapPredicate, kUsePowerOfTwoWrap>(
                   words, pair, state_0, state_8);
               const uint32_t decoded_0 =
-                  decode_state_bits(state_0, bank_mask_0, levels);
+                  decode_state_bits<UseSharedLevels>(
+                      state_0, bank_mask_0, decode_levels);
               const uint32_t decoded_8 =
-                  decode_state_bits(state_8, bank_mask_8, levels);
+                  decode_state_bits<UseSharedLevels>(
+                      state_8, bank_mask_8, decode_levels);
               union {
                 uint32_t bits;
                 half2 values;
@@ -1456,10 +1490,12 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
             window_state_pair64<
                 TransitionBits, kUsePairWrapPredicate, kUsePowerOfTwoWrap>(
                 words, pair, state_0, state_8);
-            const uint32_t decoded_0 = decode_pair_bits<TransitionBits>(
-                pair, state_0, packed_bank_id, alt_mask, levels);
-            const uint32_t decoded_8 = decode_pair_bits<TransitionBits>(
-                pair + 64, state_8, packed_bank_id, alt_mask, levels);
+            const uint32_t decoded_0 = decode_pair_bits<
+                TransitionBits, UseSharedLevels>(
+                pair, state_0, packed_bank_id, alt_mask, decode_levels);
+            const uint32_t decoded_8 = decode_pair_bits<
+                TransitionBits, UseSharedLevels>(
+                pair + 64, state_8, packed_bank_id, alt_mask, decode_levels);
             union {
               uint32_t bits;
               half2 values;
@@ -1601,13 +1637,14 @@ __device__ __forceinline__ bool grouped_block_coordinates(
 template <
     int TransitionBits,
     int Rows,
-    int StageKTiles = kStageKTiles>
+    int StageKTiles = kStageKTiles,
+    bool UseSharedLevels = false>
 __global__ __launch_bounds__(kM1Threads) void p32_window_ampere_grouped_scalar_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
     const half* __restrict__ levels,
     const uint8_t* __restrict__ bank_ids,
-    GroupedP32LaunchParams params,
+    const __grid_constant__ GroupedP32LaunchParams params,
     float* __restrict__ partial_output,
     float* __restrict__ output,
     int segment_count,
@@ -1625,7 +1662,8 @@ __global__ __launch_bounds__(kM1Threads) void p32_window_ampere_grouped_scalar_k
   const int n_tiles = params.n_tiles[segment];
   const int split_count = params.split_count[segment];
   p32_window_ampere_m1_kernel_body<
-      TransitionBits, Rows, kM1Threads, kM1TilesPerBlock, StageKTiles, 0>(
+      TransitionBits, Rows, kM1Threads, kM1TilesPerBlock, StageKTiles, 0, 0, 0,
+      UseSharedLevels>(
       input,
       trellis,
       levels,
@@ -1833,7 +1871,7 @@ template <bool Rank8BFloat, int StaticSplitCount = 0, bool SingleRow = false>
 __global__ void reduce_grouped_split_rank8_kernel(
     const float* __restrict__ partial_output,
     float* __restrict__ output,
-    GroupedP32LaunchParams params,
+    const __grid_constant__ GroupedP32LaunchParams params,
     int segment_count,
     int size_m,
     int total_n,
@@ -3528,7 +3566,7 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
           params.n_tiles[0] == 768 && params.n_tiles[1] == 32 &&
           params.n_tiles[2] == 32;
       if (use_flash_next_qkv_m4_pipeline) {
-        p32_window_ampere_grouped_scalar_kernel<TransitionBits, 4, 4>
+        p32_window_ampere_grouped_scalar_kernel<TransitionBits, 4, 4, true>
             <<<grid, kM1Threads, 0, stream>>>(
                 input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
                 partial_output_ptr, output_ptr, static_cast<int>(segment_count),
