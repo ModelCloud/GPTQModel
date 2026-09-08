@@ -489,6 +489,25 @@ def _static_split_count(*, m: int, k: int, n: int, transition_bits: int) -> int:
     return 0
 
 
+def _flash_next_group_split_counts(
+    *, m: int, k: int, widths: Sequence[int], transition_bits: int
+) -> tuple[int, ...] | None:
+    """Return the measured grouped wave policy for Flash-Next QKV decode."""
+
+    # The Qwen3.8-Flash-Next attention group is QKV=(12288, 512, 512) from
+    # K=2560.  Its wide Q child needs sixteen scalar split waves on the
+    # grouped launch; the same wave count is also best for the two small KV
+    # children once the rectangular empty-CTA tail is removed.
+    if (
+        transition_bits == 6
+        and m in (1, 2, 4)
+        and k == 2560
+        and tuple(widths) == (12288, 512, 512)
+    ):
+        return (16, 16, 16)
+    return None
+
+
 def qvq_p32_window_ampere_kernel_candidates(
     input_shape: Sequence[int],
     *,
@@ -1268,8 +1287,17 @@ def qvq_p32_window_ampere_group_plan(
         and len(bank_alt_ids) == segment_count
     ):
         raise ValueError("QVQ P32 Ampere grouped segment metadata lengths must match")
+    transition_bits = _resolve_transition_bits(bits)
     if split_counts is None:
-        requested_splits = (0,) * segment_count
+        tuned_splits = _flash_next_group_split_counts(
+            m=int(input.shape[0]),
+            k=int(input.shape[1]),
+            widths=out_features,
+            transition_bits=transition_bits,
+        )
+        requested_splits = (
+            tuned_splits if tuned_splits is not None else (0,) * segment_count
+        )
     else:
         requested_splits = tuple(int(value) for value in split_counts)
         if len(requested_splits) != segment_count:
@@ -1284,7 +1312,6 @@ def qvq_p32_window_ampere_group_plan(
         if alt_id < 0 or alt_id > 3:
             raise ValueError("QVQ P32 Ampere grouped bank IDs must be in [0, 3]")
 
-    transition_bits = _resolve_transition_bits(bits)
     resolved_splits = tuple(
         _resolve_split_count(
             input,
@@ -1472,7 +1499,7 @@ def qvq_p32_window_ampere_grouped_packed(
             7: 3.5,
         }[plan.transition_bits]
         if (
-            len(plan.segments) == 3
+            len(plan.segments) in (2, 3)
             and input.shape[0] <= 4
             and plan.in_features <= 6144
         ):
