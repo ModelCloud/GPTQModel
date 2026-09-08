@@ -1713,14 +1713,12 @@ void p32_window_ampere_grouped_flash_next_gate_up_scalar_kernel(
   constexpr int kBlocksPerSplit =
       (kSegmentTiles + kM1TilesPerBlock - 1) / kM1TilesPerBlock;
   constexpr int kBlocksPerSegment = kSplitCount * kBlocksPerSplit;
-  const int block = static_cast<int>(blockIdx.x);
-  if (block >= kSegmentCount * kBlocksPerSegment) {
-    return;
-  }
-  const int segment = block / kBlocksPerSegment;
-  const int local_block = block - segment * kBlocksPerSegment;
-  const int split = local_block / kBlocksPerSplit;
-  const int n_block = local_block - split * kBlocksPerSplit;
+  // This specialized route always launches one CTA for each
+  // (n-block, split, segment) tuple. Keep those coordinates in the grid so
+  // every thread avoids reconstructing them with integer division.
+  const int segment = static_cast<int>(blockIdx.z);
+  const int split = static_cast<int>(blockIdx.y);
+  const int n_block = static_cast<int>(blockIdx.x);
   const int output_offset = segment * size_m * kSegmentTiles * kTileColumns;
   const int64_t partial_offset = static_cast<int64_t>(segment) * kSplitCount *
       size_m * kSegmentTiles * kTileColumns;
@@ -4147,7 +4145,10 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   const bool use_flash_next_shape =
       use_flash_next_qkv_shape || use_flash_next_gate_up_shape;
   if (use_small_m_scalar) {
-    const dim3 grid(static_cast<unsigned>(active_scalar_blocks), 1, 1);
+    const dim3 grid = use_flash_next_gate_up_scalar_shape &&
+            (size_m == 1 || size_m == 2 || size_m == 4)
+        ? dim3(3, 40, 2)
+        : dim3(static_cast<unsigned>(active_scalar_blocks), 1, 1);
     if (use_flash_next_gate_up_scalar_shape &&
         (size_m == 1 || size_m == 2 || size_m == 4)) {
       if (size_m == 1) {
