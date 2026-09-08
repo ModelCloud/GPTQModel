@@ -893,6 +893,80 @@ def test_p32_window_ampere_flash_next_gate_up_direct_dispatch_matches_exact(size
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
 @pytest.mark.parametrize("size_m", (1, 2, 4, 8, 16))
+@pytest.mark.parametrize("projection_b_dtype", (torch.float16, torch.float32))
+def test_p32_window_ampere_flash_next_gate_up_direct_rank8_matches_exact(
+    size_m, projection_b_dtype
+):
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (8, 0):
+        pytest.skip("P32 Ampere WMMA requires SM80")
+
+    bits = 3.0
+    in_features = 2560
+    out_features = 640
+    tile_count = (in_features // 16) * (out_features // 16)
+    generator = torch.Generator(device="cuda").manual_seed(20261131 + size_m)
+    planar = torch.randint(
+        0,
+        1 << 32,
+        (tile_count, qvq_words_per_tile(bits, weight_count=256, vector_size=2)),
+        generator=generator,
+        device="cuda",
+        dtype=torch.int64,
+    ).to(torch.int32)
+    window = repack_p32_planar_to_window(planar, bits=bits)
+    bank_ids = pack_qvq_binary_bank_ids(
+        torch.randint(
+            0,
+            2,
+            (tile_count * 8,),
+            generator=generator,
+            device="cuda",
+            dtype=torch.uint8,
+        )
+    )
+    bank_alt_id = torch.tensor(1, dtype=torch.uint8, device="cuda")
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
+    input = (
+        torch.randn((size_m, in_features), generator=generator, device="cuda") * 0.1
+    ).half()
+    rank8_a = (
+        torch.randn((in_features, 8), generator=generator, device="cuda") * 0.01
+    ).half()
+    rank8_b = (
+        torch.randn((8, out_features), generator=generator, device="cuda") * 0.01
+    ).to(projection_b_dtype)
+    rank8_scale = 0.75
+    dense = reconstruct_p32_window_inner_weight(
+        window,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=bank_ids,
+        bank_alt_id=bank_alt_id,
+    )
+    expected = input.float() @ dense
+    expected += (input.float() @ rank8_a.float()) @ rank8_b.float() * rank8_scale
+
+    actual = qvq_p32_window_ampere(
+        input,
+        window,
+        levels,
+        bank_ids,
+        bits,
+        out_features=out_features,
+        bank_alt_id=1,
+        split_count=32,
+        rank8_a=rank8_a,
+        rank8_b=rank8_b,
+        rank8_scale=rank8_scale,
+    )
+
+    torch.testing.assert_close(actual, expected, atol=3e-3, rtol=0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("size_m", (1, 2, 4, 8, 16))
 def test_p32_window_ampere_flash_next_o_wide_dispatch_matches_exact(size_m):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (8, 0):
