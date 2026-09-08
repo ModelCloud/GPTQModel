@@ -1339,7 +1339,66 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
         const uint32_t* words = packed_words[parity][stage_k_tile][shared_tile];
         const uint8_t packed_bank_id =
             packed_bank_ids[parity][stage_k_tile][shared_tile];
-        if constexpr (
+        // Dynamic grouped plans still have the same M=4 row-pair structure as
+        // the static M=4 routes.  Hoist the bank masks and decode two rows
+        // together so Flash-Next QKV/gate-up tiles do not pay one mask
+        // selection per decoded pair.
+        if constexpr (Rows == 4 && TransitionBits != 7) {
+#pragma unroll
+          for (int bank_group = 0; bank_group < 4; ++bank_group) {
+            const uint32_t bank_mask_0 =
+                selected_bank_mask(packed_bank_id, bank_group, alt_mask);
+            const uint32_t bank_mask_8 =
+                selected_bank_mask(packed_bank_id, bank_group + 4, alt_mask);
+            uint32_t state_0[2];
+            uint32_t state_8[2];
+#pragma unroll
+            for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
+              const int row = bank_group * 2 + row_in_group;
+              const int pair = row * 8 + pair_column;
+              window_state_pair64<
+                  TransitionBits, kUsePairWrapPredicate, kUsePowerOfTwoWrap>(
+                  words, pair, state_0[row_in_group], state_8[row_in_group]);
+            }
+            uint32_t decoded_0[2];
+            uint32_t decoded_8[2];
+            decode_state_pair_bits(
+                state_0[0], state_0[1], bank_mask_0, levels,
+                decoded_0[0], decoded_0[1]);
+            decode_state_pair_bits(
+                state_8[0], state_8[1], bank_mask_8, levels,
+                decoded_8[0], decoded_8[1]);
+#pragma unroll
+            for (int row_in_group = 0; row_in_group < 2; ++row_in_group) {
+              const int row = bank_group * 2 + row_in_group;
+              union {
+                uint32_t bits;
+                half2 values;
+              } pair_0{decoded_0[row_in_group]}, pair_8{decoded_8[row_in_group]};
+              const float weight_0 = __half2float(pair_0.values.x);
+              const float weight_1 = __half2float(pair_0.values.y);
+              const float weight_8 = __half2float(pair_8.values.x);
+              const float weight_9 = __half2float(pair_8.values.y);
+#pragma unroll
+              for (int output_row = 0; output_row < Rows; ++output_row) {
+                const int row_base = output_row * (StageKTiles * kTileRows) +
+                    stage_k_tile * kTileRows;
+                const float input_0 =
+                    __half2float(input_tile[parity][row_base + row]);
+                const float input_8 =
+                    __half2float(input_tile[parity][row_base + row + 8]);
+                accumulator_0[output_row] = fmaf(
+                    input_0, weight_0, accumulator_0[output_row]);
+                accumulator_1[output_row] = fmaf(
+                    input_0, weight_1, accumulator_1[output_row]);
+                accumulator_0[output_row] = fmaf(
+                    input_8, weight_8, accumulator_0[output_row]);
+                accumulator_1[output_row] = fmaf(
+                    input_8, weight_9, accumulator_1[output_row]);
+              }
+            }
+          }
+        } else if constexpr (
             Rows == 2 && StaticN != 1024 &&
             (TransitionBits == 5 || TransitionBits == 7)) {
 #pragma unroll
@@ -3458,15 +3517,33 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
               partial_output_ptr, output_ptr, static_cast<int>(segment_count),
               size_k, total_n_tiles);
     } else {
-      constexpr int kM4StageKTiles = TransitionBits == 4
-          ? kScalarLongStageKTiles
-          : TransitionBits == 6 ? kScalarTripleStageKTiles : kStageKTiles;
-      p32_window_ampere_grouped_scalar_kernel<
-          TransitionBits, 4, kM4StageKTiles>
-          <<<grid, kM1Threads, 0, stream>>>(
-              input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
-              partial_output_ptr, output_ptr, static_cast<int>(segment_count),
-              size_k, total_n_tiles);
+      // The Flash-Next QKV child widths are 768/32/32 N16 tiles.  Its
+      // sixteen-way split wave gives exactly ten K tiles per split, so four
+      // staged K tiles removes a tail iteration without increasing the
+      // shared-memory footprint enough to reduce residency.  Gate/up keeps
+      // the two-stage default because its smaller N does not amortize the
+      // larger stage footprint.
+      const bool use_flash_next_qkv_m4_pipeline =
+          TransitionBits == 6 && segment_count == 3 &&
+          params.n_tiles[0] == 768 && params.n_tiles[1] == 32 &&
+          params.n_tiles[2] == 32;
+      if (use_flash_next_qkv_m4_pipeline) {
+        p32_window_ampere_grouped_scalar_kernel<TransitionBits, 4, 4>
+            <<<grid, kM1Threads, 0, stream>>>(
+                input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+                partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+                size_k, total_n_tiles);
+      } else {
+        constexpr int kM4StageKTiles = TransitionBits == 4
+            ? kScalarLongStageKTiles
+            : kStageKTiles;
+        p32_window_ampere_grouped_scalar_kernel<
+            TransitionBits, 4, kM4StageKTiles>
+            <<<grid, kM1Threads, 0, stream>>>(
+                input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+                partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+                size_k, total_n_tiles);
+      }
     }
   } else {
     const dim3 grid(static_cast<unsigned>(active_wmma_blocks), 1, 1);
