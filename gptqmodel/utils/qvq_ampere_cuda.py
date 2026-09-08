@@ -458,6 +458,12 @@ def _static_split_count(*, m: int, k: int, n: int, transition_bits: int) -> int:
             8: 16,
             16: 16,
         }.get(m, 0)
+    # Flash-Next attention-out=(K=12288, N=2560) is tuned for twelve K
+    # reduction waves on SM80. Keep this rate-specific so other P32 layouts
+    # continue to use the generic policy and external split_count remains
+    # authoritative when supplied by ZML or another bridge.
+    if transition_bits == 6 and k == 12288 and n == 2560:
+        return 12 if m <= 16 else 0
     if m == 1 and k == 5120 and n in (1024, 12288):
         return 56 if n == 1024 else 40
     if m in (2, 4) and k == 5120 and n == 1024:
@@ -1163,6 +1169,29 @@ def qvq_p32_window_ampere(
                 out_features,
                 bank_alt_id,
                 down_split,
+            )
+    if (
+        split_count == 0
+        and transition_bits == 6
+        and input.shape[1] == 12288
+        and out_features == 2560
+    ):
+        o_split = _static_split_count(
+            m=int(input.shape[0]),
+            k=12288,
+            n=2560,
+            transition_bits=transition_bits,
+        )
+        if o_split:
+            return _p32_window_op()(
+                input,
+                trellis,
+                levels,
+                bank_ids,
+                transition_bits,
+                out_features,
+                bank_alt_id,
+                o_split,
             )
     if split_count == 0:
         # Environment configuration is process-level. Reading ``os.environ``
