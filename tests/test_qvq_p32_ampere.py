@@ -155,8 +155,12 @@ def test_p32_ampere_dispatches_flash_next_down_shape_policy(
     assert calls[0][-1] == expected_split
 
 
-@pytest.mark.parametrize("size_m", (1, 4, 8, 16))
-def test_p32_ampere_dispatches_flash_next_o_shape_policy(monkeypatch, size_m):
+@pytest.mark.parametrize(
+    ("size_m", "expected_split"), ((1, 32), (4, 32), (8, 12), (16, 12))
+)
+def test_p32_ampere_dispatches_flash_next_o_shape_policy(
+    monkeypatch, size_m, expected_split
+):
     calls = []
     monkeypatch.setattr(
         qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
@@ -173,7 +177,7 @@ def test_p32_ampere_dispatches_flash_next_o_shape_policy(monkeypatch, size_m):
         bank_alt_id=2,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == 12
+    assert calls[0][-1] == expected_split
 
     # A bridge-selected split is authoritative and must not be replaced by
     # the native shape policy.
@@ -888,7 +892,7 @@ def test_p32_window_ampere_flash_next_gate_up_direct_dispatch_matches_exact(size
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
-@pytest.mark.parametrize("size_m", (8, 16))
+@pytest.mark.parametrize("size_m", (1, 2, 4, 8, 16))
 def test_p32_window_ampere_flash_next_o_wide_dispatch_matches_exact(size_m):
     properties = torch.cuda.get_device_properties(0)
     if (properties.major, properties.minor) != (8, 0):

@@ -475,7 +475,9 @@ def _static_split_count(*, m: int, k: int, n: int, transition_bits: int) -> int:
     # continue to use the generic policy and external split_count remains
     # authoritative when supplied by ZML or another bridge.
     if transition_bits == 6 and k == 12288 and n == 2560:
-        return 12 if m <= 16 else 0
+        # M1-M4 use the scalar long-K stage-4 route with 32 reduction waves;
+        # M8/M16 retain the WMMA route tuned for twelve waves.
+        return {1: 32, 2: 32, 4: 32, 8: 12, 16: 12}.get(m, 0)
     # Flash-Next Q=(K=2560, N=12288) uses a static wide W3 plan at M=16.
     # Keep the policy narrow: grouped QKV callers already resolve their own
     # child plan, while explicit split_count remains authoritative.
