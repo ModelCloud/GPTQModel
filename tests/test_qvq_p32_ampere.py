@@ -86,6 +86,48 @@ def test_p32_ampere_public_candidates_share_shape_policy_without_cuda_work():
     assert qvq_p32_window_ampere_kernel_candidates(
         (16, 2560), out_features=12288, bits=3, max_candidates=1
     ) == (16,)
+    assert qvq_p32_window_ampere_kernel_candidates(
+        (8, 2560), out_features=640, bits=3, max_candidates=1
+    ) == (32,)
+
+
+@pytest.mark.parametrize(
+    ("size_m", "expected_split"), ((1, 40), (2, 40), (4, 40), (8, 32), (16, 32))
+)
+def test_p32_ampere_dispatches_flash_next_gate_up_shape_policy(
+    monkeypatch, size_m, expected_split
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((size_m, 2560))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=640,
+        bank_alt_id=1,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == expected_split
+
+    # A bridge-selected split remains authoritative over the native policy.
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=640,
+        bank_alt_id=1,
+        split_count=7,
+    )
+    assert len(calls) == 2
+    assert calls[-1][-1] == 7
 
 
 @pytest.mark.parametrize(
@@ -783,6 +825,64 @@ def test_p32_window_ampere_static_n_dispatch_matches_exact(size_m, out_features)
         out_features=out_features,
         bank_alt_id=3,
         split_count=2,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-3, rtol=0.0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize("size_m", (8, 16))
+def test_p32_window_ampere_flash_next_gate_up_direct_dispatch_matches_exact(size_m):
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (8, 0):
+        pytest.skip("P32 Ampere WMMA requires SM80")
+
+    bits = 3.0
+    in_features = 2560
+    out_features = 640
+    tile_count = (in_features // 16) * (out_features // 16)
+    generator = torch.Generator(device="cuda").manual_seed(20261113 + size_m)
+    planar = torch.randint(
+        0,
+        1 << 32,
+        (tile_count, qvq_words_per_tile(bits, weight_count=256, vector_size=2)),
+        generator=generator,
+        device="cuda",
+        dtype=torch.int64,
+    ).to(torch.int32)
+    window = repack_p32_planar_to_window(planar, bits=bits)
+    bank_ids = pack_qvq_binary_bank_ids(
+        torch.randint(
+            0,
+            2,
+            (tile_count * 8,),
+            generator=generator,
+            device="cuda",
+            dtype=torch.uint8,
+        )
+    )
+    bank_alt_id = torch.tensor(1, dtype=torch.uint8, device="cuda")
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
+    input = (
+        torch.randn((size_m, in_features), generator=generator, device="cuda") * 0.1
+    ).half()
+    dense = reconstruct_p32_window_inner_weight(
+        window,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=bank_ids,
+        bank_alt_id=bank_alt_id,
+    )
+    expected = input.float() @ dense
+
+    actual = qvq_p32_window_ampere(
+        input,
+        window,
+        levels,
+        bank_ids,
+        bits,
+        out_features=out_features,
+        bank_alt_id=1,
     )
     torch.testing.assert_close(actual, expected, atol=2e-3, rtol=0.0)
 
