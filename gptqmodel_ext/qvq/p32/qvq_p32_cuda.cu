@@ -3509,6 +3509,57 @@ int launch_p32_large_m(
 }
 
 template <int RankCount>
+__global__ __launch_bounds__(256) void p32_rank8_project_kernel(
+    const float* __restrict__ input,
+    const half* __restrict__ rank8_a,
+    half* __restrict__ hidden,
+    int size_m,
+    int size_k) {
+  static_assert(RankCount == 8 || RankCount == 16 || RankCount == 24);
+  constexpr int kRanksPerBlock = 8;
+  const int row = static_cast<int>(blockIdx.y);
+  if (row >= size_m) return;
+
+  const int local_rank = static_cast<int>(threadIdx.x) >> 5;
+  const int rank = static_cast<int>(blockIdx.x) * kRanksPerBlock + local_rank;
+  const int lane = static_cast<int>(threadIdx.x) & 31;
+  __shared__ float input_tile[32];
+  __shared__ half a_tile[32][kRanksPerBlock];
+  float accumulator = 0.0f;
+
+  for (int k_base = 0; k_base < size_k; k_base += 32) {
+    if (threadIdx.x < 32) {
+      const int k = k_base + static_cast<int>(threadIdx.x);
+      input_tile[threadIdx.x] =
+          k < size_k ? input[static_cast<int64_t>(row) * size_k + k] : 0.0f;
+    }
+    for (int index = static_cast<int>(threadIdx.x);
+         index < 32 * kRanksPerBlock; index += blockDim.x) {
+      const int tile_k = index / kRanksPerBlock;
+      const int tile_rank = index - tile_k * kRanksPerBlock;
+      const int k = k_base + tile_k;
+      a_tile[tile_k][tile_rank] =
+          k < size_k
+              ? rank8_a[static_cast<int64_t>(k) * RankCount + rank]
+              : __float2half(0.0f);
+    }
+    __syncthreads();
+    accumulator = fmaf(
+        input_tile[lane], __half2float(a_tile[lane][local_rank]), accumulator);
+    __syncthreads();
+  }
+
+#pragma unroll
+  for (int offset = 16; offset > 0; offset >>= 1) {
+    accumulator += __shfl_down_sync(0xffffffffu, accumulator, offset);
+  }
+  if (lane == 0) {
+    hidden[static_cast<int64_t>(row) * RankCount + rank] =
+        __float2half_rn(accumulator);
+  }
+}
+
+template <int RankCount>
 __global__ __launch_bounds__(128) void p32_rank8_epilogue_kernel(
     const float* base_output,
     const half* __restrict__ hidden,
@@ -3625,6 +3676,57 @@ extern "C" int qvq_p32_rank8_epilogue(
       p32_rank8_epilogue_kernel<24><<<grid, 128, 0, cuda_stream>>>(
           base_output, reinterpret_cast<const half*>(hidden),
           reinterpret_cast<const float*>(rank8_b), output, size_m, size_n);
+      break;
+  }
+  const cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    set_last_error(cudaGetErrorString(error));
+    return static_cast<int>(error);
+  }
+  return 0;
+}
+
+extern "C" int qvq_p32_rank8_project(
+    const void* input,
+    const void* rank8_a,
+    void* hidden,
+    int size_m,
+    int size_k,
+    int rank_count,
+    void* stream) {
+  if (input == nullptr || rank8_a == nullptr || hidden == nullptr ||
+      stream == nullptr) {
+    set_last_error("QVQ P32 rank8 project received a null device pointer");
+    return -1;
+  }
+  if (size_m < 1 || size_k < 1 || rank_count != 8 && rank_count != 16 &&
+      rank_count != QVQ_P32_RANK8_MAX_COUNT) {
+    set_last_error("QVQ P32 rank8 project requires M/K >= 1 and rank_count in {8,16,24}");
+    return -1;
+  }
+  const dim3 grid(
+      static_cast<unsigned>((rank_count + 7) / 8),
+      static_cast<unsigned>(size_m),
+      1);
+  const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+  switch (rank_count) {
+    case 8:
+      p32_rank8_project_kernel<8><<<grid, 256, 0, cuda_stream>>>(
+          reinterpret_cast<const float*>(input),
+          reinterpret_cast<const half*>(rank8_a),
+          reinterpret_cast<half*>(hidden), size_m, size_k);
+      break;
+    case 16:
+      p32_rank8_project_kernel<16><<<grid, 256, 0, cuda_stream>>>(
+          reinterpret_cast<const float*>(input),
+          reinterpret_cast<const half*>(rank8_a),
+          reinterpret_cast<half*>(hidden), size_m, size_k);
+      break;
+    case 24:
+      p32_rank8_project_kernel<24><<<grid, 256, 0, cuda_stream>>>(
+          reinterpret_cast<const float*>(input),
+          reinterpret_cast<const half*>(rank8_a),
+          reinterpret_cast<half*>(hidden), size_m, size_k);
       break;
   }
   const cudaError_t error = cudaGetLastError();
