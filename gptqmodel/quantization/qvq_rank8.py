@@ -27,6 +27,10 @@ RANK8_SWEEP_CANDIDATES = (2, 4, 6, 8, 12)
 # The large-M Hopper consumers amortize their persistent/TMA setup at 32
 # rows. Below that point the M16 consumer remains the lower-latency choice.
 _HOPPER_LARGE_M_THRESHOLD = 32
+# The exact Qwen down projection benefits from the larger tuned CTA once the
+# batch is large enough to amortize its padding and launch geometry. Keep the
+# smaller-M auto path unchanged because it is latency-sensitive.
+_HOPPER_QWEN_DOWN_LARGE_M_THRESHOLD = 1024
 _COMPOSITE_HADAMARD_BASES = (172, 156, 140, 108, 60, 52, 36, 28, 40, 20, 12)
 
 
@@ -1881,6 +1885,7 @@ def explicit_window_inner(layer, transformed, config):
             ],
             dim=0,
         )
+    config = _select_hopper_qwen_down_geometry(layer, config, rows)
     window, banks, alt_id = layer._prepare_amd_p32_metadata(transformed.device)
     if config.algorithm == "amd_gfx950":
         from ..utils.qvq_amd import QVQAMDLaunchConfig, qvq_p32_amd
@@ -1965,6 +1970,37 @@ def explicit_window_inner(layer, transformed, config):
         bank_alt_id=alt_id,
         split_count=config.split_k,
     )[:rows]
+
+
+def _select_hopper_qwen_down_geometry(layer, config, rows):
+    """Select the measured large-M geometry without changing policy state.
+
+    This is deliberately a dispatch-local choice: ``prepare_rank8`` runs
+    before the concrete batch size is known, while CUDA Graph capture requires
+    the selected launch geometry to remain stable for that concrete shape.
+    Explicit user geometry and all other shapes/policies retain their normal
+    fallback behavior.
+    """
+    if not (
+        getattr(layer, "_p32_rank8_enabled", False)
+        and config.algorithm == "hopper_direct_decode_mma"
+        and config.quality_mode == "fast"
+        and config.recovery_kernel == "fused_epilogue"
+        and config.recovery_projection == "tensor_core"
+        and config.arithmetic_signature == "unverified_tensor_core"
+        and config.block_m == 0
+        and config.block_n == 0
+        and config.warp_groups == 0
+        and config.split_k == 1
+        and layer.in_features == 17408
+        and layer.out_features == 5120
+        and rows >= _HOPPER_QWEN_DOWN_LARGE_M_THRESHOLD
+    ):
+        return config
+    # On H100, BM128/BN128 uses the existing single-split WGMMA tuned consumer
+    # and leaves enough work per CTA to improve the large-M recovery path. The
+    # choice is local to this dispatch so M512 keeps the lower-latency default.
+    return replace(config, block_m=128, block_n=128, warp_groups=2)
 
 
 def window_kernel_candidates(layer, *, m):
