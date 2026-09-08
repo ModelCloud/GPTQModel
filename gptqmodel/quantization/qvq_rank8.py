@@ -362,6 +362,26 @@ def prepare_rank8(layer, config):
             # large-M kernels.  explicit_window_inner keeps M<32 on the M16
             # consumer, where the direct launch setup is not amortized.
             config = replace(config, algorithm="hopper_direct_decode_mma")
+            if (
+                config.quality_mode == "fast"
+                and config.recovery_mode != "off"
+                and config.recovery_kernel == "fully_fused"
+                and config.recovery_projection == "project_output_fused"
+                and config.arithmetic_signature == "unverified_project_output_fused"
+                and layer.in_features == 17408
+                and layer.out_features == 5120
+            ):
+                # On the Qwen-down shape the project-output Triton CTA spends
+                # most of its time projecting K=17408 and expanding B. The
+                # existing SM90 Tensor Core projection plus fused epilogue is
+                # faster, but remains intentionally limited to fast mode until
+                # its arithmetic signature is certified for quality policies.
+                config = replace(
+                    config,
+                    recovery_kernel="fused_epilogue",
+                    recovery_projection="tensor_core",
+                    arithmetic_signature="unverified_tensor_core",
+                )
         elif (properties.major, properties.minor) == (8, 0):
             config = replace(config, algorithm="ampere_window")
     if runtime_device.type == "cuda" and torch.cuda.is_current_stream_capturing():
