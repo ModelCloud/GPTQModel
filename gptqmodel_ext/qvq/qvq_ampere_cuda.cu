@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -2078,6 +2079,99 @@ void launch_reduce_flash_next_gate_up_rank8_kernel(
       partial_output, output, params, rank8_down, rank8_b);
 }
 
+template <bool Rank8BFloat, int StaticRows, int StaticSplitCount>
+__global__ void reduce_flash_next_qkv_rank8_kernel(
+    const float* __restrict__ partial_output,
+    float* __restrict__ output,
+    const __grid_constant__ GroupedP32LaunchParams params,
+    const float* __restrict__ rank8_down,
+    const void* __restrict__ rank8_b) {
+  constexpr int kSegmentCount = 3;
+  constexpr int kQColumns = 12288;
+  constexpr int kKVColumns = 512;
+  constexpr int kThreads = 256;
+  constexpr int kQBlocks =
+      (StaticRows * kQColumns + kThreads - 1) / kThreads;
+  constexpr int kKVBlocks =
+      (StaticRows * kKVColumns + kThreads - 1) / kThreads;
+  constexpr int kQValues = StaticRows * kQColumns;
+  constexpr int kKVValues = StaticRows * kKVColumns;
+  const int block = static_cast<int>(blockIdx.x);
+  if (block >= kQBlocks + 2 * kKVBlocks) {
+    return;
+  }
+
+  int segment = 0;
+  int local_block = block;
+  int segment_columns = kQColumns;
+  int segment_values = kQValues;
+  int global_column_start = 0;
+  int64_t output_offset = 0;
+  int64_t partial_offset = 0;
+  if (block >= kQBlocks) {
+    segment = 1;
+    local_block -= kQBlocks;
+    segment_columns = kKVColumns;
+    segment_values = kKVValues;
+    global_column_start = kQColumns;
+    output_offset = kQValues;
+    partial_offset = static_cast<int64_t>(StaticSplitCount) * kQValues;
+    if (local_block >= kKVBlocks) {
+      segment = 2;
+      local_block -= kKVBlocks;
+      global_column_start += kKVColumns;
+      output_offset += kKVValues;
+      partial_offset += static_cast<int64_t>(StaticSplitCount) * kKVValues;
+    }
+  }
+  const int64_t local_index = static_cast<int64_t>(local_block) * kThreads +
+      threadIdx.x;
+  if (local_index >= segment_values) {
+    return;
+  }
+  const int row = static_cast<int>(local_index / segment_columns);
+  const int column = static_cast<int>(local_index) - row * segment_columns;
+  const int global_column = global_column_start + column;
+  const int64_t split_stride = segment_values;
+  const float* segment_partials = partial_output + partial_offset;
+  float accumulator = 0.0f;
+#pragma unroll
+  for (int split = 0; split < StaticSplitCount; ++split) {
+    accumulator += segment_partials[
+        static_cast<int64_t>(split) * split_stride + local_index];
+  }
+
+  const float* rank8_b_float = static_cast<const float*>(rank8_b);
+  const half* rank8_b_half = static_cast<const half*>(rank8_b);
+  const int rank8_base = row * kSegmentCount * 8 + segment * 8;
+  float correction = 0.0f;
+#pragma unroll
+  for (int rank = 0; rank < 8; ++rank) {
+    const int b_index = rank * (kQColumns + 2 * kKVColumns) + global_column;
+    const float b_value = Rank8BFloat
+        ? rank8_b_float[b_index]
+        : __half2float(rank8_b_half[b_index]);
+    correction += rank8_down[rank8_base + rank] * b_value;
+  }
+  output[output_offset + local_index] =
+      accumulator + params.rank8_scale[segment] * correction;
+}
+
+template <bool Rank8BFloat, int StaticRows, int StaticSplitCount>
+void launch_reduce_flash_next_qkv_rank8_kernel(
+    const dim3 reduction_grid,
+    const cudaStream_t stream,
+    const float* partial_output,
+    float* output,
+    const GroupedP32LaunchParams& params,
+    const float* rank8_down,
+    const void* rank8_b) {
+  reduce_flash_next_qkv_rank8_kernel<
+      Rank8BFloat, StaticRows, StaticSplitCount><<<
+      reduction_grid, 256, 0, stream>>>(
+      partial_output, output, params, rank8_down, rank8_b);
+}
+
 template <int StaticSplitCount, int OutputsPerWarp = 4>
 __global__ void reduce_split_warp_kernel(
     const float* __restrict__ partial_output,
@@ -4063,6 +4157,14 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
       blocks += (segment_values + kReductionThreads - 1) / kReductionThreads;
     }
     const dim3 reduction_grid(static_cast<unsigned>(blocks), 1, 1);
+    const bool use_flash_next_qkv_rank8_reducer =
+        TransitionBits == 6 && size_k == 2560 && segment_count == 3 &&
+        total_n == 13312 && params.n_tiles[0] == 768 &&
+        params.n_tiles[1] == 32 && params.n_tiles[2] == 32 &&
+        uniform_splits &&
+        ((uniform_split_count == 16 &&
+          (size_m == 1 || size_m == 2 || size_m == 4 || size_m == 8)) ||
+         (uniform_split_count == 4 && size_m == 16));
     const bool use_flash_next_gate_up_rank8_reducer =
         TransitionBits == 6 && size_k == 2560 && segment_count == 2 &&
         total_n == 1280 && params.n_tiles[0] == 40 &&
@@ -4070,7 +4172,49 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
         uniform_split_count == 40 &&
         (size_m == 1 || size_m == 2 || size_m == 4 || size_m == 8 ||
          size_m == 16);
-    if (use_flash_next_gate_up_rank8_reducer) {
+    if (use_flash_next_qkv_rank8_reducer) {
+      auto launch_qkv_rank8 = [&](auto rows_tag, auto split_tag) {
+        constexpr int rows = decltype(rows_tag)::value;
+        constexpr int splits = decltype(split_tag)::value;
+        if (rank8_b->scalar_type() == at::kFloat) {
+          launch_reduce_flash_next_qkv_rank8_kernel<true, rows, splits>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        } else {
+          launch_reduce_flash_next_qkv_rank8_kernel<false, rows, splits>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        }
+      };
+      if (uniform_split_count == 16) {
+        if (size_m == 1) {
+          launch_qkv_rank8(std::integral_constant<int, 1>{},
+                           std::integral_constant<int, 16>{});
+        } else if (size_m == 2) {
+          launch_qkv_rank8(std::integral_constant<int, 2>{},
+                           std::integral_constant<int, 16>{});
+        } else if (size_m == 4) {
+          launch_qkv_rank8(std::integral_constant<int, 4>{},
+                           std::integral_constant<int, 16>{});
+        } else {
+          launch_qkv_rank8(std::integral_constant<int, 8>{},
+                           std::integral_constant<int, 16>{});
+        }
+      } else {
+        launch_qkv_rank8(std::integral_constant<int, 16>{},
+                         std::integral_constant<int, 4>{});
+      }
+    } else if (use_flash_next_gate_up_rank8_reducer) {
       if (rank8_b->scalar_type() == at::kFloat) {
         if (size_m == 1) {
           launch_reduce_flash_next_gate_up_rank8_kernel<true, 1>(
