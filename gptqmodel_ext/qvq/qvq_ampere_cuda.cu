@@ -1377,7 +1377,8 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
         // the static M=4 routes.  Hoist the bank masks and decode two rows
         // together so Flash-Next QKV/gate-up tiles do not pay one mask
         // selection per decoded pair.
-        if constexpr (Rows == 4 && TransitionBits != 7) {
+        if constexpr ((Rows == 4 || Rows == 2 || Rows == 1) &&
+                      TransitionBits != 7) {
 #pragma unroll
           for (int bank_group = 0; bank_group < 4; ++bank_group) {
             const uint32_t bank_mask_0 =
