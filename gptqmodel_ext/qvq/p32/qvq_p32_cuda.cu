@@ -2855,30 +2855,80 @@ int launch_p32_config_variant(
       }
     }
     if (!launched_static) {
+      // Llama 3.2 1B F6's standalone down projection is the one production
+      // scalar route that is both long-K and outside the grouped path. Its
+      // immutable 256-entry level table is small enough to stage once per
+      // CTA, avoiding repeated constant/global-cache lookups in every K tile.
+      const bool use_llama_f6_shared_levels =
+          TransitionBits == 6 && size_k == 8192 && size_n == 2048;
       switch (size_m) {
         case 1:
-          p32_window_ampere_m1_kernel<TransitionBits, 1, Threads, 4 * (Threads / 32), StageKTiles>
-              <<<grid, Threads, 0, cuda_stream>>>(
-                  input_half, trellis_words, levels_half, bank_bytes, partial_output, output,
-                  size_k, size_n, split_count, bank_alt_byte);
+          if (use_llama_f6_shared_levels) {
+            p32_window_ampere_m1_kernel<
+                TransitionBits, 1, Threads, 4 * (Threads / 32), StageKTiles,
+                0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
+                input_half, trellis_words, levels_half, bank_bytes,
+                partial_output, output, size_k, size_n, split_count,
+                bank_alt_byte);
+          } else {
+            p32_window_ampere_m1_kernel<
+                TransitionBits, 1, Threads, 4 * (Threads / 32), StageKTiles>
+                <<<grid, Threads, 0, cuda_stream>>>(
+                    input_half, trellis_words, levels_half, bank_bytes,
+                    partial_output, output, size_k, size_n, split_count,
+                    bank_alt_byte);
+          }
           break;
         case 2:
-          p32_window_ampere_m1_kernel<TransitionBits, 2, Threads, 4 * (Threads / 32), StageKTiles>
-              <<<grid, Threads, 0, cuda_stream>>>(
-                  input_half, trellis_words, levels_half, bank_bytes, partial_output, output,
-                  size_k, size_n, split_count, bank_alt_byte);
+          if (use_llama_f6_shared_levels) {
+            p32_window_ampere_m1_kernel<
+                TransitionBits, 2, Threads, 4 * (Threads / 32), StageKTiles,
+                0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
+                input_half, trellis_words, levels_half, bank_bytes,
+                partial_output, output, size_k, size_n, split_count,
+                bank_alt_byte);
+          } else {
+            p32_window_ampere_m1_kernel<
+                TransitionBits, 2, Threads, 4 * (Threads / 32), StageKTiles>
+                <<<grid, Threads, 0, cuda_stream>>>(
+                    input_half, trellis_words, levels_half, bank_bytes,
+                    partial_output, output, size_k, size_n, split_count,
+                    bank_alt_byte);
+          }
           break;
         case 3:
-          p32_window_ampere_m1_kernel<TransitionBits, 3, Threads, 4 * (Threads / 32), StageKTiles>
-              <<<grid, Threads, 0, cuda_stream>>>(
-                  input_half, trellis_words, levels_half, bank_bytes, partial_output, output,
-                  size_k, size_n, split_count, bank_alt_byte);
+          if (use_llama_f6_shared_levels) {
+            p32_window_ampere_m1_kernel<
+                TransitionBits, 3, Threads, 4 * (Threads / 32), StageKTiles,
+                0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
+                input_half, trellis_words, levels_half, bank_bytes,
+                partial_output, output, size_k, size_n, split_count,
+                bank_alt_byte);
+          } else {
+            p32_window_ampere_m1_kernel<
+                TransitionBits, 3, Threads, 4 * (Threads / 32), StageKTiles>
+                <<<grid, Threads, 0, cuda_stream>>>(
+                    input_half, trellis_words, levels_half, bank_bytes,
+                    partial_output, output, size_k, size_n, split_count,
+                    bank_alt_byte);
+          }
           break;
         case 4:
-          p32_window_ampere_m1_kernel<TransitionBits, 4, Threads, 4 * (Threads / 32), StageKTiles>
-              <<<grid, Threads, 0, cuda_stream>>>(
-                  input_half, trellis_words, levels_half, bank_bytes, partial_output, output,
-                  size_k, size_n, split_count, bank_alt_byte);
+          if (use_llama_f6_shared_levels) {
+            p32_window_ampere_m1_kernel<
+                TransitionBits, 4, Threads, 4 * (Threads / 32), StageKTiles,
+                0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
+                input_half, trellis_words, levels_half, bank_bytes,
+                partial_output, output, size_k, size_n, split_count,
+                bank_alt_byte);
+          } else {
+            p32_window_ampere_m1_kernel<
+                TransitionBits, 4, Threads, 4 * (Threads / 32), StageKTiles>
+                <<<grid, Threads, 0, cuda_stream>>>(
+                    input_half, trellis_words, levels_half, bank_bytes,
+                    partial_output, output, size_k, size_n, split_count,
+                    bank_alt_byte);
+          }
           break;
         default:
           set_last_error("QVQ P32 scalar variant supports M in [1, 4]");
