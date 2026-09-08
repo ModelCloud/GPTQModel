@@ -1753,32 +1753,35 @@ __global__ void reduce_grouped_split_rank8_kernel(
     int total_n,
     const float* __restrict__ rank8_down,
     const void* __restrict__ rank8_b) {
-  const int index = static_cast<int>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const int output_values = size_m * total_n;
-  if (index >= output_values) {
-    return;
-  }
+  const int block = static_cast<int>(blockIdx.x);
   int segment = 0;
+  int block_offset = 0;
   for (; segment < segment_count; ++segment) {
-    const int64_t start = params.output_offset[segment];
-    const int64_t count = static_cast<int64_t>(size_m) *
-        params.n_tiles[segment] * kTileColumns;
-    if (index >= start && index < start + count) {
+    const int segment_values = size_m * params.n_tiles[segment] * kTileColumns;
+    const int segment_blocks =
+        (segment_values + blockDim.x - 1) / blockDim.x;
+    if (block < block_offset + segment_blocks) {
       break;
     }
+    block_offset += segment_blocks;
   }
   if (segment == segment_count) {
     return;
   }
   const int segment_n = params.n_tiles[segment] * kTileColumns;
-  const int64_t local_index = index - params.output_offset[segment];
+  const int64_t local_index = static_cast<int64_t>(block - block_offset) *
+      blockDim.x + threadIdx.x;
+  if (local_index >= static_cast<int64_t>(size_m) * segment_n) {
+    return;
+  }
   const int row = static_cast<int>(local_index / segment_n);
   const int column = static_cast<int>(local_index -
       static_cast<int64_t>(row) * segment_n);
   const int global_column = params.n_tile_start[segment] * kTileColumns + column;
   const int split_count = params.split_count[segment];
   const int64_t split_stride = static_cast<int64_t>(size_m) * segment_n;
-  float accumulator = split_count == 1 ? output[index] : 0.0f;
+  const int64_t output_index = params.output_offset[segment] + local_index;
+  float accumulator = split_count == 1 ? output[output_index] : 0.0f;
   if (split_count > 1) {
     const float* segment_partials =
         partial_output + params.partial_offset[segment];
@@ -1799,7 +1802,7 @@ __global__ void reduce_grouped_split_rank8_kernel(
         : __half2float(rank8_b_half[rank * total_n + global_column]);
     correction += rank8_down[rank8_base + rank] * b_value;
   }
-  output[index] = accumulator + params.rank8_scale[segment] * correction;
+  output[output_index] = accumulator + params.rank8_scale[segment] * correction;
 }
 
 template <int StaticSplitCount, int OutputsPerWarp = 4>
@@ -3466,11 +3469,19 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   if (rank8_a.has_value()) {
     auto rank8_down = at::mm(input, *rank8_a, at::kFloat);
     constexpr int kReductionThreads = 256;
-    const int output_value_count = size_m * total_n;
-    const int blocks =
-        (output_value_count + kReductionThreads - 1) / kReductionThreads;
+    // Keep block ownership segment-local.  A block never crosses a child
+    // boundary, so the reducer pays the segment lookup once per block rather
+    // than once per output thread while retaining the exact split order.
+    int blocks = 0;
+    for (int segment = 0; segment < segment_count; ++segment) {
+      const int segment_values =
+          size_m * params.n_tiles[segment] * kTileColumns;
+      blocks += (segment_values + kReductionThreads - 1) / kReductionThreads;
+    }
+    const dim3 reduction_grid(static_cast<unsigned>(blocks), 1, 1);
     if (rank8_b->scalar_type() == at::kFloat) {
-      reduce_grouped_split_rank8_kernel<true><<<blocks, kReductionThreads, 0, stream>>>(
+      reduce_grouped_split_rank8_kernel<true><<<
+          reduction_grid, kReductionThreads, 0, stream>>>(
           partial_output_ptr,
           output_ptr,
           params,
@@ -3480,7 +3491,8 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
           rank8_down.data_ptr<float>(),
           rank8_b->data_ptr());
     } else {
-      reduce_grouped_split_rank8_kernel<false><<<blocks, kReductionThreads, 0, stream>>>(
+      reduce_grouped_split_rank8_kernel<false><<<
+          reduction_grid, kReductionThreads, 0, stream>>>(
           partial_output_ptr,
           output_ptr,
           params,
