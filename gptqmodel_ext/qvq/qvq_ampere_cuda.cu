@@ -1510,6 +1510,35 @@ struct GroupedP32LaunchParams {
   int64_t partial_offset[kMaxGroupedP32Segments];
 };
 
+template <int TilesPerBlock>
+__device__ __forceinline__ bool grouped_block_coordinates(
+    const GroupedP32LaunchParams& params,
+    int segment_count,
+    int linear_block,
+    int& segment,
+    int& n_block,
+    int& split) {
+  // The old grouped launch used a rectangular 3-D grid whose x/z extents
+  // came from the widest child and largest split wave.  Flash-Next Q/K/V
+  // groups have one wide child and two 512-column children, so most of that
+  // rectangle is an empty CTA.  Flatten only the valid (segment, split,
+  // n-block) tuples; this does not change partial-output ownership or the
+  // increasing-split reduction order.
+  for (int candidate = 0; candidate < segment_count; ++candidate) {
+    const int n_blocks =
+        (params.n_tiles[candidate] + TilesPerBlock - 1) / TilesPerBlock;
+    const int segment_blocks = n_blocks * params.split_count[candidate];
+    if (linear_block < segment_blocks) {
+      segment = candidate;
+      split = linear_block / n_blocks;
+      n_block = linear_block - split * n_blocks;
+      return true;
+    }
+    linear_block -= segment_blocks;
+  }
+  return false;
+}
+
 template <
     int TransitionBits,
     int Rows,
@@ -1525,18 +1554,17 @@ __global__ __launch_bounds__(kM1Threads) void p32_window_ampere_grouped_scalar_k
     int segment_count,
     int size_k,
     int total_n_tiles) {
-  const int segment = static_cast<int>(blockIdx.y);
-  if (segment >= segment_count || segment >= params.segment_count) {
+  int segment = 0;
+  int n_block = 0;
+  int split = 0;
+  if (!grouped_block_coordinates<kM1TilesPerBlock>(
+          params, std::min(segment_count, params.segment_count),
+          static_cast<int>(blockIdx.x), segment, n_block, split)) {
     return;
   }
   const int n_tile_start = params.n_tile_start[segment];
   const int n_tiles = params.n_tiles[segment];
   const int split_count = params.split_count[segment];
-  const int n_block = static_cast<int>(blockIdx.x);
-  const int split = static_cast<int>(blockIdx.z);
-  if (n_block * kM1TilesPerBlock >= n_tiles || split >= split_count) {
-    return;
-  }
   p32_window_ampere_m1_kernel_body<
       TransitionBits, Rows, kM1Threads, kM1TilesPerBlock, StageKTiles, 0>(
       input,
@@ -1571,18 +1599,17 @@ __global__ __launch_bounds__(kThreads) void p32_window_ampere_grouped_wmma_kerne
     int size_m,
     int size_k,
     int total_n_tiles) {
-  const int segment = static_cast<int>(blockIdx.y);
-  if (segment >= segment_count || segment >= params.segment_count) {
+  int segment = 0;
+  int n_block = 0;
+  int split = 0;
+  if (!grouped_block_coordinates<kTilesPerBlock>(
+          params, std::min(segment_count, params.segment_count),
+          static_cast<int>(blockIdx.x), segment, n_block, split)) {
     return;
   }
   const int n_tile_start = params.n_tile_start[segment];
   const int n_tiles = params.n_tiles[segment];
   const int split_count = params.split_count[segment];
-  const int n_block = static_cast<int>(blockIdx.x);
-  const int split = static_cast<int>(blockIdx.z);
-  if (n_block * kTilesPerBlock >= n_tiles || split >= split_count) {
-    return;
-  }
   p32_window_ampere_kernel_body<TransitionBits, FullRows, ActiveRows>(
       input,
       trellis,
@@ -1743,7 +1770,7 @@ __global__ void reduce_grouped_split_kernel(
   output[index] = accumulator;
 }
 
-template <bool Rank8BFloat>
+template <bool Rank8BFloat, int StaticSplitCount = 0, bool SingleRow = false>
 __global__ void reduce_grouped_split_rank8_kernel(
     const float* __restrict__ partial_output,
     float* __restrict__ output,
@@ -1774,7 +1801,7 @@ __global__ void reduce_grouped_split_rank8_kernel(
   if (local_index >= static_cast<int64_t>(size_m) * segment_n) {
     return;
   }
-  const int row = static_cast<int>(local_index / segment_n);
+  const int row = SingleRow ? 0 : static_cast<int>(local_index / segment_n);
   const int column = static_cast<int>(local_index -
       static_cast<int64_t>(row) * segment_n);
   const int global_column = params.n_tile_start[segment] * kTileColumns + column;
@@ -1785,8 +1812,10 @@ __global__ void reduce_grouped_split_rank8_kernel(
   if (split_count > 1) {
     const float* segment_partials =
         partial_output + params.partial_offset[segment];
-#pragma unroll 1
-    for (int split = 0; split < split_count; ++split) {
+#pragma unroll
+    for (int split = 0;
+         split < (StaticSplitCount > 0 ? StaticSplitCount : split_count);
+         ++split) {
       accumulator += segment_partials[
           static_cast<int64_t>(split) * split_stride + local_index];
     }
@@ -3311,9 +3340,10 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   GroupedP32LaunchParams params{};
   params.segment_count = static_cast<int>(segment_count);
   int total_n_tiles = 0;
-  int max_split_count = 1;
-  int max_n_blocks_scalar = 1;
-  int max_n_blocks_wmma = 1;
+  int active_scalar_blocks = 0;
+  int active_wmma_blocks = 0;
+  int uniform_split_count = 0;
+  bool uniform_splits = true;
   int64_t output_values = 0;
   int64_t partial_values = 0;
   bool needs_reduction = false;
@@ -3330,6 +3360,11 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     TORCH_CHECK(
         bank_alt_id >= 0 && bank_alt_id <= 3,
         "QVQ P32 Ampere grouped bank ID must be in [0, 3]");
+    if (segment == 0) {
+      uniform_split_count = split_count;
+    } else if (split_count != uniform_split_count) {
+      uniform_splits = false;
+    }
     const int n_tiles = size_n / kTileColumns;
     params.n_tile_start[segment] = total_n_tiles;
     params.n_tiles[segment] = n_tiles;
@@ -3347,13 +3382,10 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     }
     output_values += static_cast<int64_t>(size_m) * size_n;
     total_n_tiles += n_tiles;
-    max_split_count = std::max(max_split_count, split_count);
-    max_n_blocks_scalar = std::max(
-        max_n_blocks_scalar,
-        (n_tiles + kM1TilesPerBlock - 1) / kM1TilesPerBlock);
-    max_n_blocks_wmma = std::max(
-        max_n_blocks_wmma,
-        (n_tiles + kTilesPerBlock - 1) / kTilesPerBlock);
+    active_scalar_blocks +=
+        ((n_tiles + kM1TilesPerBlock - 1) / kM1TilesPerBlock) * split_count;
+    active_wmma_blocks +=
+        ((n_tiles + kTilesPerBlock - 1) / kTilesPerBlock) * split_count;
   }
   const int total_n = total_n_tiles * kTileColumns;
   if (rank8_a.has_value()) {
@@ -3405,10 +3437,7 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   // remain on the ordinary exact dispatcher until a matching route exists.
   const bool use_small_m_scalar = size_m <= 4 && size_k <= 6144;
   if (use_small_m_scalar) {
-    const dim3 grid(
-        static_cast<unsigned>(max_n_blocks_scalar),
-        static_cast<unsigned>(segment_count),
-        static_cast<unsigned>(max_split_count));
+    const dim3 grid(static_cast<unsigned>(active_scalar_blocks), 1, 1);
     if (size_m == 1) {
       p32_window_ampere_grouped_scalar_kernel<TransitionBits, 1>
           <<<grid, kM1Threads, 0, stream>>>(
@@ -3440,10 +3469,7 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
               size_k, total_n_tiles);
     }
   } else {
-    const dim3 grid(
-        static_cast<unsigned>(max_n_blocks_wmma),
-        static_cast<unsigned>(segment_count),
-        static_cast<unsigned>(max_split_count));
+    const dim3 grid(static_cast<unsigned>(active_wmma_blocks), 1, 1);
     if (size_m == kRows) {
       p32_window_ampere_grouped_wmma_kernel<TransitionBits, true>
           <<<grid, kThreads, 0, stream>>>(
@@ -3479,28 +3505,78 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
       blocks += (segment_values + kReductionThreads - 1) / kReductionThreads;
     }
     const dim3 reduction_grid(static_cast<unsigned>(blocks), 1, 1);
-    if (rank8_b->scalar_type() == at::kFloat) {
-      reduce_grouped_split_rank8_kernel<true><<<
-          reduction_grid, kReductionThreads, 0, stream>>>(
-          partial_output_ptr,
-          output_ptr,
-          params,
-          static_cast<int>(segment_count),
-          size_m,
-          total_n,
-          rank8_down.data_ptr<float>(),
-          rank8_b->data_ptr());
+    if (uniform_splits && uniform_split_count == 16 && size_m == 1) {
+      if (rank8_b->scalar_type() == at::kFloat) {
+        reduce_grouped_split_rank8_kernel<true, 16, true><<<
+            reduction_grid, kReductionThreads, 0, stream>>>(
+            partial_output_ptr,
+            output_ptr,
+            params,
+            static_cast<int>(segment_count),
+            size_m,
+            total_n,
+            rank8_down.data_ptr<float>(),
+            rank8_b->data_ptr());
+      } else {
+        reduce_grouped_split_rank8_kernel<false, 16, true><<<
+            reduction_grid, kReductionThreads, 0, stream>>>(
+            partial_output_ptr,
+            output_ptr,
+            params,
+            static_cast<int>(segment_count),
+            size_m,
+            total_n,
+            rank8_down.data_ptr<float>(),
+            rank8_b->data_ptr());
+      }
+    } else if (uniform_splits && uniform_split_count == 16) {
+      if (rank8_b->scalar_type() == at::kFloat) {
+        reduce_grouped_split_rank8_kernel<true, 16><<<
+            reduction_grid, kReductionThreads, 0, stream>>>(
+            partial_output_ptr,
+            output_ptr,
+            params,
+            static_cast<int>(segment_count),
+            size_m,
+            total_n,
+            rank8_down.data_ptr<float>(),
+            rank8_b->data_ptr());
+      } else {
+        reduce_grouped_split_rank8_kernel<false, 16><<<
+            reduction_grid, kReductionThreads, 0, stream>>>(
+            partial_output_ptr,
+            output_ptr,
+            params,
+            static_cast<int>(segment_count),
+            size_m,
+            total_n,
+            rank8_down.data_ptr<float>(),
+            rank8_b->data_ptr());
+      }
     } else {
-      reduce_grouped_split_rank8_kernel<false><<<
-          reduction_grid, kReductionThreads, 0, stream>>>(
-          partial_output_ptr,
-          output_ptr,
-          params,
-          static_cast<int>(segment_count),
-          size_m,
-          total_n,
-          rank8_down.data_ptr<float>(),
-          rank8_b->data_ptr());
+      if (rank8_b->scalar_type() == at::kFloat) {
+        reduce_grouped_split_rank8_kernel<true><<<
+            reduction_grid, kReductionThreads, 0, stream>>>(
+            partial_output_ptr,
+            output_ptr,
+            params,
+            static_cast<int>(segment_count),
+            size_m,
+            total_n,
+            rank8_down.data_ptr<float>(),
+            rank8_b->data_ptr());
+      } else {
+        reduce_grouped_split_rank8_kernel<false><<<
+            reduction_grid, kReductionThreads, 0, stream>>>(
+            partial_output_ptr,
+            output_ptr,
+            params,
+            static_cast<int>(segment_count),
+            size_m,
+            total_n,
+            rank8_down.data_ptr<float>(),
+            rank8_b->data_ptr());
+      }
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   } else if (needs_reduction) {

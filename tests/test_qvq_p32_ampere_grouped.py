@@ -80,6 +80,23 @@ def test_group_plan_resolves_each_child_width_independently(monkeypatch):
     assert 144 not in calls
 
 
+def test_flash_next_qkv_group_uses_compact_static_wave_policy():
+    input = torch.empty((1, 2560))
+    payloads = [torch.empty(1), torch.empty(1), torch.empty(1)]
+
+    plan = qvq_p32_window_ampere_group_plan(
+        input,
+        payloads,
+        torch.empty(256),
+        payloads,
+        3,
+        out_features=(12288, 512, 512),
+        bank_alt_ids=(3, 1, 1),
+    )
+
+    assert [segment.split_count for segment in plan.segments] == [16, 16, 16]
+
+
 def test_grouped_ampere_candidates_tune_children_independently_without_cuda_work():
     candidates = qvq_p32_window_ampere_grouped_kernel_candidates(
         (1, 5120),
@@ -410,7 +427,17 @@ def test_grouped_ampere_is_bit_exact_to_plain_children_on_h100_or_sm80(
     not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 0),
     reason="requires NVIDIA CUDA compute capability >= 8.0",
 )
-def test_grouped_ampere_rank8_shares_projection_and_matches_child_paths(monkeypatch):
+@pytest.mark.parametrize(
+    ("widths", "alt_ids", "split_counts"),
+    (
+        ((80, 64, 48), (3, 1, 2), (2, 3, 4)),
+        ((64, 64), (3, 1), (2, 3)),
+    ),
+    ids=("qkv", "gate-up"),
+)
+def test_grouped_ampere_rank8_shares_projection_and_matches_child_paths(
+    widths, alt_ids, split_counts, monkeypatch
+):
     device = _native_validation_device()
     if device is None:
         pytest.skip("requires SM80 or the dedicated H100 validation device")
@@ -421,9 +448,6 @@ def test_grouped_ampere_rank8_shares_projection_and_matches_child_paths(monkeypa
     bits = 3.0
     in_features = 256
     size_m = 4
-    widths = (80, 64, 48)
-    alt_ids = (3, 1, 2)
-    split_counts = (2, 3, 4)
     generator = torch.Generator(device=device).manual_seed(20261211)
     levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
     input = (

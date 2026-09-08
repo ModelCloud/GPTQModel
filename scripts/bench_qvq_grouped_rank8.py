@@ -21,13 +21,16 @@ from gptqmodel.utils.qvq_ampere_cuda import (
 )
 
 
-def build_case(size_m: int):
+def build_case(
+    size_m: int,
+    *,
+    size_k: int = 5120,
+    widths: tuple[int, ...] = (12288, 1024, 1024),
+    alt_ids: tuple[int, ...] = (3, 1, 1),
+    split_counts: tuple[int, ...] | None = (40, 56, 56),
+):
     device = torch.device("cuda", 0)
     bits = 3.0
-    size_k = 5120
-    widths = (12288, 1024, 1024)
-    alt_ids = (3, 1, 1)
-    split_counts = (40, 56, 56)
     generator = torch.Generator(device=device).manual_seed(20260907 + size_m)
     levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
     input = torch.randn((size_m, size_k), generator=generator, device=device).half()
@@ -128,12 +131,37 @@ def timed(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--m", type=int, nargs="+", default=[1, 2, 4, 8, 16])
+    parser.add_argument(
+        "--preset",
+        choices=(
+            "qwen38-27b-proxy",
+            "qwen38-flash-next-qkv",
+            "qwen38-flash-next-gate-up",
+        ),
+        default="qwen38-27b-proxy",
+    )
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("CUDA is required")
     prewarm_qvq_ampere_grouped()
+    if args.preset == "qwen38-flash-next-qkv":
+        case_kwargs = {
+            "size_k": 2560,
+            "widths": (12288, 512, 512),
+            "alt_ids": (3, 1, 1),
+            "split_counts": None,
+        }
+    elif args.preset == "qwen38-flash-next-gate-up":
+        case_kwargs = {
+            "size_k": 2560,
+            "widths": (640, 640),
+            "alt_ids": (3, 1),
+            "split_counts": None,
+        }
+    else:
+        case_kwargs = {}
     for size_m in args.m:
-        case = build_case(size_m)
+        case = build_case(size_m, **case_kwargs)
         input, payload, levels, packed_a, packed_b, rank8_as, rank8_bs, widths = case
         off = timed(
             input, payload, levels, packed_a, packed_b, rank8_as, rank8_bs, widths, False
