@@ -818,6 +818,8 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
   constexpr int kWordsPerTile = 4 * TransitionBits;
   static_assert(Rows >= 1 && Rows <= 8);
+  static_assert(StaticK == 0 || StaticK % kTileRows == 0,
+                "StaticK must be zero (dynamic) or a complete K tile");
   __shared__ __align__(32) half input_tile[2][Rows * StageKTiles * kTileRows];
   __shared__ __align__(16) uint32_t packed_words[
       2][StageKTiles][TilesPerBlock][kWordsPerTile];
@@ -2866,7 +2868,7 @@ int launch_p32_config_variant(
           if (use_llama_f6_shared_levels) {
             p32_window_ampere_m1_kernel<
                 TransitionBits, 1, Threads, 4 * (Threads / 32), StageKTiles,
-                0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
+                0, 0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
                 input_half, trellis_words, levels_half, bank_bytes,
                 partial_output, output, size_k, size_n, split_count,
                 bank_alt_byte);
@@ -2883,7 +2885,7 @@ int launch_p32_config_variant(
           if (use_llama_f6_shared_levels) {
             p32_window_ampere_m1_kernel<
                 TransitionBits, 2, Threads, 4 * (Threads / 32), StageKTiles,
-                0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
+                0, 0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
                 input_half, trellis_words, levels_half, bank_bytes,
                 partial_output, output, size_k, size_n, split_count,
                 bank_alt_byte);
@@ -2900,7 +2902,7 @@ int launch_p32_config_variant(
           if (use_llama_f6_shared_levels) {
             p32_window_ampere_m1_kernel<
                 TransitionBits, 3, Threads, 4 * (Threads / 32), StageKTiles,
-                0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
+                0, 0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
                 input_half, trellis_words, levels_half, bank_bytes,
                 partial_output, output, size_k, size_n, split_count,
                 bank_alt_byte);
@@ -2917,7 +2919,7 @@ int launch_p32_config_variant(
           if (use_llama_f6_shared_levels) {
             p32_window_ampere_m1_kernel<
                 TransitionBits, 4, Threads, 4 * (Threads / 32), StageKTiles,
-                0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
+                0, 0, 0, true><<<grid, Threads, 0, cuda_stream>>>(
                 input_half, trellis_words, levels_half, bank_bytes,
                 partial_output, output, size_k, size_n, split_count,
                 bank_alt_byte);
