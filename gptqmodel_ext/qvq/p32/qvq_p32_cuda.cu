@@ -180,7 +180,7 @@ __device__ __forceinline__ uint32_t selected_bank_mask(
       alt_mask;
 }
 
-template <int TransitionBits>
+template <int TransitionBits, bool UseSharedLevels = false>
 __device__ __forceinline__ uint32_t decode_pair_bits(
     int pair,
     uint32_t state,
@@ -194,11 +194,17 @@ __device__ __forceinline__ uint32_t decode_pair_bits(
     uint32_t bits;
     half2 values;
   } decoded;
-  decoded.values = __halves2half2(
-      __ldg(levels + (mixed >> 8)), __ldg(levels + (mixed & 0xffu)));
+  const half first_level = UseSharedLevels
+      ? levels[mixed >> 8]
+      : __ldg(levels + (mixed >> 8));
+  const half second_level = UseSharedLevels
+      ? levels[mixed & 0xffu]
+      : __ldg(levels + (mixed & 0xffu));
+  decoded.values = __halves2half2(first_level, second_level);
   return decoded.bits;
 }
 
+template <bool UseSharedLevels = false>
 __device__ __forceinline__ uint32_t decode_state_bits(
     uint32_t state,
     uint32_t bank_mask,
@@ -208,11 +214,17 @@ __device__ __forceinline__ uint32_t decode_state_bits(
     uint32_t bits;
     half2 values;
   } decoded;
-  decoded.values = __halves2half2(
-      __ldg(levels + (mixed >> 8)), __ldg(levels + (mixed & 0xffu)));
+  const half first_level = UseSharedLevels
+      ? levels[mixed >> 8]
+      : __ldg(levels + (mixed >> 8));
+  const half second_level = UseSharedLevels
+      ? levels[mixed & 0xffu]
+      : __ldg(levels + (mixed & 0xffu));
+  decoded.values = __halves2half2(first_level, second_level);
   return decoded.bits;
 }
 
+template <bool UseSharedLevels = false>
 __device__ __forceinline__ void decode_state_pair_bits(
     uint32_t first_state,
     uint32_t second_state,
@@ -233,12 +245,20 @@ __device__ __forceinline__ void decode_state_pair_bits(
     uint32_t bits;
     half2 values;
   } first, second;
-  first.values = __halves2half2(
-      __ldg(levels + ((mixed >> 8) & 0xffu)),
-      __ldg(levels + (mixed & 0xffu)));
-  second.values = __halves2half2(
-      __ldg(levels + (mixed >> 24)),
-      __ldg(levels + ((mixed >> 16) & 0xffu)));
+  const half first_level_0 = UseSharedLevels
+      ? levels[(mixed >> 8) & 0xffu]
+      : __ldg(levels + ((mixed >> 8) & 0xffu));
+  const half first_level_1 = UseSharedLevels
+      ? levels[mixed & 0xffu]
+      : __ldg(levels + (mixed & 0xffu));
+  const half second_level_0 = UseSharedLevels
+      ? levels[mixed >> 24]
+      : __ldg(levels + (mixed >> 24));
+  const half second_level_1 = UseSharedLevels
+      ? levels[(mixed >> 16) & 0xffu]
+      : __ldg(levels + ((mixed >> 16) & 0xffu));
+  first.values = __halves2half2(first_level_0, first_level_1);
+  second.values = __halves2half2(second_level_0, second_level_1);
   first_decoded = first.bits;
   second_decoded = second.bits;
 }
@@ -650,7 +670,8 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
 #endif
 }
 
-template <int TransitionBits, int Rows, int StageKTiles>
+template <int TransitionBits, int Rows, int StageKTiles,
+          bool UseSharedLevels = false>
 __device__ __forceinline__ void accumulate_scalar_grouped_pgc(
     const uint32_t* __restrict__ words,
     uint8_t packed_bank_id,
@@ -677,10 +698,10 @@ __device__ __forceinline__ void accumulate_scalar_grouped_pgc(
     }
     uint32_t decoded_0[2];
     uint32_t decoded_8[2];
-    decode_state_pair_bits(
+    decode_state_pair_bits<UseSharedLevels>(
         state_0[0], state_0[1], bank_mask_0, levels,
         decoded_0[0], decoded_0[1]);
-    decode_state_pair_bits(
+    decode_state_pair_bits<UseSharedLevels>(
         state_8[0], state_8[1], bank_mask_8, levels,
         decoded_8[0], decoded_8[1]);
 #pragma unroll
@@ -712,7 +733,8 @@ __device__ __forceinline__ void accumulate_scalar_grouped_pgc(
   }
 }
 
-template <int TransitionBits, int Rows, int StageKTiles>
+template <int TransitionBits, int Rows, int StageKTiles,
+          bool UseSharedLevels = false>
 __device__ __forceinline__ void accumulate_scalar_hoisted_pgc(
     const uint32_t* __restrict__ words,
     uint8_t packed_bank_id,
@@ -736,9 +758,9 @@ __device__ __forceinline__ void accumulate_scalar_hoisted_pgc(
       uint32_t state_8;
       window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
       const uint32_t decoded_0 =
-          decode_state_bits(state_0, bank_mask_0, levels);
+          decode_state_bits<UseSharedLevels>(state_0, bank_mask_0, levels);
       const uint32_t decoded_8 =
-          decode_state_bits(state_8, bank_mask_8, levels);
+          decode_state_bits<UseSharedLevels>(state_8, bank_mask_8, levels);
       union {
         uint32_t bits;
         half2 values;
@@ -773,7 +795,8 @@ template <
     int StageKTiles = kStageKTiles,
     int StaticN = 0,
     int StaticSplitCount = 0,
-    int StaticK = 0>
+    int StaticK = 0,
+    bool UseSharedLevels = false>
 __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -799,6 +822,7 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
   __shared__ __align__(16) uint32_t packed_words[
       2][StageKTiles][TilesPerBlock][kWordsPerTile];
   __shared__ __align__(16) uint8_t packed_bank_ids[2][StageKTiles][TilesPerBlock];
+  __shared__ __align__(16) half shared_levels[256];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
@@ -818,6 +842,14 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
   const int k_tile_begin = (k_tiles * split) / effective_split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / effective_split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(*bank_alt_id);
+  const half* decode_levels = levels;
+  if constexpr (UseSharedLevels) {
+    for (int level = thread; level < 256; level += Threads) {
+      shared_levels[level] = levels[level];
+    }
+    __syncthreads();
+    decode_levels = shared_levels;
+  }
 
   auto stage = [&](int k_tile_base, int destination) {
     auto* input_vectors = reinterpret_cast<uint4*>(input_tile[destination]);
@@ -991,12 +1023,13 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
                    StageKTiles != kScalarLongStageKTiles)))) ||
               (StaticN != 1024 &&
                ((Rows == 4 && TransitionBits != 7) || Rows == 1))) {
-            accumulate_scalar_grouped_pgc<TransitionBits, Rows, StageKTiles>(
+            accumulate_scalar_grouped_pgc<
+                TransitionBits, Rows, StageKTiles, UseSharedLevels>(
                 words,
                 packed_bank_id,
                 pair_column,
                 input_tile[parity] + stage_k_tile * kTileRows,
-                levels,
+                decode_levels,
                 alt_mask,
                 accumulator_0,
                 accumulator_1);
@@ -1007,10 +1040,12 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
               uint32_t state_0, state_8;
               window_state_pair64<TransitionBits>(
                   words, pair, state_0, state_8);
-              const uint32_t decoded_0 = decode_pair_bits<TransitionBits>(
-                  pair, state_0, packed_bank_id, alt_mask, levels);
-              const uint32_t decoded_8 = decode_pair_bits<TransitionBits>(
-                  pair + 64, state_8, packed_bank_id, alt_mask, levels);
+              const uint32_t decoded_0 = decode_pair_bits<
+                  TransitionBits, UseSharedLevels>(
+                  pair, state_0, packed_bank_id, alt_mask, decode_levels);
+              const uint32_t decoded_8 = decode_pair_bits<
+                  TransitionBits, UseSharedLevels>(
+                  pair + 64, state_8, packed_bank_id, alt_mask, decode_levels);
               union {
                 uint32_t bits;
                 half2 values;
@@ -1050,12 +1085,13 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
         if constexpr (
             Rows == 2 &&
             (TransitionBits == 5 || TransitionBits == 7)) {
-          accumulate_scalar_hoisted_pgc<TransitionBits, Rows, StageKTiles>(
+          accumulate_scalar_hoisted_pgc<
+              TransitionBits, Rows, StageKTiles, UseSharedLevels>(
               words,
               packed_bank_id,
               pair_column,
               input_tile[parity] + stage_k_tile * kTileRows,
-              levels,
+              decode_levels,
               alt_mask,
               accumulator_0,
               accumulator_1);
@@ -1065,10 +1101,12 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
             const int pair = row * 8 + pair_column;
             uint32_t state_0, state_8;
             window_state_pair64<TransitionBits>(words, pair, state_0, state_8);
-            const uint32_t decoded_0 = decode_pair_bits<TransitionBits>(
-                pair, state_0, packed_bank_id, alt_mask, levels);
-            const uint32_t decoded_8 = decode_pair_bits<TransitionBits>(
-                pair + 64, state_8, packed_bank_id, alt_mask, levels);
+            const uint32_t decoded_0 = decode_pair_bits<
+                TransitionBits, UseSharedLevels>(
+                pair, state_0, packed_bank_id, alt_mask, decode_levels);
+            const uint32_t decoded_8 = decode_pair_bits<
+                TransitionBits, UseSharedLevels>(
+                pair + 64, state_8, packed_bank_id, alt_mask, decode_levels);
             union {
               uint32_t bits;
               half2 values;
@@ -1131,7 +1169,8 @@ template <
     int StageKTiles = kStageKTiles,
     int StaticN = 0,
     int StaticSplitCount = 0,
-    int StaticK = 0>
+    int StaticK = 0,
+    bool UseSharedLevels = false>
 __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -1145,7 +1184,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     const uint8_t* __restrict__ bank_alt_id) {
   p32_window_ampere_m1_kernel_body<
       TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, StaticN,
-      StaticSplitCount, StaticK>(
+      StaticSplitCount, StaticK, UseSharedLevels>(
       input,
       trellis,
       levels,
@@ -1383,14 +1422,15 @@ bool validate_grouped_splits(
   return true;
 }
 
-template <int TransitionBits, int Rows, int Threads, int StageKTiles>
+template <int TransitionBits, int Rows, int Threads, int StageKTiles,
+          bool UseSharedLevels = true>
 __global__ __launch_bounds__(Threads) void p32_window_ampere_grouped_scalar_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
     const half* __restrict__ levels,
     const uint8_t* __restrict__ bank_ids,
     const uint8_t* __restrict__ bank_alt_ids,
-    GroupedP32LaunchParams params,
+    const __grid_constant__ GroupedP32LaunchParams params,
     float* __restrict__ partial_output,
     float* __restrict__ output,
     int size_k,
@@ -1411,7 +1451,8 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_grouped_scalar_kern
   const int n_tiles = params.n_tiles[segment];
   const uint8_t bank_alt_id = bank_alt_ids[segment];
   p32_window_ampere_m1_kernel_body<
-      TransitionBits, Rows, Threads, kTilesPerBlock, StageKTiles, 0>(
+      TransitionBits, Rows, Threads, kTilesPerBlock, StageKTiles, 0, 0, 0,
+      UseSharedLevels>(
       input,
       trellis,
       levels,
@@ -1438,7 +1479,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_grouped_block_kerne
     const half* __restrict__ levels,
     const uint8_t* __restrict__ bank_ids,
     const uint8_t* __restrict__ bank_alt_ids,
-    GroupedP32LaunchParams params,
+    const __grid_constant__ GroupedP32LaunchParams params,
     float* __restrict__ partial_output,
     float* __restrict__ output,
     int size_m,
@@ -1650,6 +1691,9 @@ bool launch_static_n_scalar_kernel(
             size_n, split_count, bank_alt_id);                                    \
     return true
   switch (size_n) {
+    QVQ_LAUNCH_STATIC_N(512);
+    QVQ_LAUNCH_STATIC_N(2048);
+    QVQ_LAUNCH_STATIC_N(8192);
     QVQ_LAUNCH_STATIC_N(1024);
     QVQ_LAUNCH_STATIC_N(5120);
     QVQ_LAUNCH_STATIC_N(6144);
@@ -1765,6 +1809,9 @@ bool launch_static_n_block_kernel(
         size_k, size_n, split_count, bank_alt_id, grid, stream);           \
     return true
   switch (size_n) {
+    QVQ_LAUNCH_STATIC_BLOCK_N(512);
+    QVQ_LAUNCH_STATIC_BLOCK_N(2048);
+    QVQ_LAUNCH_STATIC_BLOCK_N(8192);
     QVQ_LAUNCH_STATIC_BLOCK_N(1024);
     QVQ_LAUNCH_STATIC_BLOCK_N(5120);
     QVQ_LAUNCH_STATIC_BLOCK_N(6144);
@@ -2474,7 +2521,8 @@ int launch_p32(
   const auto* bank_alt_byte = reinterpret_cast<const uint8_t*>(bank_alt_id);
 
   if (size_m == 1 && use_small_m_scalar &&
-      (size_n == 12288 || size_n == 1024 || size_n == 10240 || size_n == 17408 ||
+      (size_n == 512 || size_n == 2048 || size_n == 8192 || size_n == 12288 ||
+       size_n == 1024 || size_n == 10240 || size_n == 17408 ||
        (size_n == 5120 && size_k == 6144)) &&
       launch_static_n_scalar_kernel<TransitionBits, 1>(
             input_half, trellis_words, levels_half, bank_bytes, partial_output, output,
@@ -2703,6 +2751,36 @@ int launch_p32_config_variant(
           }
         }
         if constexpr (StageKTiles == kStageKTiles) {
+          if (size_m == 1 && size_k == 2048 && size_n == 512 &&
+              split_count == 32 &&
+              launch_fixed_n_scalar_kernel<
+                  TransitionBits, 1, Threads, 4 * (Threads / 32),
+                  kStageKTiles, 512, 32, 2048>(
+                  input_half, trellis_words, levels_half, bank_bytes,
+                  partial_output, output, size_k, size_n, split_count,
+                  bank_alt_byte, grid, cuda_stream)) {
+            launched_static = true;
+          }
+          if (!launched_static && size_m == 1 && size_k == 2048 &&
+              size_n == 2048 && split_count == 32 &&
+              launch_fixed_n_scalar_kernel<
+                  TransitionBits, 1, Threads, 4 * (Threads / 32),
+                  kStageKTiles, 2048, 32, 2048>(
+                  input_half, trellis_words, levels_half, bank_bytes,
+                  partial_output, output, size_k, size_n, split_count,
+                  bank_alt_byte, grid, cuda_stream)) {
+            launched_static = true;
+          }
+          if (!launched_static && size_m == 1 && size_k == 2048 &&
+              size_n == 8192 && split_count == 32 &&
+              launch_fixed_n_scalar_kernel<
+                  TransitionBits, 1, Threads, 4 * (Threads / 32),
+                  kStageKTiles, 8192, 32, 2048>(
+                  input_half, trellis_words, levels_half, bank_bytes,
+                  partial_output, output, size_k, size_n, split_count,
+                  bank_alt_byte, grid, cuda_stream)) {
+            launched_static = true;
+          }
           if (size_m == 1 && size_k == 5120 && size_n == 1024 &&
               split_count == 56 &&
               launch_fixed_n_scalar_kernel<
@@ -2983,6 +3061,9 @@ int launch_p32_large_m_grid_dispatch(
             TransitionBits, Threads, StageKTiles, N, 5120>( \
             input, trellis, levels, bank_ids, bank_alt_id, output, \
             partial_output, size_m, size_k, size_n, split_count, stream)
+      QVQ_LARGE_M_STATIC_N(512);
+      QVQ_LARGE_M_STATIC_N(2048);
+      QVQ_LARGE_M_STATIC_N(8192);
       QVQ_LARGE_M_STATIC_N(1024);
       QVQ_LARGE_M_STATIC_N(5120);
       QVQ_LARGE_M_STATIC_N(6144);
@@ -3003,6 +3084,9 @@ int launch_p32_large_m_grid_dispatch(
             TransitionBits, Threads, StageKTiles, N, 0>( \
             input, trellis, levels, bank_ids, bank_alt_id, output, \
             partial_output, size_m, size_k, size_n, split_count, stream)
+      QVQ_LARGE_M_STATIC_N(512);
+      QVQ_LARGE_M_STATIC_N(2048);
+      QVQ_LARGE_M_STATIC_N(8192);
       QVQ_LARGE_M_STATIC_N(1024);
       QVQ_LARGE_M_STATIC_N(5120);
       QVQ_LARGE_M_STATIC_N(6144);
@@ -3094,6 +3178,9 @@ int launch_p32_large_m2_grid_dispatch(
             TransitionBits, StageKTiles, N, 5120, RowGroups>( \
             input, trellis, levels, bank_ids, bank_alt_id, output, \
             partial_output, size_m, size_k, size_n, split_count, stream)
+      QVQ_LARGE_M2_STATIC_N(512);
+      QVQ_LARGE_M2_STATIC_N(2048);
+      QVQ_LARGE_M2_STATIC_N(8192);
       QVQ_LARGE_M2_STATIC_N(1024);
       QVQ_LARGE_M2_STATIC_N(5120);
       QVQ_LARGE_M2_STATIC_N(6144);
@@ -3114,6 +3201,9 @@ int launch_p32_large_m2_grid_dispatch(
             TransitionBits, StageKTiles, N, 0, RowGroups>( \
             input, trellis, levels, bank_ids, bank_alt_id, output, \
             partial_output, size_m, size_k, size_n, split_count, stream)
+      QVQ_LARGE_M2_STATIC_N(512);
+      QVQ_LARGE_M2_STATIC_N(2048);
+      QVQ_LARGE_M2_STATIC_N(8192);
       QVQ_LARGE_M2_STATIC_N(1024);
       QVQ_LARGE_M2_STATIC_N(5120);
       QVQ_LARGE_M2_STATIC_N(6144);
@@ -3163,7 +3253,8 @@ int launch_p32_large_m(
   const bool automatic_policy = row_groups == QVQ_P32_ROW_GROUPS_AUTO;
   const bool use_static_n = config.static_n != 0 ||
       (automatic_policy &&
-       (size_n == 1024 || size_n == 5120 || size_n == 6144 ||
+       (size_n == 512 || size_n == 1024 || size_n == 2048 ||
+        size_n == 5120 || size_n == 6144 || size_n == 8192 ||
         size_n == 10240 || size_n == 12288 || size_n == 17408));
   const bool qwen38_27b_shape =
       (size_k == 5120 &&
@@ -3490,25 +3581,30 @@ static int qvq_p32_window_impl(
   const bool scalar_static_n =
       kernel_variant == QVQ_P32_VARIANT_SCALAR &&
       ((size_m == 1 &&
-        (size_n == 1024 || size_n == 5120 || size_n == 6144 ||
+        (size_n == 512 || size_n == 1024 || size_n == 2048 ||
+         size_n == 5120 || size_n == 6144 || size_n == 8192 ||
          size_n == 10240 || size_n == 12288 || size_n == 17408)) ||
        (size_m == 2 &&
         ((size_k <= 6144 &&
-          (size_n == 1024 || size_n == 5120 || size_n == 6144 ||
+          (size_n == 512 || size_n == 1024 || size_n == 2048 ||
+           size_n == 5120 || size_n == 6144 || size_n == 8192 ||
            size_n == 10240 || size_n == 12288 || size_n == 17408)) ||
          (size_k == 17408 && size_n == 5120))) ||
        (size_m == 4 &&
         (size_k <= 6144 || (size_k == 17408 && size_n == 5120)) &&
-        (size_n == 1024 || size_n == 5120 || size_n == 6144 ||
+        (size_n == 512 || size_n == 1024 || size_n == 2048 ||
+         size_n == 5120 || size_n == 6144 || size_n == 8192 ||
          size_n == 10240 || size_n == 12288 || size_n == 17408)));
   const bool block_static_n =
       kernel_variant == QVQ_P32_VARIANT_BLOCK &&
       (size_m == 8 || size_m == 16) &&
-      (size_n == 1024 || size_n == 5120 || size_n == 6144 ||
+      (size_n == 512 || size_n == 1024 || size_n == 2048 ||
+       size_n == 5120 || size_n == 6144 || size_n == 8192 ||
        size_n == 10240 || size_n == 12288 || size_n == 17408);
   const bool large_m_static_n =
       kernel_variant == QVQ_P32_VARIANT_BLOCK && size_m > 16 &&
-      (size_n == 1024 || size_n == 5120 || size_n == 6144 ||
+      (size_n == 512 || size_n == 1024 || size_n == 2048 ||
+       size_n == 5120 || size_n == 6144 || size_n == 8192 ||
        size_n == 10240 || size_n == 12288 || size_n == 17408);
   if (static_n != 0 && !scalar_static_n && !block_static_n &&
       !large_m_static_n) {
