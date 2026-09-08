@@ -2007,6 +2007,77 @@ __global__ void reduce_grouped_split_rank8_kernel(
   output[output_index] = accumulator + params.rank8_scale[segment] * correction;
 }
 
+template <bool Rank8BFloat, int StaticRows>
+__global__ void reduce_flash_next_gate_up_rank8_kernel(
+    const float* __restrict__ partial_output,
+    float* __restrict__ output,
+    const __grid_constant__ GroupedP32LaunchParams params,
+    const float* __restrict__ rank8_down,
+    const void* __restrict__ rank8_b) {
+  constexpr int kSegmentCount = 2;
+  constexpr int kSegmentColumns = 640;
+  constexpr int kSplitCount = 40;
+  constexpr int kThreads = 256;
+  constexpr int kBlocksPerSegment =
+      (StaticRows * kSegmentColumns + kThreads - 1) / kThreads;
+  const int block = static_cast<int>(blockIdx.x);
+  if (block >= kSegmentCount * kBlocksPerSegment) {
+    return;
+  }
+  const int segment = block / kBlocksPerSegment;
+  const int local_block = block - segment * kBlocksPerSegment;
+  const int64_t local_index = static_cast<int64_t>(local_block) * kThreads +
+      threadIdx.x;
+  if (local_index >= static_cast<int64_t>(StaticRows) * kSegmentColumns) {
+    return;
+  }
+  const int row = static_cast<int>(local_index / kSegmentColumns);
+  const int column = static_cast<int>(local_index) - row * kSegmentColumns;
+  const int global_column = segment * kSegmentColumns + column;
+  constexpr int64_t segment_values =
+      static_cast<int64_t>(StaticRows) * kSegmentColumns;
+  const int64_t output_index = segment * segment_values + local_index;
+  const int64_t partial_segment_values =
+      static_cast<int64_t>(kSplitCount) * segment_values;
+  const float* segment_partials =
+      partial_output + segment * partial_segment_values;
+  const int64_t split_stride = segment_values;
+  float accumulator = 0.0f;
+#pragma unroll
+  for (int split = 0; split < kSplitCount; ++split) {
+    accumulator += segment_partials[
+        static_cast<int64_t>(split) * split_stride + local_index];
+  }
+
+  const float* rank8_b_float = static_cast<const float*>(rank8_b);
+  const half* rank8_b_half = static_cast<const half*>(rank8_b);
+  const int rank8_base = row * kSegmentCount * 8 + segment * 8;
+  float correction = 0.0f;
+#pragma unroll
+  for (int rank = 0; rank < 8; ++rank) {
+    const float b_value = Rank8BFloat
+        ? rank8_b_float[rank * (kSegmentCount * kSegmentColumns) + global_column]
+        : __half2float(rank8_b_half[
+              rank * (kSegmentCount * kSegmentColumns) + global_column]);
+    correction += rank8_down[rank8_base + rank] * b_value;
+  }
+  output[output_index] = accumulator + params.rank8_scale[segment] * correction;
+}
+
+template <bool Rank8BFloat, int StaticRows>
+void launch_reduce_flash_next_gate_up_rank8_kernel(
+    const dim3 reduction_grid,
+    const cudaStream_t stream,
+    const float* partial_output,
+    float* output,
+    const GroupedP32LaunchParams& params,
+    const float* rank8_down,
+    const void* rank8_b) {
+  reduce_flash_next_gate_up_rank8_kernel<Rank8BFloat, StaticRows><<<
+      reduction_grid, 256, 0, stream>>>(
+      partial_output, output, params, rank8_down, rank8_b);
+}
+
 template <int StaticSplitCount, int OutputsPerWarp = 4>
 __global__ void reduce_split_warp_kernel(
     const float* __restrict__ partial_output,
@@ -3992,7 +4063,110 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
       blocks += (segment_values + kReductionThreads - 1) / kReductionThreads;
     }
     const dim3 reduction_grid(static_cast<unsigned>(blocks), 1, 1);
-    if (uniform_splits && uniform_split_count == 16 && size_m == 1) {
+    const bool use_flash_next_gate_up_rank8_reducer =
+        TransitionBits == 6 && size_k == 2560 && segment_count == 2 &&
+        total_n == 1280 && params.n_tiles[0] == 40 &&
+        params.n_tiles[1] == 40 && uniform_splits &&
+        uniform_split_count == 40 &&
+        (size_m == 1 || size_m == 2 || size_m == 4 || size_m == 8 ||
+         size_m == 16);
+    if (use_flash_next_gate_up_rank8_reducer) {
+      if (rank8_b->scalar_type() == at::kFloat) {
+        if (size_m == 1) {
+          launch_reduce_flash_next_gate_up_rank8_kernel<true, 1>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        } else if (size_m == 2) {
+          launch_reduce_flash_next_gate_up_rank8_kernel<true, 2>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        } else if (size_m == 4) {
+          launch_reduce_flash_next_gate_up_rank8_kernel<true, 4>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        } else if (size_m == 8) {
+          launch_reduce_flash_next_gate_up_rank8_kernel<true, 8>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        } else {
+          launch_reduce_flash_next_gate_up_rank8_kernel<true, 16>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        }
+      } else {
+        if (size_m == 1) {
+          launch_reduce_flash_next_gate_up_rank8_kernel<false, 1>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        } else if (size_m == 2) {
+          launch_reduce_flash_next_gate_up_rank8_kernel<false, 2>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        } else if (size_m == 4) {
+          launch_reduce_flash_next_gate_up_rank8_kernel<false, 4>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        } else if (size_m == 8) {
+          launch_reduce_flash_next_gate_up_rank8_kernel<false, 8>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        } else {
+          launch_reduce_flash_next_gate_up_rank8_kernel<false, 16>(
+              reduction_grid,
+              stream,
+              partial_output_ptr,
+              output_ptr,
+              params,
+              rank8_down.data_ptr<float>(),
+              rank8_b->data_ptr());
+        }
+      }
+    } else if (uniform_splits && uniform_split_count == 16 && size_m == 1) {
       if (rank8_b->scalar_type() == at::kFloat) {
         reduce_grouped_split_rank8_kernel<true, 16, true><<<
             reduction_grid, kReductionThreads, 0, stream>>>(
