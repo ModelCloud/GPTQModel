@@ -83,6 +83,31 @@ def test_p32_ampere_public_candidates_share_shape_policy_without_cuda_work():
 
 
 @pytest.mark.parametrize(
+    ("size_m", "expected_split"), ((1, 24), (2, 40), (4, 40), (8, 16), (16, 16))
+)
+def test_p32_ampere_dispatches_flash_next_down_shape_policy(
+    monkeypatch, size_m, expected_split
+):
+    calls = []
+    monkeypatch.setattr(
+        qvq_ampere_cuda, "_P32_WINDOW_OP", lambda *args: calls.append(args)
+    )
+    input = torch.empty((size_m, 640))
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=2560,
+        bank_alt_id=2,
+    )
+    assert len(calls) == 1
+    assert calls[0][-1] == expected_split
+
+
+@pytest.mark.parametrize(
     ("shape", "n", "bits"),
     [((0, 5120), 1024, 3), ((1, 5119), 1024, 3), ((1, 5120), 1025, 3)],
 )

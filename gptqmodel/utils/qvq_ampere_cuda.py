@@ -450,6 +450,14 @@ def _static_split_count(*, m: int, k: int, n: int, transition_bits: int) -> int:
 
     if m > 16:
         return 1
+    if k == 640 and n == 2560:
+        return {
+            1: 24,
+            2: 40,
+            4: 40,
+            8: 16,
+            16: 16,
+        }.get(m, 0)
     if m == 1 and k == 5120 and n in (1024, 12288):
         return 56 if n == 1024 else 40
     if m in (2, 4) and k == 5120 and n == 1024:
@@ -505,6 +513,17 @@ def _flash_next_group_split_counts(
         and tuple(widths) == (12288, 512, 512)
     ):
         return (16, 16, 16)
+    # Flash-Next gate/up=(640, 640) is a short scalar grouped launch.  Forty
+    # split waves keep enough K work resident for every decode batch we tune;
+    # the generic M=8/16 policy otherwise falls back to eight and leaves the
+    # small-N CTAs under-filled.
+    if (
+        transition_bits == 6
+        and m in (1, 2, 4, 8, 16)
+        and k == 2560
+        and tuple(widths) == (640, 640)
+    ):
+        return (40, 40)
     return None
 
 
@@ -1127,6 +1146,24 @@ def qvq_p32_window_ampere(
             bank_alt_id,
             40,
         )
+    if split_count == 0 and input.shape[1] == 640 and out_features == 2560:
+        down_split = _static_split_count(
+            m=int(input.shape[0]),
+            k=640,
+            n=2560,
+            transition_bits=transition_bits,
+        )
+        if down_split:
+            return _p32_window_op()(
+                input,
+                trellis,
+                levels,
+                bank_ids,
+                transition_bits,
+                out_features,
+                bank_alt_id,
+                down_split,
+            )
     if split_count == 0:
         # Environment configuration is process-level. Reading ``os.environ``
         # on every cached launch costs more than the cache lookup itself, so
