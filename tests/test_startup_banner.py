@@ -9,9 +9,7 @@ import pytest
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "gptqmodel" / "_banner.py"
-MODULE_SPEC = importlib.util.spec_from_file_location(
-    "gptqmodel_banner_test_module", MODULE_PATH
-)
+MODULE_SPEC = importlib.util.spec_from_file_location("gptqmodel_banner_test_module", MODULE_PATH)
 assert MODULE_SPEC is not None
 assert MODULE_SPEC.loader is not None
 
@@ -138,7 +136,4 @@ def test_get_startup_banner_resolves_optional_versions(monkeypatch):
         torch_version="2.10.0+cu130",
     )
 
-    assert any(
-        line.startswith("Triton") and line.endswith("3.6.0")
-        for line in banner.splitlines()
-    )
+    assert any(line.startswith("Triton") and line.endswith("3.6.0") for line in banner.splitlines())
