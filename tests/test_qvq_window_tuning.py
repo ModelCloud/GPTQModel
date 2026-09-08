@@ -11,6 +11,7 @@ import torch
 from test_qvq_window_recovery import _kernel_rank8, fixture
 
 from gptqmodel.quantization.qvq_rank8 import (
+    _HOPPER_LARGE_M_THRESHOLD,
     P32WindowConfig,
     export_window_package,
     grouped_window_kernel_shape_score,
@@ -54,6 +55,50 @@ def test_shape_scores_are_public_ordering_hints_only():
     assert grouped_window_kernel_shape_score(
         (layer, layer), (direct_bm32, direct_bm32), m=96
     ) == 0
+
+
+def test_hopper_auto_policy_selects_direct_consumer_with_small_m_cutover(monkeypatch):
+    """SM90 auto policy uses large-M reuse kernels without changing ABI state."""
+
+    class Layer:
+        v2b2_p32 = True
+        training = False
+        window_only = True
+        activation = None
+        bits = 3
+        in_features = 5120
+        out_features = 2048
+
+        @staticmethod
+        def runtime_device():
+            return torch.device("cuda")
+
+        @staticmethod
+        def _prepare_amd_p32_metadata(_device):
+            return None
+
+        @staticmethod
+        def _prepare_hopper_p32_window(_device):
+            return None
+
+    monkeypatch.setattr(torch.version, "hip", None, raising=False)
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device: type(
+            "Properties", (), {"major": 9, "minor": 0, "name": "NVIDIA H100"}
+        )(),
+    )
+    monkeypatch.setattr(
+        "gptqmodel.utils.qvq_cuda.prewarm_qvq_cuda", lambda: None
+    )
+
+    layer = Layer()
+    prepare_rank8(layer, P32WindowConfig())
+
+    assert layer._p32_window_config.algorithm == "hopper_direct_decode_mma"
+    assert _HOPPER_LARGE_M_THRESHOLD == 32
 
 
 def test_shape_ordering_keeps_every_single_projection_candidate(monkeypatch):

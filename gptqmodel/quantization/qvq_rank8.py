@@ -24,6 +24,9 @@ from .rotation.hadamard_utils import matmul_hadU
 CONTRACT = "p32-window-r8-v1:fp32-project,fp16-hidden,fp32-expand-add,existing-output-transform"
 RANK8_BUFFERS = ("rank8_A", "rank8_B", "rank8_metadata")
 RANK8_SWEEP_CANDIDATES = (2, 4, 6, 8, 12)
+# The large-M Hopper consumers amortize their persistent/TMA setup at 32
+# rows. Below that point the M16 consumer remains the lower-latency choice.
+_HOPPER_LARGE_M_THRESHOLD = 32
 _COMPOSITE_HADAMARD_BASES = (172, 156, 140, 108, 60, 52, 36, 28, 40, 20, 12)
 
 
@@ -344,6 +347,7 @@ def prepare_rank8(layer, config):
     if (
         config.algorithm == "auto"
         and getattr(layer, "window_only", False)
+        and getattr(layer, "_qvq_grouped_p32_delegate", None) is None
         and runtime_device.type == "cuda"
         and torch.version.hip is None
     ):
@@ -354,7 +358,10 @@ def prepare_rank8(layer, config):
         if (properties.major, properties.minor) == (9, 0) and any(
             name in properties.name for name in ("H100", "H200")
         ):
-            config = replace(config, algorithm="hopper_m16")
+            # The direct consumer dispatches to the existing reuse2/4/8/11
+            # large-M kernels.  explicit_window_inner keeps M<32 on the M16
+            # consumer, where the direct launch setup is not amortized.
+            config = replace(config, algorithm="hopper_direct_decode_mma")
         elif (properties.major, properties.minor) == (8, 0):
             config = replace(config, algorithm="ampere_window")
     if runtime_device.type == "cuda" and torch.cuda.is_current_stream_capturing():
@@ -1889,7 +1896,11 @@ def explicit_window_inner(layer, transformed, config):
             bank_alt_id=alt_id,
             split_count=config.split_k,
         )
-    if config.algorithm == "hopper_m16":
+    if config.algorithm == "hopper_m16" or (
+        config.algorithm == "hopper_direct_decode_mma"
+        and not config.block_m
+        and rows < _HOPPER_LARGE_M_THRESHOLD
+    ):
         return qvq_p32_window_wgmma_m16_tma(
             transformed.contiguous(),
             window,
