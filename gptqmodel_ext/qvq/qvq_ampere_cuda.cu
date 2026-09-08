@@ -1102,6 +1102,7 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
         StaticN > 0 && StaticN != 1024 && TilesPerBlock == 16 && Rows == 1 &&
         (TransitionBits == 5 || TransitionBits == 7 ||
          (TransitionBits == 6 && StaticN == 2560) ||
+         (TransitionBits == 6 && StaticN == 12288) ||
          (TransitionBits == 4 &&
           (StaticN == 12288 || StaticN == 10240 || StaticN == 17408)))) {
       if (thread < StageKTiles) {
@@ -2135,8 +2136,16 @@ __global__ void reduce_flash_next_qkv_rank8_kernel(
   if (local_index >= segment_values) {
     return;
   }
-  const int row = static_cast<int>(local_index / segment_columns);
-  const int column = static_cast<int>(local_index) - row * segment_columns;
+  int row = 0;
+  int column = 0;
+  if constexpr (StaticRows == 1) {
+    // All M=1 output elements belong to row zero.  Avoid generating the
+    // runtime segment-width divide in this fixed-shape reducer.
+    column = static_cast<int>(local_index);
+  } else {
+    row = static_cast<int>(local_index / segment_columns);
+    column = static_cast<int>(local_index) - row * segment_columns;
+  }
   const int global_column = global_column_start + column;
   const int64_t split_stride = segment_values;
   const float* segment_partials = partial_output + partial_offset;
@@ -2445,6 +2454,57 @@ at::Tensor p32_window_ampere_impl(
       launch_static_n_scalar_kernel<
           TransitionBits, 4, kM1Threads, kM1TilesPerBlock,
           kScalarLongStageKTiles, 32, 12288, true>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
+  } else if (size_m == 1 && size_k == 2560 && size_n == 12288 &&
+      TransitionBits == 6 && split_count == 40 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
+          kStageKTiles, 40, 2560>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
+  } else if (size_m == 2 && size_k == 2560 && size_n == 12288 &&
+      TransitionBits == 6 && split_count == 40 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
+          kScalarTripleStageKTiles, 40, 2560>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
+  } else if (size_m == 4 && size_k == 2560 && size_n == 12288 &&
+      TransitionBits == 6 && split_count == 40 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 4, kM1Threads, kM1TilesPerBlock,
+          kScalarTripleStageKTiles, 40, 2560>(
           input_ptr,
           trellis_ptr,
           levels_ptr,
