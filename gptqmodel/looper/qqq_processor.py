@@ -21,7 +21,7 @@ from ..utils.fallback import normalize_fallback
 from ..quantization.qqq import QQQ
 from ..utils.backend import BACKEND
 from ..utils.logger import setup_logger, log_time_block
-from ..utils.model import create_quant_module, find_modules, move_to, pack_module
+from ..utils.model import create_quant_module, move_to, pack_module
 from ..utils.torch import CPU
 
 log = setup_logger()
@@ -270,7 +270,7 @@ class QQQProcessor(LoopProcessor):
             q_g_idx = module.state.pop("q_g_idx")
             q_scales_extra = module.state.pop("q_scales_extra")
 
-        layers = find_modules(model.model)
+        layers = {module.full_name: model.model.get_submodule(module.full_name)}
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         quant_linear_cls, backend = self._quant_linear_kernel()
 
@@ -299,11 +299,12 @@ class QQQProcessor(LoopProcessor):
             )
 
         # pack module
-        qModules = {
-            name: submodule
-            for name, submodule in find_modules(model.model, [quant_linear_cls]).items()
-            if name == module.full_name
-        }
+        qmodule = model.model.get_submodule(module.full_name)
+        qModules = (
+            {module.full_name: qmodule}
+            if isinstance(qmodule, quant_linear_cls)
+            else {}
+        )
         with log_time_block(
             "pack",
             logger=log,

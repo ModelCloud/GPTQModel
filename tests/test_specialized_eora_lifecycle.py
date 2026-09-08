@@ -74,9 +74,7 @@ def test_eora_handoff_preserves_independent_reconstruction(method):
     assert module.state["wq"].device.type == "cpu"
 
 
-def test_qqq_packs_uncorrected_weight_after_eora(monkeypatch):
-    import gptqmodel.looper.qqq_processor as implementation
-
+def test_qqq_packs_uncorrected_weight_after_eora() -> None:
     processor = object.__new__(QQQProcessor)
     processor.lock = threading.Lock()
     processor.calculate_w_wq_diff = True
@@ -84,6 +82,7 @@ def test_qqq_packs_uncorrected_weight_after_eora(monkeypatch):
     module = SimpleNamespace(
         weight=torch.nn.Parameter(torch.ones(4, 4)),
         name="proj",
+        full_name="proj",
         state={
             "wq": base,
             "q_zeros": None,
@@ -92,13 +91,14 @@ def test_qqq_packs_uncorrected_weight_after_eora(monkeypatch):
             "q_scales_extra": None,
         },
     )
-    monkeypatch.setattr(implementation, "find_modules", lambda model: {})
+    model = torch.nn.Module()
+    model.proj = torch.nn.Linear(4, 4, bias=False)
 
     def stop_before_packing():
         raise RuntimeError("packing boundary")
 
     processor._quant_linear_kernel = stop_before_packing
     with pytest.raises(RuntimeError, match="packing boundary"):
-        processor.submodule_finalize(module, SimpleNamespace(model=None))
+        processor.submodule_finalize(module, SimpleNamespace(model=model))
     assert torch.equal(module.weight, base)
     assert "wq" not in module.state
