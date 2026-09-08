@@ -3523,30 +3523,16 @@ __global__ __launch_bounds__(256) void p32_rank8_project_kernel(
   const int local_rank = static_cast<int>(threadIdx.x) >> 5;
   const int rank = static_cast<int>(blockIdx.x) * kRanksPerBlock + local_rank;
   const int lane = static_cast<int>(threadIdx.x) & 31;
-  __shared__ float input_tile[32];
-  __shared__ half a_tile[32][kRanksPerBlock];
   float accumulator = 0.0f;
 
-  for (int k_base = 0; k_base < size_k; k_base += 32) {
-    if (threadIdx.x < 32) {
-      const int k = k_base + static_cast<int>(threadIdx.x);
-      input_tile[threadIdx.x] =
-          k < size_k ? input[static_cast<int64_t>(row) * size_k + k] : 0.0f;
-    }
-    for (int index = static_cast<int>(threadIdx.x);
-         index < 32 * kRanksPerBlock; index += blockDim.x) {
-      const int tile_k = index / kRanksPerBlock;
-      const int tile_rank = index - tile_k * kRanksPerBlock;
-      const int k = k_base + tile_k;
-      a_tile[tile_k][tile_rank] =
-          k < size_k
-              ? rank8_a[static_cast<int64_t>(k) * RankCount + rank]
-              : __float2half(0.0f);
-    }
-    __syncthreads();
+  // One warp owns one recovery rank. Directly walk K in lane-strided chunks;
+  // this keeps the reduction order deterministic and avoids a shared-memory
+  // rank tile whose layout is needlessly expensive for R <= 24.
+  for (int k = lane; k < size_k; k += 32) {
     accumulator = fmaf(
-        input_tile[lane], __half2float(a_tile[lane][local_rank]), accumulator);
-    __syncthreads();
+        input[static_cast<int64_t>(row) * size_k + k],
+        __half2float(rank8_a[static_cast<int64_t>(k) * RankCount + rank]),
+        accumulator);
   }
 
 #pragma unroll
