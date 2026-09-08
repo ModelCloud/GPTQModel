@@ -1686,6 +1686,62 @@ __global__ __launch_bounds__(kM1Threads) void p32_window_ampere_grouped_scalar_k
       params.partial_offset[segment]);
 }
 
+// Flash-Next gate/up has two equal 640-column children and a fixed K=2560,
+// split-40 plan. Keep the grouped output ownership, but bake the common
+// geometry into the launch so each CTA skips the small segment-walk and the
+// dynamic K/split resource calculations. StaticN intentionally remains zero:
+// 640 columns is not a multiple of the 16-tile CTA width, so the final CTA
+// still needs its ordinary tail predicate.
+template <int TransitionBits, int Rows, int StageKTiles = kStageKTiles>
+__global__ __launch_bounds__(kM1Threads)
+void p32_window_ampere_grouped_flash_next_gate_up_scalar_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    const __grid_constant__ GroupedP32LaunchParams params,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int size_m) {
+  constexpr int kSegmentCount = 2;
+  constexpr int kSegmentTiles = 40;
+  constexpr int kSplitCount = 40;
+  constexpr int kBlocksPerSplit =
+      (kSegmentTiles + kM1TilesPerBlock - 1) / kM1TilesPerBlock;
+  constexpr int kBlocksPerSegment = kSplitCount * kBlocksPerSplit;
+  const int block = static_cast<int>(blockIdx.x);
+  if (block >= kSegmentCount * kBlocksPerSegment) {
+    return;
+  }
+  const int segment = block / kBlocksPerSegment;
+  const int local_block = block - segment * kBlocksPerSegment;
+  const int split = local_block / kBlocksPerSplit;
+  const int n_block = local_block - split * kBlocksPerSplit;
+  const int output_offset = segment * size_m * kSegmentTiles * kTileColumns;
+  const int64_t partial_offset = static_cast<int64_t>(segment) * kSplitCount *
+      size_m * kSegmentTiles * kTileColumns;
+  p32_window_ampere_m1_kernel_body<
+      TransitionBits, Rows, kM1Threads, kM1TilesPerBlock, StageKTiles, 0,
+      kSplitCount, 2560, true>(
+      input,
+      trellis,
+      levels,
+      bank_ids,
+      partial_output,
+      output,
+      2560,
+      kSegmentTiles * kTileColumns,
+      kSplitCount,
+      params.bank_alt_id[segment],
+      n_block,
+      split,
+      kSegmentCount * kSegmentTiles,
+      segment * kSegmentTiles,
+      output_offset,
+      kSegmentTiles * kTileColumns,
+      partial_offset);
+}
+
 template <
     int TransitionBits,
     bool FullRows,
@@ -3706,11 +3762,53 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   const bool use_flash_next_gate_up_shape =
       TransitionBits == 6 && segment_count == 2 &&
       params.n_tiles[0] == 40 && params.n_tiles[1] == 40;
+  const bool use_flash_next_gate_up_scalar_shape =
+      use_flash_next_gate_up_shape && size_k == 2560 &&
+      params.split_count[0] == 40 && params.split_count[1] == 40;
   const bool use_flash_next_shape =
       use_flash_next_qkv_shape || use_flash_next_gate_up_shape;
   if (use_small_m_scalar) {
     const dim3 grid(static_cast<unsigned>(active_scalar_blocks), 1, 1);
-    if (size_m == 1) {
+    if (use_flash_next_gate_up_scalar_shape &&
+        (size_m == 1 || size_m == 2 || size_m == 4)) {
+      if (size_m == 1) {
+        p32_window_ampere_grouped_flash_next_gate_up_scalar_kernel<
+            TransitionBits, 1, kScalarLongStageKTiles>
+            <<<grid, kM1Threads, 0, stream>>>(
+            input_ptr,
+            trellis_ptr,
+            levels_ptr,
+            bank_ids_ptr,
+            params,
+            partial_output_ptr,
+            output_ptr,
+            size_m);
+      } else if (size_m == 2) {
+        p32_window_ampere_grouped_flash_next_gate_up_scalar_kernel<
+            TransitionBits, 2, kScalarLongStageKTiles>
+            <<<grid, kM1Threads, 0, stream>>>(
+            input_ptr,
+            trellis_ptr,
+            levels_ptr,
+            bank_ids_ptr,
+            params,
+            partial_output_ptr,
+            output_ptr,
+            size_m);
+      } else {
+        p32_window_ampere_grouped_flash_next_gate_up_scalar_kernel<
+            TransitionBits, 4, kScalarLongStageKTiles>
+            <<<grid, kM1Threads, 0, stream>>>(
+            input_ptr,
+            trellis_ptr,
+            levels_ptr,
+            bank_ids_ptr,
+            params,
+            partial_output_ptr,
+            output_ptr,
+            size_m);
+      }
+    } else if (size_m == 1) {
       if (use_flash_next_shape) {
         p32_window_ampere_grouped_scalar_kernel<
             TransitionBits, 1, kStageKTiles, true>
