@@ -464,6 +464,11 @@ def _static_split_count(*, m: int, k: int, n: int, transition_bits: int) -> int:
     # authoritative when supplied by ZML or another bridge.
     if transition_bits == 6 and k == 12288 and n == 2560:
         return 12 if m <= 16 else 0
+    # Flash-Next Q=(K=2560, N=12288) uses a static wide W3 plan at M=16.
+    # Keep the policy narrow: grouped QKV callers already resolve their own
+    # child plan, while explicit split_count remains authoritative.
+    if transition_bits == 6 and m == 16 and k == 2560 and n == 12288:
+        return 16
     if m == 1 and k == 5120 and n in (1024, 12288):
         return 56 if n == 1024 else 40
     if m in (2, 4) and k == 5120 and n == 1024:
@@ -1192,6 +1197,29 @@ def qvq_p32_window_ampere(
                 out_features,
                 bank_alt_id,
                 o_split,
+            )
+    if (
+        split_count == 0
+        and transition_bits == 6
+        and input.shape == (16, 2560)
+        and out_features == 12288
+    ):
+        q_split = _static_split_count(
+            m=16,
+            k=2560,
+            n=12288,
+            transition_bits=transition_bits,
+        )
+        if q_split:
+            return _p32_window_op()(
+                input,
+                trellis,
+                levels,
+                bank_ids,
+                transition_bits,
+                out_features,
+                bank_alt_id,
+                q_split,
             )
     if split_count == 0:
         # Environment configuration is process-level. Reading ``os.environ``
