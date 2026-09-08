@@ -809,7 +809,11 @@ def _run_single_subset_pass(
     if looper.gptq_model and hasattr(looper.gptq_model, 'moe_lifecycle_hooks'):
         hooks = looper.gptq_model.moe_lifecycle_hooks
         if hooks is not None:
-            moe_block = hooks.get_moe_block(module, looper.gptq_model.__class__)
+            moe_block = hooks.get_moe_block_for_subset(
+                module,
+                looper.gptq_model.__class__,
+                current_subset=subset,
+            )
             if moe_block is not None:
                 # Get the full name/path of the MoE block
                 for mod_name, mod in module.named_modules():

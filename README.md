@@ -21,6 +21,7 @@
 
 ## Latest News 🗞️🚀
 
+* 09/08/2026 7.5.0-dev `main`: ✨ Added `k2_horizon` quantization support for K2-Horizon dense and MoVA/MoE models.
 * 09/07/2026 [7.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.4.0): 🎉 Added resumable quantization checkpoints, shared-input Hessian deduplication, `lm_head` and embedding requantization, and updated native GGUF support. Added GLM-5.3-Flash, Apertus 1.5, and XHToken `ouro` / `spark2_5` quantization support, plus quantization, JIT cache, and Triton compatibility fixes.
 * 08/31/2026 [7.3.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.6): ✨ Added HunyuanOCR, NVIDIA LocateAnything-3B, and Qwen3.8-Flash-Next quantization support. Added tile-misaligned GPTQ/AWQ Marlin support, reduced QQQ packing memory, and improved JIT extension cache reuse.
 * 08/25/2026 [7.3.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.5): ✨ Added `lm_head` and embedding quantization lifecycle support; Unlimited-OCR, DeepSeek V3.2, Mage-VL, Muse Glimmer, OLMo 3, and SmolLM3 model support.
@@ -290,6 +291,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Intern S1 / S2 Preview | `interns1`, `intern_s2_preview` |
 | InternLM 1 / 2 / 2.5 | `internlm`, `internlm2` |
 | InternVL Chat | `internvl_chat` |
+| K2-Horizon (Dense / MoVA) |
 | Kimi K2 / K2.5 | `kimi_k2`, `kimi_k25` |
 | Klear | `klear` |
 | Laguna | `laguna` |
