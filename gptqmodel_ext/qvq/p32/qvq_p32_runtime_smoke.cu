@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -335,6 +336,94 @@ bool test_grouped_launch_plans() {
   return true;
 }
 
+bool test_rank8_epilogue() {
+  constexpr int kM = 3;
+  constexpr int kN = 80;
+  cudaStream_t stream = nullptr;
+  if (!check_cuda(cudaStreamCreate(&stream), "create rank8 stream")) return false;
+  for (int rank_count : {8, 16, 24}) {
+    std::vector<float> base(kM * kN);
+    std::vector<half> hidden(kM * rank_count);
+    std::vector<float> rank8_b(rank_count * kN);
+    for (int index = 0; index < base.size(); ++index) {
+      base[index] = (static_cast<float>((index * 7) % 23) - 11.0f) / 17.0f;
+    }
+    for (int index = 0; index < hidden.size(); ++index) {
+      hidden[index] = __float2half(
+          (static_cast<float>((index * 5) % 19) - 9.0f) / 13.0f);
+    }
+    for (int index = 0; index < rank8_b.size(); ++index) {
+      rank8_b[index] = (static_cast<float>((index * 3) % 29) - 14.0f) / 31.0f;
+    }
+    std::vector<float> expected = base;
+    for (int row = 0; row < kM; ++row) {
+      for (int column = 0; column < kN; ++column) {
+        float correction = 0.0f;
+        for (int rank = 0; rank < rank_count; ++rank) {
+          correction += __half2float(hidden[row * rank_count + rank]) *
+              rank8_b[rank * kN + column];
+        }
+        expected[row * kN + column] += correction;
+      }
+    }
+
+    float* device_base = nullptr;
+    void* device_hidden = nullptr;
+    void* device_rank8_b = nullptr;
+    bool ok = check_cuda(cudaMalloc(&device_base, base.size() * sizeof(float)),
+                         "allocate rank8 base") &&
+        check_cuda(cudaMalloc(&device_hidden, hidden.size() * sizeof(half)),
+                   "allocate rank8 hidden") &&
+        check_cuda(cudaMalloc(&device_rank8_b, rank8_b.size() * sizeof(float)),
+                   "allocate rank8 B") &&
+        check_cuda(cudaMemcpyAsync(device_base, base.data(),
+                                   base.size() * sizeof(float),
+                                   cudaMemcpyHostToDevice, stream),
+                   "copy rank8 base") &&
+        check_cuda(cudaMemcpyAsync(device_hidden, hidden.data(),
+                                   hidden.size() * sizeof(half),
+                                   cudaMemcpyHostToDevice, stream),
+                   "copy rank8 hidden") &&
+        check_cuda(cudaMemcpyAsync(device_rank8_b, rank8_b.data(),
+                                   rank8_b.size() * sizeof(float),
+                                   cudaMemcpyHostToDevice, stream),
+                   "copy rank8 B");
+    if (ok) {
+      ok = qvq_p32_rank8_epilogue(
+               device_base, device_hidden, device_rank8_b, device_base, kM, kN,
+               rank_count, stream) == 0 &&
+          check_cuda(cudaMemcpyAsync(base.data(), device_base,
+                                     base.size() * sizeof(float),
+                                     cudaMemcpyDeviceToHost, stream),
+                     "copy rank8 result") &&
+          check_cuda(cudaStreamSynchronize(stream), "sync rank8 stream");
+    }
+    if (ok) {
+      for (int index = 0; index < base.size(); ++index) {
+        const float error = std::fabs(base[index] - expected[index]);
+        if (error > 1.0e-5f || !std::isfinite(base[index])) {
+          std::fprintf(stderr,
+                       "rank8 epilogue mismatch rank_count=%d index=%d error=%g\n",
+                       rank_count, index, error);
+          ok = false;
+          break;
+        }
+      }
+    }
+    cudaFree(device_rank8_b);
+    cudaFree(device_hidden);
+    cudaFree(device_base);
+    if (!ok) {
+      cudaStreamDestroy(stream);
+      return false;
+    }
+  }
+  cudaStreamDestroy(stream);
+  std::printf("qvq_p32_rank8_epilogue=PASS M=%d N=%d rank_counts=8,16,24 alias=base\n",
+              kM, kN);
+  return true;
+}
+
 }  // namespace
 
 int test_standard_partials(int rows, int transition_bits = 4,
@@ -509,7 +598,10 @@ int test_standard_partials(int rows, int transition_bits = 4,
   return 0;
 }
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc == 2 && std::strcmp(argv[1], "--rank8") == 0) {
+    return test_rank8_epilogue() ? 0 : 1;
+  }
   for (int bits : {4, 5, 6, 7}) {
     for (int stage : {1, 2, 3, 4}) {
       for (int rows : {1, 17, 31, 32, 64, 128, 256}) {
