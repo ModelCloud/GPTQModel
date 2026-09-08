@@ -49,6 +49,52 @@ with eleven reference checks per GPU case. Largest per-case MAE was
 this exact fix alongside its existing integration patches; tested library SHA256:
 `38031246b4fec5106469bc5fcb8f24a900ac29c5b1f3fd730fb966b6e24f0da5`.
 
-The sanitizer rerun, PJRT model parity and external-runtime graph replay remain pending.
-No kernel speedup, complete coverage, SASS/profile acceptance, or model-quality
-pass is claimed.
+The full native Llama reproducer now reports **zero memcheck errors**:
+`/tmp/zml_abi_memcheck_fixed.log`. Paged/non-paged token parity and three rounds
+of continuous-batch isolation/reuse passed on the CUDA-converted rank-8 snapshot:
+`/tmp/zml_native_parity.log`. PJRT QVQ callback counts transition from 80 during
+warmup/capture to zero on subsequent decode replay. This is not an all-device
+graph-safety or model-quality claim.
+
+## Generated-code audit
+
+Code revision: `72af0c1a2f994d0589356978bc8a1c571dde4af0`. On the same isolated
+GPU, Nsight Compute 2026.2.1 captured the M2/K8192/N2048/split8 native kernel:
+
+```sh
+ncu --section SpeedOfLight --section InstructionStats --section LaunchStats \
+  --section Occupancy --kernel-name 'regex:p32_window_ampere_m1_kernel.*' \
+  --launch-skip 2 --launch-count 1 --export /tmp/qvq_f6_stride_72af0c1 \
+  python -m pytest \
+  'tests/test_qvq_p32_f6_native_stride.py::test_f6_shared_levels_native_stride_eager_and_graph[7-1-8-2]' -q -s
+```
+
+Environment: `QVQ_P32_TEST_LIBRARY` names the tested downstream library above;
+`CUDA_VISIBLE_DEVICES` is the recorded GPU UUID; the ZML CUDA sandbox's `lib/compat`
+and `lib` precede other library directories. `PYTHONPATH=.` selects this worktree.
+The selected correctness test also passed under the profiler.
+
+Raw reported fields (`/tmp/qvq_f6_stride_ncu_details.txt`):
+
+| Metric | Value |
+|---|---:|
+| Executed Instructions | 7,961,344 |
+| Registers Per Thread | 72 |
+| Local Memory Spilling Requests | 0 bytes |
+| Shared Memory Spilling Requests | 0 bytes |
+| Duration (profiled single kernel) | 99.71 us |
+| Compute (SM) Throughput | 13.24% |
+| Memory Throughput | 14.85% |
+| Achieved Occupancy | 6.25% |
+
+The exported executed SASS (`/tmp/qvq_f6_stride_sass.txt`) identifies
+`StaticK=0, UseSharedLevels=true`. Its row address uses `IMAD.WIDE.U32` with the
+runtime K argument before `LDGSTS.E.BYPASS.128`, rather than the erroneous
+one-element row stride. The existing full-K FP32 accumulation is retained;
+this repair introduces no reassociation, casts, or approximate math.
+
+No before/after speedup is valid: the baseline M2 launch performs invalid
+memory reads. The single profiled duration is not an end-to-end timing or a
+speedup claim. Broader shape coverage, a matched performance campaign, all
+instruction categories and model-quality benchmarks remain outside this narrow
+correctness result.
