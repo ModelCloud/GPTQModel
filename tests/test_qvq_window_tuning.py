@@ -12,7 +12,9 @@ from test_qvq_window_recovery import _kernel_rank8, fixture
 
 from gptqmodel.quantization.qvq_rank8 import (
     _HOPPER_LARGE_M_THRESHOLD,
+    _HOPPER_QWEN_DOWN_LARGE_M_THRESHOLD,
     P32WindowConfig,
+    _select_hopper_qwen_down_geometry,
     export_window_package,
     grouped_window_kernel_shape_score,
     load_window_artifact,
@@ -170,6 +172,36 @@ def test_hopper_qwen_down_fast_policy_selects_tensor_core_projection(monkeypatch
     )
     assert balanced._p32_window_config.recovery_kernel == "fully_fused"
     assert balanced._p32_window_config.recovery_projection == "project_output_fused"
+
+
+def test_hopper_qwen_down_large_m_geometry_is_dispatch_local():
+    """Large-M fast recovery uses the measured CTA without affecting M512."""
+
+    layer = type(
+        "Layer",
+        (),
+        {
+            "_p32_rank8_enabled": True,
+            "in_features": 17408,
+            "out_features": 5120,
+        },
+    )()
+    config = P32WindowConfig(
+        algorithm="hopper_direct_decode_mma",
+        recovery_mode="auto",
+        recovery_kernel="fused_epilogue",
+        recovery_projection="tensor_core",
+        arithmetic_signature="unverified_tensor_core",
+    )
+
+    selected = _select_hopper_qwen_down_geometry(
+        layer, config, _HOPPER_QWEN_DOWN_LARGE_M_THRESHOLD
+    )
+    assert (selected.block_m, selected.block_n, selected.warp_groups) == (128, 128, 2)
+    assert _select_hopper_qwen_down_geometry(layer, config, 512) == config
+
+    balanced = replace(config, quality_mode="balanced")
+    assert _select_hopper_qwen_down_geometry(layer, balanced, 2048) == balanced
 
 
 def test_shape_ordering_keeps_every_single_projection_candidate(monkeypatch):
