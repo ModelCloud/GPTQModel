@@ -21,6 +21,7 @@
 
 ## Latest News 🗞️🚀
 
+* 09/07/2026 7.4.0-dev `main`: ✨ Added `k2_horizon` quantization support for K2-Horizon dense and MoVA/MoE models.
 * 09/07/2026 7.4.0-dev `main`: ✨ Added XHToken `ouro` and `spark2_5` quantization support.
 * 09/02/2026 7.4.0-dev `main`: ✨ Added `apertus1p5` and `apertus1p5_text` quantization.
 * 09/01/2026 7.4.0-dev `main`: ✨ Added `glm5_next` / GLM-5.3-Flash quantization support.
@@ -276,7 +277,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | InternVL Chat | ✅ | Laguna | ✅ | Mimo / Mimo V2 | ✅ | Zamba / Zamba2 | ✅ | Intern S1 / S2 Preview | ✅ |
 | HunYuan V1 Dense / MoE | ✅ | HY-V3 | ✅ | Inkling | ✅ | Solar Open / Open 2 | ✅ | North Micro Vision | ✅ |
 | Mage-VL | ✅ | Unlimited-OCR | ✅ | HunyuanOCR | ✅ | LocateAnything | ✅ | Muse Glimmer | ✅ |
-| Ouro | ✅ | Spark-X2.5 | ✅ | SmolLM3 | ✅ |  |  |  |  |
+| Ouro | ✅ | Spark-X2.5 | ✅ | SmolLM3 | ✅ | K2-Horizon (Dense / MoVA) | ✅ |  |  |
 
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.

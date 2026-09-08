@@ -155,6 +155,8 @@ MoETopKState = List[Tuple[nn.Module, str, int]]
 MOE_TOPK_FIELD_NAMES = [
     "top_k",
     "moe_k", # ernie4_5_vl_moe
+    # K2 Horizon's MoVA router uses this name instead of ``top_k``.
+    "num_experts_per_tok",
 ]
 
 MOE_NUM_EXPERTS_FIELD_NAMES = [
@@ -2256,22 +2258,51 @@ def has_any_attr(obj, names):
 def find_moe_routing_modules(model):
     modules = []
     for module in model.modules():
-        if has_any_attr(module, MOE_TOPK_FIELD_NAMES) and \
-                has_any_attr(module, MOE_NUM_EXPERTS_FIELD_NAMES):
+        if has_any_attr(module, MOE_TOPK_FIELD_NAMES) and _get_local_expert_count(module):
             modules.append(module)
     return modules
+
+
+def _get_local_expert_count(module: nn.Module) -> Optional[int]:
+    """Return the expert cardinality owned by one router module.
+
+    Most MoE implementations expose ``num_experts`` directly.  K2 Horizon's
+    MoVA value router instead owns an ``nn.ModuleList`` called ``v_experts``;
+    deriving its local count is important because the model also contains a
+    separate 100-expert MLP router.
+    """
+    for name in MOE_NUM_EXPERTS_FIELD_NAMES:
+        value = getattr(module, name, None)
+        if isinstance(value, int) and value > 0:
+            return value
+
+    experts = getattr(module, "v_experts", None)
+    if experts is not None:
+        try:
+            count = len(experts)
+        except TypeError:
+            count = 0
+        if count > 0:
+            return count
+    return None
 
 
 def set_moe_topk(model: nn.Module, new_topk: int) -> MoETopKState:
     routers = find_moe_routing_modules(model)
     state: MoETopKState = []
     for r in routers:
+        local_count = _get_local_expert_count(r)
+        if local_count is None:
+            continue
         for name in MOE_TOPK_FIELD_NAMES:
             if hasattr(r, name):
                 old = getattr(r, name)
                 assert isinstance(old, int)
                 state.append((r, name, old))
-                setattr(r, name, new_topk)
+                # A global override is resolved independently for every
+                # router.  In particular, an override of 100 means all 100
+                # MLP experts but only the 64 local MoVA value experts.
+                setattr(r, name, min(new_topk, local_count))
                 break
     return state
 

@@ -84,7 +84,11 @@ class ForwardExecutor:
             return nullcontext()
 
         should_use_lifecycle = getattr(self.looper, "_should_use_moe_lifecycle", None)
-        if callable(should_use_lifecycle) and not should_use_lifecycle(module, processor):
+        if callable(should_use_lifecycle) and not should_use_lifecycle(
+            module,
+            processor,
+            current_subset=current_subset,
+        ):
             return nullcontext()
 
         return self.looper.MoELifecycleContext(

@@ -269,6 +269,12 @@ class BaseQModel(nn.Module):
     # usage: set to property in model.config that holds this int value: total number of experts
     dynamic_expert_index: Optional[str] = None
 
+    # Optional per-module expert cardinalities for architectures that contain
+    # more than one expert family in a decoder layer.  Keys are layer-relative
+    # prefixes (for example ``mlp.experts``) and values are config attributes.
+    # Entries not matching a key continue to use ``dynamic_expert_index``.
+    dynamic_expert_indices: Optional[Dict[str, str]] = None
+
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     loader = AutoModelForCausalLM
 
@@ -683,6 +689,10 @@ class BaseQModel(nn.Module):
         if model_config is not None and cls.dynamic_expert_index is not None:
             num_experts = cls.get_num_experts(model_config)
 
+            def expert_count(module_name: str) -> int:
+                count = cls.get_num_experts_for_module(model_config, module_name)
+                return num_experts if count is None else count
+
             moe_simple = []
             capture_only_modules = None
             for names in layer_modules:
@@ -728,9 +738,19 @@ class BaseQModel(nn.Module):
                         if not is_expert_segment:
                             moe_simple[-1].extend(segment_names)
                             continue
-                        for index in range(num_experts):
+                        # Most definitions use one cardinality per block.  If
+                        # a block mixes families, retain each family's own
+                        # count instead of expanding every placeholder with
+                        # the global MoE count.
+                        segment_counts = {expert_count(n) for n in segment_names}
+                        if len(segment_counts) == 1:
+                            for index in range(segment_counts.pop()):
+                                for n in segment_names:
+                                    moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                        else:
                             for n in segment_names:
-                                moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                                for index in range(expert_count(n)):
+                                    moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
                     # Currently, only need to add `capture_only_modules` to `['mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']`
                     # or ['mlp.shared_expert.gate_proj', 'mlp.shared_expert.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
                     # or ['mlp.shared_experts.gate_proj', 'mlp.shared_experts.up_proj', 'mlp.experts.#.gate_proj', 'mlp.experts.#.up_proj']
@@ -741,7 +761,7 @@ class BaseQModel(nn.Module):
                 else:
                     # result like: ['mlp.experts.0.gate_proj', 'mlp.experts.1.gate_proj', 'mlp.experts.0.up_proj', 'mlp.experts.1.up_proj', ...]
                     for n in names:
-                        for index in range(num_experts):
+                        for index in range(expert_count(n)):
                             moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
 
             return moe_simple
@@ -750,6 +770,7 @@ class BaseQModel(nn.Module):
 
     @classmethod
     def get_num_experts(cls, model_config):
+        """Return the model-wide fallback expert count."""
         if hasattr(model_config, "text_config"):
             num_experts = getattr(model_config.text_config, cls.dynamic_expert_index)
         elif hasattr(model_config, "thinker_config"):
@@ -757,6 +778,50 @@ class BaseQModel(nn.Module):
         else:
             num_experts = getattr(model_config, cls.dynamic_expert_index)
         return num_experts
+
+    @classmethod
+    def get_num_experts_for_module(cls, model_config, module_name: str) -> Optional[int]:
+        """Resolve a placeholder's expert count from its longest matching prefix.
+
+        ``module_name`` is a layer-relative module-tree path.  A missing or
+        malformed mapped config field deliberately falls back to the legacy
+        ``dynamic_expert_index`` behavior so existing model definitions remain
+        compatible.
+        """
+        if not isinstance(module_name, str) or EXPERT_INDEX_PLACEHOLDER not in module_name:
+            return None
+
+        expert_prefix = module_name.split(EXPERT_INDEX_PLACEHOLDER, 1)[0].rstrip(".")
+        mappings = getattr(cls, "dynamic_expert_indices", None) or {}
+        matched = None
+        for prefix, field_name in mappings.items():
+            if not isinstance(prefix, str) or not isinstance(field_name, str):
+                continue
+            prefix = prefix.strip(".")
+            if expert_prefix == prefix or expert_prefix.startswith(f"{prefix}."):
+                if matched is None or len(prefix) > len(matched[0]):
+                    matched = (prefix, field_name)
+
+        field_name = matched[1] if matched is not None else cls.dynamic_expert_index
+        if not field_name:
+            return None
+
+        config = model_config
+        if hasattr(config, "text_config"):
+            config = config.text_config
+        elif hasattr(config, "thinker_config"):
+            config = config.thinker_config.text_config
+        value = getattr(config, field_name, None)
+        if value is None and matched is not None:
+            # Mapped fields are optional on dense/checkpoint compatibility
+            # configs; preserve the legacy fallback in that case.
+            value = getattr(config, cls.dynamic_expert_index, None) if cls.dynamic_expert_index else None
+        if value is None:
+            return None
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return None
 
     @classmethod
     def filter_not_quantize_module(cls, layer_modules, quantize_config):
