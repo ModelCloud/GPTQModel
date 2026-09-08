@@ -1537,7 +1537,7 @@ def qvq_p32_window_ampere_grouped_packed(
         }[plan.transition_bits]
         if (
             len(plan.segments) in (2, 3)
-            and input.shape[0] <= 4
+            and input.shape[0] <= 16
             and plan.in_features <= 6144
         ):
             packed_a = (

@@ -157,6 +157,20 @@ bool test_grouped_launch_plans() {
     }
     ++rejected;
   }
+  {
+    qvq_p32_config invalid_tuning = {
+        4, QVQ_P32_VARIANT_SCALAR, 128, 2, 0,
+        QVQ_P32_REDUCTION_NATIVE, QVQ_P32_TUNING_EXTERNAL, 8, 4};
+    qvq_p32_launch_plan plan;
+    if (qvq_p32_grouped_launch_plan_tuned(
+            x.pointer, t.pointer, l.pointer, b.pointer, a.pointer,
+            static_cast<float*>(recorded.pointer), static_cast<float*>(scratch.pointer),
+            1, kK, kN, 4, 4, 1, 1, 1, 2, 1, 3, &invalid_tuning, &plan) == 0) {
+      std::fprintf(stderr, "unsupported external N geometry was accepted\n");
+      return false;
+    }
+    ++rejected;
+  }
   int cases = 0;
   float max_absolute = 0;
   float independent_max_absolute = 0;
@@ -171,20 +185,32 @@ bool test_grouped_launch_plans() {
     const int split2 = pattern == 0 ? 1 : 2;
     const int variant = m <= 4 ? QVQ_P32_VARIANT_SCALAR : QVQ_P32_VARIANT_BLOCK;
     const int end1 = groups == 2 ? kN / 16 : 3;
+    const int warps = threads / 32;
+    const qvq_p32_config tuned = {
+        4,
+        variant,
+        threads,
+        stage,
+        0,
+        QVQ_P32_REDUCTION_NATIVE,
+        QVQ_P32_TUNING_EXTERNAL,
+        variant == QVQ_P32_VARIANT_SCALAR ? 4 * warps : warps,
+        warps,
+    };
     qvq_p32_launch_plan plan;
-    const int status = qvq_p32_grouped_launch_plan(
+    const int status = qvq_p32_grouped_launch_plan_tuned(
         x.pointer, t.pointer, l.pointer, b.pointer, a.pointer,
         static_cast<float*>(recorded.pointer), static_cast<float*>(scratch.pointer),
-        m, kK, kN, bits, 4, split0, split1, split2, variant, threads, stage,
-        0, QVQ_P32_REDUCTION_NATIVE, groups, 1, end1, &plan);
+        m, kK, kN, bits, 4, split0, split1, split2, groups, 1, end1,
+        &tuned, &plan);
     const int expected_launches = 1 + (split0 > 1) + (split1 > 1) +
         (groups == 3 && split2 > 1);
     if (status != 0 || plan.launch_count != expected_launches ||
-        qvq_p32_grouped_window(
+        qvq_p32_grouped_window_tuned(
             x.pointer, t.pointer, l.pointer, b.pointer, a.pointer,
             static_cast<float*>(native.pointer), static_cast<float*>(scratch.pointer),
-            m, kK, kN, bits, 4, split0, split1, split2, variant, threads, stage,
-            0, QVQ_P32_REDUCTION_NATIVE, groups, 1, end1, stream) != 0 ||
+            m, kK, kN, bits, 4, split0, split1, split2, groups, 1, end1,
+            &tuned, stream) != 0 ||
         !execute_plan(plan, stream) ||
         !check_cuda(cudaMemcpyAsync(expected.data(), native.pointer, m * kN * sizeof(float), cudaMemcpyDeviceToHost, stream), "copy native plan reference") ||
         !check_cuda(cudaMemcpyAsync(actual.data(), recorded.pointer, m * kN * sizeof(float), cudaMemcpyDeviceToHost, stream), "copy plan output") ||

@@ -9,6 +9,30 @@ native split reduction or request split partials so a graph compiler can keep
 the reduction and neighboring operations visible. No ABI entry point allocates
 device memory, changes the current stream, or synchronizes the device.
 
+The version-3 tuning surface is explicit for external bridges such as ZML. The
+shape (`M`, `K`, `N`), group N16 boundaries, split wave, kernel variant, stage
+count, static-N choice, row grouping, thread count/warp count, and N tiles per
+block are all part of the caller-visible launch policy. `threads`,
+`stage_k_tiles`, `static_n`, and `row_groups` remain available through the
+legacy entry points; `qvq_p32_window_tuned`,
+`qvq_p32_grouped_window_tuned`, and `qvq_p32_grouped_launch_plan_tuned` accept
+the versioned `qvq_p32_config` object. Set `tuning_mode=QVQ_P32_TUNING_EXTERNAL`
+when a compiler owns selection. Zero-valued N-tile/warp fields request the
+compiled native geometry; nonzero values are validated and never silently
+ignored. In the current compiled families, N tiles per block is a derived
+invariant (`4 * warps` for scalar M1–4 and `warps` for block M5–16), so ZML can
+select the available warp/thread specialization and must pass the matching
+derived N-tile value; an independent unsupported value is rejected. The
+launch-plan API is the bridge's graph-safe handoff: it returns the selected
+block/grid geometry and kernel symbol without embedding CUDA template names in
+ZML.
+
+When the external config entry points are not used, QvQ retains ownership of
+its native shape policy and local autotuning. An external bridge must not infer
+or mutate private kernel constants; unsupported requested geometry is rejected
+so a tuner cannot accidentally benchmark a different kernel than the one it
+asked for.
+
 The public header is the canonical operation and launch contract. It defines
 the mathematical operation version, C ABI version, kernel version, SM target,
 tile geometry, supported transition-bit range, launch limits, and enum values.

@@ -1532,6 +1532,64 @@ void set_last_error(const char* message) {
   std::snprintf(last_error, sizeof(last_error), "%s", text);
 }
 
+bool normalize_external_tuning(
+    const qvq_p32_config* requested,
+    int size_m,
+    qvq_p32_config* resolved) {
+  if (requested == nullptr || resolved == nullptr) {
+    set_last_error("QVQ P32 tuning config is null");
+    return false;
+  }
+  *resolved = *requested;
+  if (resolved->tuning_mode != QVQ_P32_TUNING_AUTO &&
+      resolved->tuning_mode != QVQ_P32_TUNING_EXTERNAL) {
+    set_last_error("QVQ P32 tuning mode must be auto (0) or external (1)");
+    return false;
+  }
+  int threads = resolved->threads;
+  if (resolved->n_warps != QVQ_P32_WARPS_AUTO) {
+    if (resolved->n_warps != 2 && resolved->n_warps != 4 &&
+        resolved->n_warps != 8) {
+      set_last_error("QVQ P32 n_warps must be auto, 2, 4, or 8");
+      return false;
+    }
+    const int requested_threads = resolved->n_warps * 32;
+    if (threads != 0 && threads != requested_threads) {
+      set_last_error("QVQ P32 threads and n_warps disagree");
+      return false;
+    }
+    threads = requested_threads;
+  }
+  if (threads == 0) threads = 128;
+  if (threads != 64 && threads != 128 && threads != 256) {
+    set_last_error("QVQ P32 threads must be 64, 128, or 256");
+    return false;
+  }
+  const int warps = threads / 32;
+  if (resolved->n_warps != QVQ_P32_WARPS_AUTO &&
+      resolved->n_warps != warps) {
+    set_last_error("QVQ P32 n_warps does not match threads");
+    return false;
+  }
+  const int native_tiles = resolved->kernel_variant == QVQ_P32_VARIANT_SCALAR
+      ? 4 * warps
+      : warps;
+  if (resolved->n_tiles_per_block != QVQ_P32_N_TILES_AUTO &&
+      resolved->n_tiles_per_block != native_tiles) {
+    set_last_error(
+        "QVQ P32 n_tiles_per_block is not supported by this compiled variant");
+    return false;
+  }
+  if (size_m < 1) {
+    set_last_error("QVQ P32 tuning config received an invalid M");
+    return false;
+  }
+  resolved->threads = threads;
+  resolved->n_warps = warps;
+  resolved->n_tiles_per_block = native_tiles;
+  return true;
+}
+
 template <
     int TransitionBits,
     int Rows,
@@ -3459,7 +3517,8 @@ static int qvq_p32_window_impl(
   }
   const qvq_p32_config config = {
       split_count, kernel_variant, threads, stage_k_tiles, static_n,
-      reduction_mode};
+      reduction_mode, QVQ_P32_TUNING_AUTO, QVQ_P32_N_TILES_AUTO,
+      QVQ_P32_WARPS_AUTO};
   int status = 0;
   switch (transition_bits) {
     case QVQ_P32_TRANSITION_BITS_MIN:
@@ -3568,6 +3627,30 @@ extern "C" int qvq_p32_window_with_row_groups(
       threads, stage_k_tiles, static_n, reduction_mode, row_groups, stream);
 }
 
+extern "C" int qvq_p32_window_tuned(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const void* bank_alt_id,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int transition_bits,
+    int row_groups,
+    const qvq_p32_config* requested,
+    void* stream) {
+  qvq_p32_config config{};
+  if (!normalize_external_tuning(requested, size_m, &config)) return -1;
+  return qvq_p32_window_impl(
+      input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
+      size_m, size_k, size_n, transition_bits, config.split_count,
+      config.kernel_variant, config.threads, config.stage_k_tiles,
+      config.static_n, config.reduction_mode, row_groups, stream);
+}
+
 extern "C" int qvq_p32_grouped_window(
     const void* input,
     const void* trellis,
@@ -3647,7 +3730,8 @@ extern "C" int qvq_p32_grouped_window(
   }
   const qvq_p32_config config = {
       split_count, kernel_variant, threads, stage_k_tiles, static_n,
-      reduction_mode};
+      reduction_mode, QVQ_P32_TUNING_AUTO, QVQ_P32_N_TILES_AUTO,
+      QVQ_P32_WARPS_AUTO};
   int status = 0;
   switch (transition_bits) {
     case QVQ_P32_TRANSITION_BITS_MIN:
@@ -3707,6 +3791,41 @@ extern "C" int qvq_p32_grouped_window(
     set_last_error("QVQ P32 grouped launch failed");
   }
   return status;
+}
+
+extern "C" int qvq_p32_grouped_window_tuned(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const void* bank_alt_ids,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int transition_bits,
+    int split_count,
+    int split_count_0,
+    int split_count_1,
+    int split_count_2,
+    int group_count,
+    int n_tile_end_0,
+    int n_tile_end_1,
+    const qvq_p32_config* requested,
+    void* stream) {
+  qvq_p32_config config{};
+  if (!normalize_external_tuning(requested, size_m, &config)) return -1;
+  if (config.split_count != split_count) {
+    set_last_error("QVQ P32 tuning split_count disagrees with the call");
+    return -1;
+  }
+  return qvq_p32_grouped_window(
+      input, trellis, levels, bank_ids, bank_alt_ids, output, partial_output,
+      size_m, size_k, size_n, transition_bits, split_count, split_count_0,
+      split_count_1, split_count_2, config.kernel_variant, config.threads,
+      config.stage_k_tiles, config.static_n, config.reduction_mode, group_count,
+      n_tile_end_0, n_tile_end_1, stream);
 }
 
 extern "C" int qvq_p32_grouped_launch_plan(
@@ -3878,4 +3997,39 @@ extern "C" int qvq_p32_grouped_launch_plan(
     ++plan->launch_count;
   }
   return 0;
+}
+
+extern "C" int qvq_p32_grouped_launch_plan_tuned(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const void* bank_alt_ids,
+    float* output,
+    float* partial_output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int transition_bits,
+    int split_count,
+    int split_count_0,
+    int split_count_1,
+    int split_count_2,
+    int group_count,
+    int n_tile_end_0,
+    int n_tile_end_1,
+    const qvq_p32_config* requested,
+    qvq_p32_launch_plan* plan) {
+  qvq_p32_config config{};
+  if (!normalize_external_tuning(requested, size_m, &config)) return -1;
+  if (config.split_count != split_count) {
+    set_last_error("QVQ P32 tuning split_count disagrees with the plan call");
+    return -1;
+  }
+  return qvq_p32_grouped_launch_plan(
+      input, trellis, levels, bank_ids, bank_alt_ids, output, partial_output,
+      size_m, size_k, size_n, transition_bits, split_count, split_count_0,
+      split_count_1, split_count_2, config.kernel_variant, config.threads,
+      config.stage_k_tiles, config.static_n, config.reduction_mode, group_count,
+      n_tile_end_0, n_tile_end_1, plan);
 }
