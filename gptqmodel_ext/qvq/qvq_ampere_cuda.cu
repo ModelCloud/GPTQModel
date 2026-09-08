@@ -3694,12 +3694,15 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
       TransitionBits == 6 && size_k == 2560 && segment_count == 3 &&
       params.n_tiles[0] == 768 && params.n_tiles[1] == 32 &&
       params.n_tiles[2] == 32;
-  // This WMMA variant bakes in the measured sixteen-way K partition.  Keep
-  // the external split controls authoritative: custom ZML plans use the
-  // dynamic grouped route unless every child explicitly requests split=16.
+  // These WMMA variants bake in the measured K partitions. Keep the external
+  // split controls authoritative: custom ZML plans use the dynamic grouped
+  // route unless every child explicitly requests one of these exact waves.
   const bool use_flash_next_qkv_wmma_shape =
       use_flash_next_qkv_shape && params.split_count[0] == 16 &&
       params.split_count[1] == 16 && params.split_count[2] == 16;
+  const bool use_flash_next_qkv_wmma_split4_shape =
+      use_flash_next_qkv_shape && params.split_count[0] == 4 &&
+      params.split_count[1] == 4 && params.split_count[2] == 4;
   const bool use_flash_next_gate_up_shape =
       TransitionBits == 6 && segment_count == 2 &&
       params.n_tiles[0] == 40 && params.n_tiles[1] == 40;
@@ -3771,7 +3774,14 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     }
   } else {
     const dim3 grid(static_cast<unsigned>(active_wmma_blocks), 1, 1);
-    if (use_flash_next_qkv_wmma_shape && size_m == kRows) {
+    if (use_flash_next_qkv_wmma_split4_shape && size_m == kRows) {
+      p32_window_ampere_grouped_wmma_kernel<
+          TransitionBits, true, 0, 0, true, false, 2560, true, false, false,
+          false, 3, 4><<<grid, kThreads, 0, stream>>>(
+          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+          partial_output_ptr, output_ptr, static_cast<int>(segment_count),
+          size_m, size_k, total_n_tiles);
+    } else if (use_flash_next_qkv_wmma_shape && size_m == kRows) {
       p32_window_ampere_grouped_wmma_kernel<
           TransitionBits, true, 0, 0, true, false, 2560, true, false, false,
           false, 3, 16><<<grid, kThreads, 0, stream>>>(

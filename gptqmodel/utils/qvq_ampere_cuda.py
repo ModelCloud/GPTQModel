@@ -514,16 +514,18 @@ def _flash_next_group_split_counts(
     """Return the measured grouped wave policy for Flash-Next QKV decode."""
 
     # The Qwen3.8-Flash-Next attention group is QKV=(12288, 512, 512) from
-    # K=2560.  Its wide Q child needs sixteen scalar split waves on the
-    # grouped launch; the same wave count is also best for the two small KV
-    # children once the rectangular empty-CTA tail is removed.
+    # K=2560.  M1-M8 use sixteen split waves after the rectangular empty-CTA
+    # tail is removed. M16 is better with four larger waves; the grouped
+    # WMMA dispatcher has a matching static four-way specialization.
     if (
         transition_bits == 6
-        and m in (1, 2, 4)
         and k == 2560
         and tuple(widths) == (12288, 512, 512)
     ):
-        return (16, 16, 16)
+        if m == 16:
+            return (4, 4, 4)
+        if m in (1, 2, 4, 8):
+            return (16, 16, 16)
     # Flash-Next gate/up=(640, 640) is a short scalar grouped launch.  Forty
     # split waves keep enough K work resident for every decode batch we tune;
     # the generic M=8/16 policy otherwise falls back to eight and leaves the
@@ -627,7 +629,7 @@ def qvq_p32_window_ampere_grouped_kernel_candidates(
 
     # Resolve the rate once up front so invalid rates fail before any candidate
     # is returned, matching the single-child public enumerator's contract.
-    _resolve_transition_bits(bits)
+    transition_bits = _resolve_transition_bits(bits)
     child_candidates = tuple(
         qvq_p32_window_ampere_kernel_candidates(
             shape,
@@ -638,9 +640,21 @@ def qvq_p32_window_ampere_grouped_kernel_candidates(
         )
         for width in widths
     )
-    baseline = tuple(candidates[0] for candidates in child_candidates)
+    grouped_policy = _flash_next_group_split_counts(
+        m=shape[0],
+        k=shape[1],
+        widths=widths,
+        transition_bits=transition_bits,
+    )
+    baseline = (
+        grouped_policy
+        if grouped_policy is not None
+        else tuple(candidates[0] for candidates in child_candidates)
+    )
     candidates: list[tuple[int, ...]] = [baseline]
     seen = {baseline}
+    if max_candidates == 1:
+        return tuple(candidates)
 
     # Walk the per-child alternatives in rounds.  This keeps the common tuning
     # set small and makes it possible to isolate which grouped child benefits

@@ -80,8 +80,20 @@ def test_group_plan_resolves_each_child_width_independently(monkeypatch):
     assert 144 not in calls
 
 
-def test_flash_next_qkv_group_uses_compact_static_wave_policy():
-    input = torch.empty((1, 2560))
+@pytest.mark.parametrize(
+    ("size_m", "expected_splits"),
+    (
+        (1, (16, 16, 16)),
+        (2, (16, 16, 16)),
+        (4, (16, 16, 16)),
+        (8, (16, 16, 16)),
+        (16, (4, 4, 4)),
+    ),
+)
+def test_flash_next_qkv_group_uses_compact_static_wave_policy(
+    size_m, expected_splits
+):
+    input = torch.empty((size_m, 2560))
     payloads = [torch.empty(1), torch.empty(1), torch.empty(1)]
 
     plan = qvq_p32_window_ampere_group_plan(
@@ -94,7 +106,24 @@ def test_flash_next_qkv_group_uses_compact_static_wave_policy():
         bank_alt_ids=(3, 1, 1),
     )
 
-    assert [segment.split_count for segment in plan.segments] == [16, 16, 16]
+    assert [segment.split_count for segment in plan.segments] == list(expected_splits)
+
+
+@pytest.mark.parametrize(
+    ("size_m", "expected_splits"),
+    ((8, (16, 16, 16)), (16, (4, 4, 4))),
+)
+def test_flash_next_qkv_group_candidates_start_with_static_policy(
+    size_m, expected_splits
+):
+    candidates = qvq_p32_window_ampere_grouped_kernel_candidates(
+        (size_m, 2560),
+        out_features=(12288, 512, 512),
+        bits=3,
+        max_candidates=1,
+    )
+
+    assert candidates == (expected_splits,)
 
 
 def test_flash_next_gate_up_group_uses_full_scalar_wave_policy():
@@ -651,7 +680,9 @@ def test_flash_next_gate_up_rank8_wide_group_matches_child_paths(size_m, monkeyp
 )
 @pytest.mark.parametrize("size_m", (8, 16), ids=("m8", "m16"))
 @pytest.mark.parametrize(
-    "split_counts", ((16, 16, 16), (8, 8, 8)), ids=("static-16", "custom-8")
+    "split_counts",
+    ((16, 16, 16), (4, 4, 4), (8, 8, 8)),
+    ids=("split-16", "split-4", "custom-8"),
 )
 def test_flash_next_qkv_wmma_group_matches_child_paths(
     size_m, split_counts, monkeypatch
