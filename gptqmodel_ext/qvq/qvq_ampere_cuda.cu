@@ -2846,6 +2846,34 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
+  // Flash-Next direct gate/up=(K=2560, N=640) has only forty output tiles.
+  // Pair two N-tile groups per CTA so the measured thirty-two-way wave uses
+  // half as many CTAs, while static K/N and bank-mask hoisting remove the
+  // shape arithmetic from the hot decode loop. Explicit bridge-selected
+  // split counts remain on the generic route unless they select this exact
+  // native plan.
+  } else if (
+      size_m == 8 && size_k == 2560 && size_n == 640 &&
+      TransitionBits == 6 && split_count == 32) {
+    const dim3 wide_grid(
+        static_cast<unsigned>((n_tiles + 2 * kTilesPerBlock - 1) /
+                              (2 * kTilesPerBlock)),
+        1,
+        static_cast<unsigned>(split_count));
+    p32_window_ampere_kernel<
+        TransitionBits, false, 8, 640, true, false, 2560, true, false, true,
+        true, 4, 32><<<wide_grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
   } else if (size_m == 8 && size_k == 5120 && size_n == 6144 &&
              split_count == 40) {
     const dim3 wide_grid(
@@ -2965,6 +2993,28 @@ at::Tensor p32_window_ampere_impl(
         static_cast<int>(bank_alt_id));
   } else if (size_m == 8) {
     p32_window_ampere_kernel<TransitionBits, false, 8><<<grid, kThreads, 0, stream>>>(
+        reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
+        reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
+        reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
+        bank_ids.data_ptr<uint8_t>(),
+        partial_output.data_ptr<float>(),
+        output.data_ptr<float>(),
+        size_m,
+        size_k,
+        size_n,
+        static_cast<int>(split_count),
+        static_cast<int>(bank_alt_id));
+  } else if (
+      size_m == kRows && size_k == 2560 && size_n == 640 &&
+      TransitionBits == 6 && split_count == 32) {
+    const dim3 wide_grid(
+        static_cast<unsigned>((n_tiles + 2 * kTilesPerBlock - 1) /
+                              (2 * kTilesPerBlock)),
+        1,
+        static_cast<unsigned>(split_count));
+    p32_window_ampere_kernel<
+        TransitionBits, true, 0, 640, true, false, 2560, true, false, true,
+        true, 4, 32><<<wide_grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),

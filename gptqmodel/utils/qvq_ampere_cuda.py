@@ -458,6 +458,18 @@ def _static_split_count(*, m: int, k: int, n: int, transition_bits: int) -> int:
             8: 16,
             16: 16,
         }.get(m, 0)
+    # Flash-Next direct gate/up=(K=2560, N=640) is a short scalar/WMMA
+    # projection.  The generic fallback under-fills M8/M16 with eight
+    # reduction waves; a thirty-two-way wave keeps the 124-SM A100 busy while
+    # avoiding the extra reduction cost of the forty-way M1-M4 plan.
+    if transition_bits == 6 and k == 2560 and n == 640:
+        return {
+            1: 40,
+            2: 40,
+            4: 40,
+            8: 32,
+            16: 32,
+        }.get(m, 0)
     # Flash-Next attention-out=(K=12288, N=2560) is tuned for twelve K
     # reduction waves on SM80. Keep this rate-specific so other P32 layouts
     # continue to use the generic policy and external split_count remains
@@ -1234,6 +1246,29 @@ def qvq_p32_window_ampere(
                 out_features,
                 bank_alt_id,
                 q_split,
+            )
+    if (
+        split_count == 0
+        and transition_bits == 6
+        and input.shape[1] == 2560
+        and out_features == 640
+    ):
+        gate_up_split = _static_split_count(
+            m=int(input.shape[0]),
+            k=2560,
+            n=640,
+            transition_bits=transition_bits,
+        )
+        if gate_up_split:
+            return _p32_window_op()(
+                input,
+                trellis,
+                levels,
+                bank_ids,
+                transition_bits,
+                out_features,
+                bank_alt_id,
+                gate_up_split,
             )
     if split_count == 0:
         # Environment configuration is process-level. Reading ``os.environ``
