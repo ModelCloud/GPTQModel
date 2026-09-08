@@ -465,6 +465,52 @@ model.quantize(calibration_dataset, batch_size=1)
 model.save(quant_path)
 ```
 
+#### Checkpoint and Resume Long Quantization Jobs 💾
+
+Checkpointing commits completed transformer layers so an interrupted
+quantization job can reload the original model and continue without repeating
+those layers. Use an explicit checkpoint path that survives process restarts:
+
+```py
+from gptqmodel import CheckpointConfig, CheckpointStopped, GPTQConfig, GPTQModel
+
+quant_config = GPTQConfig(
+    bits=4,
+    group_size=128,
+    offload_to_disk=True,
+)
+model = GPTQModel.load(model_id, quant_config)
+
+try:
+    model.quantize(
+        calibration_dataset,
+        batch_size=1,
+        checkpoint=CheckpointConfig(
+            path="checkpoints/Llama-3.2-1B-Instruct-gptqmodel-4bit",
+            resume="auto",
+            interval="layer:1",
+            keep_last=2,
+        ),
+    )
+except CheckpointStopped:
+    # Run the script again with the same source, calibration, config, and path.
+    raise SystemExit(75)
+
+model.save(quant_path)
+```
+
+Ctrl+C and `SIGTERM` finish the current layer, publish a safe checkpoint, and
+raise `CheckpointStopped`. A hard kill resumes from the last published layer;
+the unfinished layer is repeated. Resume validation requires the same source
+weights, calibration data, quantization settings, software versions, and device
+topology. Current checkpoint support is limited to Llama and Qwen3 MoE model
+types, requires `offload_to_disk=True`, and does not yet support dynamic
+exclusions, rotation, or embedding/`lm_head` quantization.
+
+See **[Quantization checkpointing and resume](checkpoint.md)** for resume
+policies, supported methods, safe-stop behavior, storage requirements, recovery
+procedures, and operational gotchas.
+
 #### Other Quantization Formats 📦
 
 `QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
