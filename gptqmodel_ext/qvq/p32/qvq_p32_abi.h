@@ -12,7 +12,7 @@ extern "C" {
 // launch-autotune entries when implementation details change.
 #define QVQ_P32_OPERATION_VERSION 1
 #define QVQ_P32_ABI_VERSION 3
-#define QVQ_P32_KERNEL_VERSION 13
+#define QVQ_P32_KERNEL_VERSION 14
 #define QVQ_P32_COMPILED_SM 80
 
 #define QVQ_P32_TILE_SIZE 16
@@ -209,6 +209,19 @@ int qvq_p32_rank8_epilogue(
     float* output,
     int size_m,
     int size_n,
+    int rank_count,
+    void* stream);
+
+// Native rank-8 recovery projection. `input` is row-major FP32 [M,K],
+// `rank8_a` is row-major FP16 [K,rank_count], and `hidden` is row-major FP16
+// [M,rank_count]. The implementation accumulates in FP32 and rounds once to
+// FP16, matching the framework recovery boundary. rank_count is 8, 16, or 24.
+int qvq_p32_rank8_project(
+    const void* input,
+    const void* rank8_a,
+    void* hidden,
+    int size_m,
+    int size_k,
     int rank_count,
     void* stream);
 

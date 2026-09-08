@@ -424,6 +424,88 @@ bool test_rank8_epilogue() {
   return true;
 }
 
+bool test_rank8_project() {
+  constexpr int kM = 3;
+  constexpr int kK = 96;
+  cudaStream_t stream = nullptr;
+  if (!check_cuda(cudaStreamCreate(&stream), "create rank8 project stream")) return false;
+  for (int rank_count : {8, 16, 24}) {
+    std::vector<float> input(kM * kK);
+    std::vector<half> rank8_a(kK * rank_count);
+    std::vector<half> expected(kM * rank_count);
+    std::vector<half> actual(kM * rank_count);
+    for (int index = 0; index < input.size(); ++index) {
+      input[index] = (static_cast<float>((index * 11) % 37) - 18.0f) / 23.0f;
+    }
+    for (int index = 0; index < rank8_a.size(); ++index) {
+      rank8_a[index] = __float2half(
+          (static_cast<float>((index * 7) % 31) - 15.0f) / 29.0f);
+    }
+    for (int row = 0; row < kM; ++row) {
+      for (int rank = 0; rank < rank_count; ++rank) {
+        float value = 0.0f;
+        for (int k = 0; k < kK; ++k) {
+          value += input[row * kK + k] *
+              __half2float(rank8_a[k * rank_count + rank]);
+        }
+        expected[row * rank_count + rank] = __float2half_rn(value);
+      }
+    }
+
+    float* device_input = nullptr;
+    half* device_rank8_a = nullptr;
+    half* device_hidden = nullptr;
+    bool ok = check_cuda(cudaMalloc(&device_input, input.size() * sizeof(float)),
+                         "allocate rank8 project input") &&
+        check_cuda(cudaMalloc(&device_rank8_a, rank8_a.size() * sizeof(half)),
+                   "allocate rank8 project A") &&
+        check_cuda(cudaMalloc(&device_hidden, actual.size() * sizeof(half)),
+                   "allocate rank8 project hidden") &&
+        check_cuda(cudaMemcpyAsync(device_input, input.data(),
+                                   input.size() * sizeof(float),
+                                   cudaMemcpyHostToDevice, stream),
+                   "copy rank8 project input") &&
+        check_cuda(cudaMemcpyAsync(device_rank8_a, rank8_a.data(),
+                                   rank8_a.size() * sizeof(half),
+                                   cudaMemcpyHostToDevice, stream),
+                   "copy rank8 project A");
+    if (ok) {
+      ok = qvq_p32_rank8_project(
+               device_input, device_rank8_a, device_hidden, kM, kK,
+               rank_count, stream) == 0 &&
+          check_cuda(cudaMemcpyAsync(actual.data(), device_hidden,
+                                     actual.size() * sizeof(half),
+                                     cudaMemcpyDeviceToHost, stream),
+                     "copy rank8 project result") &&
+          check_cuda(cudaStreamSynchronize(stream), "sync rank8 project stream");
+    }
+    if (ok) {
+      for (int index = 0; index < actual.size(); ++index) {
+        const float error = std::fabs(__half2float(actual[index]) -
+                                     __half2float(expected[index]));
+        if (error > 2.0e-3f || !std::isfinite(__half2float(actual[index]))) {
+          std::fprintf(stderr,
+                       "rank8 project mismatch rank_count=%d index=%d error=%g\n",
+                       rank_count, index, error);
+          ok = false;
+          break;
+        }
+      }
+    }
+    cudaFree(device_hidden);
+    cudaFree(device_rank8_a);
+    cudaFree(device_input);
+    if (!ok) {
+      cudaStreamDestroy(stream);
+      return false;
+    }
+  }
+  cudaStreamDestroy(stream);
+  std::printf("qvq_p32_rank8_project=PASS M=%d K=%d rank_counts=8,16,24 output=f16\n",
+              kM, kK);
+  return true;
+}
+
 }  // namespace
 
 int test_standard_partials(int rows, int transition_bits = 4,
@@ -601,6 +683,9 @@ int test_standard_partials(int rows, int transition_bits = 4,
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--rank8") == 0) {
     return test_rank8_epilogue() ? 0 : 1;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--rank8-project") == 0) {
+    return test_rank8_project() ? 0 : 1;
   }
   for (int bits : {4, 5, 6, 7}) {
     for (int stage : {1, 2, 3, 4}) {
