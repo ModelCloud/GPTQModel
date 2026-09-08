@@ -29,7 +29,7 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FOEM, GPTAQ, GPTQ
-from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.config import METHOD, FOEMConfig, GPTAQConfig, HessianConfig, QuantizeConfig, resolve_quant_format
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
@@ -391,9 +391,15 @@ class GPTQProcessor(LoopProcessor):
                     if not bool(sample_keep.any().item()):
                         continue
 
-                    sample_inp = inp_tensor[sample_index : sample_index + 1, sample_keep, :].contiguous()
+                    input_keep = sample_keep.to(device=inp_tensor.device)
+                    sample_inp = inp_tensor[
+                        sample_index : sample_index + 1, input_keep, :
+                    ].contiguous()
                     if out_tensor is not None and out_tensor.dim() >= 3 and out_tensor.shape[:2] == inp_tensor.shape[:2]:
-                        sample_out = out_tensor[sample_index : sample_index + 1, sample_keep, :].contiguous()
+                        output_keep = sample_keep.to(device=out_tensor.device)
+                        sample_out = out_tensor[
+                            sample_index : sample_index + 1, output_keep, :
+                        ].contiguous()
                     else:
                         sample_out = out
                     g.add_batch(sample_inp.data, sample_out.data, batch_index=batch_idx)  # noqa: F821
