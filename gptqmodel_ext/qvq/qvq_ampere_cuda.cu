@@ -1932,6 +1932,103 @@ void p32_window_ampere_grouped_flash_next_qkv_static_kernel(
   }
 }
 
+template <int TransitionBits, int Rows, int StageKTiles, int StaticN>
+__device__ __forceinline__ void
+p32_window_ampere_grouped_flash_next_qkv_scalar_segment(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    const GroupedP32LaunchParams& params,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int n_block,
+    int split,
+    int segment,
+    int payload_n_tile_offset) {
+  constexpr int kQTiles = 768;
+  constexpr int kKVTiles = 32;
+  p32_window_ampere_m1_kernel_body<
+      TransitionBits,
+      Rows,
+      kM1Threads,
+      kM1TilesPerBlock,
+      StageKTiles,
+      StaticN,
+      16,
+      2560,
+      true>(
+      input,
+      trellis,
+      levels,
+      bank_ids,
+      partial_output,
+      output,
+      2560,
+      StaticN,
+      16,
+      params.bank_alt_id[segment],
+      n_block,
+      split,
+      kQTiles + 2 * kKVTiles,
+      payload_n_tile_offset,
+      static_cast<int>(params.output_offset[segment]),
+      StaticN,
+      params.partial_offset[segment]);
+}
+
+template <int TransitionBits, int Rows, int StageKTiles>
+__global__ __launch_bounds__(kM1Threads)
+void p32_window_ampere_grouped_flash_next_qkv_scalar_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    const __grid_constant__ GroupedP32LaunchParams params,
+    float* __restrict__ partial_output,
+    float* __restrict__ output) {
+  constexpr int kQTiles = 768;
+  constexpr int kKVTiles = 32;
+  constexpr int kQBlocks = kQTiles / kM1TilesPerBlock;
+  constexpr int kKVBlocks = kKVTiles / kM1TilesPerBlock;
+  constexpr int kQBlocksTotal = kQBlocks * 16;
+  constexpr int kKVBlocksTotal = kKVBlocks * 16;
+  const int block = static_cast<int>(blockIdx.x);
+  int segment;
+  int n_block;
+  int split;
+  int payload_n_tile_offset;
+  if (block < kQBlocksTotal) {
+    segment = 0;
+    split = block / kQBlocks;
+    n_block = block - split * kQBlocks;
+    payload_n_tile_offset = 0;
+  } else if (block < kQBlocksTotal + kKVBlocksTotal) {
+    segment = 1;
+    const int local_block = block - kQBlocksTotal;
+    split = local_block / kKVBlocks;
+    n_block = local_block - split * kKVBlocks;
+    payload_n_tile_offset = kQTiles;
+  } else {
+    segment = 2;
+    const int local_block = block - kQBlocksTotal - kKVBlocksTotal;
+    split = local_block / kKVBlocks;
+    n_block = local_block - split * kKVBlocks;
+    payload_n_tile_offset = kQTiles + kKVTiles;
+  }
+  if (segment == 0) {
+    p32_window_ampere_grouped_flash_next_qkv_scalar_segment<
+        TransitionBits, Rows, StageKTiles, 12288>(
+        input, trellis, levels, bank_ids, params, partial_output, output,
+        n_block, split, segment, payload_n_tile_offset);
+  } else {
+    p32_window_ampere_grouped_flash_next_qkv_scalar_segment<
+        TransitionBits, Rows, StageKTiles, 512>(
+        input, trellis, levels, bank_ids, params, partial_output, output,
+        n_block, split, segment, payload_n_tile_offset);
+  }
+}
+
 template <
     int TransitionBits,
     bool FullRows,
@@ -2258,6 +2355,43 @@ __global__ void reduce_flash_next_gate_up_rank8_kernel(
   output[output_index] = accumulator + params.rank8_scale[segment] * correction;
 }
 
+template <int StaticRows>
+__global__ void reduce_flash_next_gate_up_kernel(
+    const float* __restrict__ partial_output,
+    float* __restrict__ output) {
+  constexpr int kSegmentCount = 2;
+  constexpr int kSegmentColumns = 640;
+  constexpr int kSplitCount = 40;
+  constexpr int kThreads = 256;
+  constexpr int kSegmentValues = StaticRows * kSegmentColumns;
+  constexpr int kBlocksPerSegment =
+      (kSegmentValues + kThreads - 1) / kThreads;
+  const int block = static_cast<int>(blockIdx.x);
+  if (block >= kSegmentCount * kBlocksPerSegment) {
+    return;
+  }
+  const int segment = block / kBlocksPerSegment;
+  const int local_block = block - segment * kBlocksPerSegment;
+  const int64_t local_index = static_cast<int64_t>(local_block) * kThreads +
+      threadIdx.x;
+  if (local_index >= kSegmentValues) {
+    return;
+  }
+  const int64_t output_index =
+      static_cast<int64_t>(segment) * kSegmentValues + local_index;
+  const int64_t partial_segment_values =
+      static_cast<int64_t>(kSplitCount) * kSegmentValues;
+  const float* segment_partials =
+      partial_output + static_cast<int64_t>(segment) * partial_segment_values;
+  float accumulator = 0.0f;
+#pragma unroll
+  for (int split = 0; split < kSplitCount; ++split) {
+    accumulator += segment_partials[
+        static_cast<int64_t>(split) * kSegmentValues + local_index];
+  }
+  output[output_index] = accumulator;
+}
+
 template <bool Rank8BFloat, int StaticRows>
 void launch_reduce_flash_next_gate_up_rank8_kernel(
     const dim3 reduction_grid,
@@ -2356,6 +2490,57 @@ __global__ void reduce_flash_next_qkv_rank8_kernel(
   }
   output[output_offset + local_index] =
       accumulator + params.rank8_scale[segment] * correction;
+}
+
+template <int StaticRows, int StaticSplitCount>
+__global__ void reduce_flash_next_qkv_kernel(
+    const float* __restrict__ partial_output,
+    float* __restrict__ output) {
+  constexpr int kQColumns = 12288;
+  constexpr int kKVColumns = 512;
+  constexpr int kThreads = 256;
+  constexpr int kQValues = StaticRows * kQColumns;
+  constexpr int kKVValues = StaticRows * kKVColumns;
+  constexpr int kQBlocks = (kQValues + kThreads - 1) / kThreads;
+  constexpr int kKVBlocks = (kKVValues + kThreads - 1) / kThreads;
+  const int block = static_cast<int>(blockIdx.x);
+  if (block >= kQBlocks + 2 * kKVBlocks) {
+    return;
+  }
+
+  int segment = 0;
+  int local_block = block;
+  int segment_values = kQValues;
+  if (block >= kQBlocks) {
+    segment = 1;
+    local_block -= kQBlocks;
+    segment_values = kKVValues;
+    if (local_block >= kKVBlocks) {
+      segment = 2;
+      local_block -= kKVBlocks;
+    }
+  }
+  const int64_t local_index = static_cast<int64_t>(local_block) * kThreads +
+      threadIdx.x;
+  if (local_index >= segment_values) {
+    return;
+  }
+  const int64_t output_offset = segment == 0
+      ? 0
+      : (segment == 1 ? kQValues : static_cast<int64_t>(kQValues) + kKVValues);
+  const int64_t partial_offset = segment == 0
+      ? 0
+      : (segment == 1
+             ? static_cast<int64_t>(StaticSplitCount) * kQValues
+             : static_cast<int64_t>(StaticSplitCount) * (kQValues + kKVValues));
+  const float* segment_partials = partial_output + partial_offset;
+  float accumulator = 0.0f;
+#pragma unroll
+  for (int split = 0; split < StaticSplitCount; ++split) {
+    accumulator += segment_partials[
+        static_cast<int64_t>(split) * segment_values + local_index];
+  }
+  output[output_offset + local_index] = accumulator;
 }
 
 template <bool Rank8BFloat, int StaticRows, int StaticSplitCount>
@@ -4329,6 +4514,9 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   const bool use_flash_next_qkv_static_shape =
       (use_flash_next_qkv_wmma_shape || use_flash_next_qkv_wmma_split4_shape) &&
       (size_m == 8 || size_m == kRows);
+  const bool use_flash_next_qkv_scalar_shape =
+      use_flash_next_qkv_shape && use_flash_next_qkv_wmma_shape &&
+      (size_m == 1 || size_m == 2 || size_m == 4);
   if (use_flash_next_qkv_wide_m16) {
     // M=16 QKV is the only Flash-Next QKV case with the measured four-way
     // K split. Two N16 tiles per warp halves the CTA count without changing
@@ -4356,7 +4544,27 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
             (size_m == 1 || size_m == 2 || size_m == 4)
         ? dim3(3, 40, 2)
         : dim3(static_cast<unsigned>(active_scalar_blocks), 1, 1);
-    if (use_flash_next_gate_up_compact_scalar_shape) {
+    if (use_flash_next_qkv_scalar_shape) {
+      if (size_m == 1) {
+        p32_window_ampere_grouped_flash_next_qkv_scalar_kernel<
+            TransitionBits, 1, kStageKTiles>
+            <<<grid, kM1Threads, 0, stream>>>(
+                input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+                partial_output_ptr, output_ptr);
+      } else if (size_m == 2) {
+        p32_window_ampere_grouped_flash_next_qkv_scalar_kernel<
+            TransitionBits, 2, kScalarTripleStageKTiles>
+            <<<grid, kM1Threads, 0, stream>>>(
+                input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+                partial_output_ptr, output_ptr);
+      } else {
+        p32_window_ampere_grouped_flash_next_qkv_scalar_kernel<
+            TransitionBits, 4, kScalarLongStageKTiles>
+            <<<grid, kM1Threads, 0, stream>>>(
+                input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+                partial_output_ptr, output_ptr);
+      }
+    } else if (use_flash_next_gate_up_compact_scalar_shape) {
       const dim3 compact_grid(5, 40, 2);
       if (size_m == 1) {
         p32_window_ampere_grouped_flash_next_gate_up_compact_scalar_kernel<
@@ -4495,23 +4703,25 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     }
   } else {
     const dim3 grid(static_cast<unsigned>(active_wmma_blocks), 1, 1);
-    if (use_flash_next_qkv_static_shape && size_m == kRows) {
+    if (use_flash_next_qkv_wmma_split4_shape && size_m == kRows) {
       p32_window_ampere_grouped_flash_next_qkv_static_kernel<
           TransitionBits, 16, 5, 4, true, true><<<grid, kThreads, 0, stream>>>(
           input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
           partial_output_ptr, output_ptr);
     } else if (use_flash_next_qkv_static_shape && size_m == 8) {
-      p32_window_ampere_grouped_flash_next_qkv_static_kernel<
-          TransitionBits, 8, 5, 16, false, false><<<grid, kThreads, 0, stream>>>(
-          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
-          partial_output_ptr, output_ptr);
-    } else if (use_flash_next_qkv_wmma_split4_shape && size_m == kRows) {
-      p32_window_ampere_grouped_wmma_kernel<
-          TransitionBits, true, 0, 0, true, false, 2560, true, false, false,
-          false, 3, 4><<<grid, kThreads, 0, stream>>>(
-          input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
-          partial_output_ptr, output_ptr, static_cast<int>(segment_count),
-          size_m, size_k, total_n_tiles);
+      if (use_flash_next_qkv_wmma_split4_shape) {
+        p32_window_ampere_grouped_flash_next_qkv_static_kernel<
+            TransitionBits, 8, 5, 4, false, false>
+            <<<grid, kThreads, 0, stream>>>(
+                input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+                partial_output_ptr, output_ptr);
+      } else {
+        p32_window_ampere_grouped_flash_next_qkv_static_kernel<
+            TransitionBits, 8, 5, 16, false, false>
+            <<<grid, kThreads, 0, stream>>>(
+                input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
+                partial_output_ptr, output_ptr);
+      }
     } else if (use_flash_next_qkv_wmma_shape && size_m == kRows) {
       p32_window_ampere_grouped_wmma_kernel<
           TransitionBits, true, 0, 0, true, false, 2560, true, false, false,
@@ -4829,15 +5039,92 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   } else if (needs_reduction) {
     constexpr int kReductionThreads = 256;
     const int output_value_count = size_m * total_n;
-    const int blocks =
+    int blocks =
         (output_value_count + kReductionThreads - 1) / kReductionThreads;
-    reduce_grouped_split_kernel<<<blocks, kReductionThreads, 0, stream>>>(
-        partial_output_ptr,
-        output_ptr,
-        params,
-        static_cast<int>(segment_count),
-        size_m,
-        total_n);
+    const bool use_flash_next_qkv_reducer =
+        TransitionBits == 6 && size_k == 2560 && segment_count == 3 &&
+        total_n == 13312 && params.n_tiles[0] == 768 &&
+        params.n_tiles[1] == 32 && params.n_tiles[2] == 32 &&
+        uniform_splits &&
+        (uniform_split_count == 4 || uniform_split_count == 16) &&
+        (size_m == 1 || size_m == 2 || size_m == 4 || size_m == 8 ||
+         (size_m == 16 && uniform_split_count == 4));
+    const bool use_flash_next_gate_up_reducer =
+        TransitionBits == 6 && size_k == 2560 && segment_count == 2 &&
+        total_n == 1280 && params.n_tiles[0] == 40 &&
+        params.n_tiles[1] == 40 && uniform_splits &&
+        uniform_split_count == 40 &&
+        (size_m == 1 || size_m == 2 || size_m == 4 || size_m == 8 ||
+         size_m == 16);
+    if (use_flash_next_qkv_reducer) {
+      if (uniform_split_count == 4 && size_m == 1) {
+        reduce_flash_next_qkv_kernel<1, 4><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      } else if (uniform_split_count == 4 && size_m == 2) {
+        reduce_flash_next_qkv_kernel<2, 4><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      } else if (uniform_split_count == 4 && size_m == 4) {
+        reduce_flash_next_qkv_kernel<4, 4><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      } else if (uniform_split_count == 4 && size_m == 8) {
+        reduce_flash_next_qkv_kernel<8, 4><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      } else if (uniform_split_count == 4) {
+        reduce_flash_next_qkv_kernel<16, 4><<<
+              blocks, kReductionThreads, 0, stream>>>(
+              partial_output_ptr, output_ptr);
+      } else if (size_m == 1) {
+        reduce_flash_next_qkv_kernel<1, 16><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      } else if (size_m == 2) {
+        reduce_flash_next_qkv_kernel<2, 16><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      } else if (size_m == 4) {
+        reduce_flash_next_qkv_kernel<4, 16><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      } else {
+        reduce_flash_next_qkv_kernel<8, 16><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      }
+    } else if (use_flash_next_gate_up_reducer) {
+      if (size_m == 1) {
+        reduce_flash_next_gate_up_kernel<1><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      } else if (size_m == 2) {
+        reduce_flash_next_gate_up_kernel<2><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      } else if (size_m == 4) {
+        reduce_flash_next_gate_up_kernel<4><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      } else if (size_m == 8) {
+        reduce_flash_next_gate_up_kernel<8><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      } else {
+        reduce_flash_next_gate_up_kernel<16><<<
+            blocks, kReductionThreads, 0, stream>>>(
+            partial_output_ptr, output_ptr);
+      }
+    } else {
+      reduce_grouped_split_kernel<<<blocks, kReductionThreads, 0, stream>>>(
+          partial_output_ptr,
+          output_ptr,
+          params,
+          static_cast<int>(segment_count),
+          size_m,
+          total_n);
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   return output;
