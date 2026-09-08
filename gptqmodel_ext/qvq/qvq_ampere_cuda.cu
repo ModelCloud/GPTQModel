@@ -1100,6 +1100,7 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
     } else if constexpr (
         StaticN > 0 && StaticN != 1024 && TilesPerBlock == 16 && Rows == 1 &&
         (TransitionBits == 5 || TransitionBits == 7 ||
+         (TransitionBits == 6 && StaticN == 2560) ||
          (TransitionBits == 4 &&
           (StaticN == 12288 || StaticN == 10240 || StaticN == 17408)))) {
       if (thread < StageKTiles) {
@@ -1560,7 +1561,8 @@ template <
     int StageKTiles = kStageKTiles,
     int StaticN = 0,
     int StaticSplitCount = 0,
-    int StaticK = 0>
+    int StaticK = 0,
+    bool UseSharedLevels = false>
 __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     const half* __restrict__ input,
     const uint32_t* __restrict__ trellis,
@@ -1574,7 +1576,7 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_m1_kernel(
     int bank_alt_id) {
   p32_window_ampere_m1_kernel_body<
       TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, StaticN,
-      StaticSplitCount, StaticK>(
+      StaticSplitCount, StaticK, UseSharedLevels>(
       input,
       trellis,
       levels,
@@ -1810,7 +1812,8 @@ template <
     int TilesPerBlock = kM1TilesPerBlock,
     int StageKTiles = kStageKTiles,
     int StaticSplitCount = 0,
-    int StaticK = 0>
+    int StaticK = 0,
+    bool UseSharedLevels = false>
 inline bool launch_static_n_scalar_kernel(
     const half* input,
     const uint32_t* trellis,
@@ -1826,7 +1829,7 @@ inline bool launch_static_n_scalar_kernel(
     const cudaStream_t stream) {
 #define QVQ_LAUNCH_STATIC_N(N)                                                        \
   case N:                                                                             \
-    p32_window_ampere_m1_kernel<TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, N, StaticSplitCount, StaticK> \
+    p32_window_ampere_m1_kernel<TransitionBits, Rows, Threads, TilesPerBlock, StageKTiles, N, StaticSplitCount, StaticK, UseSharedLevels> \
         <<<grid, Threads, 0, stream>>>(                                               \
             input, trellis, levels, bank_ids, partial_output, output, size_k, size_n, \
             split_count, bank_alt_id);                                                \
@@ -2226,13 +2229,16 @@ at::Tensor p32_window_ampere_impl(
   // The scalar M<=4 route pays one decode loop per K16 row and reuses each
   // decoded pair across the live output rows. It wins for the common 5-6K K
   // projections; with the wider long-K wave and four-K16 scalar stage it also
-  // wins for M1-M4, while larger long-K projections remain on WMMA.
+  // wins for M1-M4, including the exact Flash-Next O shape (K=12288,
+  // N=2560); other larger long-K projections remain on WMMA.
   const bool use_small_m_scalar =
       (size_m <= 4 && size_k <= 6144) ||
-      (size_m <= 4 && size_k == 17408 && size_n == 5120);
+      (size_m <= 4 && size_k == 17408 && size_n == 5120) ||
+      (size_m <= 4 && size_k == 12288 && size_n == 2560);
   const bool use_four_tile_scalar_stage =
       (size_m == 4 && size_k <= 6144) ||
-      (size_m <= 4 && size_k == 17408 && size_n == 5120);
+      (size_m <= 4 && size_k == 17408 && size_n == 5120) ||
+      (size_m <= 4 && size_k == 12288 && size_n == 2560);
   const bool use_three_tile_scalar_stage = size_m == 2 && size_k <= 6144;
   constexpr int kM4StageKTiles = TransitionBits == 4
       ? kScalarLongStageKTiles
@@ -2303,6 +2309,57 @@ at::Tensor p32_window_ampere_impl(
           output_ptr, size_m, size_k, size_n, static_cast<int>(split_count),
           static_cast<int>(bank_alt_id));
     }
+  } else if (size_m == 1 && size_k == 12288 && size_n == 2560 &&
+      TransitionBits == 6 && split_count == 32 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 1, kM1Threads, kM1TilesPerBlock,
+          kScalarLongStageKTiles, 32, 12288, true>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
+  } else if (size_m == 2 && size_k == 12288 && size_n == 2560 &&
+      TransitionBits == 6 && split_count == 32 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 2, kM1Threads, kM1TilesPerBlock,
+          kScalarLongStageKTiles, 32, 12288, true>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
+  } else if (size_m == 4 && size_k == 12288 && size_n == 2560 &&
+      TransitionBits == 6 && split_count == 32 &&
+      launch_static_n_scalar_kernel<
+          TransitionBits, 4, kM1Threads, kM1TilesPerBlock,
+          kScalarLongStageKTiles, 32, 12288, true>(
+          input_ptr,
+          trellis_ptr,
+          levels_ptr,
+          bank_ids_ptr,
+          partial_output_ptr,
+          output_ptr,
+          size_k,
+          size_n,
+          static_cast<int>(split_count),
+          static_cast<int>(bank_alt_id),
+          grid,
+          stream)) {
   } else if (size_m == 1 && size_k == 5120 && size_n == 12288 &&
       split_count == 40 &&
       launch_static_n_scalar_kernel<
@@ -3391,6 +3448,17 @@ at::Tensor p32_window_ampere_impl(
     constexpr int kReductionThreads = 256;
     const int output_values = size_m * size_n;
     const int blocks = (output_values + kReductionThreads - 1) / kReductionThreads;
+    if (TransitionBits == 6 && size_k == 12288 && size_n == 2560 &&
+        (size_m == 1 || size_m == 2 || size_m == 4) &&
+        split_count == 32) {
+      reduce_split_kernel<32><<<blocks, kReductionThreads, 0, stream>>>(
+          partial_output.data_ptr<float>(),
+          output.data_ptr<float>(),
+          output_values,
+          32);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+      return output;
+    }
     if (size_m <= 4 && size_n == 1024 && split_count == 64) {
       constexpr int kReductionWarps = kReductionThreads / 32;
       const int warp_blocks =
