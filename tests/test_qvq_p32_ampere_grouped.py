@@ -644,6 +644,103 @@ def test_flash_next_gate_up_rank8_wide_group_matches_child_paths(size_m, monkeyp
         torch.testing.assert_close(grouped_child, plain_child, rtol=0.0, atol=2e-3)
 
 
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() < (8, 0),
+    reason="requires NVIDIA CUDA compute capability >= 8.0",
+)
+@pytest.mark.parametrize("size_m", (8, 16), ids=("m8", "m16"))
+@pytest.mark.parametrize(
+    "split_counts", ((16, 16, 16), (8, 8, 8)), ids=("static-16", "custom-8")
+)
+def test_flash_next_qkv_wmma_group_matches_child_paths(
+    size_m, split_counts, monkeypatch
+):
+    device = _native_validation_device()
+    if device is None:
+        pytest.skip("requires SM80 or the dedicated H100 validation device")
+    properties = torch.cuda.get_device_properties(device)
+    if (properties.major, properties.minor) == (9, 0):
+        monkeypatch.setenv("QVQ_AMPERE_ALLOW_SM90_VALIDATION", "1")
+
+    bits = 3.0
+    in_features = 2560
+    widths = (12288, 512, 512)
+    alt_ids = (3, 1, 1)
+    generator = torch.Generator(device=device).manual_seed(20261219 + size_m)
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().to(device)
+    input = (
+        torch.randn((size_m, in_features), generator=generator, device=device) * 0.1
+    ).half()
+    windows = []
+    selectors = []
+    dense_q = None
+    for index, (width, alt_id) in enumerate(zip(widths, alt_ids, strict=True)):
+        tile_count = (in_features // 16) * (width // 16)
+        planar = torch.randint(
+            0,
+            1 << 32,
+            (tile_count, qvq_words_per_tile(bits, weight_count=256, vector_size=2)),
+            generator=generator,
+            device=device,
+            dtype=torch.int64,
+        ).to(torch.int32)
+        window = repack_p32_planar_to_window(planar, bits=bits)
+        bank_ids = pack_qvq_binary_bank_ids(
+            torch.randint(
+                0,
+                2,
+                (tile_count * 8,),
+                generator=generator,
+                device=device,
+                dtype=torch.uint8,
+            )
+        )
+        if index == 0:
+            dense_q = reconstruct_p32_window_inner_weight(
+                window,
+                bits=bits,
+                in_features=in_features,
+                out_features=width,
+                bank_ids=bank_ids,
+                bank_alt_id=torch.tensor(alt_id, dtype=torch.uint8, device=device),
+            )
+        windows.append(window)
+        selectors.append(bank_ids)
+
+    plain = tuple(
+        qvq_p32_window_ampere(
+            input,
+            window,
+            levels,
+            bank_id,
+            bits,
+            out_features=width,
+            bank_alt_id=alt_id,
+            split_count=split_count,
+        )
+        for window, bank_id, width, alt_id, split_count in zip(
+            windows, selectors, widths, alt_ids, split_counts, strict=True
+        )
+    )
+    grouped = qvq_p32_window_ampere_grouped(
+        input,
+        windows,
+        levels,
+        selectors,
+        bits,
+        out_features=widths,
+        bank_alt_ids=alt_ids,
+        split_counts=split_counts,
+    )
+
+    for grouped_child, plain_child in zip(grouped, plain, strict=True):
+        torch.testing.assert_close(grouped_child, plain_child, rtol=0.0, atol=2e-3)
+    torch.testing.assert_close(
+        grouped[0], input.float() @ dense_q, rtol=0.0, atol=2e-3
+    )
+
+
 @pytest.mark.parametrize("size_m", (1, 2, 4, 8, 16))
 @pytest.mark.parametrize(
     ("widths", "alt_ids", "split_counts"),
