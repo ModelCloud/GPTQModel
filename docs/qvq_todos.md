@@ -17,6 +17,9 @@ instructions below are archival, not branch starting points.
   calibration corpus and locked full-model KLD/MSE/Top-1/5/10 evaluation:
   [results](experiments/gsq-p32-f6-seed7-full-qkv.md). Small KLD benefit only;
   no default promotion.
+- [x] Test full Q/K/V at W2.5 against fresh real-Fisher YAQA initialization:
+  [results](experiments/gsq-p32-f6-seed7-w25-qkv.md). The GSQ-inspired arm
+  slightly worsens final KLD and Top-1; no promotion.
 - [ ] Extend candidate coverage and learn existing representable scales; compare
   assignment-only, scale-only, combined and deterministic-search arms.
 - [ ] Validate full modules and propagated final-logit KL / Top-1/5/10 on larger

@@ -75,6 +75,11 @@ KLD/MSE/Top-N propagation. It supersedes the slice as decision evidence: the
 full-model KLD improvement is only about 0.177%, with noise-consistent GSQ-inspired
 Top-N changes. Neither method is promoted.
 
+The subsequent [matched W2.5 YAQA comparison](../docs/experiments/gsq-p32-f6-seed7-w25-qkv.md)
+freshly quantizes complete Q/K/V projections from real full-model Fisher
+calibration. GSQ-inspired refinement slightly worsens final KLD and Top-1 on
+the locked set despite tiny local fitting gains; it is not promoted.
+
 `scripts/validate_qvq_gsq.py` uses the published local F6 snapshot and dense
 Llama 3.2 1B weights. It captures first-layer q_proj inputs directly from real
 token embeddings and RMSNorm, transforms them into the deployed inner basis,

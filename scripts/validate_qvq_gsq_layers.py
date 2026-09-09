@@ -99,6 +99,7 @@ def prepare(args):
         "refinement": "16 stratified original-corpus documents by default; not a repeat of all 10178 YAQA rows",
         "seed": 7, "train_rows": len(train), "eval_rows": len(heldout), "token_cap": args.tokens,
         "targets": TARGETS, "candidate_count": args.candidates, "steps": args.steps,
+        "target_bits": args.target_bits,
         "train_tokens": sum(len(r["input_ids"]) for r in train),
         "heldout_tokens": sum(len(r["input_ids"]) for r in heldout),
         "train_source_weights": dict(cfg["yaqa"]["source_weights"]),
@@ -134,11 +135,13 @@ def execute(args):
         decode_p32_window_tiles,
         reconstruct_p32_window_inner_weight,
         reconstruct_qvq_inner_weight,
+        quantize_qvq_linear,
         repack_p32_planar_to_window,
         repack_p32_window_to_planar,
         rht_preprocess_weight,
     )
     from gptqmodel.quantization.qvq_gsq import refine_p32_candidates
+    from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
     from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
     from scripts.p32_twenty.scorecard import logits_metrics
 
@@ -155,6 +158,8 @@ def execute(args):
             raise ValueError(f"Prepared input changed before execution: {path}")
     if provenance["candidate_count"] != args.candidates or provenance["steps"] != args.steps:
         raise ValueError("Execution parameters differ from prepared contract")
+    if provenance.get("target_bits") != args.target_bits:
+        raise ValueError("Execution rate differs from prepared contract")
     cfg = json.loads((args.output / "quantize_config.json").read_text())
     snapshot = args.snapshot / "qvq-p32"
     if cfg != json.loads((snapshot / "quantize_config.json").read_text()):
@@ -203,6 +208,35 @@ def execute(args):
                 print("DENSE", split, i + 1, "/", len(data[split]), flush=True)
     for hook in hooks:
         hook.remove()
+    requantized = {}
+    if args.target_bits is not None:
+        sources = provenance["train_source_weights"]
+        batches = [{"input_ids": torch.tensor([row["input_ids"]]),
+                    "attention_mask": torch.ones(1, len(row["input_ids"]), dtype=torch.long),
+                    "fisher_sequence_weight": torch.tensor([sources[row["source_name"]]])}
+                   for row in data["train"]]
+        inputs_h, outputs_h, stats = capture_yaqa_sketch_b(
+            model, batches, {name: model.get_submodule(name) for name in TARGETS},
+            device=torch.device("cuda:0"), seed=7, minimum_sequences=len(batches),
+            first_decoder_layer=model.model.layers[0],
+            checkpoint_modules=tuple(model.model.layers),
+            progress_callback=lambda p: print("W25_FISHER", json.dumps(p), flush=True))
+        report["requantization"] = {"target_bits": args.target_bits, "fisher_stats": stats,
+                                     "minimum_sequences": len(batches), "rounding": "yaqa",
+                                     "regularization": 0.02, "family_mode": "reselect"}
+        for name in TARGETS:
+            print("W25_QUANTIZE", name, flush=True)
+            torch.save({"input_hessian": inputs_h[name].cpu(), "output_hessian": outputs_h[name].cpu()},
+                       args.output / (name + ".fisher.pt"))
+            requantized[name] = quantize_qvq_linear(
+                dense_weights[name], inputs_h[name], output_hessian=outputs_h[name],
+                bits=args.target_bits, seed=7, input_sign_seed=7,
+                rounding="yaqa", damp_percent=0.02, v2b2_p32=True, bank_count=2,
+                codebook_version=cfg["codebook"], viterbi_pruning=cfg["viterbi_pruning"],
+                yaqa_v2b2_family_mode=cfg["yaqa"]["v2b2_family_mode"],
+                yaqa_sample_strategy=cfg["yaqa"]["sample_strategy"])
+            print("W25_QUANTIZED", name, flush=True)
+        del inputs_h, outputs_h
     # Snapshot-owned endpoints/norms must be copied, not silently left as the source model's.
     with torch.no_grad():
         for name, param in model.named_parameters():
@@ -301,6 +335,23 @@ def execute(args):
         write_json(args.output / "report.json", report)
 
     evaluate("f6_seed7")
+    baseline_label = "f6_seed7"
+    if args.target_bits is not None:
+        baseline_label = "w2_5_yaqa"
+        for name, result in requantized.items():
+            if not result.serialization_allowed:
+                raise ValueError("W2.5 result is not serializable")
+            state = saved[name]
+            state["kw"].update(bits=args.target_bits, bank_ids=result.bank_ids, bank_alt_id=result.bank_alt_id)
+            state["base"] = repack_p32_planar_to_window(result.trellis, bits=args.target_bits)
+            state["su"], state["sv"] = result.SU, result.SV
+            inner = reconstruct_p32_window_inner_weight(state["base"], **state["kw"])
+            if not torch.equal(inner, result.inner_weight):
+                raise ValueError("W2.5 quantize/decode mismatch")
+            module = model.get_submodule(name)
+            module.inner, module.su, module.sv = inner, result.SU.float(), result.SV.float()
+        report["comparison_baseline"] = baseline_label
+        evaluate(baseline_label)
     for name in TARGETS:
         state = saved[name]
         kw, base = state["kw"], state["base"]
@@ -368,7 +419,7 @@ def execute(args):
         report["paired_intervals"][arm] = {}
         for key in ("kl_teacher_candidate", "mse", "nmse", "top1_agreement", "top5_agreement", "top10_agreement"):
             delta = torch.tensor([a[key] - b[key] for a, b in zip(
-                report["model"][arm]["rows"], report["model"]["f6_seed7"]["rows"], strict=True)])
+                report["model"][arm]["rows"], report["model"][baseline_label]["rows"], strict=True)])
             boot = torch.randint(len(delta), (2000, len(delta)), generator=torch.Generator().manual_seed(7))
             interval = delta[boot].mean(1).quantile(torch.tensor([0.025, 0.975])).tolist()
             positive = interval[1] < 0 if key in ("kl_teacher_candidate", "mse", "nmse") else interval[0] > 0
@@ -392,6 +443,8 @@ def main():
     parser.add_argument("--tokens", type=int, default=256)
     parser.add_argument("--candidates", type=int, default=33)
     parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument("--target-bits", type=float, choices=(2.5,),
+                        help="Fresh YAQA W2.5 QKV baseline; all other F6 projections remain unchanged")
     args = parser.parse_args()
     if args.train_rows < 2 or args.train_rows % 2 or args.eval_rows < 2 or args.tokens < 2:
         parser.error("Use positive even train rows, >=2 eval rows and >=2 tokens")
