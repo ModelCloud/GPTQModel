@@ -29,8 +29,8 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.loop_processor import LoopProcessor
 from ..looper.named_module import NamedModule
-from ..models.base import MODULE_TREE_FLAG_ROUTED, module_tree_flags_are_moe
 from ..models._const import META
+from ..models.base import MODULE_TREE_FLAG_ROUTED, module_tree_flags_are_moe
 from ..quantization.config import ExpertsRoutingBypass, GcMode, VramStrategy
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry
