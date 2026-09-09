@@ -132,6 +132,8 @@ class AwqExllamaV2Linear(AWQuantLinear):
         super().post_init()
 
     def forward(self, x: torch.Tensor):
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
         assert self.q_handle is not None, (
             "module.post_init() must be called before module.forward(). "
         )

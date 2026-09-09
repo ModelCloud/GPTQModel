@@ -9,6 +9,8 @@
 #include "rotation.cuh"
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -97,12 +99,14 @@ __global__ void rotate_kernel_bf16_half_workspace(const __nv_bfloat16 *__restric
       rotate_kernel<CUDA_T, CTA_M, GROUP_SIZE, KROT, false, ROW_PAD><<<grid, block, 0, stream>>>(   \
           x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, nullptr, seq_len, h);                           \
     }                                                                                                \
+    C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                   \
     break;                                                                                           \
   }
 
 template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
 torch::Tensor rotate_launcher_bf16_half_workspace(at::Tensor x, at::Tensor idx_ij,
                                                   at::Tensor theta, at::Tensor scales) {
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   int h = x.size(-1);
   TORCH_CHECK(h % GROUP_SIZE == 0, "h must be divisible by GROUP_SIZE");
   int groups_per_row = h / GROUP_SIZE;
@@ -131,12 +135,14 @@ torch::Tensor rotate_launcher_bf16_half_workspace(at::Tensor x, at::Tensor idx_i
     rotate_kernel_bf16_half_workspace<CTA_M, GROUP_SIZE, KROT, false, ROW_PAD><<<grid, block, 0, stream>>>(
         x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, nullptr, seq_len, h);
   }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
 
 template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
 torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
                               at::Tensor scales) {
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   int h = x.size(-1);
   TORCH_CHECK(h % GROUP_SIZE == 0, "h must be divisible by GROUP_SIZE");
   int groups_per_row = h / GROUP_SIZE;
@@ -615,14 +621,46 @@ int64_t rotation_autotune_cache_size() {
   return static_cast<int64_t>(autotune_cache().size());
 }
 
+void validate_rotation_inputs(const at::Tensor &x, const at::Tensor &idx,
+                              const at::Tensor &theta, const at::Tensor &scales) {
+  // Rotation kernels use raw pointers and vectorized loads, so reject invalid
+  // devices/layouts before dispatching a specialized launch variant.
+  const bool has_scale = scales.defined() && scales.numel() > 0;
+  TORCH_CHECK(x.is_cuda() && idx.is_cuda() && theta.is_cuda(),
+              "ParoQuant rotation expects CUDA tensors.");
+  TORCH_CHECK(!has_scale || scales.is_cuda(),
+              "ParoQuant rotation scales must be a CUDA tensor.");
+  TORCH_CHECK(x.device() == idx.device() && x.device() == theta.device() &&
+                  (!has_scale || x.device() == scales.device()),
+              "ParoQuant rotation tensors must be on the same CUDA device.");
+  TORCH_CHECK(x.is_contiguous() && idx.is_contiguous() && theta.is_contiguous() &&
+                  (!has_scale || scales.is_contiguous()),
+              "ParoQuant rotation tensors must be contiguous.");
+  TORCH_CHECK(x.is_floating_point() && x.dim() >= 1,
+              "ParoQuant rotation input must be a floating-point tensor with at least one dimension.");
+  TORCH_CHECK(idx.scalar_type() == at::kShort && idx.dim() == 2,
+              "ParoQuant rotation indices must be contiguous int16 pairs.");
+  TORCH_CHECK(theta.is_floating_point() && theta.dim() == 2,
+              "ParoQuant rotation theta must be a 2D floating-point tensor.");
+  TORCH_CHECK(!has_scale || (scales.is_floating_point() && scales.dim() >= 1),
+              "ParoQuant rotation scales must be floating-point.");
+}
+
 } // namespace
 
 torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
                              c10::optional<at::Tensor> scales_opt, int64_t group_size = 128,
                              int64_t requested_cta_m = -1, int64_t requested_row_pad = -1) {
+  TORCH_CHECK(x.is_cuda(), "ParoQuant rotation requires a CUDA input tensor.");
+  // Autotune and the final launch must run on x's device, not the thread's
+  // previously selected CUDA device.
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
+  TORCH_CHECK(theta.dim() >= 1 && idx.dim() >= 1,
+              "ParoQuant rotation theta and indices must have at least one dimension.");
   int64_t krot = theta.size(0);
   TORCH_CHECK(krot == idx.size(0), "theta.size(0) must equal idx_ij.size(0)");
   at::Tensor scales = scales_opt.value_or(at::Tensor());
+  validate_rotation_inputs(x, idx, theta, scales);
   const bool has_scale = scales.defined() && scales.numel() > 0;
   const LaunchConfig config = resolve_runtime_launch_config(
       x, idx, theta, scales, group_size, krot, static_cast<int>(requested_cta_m),
@@ -634,6 +672,10 @@ torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
 std::vector<int64_t> rotate_launch_config(at::Tensor x, int64_t krot = 8, bool has_scale = true,
                                           int64_t group_size = 128, int64_t cta_m = -1,
                                           int64_t row_pad = -1) {
+  TORCH_CHECK(x.is_cuda(), "ParoQuant rotation launch config requires a CUDA input tensor.");
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
+  TORCH_CHECK(x.is_contiguous() && x.is_floating_point() && x.dim() >= 1,
+              "ParoQuant rotation launch config expects contiguous floating-point input.");
   const LaunchConfig config = resolve_query_launch_config(
       x, krot, has_scale, group_size, static_cast<int>(cta_m), static_cast<int>(row_pad));
   return {

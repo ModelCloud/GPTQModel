@@ -303,11 +303,8 @@ class SwordfishLinear(GPTQQuantLinear):
         return buf
 
     def forward(self, x: torch.Tensor):
-        if x.shape[0] == 0:
-            result = torch.empty(x.shape[:-1] + (self.out_features,), dtype=x.dtype, device=x.device)
-            if self.adapter is not None:
-                result = self.adapter.apply(x=x, out=result)
-            return result
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
 
         input_2d = x.reshape(-1, x.shape[-1])
 
@@ -673,11 +670,8 @@ class AwqSwordfishLinear(AWQuantLinear):
         return buf
 
     def forward(self, x: torch.Tensor):
-        if x.shape[0] == 0:
-            result = torch.empty(x.shape[:-1] + (self.out_features,), dtype=x.dtype, device=x.device)
-            if self.adapter is not None:
-                result = self.adapter.apply(x=x, out=result)
-            return result
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
 
         input_2d = x.reshape(-1, x.shape[-1])
 

@@ -154,6 +154,8 @@ class AwqGEMVFastLinear(AWQuantLinear):
                 self.bias = None
 
     def forward(self, x: torch.Tensor):
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
         if not awq_runtime_available():
             raise ModuleNotFoundError("AWQ torch.ops kernels are not properly installed. Error: " + awq_runtime_error())
 

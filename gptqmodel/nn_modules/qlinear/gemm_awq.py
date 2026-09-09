@@ -11,7 +11,7 @@ from torch import nn
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, empty_linear_output, input_rows
 from ...quantization import FORMAT, METHOD
 from ...utils.awq import awq_dequantize_weights, awq_gemm_forward, awq_runtime_available, awq_runtime_error
 from ...utils.backend import BACKEND
@@ -40,21 +40,30 @@ class AwqGemmFn(torch.autograd.Function):
         prefer_backend=None,
         fp32_accum=FP32_ACCUM,
     ):
-        ctx.save_for_backward(x, qweight, qzeros, scales, bias)
+        # Input and bias values are not needed for the input-gradient backward;
+        # retain only input metadata and the quantized weight tensors.
+        ctx.save_for_backward(qweight, qzeros, scales)
+        ctx.input_shape = tuple(x.shape)
         ctx.out_features = out_features
 
         out_shape = x.shape[:-1] + (out_features,)
-        if x.shape[0] == 0:
-            return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
+        rows = input_rows(x)
+        ctx.input_rows = rows
+        if rows == 0:
+            # CUDA AWQ kernels do not accept M=0; preserve Linear's shape and
+            # autograd behavior without launching a native kernel.
+            return empty_linear_output(x, out_features)
 
-        # Above compute density threshold it is faster to just dequantize the whole thing and do simple matmul
-        FULL_DEQUANT_MATMUL_THRESHOLD = x.shape[0] * x.shape[1] > 1024
+        # Dense matmul is faster once the flattened row count is large enough.
+        FULL_DEQUANT_MATMUL_THRESHOLD = rows > 1024
+        # Native GEMM consumes [rows, features]; restore leading dimensions later.
+        x_2d = x.reshape(rows, x.shape[-1])
         if FULL_DEQUANT_MATMUL_THRESHOLD:
             out = awq_dequantize_weights(qweight, scales, qzeros, 0, 0, 0, False)
-            out = torch.matmul(x, out.to(dtype=x.dtype))
+            out = torch.matmul(x_2d, out.to(dtype=x.dtype))
         else:
             out = _awq_cuda_gemm_forward(
-                x.reshape(-1, x.shape[-1]),
+                x_2d,
                 qweight,
                 scales,
                 qzeros,
@@ -64,24 +73,24 @@ class AwqGemmFn(torch.autograd.Function):
 
         out = out + bias if bias is not None else out
         out = out.reshape(out_shape)
-
-        if len(out.shape) == 2:
-            out = out.unsqueeze(0)
-
         return out
 
     @staticmethod
     def backward(ctx, grad_output):
-        input, qweight, qzeros, scales, bias = ctx.saved_tensors
-
-        weights = awq_dequantize_weights(
-            qweight, scales, qzeros, 1, 0, 0, False
-        ).to(grad_output.dtype)
+        qweight, qzeros, scales = ctx.saved_tensors
 
         grad_input = None
         if ctx.needs_input_grad[0]:
-            batch_size = grad_output.shape[0]
-            grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
+            if ctx.input_rows == 0:
+                grad_input = grad_output.new_empty(ctx.input_shape)
+                return grad_input, None, None, None, None, None, None, None, None, None
+            weights = awq_dequantize_weights(
+                qweight, scales, qzeros, 1, 0, 0, False
+            ).to(grad_output.dtype)
+            # Mirror forward's flatten/restore so backward supports every rank.
+            grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])
+            grad_input = torch.matmul(grad_output_2d, weights.transpose(-1, -2))
+            grad_input = grad_input.reshape(ctx.input_shape)
 
         return grad_input, None, None, None, None, None, None, None, None, None
 
@@ -167,11 +176,21 @@ class AwqGEMMLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
 
+        # The extension dereferences these pointers directly; fail early with
+        # a useful message instead of reporting an opaque CUDA device error.
+        for name in ("qweight", "qzeros", "scales"):
+            tensor = getattr(self, name, None)
+            if tensor is not None and tensor.device != x.device:
+                raise RuntimeError(
+                    f"AWQ GEMM input and {name} must be on the same device: "
+                    f"input={x.device}, {name}={tensor.device}"
+                )
+
         input_dtype = x.dtype
         compute_dtype = input_dtype if input_dtype in (torch.float16, torch.bfloat16) else torch.float16
         if input_dtype != compute_dtype:
             x = x.to(compute_dtype)
-        elif not x.is_contiguous():
+        if not x.is_contiguous():
             x = x.contiguous()
 
         self._ensure_runtime_dtype(compute_dtype)

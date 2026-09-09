@@ -147,8 +147,8 @@ class ExllamaV2Linear(GPTQQuantLinear):
     def forward(self, x: torch.Tensor, force_cuda=False):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
-        if x.shape[0] == 0:
-            return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
 
         x_dtype = x.dtype
         if x_dtype != torch.float16:

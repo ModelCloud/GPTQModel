@@ -281,6 +281,10 @@ class ParoLinear(AwqTorchLinear):
     def forward(self, x: torch.Tensor):
         """Rotate inputs, run quantized matmul, then apply adapters in input space."""
         original_shape = x.shape[:-1] + (self.out_features,)
+        if self.input_rows(x) == 0:
+            # Rotation and AWQ GEMM both require a positive row count; keep the
+            # empty batch on the shared shape-preserving path instead.
+            return self.empty_linear_output(x)
         x_flat = x.reshape(-1, x.shape[-1])
         rotated = self._rotate_inputs(x_flat)
 

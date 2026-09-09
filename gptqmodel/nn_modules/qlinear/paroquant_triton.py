@@ -190,6 +190,9 @@ class ParoQuantTritonLinear(ParoLinear):
     def forward(self, x: torch.Tensor):
         """Rotate inputs, pick a Triton plan, and preserve adapter semantics."""
         original_shape = x.shape[:-1] + (self.out_features,)
+        if self.input_rows(x) == 0:
+            # Do not autotune or launch Triton plans for a zero-row matrix.
+            return self.empty_linear_output(x)
         adapter_input = x.reshape(-1, x.shape[-1])
         x_flat = x.reshape(-1, x.shape[-1])
         rotated = self._rotate_inputs(x_flat)

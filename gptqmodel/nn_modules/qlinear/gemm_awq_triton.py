@@ -10,7 +10,7 @@ import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
-from ...nn_modules.qlinear import AWQuantLinear
+from ...nn_modules.qlinear import AWQuantLinear, empty_linear_output, input_rows
 from ...quantization import FORMAT, METHOD
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
@@ -36,24 +36,33 @@ class AwqGemmTritonFn(torch.autograd.Function):
         out_features=0,
         prefer_backend=None,
     ):
-        from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
-
-        ctx.save_for_backward(x, qweight, qzeros, scales, bias)
+        # Only quantized weights and input metadata are needed for the
+        # input-gradient backward; input and bias values are not retained.
+        ctx.save_for_backward(qweight, qzeros, scales)
+        ctx.input_shape = tuple(x.shape)
         ctx.out_features = out_features
 
         out_shape = x.shape[:-1] + (out_features,)
         x = x.to(torch.float16)
-        if x.shape[0] == 0:
-            return torch.zeros(out_shape, dtype=x.dtype, device=x.device)
+        rows = input_rows(x)
+        ctx.input_rows = rows
+        if rows == 0:
+            # Triton also requires a positive M dimension, so use the shared
+            # empty path and avoid compiling/launching a zero-row kernel.
+            return empty_linear_output(x, out_features)
 
-        # Above compute density threshold it is faster to just dequantize the whole thing and do simple matmul
-        FULL_DEQUANT_MATMUL_THRESHOLD = x.shape[0] * x.shape[1] > 128
+        from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
+
+        # Dense matmul is faster once the flattened row count is large enough.
+        FULL_DEQUANT_MATMUL_THRESHOLD = rows > 128
+        # Triton consumes [rows, features]; restore leading dimensions later.
+        x_2d = x.reshape(rows, x.shape[-1])
         if FULL_DEQUANT_MATMUL_THRESHOLD:
             out = awq_dequantize_triton(qweight, scales, qzeros)
-            out = torch.matmul(x, out.to(x.dtype))
+            out = torch.matmul(x_2d, out.to(x.dtype))
         else:
             out = awq_gemm_triton(
-                x.reshape(-1, x.shape[-1]),
+                x_2d,
                 qweight,
                 scales,
                 qzeros,
@@ -64,23 +73,24 @@ class AwqGemmTritonFn(torch.autograd.Function):
 
         out = out + bias if bias is not None else out
         out = out.reshape(out_shape)
-        if len(out.shape) == 2:
-            out = out.unsqueeze(0)
         return out
 
     @staticmethod
     def backward(ctx, grad_output):
-        from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton
-
-
-        input, qweight, qzeros, scales, bias = ctx.saved_tensors
-
-        weights = awq_dequantize_triton(qweight, scales, qzeros).to(grad_output.dtype)
+        qweight, qzeros, scales = ctx.saved_tensors
 
         grad_input = None
         if ctx.needs_input_grad[0]:
-            batch_size = grad_output.shape[0]
-            grad_input = grad_output.bmm(weights.transpose(0, 1).unsqueeze(0).repeat(batch_size, 1, 1))
+            if ctx.input_rows == 0:
+                grad_input = grad_output.new_empty(ctx.input_shape)
+                return grad_input, None, None, None, None, None, None, None, None
+            from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton
+
+            weights = awq_dequantize_triton(qweight, scales, qzeros).to(grad_output.dtype)
+            # Mirror forward's flatten/restore so backward supports every rank.
+            grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])
+            grad_input = torch.matmul(grad_output_2d, weights.transpose(-1, -2))
+            grad_input = grad_input.reshape(ctx.input_shape)
 
         return grad_input, None, None, None, None, None, None, None, None
 
@@ -162,11 +172,31 @@ class AwqGEMMTritonLinear(AWQuantLinear):
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
 
+        # Quantized tensors are passed as raw device pointers to Triton; do
+        # this check before entering its device context.
+        for name in ("qweight", "qzeros", "scales"):
+            tensor = getattr(self, name, None)
+            if tensor is not None and tensor.device != x.device:
+                raise RuntimeError(
+                    f"AWQ Triton input and {name} must be on the same device: "
+                    f"input={x.device}, {name}={tensor.device}"
+                )
+
         input_dtype = x.dtype
         if input_dtype != torch.float16:
             x = x.half()
+        if not x.is_contiguous():
+            x = x.contiguous()
 
-        with torch.xpu.device(self.qweight.device) if HAS_XPU else torch.cuda.device(self.qweight.device):
+        # Select from x.device instead of whichever accelerator is globally available.
+        device_context = (
+            torch.xpu.device(x.device)
+            if x.device.type == "xpu" and HAS_XPU
+            else torch.cuda.device(x.device)
+            if x.device.type == "cuda"
+            else nullcontext()
+        )
+        with device_context:
             with nullcontext() if self.training else torch.inference_mode():
                 out = AwqGemmTritonFn.apply(
                     x,

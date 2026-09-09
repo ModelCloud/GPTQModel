@@ -282,8 +282,8 @@ class MacheteLinear(GPTQQuantLinear):
         return buf
 
     def forward(self, x: torch.Tensor):
-        if x.shape[0] == 0:
-            return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
 
         input_2d = x.reshape(-1, x.shape[-1])
 
