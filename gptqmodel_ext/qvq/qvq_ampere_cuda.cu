@@ -4509,25 +4509,12 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   const bool use_flash_next_qkv_wmma_split4_shape =
       use_flash_next_qkv_shape && params.split_count[0] == 4 &&
       params.split_count[1] == 4 && params.split_count[2] == 4;
-  const bool use_flash_next_qkv_wide_m16 =
-      use_flash_next_qkv_wmma_split4_shape && size_m == kRows;
   const bool use_flash_next_qkv_static_shape =
       (use_flash_next_qkv_wmma_shape || use_flash_next_qkv_wmma_split4_shape) &&
       (size_m == 8 || size_m == kRows);
   const bool use_flash_next_qkv_scalar_shape =
       use_flash_next_qkv_shape && use_flash_next_qkv_wmma_shape &&
       (size_m == 1 || size_m == 2 || size_m == 4);
-  if (use_flash_next_qkv_wide_m16) {
-    // M=16 QKV is the only Flash-Next QKV case with the measured four-way
-    // K split. Two N16 tiles per warp halves the CTA count without changing
-    // the per-tile decode or the increasing-split reduction order.
-    active_wmma_blocks = 0;
-    for (int segment = 0; segment < segment_count; ++segment) {
-      active_wmma_blocks +=
-          ((params.n_tiles[segment] + 2 * kTilesPerBlock - 1) /
-           (2 * kTilesPerBlock)) * params.split_count[segment];
-    }
-  }
   const bool use_flash_next_gate_up_shape =
       TransitionBits == 6 && segment_count == 2 &&
       params.n_tiles[0] == 40 && params.n_tiles[1] == 40;
@@ -4704,8 +4691,11 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   } else {
     const dim3 grid(static_cast<unsigned>(active_wmma_blocks), 1, 1);
     if (use_flash_next_qkv_wmma_split4_shape && size_m == kRows) {
+      // M=16 is register-bound on SM80.  Keep one N16 tile per warp here;
+      // the two-tile variant cuts CTA count but loses more throughput to
+      // occupancy than it saves in launch/coordination work.
       p32_window_ampere_grouped_flash_next_qkv_static_kernel<
-          TransitionBits, 16, 5, 4, true, true><<<grid, kThreads, 0, stream>>>(
+          TransitionBits, 16, 5, 4, true, false><<<grid, kThreads, 0, stream>>>(
           input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
           partial_output_ptr, output_ptr);
     } else if (use_flash_next_qkv_static_shape && size_m == 8) {
