@@ -142,6 +142,7 @@ def prepare(args):
         "targets": TARGETS, "candidate_count": args.candidates, "steps": args.steps,
         "gsq_enabled": args.gsq,
         "gsq_lifecycle": args.gsq_lifecycle,
+        "compare_deterministic": args.compare_deterministic,
         "target_bits": args.target_bits,
         "train_tokens": sum(len(r["input_ids"]) for r in train),
         "heldout_tokens": sum(len(r["input_ids"]) for r in heldout),
@@ -217,6 +218,8 @@ def execute(args):
         raise ValueError("Execution GSQ control differs from prepared contract; prepare a new run")
     if provenance.get("gsq_lifecycle", False) != args.gsq_lifecycle:
         raise ValueError("Execution GSQ lifecycle differs from prepared contract")
+    if provenance.get("compare_deterministic", False) != args.compare_deterministic:
+        raise ValueError("Execution deterministic comparison differs from prepared contract")
     if provenance.get("target_bits") != args.target_bits:
         raise ValueError("Execution rate differs from prepared contract")
     cfg = json.loads((args.output / "quantize_config.json").read_text())
