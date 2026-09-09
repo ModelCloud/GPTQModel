@@ -14,6 +14,8 @@
 #include <stdio.h>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAException.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "gemv_cuda.h"
 #define VECTORIZE_FACTOR 8
 #define Q_VECTORIZE_FACTOR 8
@@ -207,8 +209,57 @@ torch::Tensor gemv_forward_cuda(
     torch::Tensor _zeros,
     int group_size)
 {
+    // Validate the ABI before converting tensors to raw pointers. This turns
+    // malformed layouts or cross-device buffers into actionable Python errors.
+    TORCH_CHECK(_in_feats.is_cuda(), "AWQ GEMV expects CUDA input activations.");
+    TORCH_CHECK(_kernel.is_cuda() && _scaling_factors.is_cuda() && _zeros.is_cuda(),
+                "AWQ GEMV expects all tensors on CUDA.");
+    TORCH_CHECK(_in_feats.dim() == 2, "AWQ GEMV expects 2D input activations.");
+    TORCH_CHECK(_kernel.dim() == 2 && _scaling_factors.dim() == 2 && _zeros.dim() == 2,
+                "AWQ GEMV expects 2D weights, scales, and zero-points.");
+    TORCH_CHECK(_in_feats.is_contiguous() && _kernel.is_contiguous() &&
+                    _scaling_factors.is_contiguous() && _zeros.is_contiguous(),
+                "AWQ GEMV expects contiguous input, weights, scales, and zero-points.");
+    TORCH_CHECK(_in_feats.scalar_type() == at::kHalf,
+                "AWQ GEMV only supports float16 activations.");
+    TORCH_CHECK(_scaling_factors.scalar_type() == at::kHalf,
+                "AWQ GEMV only supports float16 scales.");
+    TORCH_CHECK(_kernel.scalar_type() == at::kInt && _zeros.scalar_type() == at::kInt,
+                "AWQ GEMV packed weights and zero-points must be int32.");
+    TORCH_CHECK(_in_feats.device() == _kernel.device() &&
+                    _in_feats.device() == _scaling_factors.device() &&
+                    _in_feats.device() == _zeros.device(),
+                "AWQ GEMV tensors must be on the same CUDA device.");
+    TORCH_CHECK(group_size == 64 || group_size == 128,
+                "AWQ GEMV supports group_size 64 or 128.");
+
     int num_in_feats = _in_feats.size(0);
     int num_in_channels = _in_feats.size(1);
+    TORCH_CHECK(num_in_feats > 0, "AWQ GEMV does not support zero-row launches.");
+    int num_out_channels = _kernel.size(0);
+    TORCH_CHECK(num_in_channels > 0 && num_in_channels % 8 == 0,
+                "AWQ GEMV input channels must be a positive multiple of 8.");
+    TORCH_CHECK(num_in_channels % group_size == 0,
+                "AWQ GEMV input channels must be divisible by group_size.");
+    TORCH_CHECK(num_out_channels > 0 && num_out_channels % 4 == 0,
+                "AWQ GEMV output channels must be a positive multiple of 4.");
+    TORCH_CHECK(_kernel.size(1) == num_in_channels / 8,
+                "AWQ GEMV packed weight shape does not match input channels.");
+    const int num_groups = num_in_channels / group_size;
+    const int group_alignment = group_size == 64 ? 2 : 1;
+    const int packed_groups_unaligned = (num_groups + PACK_FACTOR - 1) / PACK_FACTOR;
+    const int packed_groups = (packed_groups_unaligned + group_alignment - 1) /
+                              group_alignment * group_alignment;
+    TORCH_CHECK(_zeros.size(0) == num_out_channels &&
+                    _zeros.size(1) == packed_groups,
+                "AWQ GEMV packed zero-point shape does not match input channels.");
+    TORCH_CHECK(_scaling_factors.size(0) == num_out_channels &&
+                    _scaling_factors.size(1) == packed_groups * PACK_FACTOR,
+                "AWQ GEMV scale shape does not match input channels.");
+
+    // Kernels must follow the input tensor's device, not the caller's current
+    // device (which may differ in multi-GPU inference).
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
     // int kernel_volume = _out_in_map.size(1);
     auto in_feats = reinterpret_cast<float4*>(_in_feats.data_ptr<at::Half>());
     auto kernel = reinterpret_cast<uint32_t*>(_kernel.data_ptr<int>());
@@ -220,7 +271,7 @@ torch::Tensor gemv_forward_cuda(
     // kernel is [OC, IC]
     at::Tensor _out_feats = torch::empty({num_in_feats, _kernel.size(0)}, options);
     int num_out_feats = _out_feats.size(-2);
-    int num_out_channels = _out_feats.size(-1);
+    num_out_channels = _out_feats.size(-1);
     auto out_feats = reinterpret_cast<half*>(_out_feats.data_ptr<at::Half>());
     int blockDim_z = num_out_feats;
     dim3 num_blocks(1, num_out_channels / 4, num_out_feats);
@@ -244,6 +295,6 @@ torch::Tensor gemv_forward_cuda(
         num_in_channels, num_out_channels
       );
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return _out_feats;
 ;}
-

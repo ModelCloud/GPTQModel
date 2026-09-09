@@ -1053,6 +1053,8 @@ class ParoQuantTritonLinear(ParoLinear):
     def forward(self, x: torch.Tensor):
         """Rotate inputs, pick a Triton plan, and preserve adapter semantics."""
         original_shape = x.shape[:-1] + (self.out_features,)
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
         # A warm compiled split-K launch consumes only the activation pointer and explicit M/K. Passing a
         # contiguous caller tensor directly avoids constructing the otherwise-identical two-dimensional view.
         rows = x.numel() // self.in_features if x.dim() >= 1 and x.shape[-1] == self.in_features else 0
