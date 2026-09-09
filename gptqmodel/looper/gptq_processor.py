@@ -1239,7 +1239,8 @@ class GPTQProcessor(LoopProcessor):
                         sample_keep_device = sample_keep.to(inp_tensor.device)
                         sample_inp = inp_tensor[sample_index : sample_index + 1, sample_keep_device, :].contiguous()
                         if out_tensor is not None and out_tensor.dim() >= 3 and out_tensor.shape[:2] == inp_tensor.shape[:2]:
-                            sample_out = out_tensor[sample_index : sample_index + 1, sample_keep_device, :].contiguous()
+                            output_keep = sample_keep.to(device=out_tensor.device)
+                            sample_out = out_tensor[sample_index : sample_index + 1, output_keep, :].contiguous()
                         else:
                             sample_out = out
                     observation = self._add_batch_with_shared_hessian(
