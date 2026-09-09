@@ -168,3 +168,24 @@ difference 229. This is an existing native-versus-Torch contract discrepancy,
 not a GSQ quality result. Since GSQ currently scores the Torch saturation
 contract, native QQQ support must remain unverified until this is resolved.
 The lease was released. Raw log: `/tmp/gsq-qqq-native.log`.
+
+## Native saturation root cause and proposed arithmetic correction
+
+`dequant_per_group` in `gptqmodel_ext/qqq/qqq_gemm.cu` uses half2 FMA with
+magic value 1152 (`0x6480`), then extracts low bytes and XORs 128. It does not
+clamp the resulting value. Thus +154 becomes -102; -160 becomes +64. The
+negative side also crosses the FP16 binade at 1024, changing rounding spacing.
+
+A proposed correction clamps the existing fused result to [1024,1279] before
+byte extraction (`0x6400`/`0x64ff` per half lane). This preserves the fused
+rounding order, avoiding a separate rounded half multiply. An exhaustive CPU
+arithmetic audit covers all 16 signed W4 codes and 31,743 positive finite FP16
+scale patterns (507,888 pairs, including subnormals). Float64 evaluates exact
+products/sums before the final half conversion. The proposed mapping agrees
+with round-to-even followed by INT8 saturation for every pair, and leaves the
+magic result unchanged for products within [-128,127]. Both audit tests pass
+(0.10 seconds), including reproduction of the known native endpoint outputs.
+
+This is a proposed kernel correction backed by exhaustive representation math;
+the CUDA source is not changed yet. Actual native tests, executed-instruction
+inspection, graph checks and matched correctness/timing remain required.
