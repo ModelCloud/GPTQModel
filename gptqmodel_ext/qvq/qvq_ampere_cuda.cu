@@ -1938,6 +1938,54 @@ void p32_window_ampere_grouped_flash_next_qkv_static_kernel(
   }
 }
 
+// Flash-Next gate/up has two equal 640-column children and a fixed K=2560,
+// split-40 plan.  The WMMA body is already fully static for this shape; use a
+// rectangular grid to provide the child, split, and N-block coordinates
+// directly instead of walking the grouped segment table in every CTA.
+template <int TransitionBits, bool FullRows, bool UpperRowsOnly = false>
+__global__ __launch_bounds__(kThreads)
+void p32_window_ampere_grouped_flash_next_gate_up_wmma_kernel(
+    const half* __restrict__ input,
+    const uint32_t* __restrict__ trellis,
+    const half* __restrict__ levels,
+    const uint8_t* __restrict__ bank_ids,
+    const __grid_constant__ GroupedP32LaunchParams params,
+    float* __restrict__ partial_output,
+    float* __restrict__ output,
+    int size_m) {
+  constexpr int kSegmentCount = 2;
+  constexpr int kSegmentTiles = 40;
+  constexpr int kSplitCount = 40;
+  constexpr int kTotalTiles = kSegmentCount * kSegmentTiles;
+  const int segment = static_cast<int>(blockIdx.z);
+  const int split = static_cast<int>(blockIdx.y);
+  const int n_block = static_cast<int>(blockIdx.x);
+  const int output_offset = segment * size_m * kSegmentTiles * kTileColumns;
+  const int64_t partial_offset = static_cast<int64_t>(segment) * kSplitCount *
+      size_m * kSegmentTiles * kTileColumns;
+  p32_window_ampere_kernel_body<
+      TransitionBits, FullRows, FullRows ? 0 : 8, 640, true, UpperRowsOnly,
+      2560, true, false, true, true, 4, kSplitCount>(
+      input,
+      trellis,
+      levels,
+      bank_ids,
+      partial_output,
+      output,
+      size_m,
+      2560,
+      kSegmentTiles * kTileColumns,
+      kSplitCount,
+      params.bank_alt_id[segment],
+      n_block,
+      split,
+      kTotalTiles,
+      segment * kSegmentTiles,
+      output_offset,
+      kSegmentTiles * kTileColumns,
+      partial_offset);
+}
+
 template <int TransitionBits, int Rows, int StageKTiles, int StaticN>
 __device__ __forceinline__ void
 p32_window_ampere_grouped_flash_next_qkv_scalar_segment(
@@ -4750,19 +4798,17 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
           partial_output_ptr, output_ptr, static_cast<int>(segment_count),
           size_m, size_k, total_n_tiles);
     } else if (use_flash_next_gate_up_wide && size_m == kRows) {
-      p32_window_ampere_grouped_wmma_kernel<
-          TransitionBits, true, 0, 640, true, false, 2560, false, false,
-          true, true, 4, 40><<<grid, kThreads, 0, stream>>>(
+      const dim3 gate_up_grid(5, 40, 2);
+      p32_window_ampere_grouped_flash_next_gate_up_wmma_kernel<
+          TransitionBits, true><<<gate_up_grid, kThreads, 0, stream>>>(
           input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
-          partial_output_ptr, output_ptr, static_cast<int>(segment_count),
-          size_m, size_k, total_n_tiles);
+          partial_output_ptr, output_ptr, size_m);
     } else if (use_flash_next_gate_up_wide && size_m == 8) {
-      p32_window_ampere_grouped_wmma_kernel<
-          TransitionBits, false, 8, 640, true, true, 2560, false, false,
-          true, true, 4, 40><<<grid, kThreads, 0, stream>>>(
+      const dim3 gate_up_grid(5, 40, 2);
+      p32_window_ampere_grouped_flash_next_gate_up_wmma_kernel<
+          TransitionBits, false, true><<<gate_up_grid, kThreads, 0, stream>>>(
           input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
-          partial_output_ptr, output_ptr, static_cast<int>(segment_count),
-          size_m, size_k, total_n_tiles);
+          partial_output_ptr, output_ptr, size_m);
     } else if (size_m == kRows) {
       p32_window_ampere_grouped_wmma_kernel<TransitionBits, true>
           <<<grid, kThreads, 0, stream>>>(
