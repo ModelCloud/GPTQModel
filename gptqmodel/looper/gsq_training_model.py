@@ -6,6 +6,35 @@ from .gsq_training_capture import capture_llama_gsq_inputs, quantize_llama_gsq_c
 from ..quantization.gsq_training_config import GSQTrainingConfig
 
 
+def staged_documents_from_prepared(prepared):
+    """Convert standard prepared token batches into unpadded staged documents.
+
+    Only contiguous valid spans are accepted: dropping holes would change token
+    positions and attention semantics. Token weighting and other metadata need
+    explicit staged support rather than being silently discarded here.
+    """
+    documents = []
+    for batch in prepared:
+        if set(batch)-{'input_ids', 'attention_mask'}:
+            raise ValueError('Unsupported prepared calibration metadata for staged GSQ')
+        ids = batch.get('input_ids')
+        if (not isinstance(ids, torch.Tensor) or ids.ndim != 2
+                or ids.dtype not in (torch.int32, torch.int64)):
+            raise ValueError('Staged GSQ requires prepared rank-2 integer token IDs')
+        mask = batch.get('attention_mask', torch.ones_like(ids))
+        if (not isinstance(mask, torch.Tensor) or mask.shape != ids.shape
+                or not ((mask == 0) | (mask == 1)).all()):
+            raise ValueError('Staged GSQ requires an aligned binary padding mask')
+        for row, keep in zip(ids.cpu(), mask.cpu().bool()):
+            indices = keep.nonzero().flatten()
+            if not len(indices) or int(indices[-1]-indices[0]+1) != len(indices):
+                raise ValueError('Staged GSQ requires a nonempty contiguous valid token span')
+            documents.append({'input_ids': row[keep].tolist()})
+    if not documents:
+        raise ValueError('Staged GSQ requires nonempty prepared calibration')
+    return documents
+
+
 def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, layer_indices=None):
     """Quantize selected Llama blocks in place and replay the packed prefix.
 
@@ -80,23 +109,16 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     return run
 
 
-def save_llama_gsq_model(model, run, output, *, tokenizer, source_model):
-    """Convert a complete staged model to FP16 and use the public GPTQ writer.
+def prepare_llama_gsq_export(model, run):
+    """Finalize a complete staged model without creating a wrapper or writing files.
 
-    Saving is explicit because it changes the floating runtime tensors to FP16.
-    Partial-layer runs require a dynamic checkpoint configuration and are not
-    handled by this uniform-format exporter.
+    Returns its matching quantization configuration. A public lifecycle caller
+    can retain its existing wrapper and install this configuration only after
+    successful preparation. This converts floating runtime tensors to FP16.
     """
-    import json
-    from pathlib import Path
-
-    from ..models.definitions.llama import LlamaQModel
     from ..nn_modules.qlinear.torch import TorchLinear
     from ..quantization.config import FORMAT, GPTQConfig
 
-    output, source_model = Path(output), Path(source_model)
-    if output.exists() or not source_model.is_dir():
-        raise ValueError('Staged export requires a fresh destination and existing dense source directory')
     if (run['state'] != 'complete' or run['layer_indices'] != list(range(len(model.model.layers)))
             or not any(record is run for record in getattr(model, 'gsq_training_runs', []))):
         raise ValueError('Uniform staged export requires this model’s completed all-layer run')
@@ -120,6 +142,37 @@ def save_llama_gsq_model(model, run, output, *, tokenizer, source_model):
     # constructing directly on CUDA can differ by FP32 ulps in pow/division.
     model.model.rotary_emb = LlamaRotaryEmbedding(
         model.config, device='cpu').to(model.model.embed_tokens.weight.device).eval()
+    return qcfg
+
+
+def finalize_llama_gsq_wrapper(wrapper, run):
+    """Install completed staged export state on the caller's existing wrapper.
+
+    The prepared configuration describes the actual uniform packed format;
+    caller-owned model path and tokenizer identities remain on the wrapper.
+    """
+    from ..nn_modules.qlinear.torch import TorchLinear
+
+    config = prepare_llama_gsq_export(wrapper.model, run)
+    wrapper.quantize_config = config
+    wrapper.qlinear_kernel = TorchLinear
+    wrapper.quantized = True
+    wrapper.gsq_training_run = run
+    return wrapper
+
+
+def save_llama_gsq_model(model, run, output, *, tokenizer, source_model):
+    """Finalize a complete staged model and save through the public GPTQ writer."""
+    import json
+    from pathlib import Path
+
+    from ..models.definitions.llama import LlamaQModel
+    from ..nn_modules.qlinear.torch import TorchLinear
+
+    output, source_model = Path(output), Path(source_model)
+    if output.exists() or not source_model.is_dir():
+        raise ValueError('Staged export requires a fresh destination and existing dense source directory')
+    qcfg = prepare_llama_gsq_export(model, run)
     wrapper = LlamaQModel(model=model, quantized=True, quantize_config=qcfg, tokenizer=tokenizer,
                           qlinear_kernel=TorchLinear, model_local_path=str(source_model))
     wrapper.save(str(output))

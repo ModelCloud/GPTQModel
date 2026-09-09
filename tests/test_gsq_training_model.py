@@ -101,3 +101,37 @@ def test_staged_model_uses_public_checkpoint_writer_and_loader(tmp_path, initial
     with torch.no_grad():
         after = restored.model(tokens, use_cache=False).logits
     torch.testing.assert_close(after, before, rtol=0, atol=0)
+
+
+def test_staged_finalization_preserves_existing_wrapper(tmp_path):
+    from gptqmodel.models.definitions.llama import LlamaQModel
+    from gptqmodel.quantization import GPTQConfig, FORMAT
+    from gptqmodel.looper.gsq_training_model import quantize_llama_gsq_model, finalize_llama_gsq_wrapper
+
+    model, documents = fixture()
+    wrapper = LlamaQModel(model=model, quantized=False,
+                          quantize_config=GPTQConfig(bits=4, group_size=32),
+                          model_local_path=str(tmp_path))
+    run = quantize_llama_gsq_model(model, documents, bits=4, group_size=32)
+    assert finalize_llama_gsq_wrapper(wrapper, run) is wrapper
+    assert wrapper.model is model and wrapper.model_local_path == str(tmp_path)
+    assert wrapper.quantized and wrapper.qlinear_kernel is TorchLinear
+    assert wrapper.quantize_config.bits == 4 and wrapper.quantize_config.format == FORMAT.GPTQ_V2
+    assert wrapper.quantize_config.meta['gsq_training']['enabled'] is False
+    assert wrapper.gsq_training_run is run
+    assert torch.isfinite(wrapper.model(torch.tensor([[1, 2, 3]]), use_cache=False).logits).all()
+
+
+def test_staged_prepared_documents_preserve_order_and_remove_only_padding():
+    from gptqmodel.looper.gsq_training_model import staged_documents_from_prepared
+
+    batches = [{'input_ids': torch.tensor([[0, 1, 2], [3, 4, 0]]),
+                'attention_mask': torch.tensor([[0, 1, 1], [1, 1, 0]])},
+               {'input_ids': torch.tensor([[5, 6]])}]
+    assert staged_documents_from_prepared(batches) == [
+        {'input_ids': [1, 2]}, {'input_ids': [3, 4]}, {'input_ids': [5, 6]}]
+    batches[0]['attention_mask'][0] = torch.tensor([1, 0, 1])
+    with pytest.raises(ValueError, match='contiguous'):
+        staged_documents_from_prepared(batches)
+    with pytest.raises(ValueError, match='metadata'):
+        staged_documents_from_prepared([{'input_ids': torch.tensor([[1]]), 'weights': [2.]}])
