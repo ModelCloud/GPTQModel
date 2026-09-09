@@ -5642,8 +5642,13 @@ class AWQConfig(PreProcessorConfig):
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
         self.gsq = normalize_gsq_config(self.gsq)
-        if self.gsq is not None and self.gsq.enabled and self.format != FORMAT.GEMM:
-            raise ValueError("AWQConfig: enabled gsq currently requires GEMM packing")
+        if self.gsq is not None and self.gsq.enabled:
+            if self.format not in (FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+                raise ValueError("AWQConfig: enabled gsq requires GEMM, GEMV, GEMV_FAST or LLM_AWQ packing")
+            if self.bits != 4:
+                raise ValueError("AWQConfig: GSQ AWQ packing adapters currently require 4 bits")
+            if self.format != FORMAT.GEMM and self.group_size not in (-1, 32, 64, 128):
+                raise ValueError("AWQConfig: GSQ GEMV adapters require group_size -1, 32, 64 or 128")
         value = self.scale_search_refine_steps
         if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value == 1:
             raise ValueError(
@@ -7046,8 +7051,13 @@ class RTNConfig(PreProcessorConfig):
     def __post_init__(self):
         super().__post_init__()
         self.gsq = normalize_gsq_config(self.gsq)
-        if self.gsq is not None and self.gsq.enabled and self.format not in GPTQ_EXPORT_FORMATS:
-            raise ValueError("RTNConfig: enabled gsq currently requires a GPTQ export format")
+        if self.gsq is not None and self.gsq.enabled:
+            if self.format not in (*GPTQ_EXPORT_FORMATS, FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+                raise ValueError("RTNConfig: enabled gsq requires GPTQ or supported AWQ export packing")
+            if self.format in (FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ) and self.bits != 4:
+                raise ValueError("RTNConfig: GSQ AWQ packing adapters currently require 4 bits")
+            if self.format in (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ) and self.group_size not in (-1, 32, 64, 128):
+                raise ValueError("RTNConfig: GSQ GEMV adapters require group_size -1, 32, 64 or 128")
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["sym"] = self.sym

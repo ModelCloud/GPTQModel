@@ -13,7 +13,7 @@ from ...nn_modules.qlinear import AWQuantLinear, FormatSupport
 from ...quantization import FORMAT, METHOD
 from ...utils.awq import awq_gemmv2_forward, awq_gemv_forward
 from ...utils.backend import BACKEND
-from ...utils.gemv import calculate_zeros_width
+from ...utils.gemv import awq_gemv_codes, calculate_zeros_width, dequantize_awq_gemv
 from ...utils.logger import setup_logger
 
 
@@ -160,7 +160,6 @@ class AwqGEMVLinear(AWQuantLinear):
     ):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
-        scale_zeros = zeros * scales
 
         pack_num = 32 // self.bits
         qscales = torch.zeros(
@@ -178,16 +177,8 @@ class AwqGEMVLinear(AWQuantLinear):
         else:
             self.bias = None
 
-        intweight = []
-        for idx in range(self.in_features):
-            intweight.append(
-                torch.round(
-                    (linear.weight.data[:, idx] + scale_zeros[:, idx // self.group_size])
-                    / self.scales[:, idx // self.group_size]
-                ).to(torch.int)[:, None]
-            )
-        intweight = torch.cat(intweight, dim=1)
-        intweight = intweight.to(dtype=torch.int32)
+        groups = torch.arange(self.in_features, device=scales.device) // self.group_size
+        intweight = awq_gemv_codes(linear.weight.data, scales, zeros, groups).to(torch.int32)
         qweight = torch.zeros(
             (intweight.shape[0], intweight.shape[1] // 32 * self.bits),
             dtype=torch.int32,
@@ -222,6 +213,10 @@ class AwqGEMVLinear(AWQuantLinear):
                 qzero_col = zeros[:, col * pack_num + order_map[i]]
                 qzeros[:, col] |= qzero_col << (i * self.bits)
         self.register_buffer("qzeros", qzeros)
+
+    def dequantize_weight(self, num_itr: int = 1) -> torch.Tensor:
+        return dequantize_awq_gemv(self.qweight, self.scales, self.qzeros, group_size=self.group_size,
+                                   in_features=self.in_features, out_features=self.out_features)
 
     def extra_repr(self) -> str:
         return (

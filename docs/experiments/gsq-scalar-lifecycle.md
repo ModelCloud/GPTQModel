@@ -18,12 +18,12 @@ candidate adapter and calibration objective.
   using the returned `g_idx`, scales and zeros. Embedding metrics stay diagonal.
   GPTAQ/FOEM and mock quantization currently reject enabled GSQ pending their
   own objective adapters.
-- AWQ GEMM snapshots scaled dense weights before clipping. GSQ runs after AWQ
+- AWQ GEMM/GEMV/GEMV_FAST/LLM-AWQ snapshot scaled dense weights before clipping. GSQ runs after AWQ
   rounding and optional adjacent refinement, using the corresponding scaled
   activations. It runs before EoRA residual capture and packing. A fallback
   without activations explicitly uses weight MSE.
-- RTN uses weight reconstruction without manufacturing calibration data. Its
-  current adapter is limited to GPTQ exports.
+- RTN uses weight reconstruction without manufacturing calibration data. It
+  supports GPTQ exports and the same four AWQ storage adapters.
 
 Scalar candidates are legal affine integer codes, with fixed zero-points and
 group ownership. The grid uses all codes when the candidate budget allows it,
@@ -67,7 +67,8 @@ that scope open; a missing adapter does not establish mathematical incompatibili
 | QVQ P32 and ordinary W4–W8 | Published draft PR has all-rate GPU checks and real F6/seed7 W2.5/W4/W8 measurements; no gain in those lifecycle runs |
 | GPTQ | Real F6/seed7 W4 QKV, config/packed reload and Torch GPU layer checks pass; other rates/backends and complete-model exports pending |
 | AWQ GEMM | Preclip teacher hook and actual CPU packer checks implemented; full scale-search lifecycle, real-model and native backend validation pending |
-| AWQ GEMV/GEMV_FAST/Marlin/BitBLAS | Audit separate packers, stored scales and code conventions; currently rejected by enabled AWQ GSQ config |
+| AWQ GEMV/GEMV_FAST/LLM-AWQ | Format-specific scalar adapters, CPU packed-objective and native GPU fixture checks pass; real-model scale-search and propagation validation pending |
+| AWQ Marlin/BitBLAS | Separate packing/storage audit and adapters pending; currently rejected by enabled AWQ GSQ config |
 | RTN | Real F6/seed7 W4 QKV and Torch GPU reload checks pass with mixed quality effects; remaining formats/backends and complete-model exports pending |
 | GPTAQ/FOEM | Preserve asymmetric/first-order targets rather than substitute ordinary GPTQ reconstruction; currently rejected |
 | QQQ | Audit W4A8 deployed activation and multi-scale contract before reusing scalar assignments |
@@ -165,12 +166,69 @@ at `dfdd1564f` identifies these distinct contracts:
   `-round_fp16(stored_scale * zero)`. Its canonical decoded operator is
   `stored_scale * code + stored_offset`; for asymmetric zeros it can differ
   from `stored_scale * (code - zero)`. The LLM-AWQ subclass shares this packer.
-- Both GEMV packers currently convert rounded weights to integers without a
-  saturation step. A new GSQ adapter must not assume that clamping in its scorer
-  describes those packers for every input. Endpoint/tiny-scale tests and either
-  proven representability or a packing fix are required before enabling them.
+- At that revision, both GEMV packers converted rounded weights to integers
+  without saturation. The current integration shares their source-offset /
+  stored-FP16-scale inverse, clamps codes before integer conversion and rejects
+  invalid metadata, including FP16 scale underflow. Normal in-range codes remain
+  exact against the original per-column reference. Out-of-range codes now
+  saturate instead of corrupting neighboring packed bits.
 
 These are identified implementation requirements, not a claim that GEMV or
 GEMV_FAST is mathematically incompatible with GSQ. In particular, learned
 scales must be scored after both the returned source dtype and the packer's
 storage dtype conversions, including the separately stored fast-path offset.
+
+The new adapters implement those requirements. `AWQConfig.gsq` and
+`RTNConfig.gsq` accept GEMM, GEMV, GEMV_FAST and LLM-AWQ exports at W4. GEMV-family
+group sizes are -1, 32, 64 and 128. Group size 16 remains rejected for enabled
+GSQ because the existing GEMV storage-width helper does not implement it.
+Marlin and BitBLAS AWQ still require their own adapters. These exclusions are
+open implementation work, not blanket mathematical incompatibility claims.
+
+GEMV and GEMV_FAST also now override the inherited GEMM-layout dequantizer.
+Their reference decoders return [in,out] weights with integer zeros for GEMV
+and stored additive offsets for GEMV_FAST/LLM-AWQ. Native FP16 reconstruction
+and canonical FP32 reconstruction are checked separately. This makes
+post-pack error measurement use the actual saved layout.
+
+The native fixture uses a 128x256 projection, group size 128, asymmetric W4,
+GSQ scale learning, and exact packed save/reload. All six native cases pass
+the unchanged mean <= 0.002 and max <= 0.046875 gates:
+
+| Backend | Input tokens | Mean absolute error | Maximum absolute error |
+|---|---:|---:|---:|
+| GEMV | 1 | 0.000083676 | 0.000706434 |
+| GEMV_FAST | 1 | 0.000187241 | 0.000849247 |
+| LLM-AWQ | 1 | 0.000187241 | 0.000849247 |
+| GEMV | 16 | 0.000212935 | 0.001420975 |
+| GEMV_FAST | 16 | 0.000220199 | 0.001721859 |
+| LLM-AWQ | 16 | 0.000220199 | 0.001721859 |
+
+These are synthetic native-kernel correctness fixtures, not real-model quality
+measurements. They ran on the same exclusively leased physical GPU 0 / SM80
+device described above. There is no new kernel or inference-format payload.
+The CPU suite additionally checks all three source dtypes, all four supported
+group sizes, source/storage casting of improving hard checkpoints, both public
+AWQ and RTN hooks, and malformed/tiny-scale/endpoint cases.
+
+Final CPU checks pass 141 cases with six CUDA-only skips. The six native cases
+then pass separately after pack/save/reload. Coverage is 100% of the two measured
+helpers (205 statements and 92 branches), not whole-lifecycle coverage. Raw
+[coverage](../../artifacts/gsq-scalar/gemv-validation/coverage.json) and
+[native log](../../artifacts/gsq-scalar/gemv-validation/native.log) preserve this scope.
+
+The real-input regression audit also exposed a pre-existing local-grid optimizer
+issue: FP16 AWQ codes left logits and Adam state in FP16, where the optimizer
+epsilon underflows. Packing retains its original arithmetic; candidate codes
+are now converted to FP32 before optimization. The 16-case audit uses an 8x64
+real block-0 K slice and 128 actual calibration rows. Twelve GPTQ/full-grid AWQ
+histories and output tensor sets exactly match commit `22d98963a`; the four
+local-grid AWQ cases intentionally change optimizer precision. Both old FP16
+cases failed with a non-finite objective; all four corrected cases finish with
+finite histories and retain the best hard checkpoint including baseline.
+BF16 local-grid trajectories also change. This is correctness evidence, not a
+new model-quality claim. See the [audit report](../../artifacts/gsq-scalar/gemv-validation/prior-path-regression-v3.json)
+and `scripts/validate_gsq_scalar_compatibility.py` for reproduction.
+
+Real AWQ scale-search, scaled-normalization propagation and complete-model
+export validation remain open, along with the remaining adapters in the inventory.

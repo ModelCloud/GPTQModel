@@ -2780,8 +2780,10 @@ class AWQProcessor(LoopProcessor):
                 groups = torch.arange(wq.shape[1], device=wq.device, dtype=torch.int32) // group_size
                 fitted = refine_affine_scalar(
                     wq, scales, zeros, groups, target=teacher, bits=int(self.qcfg.bits), config=gsq,
-                    inputs=gsq_inputs, packing="awq_gemm",
-                    scale_dtype=scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16,
+                    inputs=gsq_inputs, packing={FORMAT.GEMM: "awq_gemm", FORMAT.GEMV: "awq_gemv",
+                                               FORMAT.GEMV_FAST: "awq_gemv_fast", FORMAT.LLM_AWQ: "awq_gemv_fast"}[self.qcfg.format],
+                    scale_dtype=(scales.dtype if self.qcfg.format == FORMAT.GEMM and
+                                 scales.dtype in (torch.float16, torch.bfloat16) else torch.float16),
                 )
                 wq, scales, zeros = fitted.weight, fitted.scales, fitted.zeros
                 named_module.state["gsq_diagnostics"] = {

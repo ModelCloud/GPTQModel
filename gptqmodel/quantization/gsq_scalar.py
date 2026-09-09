@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import pcre
 import torch
 
+from ..utils.gemv import awq_gemv_codes
 from .config import normalize_gsq_config
 
 
@@ -42,8 +43,12 @@ def affine_codes(weight, scales, zeros, g_idx, bits, *, packing, scale_dtype=tor
         stored = scales.to(scale_dtype)[:, g_idx]
         offset = (zeros[:, g_idx] * stored).to(weight.dtype)
         values = (weight + offset) / stored
+    elif packing in ("awq_gemv", "awq_gemv_fast"):
+        if bits != 4 or scale_dtype != torch.float16:
+            raise ValueError("AWQ GEMV requires int4 codes and FP16 stored scales")
+        return awq_gemv_codes(weight, scales, zeros, g_idx)
     else:
-        raise ValueError("scalar GSQ packing must be gptq or awq_gemm")
+        raise ValueError("scalar GSQ packing must be gptq, awq_gemm, awq_gemv or awq_gemv_fast")
     return values.round().clamp(0, 2**bits - 1)
 
 
@@ -135,16 +140,33 @@ def refine_affine_scalar(
             error = project(matrix - teacher)
             return error.square().sum() / denominator
 
-        def exported(candidate_weight, candidate_scales):
-            codes = affine_codes(candidate_weight, candidate_scales, zero, groups, bits,
-                                 packing=packing, scale_dtype=scale_dtype)
+        gemv = packing in ("awq_gemv", "awq_gemv_fast")
+
+        def recover_codes(candidate_weight, candidate_scales):
+            source_scales = candidate_scales.to(scales.dtype) if gemv else candidate_scales
+            source_zeros = zero.to(zeros.dtype) if gemv else zero
+            values = affine_codes(candidate_weight, source_scales, source_zeros, groups, bits,
+                                  packing=packing, scale_dtype=scale_dtype)
+            # Packing arithmetic keeps its native dtype above. Optimization
+            # needs FP32: Adam's epsilon underflows in FP16 for local grids.
+            return values.float()
+
+        def decode(codes, candidate_scales):
             stored_scales = candidate_scales.to(scale_dtype).float()
             if not torch.isfinite(stored_scales).all() or (stored_scales <= 0).any():
                 raise ValueError("scalar GSQ scales are not finite positive in the checkpoint dtype")
+            if packing == "awq_gemv_fast":
+                offset = -(stored_scales * zero).half().float()
+                if not torch.isfinite(offset).all():
+                    raise ValueError("scalar GSQ GEMV_FAST offsets must be finite in FP16 storage")
+                return stored_scales[:, groups] * codes + offset[:, groups]
             return stored_scales[:, groups] * (codes - zero[:, groups])
 
-        base_codes = affine_codes(baseline, base_scales, zero, groups, bits,
-                                  packing=packing, scale_dtype=scale_dtype)
+        def exported(candidate_weight, candidate_scales):
+            source_scales = candidate_scales.to(scales.dtype) if gemv else candidate_scales
+            return decode(recover_codes(candidate_weight, source_scales), source_scales)
+
+        base_codes = recover_codes(baseline, base_scales)
         if count == 2**bits:
             codes = torch.arange(count, device=weight.device).float().expand(n, k, count)
             valid = torch.ones((n, k, count), device=weight.device, dtype=torch.bool)
@@ -187,7 +209,9 @@ def refine_affine_scalar(
                 selected = logits.masked_fill(~valid, -torch.inf).argmax(-1, keepdim=True)
                 hard_codes = codes.gather(-1, selected).squeeze(-1)
                 hard_scales = (base_scales * scale_delta.exp()).to(scale_dtype).float()
-                candidate = (hard_scales[:, groups] * (hard_codes - zero[:, groups])).to(weight.dtype)
+                if gemv:
+                    hard_scales = hard_scales.to(scales.dtype)
+                candidate = decode(hard_codes, hard_scales).to(weight.dtype)
                 score = float(loss(exported(candidate, hard_scales)))
                 if not torch.isfinite(torch.tensor(score)):
                     raise ValueError("non-finite scalar GSQ hard objective")

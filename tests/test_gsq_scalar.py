@@ -23,6 +23,26 @@ def test_scalar_assignment_fit_on_grid(bits, packing):
     assert torch.equal(affine_codes(result.weight, result.scales, zero, groups, bits, packing=packing), target_codes)
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("learn_scales", [False, True])
+def test_awq_local_grid_optimizer_stays_finite(dtype, learn_scales):
+    scales = torch.full((2, 1), 0.125, dtype=dtype)
+    zeros = torch.full_like(scales, 7)
+    groups = torch.zeros(8, dtype=torch.int32)
+    weight = torch.full((2, 8), 0.125, dtype=dtype)
+    result = refine_affine_scalar(
+        weight, scales, zeros, groups, target=torch.full((2, 8), 0.2), bits=4,
+        packing="awq_gemm", scale_dtype=dtype,
+        config=GSQConfig(enabled=True, candidates=3, steps=100, seed=7, learn_scales=learn_scales),
+    )
+    assert torch.isfinite(torch.tensor(result.history)).all()
+    assert result.after <= result.before
+    codes = affine_codes(result.weight, result.scales, result.zeros, groups, 4,
+                         packing="awq_gemm", scale_dtype=dtype)
+    decoded = result.scales.float()[:, groups] * (codes.float() - result.zeros.float()[:, groups])
+    assert result.after == pytest.approx(float((decoded - 0.2).square().mean() / 0.2**2), rel=1e-5)
+
+
 def test_scalar_scale_learning_and_storage_guard():
     scale = torch.full((2, 1), 0.125)
     zeros, groups = torch.full_like(scale, 2), torch.zeros(8, dtype=torch.int32)

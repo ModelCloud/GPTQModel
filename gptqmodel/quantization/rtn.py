@@ -13,7 +13,7 @@ import transformers
 from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
-from .config import Fallback, FallbackStrategy, RTNConfig, SmoothMSE
+from .config import FORMAT, Fallback, FallbackStrategy, RTNConfig, SmoothMSE
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
 from .quantizer import HF_OPTIMUM, Quantizer
@@ -189,6 +189,8 @@ class RTN:
             fitted = refine_affine_scalar(
                 quantized.to(self.module.weight.dtype), scale, zero, g_idx,
                 target=weights[:, :valid_cols], bits=self.qcfg.bits, config=self.qcfg.gsq,
+                packing={FORMAT.GEMM: "awq_gemm", FORMAT.GEMV: "awq_gemv",
+                         FORMAT.GEMV_FAST: "awq_gemv_fast", FORMAT.LLM_AWQ: "awq_gemv_fast"}.get(self.qcfg.format, "gptq"),
             )
             quantized, scale, zero, g_idx = fitted.weight, fitted.scales, fitted.zeros, fitted.g_idx
             self.gsq_diagnostics = {
