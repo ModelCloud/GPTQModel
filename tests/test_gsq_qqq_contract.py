@@ -267,3 +267,42 @@ def test_qqq_effective_damping_roundtrip(damp_percent):
     assert restored.damp == config.damp
     assert restored.damp_percent == config.damp_percent == config.damp.min
     assert restored.damp_auto_increment == config.damp_auto_increment == config.damp.step
+
+
+@pytest.mark.parametrize("group_size", [-1, 128])
+@pytest.mark.parametrize("tokens", [1, 17])
+def test_gsq_qqq_native_reload_matches_torch(group_size, tokens):
+    import os
+    if not os.environ.get("GPU_ALLOCATOR_LEASE_ID"):
+        pytest.skip("requires an exclusive GPU lease")
+    from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
+    from gptqmodel.quantization.config import GSQConfig, QQQConfig
+    from gptqmodel.quantization.qqq import QQQ
+
+    rng = torch.Generator().manual_seed(7)
+    layer = torch.nn.Linear(256, 128, bias=False, dtype=torch.float16)
+    layer.weight.data.copy_(torch.randn(128, 256, generator=rng) * 0.03)
+    quantizer = QQQ(layer, QQQConfig(bits=4, group_size=group_size, desc_act=False,
+                                    gsq=GSQConfig(enabled=True, steps=10)))
+    quantizer.quantizer.configure(4, perchannel=True, sym=True, mse=False, groupsize=group_size)
+    calibration = torch.randn(320, 256, generator=rng).half()
+    quantizer.add_batch(calibration, None)
+    weight, scales, _, _, _, _, _, extra, _ = quantizer.quantize()
+    layer.weight.data.copy_(weight)
+    kwargs = dict(bits=4, group_size=group_size, sym=True, desc_act=False,
+                  in_features=256, out_features=128, bias=False)
+    reference = QQQTorchLinear(**kwargs)
+    reference.pack(layer, scales, extra)
+    native = QQQLinear(**kwargs)
+    native.load_state_dict(reference.state_dict(), strict=True)
+    native = native.cuda().eval()
+    native.post_init()
+    inputs = torch.randn(tokens, 256, generator=rng).half()
+    actual = native(inputs.cuda()).cpu().float()
+    expected = reference(inputs).float()
+    delta = (actual - expected).abs()
+    assert torch.isfinite(actual).all()
+    assert delta.mean() <= 0.002
+    assert delta.max() <= 0.046875
+    print("QQQ_GSQ_NATIVE", group_size, tokens, float(delta.mean()), float(delta.max()))
+    quantizer.free()
