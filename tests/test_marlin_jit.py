@@ -15,6 +15,7 @@ import gptqmodel.utils.marlin as marlin_utils
 from gptqmodel import extension as extension_api
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.utils import cpp as cpp_module
+from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 
 
@@ -324,10 +325,10 @@ def test_marlin_quant_linear_validation_limits_tile_padding_to_non_act_order(mon
     monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
     common = {
         "bits": 4,
-        "group_size": 32,
+        "group_size": 128,
         "sym": True,
         "in_features": 288,
-        "out_features": 200,
+        "out_features": 224,
         "pack_dtype": torch.int32,
         "dtype": torch.float16,
         "dynamic": None,
@@ -346,7 +347,7 @@ def test_marlin_quant_linear_validation_limits_tile_padding_to_non_act_order(mon
         **common, desc_act=True
     )
     assert ok is False
-    assert "activation-order" in str(err)
+    assert "K padding" in str(err)
 
     channelwise = dict(common, group_size=-1)
     ok, err = marlin_qlinear_module.MarlinLinear._validate(
@@ -362,15 +363,21 @@ def test_marlin_quant_linear_validation_limits_tile_padding_to_non_act_order(mon
     assert ok is True
     assert err is None
 
-    aligned = dict(common, in_features=64, out_features=128)
+    aligned = dict(common, in_features=256, out_features=128)
     ok, err = marlin_qlinear_module.MarlinLinear._validate(
         **aligned, desc_act=True
     )
     assert ok is True
     assert err is None
 
+    # Runtime tile padding does not remove GPTQ checkpoint alignment constraints.
+    invalid_checkpoint = dict(common, out_features=200)
+    ok, err = marlin_qlinear_module.MarlinLinear._validate(**invalid_checkpoint, desc_act=False)
+    assert ok is False
+    assert "out_features" in str(err) and "divisible" in str(err)
 
-def test_marlin_auto_selection_keeps_tile_padding_opt_in(monkeypatch):
+
+def test_marlin_checkpoint_alignment_and_runtime_padding(monkeypatch):
     monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
     kwargs = {
         "bits": 4,
@@ -378,19 +385,18 @@ def test_marlin_auto_selection_keeps_tile_padding_opt_in(monkeypatch):
         "desc_act": False,
         "sym": True,
         "in_features": 288,
-        "out_features": 200,
+        "out_features": 224,
         "bias": False,
         "dtype": torch.float16,
     }
 
-    with pytest.raises(NotImplementedError, match="request GPTQ_MARLIN explicitly"):
-        marlin_qlinear_module.MarlinLinear(**kwargs, backend=BACKEND.AUTO)
-
-    explicit = marlin_qlinear_module.MarlinLinear(
-        **kwargs, backend=BACKEND.GPTQ_MARLIN
-    )
-    assert explicit.in_features == 288
-    assert explicit.out_features == 200
+    for backend in (BACKEND.AUTO, BACKEND.GPTQ_MARLIN):
+        module = marlin_qlinear_module.MarlinLinear(**kwargs, backend=backend)
+        assert module.in_features == 288
+        assert module.out_features == 224
+        assert module.padded_out_features == 256
+        with pytest.raises(NotImplementedError, match="out_features.*divisible"):
+            marlin_qlinear_module.MarlinLinear(**dict(kwargs, out_features=200), backend=backend)
 
     aligned = marlin_qlinear_module.MarlinLinear(
         **dict(kwargs, in_features=128, out_features=64),

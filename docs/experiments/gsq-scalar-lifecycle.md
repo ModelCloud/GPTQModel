@@ -463,11 +463,18 @@ changed. The failed attempt/log remain local. The corrected run used a fresh
 report and lease. Reproduce with `scripts.validate_gsq_awq_marlin --run
 artifacts/gsq-scalar/awq-w4-seed7-v2 --output NEW_JSON` under the GPU allocator.
 
-The CPU command `pytest tests/test_marlin_jit.py -k 'pad or align'` records
-10 passed, three failed and 44 deselected. The padding helpers and AWQ
-post-init/forward fixtures pass. Two selector tests reference `BACKEND` without
-importing it; the GPTQ validation test expects a 200-column shape to be accepted,
-but the unchanged GPTQ Marlin validator rejects it. These are unresolved
-selector-test issues, not a green full-suite claim. No selector rule, test
-expectation or error gate was weakened. See the
-[raw CPU output](../../artifacts/gsq-scalar/awq-w4-seed7-v2/marlin-padding-cpu.txt).
+The initial CPU command `pytest tests/test_marlin_jit.py -k 'pad or align'`
+recorded 10 passed, three failed and 44 deselected; the
+[original failure output](../../artifacts/gsq-scalar/awq-w4-seed7-v2/marlin-padding-cpu.txt)
+is preserved. The follow-up fixes the missing `BACKEND` test import and corrects
+GPTQ fixtures to respect the existing 32-value checkpoint alignment. A valid
+224-column fixture exercises padding to 256; a 200-column fixture explicitly
+checks rejection. Group size 128 with 288 input columns exercises the existing
+activation-order restriction on K padding. AWQ's explicit-backend padding rule
+remains covered separately. Production selectors and error gates are unchanged.
+
+The full CPU command `CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=4
+/root/venv-py3.14t/bin/python -m pytest -q tests/test_marlin_jit.py` now reports
+**42 passed, 15 skipped** in 12.39 seconds. The skipped cases require CUDA; this
+CPU result does not replace the 18 real GPU runtime cases above. See the
+[full corrected CPU output](../../artifacts/gsq-scalar/awq-w4-seed7-v2/marlin-cpu-corrected.txt).
