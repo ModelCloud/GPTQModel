@@ -9,6 +9,9 @@ instructions below are archival, not branch starting points.
   RCO, and the proposed P32 adaptation: [research note](../research/gsq-rco.md).
 - [x] Implement an experimental Gumbel-Softmax relaxation over valid circular
   P32 tile candidates, fixed banks/scales, with hard calibration rollback.
+- [x] Audit Gumbel sign, temperature and gradients against the paper/author code;
+  add an optional research API/CLI control disabled by default, with an exact
+  baseline bypass. Production `QVQConfig` integration remains pending.
 - [x] Check W1–W3.5 hard export, unchanged payload size, deterministic seed,
   planar/window round-trip, reload and nonfinite rejection.
 - [x] Start real Llama 3.2 1B W2 P32 validation on disjoint refinement documents,

@@ -121,10 +121,10 @@ Those partial tensor artifacts are not published as a complete model snapshot.
 
 ```bash
 PYTHONPATH=. /root/venv-py3.14t/bin/python -m scripts.validate_qvq_gsq_layers \
-  --prepare --output artifacts/gsq-p32/full-qkv-seed7
+  --gsq --prepare --output artifacts/gsq-p32/full-qkv-seed7
 PYTHONPATH=. /root/venv-py3.14t/bin/python -m gpu_allocator.cli run -n 1 --style uuid -- \
   /root/venv-py3.14t/bin/python -u -m scripts.validate_qvq_gsq_layers \
-  --output artifacts/gsq-p32/full-qkv-seed7
+  --gsq --output artifacts/gsq-p32/full-qkv-seed7
 ```
 
 Use a new output directory for another run. This does not overwrite the F6

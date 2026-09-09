@@ -103,10 +103,10 @@ normal seeded transform initialization.
 
 ```bash
 PYTHONPATH=. /root/venv-py3.14t/bin/python -m scripts.validate_qvq_gsq_layers \
-  --prepare --target-bits 2.5 --output artifacts/gsq-p32/full-qkv-w25-seed7-v2
+  --gsq --prepare --target-bits 2.5 --output artifacts/gsq-p32/full-qkv-w25-seed7-v2
 PYTHONPATH=. MAX_JOBS=4 /root/venv-py3.14t/bin/python -m gpu_allocator.cli run -n 1 --style uuid -- \
   /root/venv-py3.14t/bin/python -u -m scripts.validate_qvq_gsq_layers \
-  --target-bits 2.5 --output artifacts/gsq-p32/full-qkv-w25-seed7-v2
+  --gsq --target-bits 2.5 --output artifacts/gsq-p32/full-qkv-w25-seed7-v2
 ```
 
 Use a new output directory for another run. The partial-layer experiment is

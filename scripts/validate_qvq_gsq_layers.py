@@ -99,6 +99,7 @@ def prepare(args):
         "refinement": "16 stratified original-corpus documents by default; not a repeat of all 10178 YAQA rows",
         "seed": 7, "train_rows": len(train), "eval_rows": len(heldout), "token_cap": args.tokens,
         "targets": TARGETS, "candidate_count": args.candidates, "steps": args.steps,
+        "gsq_enabled": args.gsq,
         "target_bits": args.target_bits,
         "train_tokens": sum(len(r["input_ids"]) for r in train),
         "heldout_tokens": sum(len(r["input_ids"]) for r in heldout),
@@ -158,6 +159,8 @@ def execute(args):
             raise ValueError(f"Prepared input changed before execution: {path}")
     if provenance["candidate_count"] != args.candidates or provenance["steps"] != args.steps:
         raise ValueError("Execution parameters differ from prepared contract")
+    if provenance.get("gsq_enabled") is not args.gsq:
+        raise ValueError("Execution GSQ control differs from prepared contract; prepare a new run")
     if provenance.get("target_bits") != args.target_bits:
         raise ValueError("Execution rate differs from prepared contract")
     cfg = json.loads((args.output / "quantize_config.json").read_text())
@@ -378,7 +381,7 @@ def execute(args):
         result = refine_p32_candidates(
             candidates, bits=kw["bits"], bank_ids=kw["bank_ids"], bank_alt_id=kw["bank_alt_id"],
             codebook_version=kw["codebook_version"], target=target, inputs=x,
-            steps=args.steps, seed=7, progress=progress)
+            enabled=args.gsq, steps=args.steps, seed=7, progress=progress)
         state["gsq"] = result.window_words
         state["greedy"] = greedy_fit(candidates, x, target, kw)
         layer = {"shape_out_in": list(dense_weights[name].shape), "bits": kw["bits"],
@@ -443,6 +446,7 @@ def main():
     parser.add_argument("--tokens", type=int, default=256)
     parser.add_argument("--candidates", type=int, default=33)
     parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument("--gsq", action="store_true", help="Enable experimental GSQ refinement (default: disabled)")
     parser.add_argument("--target-bits", type=float, choices=(2.5,),
                         help="Fresh YAQA W2.5 QKV baseline; all other F6 projections remain unchanged")
     args = parser.parse_args()

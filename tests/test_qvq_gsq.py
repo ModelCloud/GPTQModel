@@ -9,7 +9,7 @@ from gptqmodel.quantization.qvq import (
     repack_p32_window_to_planar,
     rht_preprocess_weight,
 )
-from gptqmodel.quantization.qvq_gsq import refine_p32_candidates
+from gptqmodel.quantization.qvq_gsq import _candidate_probabilities, refine_p32_candidates
 from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
 
 
@@ -22,7 +22,8 @@ def test_hard_export_and_baseline_guard(bits):
     target = decode_p32_window_tiles(candidates[1], bits=bits, bank_ids=bank, bank_alt_id=alt).reshape(16, 16)
     inputs = torch.eye(16)
     original = candidates.clone()
-    kwargs = dict(bits=bits, bank_ids=bank, bank_alt_id=alt, target=target, inputs=inputs, steps=40, seed=9)
+    kwargs = dict(bits=bits, bank_ids=bank, bank_alt_id=alt, target=target, inputs=inputs,
+                  enabled=True, steps=40, seed=9)
     result = refine_p32_candidates(candidates, **kwargs)
     repeated = refine_p32_candidates(candidates, **kwargs)
     assert torch.equal(result.window_words, repeated.window_words)
@@ -44,7 +45,7 @@ def test_hard_export_and_baseline_guard(bits):
 def test_reject_nonfinite_and_noop():
     candidates = torch.zeros(2, 1, 16, dtype=torch.int32)
     kwargs = dict(bits=2, bank_ids=torch.zeros(1, dtype=torch.uint8), bank_alt_id=torch.tensor([1]),
-                  target=torch.ones(16, 16), inputs=torch.eye(16), steps=0)
+                  target=torch.ones(16, 16), inputs=torch.eye(16), enabled=True, steps=0)
     result = refine_p32_candidates(candidates, **kwargs)
     assert result.calibration_before == result.calibration_after
     kwargs["target"][0, 0] = float("nan")
@@ -67,3 +68,55 @@ def test_full_layer_inner_objective_matches_deployed_output():
     inner_nmse = (transformed @ (candidate - target)).square().sum() / (transformed @ target).square().sum()
     deployed_nmse = (matmul_hadU(transformed @ candidate) * sv - teacher).square().sum() / teacher.square().sum()
     torch.testing.assert_close(inner_nmse, deployed_nmse)
+
+
+@pytest.mark.parametrize("temperature", [0.1, 1.0, 2.0])
+def test_gumbel_math_and_gradient(temperature):
+    logits = torch.tensor([0.2, -0.3, 0.7], dtype=torch.float64, requires_grad=True)
+    uniform = torch.tensor([0.17, 0.61, 0.89], dtype=torch.float64)
+    probabilities = _candidate_probabilities(logits, uniform, temperature)
+    # Independent scalar formula; also pins the noise sign.
+    import math
+    expected = torch.tensor([math.exp((value - math.log(-math.log(u))) / temperature)
+                             for value, u in zip(logits.tolist(), uniform.tolist(), strict=True)], dtype=torch.float64)
+    expected /= expected.sum()
+    torch.testing.assert_close(probabilities, expected)
+    jacobian = torch.autograd.functional.jacobian(
+        lambda value: _candidate_probabilities(value, uniform, temperature), logits)
+    torch.testing.assert_close(jacobian, (torch.diag(expected) - expected.outer(expected)) / temperature)
+    assert torch.autograd.gradcheck(lambda value: _candidate_probabilities(value, uniform, temperature), (logits,))
+    # Refactoring the audited formula preserves the previous FP32 experiment.
+    old = ((logits.float() - (-uniform.float().log()).log()) / temperature).softmax(-1)
+    assert torch.equal(_candidate_probabilities(logits.float(), uniform.float(), temperature), old)
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_disabled_preserves_payload_without_fitting(monkeypatch, explicit):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Disabled GSQ must not decode, optimize, or sample")
+
+    import gptqmodel.quantization.qvq_gsq as gsq
+    candidates = torch.arange(40, dtype=torch.int32).reshape(2, 1, 20)
+    original = candidates.clone()
+    rng = torch.random.get_rng_state().clone()
+    monkeypatch.setattr(gsq, "decode_p32_window_tiles", forbidden)
+    monkeypatch.setattr(torch.optim, "Adam", forbidden)
+    monkeypatch.setattr(torch, "rand", forbidden)
+    kwargs = {"enabled": False} if explicit else {}
+    result = refine_p32_candidates(
+        candidates, bits=2.5, bank_ids=torch.empty(0), bank_alt_id=torch.empty(0),
+        target=torch.tensor(float("nan")), inputs=torch.empty(0), progress=forbidden, **kwargs)
+    assert torch.equal(result.window_words, original[0])
+    assert result.window_words.data_ptr() != candidates.data_ptr()
+    assert torch.equal(candidates, original)
+    assert torch.equal(torch.random.get_rng_state(), rng)
+    assert result.choices.tolist() == [0]
+    assert result.calibration_before is result.calibration_after is None
+    assert result.history == []
+
+
+def test_control_requires_boolean():
+    with pytest.raises(TypeError, match="enabled must be boolean"):
+        refine_p32_candidates(torch.zeros(2, 1, 20, dtype=torch.int32), bits=2.5,
+                              bank_ids=torch.empty(0), bank_alt_id=torch.empty(0),
+                              target=torch.empty(0), inputs=torch.empty(0), enabled="false")

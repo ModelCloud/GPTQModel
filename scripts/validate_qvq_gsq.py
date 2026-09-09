@@ -36,6 +36,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument("--gsq", action="store_true", help="Enable experimental GSQ refinement (default: disabled)")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=False)
     torch.set_num_threads(4)
@@ -84,7 +85,7 @@ def main():
     train = torch.cat(xrows[:4])
     result = refine_p32_candidates(candidates, bits=bits, bank_ids=bank, bank_alt_id=alt,
                                    target=target, inputs=train, codebook_version=cfg["codebook"],
-                                   steps=args.steps, seed=args.seed)
+                                   enabled=args.gsq, steps=args.steps, seed=args.seed)
 
     def matrix(words):
         return decode_p32_window_tiles(words, bits=bits, bank_ids=bank, bank_alt_id=alt,
@@ -136,6 +137,7 @@ def main():
               "dense": str(args.dense), "snapshot": str(args.snapshot), "data": str(args.data),
               "data_sha256": hashlib.sha256(args.data.read_bytes()).hexdigest(),
               "module": prefix, "bits": bits, "codebook": cfg["codebook"], "seed": args.seed,
+              "gsq_enabled": args.gsq,
               "steps": args.steps, "train_rows": [0, 1, 2, 3], "heldout_rows": [4, 5, 6, 7],
               "token_hashes": fingerprints, "token_counts": [len(row) for row in ids],
               "paired_delta_bootstrap95": interval,

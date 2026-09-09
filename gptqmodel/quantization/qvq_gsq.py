@@ -20,9 +20,19 @@ from .qvq_codecs import PGC16_CODEBOOK_VERSION
 class P32GSQResult:
     window_words: torch.Tensor
     choices: torch.Tensor
-    calibration_before: float
-    calibration_after: float
+    calibration_before: float | None
+    calibration_after: float | None
     history: list[float]
+
+
+def _candidate_probabilities(logits: torch.Tensor, uniform: torch.Tensor, temperature: float) -> torch.Tensor:
+    """GSQ's softmax((kappa * logits + Gumbel(0,1)) / tau), with kappa=1.
+
+    The caller supplies fixed noise for gradient checks and a private RNG for
+    fitting. Clamp the uniform endpoints before this function, not the logits.
+    """
+    gumbel = -(-uniform.log()).log()
+    return ((logits + gumbel) / temperature).softmax(-1)
 
 
 def refine_p32_candidates(
@@ -33,6 +43,7 @@ def refine_p32_candidates(
     bank_alt_id: torch.Tensor,
     target: torch.Tensor,
     inputs: torch.Tensor,
+    enabled: bool = False,
     codebook_version: str = PGC16_CODEBOOK_VERSION,
     steps: int = 100,
     learning_rate: float = 0.1,
@@ -48,9 +59,20 @@ def refine_p32_candidates(
     inputs: [tokens, K] calibration activations in that coordinate system.
     Callers must evaluate the hard returned payload on independent data.
     The best *hard* calibration checkpoint (including baseline) is returned.
+    Disabled by default: returns an independent, byte-identical baseline with
+    no decoding, calibration reads, optimizer, or random sampling. Losses are
+    None and history is empty because no objective was evaluated.
     """
+    if not isinstance(enabled, bool):
+        raise TypeError("enabled must be boolean")
     if candidates.ndim != 3 or candidates.dtype != torch.int32 or candidates.shape[0] < 2:
         raise ValueError("candidates must be int32 [choices>=2, tiles, words]")
+    if not enabled:
+        return P32GSQResult(
+            candidates[0].detach().clone().contiguous(),
+            torch.zeros(candidates.shape[1], device=candidates.device, dtype=torch.int64),
+            None, None, [],
+        )
     if target.ndim != 2 or min(target.shape) < 16 or any(d % 16 for d in target.shape):
         raise ValueError("target must be [K, N] with positive dimensions divisible by 16")
     k, n = target.shape
@@ -96,7 +118,7 @@ def refine_p32_candidates(
         for step in range(steps):
             tau = temperature_start * (temperature_end / temperature_start) ** (step / max(steps - 1, 1))
             uniform = torch.rand(logits.shape, device=logits.device, generator=generator).clamp_(1e-6, 1 - 1e-6)
-            probabilities = ((logits - (-uniform.log()).log()) / tau).softmax(-1)
+            probabilities = _candidate_probabilities(logits, uniform, tau)
             objective = loss((probabilities.unsqueeze(-1) * decoded).sum(1))
             if not torch.isfinite(objective):
                 raise ValueError("non-finite relaxed objective")

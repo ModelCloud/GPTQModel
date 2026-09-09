@@ -39,6 +39,59 @@ the export authority. This helper has no production config or lifecycle dispatch
 It materializes decoded candidate tiles, so it is suitable for bounded experiments,
 not yet memory-efficient full-model quantization. Joint scale learning remains TODO.
 
+### Math audit and disabled-by-default control
+
+Audited against [GSQ Algorithm 1](https://arxiv.org/html/2604.18556v2#S3)
+and the author's pinned revision
+[`03fc16484c369e3127225615d5e03e8d3a6043e3`](https://github.com/IST-DASLab/GSQ/blob/03fc16484c369e3127225615d5e03e8d3a6043e3/src/quantization/gumbel_quantizer_2bit.py#L45).
+For tile logits `l`, independent uniforms `u`, and temperature `tau`, this
+experiment computes `g = -log(-log(u))`, `p = softmax((l + g) / tau)`, and
+`W_soft[t] = sum_c p[t,c] * decode(candidate[c,t])`. The noise sign and
+temperature placement are correct. The analytic probability Jacobian is
+`(diag(p) - p p^T) / tau`; independent double-precision finite differences and
+the scalar formula are checked at temperatures 0.1, 1 and 2.
+
+This fixes the paper's logit multiplier kappa at 1. The author implementation
+uses trainable scalar group scales and Lion with scheduled temperature/logit
+scale; this experiment uses fixed P32 scales/banks, Adam, and geometric
+temperature decay. Uniform clamping to `[1e-6, 1-1e-6]` truncates the extreme
+noise tails; the author's endpoint stabilization differs. These are explicit
+experimental choices, not a faithful scalar-GSQ reproduction.
+
+The fitting loss is `||X(W_soft - W_teacher)||_F^2 / ||X W_teacher||_F^2`
+(with a tiny positive denominator floor). This is activation reconstruction,
+not the full two-sided YAQA/Fisher objective. With the checked constant-absolute
+SV contract, its inner-basis value equals deployed-output NMSE by orthogonality.
+Lowering it does not guarantee lower final-model KLD. A soft mixture is generally
+not representable: export uses noise-free logit argmax and selects the best
+hard calibration checkpoint, including baseline. Complete tile selection keeps
+the circular history legal. No held-out rows enter that selection.
+
+`refine_p32_candidates(..., enabled=False)` now defaults to disabled. It returns
+an independent byte-identical copy of candidate zero, zero choices, `None`
+losses and empty history without decoding, reading calibration, creating an
+optimizer or sampling. Use `enabled=True` to fit. Both validation scripts require
+`--gsq` to enable fitting; the full-layer runner binds that flag into preparation
+provenance and rejects a mismatch at execution. Without it, the `gsq` report arm
+is an explicitly disabled baseline copy; the independent deterministic control
+still runs. Historical reports predate the flag and ran fitting enabled.
+
+This is an optional **research** control, not a `QVQConfig` production option.
+YAQA remains the initializer. Production lifecycle integration and its different
+calibration-objective contract remain pending, particularly given the W2.5
+propagated regressions. The enabled probability refactor is checked for exact
+FP32 equivalence to the previously measured expression.
+
+Audit validation: 14 CPU tests pass. The enabled real Llama slice reproduces
+its archived payload and both calibration losses exactly. Disabled calls on
+the complete real W2.5 Q/K/V exports preserve all bytes and RNG state; see
+[audit report](../artifacts/gsq-p32/math-audit-default-off/report.json).
+The extracted probability calculation and new control branches are fully
+exercised. Coverage for the entire experimental helper is 80% combined
+line/branch coverage; pre-existing validation/error and progress branches remain
+uncovered. This audit did not rerun full-model inference or GPU kernels; the
+earlier model-quality reports remain the propagated evidence.
+
 RCO is research-only and unimplemented. A QVQ implementation must count actual
 serialized costs, respect backend-supported rates, and enforce feasibility after
 hard assignment; an expected soft budget is insufficient. Keep this independent
@@ -153,6 +206,7 @@ Neither agreement metric by itself measures task correctness.
 
 ```bash
 PYTHONPATH=. /root/venv-py3.14t/bin/python -m scripts.validate_qvq_gsq \
+  --gsq \
   --dense /monster/data/model/Llama-3.2-1B-Instruct \
   --snapshot /monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32 \
   --data dataset/calibration_mix_128k_qwen3_0.6b/calibration.parquet \

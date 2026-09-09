@@ -1,0 +1,33 @@
+{
+  "enabled_real_slice_matches_recorded_payload_and_losses": true,
+  "disabled_real_slice_exact": true,
+  "w25_full_projection_disabled": {
+    "model.layers.0.self_attn.k_proj.pt": {
+      "payload_bytes": 327680,
+      "exact": true,
+      "rng_unchanged": true,
+      "source_sha256": "bd45605288784e4b39e4bd3c01c7b623649674be3896572b0c41cb5d84550cdd"
+    },
+    "model.layers.0.self_attn.q_proj.pt": {
+      "payload_bytes": 1310720,
+      "exact": true,
+      "rng_unchanged": true,
+      "source_sha256": "03438e1efec3de62a092fe2f2f140a1ac2db7af853da8d6d24f7555c72a6247d"
+    },
+    "model.layers.0.self_attn.v_proj.pt": {
+      "payload_bytes": 327680,
+      "exact": true,
+      "rng_unchanged": true,
+      "source_sha256": "e0f1398a24fcc6d7f8e6abd6bdf15903a47b7bfe7e79027018fc029ad7b0c018"
+    }
+  },
+  "source_hashes": {
+    "gptqmodel/quantization/qvq_gsq.py": "fb479030abcfb794274947e09ea803403e79657c6026a7cb33341229b966f1f5",
+    "tests/test_qvq_gsq.py": "3c57ad905b41f1157d316fe9b8f5f53084b5f52b58fca89b39b05e3d6db83487"
+  },
+  "backend": "CPU FP32; saved real model/calibration artifacts",
+  "tests_passed": 14,
+  "whole_helper_combined_coverage_percent": 80,
+  "full_model_inference_rerun": false,
+  "author_revision": "03fc16484c369e3127225615d5e03e8d3a6043e3"
+}
