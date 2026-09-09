@@ -94,6 +94,8 @@ QVQ extensions. Research notes do not override the accuracy gates above.
 - CUDA, C++, CUTLASS, Triton, JIT extensions, correctness debugging, or kernel benchmarks: use `$gptqmodel-cuda-kernels`.
 - Multi-kernel fusion, cooperative or persistent mega-kernels, cross-phase scratch reuse, grid barriers, fused phase
   scheduling, or launch-count reduction: also use `$gptqmodel-mega-kernels`.
+- Cohere-style decode task graphs, per-tile dependency counters, warp-specialized pipelines, or ragged
+  attention/MoE work queues: also use [$cohere-megakernel](.agents/skills/cohere-megakernel/SKILL.md).
 - MoE routing, expert dispatch, grouped GEMM, per-expert loops, and QKV/gate-up fusion inside MoE models:
   use `$gptqmodel-moe`.
 - Fused inference QKV/gate-up, `model.fuse()`, `flash_attention_2`, and decode/prefill optimization:
