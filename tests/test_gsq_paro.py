@@ -150,7 +150,7 @@ def test_paro_gsq_config_roundtrip(gsq):
 
 
 @pytest.mark.parametrize('scope', ['layer', 'compute_block'])
-def test_paro_gsq_grouped_config_roundtrip_and_noisy_guard(scope):
+def test_paro_gsq_grouped_config_roundtrip_with_paired_inputs(scope):
     from gptqmodel.quantization.config import ParoConfig
 
     from gptqmodel.quantization.config import QuantizeConfig
@@ -158,8 +158,10 @@ def test_paro_gsq_grouped_config_roundtrip_and_noisy_guard(scope):
     cfg = ParoConfig(gsq={'enabled': True}, opt_scope=scope)
     restored = QuantizeConfig.from_quant_config(cfg.to_dict())
     assert restored.opt_scope == scope and restored.gsq.enabled
-    with pytest.raises(ValueError, match='paired clean/noisy'):
-        ParoConfig(gsq={'enabled': True}, opt_scope=scope, opt_train_on_noisy_inputs=True)
+    paired = ParoConfig(gsq={'enabled': True}, opt_scope=scope, opt_train_on_noisy_inputs=True)
+    paired_restored = QuantizeConfig.from_quant_config(paired.to_dict())
+    assert paired_restored.gsq.enabled and paired_restored.opt_train_on_noisy_inputs
+    assert paired_restored.opt_scope == scope
     assert ParoConfig(gsq={'enabled': False}, opt_scope=scope).gsq.enabled is False
 
 

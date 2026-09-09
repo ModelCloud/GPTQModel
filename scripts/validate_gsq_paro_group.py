@@ -13,7 +13,30 @@ from types import SimpleNamespace
 from scripts.validate_qvq_gsq_layers import digest, write_json
 
 
-def execute(prepared, output, scope):
+def make_decoder_layer(config, layer_state, layer_index=0):
+    import torch
+    from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding
+
+    class Layer(LlamaDecoderLayer):
+        def forward(self, hidden_states, attention_mask=None, position_ids=None, position_embeddings=None, **kwargs):
+            if position_ids is None:
+                position_ids = torch.arange(hidden_states.shape[-2], device=hidden_states.device).unsqueeze(0)
+            if position_embeddings is None:
+                position_embeddings = self.rotary(hidden_states, position_ids)
+            if attention_mask is None:
+                length = hidden_states.shape[-2]
+                attention_mask = torch.full((length, length), torch.finfo(hidden_states.dtype).min,
+                                            device=hidden_states.device, dtype=hidden_states.dtype).triu(1)[None, None]
+            return super().forward(hidden_states, attention_mask=attention_mask, position_ids=position_ids,
+                                   position_embeddings=position_embeddings, **kwargs)
+
+    dense = Layer(config, layer_idx=layer_index).float()
+    dense.load_state_dict(layer_state, strict=True)
+    dense.rotary = LlamaRotaryEmbedding(config)
+    return dense
+
+
+def execute(prepared, output, scope, paired=False):
     if output.exists():
         raise ValueError('Use a fresh execution directory')
     provenance = json.loads((prepared / 'provenance.json').read_text())
@@ -39,12 +62,11 @@ def execute(prepared, output, scope):
 
     import torch
     from transformers import AutoConfig
-    from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding
     from gptqmodel.looper.input_cache import InputCache
     from gptqmodel.looper.named_module import NamedModule
     from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
     from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
-    from gptqmodel.quantization.config import GSQConfig, ParoConfig
+    from gptqmodel.quantization.config import GSQConfig, ParoConfig, QuantizeConfig
     from gptqmodel.quantization.gsq_scalar import affine_codes
     from gptqmodel.quantization.paroquant.optimization import _apply_inverse_rotation
 
@@ -56,31 +78,24 @@ def execute(prepared, output, scope):
     config = AutoConfig.from_pretrained(provenance['dense'], local_files_only=True)
     config._attn_implementation = 'eager'
 
-    class Layer(LlamaDecoderLayer):
-        def forward(self, hidden_states, attention_mask=None, position_ids=None, position_embeddings=None, **kwargs):
-            if position_ids is None:
-                position_ids = torch.arange(hidden_states.shape[-2], device=hidden_states.device).unsqueeze(0)
-            if position_embeddings is None:
-                position_embeddings = self.rotary(hidden_states, position_ids)
-            if attention_mask is None:
-                length = hidden_states.shape[-2]
-                attention_mask = torch.full((length, length), torch.finfo(hidden_states.dtype).min,
-                                            device=hidden_states.device, dtype=hidden_states.dtype).triu(1)[None, None]
-            return super().forward(hidden_states, attention_mask=attention_mask, position_ids=position_ids,
-                                   position_embeddings=position_embeddings, **kwargs)
-
-    dense = Layer(config, layer_idx=0).float()
-    dense.load_state_dict(data['layer_state'], strict=True)
-    dense.rotary = LlamaRotaryEmbedding(config)
+    layer_index = provenance['layer_index']
+    dense = make_decoder_layer(config, data['layer_state'], layer_index)
     dense = dense.cuda().eval().requires_grad_(False)
-    calibration = data['inputs']['train'] + data['inputs']['validation']
+    if paired:
+        clean_data = {key: value['clean'] for key, value in data['paired_inputs'].items()}
+        noisy_data = {key: value['noisy'] for key, value in data['paired_inputs'].items()}
+    else:
+        clean_data = noisy_data = data['inputs']
+    calibration = noisy_data['train'] + noisy_data['validation']
+    clean_calibration = clean_data['train'] + clean_data['validation']
     with torch.no_grad():
-        targets = [dense(x.cuda().half().float()).cpu() for x in calibration]
-        heldout_targets = [dense(x.cuda().half().float()).cpu() for x in data['inputs']['heldout']]
+        targets = [dense(x.cuda().half().float()).cpu() for x in clean_calibration]
+        heldout_targets = [dense(x.cuda().half().float()).cpu() for x in clean_data['heldout']]
     output.mkdir(parents=True)
     report = {'state': 'running', 'scope': scope, 'inventory': inventory, 'provenance': provenance,
               'runner_sha256': digest(__file__), 'torch': str(torch.__version__), 'cuda': torch.version.cuda,
-              'epochs': {'rotation': 2, 'finetune': 2}, 'arms': {}}
+              'epochs': {'rotation': 2, 'finetune': 2}, 'paired': paired,
+              'internal_noisy_guard_bypass': False, 'arms': {}}
     write_json(output / 'report.json', report)
     baseline = {}
     for arm in ('baseline', 'gsq_fixed', 'gsq_scales'):
@@ -92,8 +107,9 @@ def execute(prepared, output, scope):
         processor = object.__new__(ParoQuantProcessor)
         processor.qcfg = ParoConfig(bits=4, group_size=128, krot=8, opt_scope=scope, opt_seed=7,
             opt_rotation_epochs=2, opt_finetune_epochs=2, opt_fused_rotation=True, opt_stage_cudagraph=False,
-            offload_to_disk=False, gsq=None if arm == 'baseline' else GSQConfig(
+            offload_to_disk=False, opt_train_on_noisy_inputs=paired, gsq=None if arm == 'baseline' else GSQConfig(
                 enabled=True, seed=7, steps=100, learn_scales=arm == 'gsq_scales'))
+        processor.qcfg = QuantizeConfig.from_quant_config(processor.qcfg.to_dict())
         write_json(output / (arm + '.config.json'), processor.qcfg.to_dict())
         processor.lock = threading.Lock()
         processor._layer_states_lock = threading.Lock()
@@ -108,17 +124,24 @@ def execute(prepared, output, scope):
         processor._validation_calibration_batch_count = 4
         processor.inputs_cache = InputCache(layer_inputs=[[x] for x in calibration], layer_input_kwargs=[{}]*16,
                                             position_ids=[None]*16, attention_masks=[None]*16)
-        state = processor._get_layer_state(0)
+        state = processor._get_layer_state(layer_index)
         state.layer_module = layer
         state.layer_inputs = [[x.half()] for x in calibration]
         state.layer_outputs = [[x] for x in targets]
+        if paired:
+            processor.receive_pristine_layer_module(layer_index=layer_index, layer_module=layer)
+            with processor.pristine_quant_input_capture(layer_index=layer_index), torch.no_grad():
+                for index, x in enumerate(clean_calibration):
+                    processor._set_current_batch_index(index)
+                    layer(x.cuda().half())
+            processor._set_current_batch_index(None)
         modules, hooks = {}, []
         for role in ('q', 'k', 'v'):
             name = 'self_attn.' + role + '_proj'
-            module = NamedModule(getattr(layer.self_attn, role + '_proj'), name, 'model.layers.0.' + name, 0)
+            module = NamedModule(getattr(layer.self_attn, role + '_proj'), name, f'model.layers.{layer_index}.' + name, layer_index)
             module.state['module_tree_flags'] = frozenset({role})
             modules[name] = module
-            processor.tasks[name] = {'inputs': [], 'batch_indices': [], 'layer_index': 0}
+            processor.tasks[name] = {'inputs': [], 'batch_indices': [], 'layer_index': layer_index}
             hooks.append(module.module.register_forward_hook(processor.pre_process_fwd_hook(name)))
         state.modules = modules.copy()
         try:
@@ -131,7 +154,7 @@ def execute(prepared, output, scope):
                 hook.remove()
             processor._set_current_batch_index(None)
         processor._log_quant_result = lambda *args: None
-        processor._quantize_layer(0, state)
+        processor._quantize_layer(layer_index, state)
         layer.cuda()
         checks = []
         native_hooks = []
@@ -179,7 +202,7 @@ def execute(prepared, output, scope):
                                           'payload_equal_baseline': equal, 'sha256': digest(path)}
         error, count = 0., 0
         with torch.no_grad():
-            for x, target in zip(data['inputs']['heldout'], heldout_targets, strict=True):
+            for x, target in zip(noisy_data['heldout'], heldout_targets, strict=True):
                 actual = layer(x.cuda().half()).float()
                 error += (actual.double() - target.cuda().double()).square().sum().item()
                 count += actual.numel()
@@ -200,5 +223,6 @@ if __name__ == '__main__':
     parser.add_argument('--prepared', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--scope', choices=['layer', 'compute_block'], required=True)
+    parser.add_argument('--paired', action='store_true')
     args = parser.parse_args()
-    execute(args.prepared.resolve(), args.output.resolve(), args.scope)
+    execute(args.prepared.resolve(), args.output.resolve(), args.scope, args.paired)

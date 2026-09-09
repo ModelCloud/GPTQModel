@@ -195,3 +195,11 @@ Learned-scale GSQ retains baseline payloads exactly in both. All 576 native
 projection checks pass. This is not a full-model KL/Top-K measurement, and
 layer-0 clean/noisy inputs coincide; later-layer paired validation remains
 pending. See [real grouped report](../docs/experiments/gsq-paro-real-group.md).
+
+Real layer-1 paired dense/F6 experiments complete both scopes with 576 passing
+native checks. Fixed GSQ worsens held-out decoder MSE by 8.6934% in compute
+block and 0.3450% in layer scope; learned-scale arms retain baseline exactly.
+The obsolete public noisy-input rejection has been removed after these
+compatibility checks, with default-off unchanged. Full-model/MoE orchestration
+and final-logit quality remain unverified; no recovery is claimed. Details:
+[paired real-model report](../docs/experiments/gsq-paro-real-paired.md).

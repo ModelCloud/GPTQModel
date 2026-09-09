@@ -172,10 +172,8 @@ def _run_paired_group_lifecycle(scope, actual_initializer, monkeypatch, width=32
 
     processor = object.__new__(ParoQuantProcessor)
     processor.qcfg = ParoConfig(group_size=group, opt_scope=scope, offload_to_disk=False,
-                                opt_train_samples=64, opt_validation_samples=16,
+                                opt_train_samples=64, opt_validation_samples=16, opt_train_on_noisy_inputs=True,
                                 gsq={'enabled': True, 'steps': 80, 'learning_rate': .2})
-    # Internal integration probe while the public configuration remains guarded.
-    processor.qcfg.opt_train_on_noisy_inputs = True
     processor.qcfg.opt_rotation_epochs = 1
     processor.qcfg.opt_finetune_epochs = 1
     processor.qcfg.opt_fused_rotation = False

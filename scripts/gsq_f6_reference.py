@@ -3,7 +3,7 @@
 import json
 
 
-def install_f6(model, snapshot):
+def install_f6(model, snapshot, *, module_prefix=None):
     import torch
     from safetensors import safe_open
 
@@ -29,12 +29,12 @@ def install_f6(model, snapshot):
 
     with torch.no_grad():
         for name, param in model.named_parameters():
-            if name in index:
+            if name in index and (module_prefix is None or name.startswith(module_prefix + ".")):
                 param.copy_(read(name))
     if cfg.get("activation") or cfg.get("incoherence") != "rht":
         raise ValueError("Unsupported F6 transform")
     for name in sorted(index):
-        if not name.endswith(".trellis"):
+        if not name.endswith(".trellis") or (module_prefix is not None and not name.startswith(module_prefix + ".")):
             continue
         prefix = name[:-8]
         trellis, su, sv = [read(prefix + "." + suffix) for suffix in ("trellis", "SU", "SV")]
@@ -46,5 +46,6 @@ def install_f6(model, snapshot):
             bank_ids=bank, bank_alt_id=alt, codebook_version=cfg["codebook"], v2b2_p32=p32)
         parent, leaf = prefix.rsplit(".", 1)
         setattr(model.get_submodule(parent), leaf, CanonicalQVQ(inner, su, sv))
-    return {"snapshot_quantized_modules": sum(n.endswith(".trellis") for n in index),
-            "snapshot_p32_modules": sum(n.endswith(".bank_alt_id") for n in index)}
+    selected = [name for name in index if module_prefix is None or name.startswith(module_prefix + ".")]
+    return {"snapshot_quantized_modules": sum(n.endswith(".trellis") for n in selected),
+            "snapshot_p32_modules": sum(n.endswith(".bank_alt_id") for n in selected)}
