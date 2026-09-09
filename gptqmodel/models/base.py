@@ -73,8 +73,8 @@ from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND, normalize_backend
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
-from ..utils.disk_telemetry import disk_telemetry
 from ..utils.device_telemetry import with_quantization_device_telemetry
+from ..utils.disk_telemetry import disk_telemetry
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
@@ -148,7 +148,7 @@ class _QuantizedCheckpointSource:
             from safetensors import safe_open
 
             with safe_open(single_shard, framework="pt", device="cpu") as handler:
-                self._weight_map = {name: "model.safetensors" for name in handler.keys()}
+                self._weight_map = dict.fromkeys(handler.keys(), "model.safetensors")
 
 
 class _ClassPropertyDescriptor:

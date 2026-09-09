@@ -5,6 +5,7 @@ import argparse
 import itertools
 import math
 import os
+import sys
 from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass, fields
@@ -13,7 +14,6 @@ from pathlib import Path
 
 import jinja2
 
-import sys
 
 _ROOT = Path(__file__).resolve().parents[2]
 _CUTLASS_EXT_DIR = _ROOT / "gptqmodel_ext" / "cutlass_extensions"
@@ -66,6 +66,7 @@ from vllm_cutlass_library_extension import (  # noqa: E402
     VLLMKernelScheduleTag,
 )
 
+
 #
 #   Generator templating
 #
@@ -85,7 +86,7 @@ torch::Tensor mm_dispatch_{{type_sig}}(MMArgs args) {
   [[maybe_unused]] auto M = args.A.size(0);
   [[maybe_unused]] auto N = args.B.size(1);
   [[maybe_unused]] auto K = args.A.size(1);
-    
+
   if (!args.maybe_schedule) {
     {%- for cond, s in impl_config.heuristic %}
     {%if cond is not none%}if ({{cond}})
@@ -143,7 +144,7 @@ torch::Tensor mm_dispatch(MMArgs args) {
       return mm_dispatch_{{type_sig}}(args);
   }
   {%- endfor %}
-  
+
   TORCH_CHECK_NOT_IMPLEMENTED(
     false, "machete_mm(..) is not implemented for "
     "a_type=", args.A.scalar_type(),
@@ -168,7 +169,7 @@ torch::Tensor mm_dispatch(MMArgs args) {
 std::vector<std::string> supported_schedules_dispatch(
     SupportedSchedulesArgs args) {
     auto out_type = args.maybe_out_type.value_or(args.a_type);
-    
+
     {% for impl_config in impl_configs %}
     {% set t = impl_config.types -%}
     {% set schs = impl_config.schedules -%}
@@ -189,7 +190,7 @@ std::vector<std::string> supported_schedules_dispatch(
         };
     }
     {%- endfor %}
-    
+
     return {};
 };
 
@@ -200,7 +201,7 @@ IMPL_TEMPLATE = """
 #include "machete_mm_launcher.cuh"
 
 namespace machete {
-    
+
 {% for sch in unique_schedules(impl_configs) %}
 {% set sch_sig = gen_sch_sig(sch) -%}
 struct sch_{{sch_sig}} {
@@ -215,7 +216,7 @@ struct sch_{{sch_sig}} {
   using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 };
 {% endfor %}
-    
+
 {% for impl_config in impl_configs %}
 {% set t = impl_config.types -%}
 {% set schs = impl_config.schedules -%}
@@ -236,7 +237,7 @@ using Kernel_{{type_sig}} = MacheteKernelTemplate<
 
 {% for sch in schs %}
 {% set sch_sig = gen_sch_sig(sch) -%}
-torch::Tensor 
+torch::Tensor
 impl_{{type_sig}}_sch_{{sch_sig}}(MMArgs args) {
   return run_impl<Kernel_{{type_sig}}<sch_{{sch_sig}}>>(args);
 }
@@ -256,7 +257,7 @@ torch::Tensor prepack_B_dispatch(PrepackBArgs args) {
   {%- for t in types %}
   {% set b_type = unsigned_type_with_bitwidth(t.b_num_bits) %}
   if (args.a_type == {{TorchTypeTag[t.a]}}
-      && args.b_type.size_bits() == {{t.b_num_bits}} 
+      && args.b_type.size_bits() == {{t.b_num_bits}}
       && convert_type == {{TorchTypeTag[t.convert]}}) {
     return prepack_impl<
       PrepackedLayoutBTemplate<
@@ -266,15 +267,15 @@ torch::Tensor prepack_B_dispatch(PrepackBArgs args) {
         {{DataTypeTag[t.accumulator]}}, // Accumulator
         cutlass::layout::ColumnMajor,
         cutlass::gemm::KernelTmaWarpSpecializedCooperative>
-    >(args.B); 
+    >(args.B);
   }
   {%- endfor %}
-  
-  TORCH_CHECK_NOT_IMPLEMENTED(false, 
+
+  TORCH_CHECK_NOT_IMPLEMENTED(false,
     "prepack_B_dispatch(..) is not implemented for "
     "atype = ", args.a_type,
     ", b_type = ", args.b_type.str(),
-    ", with_group_scales_type= ", args.maybe_group_scales_type ? 
+    ", with_group_scales_type= ", args.maybe_group_scales_type ?
         toString(*args.maybe_group_scales_type) : "None");
 }
 
@@ -551,11 +552,11 @@ def _default_output_dir() -> Path:
 def generate(output_dir: str | os.PathLike[str] | None = None):
     # See csrc/quantization/machete/Readme.md, the Codegeneration for more info
     # about how this works
-    sch_common_params = dict(
-        kernel_schedule=TmaMI,
-        epilogue_schedule=TmaCoop,
-        tile_scheduler=TileSchedulerType.StreamK,
-    )
+    sch_common_params = {
+        "kernel_schedule": TmaMI,
+        "epilogue_schedule": TmaCoop,
+        "tile_scheduler": TileSchedulerType.StreamK,
+    }
 
     # Stored as "condition": ((tile_shape_mn), (cluster_shape_mnk))
     default_tile_heuristic_config = {
@@ -602,7 +603,7 @@ def generate(output_dir: str | os.PathLike[str] | None = None):
 
     impl_configs = []
 
-    GPTQ_kernel_type_configs = list(
+    GPTQ_kernel_type_configs = [
         TypeConfig(
             a=a,
             b=b,
@@ -615,7 +616,7 @@ def generate(output_dir: str | os.PathLike[str] | None = None):
         )
         for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
         for a in (DataType.f16, DataType.bf16)
-    )
+    ]
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
@@ -626,7 +627,7 @@ def generate(output_dir: str | os.PathLike[str] | None = None):
         )
     ]
 
-    AWQ_kernel_type_configs = list(
+    AWQ_kernel_type_configs = [
         TypeConfig(
             a=a,
             b=b,
@@ -639,7 +640,7 @@ def generate(output_dir: str | os.PathLike[str] | None = None):
         )
         for b in (DataType.u4, DataType.u8)
         for a in (DataType.f16, DataType.bf16)
-    )
+    ]
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])

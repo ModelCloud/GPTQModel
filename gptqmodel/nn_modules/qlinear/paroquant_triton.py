@@ -21,8 +21,8 @@ from ...quantization import FORMAT
 from ...quantization.paroquant.modules.triton.gemm import (
     _paroquant_prepare_splitk_compiled_launch,
     _paroquant_rotation_gemm_splitk_triton_compiled,
-    _paroquant_rotation_gemm_splitk_triton_prepared,
     _paroquant_rotation_gemm_splitk_triton_prepare,
+    _paroquant_rotation_gemm_splitk_triton_prepared,
     _paroquant_rotation_gemm_splitk_triton_unchecked,
     _paroquant_splitk_compiled_launch_supported,
     _paroquant_splitk_fp16_prefill_shape,

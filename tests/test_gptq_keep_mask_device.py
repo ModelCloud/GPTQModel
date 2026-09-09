@@ -1,3 +1,4 @@
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -48,7 +49,10 @@ def test_keep_mask_preserves_samples_across_devices(
     task = GPTQ(layer, qcfg=QuantizeConfig(bits=4, group_size=2))
     processor = object.__new__(GPTQProcessor)
     processor.tasks = {"linear": task}
+    processor.lock = threading.Lock()
+    processor._shared_input_leaders = {}
     processor._batch_tls = SimpleNamespace(index=7)
+    processor._hook_observation_tls = SimpleNamespace(value={})
     processor._mask_tls = SimpleNamespace(
         value=torch.tensor(
             [[True, False, True], [False, True, False], [False, False, False]],
@@ -60,13 +64,39 @@ def test_keep_mask_preserves_samples_across_devices(
     captured = []
     add_batch = task.add_batch
 
+    def compute_hessian_xtx(
+        matrix: torch.Tensor,
+        out: torch.Tensor | None = None,
+        sequence_count: int = 1,
+    ) -> torch.Tensor:
+        del sequence_count
+        update = matrix.float().T @ matrix.float()
+        if out is None:
+            return update
+        out.add_(update)
+        return out
+
     def capture(
         inp: torch.Tensor, out: torch.Tensor, batch_index: int | None = None
     ) -> None:
         captured.append((inp, out, batch_index))
         add_batch(inp, out, batch_index=batch_index)
 
+    def add_batch_without_shared_hessian(
+        task: GPTQ,
+        inp: torch.Tensor,
+        out: torch.Tensor,
+        *,
+        batch_index: int | None,
+        cache_source: torch.Tensor,
+        cache_extra: tuple[object, ...] | None = None,
+    ) -> None:
+        del cache_source, cache_extra
+        task.add_batch(inp, out, batch_index=batch_index)
+
+    monkeypatch.setattr(task, "compute_hessian_xtx", compute_hessian_xtx)
     monkeypatch.setattr(task, "add_batch", capture)
+    processor._add_batch_with_shared_hessian = add_batch_without_shared_hessian
     processor.pre_process_fwd_hook("linear")(layer, (inputs,), outputs)
 
     assert len(captured) == 2
