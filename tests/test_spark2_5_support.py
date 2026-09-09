@@ -28,7 +28,7 @@ def test_spark2_5_model_type_selects_definition(monkeypatch):
 
     assert (
         auto.check_and_get_model_definition(
-            "/monster/data/model/Spark-X2.5-4B", trust_remote_code=True
+            "XHToken/Spark-X2.5-4B", trust_remote_code=True
         )
         is Spark2_5QModel
     )
@@ -96,7 +96,7 @@ def test_spark2_5_before_model_load_adapts_both_legacy_mask_helpers(monkeypatch)
     )
 
     Spark2_5QModel.before_model_load(
-        Spark2_5QModel, "/monster/data/model/Spark-X2.5-4B", False
+        Spark2_5QModel, "XHToken/Spark-X2.5-4B", False
     )
 
     for mask_name in ("create_causal_mask", "create_sliding_window_causal_mask"):

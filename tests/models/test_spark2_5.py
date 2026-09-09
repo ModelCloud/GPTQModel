@@ -5,7 +5,7 @@ from model_test import ModelTest
 
 
 class TestSpark2_5(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Spark-X2.5-4B" # XHToken/Spark-X2.5-4B
+    NATIVE_MODEL_ID = "XHToken/Spark-X2.5-4B"
     TRUST_REMOTE_CODE = True
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 16
