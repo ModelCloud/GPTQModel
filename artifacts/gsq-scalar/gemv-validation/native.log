@@ -1,0 +1,50 @@
+
+INFO  LogBar: headless/CI mode; progress animations disabled.                   
+INFO  GPUAllocatorClient initialized: base_url=http://127.0.0.1:17351 session_id=pid-2519494
+INFO  POST /allocate: count=1 timeout=None exclusive=True reason=None           
+INFO  Allocated lease 3b1459f9a2244399a559ec9c3113406a with 1 GPU(s) for session pid-2519494
+IDLE 1 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 98304, 0, 610.43.02
+IDLE 2 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 98304, 0, 610.43.02
+IDLE 3 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 98304, 0, 610.43.02
+============================= test session starts ==============================
+platform linux -- Python 3.14.6, pytest-9.1.1, pluggy-1.6.0
+rootdir: /root/polly-work/qvq-gsq/tests
+configfile: pytest.ini
+plugins: anyio-4.14.2
+
+INFO  LogBar: headless/CI mode; progress animations disabled.                   
+WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
+INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
+INFO  
+
+┌─────────────┐    ┌────────────────────────┐    ┌────────────┐    ┌─────────┐
+│ GPT-QModel  │ -> │ ▓▓▓▓▓▓▓▓▓▓▓▓ 16bit     │ -> │ ▒▒▒▒ 8bit  │ -> │ ░░ 4bit │
+└─────────────┘    └────────────────────────┘    └────────────┘    └─────────┘
+GPT-QModel   : 7.4.0+ultra+22d98963a
+Transformers : 5.15.0
+Torch        : 2.15.0.dev20260817+cu130
+Triton       : 3.8.0+gitdf3f91dd
+collected 87 items / 81 deselected / 6 selected
+
+tests/test_gsq_awq_gemv.py::test_gemv_native_reloaded_forward[1-gemv-AwqGEMVLinear-awq_gemv] INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_yv59c_gt`
+NATIVE_PARITY gemv tokens=1 mean=8.36758991e-05 max=0.00070643425
+PASSED
+tests/test_gsq_awq_gemv.py::test_gemv_native_reloaded_forward[1-gemv_fast-AwqGEMVFastLinear-awq_gemv_fast] INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_h9zap2gd`
+NATIVE_PARITY gemv_fast tokens=1 mean=0.000187241298 max=0.000849246979
+PASSED
+tests/test_gsq_awq_gemv.py::test_gemv_native_reloaded_forward[1-llm-awq-LLMAwqLinear-awq_gemv_fast] INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_jjf0s3hi`
+NATIVE_PARITY llm-awq tokens=1 mean=0.000187241298 max=0.000849246979
+PASSED
+tests/test_gsq_awq_gemv.py::test_gemv_native_reloaded_forward[16-gemv-AwqGEMVLinear-awq_gemv] INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_88ssbxsb`
+NATIVE_PARITY gemv tokens=16 mean=0.000212935382 max=0.00142097473
+PASSED
+tests/test_gsq_awq_gemv.py::test_gemv_native_reloaded_forward[16-gemv_fast-AwqGEMVFastLinear-awq_gemv_fast] INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_fvpamhoi`
+NATIVE_PARITY gemv_fast tokens=16 mean=0.000220199028 max=0.00172185898
+PASSED
+tests/test_gsq_awq_gemv.py::test_gemv_native_reloaded_forward[16-llm-awq-LLMAwqLinear-awq_gemv_fast] INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_c0r4_mqk`
+NATIVE_PARITY llm-awq tokens=16 mean=0.000220199028 max=0.00172185898
+PASSED
+
+----------------- generated xml file: /tmp/gsq-gemv-native.xml -----------------
+======================= 6 passed, 81 deselected in 4.44s =======================
+INFO  POST /release: lease_id=3b1459f9a2244399a559ec9c3113406a                  
