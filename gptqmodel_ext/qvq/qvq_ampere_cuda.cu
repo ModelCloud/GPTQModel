@@ -463,7 +463,9 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
 
   auto stage = [&](int k_tile_base, int destination) {
     auto* input_vectors = reinterpret_cast<uint4*>(input_tile[destination]);
-    for (int index = thread; index < kRows * kKernelStageColumns / 8; index += kThreads) {
+    constexpr int kInputStageRows = UpperRowsOnly ? ActiveRows : kRows;
+    for (int index = thread; index < kInputStageRows * kKernelStageColumns / 8;
+         index += kThreads) {
       const int row = index / (kKernelStageColumns / 8);
       const int vector = index - row * (kKernelStageColumns / 8);
       const int source_column = k_tile_base * kTileRows + vector * 8;
