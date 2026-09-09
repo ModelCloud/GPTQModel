@@ -355,3 +355,24 @@ and reduces calibration objectives, with small held-out KL/MSE improvements
 but a clear Top-1 regression. All nine selected-layer native reload checks pass.
 This closes the requested matched comparison for this W2.5 configuration only;
 it supports neither default promotion nor a general recovery claim.
+
+## Older review rechecked against current head
+
+The fallback issue remained: enabled GPTQ GSQ could refine a data-independent
+fallback with calibration moments. Requested fallbacks now bypass GSQ before
+Hessian materialization; fallback results selected inside the initializer also
+bypass fitting. Diagnostics explicitly record `data_independent_fallback`.
+RTN/MIDPOINT regression fixtures retain exact weights, scales, zeros, groups
+and loss labels across different calibration data.
+
+The experiment digest now streams SHA256 without Python 3.11's `file_digest`;
+a compatibility fixture removes that API before hashing a multi-block file.
+QQQ's processor preserves GSQ diagnostics in module state before freeing its
+quantizer. Enabled padded GPTAQ/FOEM GSQ requests are rejected at construction,
+before calibration; no tensor-parallel support claim is made.
+
+Focused review suites: 137 passed (6.59 seconds), plus the QQQ processor
+diagnostic-copy test passed (3.22 seconds). Focused Ruff is clean. Broad Ruff
+reports 94 findings and committed raw logs contain trailing whitespace, so
+branch-wide lint/whitespace are not claimed clean. GitHub's status-check rollup
+is empty, not green CI. These findings remain distinct from local test results.

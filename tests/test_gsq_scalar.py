@@ -379,3 +379,45 @@ def test_zero_weight_quantizer_packing_reload(method, learn_scales):
     output = reloaded(inputs.half())
     assert torch.isfinite(output).all()
     assert torch.count_nonzero(output) == 0
+
+
+@pytest.mark.parametrize("strategy", ["rtn", "midpoint"])
+def test_explicit_fallback_bypasses_gsq_and_calibration(strategy, monkeypatch):
+    import gptqmodel.quantization.gptq as implementation
+    from gptqmodel.quantization import GPTQConfig
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("data-independent fallback must not fit GSQ")
+    monkeypatch.setattr(implementation, "refine_affine_scalar", forbidden)
+    rng = torch.Generator().manual_seed(7)
+    weights = torch.randn(32, 64, generator=rng).half() * 0.05
+    outputs = []
+    for enabled, multiplier in ((False, 1), (True, 1), (True, 100)):
+        layer = torch.nn.Linear(64, 32, bias=False, dtype=torch.float16)
+        layer.weight.data.copy_(weights)
+        cfg = GPTQConfig(bits=4, group_size=32, fallback={"strategy": strategy, "threshold": 1000},
+                         gsq=GSQConfig(enabled=enabled, steps=10, learn_scales=True))
+        q = implementation.GPTQ(layer, cfg)
+        q.quantizer.configure(perchannel=True)
+        q.add_batch(torch.randn(128, 64, generator=rng) * multiplier, None)
+        result = q.quantize()
+        assert result[5].startswith(f"fallback({strategy})")
+        outputs.append(result)
+        if enabled:
+            assert q.gsq_diagnostics == {"status": "skipped", "reason": "data_independent_fallback"}
+    for result in outputs[1:]:
+        assert all(torch.equal(a, b) for a, b in zip(result[:4], outputs[0][:4], strict=True))
+        assert result[5] == outputs[0][5]
+
+
+@pytest.mark.parametrize("enhancement", ["gptaq", "foem"])
+def test_padded_asymmetric_gsq_rejected_before_calibration(enhancement):
+    from gptqmodel.quantization import GPTQConfig
+    from gptqmodel.quantization.gptq import GPTQ
+
+    layer = torch.nn.Linear(64, 32, bias=False)
+    layer._tp_pad_info = {"pad_cols": 64}
+    cfg = GPTQConfig(bits=4, group_size=128, gsq=GSQConfig(enabled=True),
+                     **{enhancement: {"alpha": 0.5}})
+    with pytest.raises(ValueError, match="tensor-parallel padded"):
+        GPTQ(layer, cfg)

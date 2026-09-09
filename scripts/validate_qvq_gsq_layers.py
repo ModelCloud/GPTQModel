@@ -66,7 +66,10 @@ def quantize_with_matched_search(quantize, comparison, artifact, *args, **kwargs
 
 def digest(path):
     with Path(path).open("rb") as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
+        hasher = hashlib.sha256()
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(block)
+        return hasher.hexdigest()
 
 
 def write_json(path, value):

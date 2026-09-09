@@ -160,3 +160,11 @@ loss minus the candidate-independent asymmetric constant. That score agrees
 with the quantizer diagnostic (relative 2e-5, absolute 1e-7). The expanded CPU
 suite reports 54 passed (4.58 seconds). This verifies score-to-packer binding
 across those ordering settings, not real-model recovery or GPU parity.
+
+Native QQQ preflight (2026-09-09, SM80 physical GPU 0) compiled and executed
+the existing grouped parity suite: four regular-value cases passed, but the
+rounding/saturation fixture failed on two of nine values, with maximum absolute
+difference 229. This is an existing native-versus-Torch contract discrepancy,
+not a GSQ quality result. Since GSQ currently scores the Torch saturation
+contract, native QQQ support must remain unverified until this is resolved.
+The lease was released. Raw log: `/tmp/gsq-qqq-native.log`.

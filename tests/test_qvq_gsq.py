@@ -284,3 +284,14 @@ def test_matched_experiment_records_exact_pool_and_restores_hook(tmp_path):
     assert comparison["shared_artifact_sha256"] == digest(path)
     assert comparison["before"] == pytest.approx(result.calibration_before)
     assert comparison["after"] <= comparison["before"]
+
+
+def test_experiment_digest_without_python311_api(tmp_path, monkeypatch):
+    import hashlib
+    from scripts.validate_qvq_gsq_layers import digest
+
+    monkeypatch.delattr(hashlib, "file_digest", raising=False)
+    data = b"calibration" * 200000
+    path = tmp_path / "source.bin"
+    path.write_bytes(data)
+    assert digest(path) == hashlib.sha256(data).hexdigest()

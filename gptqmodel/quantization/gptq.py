@@ -389,6 +389,10 @@ class GPTQ:
         self.validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
+        if pad_cols and (self.qcfg.gptaq is not None or self.qcfg.foem is not None):
+            full_name = self._named_module.full_name if self._named_module is not None else self.name
+            if gsq_enabled_for(getattr(self.qcfg, "gsq", None), full_name):
+                raise ValueError("GSQ with tensor-parallel padded GPTAQ/FOEM is not supported")
         hessian_cfg = getattr(self.qcfg, "hessian", None)
         self.length_aware_config = getattr(hessian_cfg, "length_aware", None)
         if not isinstance(self.length_aware_config, LengthAwareConfig):
@@ -2474,6 +2478,10 @@ class GPTQ:
         if getattr(self, "_gsq_active", False) or not gsq_enabled_for(config, module_name):
             return self._quantize_impl(blocksize=blocksize)
 
+        from ..utils.fallback import should_use_fallback
+        if should_use_fallback(self.fallback, float(self.nsamples), self.expected_nsamples):
+            self.gsq_diagnostics = {"status": "skipped", "reason": "data_independent_fallback"}
+            return self._quantize_impl(blocksize=blocksize)
         start = time.time()
         target = self.clone_module()
         # Preserve the original-column calibration metric before GPTQ consumes,
@@ -2503,6 +2511,9 @@ class GPTQ:
         finally:
             self._gsq_active = False
         weight, scales, zeros, groups, duration, avg_loss, damp, samples = result
+        if isinstance(avg_loss, str) and avg_loss.startswith("fallback("):
+            self.gsq_diagnostics = {"status": "skipped", "reason": "data_independent_fallback"}
+            return result
         canonical = weight
         if isinstance(self.module, (nn.Embedding, transformers.Conv1D)):
             canonical = canonical.T

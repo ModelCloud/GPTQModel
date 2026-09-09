@@ -182,6 +182,9 @@ class QQQProcessor(LoopProcessor):
         q = qqq[module.name]
         try:
             wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, q_scales_extra, nsamples = q.quantize()
+            gsq_diagnostics = getattr(q, "gsq_diagnostics", None)
+            if gsq_diagnostics is not None:
+                module.state["gsq_diagnostics"] = gsq_diagnostics
         finally:
             q.free()
 

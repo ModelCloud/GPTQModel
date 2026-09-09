@@ -52,7 +52,11 @@ combined scalar/GPTQ/AWQ/RTN/QVQ regression command passed 10,320 cases with 1,0
 skips in 211.68 seconds; most cases are existing randomized GPTQ Hessian tests.
 A separate QVQ config/processor and weight-only/AWQ processor run passed 48
 cases with one accelerator skip. All runs hid CUDA; skips do not establish
-accelerator support. Ruff and `git diff --check` passed for the changed files.
+accelerator support. Those historical Ruff and `git diff --check` results covered the then-current
+working changes only, not every committed file in the PR. A later broad audit
+found 94 Ruff findings (including historical artifact scripts and package
+re-exports) and trailing whitespace in committed raw logs; the branch-wide
+checks are not clean.
 An expanded 56-case scalar suite adds malformed metadata, mixed-device input,
 storage underflow and finite-objective/gradient/checkpoint failure cases. It
 achieves 100% CPU line/branch coverage of `gsq_scalar.py` (138 statements, 60
