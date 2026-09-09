@@ -18,7 +18,7 @@ template void run_prefill_all<cutlass::half_t>(torch::stable::Tensor&,
                                                torch::stable::Tensor&,
                                                const void*, bool, bool, int,
                                                torch::stable::Tensor&, int, int,
-                                               int, cudaStream_t);
+                                               int, cudaStream_t, int, int);
 }  // namespace prefill
 #endif
 }  // namespace swordfish

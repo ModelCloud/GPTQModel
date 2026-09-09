@@ -12,6 +12,13 @@
 #include <torch/csrc/stable/tensor.h>
 
 STABLE_TORCH_LIBRARY_FRAGMENT(gptqmodel_swordfish, ops) {
+  ops.def("swordfish_prefill_explicit(Tensor a, Tensor b_packed, Tensor group_scales, "
+          "Tensor? group_zps, int num_bits, int group_size, SymInt size_k, SymInt size_n, "
+          "int tile_n, int chunk_m) -> Tensor");
+  // Exact decode selection for external hosts; never enters prefill/dense tiers.
+  ops.def("swordfish_decode_explicit(Tensor a, Tensor b_packed, Tensor group_scales, "
+          "Tensor? group_zps, int num_bits, int group_size, SymInt size_k, SymInt size_n, "
+          "int mode, int m_tiles, int split_k, int ctas, bool cta_quad, int threads, int stages) -> Tensor");
   // Pack a GPTQ int4/int8 weight into the Swordfish ABI v1 block-linear
   // layout. perm applies the act_order row sort during the repack.
   ops.def(

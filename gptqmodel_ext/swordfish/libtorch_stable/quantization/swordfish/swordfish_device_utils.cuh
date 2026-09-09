@@ -7,7 +7,8 @@
 
 #pragma once
 
-#ifndef __CUDA_ARCH__
+// These unannotated functions are host-only. Keep declarations visible in the
+// device pass too: nvcc still parses the host launcher bodies that call them.
 
 #include <cuda_runtime.h>
 #include <functional>
@@ -89,5 +90,3 @@ inline int cached_occupancy_for_device(int device_index, Kernel kernel,
 }
 
 }  // namespace swordfish
-
-#endif  // __CUDA_ARCH__

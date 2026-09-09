@@ -153,9 +153,11 @@ _SWORDFISH_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     required_ops=(
         "swordfish_prepack_B",
         "swordfish_mm",
+        "swordfish_decode_explicit",
         "swordfish_dequant_dense",
         "swordfish_moe_mm",
         "swordfish_prefill_mm",
+        "swordfish_prefill_explicit",
     ),
     sources=_swordfish_sources,
     build_root_env="GPTQMODEL_SWORDFISH_BUILD_ROOT",
